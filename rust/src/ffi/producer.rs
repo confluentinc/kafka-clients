@@ -2682,7 +2682,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch(
 /// Sends a single record without ever blocking the caller for `max.block.ms`,
 /// invoking `callback` on completion.
 ///
-/// Same input parameters as [`kafka_producer_Producer_send`], plus a completion
+/// Same input as [`kafka_producer_Producer_send`] — the record's fields, headers
+/// included (`headers` / `header_count`, exactly as
+/// [`kafka_producer_ProducerRecord_t`] carries them) — plus a completion
 /// `callback` + `user_data`; the result is delivered through `callback` instead of
 /// a future. The record is first handed to the producer **on the calling thread**
 /// — where Java's `send()` appends it — and only where Java's `send()` would block
@@ -2778,7 +2780,10 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch(
 /// valid for the duration of the call. A record this returns a handle for borrows
 /// them until the handle settles, accepted or refused; keeping them valid until
 /// `callback` fires, as a caller naturally does, satisfies that, and a refusal
-/// with `callback_pending` false releases them (and `user_data`) at once.
+/// with `callback_pending` false releases them (and `user_data`) at once. The
+/// headers are **copied** into the record during the call (as every send function
+/// here does — the core's `RecordHeader` owns its key and value), so `headers` and
+/// what its entries point to need only stay valid until this returns.
 ///
 /// # Safety
 ///
@@ -2786,6 +2791,10 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch(
 /// - `topic` must be a valid C string.
 /// - `key`/`value` must be valid for `key_len`/`value_len` bytes when `>= 0`,
 ///   and, when a handle is returned, remain valid until it settles.
+/// - `headers`, when `header_count > 0`, must point to `header_count` valid
+///   [`kafka_common_header_Header_t`] entries, each with a valid NUL-terminated
+///   `key` and a `value` valid for `value_len` bytes when `value_len >= 0`; null
+///   with `header_count <= 0` means no headers.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_send_async(
@@ -2797,6 +2806,8 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
     key_len: i32,
     value: *const u8,
     value_len: i32,
+    headers: *const kafka_common_header_Header_t,
+    header_count: i32,
     callback: kafka_producer_Producer_send_callback_t,
     user_data: *mut std::ffi::c_void,
     out_error: *mut *mut kafka_common_Error_t,
@@ -2871,19 +2882,28 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
 
     // Build (and validate) the record here, so construction errors are reported
     // synchronously via `out_error` rather than deferred to the task. Reusable
-    // because the fast path below consumes the record it is given.
+    // because the fast path below consumes the record it is given; the headers are
+    // copied again on the slow path, which is the only one that pays for it.
     let build_record = || {
         // SAFETY: `topic` is non-null (checked above) and, per this function's `# Safety`, a
         // valid C string; it is copied into an owned `String` at once, so nothing borrowed
         // outlives the call (the record carries the owned copy to the producer, or to the
         // submission task).
         let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().into_owned();
+        // Headers are copied into owned RecordHeaders here (not borrowed like
+        // key/value), so they need not outlive this call.
+        // SAFETY: `build_record_headers` requires `headers` to point to `header_count` valid
+        // entries when the count is positive, which this function's `# Safety` promises (null
+        // with a non-positive count is "no headers", and the helper checks both). Every
+        // header is copied into an owned `RecordHeader` here.
+        let record_headers = unsafe { build_record_headers(headers, header_count) };
         ProducerRecordOptionsBuilder::new()
             .set_topic(topic_str)
             .set_value(value_slice)
             .set_partition(partition_opt)
             .set_timestamp(timestamp_opt)
             .set_key(key_slice)
+            .set_headers(Some(record_headers))
             .build()
             .and_then(|options| {
                 ProducerRecord::with_options(options).map_err(|e| Error::local_illegal_argument(e.message()))
@@ -7341,6 +7361,86 @@ mod tests {
         }
     }
 
+    /// `send_async` carries the record's headers (and a null value / tombstone)
+    /// through to the produced record exactly as `send_batch` does — verified via
+    /// the mock's history, since the record is taken at once on the fast path.
+    #[test]
+    fn test_send_async_carries_headers_and_tombstone() {
+        let producer = kafka_producer_MockProducer_new(true);
+        let topic = CString::new("t").unwrap();
+        let key = b"k";
+        let h0_key = CString::new("trace-id").unwrap();
+        let h0_val = b"abc";
+        let h1_key = CString::new("null-header").unwrap();
+        let headers = [
+            kafka_common_header_Header_t {
+                key: h0_key.as_ptr(),
+                value: h0_val.as_ptr(),
+                value_len: h0_val.len() as i32,
+            },
+            kafka_common_header_Header_t {
+                key: h1_key.as_ptr(),
+                value: std::ptr::null(),
+                value_len: -1, // null header value
+            },
+        ];
+        let captured = CapturedRecordResult::new();
+        let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+
+        // SAFETY: Test: `producer` is the live mock handle, destroyed exactly once at the end;
+        // `topic`/`key` outlive the call (the mock copies them before it returns), and
+        // `headers` (two entries, each `key` a live `CString`, the first `value` valid for
+        // `value_len` bytes, the second null with `value_len == -1`) outlive the call, during
+        // which they are copied; the null `value` with `value_len == -1` is the documented
+        // tombstone; `captured` outlives the callback (the destroy below joins the
+        // dispatcher); `err` is a local written exactly once. The mock lock is taken and
+        // dropped before the producer is destroyed.
+        unsafe {
+            let accepted = kafka_producer_Producer_send_async(
+                producer,
+                topic.as_ptr(),
+                -1,
+                -1,
+                key.as_ptr(),
+                key.len() as i32,
+                std::ptr::null(),
+                -1,
+                headers.as_ptr(),
+                2,
+                capture_record_result,
+                captured.as_user_data(),
+                &mut err,
+            );
+            assert_success(err);
+            assert!(accepted.is_null(), "the mock takes the record at once");
+
+            // Inspect the mock's stored record: headers preserved (order + null),
+            // value is None (tombstone).
+            use crate::common::header::{Header, Headers, RecordHeader};
+            let guard = producer_ref(producer).lock().unwrap();
+            if let ProducerKind::Mock(mock, _) = &*guard {
+                let history = mock.history();
+                assert_eq!(history.len(), 1);
+                let rec = &history[0];
+                assert_eq!(rec.key().map(Vec::as_slice), Some(&b"k"[..]));
+                assert!(rec.value().is_none(), "tombstone value must be None");
+                let hs: Vec<&RecordHeader> = rec.headers().iter().collect();
+                assert_eq!(hs.len(), 2);
+                assert_eq!(hs[0].key(), "trace-id");
+                assert_eq!(hs[0].value(), Some(&b"abc"[..]));
+                assert_eq!(hs[1].key(), "null-header");
+                assert_eq!(hs[1].value(), None);
+            } else {
+                panic!("expected a mock producer");
+            }
+            drop(guard);
+
+            wait_for_record_fired(&captured);
+            kafka_producer_Producer_destroy(producer);
+        }
+        assert_eq!(captured.fired(), 1);
+    }
+
     // -- refusal settlement (`CallbackState` / `SendSettlement`) -------------
     //
     // After the producer's `send` returned `Err` — where Java's `send()` throws —
@@ -7774,6 +7874,8 @@ mod tests {
                 -1,
                 value.as_ptr(),
                 value.len() as i32,
+                std::ptr::null(),
+                0,
                 capture_record_result,
                 captured.as_user_data(),
                 &mut err,
@@ -8077,6 +8179,8 @@ mod tests {
                 -1,
                 std::ptr::null(),
                 -1,
+                std::ptr::null(),
+                0,
                 capture_record_result,
                 captured.as_user_data(),
                 &mut err,
@@ -8098,6 +8202,8 @@ mod tests {
                 -1,
                 std::ptr::null(),
                 -1,
+                std::ptr::null(),
+                0,
                 capture_record_result,
                 captured.as_user_data(),
                 &mut err,
@@ -8119,6 +8225,8 @@ mod tests {
                 3,
                 std::ptr::null(),
                 -1,
+                std::ptr::null(),
+                0,
                 capture_record_result,
                 captured.as_user_data(),
                 &mut err,
@@ -8139,6 +8247,8 @@ mod tests {
                 -1,
                 std::ptr::null(),
                 2,
+                std::ptr::null(),
+                0,
                 capture_record_result,
                 captured.as_user_data(),
                 std::ptr::null_mut(),
@@ -9783,6 +9893,8 @@ mod tests {
                 -1,
                 value.as_ptr(),
                 value.len() as i32,
+                std::ptr::null(),
+                0,
                 count_send_callback,
                 user_data,
                 &mut out_error,
