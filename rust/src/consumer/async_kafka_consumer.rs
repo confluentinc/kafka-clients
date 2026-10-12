@@ -12708,7 +12708,8 @@ mod tests {
     /// event (a fresh one would re-run validate-positions and starve them).
     ///
     /// Also carries the assertion 20e952c783 added to Java's
-    /// `testCommitInRebalanceCallback`: when `poll()` returns records the next
+    /// `testClearWakeupTriggerAfterPoll` (`AsyncKafkaConsumerTest.java:690`):
+    /// when `poll()` returns records the next
     /// fetch is pipelined (`CreateFetchRequests`), so a fetch request stays
     /// pending while the application processes them.
     #[tokio::test]

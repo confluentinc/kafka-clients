@@ -263,6 +263,8 @@ rule, what changed, and the suggested amendment.
      - The class still carries no `@InterfaceAudience.Public`, so the allow-list reasoning holds.
        Suggested wording: "Java ships it in the clients *test-fixtures* source set" instead of "the
        clients *test* jar".
+       The same wording is now in `rust/xtask/public-audience-allowlist.txt`'s two `MockAdminClient`
+       entries (review fix round, COMMENTS.114 C9.9); only the rules text is outstanding.
    - **New in-memory implementations:**
      - `describeStreamsGroups` was `throw new UnsupportedOperationException("Not implemented yet")` at
        4.3.1. At 4.4 it is implemented against a new `streamsGroupDescriptions` map, with

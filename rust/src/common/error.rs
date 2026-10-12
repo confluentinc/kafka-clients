@@ -2502,9 +2502,9 @@ mod tests {
             ),
             // UNSUPPORTED_VERSION: UnsupportedVersionException -> InvalidConfigurationException
             // -> ApiException -> KafkaException, and fatal per `RequestUtils.isFatalException`.
-            // Intermediate since Kafka 4.4's
-            // `UnsupportedProtocolFieldException` subclass; the subclass is a
-            // crate-private kind of the same variant and answers alike.
+            // Intermediate (already in 4.3.1, through the `NoBatched*`
+            // subclasses); Kafka 4.4 adds the `UnsupportedProtocolFieldException`
+            // subclass, a crate-private kind of the same variant that answers alike.
             (
                 "UnsupportedVersion (from the code)",
                 Error::new(Errors::UnsupportedVersion),

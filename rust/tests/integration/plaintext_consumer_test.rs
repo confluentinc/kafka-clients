@@ -98,8 +98,10 @@
 //!   assign / seek / poll / CreateTime full per-record field verification).
 //! - SKIP (OUT_OF_SCOPE §20): all `testClassicConsumer*` twins,
 //!   `*MetricsCleanUp*` / `QuotaMetrics*`,
-//!   `testAsyncConsumerCloseLeavesGroupOnInterrupt`,
 //!   `testAsyncConsumerClusterResourceListener`.
+//! - `testAsyncConsumerCloseLeavesGroupOnInterrupt` no longer exists: Kafka
+//!   4.4 removed it (KAFKA-20522, 096cc96fee) in favour of unit tests in
+//!   `KafkaConsumerTest` / `AsyncKafkaConsumerTest`.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;

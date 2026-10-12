@@ -1638,6 +1638,8 @@ impl<K, V> KafkaProducer<K, V> {
     ///   the transaction
     /// - [`Error::Timeout`] if the combined time taken for resolving topic metadata
     ///   and sending the offsets has surpassed `max.block.ms`
+    /// - [`Error::BootstrapResolution`] if DNS resolution of the bootstrap servers
+    ///   fails within `bootstrap.resolve.timeout.ms`
     ///
     /// The producer first resolves the metadata for the topics in `offsets`
     /// (KIP-1319), so the `TxnOffsetCommit` can carry their topic ids and use v6.

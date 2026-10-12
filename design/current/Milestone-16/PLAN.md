@@ -61,7 +61,7 @@ reason in that phase's completion notes.
 | # | Decision | Default |
 |---|---|---|
 | D1 | Target | Start on **4.4.0-rc4** now; Phase 13 re-diffs and bumps refs to **4.4.0 final**. |
-| D2 | Java's `common.utils` → `common.utils.internals` package moves (KAFKA-20297) | **Mirror them** (M13 precedent: `record` → `record::internal`). In Rust this affects only `byte_utils`, `exponential_backoff`, `log_context`, `producer_id_and_epoch`. |
+| D2 | Java's `common.utils` → `common.utils.internals` package moves (KAFKA-20297) | **Mirror them** (M13 precedent: `record` → `record::internal`). In Rust this affects only `byte_utils`, `exponential_backoff`, `log_context`, `producer_id_and_epoch`. Correction (review fix round, COMMENTS.114 C9.8): `BufferSupplier` (moved by `4ae78a36ac`) also has a Rust counterpart, `common::memory::BufferSupplier`; it was already `pub(crate)` and outside `common::utils`, so only its Java-path docs changed. |
 | D3 | KAFKA-20864 (trunk-only fix to the 4.4 incremental-allocation code: closing the wrong batch on extension failure, unbounded retries) | **Include it** as a recorded deviation ahead of 4.4. Otherwise the 4.4 bug would be ported faithfully. |
 | D4 | Representing `UnsupportedProtocolFieldException` (crate-private, `extends UnsupportedVersionException`) | Model it as a crate-private kind on the existing `UnsupportedVersion` variant, so the public `Error` surface still matches Java's public view (§2.4). |
 
@@ -2945,7 +2945,7 @@ master merges and the one patch-equivalent commit that `--cherry-pick` drops, ma
 | `3b6c8385ca` | Common | N | MINOR | No-op | Test utilities to `testFixtures`; xtask now indexes `clients/src/testFixtures` (P0 `e84c6434`) |
 | `4048aa19fa` | Common | N | MINOR | No-op | Java `Collections` factory idiom |
 | `496ed66512` | Common | N | MINOR | No-op | Unused telemetry `MetricsEmitter` method (KIP-714 untranslated) |
-| `4ae78a36ac` | Common | N | KAFKA-20297 | No-op | KAFKA-20297 move of classes with no Rust counterpart |
+| `4ae78a36ac` | Common | N | KAFKA-20297 | No-op | KAFKA-20297 move of `ByteBufferUnmapper`, `BufferSupplier`, `ChunkedBytesStream`. Only `BufferSupplier` has a Rust counterpart (`common::memory::BufferSupplier`, already `pub(crate)`); its doc paths now name `common.utils.internals` (review fix round, COMMENTS.114 C9.8). The other two have none |
 | `5eff4ceb5f` | Common | N | MINOR | No-op | Java `Collections` factory idiom |
 | `6c3b63b825` | Common | N | MINOR | No-op | Java `RecordHeaders` constructor allocation tweak; no behaviour change |
 | `6cd450e677` | Common | N | MINOR | No-op | Java stream classes to `utils.internal`; P7 placed the new `ByteBufferOutputStream` in `common::utils::internals` to match (`14eec39c`) |

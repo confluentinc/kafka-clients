@@ -1752,7 +1752,8 @@ impl TransactionManager {
     }
 
     /// Records `offsets` as pending and builds the `TxnOffsetCommit` that commits
-    /// every offset still outstanding.
+    /// exactly those offsets — this call's map, not every pending offset (the
+    /// 4.3.1 behaviour; 4.4 builds the request from `offsets`).
     ///
     /// Translated from
     /// `txnOffsetCommitHandler(TransactionalRequestResult, Map, ConsumerGroupMetadata)`

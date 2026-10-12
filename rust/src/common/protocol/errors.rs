@@ -1802,7 +1802,7 @@ mod tests {
     /// Each hierarchy predicate (CLAUDE.md §12.4) must be `true` for **exactly** the
     /// error codes whose Java exception class extends the corresponding class.
     ///
-    /// Sets derived from the Apache Kafka 4.2 source in `kafka/` by taking the
+    /// Sets derived from the Apache Kafka 4.4 source in `kafka/` by taking the
     /// transitive closure of each root over `extends`, then keeping the classes with
     /// a protocol code. Asserted in both directions over every assigned code, for
     /// the same reason as the retriable/fatal tests: a sampled test cannot catch a
@@ -2027,7 +2027,7 @@ mod tests {
     /// The four intermediate classes added alongside the `ErrorHierarchy`
     /// refactor must cover **exactly** the codes whose Java class transitively
     /// extends them — checked in both directions over every code, per
-    /// CLAUDE.md §12.4. Sets derived from `common/errors/*.java` in Kafka 4.2.
+    /// CLAUDE.md §12.4. Sets derived from `common/errors/*.java` in Kafka 4.4.
     #[test]
     fn test_new_intermediate_predicates_match_java_hierarchy() {
         let invalid_configuration: HashSet<Errors> = [
