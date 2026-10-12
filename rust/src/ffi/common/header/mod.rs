@@ -188,11 +188,11 @@ impl HeadersInner {
         match &self.headers {
             // SAFETY: A borrowed `HeadersImpl` points at an implementation that outlives this view,
             // as `HeadersInner::borrowed`'s rustdoc requires of its caller: the `RecordHeaders` of
-            // the handle that caches this view (`RecordHeadersInner::headers_view`), or the `&dyn
-            // Headers` a deserializer call holds for the whole life of its call-local view. The
-            // implementation is mutated only through `headers_mut`, which takes `&mut self`, or by
-            // `kafka_common_header_internals_RecordHeaders_set_read_only`, which requires that no
-            // other call use the handle at the same time, so no mutation overlaps this shared
+            // the handle that caches this view (`RecordHeadersInner::headers_view`), or the
+            // `&dyn Headers` a deserializer call holds for the whole life of its call-local view.
+            // The implementation is mutated only through `headers_mut`, which takes `&mut self`, or
+            // by `kafka_common_header_internals_RecordHeaders_set_read_only`, which requires that
+            // no other call use the handle at the same time, so no mutation overlaps this shared
             // reference, bounded by `&self`.
             HeadersImpl::Borrowed(headers) => unsafe { &**headers },
             HeadersImpl::Owned(headers) => &**headers,

@@ -87,8 +87,8 @@ impl RecordHeadersInner {
         // SAFETY: `view` points at the live `OnceLock` of the handle at `this`, and `get_or_init`
         // needs only a shared reference to it, which `OnceLock`'s interior mutability allows. The
         // `HeadersInner` it may build points at the handle's `headers` field, which lives as long
-        // as the view since both are fields of the same handle, which per this function's `#
-        // Safety` does not move.
+        // as the view since both are fields of the same handle, which per this function's
+        // `# Safety` does not move.
         unsafe { (*view).get_or_init(|| HeadersInner::borrowed(headers)) };
         // SAFETY: `view` points at the live `OnceLock` of the handle at `this`, and per this
         // function's `# Safety` no other reference to it is in use during this call, so the
