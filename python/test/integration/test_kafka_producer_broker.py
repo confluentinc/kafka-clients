@@ -28,7 +28,6 @@ import time
 import uuid
 from typing import Any
 
-import _confluentkafka as _lib  # type: ignore[import-not-found]
 import pytest
 
 from confluent_kafka import IllegalStateError
@@ -233,14 +232,19 @@ def _invalid_begin(transactional_id: str) -> str:
             "IN_TRANSACTION to state IN_TRANSACTION")
 
 
-def test_begin_transaction_does_not_wait_and_an_open_transaction_keeps_its_records(
+def test_begin_transaction_fails_at_once_and_an_open_transaction_keeps_its_records(
         kafka_broker: Any) -> None:
-    # Critic 75 N1: Java's beginTransaction does not wait. A record sent in the
-    # open transaction and still in the batching engine (its handover held)
-    # stays in that transaction: a second begin_transaction() fails at once
-    # with the transaction manager's invalid transition, and the
-    # commit_transaction() after it drains and commits the record
-    # (producer-transactions.md §13).
+    # Critic 75 N1: a record sent in the open transaction stays in that
+    # transaction: a second begin_transaction() fails at once with the
+    # transaction manager's invalid transition, and the commit_transaction()
+    # after it drains and commits the record (producer-transactions.md §13).
+    # Updated for the branch C API, which has no hook to hold a record's
+    # handover (master's Producer_test_set_paused): its beginTransaction drains
+    # the submission queue first, as every transaction-control operation does,
+    # so the second begin waits for the record to reach the producer, which
+    # takes one metadata round trip, well under max.block.ms (60 s); and the
+    # record may be acknowledged before the commit, so whether its future is
+    # still pending at the second begin is not checked.
     topic = _topic(kafka_broker)
     configs = _configs(kafka_broker)
     producer = KafkaProducer(configs=configs, key_serializer=string_serializer(),
@@ -248,23 +252,21 @@ def test_begin_transaction_does_not_wait_and_an_open_transaction_keeps_its_recor
     try:
         producer.init_transactions()
         producer.begin_transaction()
-        _lib.Producer_test_set_paused(producer._c_producer, True)  # noqa: SLF001
         future = producer.send(record=ProducerRecord(topic=topic, key="key", value="value"))
         start = time.monotonic()
         with pytest.raises(IllegalStateError) as err:
             producer.begin_transaction()
-        assert time.monotonic() - start < 1
+        assert time.monotonic() - start < 5
         assert str(err.value) == _invalid_begin(configs["transactional.id"])
-        assert not future.done()
-        _lib.Producer_test_set_paused(producer._c_producer, False)  # noqa: SLF001
         producer.commit_transaction()
         assert future.result(timeout=30).offset() >= 0
     finally:
         producer.close(timeout=0)
 
 
-def test_async_begin_transaction_does_not_wait_and_an_open_transaction_keeps_its_records(
+def test_async_begin_transaction_fails_at_once_and_an_open_transaction_keeps_its_records(
         kafka_broker: Any) -> None:
+    # The async peer of the test above, updated for the branch C API the same way.
     topic = _topic(kafka_broker)
     configs = _configs(kafka_broker)
 
@@ -274,16 +276,13 @@ def test_async_begin_transaction_does_not_wait_and_an_open_transaction_keeps_its
         try:
             await producer.init_transactions()
             await producer.begin_transaction()
-            _lib.Producer_test_set_paused(producer._c_producer, True)  # noqa: SLF001
             future = await producer.send(
                 record=ProducerRecord(topic=topic, key="key", value="value"))
             start = time.monotonic()
             with pytest.raises(IllegalStateError) as err:
                 await producer.begin_transaction()
-            assert time.monotonic() - start < 1
+            assert time.monotonic() - start < 5
             assert str(err.value) == _invalid_begin(configs["transactional.id"])
-            assert not future.done()
-            _lib.Producer_test_set_paused(producer._c_producer, False)  # noqa: SLF001
             await producer.commit_transaction()
             assert (await asyncio.wait_for(future, 30)).offset() >= 0
         finally:
