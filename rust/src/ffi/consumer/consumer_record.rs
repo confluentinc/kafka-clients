@@ -93,16 +93,26 @@ impl ConsumerRecordInner {
 
 impl Drop for ConsumerRecordInner {
     fn drop(&mut self) {
-        // SAFETY: an owned `void *` is a `kafka_Bytes_t *` built by the
-        // passthrough deserializer and handed out by this record alone.
         if self.owns_key
             && let Some(key) = self.record.key()
         {
+            // SAFETY: `owns_key` is set only by a consumer built with a `NULL` key deserializer,
+            // whose `BytesPassthroughDeserializer` returns the `box_bytes` handle of a
+            // `kafka_Bytes_t`; the record moved here from `poll` uncloned, and the only copies made
+            // of records (`with_next_offsets`, the mock's `add_record`) do not own. So `key` is an
+            // owned array not yet destroyed, as `kafka_Bytes_destroy` requires, freed here once, as
+            // the record goes.
             unsafe { kafka_Bytes_destroy(key.as_ptr() as *mut kafka_Bytes_t) };
         }
         if self.owns_value
             && let Some(value) = self.record.value()
         {
+            // SAFETY: `owns_value` is set only by a consumer built with a `NULL` value
+            // deserializer, whose `BytesPassthroughDeserializer` returns the `box_bytes` handle of
+            // a `kafka_Bytes_t`; the record moved here from `poll` uncloned, and the only copies
+            // made of records (`with_next_offsets`, the mock's `add_record`) do not own. So `value`
+            // is an owned array not yet destroyed, as `kafka_Bytes_destroy` requires, freed here
+            // once, as the record goes.
             unsafe { kafka_Bytes_destroy(value.as_ptr() as *mut kafka_Bytes_t) };
         }
     }
@@ -123,12 +133,26 @@ pub(crate) fn box_consumer_record(
 ///
 /// # Safety
 ///
-/// `record` must be a valid record handle.
+/// `record` must be a valid record handle, kept alive for `'a`.
 pub(crate) unsafe fn consumer_record_ref<'a>(record: *const kafka_consumer_ConsumerRecord_t) -> &'a GenericRecord {
+    // SAFETY: Per this function's `# Safety`, `record` is a valid record handle kept alive for
+    // `'a`, so it points at a live `ConsumerRecordInner`, as `inner_ref` describes; nothing takes a
+    // `&mut` to it until it is freed, so the shared reference, and the field borrowed from it, are
+    // sound for `'a`.
     &unsafe { &*(record as *const ConsumerRecordInner) }.record
 }
 
+/// The state behind a handle.
+///
+/// # Safety
+///
+/// `record` must be a valid record handle, kept alive for `'a`.
 unsafe fn inner_ref<'a>(record: *const kafka_consumer_ConsumerRecord_t) -> &'a ConsumerRecordInner {
+    // SAFETY: Per this function's `# Safety`, `record` is a valid record handle kept alive for
+    // `'a`, so it points at a live `ConsumerRecordInner`: the box of `box_consumer_record`, or an
+    // element of a `ConsumerRecordsInner` vector, which is never resized and lives as long as its
+    // records handle. Nothing takes a `&mut` to it until it is freed, and its one lazily set field
+    // is a `OnceLock`, so the shared reference is sound for `'a`.
     unsafe { &*(record as *const ConsumerRecordInner) }
 }
 
@@ -161,6 +185,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_new(
     key: *const c_void,
     value: *const c_void,
 ) -> *mut kafka_consumer_ConsumerRecord_t {
+    // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied into an owned `String`.
     let topic = unsafe { c_str_to_string(topic) };
     box_consumer_record(
         GenericRecord::new(topic, partition, offset, generic(key), generic(value)),
@@ -181,6 +207,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_new(
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_with_options(
     options: *const kafka_consumer_ConsumerRecordOptions_t,
 ) -> *mut kafka_consumer_ConsumerRecord_t {
+    // SAFETY: Per this function's `# Safety`, `options` is a valid options handle, alive for this
+    // statement, as `options_ref` requires; the options are cloned, so the borrow ends here.
     let options = unsafe { options_ref(options) }.clone();
     box_consumer_record(GenericRecord::with_options(options), false, false)
 }
@@ -195,6 +223,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_with_options(
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_topic(
     self_: *const kafka_consumer_ConsumerRecord_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
+    // as `inner_ref` requires. The string returned points into the handle's `topic_c`, which is
+    // never changed and is freed only with the record, so it is valid until the record is
+    // destroyed, as the rustdoc states.
     unsafe { inner_ref(self_) }.topic_c.as_ptr()
 }
 
@@ -206,6 +238,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_topic(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_partition(self_: *const kafka_consumer_ConsumerRecord_t) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
+    // the only use of the reference, as `consumer_record_ref` requires.
     unsafe { consumer_record_ref(self_) }.partition()
 }
 
@@ -217,6 +251,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_partition(self_: *const k
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_offset(self_: *const kafka_consumer_ConsumerRecord_t) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
+    // the only use of the reference, as `consumer_record_ref` requires.
     unsafe { consumer_record_ref(self_) }.offset()
 }
 
@@ -228,6 +264,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_offset(self_: *const kafk
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_timestamp(self_: *const kafka_consumer_ConsumerRecord_t) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
+    // the only use of the reference, as `consumer_record_ref` requires.
     unsafe { consumer_record_ref(self_) }.timestamp()
 }
 
@@ -241,6 +279,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_timestamp(self_: *const k
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_timestamp_type(
     self_: *const kafka_consumer_ConsumerRecord_t,
 ) -> *const kafka_common_record_TimestampType_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
+    // the only use of the reference, as `consumer_record_ref` requires.
     timestamp_type::singleton(unsafe { consumer_record_ref(self_) }.timestamp_type())
 }
 
@@ -254,6 +294,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_timestamp_type(
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_serialized_key_size(
     self_: *const kafka_consumer_ConsumerRecord_t,
 ) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
+    // the only use of the reference, as `consumer_record_ref` requires.
     unsafe { consumer_record_ref(self_) }.serialized_key_size()
 }
 
@@ -267,6 +309,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_serialized_key_size(
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_serialized_value_size(
     self_: *const kafka_consumer_ConsumerRecord_t,
 ) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
+    // the only use of the reference, as `consumer_record_ref` requires.
     unsafe { consumer_record_ref(self_) }.serialized_value_size()
 }
 
@@ -281,6 +325,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_serialized_value_size(
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_key(
     self_: *const kafka_consumer_ConsumerRecord_t,
 ) -> *mut c_void {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
+    // the only use of the reference, as `consumer_record_ref` requires. The pointer returned is the
+    // `void *` the record holds, borrowed from it as the rustdoc states.
     generic_ptr(unsafe { consumer_record_ref(self_) }.key())
 }
 
@@ -295,10 +342,14 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_key(
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_value(
     self_: *const kafka_consumer_ConsumerRecord_t,
 ) -> *mut c_void {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
+    // the only use of the reference, as `consumer_record_ref` requires. The pointer returned is the
+    // `void *` the record holds, borrowed from it as the rustdoc states.
     generic_ptr(unsafe { consumer_record_ref(self_) }.value())
 }
 
-/// `headers()`: borrowed from the record, valid until it is destroyed.
+/// `headers()`: borrowed from the record, valid until it is destroyed. It is
+/// handed out `const`: only read through it.
 ///
 /// # Safety
 ///
@@ -308,6 +359,14 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_value(
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_headers(
     self_: *const kafka_consumer_ConsumerRecord_t,
 ) -> *const kafka_common_header_internals_RecordHeaders_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this call, as
+    // `inner_ref` requires. The view returned is the boxed `RecordHeadersInner` the record's
+    // `headers` `OnceLock` holds: set once, never moved or replaced, and freed only with the
+    // record, so it is valid until the record is destroyed, as the rustdoc states. It is derived
+    // from a shared reference and handed out `const`, so C only reads through it: the mutating
+    // `Headers_*` functions exclude, by their `# Safety`, a view on a handle the caller received
+    // `const`, and `kafka_common_header_internals_RecordHeaders_set_read_only` excludes such a
+    // handle.
     let inner = unsafe { inner_ref(self_) };
     inner
         .headers
@@ -327,6 +386,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_headers(
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_leader_epoch(
     self_: *const kafka_consumer_ConsumerRecord_t,
 ) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
+    // the only use of the reference, as `consumer_record_ref` requires.
     unsafe { consumer_record_ref(self_) }.leader_epoch().unwrap_or(-1)
 }
 
@@ -342,6 +403,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_leader_epoch(
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_delivery_count(
     self_: *const kafka_consumer_ConsumerRecord_t,
 ) -> i16 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
+    // the only use of the reference, as `consumer_record_ref` requires.
     unsafe { consumer_record_ref(self_) }.delivery_count().unwrap_or(-1)
 }
 
@@ -356,6 +419,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_delivery_count(
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_to_string(
     self_: *const kafka_consumer_ConsumerRecord_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
+    // the only use of the reference, as `consumer_record_ref` requires. The string is copied into
+    // an owned C string before return.
     into_c_string(&unsafe { consumer_record_ref(self_) }.to_string())
 }
 
@@ -370,6 +436,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_to_string(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_destroy(self_: *mut kafka_consumer_ConsumerRecord_t) {
     if !self_.is_null() {
+        // SAFETY: Per this function's `# Safety`, `self_` (non-null, checked above) is an owned
+        // handle not yet destroyed, i.e. a `Box<ConsumerRecordInner>` from `box_consumer_record` (a
+        // record borrowed from a records handle is never passed here), so taking it back and
+        // dropping it frees it, and the arrays it owns, exactly once.
         unsafe { drop(Box::from_raw(self_ as *mut ConsumerRecordInner)) };
     }
 }
@@ -385,18 +455,32 @@ type GenericBuilder = ConsumerRecordOptionsBuilder<GenericValue, GenericValue>;
 ///
 /// # Safety
 ///
-/// `options` must be a valid options handle.
+/// `options` must be a valid options handle, kept alive for `'a`.
 unsafe fn options_ref<'a>(options: *const kafka_consumer_ConsumerRecordOptions_t) -> &'a GenericOptions {
+    // SAFETY: Per this function's `# Safety`, `options` is a valid options handle kept alive for
+    // `'a`, i.e. the `Box::into_raw` of a `GenericOptions` in
+    // `kafka_consumer_ConsumerRecordOptionsBuilder_build`, the only constructor. Nothing mutates it
+    // after that, so the shared reference is sound.
     unsafe { &*(options as *const GenericOptions) }
 }
 
 /// Applies a by-value fluent setter to the builder behind a handle. The
 /// slot is empty only after `build`, which consumes the builder; a setter
 /// after that is a no-op.
+///
+/// # Safety
+///
+/// `builder` must be a valid builder handle that no other call uses at the
+/// same time.
 unsafe fn with_builder(
     builder: *mut kafka_consumer_ConsumerRecordOptionsBuilder_t,
     f: impl FnOnce(GenericBuilder) -> GenericBuilder,
 ) {
+    // SAFETY: Per this function's `# Safety`, `builder` is a valid builder handle, i.e. the
+    // `Box::into_raw` of an `Option<GenericBuilder>` in
+    // `kafka_consumer_ConsumerRecordOptionsBuilder_new`, the only constructor, that no other call
+    // uses at the same time, so the exclusive reference, used only within this call, aliases
+    // nothing.
     let slot = unsafe { &mut *(builder as *mut Option<GenericBuilder>) };
     if let Some(b) = slot.take() {
         *slot = Some(f(b));
@@ -416,15 +500,19 @@ pub extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_new() -> *mut kafk
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle and `topic` a valid NUL-terminated
-/// string.
+/// `self_` must be a valid builder handle that no other call uses at the
+/// same time, and `topic` a valid NUL-terminated string.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_topic(
     self_: *mut kafka_consumer_ConsumerRecordOptionsBuilder_t,
     topic: *const c_char,
 ) {
+    // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied into an owned `String`.
     let topic = unsafe { c_str_to_string(topic) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
+    // uses at the same time, as `with_builder` requires.
     unsafe { with_builder(self_, |b| b.set_topic(topic)) }
 }
 
@@ -432,13 +520,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_topic(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle.
+/// `self_` must be a valid builder handle that no other call uses at the
+/// same time.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_partition(
     self_: *mut kafka_consumer_ConsumerRecordOptionsBuilder_t,
     partition: i32,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
+    // uses at the same time, as `with_builder` requires.
     unsafe { with_builder(self_, |b| b.set_partition(partition)) }
 }
 
@@ -446,13 +537,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_partiti
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle.
+/// `self_` must be a valid builder handle that no other call uses at the
+/// same time.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_offset(
     self_: *mut kafka_consumer_ConsumerRecordOptionsBuilder_t,
     offset: i64,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
+    // uses at the same time, as `with_builder` requires.
     unsafe { with_builder(self_, |b| b.set_offset(offset)) }
 }
 
@@ -460,13 +554,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_offset(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle.
+/// `self_` must be a valid builder handle that no other call uses at the
+/// same time.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_timestamp(
     self_: *mut kafka_consumer_ConsumerRecordOptionsBuilder_t,
     timestamp: i64,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
+    // uses at the same time, as `with_builder` requires.
     unsafe { with_builder(self_, |b| b.set_timestamp(timestamp)) }
 }
 
@@ -474,15 +571,20 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_timesta
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle and `timestamp_type` a singleton
-/// of `kafka_common_record_TimestampType_t`.
+/// `self_` must be a valid builder handle that no other call uses at the
+/// same time, and `timestamp_type` a singleton of
+/// `kafka_common_record_TimestampType_t`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_timestamp_type(
     self_: *mut kafka_consumer_ConsumerRecordOptionsBuilder_t,
     timestamp_type: *const kafka_common_record_TimestampType_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `timestamp_type` is a singleton of
+    // `kafka_common_record_TimestampType_t`, as `value_of` requires.
     let timestamp_type = unsafe { timestamp_type::value_of(timestamp_type) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
+    // uses at the same time, as `with_builder` requires.
     unsafe { with_builder(self_, |b| b.set_timestamp_type(timestamp_type)) }
 }
 
@@ -490,13 +592,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_timesta
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle.
+/// `self_` must be a valid builder handle that no other call uses at the
+/// same time.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_serialized_key_size(
     self_: *mut kafka_consumer_ConsumerRecordOptionsBuilder_t,
     serialized_key_size: i32,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
+    // uses at the same time, as `with_builder` requires.
     unsafe { with_builder(self_, |b| b.set_serialized_key_size(serialized_key_size)) }
 }
 
@@ -504,13 +609,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_seriali
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle.
+/// `self_` must be a valid builder handle that no other call uses at the
+/// same time.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_serialized_value_size(
     self_: *mut kafka_consumer_ConsumerRecordOptionsBuilder_t,
     serialized_value_size: i32,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
+    // uses at the same time, as `with_builder` requires.
     unsafe { with_builder(self_, |b| b.set_serialized_value_size(serialized_value_size)) }
 }
 
@@ -518,13 +626,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_seriali
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle.
+/// `self_` must be a valid builder handle that no other call uses at the
+/// same time.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_key(
     self_: *mut kafka_consumer_ConsumerRecordOptionsBuilder_t,
     key: *const c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
+    // uses at the same time, as `with_builder` requires.
     unsafe { with_builder(self_, |b| b.set_key(generic(key))) }
 }
 
@@ -532,13 +643,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_key(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle.
+/// `self_` must be a valid builder handle that no other call uses at the
+/// same time.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_value(
     self_: *mut kafka_consumer_ConsumerRecordOptionsBuilder_t,
     value: *const c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
+    // uses at the same time, as `with_builder` requires.
     unsafe { with_builder(self_, |b| b.set_value(generic(value))) }
 }
 
@@ -546,15 +660,20 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_value(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle and `headers` a valid record-headers
-/// handle.
+/// `self_` must be a valid builder handle that no other call uses at the
+/// same time, and `headers` a valid record-headers handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_headers(
     self_: *mut kafka_consumer_ConsumerRecordOptionsBuilder_t,
     headers: *const kafka_common_header_internals_RecordHeaders_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `headers` is a valid record-headers handle, as
+    // `record_headers_ref` requires; the headers are cloned, so the borrow lasts for this statement
+    // only.
     let headers = unsafe { record_headers_ref(headers) }.clone();
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
+    // uses at the same time, as `with_builder` requires.
     unsafe { with_builder(self_, |b| b.set_headers(headers)) }
 }
 
@@ -562,13 +681,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_headers
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle.
+/// `self_` must be a valid builder handle that no other call uses at the
+/// same time.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_leader_epoch(
     self_: *mut kafka_consumer_ConsumerRecordOptionsBuilder_t,
     leader_epoch: i32,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
+    // uses at the same time, as `with_builder` requires.
     unsafe { with_builder(self_, |b| b.set_leader_epoch((leader_epoch >= 0).then_some(leader_epoch))) }
 }
 
@@ -576,13 +698,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_leader_
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle.
+/// `self_` must be a valid builder handle that no other call uses at the
+/// same time.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_delivery_count(
     self_: *mut kafka_consumer_ConsumerRecordOptionsBuilder_t,
     delivery_count: i16,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
+    // uses at the same time, as `with_builder` requires.
     unsafe { with_builder(self_, |b| b.set_delivery_count((delivery_count >= 0).then_some(delivery_count))) }
 }
 
@@ -593,13 +718,18 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_deliver
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle and `out_build` a valid pointer.
+/// `self_` must be a valid builder handle that no other call uses at the
+/// same time, and `out_build` a valid pointer.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_build(
     self_: *mut kafka_consumer_ConsumerRecordOptionsBuilder_t,
     out_build: *mut *mut kafka_consumer_ConsumerRecordOptions_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle, i.e. the
+    // `Box::into_raw` of an `Option<GenericBuilder>` in
+    // `kafka_consumer_ConsumerRecordOptionsBuilder_new`, that no other call uses at the same time,
+    // so the exclusive reference, used only within this call, aliases nothing.
     let slot = unsafe { &mut *(self_ as *mut Option<GenericBuilder>) };
     let Some(builder) = slot.take() else {
         return box_error(crate::common::Error::local_illegal_state(
@@ -608,6 +738,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_build(
     };
     match builder.build() {
         Ok(options) => {
+            // SAFETY: Per this function's `# Safety`, `out_build` is a valid pointer, so the write
+            // is sound; the handle written is a fresh box the caller owns, freed with
+            // `kafka_consumer_ConsumerRecordOptions_destroy`.
             unsafe { *out_build = Box::into_raw(Box::new(options)) as *mut kafka_consumer_ConsumerRecordOptions_t };
             std::ptr::null_mut()
         },
@@ -626,6 +759,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_destroy(
     self_: *mut kafka_consumer_ConsumerRecordOptionsBuilder_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: Per this function's `# Safety`, `self_` (non-null, checked above) is a builder
+        // handle not yet destroyed, i.e. the `Box::into_raw` of
+        // `kafka_consumer_ConsumerRecordOptionsBuilder_new`, so `Box::from_raw` reclaims it exactly
+        // once.
         unsafe { drop(Box::from_raw(self_ as *mut Option<GenericBuilder>)) };
     }
 }
@@ -641,6 +778,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptions_destroy(
     self_: *mut kafka_consumer_ConsumerRecordOptions_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: Per this function's `# Safety`, `self_` (non-null, checked above) is an options
+        // handle not yet destroyed, i.e. the `Box::into_raw` of a `GenericOptions` in
+        // `kafka_consumer_ConsumerRecordOptionsBuilder_build`, so `Box::from_raw` reclaims it
+        // exactly once.
         unsafe { drop(Box::from_raw(self_ as *mut GenericOptions)) };
     }
 }
@@ -657,6 +798,7 @@ mod tests {
     #[test]
     fn plain_constructor_and_getters() {
         let mut key = 1i32;
+        // SAFETY: Test code: `topic` is a NUL-terminated literal, and `key` outlives the record.
         let record = unsafe {
             kafka_consumer_ConsumerRecord_new(
                 c"t".as_ptr(),
@@ -666,6 +808,8 @@ mod tests {
                 std::ptr::null(),
             )
         };
+        // SAFETY: Test code: `record` is a live handle from its constructor, destroyed once, last;
+        // the topic string and the headers view are read before that.
         unsafe {
             assert_eq!(
                 CStr::from_ptr(kafka_consumer_ConsumerRecord_topic(record)).to_str().unwrap(),
@@ -691,15 +835,21 @@ mod tests {
         let builder = kafka_consumer_ConsumerRecordOptionsBuilder_new();
         let mut options = std::ptr::null_mut();
         // Missing mandatory fields: the Rust builder's IllegalArgumentError.
+        // SAFETY: Test code: `builder` is a live builder and `options` a local slot.
         let error = unsafe { kafka_consumer_ConsumerRecordOptionsBuilder_build(builder, &mut options) };
         assert!(!error.is_null());
+        // SAFETY: Test code: `error` is the owned error just returned, non-null (asserted above).
         assert!(unsafe { error_ref(error) }.error.is_local_illegal_argument_error());
+        // SAFETY: Test code: `error` and `builder` are live handles, each destroyed once here.
         unsafe {
             kafka_common_Error_destroy(error);
             kafka_consumer_ConsumerRecordOptionsBuilder_destroy(builder);
         }
 
         let builder = kafka_consumer_ConsumerRecordOptionsBuilder_new();
+        // SAFETY: Test code: `builder` is a live builder used by this thread only, destroyed once
+        // after its last use; `options` is the handle `build` wrote, destroyed once after
+        // `with_options` copied it; `record` is destroyed once, last.
         unsafe {
             kafka_consumer_ConsumerRecordOptionsBuilder_set_topic(builder, c"t".as_ptr());
             kafka_consumer_ConsumerRecordOptionsBuilder_set_partition(builder, 1);
@@ -740,6 +890,8 @@ mod tests {
             true,
             true,
         );
+        // SAFETY: Test code: `record` is a live handle that owns `key`, the `box_bytes` handle
+        // built above; `key` is read before the record, and with it the array, is destroyed once.
         unsafe {
             assert_eq!(kafka_consumer_ConsumerRecord_key(record) as *mut kafka_Bytes_t, key);
             assert_eq!((*key).as_slice(), Some(&b"k"[..]));

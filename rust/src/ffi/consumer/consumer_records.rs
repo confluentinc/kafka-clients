@@ -105,7 +105,16 @@ pub(crate) fn box_consumer_records(
         as *mut kafka_consumer_ConsumerRecords_t
 }
 
+/// The state behind a handle.
+///
+/// # Safety
+///
+/// `records` must be a valid records handle, kept alive for `'a`.
 unsafe fn inner_ref<'a>(records: *const kafka_consumer_ConsumerRecords_t) -> &'a ConsumerRecordsInner {
+    // SAFETY: Per this function's `# Safety`, `records` is a valid records handle kept alive for
+    // `'a`, i.e. the `Box::into_raw` of a `ConsumerRecordsInner` in `box_consumer_records`, the
+    // only constructor. Nothing takes a `&mut` to it until it is destroyed (its records' lazily
+    // built headers live in `OnceLock`s), so the shared reference is sound for `'a`.
     unsafe { &*(records as *const ConsumerRecordsInner) }
 }
 
@@ -126,7 +135,8 @@ pub extern "C" fn kafka_consumer_ConsumerRecords_empty() -> *mut kafka_consumer_
 /// # Safety
 ///
 /// `records` and `next_offsets` must be null or valid maps of the documented
-/// element types.
+/// element types, which no other call mutates during this one, nor the
+/// lists in `records`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_with_next_offsets(
@@ -134,14 +144,27 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_with_next_offsets(
     next_offsets: *const kafka_Map_t,
 ) -> *mut kafka_consumer_ConsumerRecords_t {
     let mut by_partition: IndexMap<TopicPartition, Vec<GenericRecord>> = IndexMap::new();
+    // SAFETY: Per this function's `# Safety`, `records` is null or a valid map that no other call
+    // mutates during this one, as `map_entries` requires; the entries are read only within this
+    // loop.
     for &(tp, list) in unsafe { map_entries(records) } {
+        // SAFETY: Per this function's `# Safety`, every key of `records` is a valid topic-partition
+        // handle, as `topic_partition_ref` requires; it is cloned, so the borrow ends here.
         let tp = unsafe { topic_partition_ref(tp as *const kafka_common_TopicPartition_t) }.clone();
+        // SAFETY: Per this function's `# Safety`, every value of `records` is a valid list of
+        // record handles that no other call mutates during this one, as `list_elements` requires;
+        // the elements are read only within this statement.
         let records = unsafe { list_elements(list as *const kafka_List_t) }
             .iter()
+            // SAFETY: Per this function's `# Safety`, every element of that list is a valid record
+            // handle, as `consumer_record_ref` requires; it is cloned, so the borrow ends here.
             .map(|&record| unsafe { consumer_record_ref(record as *const kafka_consumer_ConsumerRecord_t) }.clone())
             .collect();
         by_partition.insert(tp, records);
     }
+    // SAFETY: Per this function's `# Safety`, `next_offsets` is null or a valid map of
+    // topic-partition to offset-and-metadata handles that no other call mutates during this one, as
+    // `map_offset_and_metadata` requires.
     let next_offsets = unsafe { map_offset_and_metadata(next_offsets) };
     box_consumer_records(ConsumerRecords::with_next_offsets(by_partition, next_offsets), false, false)
 }
@@ -157,6 +180,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_with_next_offsets(
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_next_offsets(
     self_: *const kafka_consumer_ConsumerRecords_t,
 ) -> *mut kafka_Map_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
+    // the only use of the reference, as `inner_ref` requires. The offsets are copied into the owned
+    // map before return.
     offset_and_metadata_map(&unsafe { inner_ref(self_) }.next_offsets)
 }
 
@@ -171,6 +197,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_next_offsets(
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_partitions(
     self_: *const kafka_consumer_ConsumerRecords_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
+    // the only use of the reference, as `inner_ref` requires. The partitions are cloned into the
+    // owned list before return.
     topic_partition_list(unsafe { inner_ref(self_) }.partitions.iter().map(|(tp, _)| tp.clone()))
 }
 
@@ -188,7 +217,12 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_records_with_partition(
     self_: *const kafka_consumer_ConsumerRecords_t,
     partition: *const kafka_common_TopicPartition_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this call, as
+    // `inner_ref` requires. The list holds pointers to records in the handle's vectors, which are
+    // never resized, so they stay valid until the handle is destroyed, as the rustdoc states.
     let inner = unsafe { inner_ref(self_) };
+    // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, alive
+    // for this call, as `topic_partition_ref` requires; it is only compared.
     let partition = unsafe { topic_partition_ref(partition) };
     ConsumerRecordsInner::borrowed_list(
         inner
@@ -212,7 +246,12 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_records_with_topic(
     self_: *const kafka_consumer_ConsumerRecords_t,
     topic: *const c_char,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this call, as
+    // `inner_ref` requires. The list holds pointers to records in the handle's vectors, which are
+    // never resized, so they stay valid until the handle is destroyed, as the rustdoc states.
     let inner = unsafe { inner_ref(self_) };
+    // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied into an owned `String`.
     let topic = unsafe { c_str_to_string(topic) };
     ConsumerRecordsInner::borrowed_list(
         inner
@@ -231,6 +270,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_records_with_topic(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_is_empty(self_: *const kafka_consumer_ConsumerRecords_t) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
+    // the only use of the reference, as `inner_ref` requires.
     i8::from(unsafe { inner_ref(self_) }.count() == 0)
 }
 
@@ -242,6 +283,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_is_empty(self_: *const k
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_count(self_: *const kafka_consumer_ConsumerRecords_t) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
+    // the only use of the reference, as `inner_ref` requires.
     i32::try_from(unsafe { inner_ref(self_) }.count()).unwrap_or(i32::MAX)
 }
 
@@ -249,12 +292,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_count(self_: *const kafk
 ///
 /// # Safety
 ///
-/// `self_` must be null or a valid handle not used afterwards, nor any
-/// record borrowed from it.
+/// `self_` must be null or an owned handle not yet destroyed; neither it nor
+/// any record borrowed from it is used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_destroy(self_: *mut kafka_consumer_ConsumerRecords_t) {
     if !self_.is_null() {
+        // SAFETY: Per this function's `# Safety`, `self_` (non-null, checked above) is an owned
+        // handle not yet destroyed, i.e. a `Box<ConsumerRecordsInner>` from `box_consumer_records`,
+        // the only constructor, so taking it back and dropping it frees it, and every record it
+        // holds, exactly once; no record borrowed from it is used afterwards.
         unsafe { drop(Box::from_raw(self_ as *mut ConsumerRecordsInner)) };
     }
 }
@@ -289,6 +336,9 @@ mod tests {
     #[test]
     fn views_keep_fetch_order_and_borrow_records() {
         let records = box_consumer_records(sample(), false, false);
+        // SAFETY: Test code: `records` is the owned handle built above, destroyed once, last; every
+        // list, map and topic-partition handle made here is destroyed once after its last use, and
+        // the borrowed record pointers are read before `records` goes.
         unsafe {
             assert_eq!(kafka_consumer_ConsumerRecords_count(records), 3);
             assert_eq!(kafka_consumer_ConsumerRecords_is_empty(records), 0);
@@ -318,6 +368,9 @@ mod tests {
 
     #[test]
     fn built_from_c_copies_the_records() {
+        // SAFETY: Test code: every handle is built here and destroyed once after its last use; the
+        // C-built map and list own nothing, so destroying them leaves `tp` and `record` to their
+        // own destroys, and `records` holds copies, read after the inputs are gone.
         unsafe {
             let tp = box_topic_partition(TopicPartition::new("t", 1));
             let record = kafka_consumer_ConsumerRecord_new(c"t".as_ptr(), 1, 5, std::ptr::null(), std::ptr::null());
