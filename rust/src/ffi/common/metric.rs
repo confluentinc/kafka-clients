@@ -88,8 +88,12 @@ pub(crate) fn box_metric_value(value: MetricValue) -> *mut kafka_common_MetricVa
 ///
 /// # Safety
 ///
-/// `value` must be a valid metric-value handle.
+/// `value` must be a valid metric-value handle, alive for `'a`.
 unsafe fn metric_value_ref<'a>(value: *const kafka_common_MetricValue_t) -> &'a MetricValueInner {
+    // SAFETY: Per this function's `# Safety`, `value` is a valid metric-value handle alive for
+    // `'a`, so it points at a live `MetricValueInner`, the `Box::into_raw` of `box_metric_value`,
+    // the only function that makes one. No call mutates a `MetricValueInner`, so the shared
+    // reference is sound for `'a`.
     unsafe { &*(value as *const MetricValueInner) }
 }
 
@@ -99,6 +103,9 @@ unsafe fn metric_value_ref<'a>(value: *const kafka_common_MetricValue_t) -> &'a 
 ///
 /// `value` must be an owned metric-value handle not destroyed afterwards.
 pub(crate) unsafe fn take_metric_value(value: *mut kafka_common_MetricValue_t) -> MetricValue {
+    // SAFETY: Per this function's `# Safety`, `value` is an owned metric-value handle, the
+    // `Box::into_raw` of `box_metric_value`, that is not destroyed afterwards, so `Box::from_raw`
+    // reclaims it exactly once.
     unsafe { Box::from_raw(value as *mut MetricValueInner) }.value
 }
 
@@ -115,7 +122,9 @@ impl MetricInner {
     ///
     /// # Safety
     ///
-    /// `metric` must point at a live implementation.
+    /// `metric` must point at a live implementation that outlives the
+    /// returned view, and the implementation must be `Sync`: the view is
+    /// `Send` and `Sync` and hands it out as `&dyn Metric`.
     pub(crate) unsafe fn new(metric: *const dyn Metric) -> Self {
         Self { metric, name: OnceLock::new() }
     }
@@ -128,14 +137,22 @@ impl MetricInner {
 
 impl MetricInner {
     fn metric(&self) -> &dyn Metric {
+        // SAFETY: `self.metric` was given to `MetricInner::new`, whose `# Safety` requires it to
+        // point at a live implementation that outlives the view; `self` is that view, so the
+        // implementation is live for the borrow of `self`.
         unsafe { &*self.metric }
     }
 }
 
-// SAFETY: the pointer targets a metric owned by the same handle tree as this
-// view, and a handle tree crosses threads only as a whole, under the C
-// caller's synchronisation, like every other handle.
+// SAFETY: `MetricInner` holds the `*const dyn Metric` and a `OnceLock<MetricNameInner>`, which is
+// `Send`. Per `MetricInner::new`'s `# Safety`, the pointer targets a live `Sync` implementation
+// that outlives the view, so moving the view to another thread moves only a shared reference to
+// it, as sending a `&dyn Metric` to a `Sync` implementation would. The one production caller,
+// `kafka_common_metrics_KafkaMetric__as_Metric`, points it at a `KafkaMetric`, which is `Sync`.
 unsafe impl Send for MetricInner {}
+// SAFETY: `Sync` because a `&MetricInner` reads the pointer only as `&dyn Metric`
+// (`MetricInner::metric`), and the implementation is `Sync` per `MetricInner::new`'s `# Safety`;
+// the `OnceLock<MetricNameInner>` is `Sync` itself.
 unsafe impl Sync for MetricInner {}
 
 /// `metricName()`: borrowed from the handle, valid as long as it is.
@@ -148,6 +165,12 @@ unsafe impl Sync for MetricInner {}
 pub unsafe extern "C" fn kafka_common_Metric_metric_name(
     self_: *const kafka_common_Metric_t,
 ) -> *const kafka_common_MetricName_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid metric handle, i.e. a
+    // `MetricInner` view a class hands out through `MetricInner::as_ptr`
+    // (`kafka_common_metrics_KafkaMetric__as_Metric`), alive for this call. Nothing takes a
+    // `&mut MetricInner` (the name is filled through `OnceLock`), so the shared reference is sound.
+    // The name handle returned lives in the view's own `name` cell, so it lives as long as the
+    // handle; that is the rustdoc's "borrowed from the handle, valid as long as it is".
     let inner = unsafe { &*(self_ as *const MetricInner) };
     inner
         .name
@@ -166,6 +189,11 @@ pub unsafe extern "C" fn kafka_common_Metric_metric_name(
 pub unsafe extern "C" fn kafka_common_Metric_metric_value(
     self_: *const kafka_common_Metric_t,
 ) -> *mut kafka_common_MetricValue_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid metric handle, i.e. a
+    // `MetricInner` view a class hands out through `MetricInner::as_ptr`
+    // (`kafka_common_metrics_KafkaMetric__as_Metric`), alive for this call. Nothing takes a
+    // `&mut MetricInner` (the name is filled through `OnceLock`), so the shared reference is sound.
+    // The reading is copied into the owned handle returned.
     box_metric_value(unsafe { &*(self_ as *const MetricInner) }.metric().metric_value())
 }
 
@@ -183,6 +211,9 @@ pub unsafe extern "C" fn kafka_common_Metric_metric_value(
 pub unsafe extern "C" fn kafka_common_MetricValue__enum(
     self_: *const kafka_common_MetricValue_t,
 ) -> kafka_common_MetricValue_e {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid metric-value handle, as
+    // `metric_value_ref` requires; the reference is used only within this call, and the reading is
+    // copied out.
     match unsafe { metric_value_ref(self_) }.value {
         MetricValue::Double(_) => kafka_common_MetricValue_e::kafka_common_MetricValue_DOUBLE,
         MetricValue::String(_) => kafka_common_MetricValue_e::kafka_common_MetricValue_STRING,
@@ -207,6 +238,9 @@ pub extern "C" fn kafka_common_MetricValue_double(value: f64) -> *mut kafka_comm
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricValue_string(value: *const c_char) -> *mut kafka_common_MetricValue_t {
+    // SAFETY: Per this function's `# Safety`, `value` is a valid NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // this call.
     box_metric_value(MetricValue::String(unsafe { c_str_to_string(value) }))
 }
 
@@ -234,6 +268,9 @@ pub extern "C" fn kafka_common_MetricValue_int(value: i32) -> *mut kafka_common_
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricValue_as_double(self_: *const kafka_common_MetricValue_t) -> f64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid metric-value handle, as
+    // `metric_value_ref` requires; the reference is used only within this call, and the reading is
+    // copied out.
     unsafe { metric_value_ref(self_) }.value.as_double().unwrap_or(f64::NAN)
 }
 
@@ -246,6 +283,10 @@ pub unsafe extern "C" fn kafka_common_MetricValue_as_double(self_: *const kafka_
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricValue_as_string(self_: *const kafka_common_MetricValue_t) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid metric-value handle, as
+    // `metric_value_ref` requires. The string returned is the handle's own `string_c`, so it lives
+    // until the handle is destroyed; that is the rustdoc's "borrowed, valid until the handle is
+    // destroyed".
     unsafe { metric_value_ref(self_) }
         .string_c
         .as_ref()
@@ -262,6 +303,9 @@ pub unsafe extern "C" fn kafka_common_MetricValue_as_string(self_: *const kafka_
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricValue_as_long(self_: *const kafka_common_MetricValue_t) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid metric-value handle, as
+    // `metric_value_ref` requires; the reference is used only within this call, and the reading is
+    // copied out.
     unsafe { metric_value_ref(self_) }.value.as_long().unwrap_or(-1)
 }
 
@@ -275,6 +319,9 @@ pub unsafe extern "C" fn kafka_common_MetricValue_as_long(self_: *const kafka_co
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricValue_as_int(self_: *const kafka_common_MetricValue_t) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid metric-value handle, as
+    // `metric_value_ref` requires; the reference is used only within this call, and the reading is
+    // copied out.
     unsafe { metric_value_ref(self_) }.value.as_int().unwrap_or(-1)
 }
 
@@ -287,6 +334,9 @@ pub unsafe extern "C" fn kafka_common_MetricValue_as_int(self_: *const kafka_com
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricValue_destroy(self_: *mut kafka_common_MetricValue_t) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // metric-value handle not yet destroyed, i.e. the `Box::into_raw` of `box_metric_value`, so
+        // `Box::from_raw` reclaims it exactly once.
         drop(unsafe { Box::from_raw(self_ as *mut MetricValueInner) });
     }
 }
@@ -322,8 +372,13 @@ mod tests {
             name: MetricName::new("n", "g", "d", BTreeMap::new()),
             value: MetricValue::Double(1.5),
         };
+        // SAFETY: Test code: `metric` is a local declared before `inner` and dropped after it, so
+        // it outlives the view, and `TestMetric` is `Sync`, as `MetricInner::new` requires.
         let inner = unsafe { MetricInner::new(&metric as *const dyn Metric) };
         let view = inner.as_ptr();
+        // SAFETY: Test code: `view` comes from `inner.as_ptr()` and `inner` outlives every call
+        // using it; the cached name handle and its string are read while the view lives; the value
+        // handle is destroyed once, and destroying null is a no-op.
         unsafe {
             let name = kafka_common_Metric_metric_name(view);
             assert_eq!(name, kafka_common_Metric_metric_name(view), "the name handle is cached");
@@ -337,6 +392,8 @@ mod tests {
 
     #[test]
     fn variant_constructors_round_trip_through_enum_and_take() {
+        // SAFETY: Test code: each handle comes from its constructor and is taken back exactly once
+        // by `take_metric_value`, after `__enum` reads it; `c"up"` is a static string.
         unsafe {
             let cases: [(*mut kafka_common_MetricValue_t, kafka_common_MetricValue_e, MetricValue); 4] = [
                 (
@@ -375,7 +432,11 @@ mod tests {
             MetricValue::String("s".to_string()),
         ] {
             let metric = TestMetric { name: MetricName::new("n", "g", "d", BTreeMap::new()), value };
+            // SAFETY: Test code: `metric` is a local declared before `inner` and dropped after it,
+            // so it outlives the view, and `TestMetric` is `Sync`, as `MetricInner::new` requires.
             let inner = unsafe { MetricInner::new(&metric as *const dyn Metric) };
+            // SAFETY: Test code: `inner` outlives the view `as_ptr` returns, and the value handle
+            // is destroyed once, after it is read.
             unsafe {
                 let value = kafka_common_Metric_metric_value(inner.as_ptr());
                 assert!(kafka_common_MetricValue_as_double(value).is_nan());
@@ -386,6 +447,9 @@ mod tests {
 
     #[test]
     fn typed_accessors_answer_only_their_own_kind() {
+        // SAFETY: Test code: each handle comes from its constructor and is destroyed once, after
+        // every read; `s` outlives the constructor reading it, and the string `as_string` borrows
+        // is read before its handle is destroyed.
         unsafe {
             let long = kafka_common_MetricValue_long(3);
             let int = kafka_common_MetricValue_int(4);

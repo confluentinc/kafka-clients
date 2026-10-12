@@ -90,6 +90,9 @@ pub(crate) fn singleton(state: GroupState) -> *const kafka_common_GroupState_t {
 ///
 /// `state` must be a singleton returned by this module.
 pub(crate) unsafe fn value_of(state: *const kafka_common_GroupState_t) -> GroupState {
+    // SAFETY: Per this function's `# Safety`, `state` is a singleton returned by this module, i.e.
+    // a pointer to an element of the `static` `VARIANTS` array (`singleton`), so it points at a
+    // live, initialised `GroupState`, which is `Copy` and read out here.
     unsafe { *(state as *const GroupState) }
 }
 
@@ -168,6 +171,8 @@ pub extern "C" fn kafka_common_GroupState_not_ready() -> *const kafka_common_Gro
 pub unsafe extern "C" fn kafka_common_GroupState__enum(
     self_: *const kafka_common_GroupState_t,
 ) -> kafka_common_GroupState_e {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `value_of` requires; the value is copied out.
     enum_of(unsafe { value_of(self_) })
 }
 
@@ -179,6 +184,9 @@ pub unsafe extern "C" fn kafka_common_GroupState__enum(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupState_name(self_: *const kafka_common_GroupState_t) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `value_of` requires; the value is copied out, and the name returned is owned by the `static`
+    // `NAMES`, which is never dropped, so it is never freed, as the rustdoc states.
     NAMES[enum_of(unsafe { value_of(self_) }) as usize].as_ptr()
 }
 
@@ -191,6 +199,9 @@ pub unsafe extern "C" fn kafka_common_GroupState_name(self_: *const kafka_common
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupState_parse(name: *const c_char) -> *const kafka_common_GroupState_t {
+    // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // this call.
     singleton(GroupState::parse(&unsafe { c_str_to_string(name) }))
 }
 
@@ -210,6 +221,8 @@ pub unsafe extern "C" fn kafka_common_GroupState_parse(name: *const c_char) -> *
 pub unsafe extern "C" fn kafka_common_GroupState_group_states_for_type(
     group_type: *const kafka_common_GroupType_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `group_type` is a `kafka_common_GroupType_t`
+    // singleton, as `group_type_of` (`group_type::value_of`) requires; the value is copied out.
     let group_type = unsafe { group_type_of(group_type) };
     if group_type == GroupType::Unknown {
         return std::ptr::null_mut();
@@ -233,6 +246,8 @@ pub unsafe extern "C" fn kafka_common_GroupState_group_states_for_type(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupState_to_string(self_: *const kafka_common_GroupState_t) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `value_of` requires; the value is copied out and its text copied into an owned string.
     into_c_string(&unsafe { value_of(self_) }.to_string())
 }
 
@@ -248,6 +263,9 @@ mod tests {
     fn singletons_round_trip_and_match_their_enumerator() {
         for (index, &state) in VARIANTS.iter().enumerate() {
             let handle = singleton(state);
+            // SAFETY: Test code: every handle passed is a singleton from `singleton`, which points
+            // into the static `VARIANTS` array and is never freed, and the names read are owned by
+            // the static `NAMES`.
             unsafe {
                 assert_eq!(value_of(handle), state);
                 assert_eq!(kafka_common_GroupState__enum(handle) as usize, index);
@@ -278,6 +296,10 @@ mod tests {
     fn parse_group_states_for_type_and_to_string_follow_java() {
         let stable = CString::new("Stable").unwrap();
         let bogus = CString::new("bogus").unwrap();
+        // SAFETY: Test code: the `CString`s outlive the calls reading them, the singletons (of this
+        // module and of `group_type`) are never freed, the owned list from `group_states_for_type`
+        // is destroyed once, after its elements are read, and the string from `to_string` is
+        // destroyed once, after it is read.
         unsafe {
             assert_eq!(kafka_common_GroupState_parse(stable.as_ptr()), kafka_common_GroupState_stable());
             assert_eq!(kafka_common_GroupState_parse(bogus.as_ptr()), kafka_common_GroupState_unknown());

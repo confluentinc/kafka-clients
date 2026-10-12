@@ -44,7 +44,16 @@ impl TopicIdPartitionInner {
     }
 }
 
+/// What a handle points at.
+///
+/// # Safety
+///
+/// `tip` must be a valid topic-id-partition handle, alive for `'a`.
 unsafe fn inner_ref<'a>(tip: *const kafka_common_TopicIdPartition_t) -> &'a TopicIdPartitionInner {
+    // SAFETY: Per this function's `# Safety`, `tip` is a valid topic-id-partition handle alive for
+    // `'a`, i.e. the `Box::into_raw` of a `TopicIdPartitionInner` in `boxed`, the only function
+    // that makes one, not yet destroyed. No call mutates a `TopicIdPartitionInner`, so the shared
+    // reference is sound for `'a`.
     unsafe { &*(tip as *const TopicIdPartitionInner) }
 }
 
@@ -67,7 +76,12 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_new(
     topic_partition: *const kafka_common_TopicPartition_t,
 ) -> *mut kafka_common_TopicIdPartition_t {
     boxed(TopicIdPartition::new(
+        // SAFETY: Per this function's `# Safety`, `topic_id` is a valid uuid handle, as `uuid_of`
+        // requires; the `Uuid` is copied out.
         unsafe { uuid_of(topic_id) },
+        // SAFETY: Per this function's `# Safety`, `topic_partition` is a valid topic-partition
+        // handle, as `topic_partition_ref` requires; the value is cloned, so the borrow lasts for
+        // this call only.
         unsafe { topic_partition_ref(topic_partition) }.clone(),
     ))
 }
@@ -86,8 +100,13 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_with_partition_topic(
     topic: *const c_char,
 ) -> *mut kafka_common_TopicIdPartition_t {
     boxed(TopicIdPartition::with_partition_topic(
+        // SAFETY: Per this function's `# Safety`, `topic_id` is a valid uuid handle, as `uuid_of`
+        // requires; the `Uuid` is copied out.
         unsafe { uuid_of(topic_id) },
         partition,
+        // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
+        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // after this call.
         unsafe { c_str_to_string(topic) },
     ))
 }
@@ -102,6 +121,8 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_with_partition_topic(
 pub unsafe extern "C" fn kafka_common_TopicIdPartition_topic_id(
     self_: *const kafka_common_TopicIdPartition_t,
 ) -> *mut kafka_common_Uuid_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-id-partition handle, as
+    // `inner_ref` requires; the uuid is copied into a new owned handle.
     box_uuid(unsafe { inner_ref(self_) }.tip.topic_id())
 }
 
@@ -115,6 +136,10 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_topic_id(
 pub unsafe extern "C" fn kafka_common_TopicIdPartition_topic(
     self_: *const kafka_common_TopicIdPartition_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-id-partition handle, as
+    // `inner_ref` requires. The string returned is the embedded `TopicPartitionInner`'s own topic,
+    // so it lives as long as the handle; that is the rustdoc's "borrowed from the handle, valid
+    // until it is destroyed".
     unsafe { inner_ref(self_) }.topic_partition.topic_ptr()
 }
 
@@ -126,6 +151,8 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_topic(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicIdPartition_partition(self_: *const kafka_common_TopicIdPartition_t) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-id-partition handle, as
+    // `inner_ref` requires; the reference is used only within this call.
     unsafe { inner_ref(self_) }.tip.partition()
 }
 
@@ -139,6 +166,10 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_partition(self_: *const k
 pub unsafe extern "C" fn kafka_common_TopicIdPartition_topic_partition(
     self_: *const kafka_common_TopicIdPartition_t,
 ) -> *const kafka_common_TopicPartition_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-id-partition handle, as
+    // `inner_ref` requires. The handle returned points at the `TopicPartitionInner` the inner
+    // embeds, so it lives as long as the handle; that is the rustdoc's "borrowed from the handle,
+    // valid until it is destroyed".
     unsafe { inner_ref(self_) }.topic_partition.as_ptr()
 }
 
@@ -153,6 +184,9 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_topic_partition(
 pub unsafe extern "C" fn kafka_common_TopicIdPartition_to_string(
     self_: *const kafka_common_TopicIdPartition_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-id-partition handle, as
+    // `inner_ref` requires; the reference is used only within this call, and the text is copied
+    // into an owned string.
     into_c_string(&unsafe { inner_ref(self_) }.tip.to_string())
 }
 
@@ -165,6 +199,9 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_to_string(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicIdPartition_destroy(self_: *mut kafka_common_TopicIdPartition_t) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // handle not yet destroyed, i.e. the `Box::into_raw` of `boxed`, so `Box::from_raw`
+        // reclaims it exactly once, together with the topic-partition view it embeds.
         drop(unsafe { Box::from_raw(self_ as *mut TopicIdPartitionInner) });
     }
 }
@@ -186,6 +223,11 @@ mod tests {
     fn both_constructors_expose_the_same_parts() {
         let id = Uuid::new(5, 6);
         let topic = CString::new("t").unwrap();
+        // SAFETY: Test code: `uuid` comes from `box_uuid` and `tp` from `box_topic_partition`, and
+        // each is destroyed once, after both constructors copy it; `topic` outlives the constructor
+        // reading it; each topic-id-partition is destroyed once, after the views it lends (the
+        // topic, the topic-partition) are read; the uuid from `topic_id` and the string from
+        // `to_string` are each destroyed once, after they are read.
         unsafe {
             let uuid = box_uuid(id);
             let tp =

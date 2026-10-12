@@ -89,7 +89,16 @@ impl ClusterInner {
     }
 }
 
+/// What a handle points at.
+///
+/// # Safety
+///
+/// `cluster` must be a valid cluster handle, alive for `'a`.
 unsafe fn inner_ref<'a>(cluster: *const kafka_common_Cluster_t) -> &'a ClusterInner {
+    // SAFETY: Per this function's `# Safety`, `cluster` is a valid cluster handle alive for `'a`,
+    // so it points at a live `ClusterInner`, the `Box::into_raw` of `box_cluster`, the only
+    // function that makes one. No call mutates a `ClusterInner`, so the shared reference is sound
+    // for `'a`.
     unsafe { &*(cluster as *const ClusterInner) }
 }
 
@@ -103,8 +112,12 @@ pub(crate) fn box_cluster(cluster: Cluster) -> *mut kafka_common_Cluster_t {
 ///
 /// # Safety
 ///
-/// `cluster` must be a live handle.
+/// `cluster` must be a valid cluster handle, alive for `'a`.
 pub(crate) unsafe fn cluster_ref<'a>(cluster: *const kafka_common_Cluster_t) -> &'a Cluster {
+    // SAFETY: Per this function's `# Safety`, `cluster` is a valid cluster handle alive for `'a`,
+    // so it points at a live `ClusterInner`, the `Box::into_raw` of `box_cluster`, the only
+    // function that makes one. No call mutates a `ClusterInner`, so the shared reference is sound
+    // for `'a`.
     &unsafe { &*(cluster as *const ClusterInner) }.cluster
 }
 
@@ -129,10 +142,25 @@ pub unsafe extern "C" fn kafka_common_Cluster_new(
     internal_topics: *const kafka_List_t,
 ) -> *mut kafka_common_Cluster_t {
     box_cluster(Cluster::new(
+        // SAFETY: Per this function's `# Safety`, `cluster_id` is null or a valid NUL-terminated
+        // string, as `c_str_to_option` requires; it is copied into an owned value, so nothing
+        // borrows it after this call.
         unsafe { c_str_to_option(cluster_id) },
+        // SAFETY: Per this function's `# Safety`, `nodes` is null or a valid list of node handles,
+        // as `list_nodes` requires; the nodes are copied, so nothing borrows the list after this
+        // call.
         unsafe { list_nodes(nodes) },
+        // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+        // partition-info handles, as `list_partition_infos` requires; the infos are copied, so
+        // nothing borrows the list after this call.
         unsafe { list_partition_infos(partitions) },
+        // SAFETY: Per this function's `# Safety`, `unauthorized_topics` is null or a valid list of
+        // NUL-terminated strings, as `list_string_set` requires; the strings are copied, so nothing
+        // borrows the list after this call.
         unsafe { list_string_set(unauthorized_topics) },
+        // SAFETY: Per this function's `# Safety`, `internal_topics` is null or a valid list of
+        // NUL-terminated strings, as `list_string_set` requires; the strings are copied, so nothing
+        // borrows the list after this call.
         unsafe { list_string_set(internal_topics) },
     ))
 }
@@ -156,11 +184,29 @@ pub unsafe extern "C" fn kafka_common_Cluster_with_controller(
     controller: *const kafka_common_Node_t,
 ) -> *mut kafka_common_Cluster_t {
     box_cluster(Cluster::with_controller(
+        // SAFETY: Per this function's `# Safety`, through `kafka_common_Cluster_new`'s,
+        // `cluster_id` is null or a valid NUL-terminated string, as `c_str_to_option` requires; it
+        // is copied into an owned value, so nothing borrows it after this call.
         unsafe { c_str_to_option(cluster_id) },
+        // SAFETY: Per this function's `# Safety`, through `kafka_common_Cluster_new`'s, `nodes` is
+        // null or a valid list of node handles, as `list_nodes` requires; the nodes are copied, so
+        // nothing borrows the list after this call.
         unsafe { list_nodes(nodes) },
+        // SAFETY: Per this function's `# Safety`, through `kafka_common_Cluster_new`'s,
+        // `partitions` is null or a valid list of partition-info handles, as `list_partition_infos`
+        // requires; the infos are copied, so nothing borrows the list after this call.
         unsafe { list_partition_infos(partitions) },
+        // SAFETY: Per this function's `# Safety`, through `kafka_common_Cluster_new`'s,
+        // `unauthorized_topics` is null or a valid list of NUL-terminated strings, as
+        // `list_string_set` requires; the strings are copied, so nothing borrows the list after
+        // this call.
         unsafe { list_string_set(unauthorized_topics) },
+        // SAFETY: Per this function's `# Safety`, through `kafka_common_Cluster_new`'s,
+        // `internal_topics` is null or a valid list of NUL-terminated strings, as `list_string_set`
+        // requires; the strings are copied, so nothing borrows the list after this call.
         unsafe { list_string_set(internal_topics) },
+        // SAFETY: Per this function's `# Safety`, `controller` is null or a valid node handle, as
+        // `optional_node` requires; the node is copied, so nothing borrows it after this call.
         unsafe { optional_node(controller) },
     ))
 }
@@ -185,12 +231,34 @@ pub unsafe extern "C" fn kafka_common_Cluster_with_invalid_topics_controller(
     controller: *const kafka_common_Node_t,
 ) -> *mut kafka_common_Cluster_t {
     box_cluster(Cluster::with_invalid_topics_controller(
+        // SAFETY: Per this function's `# Safety`, through `kafka_common_Cluster_with_controller`'s,
+        // `cluster_id` is null or a valid NUL-terminated string, as `c_str_to_option` requires; it
+        // is copied into an owned value, so nothing borrows it after this call.
         unsafe { c_str_to_option(cluster_id) },
+        // SAFETY: Per this function's `# Safety`, through `kafka_common_Cluster_with_controller`'s,
+        // `nodes` is null or a valid list of node handles, as `list_nodes` requires; the nodes are
+        // copied, so nothing borrows the list after this call.
         unsafe { list_nodes(nodes) },
+        // SAFETY: Per this function's `# Safety`, through `kafka_common_Cluster_with_controller`'s,
+        // `partitions` is null or a valid list of partition-info handles, as `list_partition_infos`
+        // requires; the infos are copied, so nothing borrows the list after this call.
         unsafe { list_partition_infos(partitions) },
+        // SAFETY: Per this function's `# Safety`, through `kafka_common_Cluster_with_controller`'s,
+        // `unauthorized_topics` is null or a valid list of NUL-terminated strings, as
+        // `list_string_set` requires; the strings are copied, so nothing borrows the list after
+        // this call.
         unsafe { list_string_set(unauthorized_topics) },
+        // SAFETY: Per this function's `# Safety`, `invalid_topics` is null or a valid list of
+        // NUL-terminated strings, as `list_string_set` requires; the strings are copied, so nothing
+        // borrows the list after this call.
         unsafe { list_string_set(invalid_topics) },
+        // SAFETY: Per this function's `# Safety`, through `kafka_common_Cluster_with_controller`'s,
+        // `internal_topics` is null or a valid list of NUL-terminated strings, as `list_string_set`
+        // requires; the strings are copied, so nothing borrows the list after this call.
         unsafe { list_string_set(internal_topics) },
+        // SAFETY: Per this function's `# Safety`, through `kafka_common_Cluster_with_controller`'s,
+        // `controller` is null or a valid node handle, as `optional_node` requires; the node is
+        // copied, so nothing borrows it after this call.
         unsafe { optional_node(controller) },
     ))
 }
@@ -217,21 +285,56 @@ pub unsafe extern "C" fn kafka_common_Cluster_with_invalid_topics_controller_top
     controller: *const kafka_common_Node_t,
     topic_ids: *const kafka_Map_t,
 ) -> *mut kafka_common_Cluster_t {
+    // SAFETY: Per this function's `# Safety`, `topic_ids` is null or a valid map, which the caller
+    // keeps alive and does not mutate for this call, as `map_entries` requires; the borrow of its
+    // entries ends when they are collected.
     let topic_ids = unsafe { map_entries(topic_ids) }
         .iter()
         .map(|&(name, id)| {
+            // SAFETY: Per this function's `# Safety`, every key of `topic_ids` is a valid
+            // NUL-terminated string, as `c_str_to_string` requires, and every value a valid uuid
+            // handle, as `uuid_of` requires; both are copied into owned values, so nothing borrows
+            // the map after this call.
             (unsafe { c_str_to_string(name as *const c_char) }, unsafe {
                 uuid_of(id as *const kafka_common_Uuid_t)
             })
         })
         .collect();
     box_cluster(Cluster::with_invalid_topics_controller_topic_ids(
+        // SAFETY: Per this function's `# Safety`, through
+        // `kafka_common_Cluster_with_invalid_topics_controller`'s, `cluster_id` is null or a valid
+        // NUL-terminated string, as `c_str_to_option` requires; it is copied into an owned value,
+        // so nothing borrows it after this call.
         unsafe { c_str_to_option(cluster_id) },
+        // SAFETY: Per this function's `# Safety`, through
+        // `kafka_common_Cluster_with_invalid_topics_controller`'s, `nodes` is null or a valid list
+        // of node handles, as `list_nodes` requires; the nodes are copied, so nothing borrows the
+        // list after this call.
         unsafe { list_nodes(nodes) },
+        // SAFETY: Per this function's `# Safety`, through
+        // `kafka_common_Cluster_with_invalid_topics_controller`'s, `partitions` is null or a valid
+        // list of partition-info handles, as `list_partition_infos` requires; the infos are copied,
+        // so nothing borrows the list after this call.
         unsafe { list_partition_infos(partitions) },
+        // SAFETY: Per this function's `# Safety`, through
+        // `kafka_common_Cluster_with_invalid_topics_controller`'s, `unauthorized_topics` is null or
+        // a valid list of NUL-terminated strings, as `list_string_set` requires; the strings are
+        // copied, so nothing borrows the list after this call.
         unsafe { list_string_set(unauthorized_topics) },
+        // SAFETY: Per this function's `# Safety`, through
+        // `kafka_common_Cluster_with_invalid_topics_controller`'s, `invalid_topics` is null or a
+        // valid list of NUL-terminated strings, as `list_string_set` requires; the strings are
+        // copied, so nothing borrows the list after this call.
         unsafe { list_string_set(invalid_topics) },
+        // SAFETY: Per this function's `# Safety`, through
+        // `kafka_common_Cluster_with_invalid_topics_controller`'s, `internal_topics` is null or a
+        // valid list of NUL-terminated strings, as `list_string_set` requires; the strings are
+        // copied, so nothing borrows the list after this call.
         unsafe { list_string_set(internal_topics) },
+        // SAFETY: Per this function's `# Safety`, through
+        // `kafka_common_Cluster_with_invalid_topics_controller`'s, `controller` is null or a valid
+        // node handle, as `optional_node` requires; the node is copied, so nothing borrows it after
+        // this call.
         unsafe { optional_node(controller) },
         topic_ids,
     ))
@@ -258,6 +361,9 @@ pub extern "C" fn kafka_common_Cluster_empty() -> *mut kafka_common_Cluster_t {
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_bootstrap(addresses: *const kafka_List_t) -> *mut kafka_common_Cluster_t {
+    // SAFETY: Per this function's `# Safety`, `addresses` is null or a valid list of NUL-terminated
+    // strings, as `list_strings` requires; the strings are copied, so nothing borrows the list
+    // after this call.
     let addresses: Vec<(String, SocketAddr)> = unsafe { list_strings(addresses) }
         .iter()
         .map(|address| {
@@ -285,15 +391,27 @@ pub unsafe extern "C" fn kafka_common_Cluster_with_partitions(
     self_: *const kafka_common_Cluster_t,
     partitions: *const kafka_Map_t,
 ) -> *mut kafka_common_Cluster_t {
+    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid map, which the caller
+    // keeps alive and does not mutate for this call, as `map_entries` requires; the borrow of its
+    // entries ends when they are collected.
     let partitions: HashMap<TopicPartition, PartitionInfo> = unsafe { map_entries(partitions) }
         .iter()
         .map(|&(tp, info)| {
             (
+                // SAFETY: Per this function's `# Safety`, every key of `partitions` is a valid
+                // topic-partition handle, as `topic_partition_ref` requires; it is cloned, so
+                // nothing borrows it after this call.
                 unsafe { topic_partition_ref(tp as *const kafka_common_TopicPartition_t) }.clone(),
+                // SAFETY: Per this function's `# Safety`, every value of `partitions` is a valid
+                // partition-info handle, as `partition_info_ref` requires; it is cloned, so nothing
+                // borrows it after this call.
                 unsafe { partition_info_ref(info as *const kafka_common_PartitionInfo_t) }.clone(),
             )
         })
         .collect();
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster handle, as `inner_ref`
+    // requires; the reference is used only within this call, and what it reads is copied into the
+    // new cluster returned.
     box_cluster(unsafe { inner_ref(self_) }.cluster.with_partitions(partitions))
 }
 
@@ -306,6 +424,9 @@ pub unsafe extern "C" fn kafka_common_Cluster_with_partitions(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_nodes(self_: *const kafka_common_Cluster_t) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster handle, as `inner_ref`
+    // requires; the reference is used only within this call, and what it reads is copied into the
+    // owned list returned.
     node_list(unsafe { inner_ref(self_) }.cluster.nodes())
 }
 
@@ -320,6 +441,10 @@ pub unsafe extern "C" fn kafka_common_Cluster_node_by_id(
     self_: *const kafka_common_Cluster_t,
     id: i32,
 ) -> *const kafka_common_Node_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster handle, as `inner_ref`
+    // requires; the reference is used only within this call. The handle returned is a view on the
+    // `NodeInner` the cluster caches, so it lives as long as the cluster handle; that is the
+    // rustdoc's "borrowed from the handle".
     unsafe { inner_ref(self_) }.node_ptr_by_id(id)
 }
 
@@ -338,7 +463,13 @@ pub unsafe extern "C" fn kafka_common_Cluster_node_if_online(
     partition: *const kafka_common_TopicPartition_t,
     id: i32,
 ) -> *const kafka_common_Node_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster handle, as `inner_ref`
+    // requires; the reference is used only within this call; the node handle returned is a view on
+    // a `NodeInner` the cluster caches (`node_ptr_by_id`), so it lives as long as the cluster
+    // handle; that is the rustdoc's "borrowed from the handle".
     let inner = unsafe { inner_ref(self_) };
+    // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, as
+    // `topic_partition_ref` requires; it is used only for the lookup.
     match inner.cluster.node_if_online(unsafe { topic_partition_ref(partition) }, id) {
         Some(node) => inner.node_ptr_by_id(node.id()),
         None => ptr::null(),
@@ -358,8 +489,14 @@ pub unsafe extern "C" fn kafka_common_Cluster_leader_for(
     self_: *const kafka_common_Cluster_t,
     topic_partition: *const kafka_common_TopicPartition_t,
 ) -> *const kafka_common_Node_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster handle, as `inner_ref`
+    // requires; the reference is used only within this call. The handle returned is a view on the
+    // leader `NodeInner` of a `PartitionInfoInner` the cluster caches, so it lives as long as the
+    // cluster handle; that is the rustdoc's "borrowed from the handle".
     unsafe { inner_ref(self_) }
         .partitions
+        // SAFETY: Per this function's `# Safety`, `topic_partition` is a valid topic-partition
+        // handle, as `topic_partition_ref` requires; it is used only for the lookup.
         .get(unsafe { topic_partition_ref(topic_partition) })
         .map_or(ptr::null(), PartitionInfoInner::leader_ptr)
 }
@@ -377,8 +514,14 @@ pub unsafe extern "C" fn kafka_common_Cluster_partition(
     self_: *const kafka_common_Cluster_t,
     topic_partition: *const kafka_common_TopicPartition_t,
 ) -> *const kafka_common_PartitionInfo_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster handle, as `inner_ref`
+    // requires; the reference is used only within this call. The handle returned is a view on the
+    // `PartitionInfoInner` the cluster caches, so it lives as long as the cluster handle; that is
+    // the rustdoc's "borrowed from the handle".
     unsafe { inner_ref(self_) }
         .partitions
+        // SAFETY: Per this function's `# Safety`, `topic_partition` is a valid topic-partition
+        // handle, as `topic_partition_ref` requires; it is used only for the lookup.
         .get(unsafe { topic_partition_ref(topic_partition) })
         .map_or(ptr::null(), PartitionInfoInner::as_ptr)
 }
@@ -397,8 +540,14 @@ pub unsafe extern "C" fn kafka_common_Cluster_partitions_for_topic(
     topic: *const c_char,
 ) -> *mut kafka_List_t {
     partition_info_list(
+        // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster handle, as `inner_ref`
+        // requires; the reference is used only within this call, and what it reads is copied into
+        // the owned list returned.
         unsafe { inner_ref(self_) }
             .cluster
+            // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
+            // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows
+            // it after this call.
             .partitions_for_topic(&unsafe { c_str_to_string(topic) }),
     )
 }
@@ -418,8 +567,13 @@ pub unsafe extern "C" fn kafka_common_Cluster_partition_count_for_topic(
     self_: *const kafka_common_Cluster_t,
     topic: *const c_char,
 ) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster handle, as `inner_ref`
+    // requires; the reference is used only within this call, and only a count is read.
     unsafe { inner_ref(self_) }
         .cluster
+        // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
+        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // after this call.
         .partition_count_for_topic(&unsafe { c_str_to_string(topic) })
         .map_or(-1, |count| count as i32)
 }
@@ -438,8 +592,14 @@ pub unsafe extern "C" fn kafka_common_Cluster_available_partitions_for_topic(
     topic: *const c_char,
 ) -> *mut kafka_List_t {
     partition_info_list(
+        // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster handle, as `inner_ref`
+        // requires; the reference is used only within this call, and what it reads is copied into
+        // the owned list returned.
         unsafe { inner_ref(self_) }
             .cluster
+            // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
+            // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows
+            // it after this call.
             .available_partitions_for_topic(&unsafe { c_str_to_string(topic) }),
     )
 }
@@ -456,6 +616,9 @@ pub unsafe extern "C" fn kafka_common_Cluster_partitions_for_node(
     self_: *const kafka_common_Cluster_t,
     node_id: i32,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster handle, as `inner_ref`
+    // requires; the reference is used only within this call, and what it reads is copied into the
+    // owned list returned.
     partition_info_list(unsafe { inner_ref(self_) }.cluster.partitions_for_node(node_id))
 }
 
@@ -468,6 +631,9 @@ pub unsafe extern "C" fn kafka_common_Cluster_partitions_for_node(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_topics(self_: *const kafka_common_Cluster_t) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster handle, as `inner_ref`
+    // requires; the reference is used only within this call, and what it reads is copied into the
+    // owned list returned.
     sorted_string_list(unsafe { inner_ref(self_) }.cluster.topics())
 }
 
@@ -482,6 +648,9 @@ pub unsafe extern "C" fn kafka_common_Cluster_unauthorized_topics(
     self_: *const kafka_common_Cluster_t,
 ) -> *mut kafka_List_t {
     sorted_string_list(
+        // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster handle, as `inner_ref`
+        // requires; the reference is used only within this call, and what it reads is copied into
+        // the owned list returned.
         unsafe { inner_ref(self_) }
             .cluster
             .unauthorized_topics()
@@ -500,6 +669,9 @@ pub unsafe extern "C" fn kafka_common_Cluster_unauthorized_topics(
 pub unsafe extern "C" fn kafka_common_Cluster_invalid_topics(
     self_: *const kafka_common_Cluster_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster handle, as `inner_ref`
+    // requires; the reference is used only within this call, and what it reads is copied into the
+    // owned list returned.
     sorted_string_list(unsafe { inner_ref(self_) }.cluster.invalid_topics().iter().map(String::as_str))
 }
 
@@ -513,6 +685,9 @@ pub unsafe extern "C" fn kafka_common_Cluster_invalid_topics(
 pub unsafe extern "C" fn kafka_common_Cluster_internal_topics(
     self_: *const kafka_common_Cluster_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster handle, as `inner_ref`
+    // requires; the reference is used only within this call, and what it reads is copied into the
+    // owned list returned.
     sorted_string_list(unsafe { inner_ref(self_) }.cluster.internal_topics().iter().map(String::as_str))
 }
 
@@ -524,6 +699,8 @@ pub unsafe extern "C" fn kafka_common_Cluster_internal_topics(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_is_bootstrap_configured(self_: *const kafka_common_Cluster_t) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster handle, as `inner_ref`
+    // requires; the reference is used only within this call, and only a flag is read.
     unsafe { inner_ref(self_) }.cluster.is_bootstrap_configured() as i8
 }
 
@@ -538,6 +715,10 @@ pub unsafe extern "C" fn kafka_common_Cluster_is_bootstrap_configured(self_: *co
 pub unsafe extern "C" fn kafka_common_Cluster_cluster_resource(
     self_: *const kafka_common_Cluster_t,
 ) -> *const kafka_common_ClusterResource_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster handle, as `inner_ref`
+    // requires; the reference is used only within this call. The handle returned is a view on the
+    // `ClusterResourceInner` the cluster caches, so it lives as long as the cluster handle; that is
+    // the rustdoc's "borrowed from the handle, valid until it is destroyed".
     unsafe { inner_ref(self_) }.cluster_resource.as_ptr()
 }
 
@@ -551,6 +732,10 @@ pub unsafe extern "C" fn kafka_common_Cluster_cluster_resource(
 pub unsafe extern "C" fn kafka_common_Cluster_controller(
     self_: *const kafka_common_Cluster_t,
 ) -> *const kafka_common_Node_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster handle, as `inner_ref`
+    // requires; the reference is used only within this call. The handle returned is a view on the
+    // controller `NodeInner` the cluster caches, so it lives as long as the cluster handle; that is
+    // the rustdoc's "borrowed from the handle".
     optional_node_ptr(unsafe { inner_ref(self_) }.controller.as_ref())
 }
 
@@ -563,6 +748,8 @@ pub unsafe extern "C" fn kafka_common_Cluster_controller(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_topic_ids(self_: *const kafka_common_Cluster_t) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster handle, as `inner_ref`
+    // requires; the reference is used only within this call, and the ids are copied out.
     let mut ids: Vec<Uuid> = unsafe { inner_ref(self_) }.cluster.topic_ids().copied().collect();
     ids.sort_unstable_by_key(|id| (id.most_significant_bits(), id.least_significant_bits()));
     uuid_list(ids)
@@ -581,6 +768,10 @@ pub unsafe extern "C" fn kafka_common_Cluster_topic_id(
     self_: *const kafka_common_Cluster_t,
     topic: *const c_char,
 ) -> *mut kafka_common_Uuid_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster handle, as `inner_ref`
+    // requires; the reference is used only within this call, and `topic` is a valid NUL-terminated
+    // string, as `c_str_to_string` requires; both are read only within this call, and the id is
+    // copied into the owned handle returned.
     box_uuid(unsafe { inner_ref(self_) }.cluster.topic_id(&unsafe { c_str_to_string(topic) }))
 }
 
@@ -597,8 +788,14 @@ pub unsafe extern "C" fn kafka_common_Cluster_topic_name(
     self_: *const kafka_common_Cluster_t,
     topic_id: *const kafka_common_Uuid_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster handle, as `inner_ref`
+    // requires; the reference is used only within this call. The string returned is a
+    // NUL-terminated topic name the cluster caches, so it lives as long as the cluster handle; that
+    // is the rustdoc's "borrowed from the handle".
     unsafe { inner_ref(self_) }
         .topic_names_c
+        // SAFETY: Per this function's `# Safety`, `topic_id` is a valid uuid handle, as `uuid_of`
+        // requires; the uuid is copied out for the lookup.
         .get(&unsafe { uuid_of(topic_id) })
         .map_or(ptr::null(), |name| name.as_ptr())
 }
@@ -611,6 +808,9 @@ pub unsafe extern "C" fn kafka_common_Cluster_topic_name(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_to_string(self_: *const kafka_common_Cluster_t) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster handle, as `inner_ref`
+    // requires; the reference is used only within this call, and the text is copied into an owned
+    // string.
     into_c_string(&unsafe { inner_ref(self_) }.cluster.to_string())
 }
 
@@ -623,6 +823,9 @@ pub unsafe extern "C" fn kafka_common_Cluster_to_string(self_: *const kafka_comm
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_destroy(self_: *mut kafka_common_Cluster_t) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // cluster handle not yet destroyed, i.e. the `Box::into_raw` of `box_cluster`, so
+        // `Box::from_raw` reclaims it exactly once.
         drop(unsafe { Box::from_raw(self_ as *mut ClusterInner) });
     }
 }
@@ -674,6 +877,11 @@ mod tests {
         let cluster = box_cluster(sample());
         let topic = CString::new("t").unwrap();
         let missing = CString::new("missing").unwrap();
+        // SAFETY: Test code: `cluster` comes from `box_cluster` and is destroyed once, after every
+        // borrowed view read from it; the `CString`s outlive the calls reading them; each
+        // topic-partition and uuid handle comes from its constructor and is destroyed once, after
+        // the calls using it; every owned list and string is destroyed once, after it is read;
+        // destroying null is a no-op.
         unsafe {
             assert_eq!(kafka_common_Node_id(kafka_common_Cluster_controller(cluster)), 1);
             assert_eq!(kafka_common_Node_port(kafka_common_Cluster_node_by_id(cluster, 2)), 9092);
@@ -756,6 +964,11 @@ mod tests {
         let cid = CString::new("cid").unwrap();
         let ua = CString::new("ua").unwrap();
         let t = CString::new("t").unwrap();
+        // SAFETY: Test code: the `CString`s outlive every call reading them; each list and map
+        // comes from `kafka_List_new` or `kafka_Map_new`, borrows handles and strings that outlive
+        // it, and is destroyed once, after the constructors copy it; the node, partition-info, uuid
+        // and topic-partition handles come from their constructors and are each destroyed once,
+        // after the constructors copy them; each cluster is destroyed once, after it is read.
         unsafe {
             let node = crate::ffi::common::node::box_node(Node::new(1, "h".to_string(), 1));
             let nodes = kafka_List_new();
@@ -832,6 +1045,11 @@ mod tests {
     fn empty_and_bootstrap_follow_java() {
         let a = CString::new("h1:9091").unwrap();
         let b = CString::new("[::1]:9092").unwrap();
+        // SAFETY: Test code: the `CString`s outlive the calls reading them; `addresses` comes from
+        // `kafka_List_new`, borrows them and is destroyed once, after
+        // `kafka_common_Cluster_bootstrap` copies it; each cluster is destroyed once, after the
+        // node views borrowed from it are read; each owned list is destroyed once, after it is
+        // read.
         unsafe {
             let empty = kafka_common_Cluster_empty();
             let nodes = kafka_common_Cluster_nodes(empty);

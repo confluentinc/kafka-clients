@@ -77,6 +77,9 @@ pub(crate) fn singleton(group_type: GroupType) -> *const kafka_common_GroupType_
 ///
 /// `group_type` must be a singleton returned by this module.
 pub(crate) unsafe fn value_of(group_type: *const kafka_common_GroupType_t) -> GroupType {
+    // SAFETY: Per this function's `# Safety`, `group_type` is a singleton returned by this module,
+    // i.e. a pointer to an element of the `static` `VARIANTS` array (`singleton`), so it points at
+    // a live, initialised `GroupType`, which is `Copy` and read out here.
     unsafe { *(group_type as *const GroupType) }
 }
 
@@ -127,6 +130,8 @@ pub extern "C" fn kafka_common_GroupType_streams() -> *const kafka_common_GroupT
 pub unsafe extern "C" fn kafka_common_GroupType__enum(
     self_: *const kafka_common_GroupType_t,
 ) -> kafka_common_GroupType_e {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `value_of` requires; the value is copied out.
     enum_of(unsafe { value_of(self_) })
 }
 
@@ -138,6 +143,9 @@ pub unsafe extern "C" fn kafka_common_GroupType__enum(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupType_name(self_: *const kafka_common_GroupType_t) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `value_of` requires; the value is copied out, and the name returned is owned by the `static`
+    // `NAMES`, which is never dropped, so it is never freed, as the rustdoc states.
     NAMES[enum_of(unsafe { value_of(self_) }) as usize].as_ptr()
 }
 
@@ -150,6 +158,9 @@ pub unsafe extern "C" fn kafka_common_GroupType_name(self_: *const kafka_common_
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupType_parse(name: *const c_char) -> *const kafka_common_GroupType_t {
+    // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // this call.
     singleton(GroupType::parse(&unsafe { c_str_to_string(name) }))
 }
 
@@ -161,6 +172,8 @@ pub unsafe extern "C" fn kafka_common_GroupType_parse(name: *const c_char) -> *c
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupType_to_string(self_: *const kafka_common_GroupType_t) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `value_of` requires; the value is copied out and its text copied into an owned string.
     into_c_string(&unsafe { value_of(self_) }.to_string())
 }
 
@@ -175,6 +188,9 @@ mod tests {
     fn singletons_round_trip_and_match_their_enumerator() {
         for (index, &group_type) in VARIANTS.iter().enumerate() {
             let handle = singleton(group_type);
+            // SAFETY: Test code: every handle passed is a singleton from `singleton`, which points
+            // into the static `VARIANTS` array and is never freed, and the names read are owned by
+            // the static `NAMES`.
             unsafe {
                 assert_eq!(value_of(handle), group_type);
                 assert_eq!(kafka_common_GroupType__enum(handle) as usize, index);
@@ -195,6 +211,8 @@ mod tests {
     fn parse_and_to_string_follow_java() {
         let consumer = CString::new("consumer").unwrap();
         let bogus = CString::new("bogus").unwrap();
+        // SAFETY: Test code: the `CString`s outlive the calls reading them, the singletons are
+        // never freed, and the string from `to_string` is destroyed once, after it is read.
         unsafe {
             assert_eq!(
                 kafka_common_GroupType_parse(consumer.as_ptr()),

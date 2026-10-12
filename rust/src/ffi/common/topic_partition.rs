@@ -75,8 +75,13 @@ pub(crate) fn box_topic_partition(tp: TopicPartition) -> *mut kafka_common_Topic
 ///
 /// # Safety
 ///
-/// `tp` must be a valid topic-partition handle.
+/// `tp` must be a valid topic-partition handle, alive for `'a`.
 pub(crate) unsafe fn topic_partition_ref<'a>(tp: *const kafka_common_TopicPartition_t) -> &'a TopicPartition {
+    // SAFETY: Per this function's `# Safety`, `tp` is a valid topic-partition handle alive for
+    // `'a`, so it points at a live `TopicPartitionInner`: the `Box::into_raw` of
+    // `box_topic_partition`, or one a parent embeds and hands out through
+    // `TopicPartitionInner::as_ptr`, which lives as long as that parent. No call mutates a
+    // `TopicPartitionInner`, so the shared reference is sound for `'a`.
     unsafe { &*(tp as *const TopicPartitionInner) }.topic_partition()
 }
 
@@ -103,18 +108,31 @@ pub(crate) fn sorted_topic_partition_list<'a>(tps: impl IntoIterator<Item = &'a 
 /// `list` must be null or a valid list whose elements are topic-partition
 /// handles.
 pub(crate) unsafe fn list_topic_partitions(list: *const kafka_List_t) -> Vec<TopicPartition> {
+    // SAFETY: Per this function's `# Safety`, `list` is null or a valid list handle, as
+    // `list_elements` requires; the slice is used only within this call, while nothing mutates the
+    // list.
     unsafe { list_elements(list) }
         .iter()
+        // SAFETY: Per this function's `# Safety`, every element of `list` is a topic-partition
+        // handle, as `topic_partition_ref` requires; the value is cloned, so the borrow lasts for
+        // this call only.
         .map(|&element| unsafe { topic_partition_ref(element as *const kafka_common_TopicPartition_t) }.clone())
         .collect()
 }
 
 /// Compares two `kafka_common_TopicPartition_t` keys by value, for
 /// `kafka_Map_get` on a Rust-built map keyed by topic-partition.
+///
+/// # Safety
+///
+/// `a` and `b` must each be null or a valid topic-partition handle.
 pub(crate) unsafe fn topic_partition_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
     if a.is_null() || b.is_null() {
         return a == b;
     }
+    // SAFETY: `a` and `b` are non-null (checked above) and, per this function's `# Safety`, valid
+    // topic-partition handles, as `topic_partition_ref` requires; both references are used only for
+    // the comparison.
     unsafe {
         topic_partition_ref(a as *const kafka_common_TopicPartition_t)
             == topic_partition_ref(b as *const kafka_common_TopicPartition_t)
@@ -152,11 +170,22 @@ pub(crate) fn topic_partition_i64_map(map: &HashMap<TopicPartition, i64>) -> *mu
 /// `map` must be null or a valid map whose keys are topic-partition handles
 /// and whose values point at `int64_t`s.
 pub(crate) unsafe fn map_topic_partition_i64(map: *const kafka_Map_t) -> HashMap<TopicPartition, i64> {
+    // SAFETY: Per this function's `# Safety`, `map` is null or a valid map handle, as `map_entries`
+    // requires; the slice is used only within this call, while nothing mutates the map.
     unsafe { map_entries(map) }
         .iter()
         .map(|&(k, v)| {
+            // SAFETY: Per this function's `# Safety`, every key of `map` is a topic-partition
+            // handle, as `topic_partition_ref` requires; the value is cloned, so the borrow lasts
+            // for this call only.
             let tp = unsafe { topic_partition_ref(k as *const kafka_common_TopicPartition_t) }.clone();
-            let offset = if v.is_null() { 0 } else { unsafe { *(v as *const i64) } };
+            let offset = if v.is_null() {
+                0
+            } else {
+                // SAFETY: `v` is non-null (checked above) and, per this function's `# Safety`,
+                // points at an `int64_t`, so the read is sound.
+                unsafe { *(v as *const i64) }
+            };
             (tp, offset)
         })
         .collect()
@@ -174,6 +203,9 @@ pub unsafe extern "C" fn kafka_common_TopicPartition_new(
     topic: *const c_char,
     partition: i32,
 ) -> *mut kafka_common_TopicPartition_t {
+    // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // this call.
     box_topic_partition(TopicPartition::new(unsafe { c_str_to_string(topic) }, partition))
 }
 
@@ -188,6 +220,12 @@ pub unsafe extern "C" fn kafka_common_TopicPartition_new(
 pub unsafe extern "C" fn kafka_common_TopicPartition_topic(
     self_: *const kafka_common_TopicPartition_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-partition handle, so it
+    // points at a live `TopicPartitionInner`: the `Box::into_raw` of `box_topic_partition`, or one
+    // a parent embeds and hands out through `TopicPartitionInner::as_ptr`, which lives as long as
+    // that parent. No call mutates a `TopicPartitionInner`, so the shared reference is sound for
+    // this call. The string returned is the inner's own `topic_c`, so it lives as long as the
+    // handle; that is the rustdoc's "borrowed from the handle and valid until it is destroyed".
     unsafe { &*(self_ as *const TopicPartitionInner) }.topic_ptr()
 }
 
@@ -199,6 +237,8 @@ pub unsafe extern "C" fn kafka_common_TopicPartition_topic(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartition_partition(self_: *const kafka_common_TopicPartition_t) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-partition handle, as
+    // `topic_partition_ref` requires; the reference is used only within this call.
     unsafe { topic_partition_ref(self_) }.partition()
 }
 
@@ -213,6 +253,9 @@ pub unsafe extern "C" fn kafka_common_TopicPartition_partition(self_: *const kaf
 pub unsafe extern "C" fn kafka_common_TopicPartition_to_string(
     self_: *const kafka_common_TopicPartition_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-partition handle, as
+    // `topic_partition_ref` requires; the reference is used only within this call, and the text is
+    // copied into an owned string.
     into_c_string(&unsafe { topic_partition_ref(self_) }.to_string())
 }
 
@@ -225,6 +268,10 @@ pub unsafe extern "C" fn kafka_common_TopicPartition_to_string(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartition_destroy(self_: *mut kafka_common_TopicPartition_t) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // topic-partition handle not yet destroyed, i.e. the `Box::into_raw` of
+        // `box_topic_partition`, so `Box::from_raw` reclaims it exactly once. A borrowed handle
+        // from `TopicPartitionInner::as_ptr` is never passed here.
         drop(unsafe { Box::from_raw(self_ as *mut TopicPartitionInner) });
     }
 }
@@ -240,7 +287,11 @@ mod tests {
     #[test]
     fn handle_round_trips_topic_partition_and_display() {
         let topic = CString::new("orders").unwrap();
+        // SAFETY: Test code: `topic` outlives the constructor, which copies it.
         let tp = unsafe { kafka_common_TopicPartition_new(topic.as_ptr(), 7) };
+        // SAFETY: Test code: `tp` comes from `kafka_common_TopicPartition_new` and is destroyed
+        // once, after the topic it lends and the string from `to_string`, itself destroyed once,
+        // are read.
         unsafe {
             assert_eq!(
                 CStr::from_ptr(kafka_common_TopicPartition_topic(tp)).to_str().unwrap(),
@@ -263,6 +314,9 @@ mod tests {
             TopicPartition::new("a", 1),
         ];
         let list = sorted_topic_partition_list(tps.iter());
+        // SAFETY: Test code: `list` comes from `sorted_topic_partition_list`, whose elements are
+        // topic-partition handles, and is destroyed once, after the references read from it are
+        // last used.
         unsafe {
             assert_eq!(kafka_List_size(list), 3);
             let read = |i| {
@@ -286,6 +340,10 @@ mod tests {
         // A fresh handle with the same value finds the entry: keys compare by
         // value, not by pointer.
         let probe = box_topic_partition(TopicPartition::new("t", 1));
+        // SAFETY: Test code: `c_map` comes from `topic_partition_i64_map`, whose keys are
+        // topic-partition handles and whose values point at `i64`s, and is destroyed once, after
+        // the value read from it; `probe` comes from `box_topic_partition` and is destroyed once,
+        // after the lookup.
         unsafe {
             let value = kafka_Map_get(c_map, probe as *mut c_void) as *const i64;
             assert_eq!(*value, 10);

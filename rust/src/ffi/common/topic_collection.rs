@@ -61,6 +61,8 @@ pub enum kafka_common_TopicCollection_e {
 pub unsafe extern "C" fn kafka_common_TopicCollection__enum(
     self_: *const kafka_common_TopicCollection_t,
 ) -> kafka_common_TopicCollection_e {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-collection handle, as
+    // `topic_collection_ref` requires; the reference is used only for the match.
     match unsafe { topic_collection_ref(self_) } {
         TopicCollection::TopicIds(_) => kafka_common_TopicCollection_e::kafka_common_TopicCollection_TOPIC_IDS,
         TopicCollection::TopicNames(_) => kafka_common_TopicCollection_e::kafka_common_TopicCollection_TOPIC_NAMES,
@@ -80,6 +82,8 @@ pub unsafe extern "C" fn kafka_common_TopicCollection__enum(
 pub unsafe extern "C" fn kafka_common_TopicCollection_topic_ids(
     value: *const kafka_List_t,
 ) -> *mut kafka_common_TopicCollection_t {
+    // SAFETY: Per this function's `# Safety`, `value` is null or a valid list of uuid handles, as
+    // `list_uuids` requires; the uuids are copied out, so nothing borrows the list after this call.
     boxed(TopicCollection::TopicIds(unsafe { list_uuids(value) }))
 }
 
@@ -95,6 +99,9 @@ pub unsafe extern "C" fn kafka_common_TopicCollection_topic_ids(
 pub unsafe extern "C" fn kafka_common_TopicCollection_topic_names(
     value: *const kafka_List_t,
 ) -> *mut kafka_common_TopicCollection_t {
+    // SAFETY: Per this function's `# Safety`, `value` is null or a valid list of NUL-terminated
+    // strings, as `list_strings` requires; the strings are copied into owned `String`s, so nothing
+    // borrows the list after this call.
     boxed(TopicCollection::TopicNames(unsafe { list_strings(value) }))
 }
 
@@ -102,8 +109,12 @@ pub unsafe extern "C" fn kafka_common_TopicCollection_topic_names(
 ///
 /// # Safety
 ///
-/// `topics` must be a valid topic-collection handle.
+/// `topics` must be a valid topic-collection handle, alive for `'a`.
 pub(crate) unsafe fn topic_collection_ref<'a>(topics: *const kafka_common_TopicCollection_t) -> &'a TopicCollection {
+    // SAFETY: Per this function's `# Safety`, `topics` is a valid topic-collection handle alive for
+    // `'a`, i.e. the `Box::into_raw` of a `TopicCollection` in `boxed`, the only function that
+    // makes one, not yet destroyed. No call mutates a `TopicCollection` handle, so the shared
+    // reference is sound for `'a`.
     unsafe { &*(topics as *const TopicCollection) }
 }
 
@@ -123,6 +134,8 @@ fn boxed(topics: TopicCollection) -> *mut kafka_common_TopicCollection_t {
 pub unsafe extern "C" fn kafka_common_TopicCollection_of_topic_ids(
     topics: *const kafka_List_t,
 ) -> *mut kafka_common_TopicCollection_t {
+    // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list of uuid handles, as
+    // `list_uuids` requires; the uuids are copied out, so nothing borrows the list after this call.
     boxed(TopicCollection::of_topic_ids(unsafe { list_uuids(topics) }))
 }
 
@@ -137,6 +150,9 @@ pub unsafe extern "C" fn kafka_common_TopicCollection_of_topic_ids(
 pub unsafe extern "C" fn kafka_common_TopicCollection_of_topic_names(
     topics: *const kafka_List_t,
 ) -> *mut kafka_common_TopicCollection_t {
+    // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list of NUL-terminated
+    // strings, as `list_strings` requires; the strings are copied into owned `String`s, so nothing
+    // borrows the list after this call.
     boxed(TopicCollection::of_topic_names(unsafe { list_strings(topics) }))
 }
 
@@ -149,6 +165,9 @@ pub unsafe extern "C" fn kafka_common_TopicCollection_of_topic_names(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicCollection_destroy(self_: *mut kafka_common_TopicCollection_t) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // handle not yet destroyed, i.e. the `Box::into_raw` of `boxed`, so `Box::from_raw`
+        // reclaims it exactly once.
         drop(unsafe { Box::from_raw(self_ as *mut TopicCollection) });
     }
 }
@@ -166,6 +185,10 @@ mod tests {
     #[test]
     fn factories_copy_their_lists() {
         let name = CString::new("orders").unwrap();
+        // SAFETY: Test code: each list comes from `kafka_List_new`, borrowing `name`, which
+        // outlives it, or from `uuid_list`, and is destroyed once, after the constructor copies it;
+        // each collection comes from a constructor and is destroyed once, after the calls reading
+        // it.
         unsafe {
             let names = kafka_List_new();
             kafka_List_add(names, name.as_ptr() as *mut c_void);
@@ -192,6 +215,10 @@ mod tests {
     #[test]
     fn variant_constructors_build_the_same_values_and_enum_tells_them_apart() {
         let name = CString::new("orders").unwrap();
+        // SAFETY: Test code: each list comes from `kafka_List_new`, borrowing `name`, which
+        // outlives it, or from `uuid_list`, and is destroyed once, after the constructor copies it;
+        // each collection comes from a constructor and is destroyed once, after the calls reading
+        // it.
         unsafe {
             let names = kafka_List_new();
             kafka_List_add(names, name.as_ptr() as *mut c_void);

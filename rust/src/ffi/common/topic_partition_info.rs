@@ -58,7 +58,17 @@ impl TopicPartitionInfoInner {
     }
 }
 
+/// What a handle points at.
+///
+/// # Safety
+///
+/// `info` must be a valid topic-partition-info handle, alive for `'a`.
 unsafe fn inner_ref<'a>(info: *const kafka_common_TopicPartitionInfo_t) -> &'a TopicPartitionInfoInner {
+    // SAFETY: Per this function's `# Safety`, `info` is a valid topic-partition-info handle alive
+    // for `'a`, so it points at a live `TopicPartitionInfoInner`: the `Box::into_raw` of `boxed`,
+    // or one a holder hands out through `TopicPartitionInfoInner::as_ptr`, which lives as long as
+    // that holder (no holder does yet outside the tests). No call mutates a
+    // `TopicPartitionInfoInner`, so the shared reference is sound for `'a`.
     unsafe { &*(info as *const TopicPartitionInfoInner) }
 }
 
@@ -70,10 +80,12 @@ fn boxed(info: TopicPartitionInfo) -> *mut kafka_common_TopicPartitionInfo_t {
 ///
 /// # Safety
 ///
-/// `info` must be a live handle.
+/// `info` must be a valid topic-partition-info handle, alive for `'a`.
 pub(crate) unsafe fn topic_partition_info_ref<'a>(
     info: *const kafka_common_TopicPartitionInfo_t,
 ) -> &'a TopicPartitionInfo {
+    // SAFETY: Per this function's `# Safety`, `info` is a valid topic-partition-info handle alive
+    // for `'a`, as `inner_ref` requires.
     &unsafe { inner_ref(info) }.info
 }
 
@@ -102,8 +114,15 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_new(
 ) -> *mut kafka_common_TopicPartitionInfo_t {
     boxed(TopicPartitionInfo::new(
         partition,
+        // SAFETY: Per this function's `# Safety`, `leader` is null or a valid node handle, as
+        // `optional_node` requires; the node is cloned, so nothing borrows it after this call.
         unsafe { optional_node(leader) },
+        // SAFETY: Per this function's `# Safety`, `replicas` is null or a valid list of node
+        // handles, as `list_nodes` requires; the nodes are cloned, so nothing borrows the list
+        // after this call.
         unsafe { list_nodes(replicas) },
+        // SAFETY: Per this function's `# Safety`, `isr` is null or a valid list of node handles, as
+        // `list_nodes` requires; the nodes are cloned, so nothing borrows the list after this call.
         unsafe { list_nodes(isr) },
     ))
 }
@@ -129,10 +148,22 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_with_elr_last_known_elr
 ) -> *mut kafka_common_TopicPartitionInfo_t {
     boxed(TopicPartitionInfo::with_elr_last_known_elr(
         partition,
+        // SAFETY: Per this function's `# Safety`, `leader` is null or a valid node handle, as
+        // `optional_node` requires; the node is cloned, so nothing borrows it after this call.
         unsafe { optional_node(leader) },
+        // SAFETY: Per this function's `# Safety`, `replicas` is null or a valid list of node
+        // handles, as `list_nodes` requires; the nodes are cloned, so nothing borrows the list
+        // after this call.
         unsafe { list_nodes(replicas) },
+        // SAFETY: Per this function's `# Safety`, `isr` is null or a valid list of node handles, as
+        // `list_nodes` requires; the nodes are cloned, so nothing borrows the list after this call.
         unsafe { list_nodes(isr) },
+        // SAFETY: Per this function's `# Safety`, `elr` is null or a valid list of node handles, as
+        // `list_nodes` requires; the nodes are cloned, so nothing borrows the list after this call.
         unsafe { list_nodes(elr) },
+        // SAFETY: Per this function's `# Safety`, `last_known_elr` is null or a valid list of node
+        // handles, as `list_nodes` requires; the nodes are cloned, so nothing borrows the list
+        // after this call.
         unsafe { list_nodes(last_known_elr) },
     ))
 }
@@ -147,6 +178,8 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_with_elr_last_known_elr
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_partition(
     self_: *const kafka_common_TopicPartitionInfo_t,
 ) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-partition-info handle, as
+    // `inner_ref` requires; the reference is used only within this call.
     unsafe { inner_ref(self_) }.info.partition()
 }
 
@@ -160,6 +193,9 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_partition(
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_leader(
     self_: *const kafka_common_TopicPartitionInfo_t,
 ) -> *const kafka_common_Node_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-partition-info handle, as
+    // `inner_ref` requires. The node returned is the inner's own cached `leader`, so it lives as
+    // long as the handle; that is the rustdoc's "borrowed from the handle".
     optional_node_ptr(unsafe { inner_ref(self_) }.leader.as_ref())
 }
 
@@ -174,6 +210,9 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_leader(
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_replicas(
     self_: *const kafka_common_TopicPartitionInfo_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-partition-info handle, as
+    // `inner_ref` requires; the nodes are cloned into the owned list returned, so the borrow lasts
+    // for this call only.
     node_list(unsafe { inner_ref(self_) }.info.replicas())
 }
 
@@ -187,6 +226,9 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_replicas(
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_isr(
     self_: *const kafka_common_TopicPartitionInfo_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-partition-info handle, as
+    // `inner_ref` requires; the nodes are cloned into the owned list returned, so the borrow lasts
+    // for this call only.
     node_list(unsafe { inner_ref(self_) }.info.isr())
 }
 
@@ -201,6 +243,9 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_isr(
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_elr(
     self_: *const kafka_common_TopicPartitionInfo_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-partition-info handle, as
+    // `inner_ref` requires; the nodes are cloned into the owned list returned, so the borrow lasts
+    // for this call only.
     unsafe { inner_ref(self_) }.info.elr().map_or(ptr::null_mut(), node_list)
 }
 
@@ -215,6 +260,9 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_elr(
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_last_known_elr(
     self_: *const kafka_common_TopicPartitionInfo_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-partition-info handle, as
+    // `inner_ref` requires; the nodes are cloned into the owned list returned, so the borrow lasts
+    // for this call only.
     unsafe { inner_ref(self_) }
         .info
         .last_known_elr()
@@ -231,6 +279,9 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_last_known_elr(
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_to_string(
     self_: *const kafka_common_TopicPartitionInfo_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-partition-info handle, as
+    // `inner_ref` requires; the reference is used only within this call, and the text is copied
+    // into an owned string.
     into_c_string(&unsafe { inner_ref(self_) }.info.to_string())
 }
 
@@ -244,6 +295,9 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_to_string(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_destroy(self_: *mut kafka_common_TopicPartitionInfo_t) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // handle not yet destroyed, i.e. the `Box::into_raw` of `boxed`, so `Box::from_raw`
+        // reclaims it exactly once, together with the leader node it caches.
         drop(unsafe { Box::from_raw(self_ as *mut TopicPartitionInfoInner) });
     }
 }
@@ -279,6 +333,9 @@ mod tests {
                 Node::new(3, "h3".to_string(), 9093),
             ],
         ));
+        // SAFETY: Test code: every handle passed is a view from `TopicPartitionInfoInner::as_ptr`
+        // on a local inner that outlives the calls; each list returned is destroyed once, after it
+        // is read.
         unsafe {
             assert!(kafka_common_TopicPartitionInfo_elr(absent.as_ptr()).is_null());
             assert!(kafka_common_TopicPartitionInfo_last_known_elr(absent.as_ptr()).is_null());
@@ -305,6 +362,9 @@ mod tests {
 
     #[test]
     fn constructors_build_owned_handles() {
+        // SAFETY: Test code: the null lists and leader are accepted by the constructors; each
+        // handle comes from a constructor and is destroyed once, after the calls reading it, and
+        // the `elr` list is destroyed once, after it is read.
         unsafe {
             let plain = kafka_common_TopicPartitionInfo_new(4, ptr::null(), ptr::null(), ptr::null());
             assert_eq!(kafka_common_TopicPartitionInfo_partition(plain), 4);

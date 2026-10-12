@@ -47,7 +47,17 @@ impl ClusterResourceInner {
     }
 }
 
+/// What a handle points at.
+///
+/// # Safety
+///
+/// `resource` must be a valid cluster-resource handle, alive for `'a`.
 unsafe fn inner_ref<'a>(resource: *const kafka_common_ClusterResource_t) -> &'a ClusterResourceInner {
+    // SAFETY: Per this function's `# Safety`, `resource` is a valid cluster-resource handle alive
+    // for `'a`, so it points at a live `ClusterResourceInner`: the `Box::into_raw` of
+    // `kafka_common_ClusterResource_new`, or the one a `kafka_common_Cluster_t` stores and hands
+    // out through `ClusterResourceInner::as_ptr`, which lives as long as that cluster. No call
+    // mutates a `ClusterResourceInner`, so the shared reference is sound for `'a`.
     unsafe { &*(resource as *const ClusterResourceInner) }
 }
 
@@ -63,6 +73,9 @@ unsafe fn inner_ref<'a>(resource: *const kafka_common_ClusterResource_t) -> &'a 
 pub unsafe extern "C" fn kafka_common_ClusterResource_new(
     cluster_id: *const c_char,
 ) -> *mut kafka_common_ClusterResource_t {
+    // SAFETY: Per this function's `# Safety`, `cluster_id` is null or a valid NUL-terminated
+    // string, as `c_str_to_option` requires; it is copied into an owned value, so nothing borrows
+    // it after this call.
     let inner = ClusterResourceInner::new(ClusterResource::new(unsafe { c_str_to_option(cluster_id) }));
     Box::into_raw(Box::new(inner)) as *mut kafka_common_ClusterResource_t
 }
@@ -78,6 +91,9 @@ pub unsafe extern "C" fn kafka_common_ClusterResource_new(
 pub unsafe extern "C" fn kafka_common_ClusterResource_cluster_id(
     self_: *const kafka_common_ClusterResource_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster-resource handle, as
+    // `inner_ref` requires. The string returned is the inner's own `cluster_id_c`, so it lives as
+    // long as the handle; that is the rustdoc's "borrowed from the handle".
     unsafe { inner_ref(self_) }
         .cluster_id_c
         .as_ref()
@@ -94,6 +110,9 @@ pub unsafe extern "C" fn kafka_common_ClusterResource_cluster_id(
 pub unsafe extern "C" fn kafka_common_ClusterResource_to_string(
     self_: *const kafka_common_ClusterResource_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster-resource handle, as
+    // `inner_ref` requires; the reference is used only within this call, and the text is copied
+    // into an owned string.
     into_c_string(&unsafe { inner_ref(self_) }.resource.to_string())
 }
 
@@ -108,6 +127,10 @@ pub unsafe extern "C" fn kafka_common_ClusterResource_to_string(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ClusterResource_destroy(self_: *mut kafka_common_ClusterResource_t) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // cluster-resource handle not yet destroyed, i.e. the `Box::into_raw` of
+        // `kafka_common_ClusterResource_new`, so `Box::from_raw` reclaims it exactly once. The
+        // resource borrowed from a cluster is never passed here, as the rustdoc states.
         drop(unsafe { Box::from_raw(self_ as *mut ClusterResourceInner) });
     }
 }
@@ -122,6 +145,9 @@ mod tests {
     #[test]
     fn cluster_id_is_nullable() {
         let id = CString::new("abc").unwrap();
+        // SAFETY: Test code: `id` outlives the constructor, which copies it; each resource comes
+        // from `kafka_common_ClusterResource_new` and is destroyed once, after the id it lends and
+        // the string from `to_string`, itself destroyed once, are read.
         unsafe {
             let with_id = kafka_common_ClusterResource_new(id.as_ptr());
             assert_eq!(

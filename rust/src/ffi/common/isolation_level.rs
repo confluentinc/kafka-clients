@@ -66,6 +66,9 @@ pub(crate) fn singleton(level: IsolationLevel) -> *const kafka_common_IsolationL
 ///
 /// `level` must be a singleton returned by this module.
 pub(crate) unsafe fn value_of(level: *const kafka_common_IsolationLevel_t) -> IsolationLevel {
+    // SAFETY: Per this function's `# Safety`, `level` is a singleton returned by this module, i.e.
+    // a pointer to an element of the `static` `VARIANTS` array (`singleton`), so it points at a
+    // live, initialised `IsolationLevel`, which is `Copy` and read out here.
     unsafe { *(level as *const IsolationLevel) }
 }
 
@@ -97,6 +100,8 @@ pub extern "C" fn kafka_common_IsolationLevel_read_committed() -> *const kafka_c
 pub unsafe extern "C" fn kafka_common_IsolationLevel__enum(
     self_: *const kafka_common_IsolationLevel_t,
 ) -> kafka_common_IsolationLevel_e {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `value_of` requires; the value is copied out.
     enum_of(unsafe { value_of(self_) })
 }
 
@@ -111,6 +116,8 @@ pub unsafe extern "C" fn kafka_common_IsolationLevel__enum(
 #[ffi_guard(fallback = -1)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_IsolationLevel_id(self_: *const kafka_common_IsolationLevel_t) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `value_of` requires; the value is copied out.
     unsafe { value_of(self_) }.id() as i8
 }
 
@@ -129,6 +136,9 @@ pub unsafe extern "C" fn kafka_common_IsolationLevel_for_id(
 ) -> *mut kafka_common_Error_t {
     match IsolationLevel::for_id(id as u8) {
         Ok(level) => {
+            // SAFETY: Per this function's `# Safety`, `out_for_id` is a valid pointer, so the write
+            // is sound; the singleton written points into the static `VARIANTS` array and is never
+            // freed.
             unsafe { *out_for_id = singleton(level) };
             std::ptr::null_mut()
         },
@@ -146,6 +156,8 @@ pub unsafe extern "C" fn kafka_common_IsolationLevel_for_id(
 pub unsafe extern "C" fn kafka_common_IsolationLevel_to_string(
     self_: *const kafka_common_IsolationLevel_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `value_of` requires; the value is copied out and its text copied into an owned string.
     into_c_string(&unsafe { value_of(self_) }.to_string())
 }
 
@@ -163,6 +175,8 @@ mod tests {
     fn singletons_round_trip_and_match_their_enumerator() {
         for (index, &level) in VARIANTS.iter().enumerate() {
             let handle = singleton(level);
+            // SAFETY: Test code: every handle passed is a singleton from `singleton`, which points
+            // into the static `VARIANTS` array and is never freed.
             unsafe {
                 assert_eq!(value_of(handle), level);
                 assert_eq!(kafka_common_IsolationLevel__enum(handle) as usize, index);
@@ -180,6 +194,9 @@ mod tests {
 
     #[test]
     fn id_for_id_and_to_string_follow_java() {
+        // SAFETY: Test code: the singletons are never freed, `level` is a valid out pointer, the
+        // error from the unknown id is destroyed once, and the string from `to_string` is destroyed
+        // once, after it is read.
         unsafe {
             assert_eq!(kafka_common_IsolationLevel_id(kafka_common_IsolationLevel_read_committed()), 1);
             let mut level = ptr::null();

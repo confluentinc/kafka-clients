@@ -62,6 +62,9 @@ pub(crate) fn singleton(election_type: ElectionType) -> *const kafka_common_Elec
 ///
 /// `election_type` must be a singleton returned by this module.
 pub(crate) unsafe fn value_of(election_type: *const kafka_common_ElectionType_t) -> ElectionType {
+    // SAFETY: Per this function's `# Safety`, `election_type` is a singleton returned by this
+    // module, i.e. a pointer to an element of the `static` `VARIANTS` array (`singleton`), so it
+    // points at a live, initialised `ElectionType`, which is `Copy` and read out here.
     unsafe { *(election_type as *const ElectionType) }
 }
 
@@ -93,6 +96,8 @@ pub extern "C" fn kafka_common_ElectionType_unclean() -> *const kafka_common_Ele
 pub unsafe extern "C" fn kafka_common_ElectionType__enum(
     self_: *const kafka_common_ElectionType_t,
 ) -> kafka_common_ElectionType_e {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `value_of` requires; the value is copied out.
     enum_of(unsafe { value_of(self_) })
 }
 
@@ -107,6 +112,8 @@ pub unsafe extern "C" fn kafka_common_ElectionType__enum(
 #[ffi_guard(fallback = -1)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ElectionType_value(self_: *const kafka_common_ElectionType_t) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `value_of` requires; the value is copied out.
     unsafe { value_of(self_) }.value()
 }
 
@@ -125,6 +132,9 @@ pub unsafe extern "C" fn kafka_common_ElectionType_value_of(
 ) -> *mut kafka_common_Error_t {
     match ElectionType::value_of(value) {
         Ok(election_type) => {
+            // SAFETY: Per this function's `# Safety`, `out_value_of` is a valid pointer, so the
+            // write is sound; the singleton written points into the static `VARIANTS` array and is
+            // never freed.
             unsafe { *out_value_of = singleton(election_type) };
             std::ptr::null_mut()
         },
@@ -155,6 +165,8 @@ mod tests {
     fn singletons_round_trip_and_match_their_enumerator() {
         for (index, &election_type) in VARIANTS.iter().enumerate() {
             let handle = singleton(election_type);
+            // SAFETY: Test code: every handle passed is a singleton from `singleton`, which points
+            // into the static `VARIANTS` array and is never freed.
             unsafe {
                 assert_eq!(value_of(handle), election_type);
                 assert_eq!(kafka_common_ElectionType__enum(handle) as usize, index);
@@ -166,6 +178,9 @@ mod tests {
 
     #[test]
     fn value_value_of_and_values_follow_java() {
+        // SAFETY: Test code: the singletons are never freed, `election_type` is a valid out
+        // pointer, the error from the unknown value is destroyed once, and the owned list from
+        // `values` is destroyed once, after its elements are read.
         unsafe {
             assert_eq!(kafka_common_ElectionType_value(kafka_common_ElectionType_unclean()), 1);
             let mut election_type = ptr::null();
