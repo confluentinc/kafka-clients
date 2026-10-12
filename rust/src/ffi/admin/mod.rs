@@ -496,8 +496,10 @@ impl FutureCtx {
         T: Clone + Send + Sync + 'static,
         F: Fn(T) -> *mut c_void + Send + Sync + 'static,
     {
-        // `map_future_handle`'s caller guarantee is this function's `# Safety`.
-        self.boxed(map_future_handle(future, boxer, destroy))
+        // SAFETY: Per this function's `# Safety`, each pointer `boxer` returns is null or an owned
+        // handle `destroy` frees exactly, which may be freed from any thread and read from several
+        // threads at once, which is what `map_future_handle` requires.
+        self.boxed(unsafe { map_future_handle(future, boxer, destroy) })
     }
 
     /// A future resolving to a scalar, delivered boxed as a `T *`
@@ -512,9 +514,12 @@ impl FutureCtx {
     /// A future resolving to a `String`, delivered as a `char *` owned by the
     /// future.
     pub(crate) fn string_future(&self, future: &KafkaFuture<String>) -> *mut kafka_common_KafkaFuture_t {
-        self.boxed(
-            future.then_apply(|s| Ok(FfiValue::handle(into_c_string(&s) as *mut c_void, destroy_string_element))),
-        )
+        self.boxed(future.then_apply(|s| {
+            // SAFETY: `into_c_string` returns an owned `char *` that `destroy_string_element`, its
+            // paired destructor, frees exactly, and nothing else frees it. A C string has no
+            // thread affinity: it may be freed from any thread and read from several at once.
+            Ok(unsafe { FfiValue::handle(into_c_string(&s) as *mut c_void, destroy_string_element) })
+        }))
     }
 
     /// Java's `Map<String, KafkaFuture<T>>`: an owned map of owned `char *`

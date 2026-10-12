@@ -111,12 +111,16 @@ impl FfiValue {
     /// Wraps an owned C handle (a `<Type>_t *` from one of the `box_*`
     /// helpers), freed with the handle through its `_destroy`.
     ///
-    /// The caller guarantees that `destroy` frees exactly `ptr`: it is the
-    /// destructor paired with the helper that made `ptr` (a `box_*` helper and
-    /// its `_destroy`, `into_c_string` and `destroy_string_element`). It also
-    /// guarantees that the handle may be freed from any thread, and read
-    /// through its accessors from several threads at once.
-    pub(crate) fn handle(ptr: *mut c_void, destroy: unsafe fn(*mut c_void)) -> Arc<Self> {
+    /// # Safety
+    ///
+    /// `ptr` must be null or an owned handle that `destroy` frees exactly:
+    /// `destroy` is the destructor paired with the helper that made `ptr` (a
+    /// `box_*` helper and its `_destroy`, `into_c_string` and
+    /// `destroy_string_element`), and nothing else frees `ptr`. The handle must
+    /// also be one that may be freed from any thread, and read through its
+    /// accessors from several threads at once: `Drop` frees it and the `Send`
+    /// and `Sync` impls share it on that promise.
+    pub(crate) unsafe fn handle(ptr: *mut c_void, destroy: unsafe fn(*mut c_void)) -> Arc<Self> {
         Arc::new(Self { ptr, destroy: Some(destroy) })
     }
 
@@ -166,15 +170,25 @@ where
 /// resolves, freed with `destroy` (the handle type's `_destroy`) together with
 /// the future's value.
 ///
-/// The caller gives each handle `boxer` makes the guarantees
-/// [`FfiValue::handle`] requires: `destroy` frees exactly that handle, and the
-/// handle may be freed and read from any thread.
-pub(crate) fn map_future_handle<T, F>(future: &KafkaFuture<T>, boxer: F, destroy: unsafe fn(*mut c_void)) -> FfiFuture
+/// # Safety
+///
+/// Each pointer `boxer` returns must meet [`FfiValue::handle`]'s `# Safety`
+/// with `destroy`: null or an owned handle `destroy` frees exactly, which may
+/// be freed from any thread and read from several threads at once.
+pub(crate) unsafe fn map_future_handle<T, F>(
+    future: &KafkaFuture<T>,
+    boxer: F,
+    destroy: unsafe fn(*mut c_void),
+) -> FfiFuture
 where
     T: Clone + Send + Sync + 'static,
     F: Fn(T) -> *mut c_void + Send + Sync + 'static,
 {
-    future.then_apply(move |value| Ok(FfiValue::handle(boxer(value), destroy)))
+    future.then_apply(move |value| {
+        // SAFETY: Per this function's `# Safety`, the pointer `boxer` returns and `destroy` meet
+        // `FfiValue::handle`'s `# Safety`.
+        Ok(unsafe { FfiValue::handle(boxer(value), destroy) })
+    })
 }
 
 /// Maps a `Void` future to the `NULL` it delivers.

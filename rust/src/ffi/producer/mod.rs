@@ -359,11 +359,17 @@ fn deliver_send(
 fn metadata_future(
     future: &crate::common::KafkaFuture<crate::producer::RecordMetadata>,
 ) -> crate::ffi::kafka_future::FfiFuture {
-    map_future_handle(
-        future,
-        |metadata| box_record_metadata(metadata) as *mut c_void,
-        destroy_record_metadata,
-    )
+    // SAFETY: `box_record_metadata` returns an owned record-metadata handle that
+    // `destroy_record_metadata` frees exactly, and nothing else frees it. The handle is an
+    // immutable Rust value behind a `Box` (`Send + Sync`), so it may be freed from any thread and
+    // read through its accessors from several at once.
+    unsafe {
+        map_future_handle(
+            future,
+            |metadata| box_record_metadata(metadata) as *mut c_void,
+            destroy_record_metadata,
+        )
+    }
 }
 
 /// Frees a record-metadata handle held as a future's value (see
