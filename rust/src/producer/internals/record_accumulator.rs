@@ -142,13 +142,22 @@ pub struct AppendFailure {
     /// The callback, when this append did not consume it. `None` when the caller
     /// passed no callback, or when the callback was already handed to a batch.
     pub callback: Option<Callback>,
+    /// The partition the record was being appended to when the append failed.
+    ///
+    /// Java's `append` tells the caller the partition as soon as it is chosen
+    /// (`setPartition`, `RecordAccumulator.java:309-310`), before it tries to append
+    /// or waits for memory, and `doSend` reports it to the callback on failure
+    /// through `appendCallbacks.topicPartition()` (`KafkaProducer.java:1052`). When
+    /// the built-in partitioner chooses, the caller's own partition is still
+    /// `UNKNOWN_PARTITION`, so the chosen one comes back here.
+    pub partition: i32,
 }
 
 impl AppendFailure {
     /// An append that failed without ever taking the callback, boxed for the
     /// `Result` position (see the type-level note).
-    pub(crate) fn boxed(error: Error, callback: Option<Callback>) -> Box<Self> {
-        Box::new(Self { error, callback })
+    pub(crate) fn boxed(error: Error, callback: Option<Callback>, partition: i32) -> Box<Self> {
+        Box::new(Self { error, callback, partition })
     }
 }
 
@@ -159,6 +168,7 @@ impl std::fmt::Debug for AppendFailure {
         f.debug_struct("AppendFailure")
             .field("error", &self.error)
             .field("callback_returned", &self.callback.is_some())
+            .field("partition", &self.partition)
             .finish()
     }
 }
@@ -963,7 +973,7 @@ impl RecordAccumulator {
                     self.free
                         .allocate(size as usize, max_time_to_block)
                         .await
-                        .map_err(|error| AppendFailure::boxed(error, callback.take()))?,
+                        .map_err(|error| AppendFailure::boxed(error, callback.take(), effective_partition))?,
                 );
                 // Update the current time in case the buffer allocation blocked above.
                 // NOTE: getting time may be expensive, so calling it under a lock
@@ -1249,14 +1259,14 @@ impl RecordAccumulator {
 
         let records_builder = match records_builder_supplier() {
             Ok(records_builder) => records_builder,
-            Err(error) => return Err(AppendFailure::boxed(error, callback)),
+            Err(error) => return Err(AppendFailure::boxed(error, callback, partition)),
         };
         // Both the batch and the append result carry this; `TopicPartition` holds an
         // `Arc<str>`, so the clone is a refcount increment, not a copy.
         let tp = TopicPartition::new(Arc::clone(topic), partition);
         let mut batch = match create_producer_batch(tp.clone(), records_builder, now_ms) {
             Ok(batch) => batch,
-            Err(error) => return Err(AppendFailure::boxed(error, callback)),
+            Err(error) => return Err(AppendFailure::boxed(error, callback, partition)),
         };
 
         // Java's `Objects.requireNonNull(batch.tryAppend(..))`. A fresh plain batch always has
@@ -1272,7 +1282,7 @@ impl RecordAccumulator {
                 } else {
                     "Newly created batch should have room for at least one record"
                 };
-                return Err(AppendFailure::boxed(Error::local_illegal_state(message), callback));
+                return Err(AppendFailure::boxed(Error::local_illegal_state(message), callback, partition));
             },
         };
 
@@ -1396,7 +1406,7 @@ impl RecordAccumulator {
         now_ms: i64,
     ) -> Result<(RecordAppendResult, Option<Callback>), Box<AppendFailure>> {
         if self.closed.load(Ordering::Relaxed) {
-            return Err(Self::closed_while_send_in_progress(callback));
+            return Err(Self::closed_while_send_in_progress(callback, partition));
         }
 
         if let Some(last) = deque.back_mut() {
@@ -1447,8 +1457,12 @@ impl RecordAccumulator {
     /// appended, so nothing else owns it, and it is `do_send_bytes` — not the
     /// accumulator — that decides whether an error fires it. The
     /// `Box<dyn FnOnce>` cannot be cloned, so handing it back is the only way.
-    pub(crate) fn closed_while_send_in_progress(callback: Option<Callback>) -> Box<AppendFailure> {
-        AppendFailure::boxed(Error::kafka_message("Producer closed while send in progress"), callback)
+    pub(crate) fn closed_while_send_in_progress(callback: Option<Callback>, partition: i32) -> Box<AppendFailure> {
+        AppendFailure::boxed(
+            Error::kafka_message("Producer closed while send in progress"),
+            callback,
+            partition,
+        )
     }
     #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#isMuted")]
     fn is_muted(&self, tp: &TopicPartition) -> bool {
