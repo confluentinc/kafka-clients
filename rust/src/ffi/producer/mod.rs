@@ -80,8 +80,8 @@
 //!
 //! # Destroy
 //!
-//! `_destroy` on a class handle stops the submission task, waits for the
-//! tasks spawned by `_cb` calls, runs the still-pending callbacks so each
+//! `_destroy` on a class handle waits for the tasks spawned by `_cb` calls,
+//! then stops the submission task and waits for it, runs the still-pending callbacks so each
 //! fires exactly once (§4 rule 5), and drops the producer; the
 //! `kafka_common_KafkaFuture_get_cb` calls still waiting on its futures fire
 //! last, once each (see `ffi::kafka_future`). It does not
@@ -387,6 +387,9 @@ pub(crate) struct ProducerHandle<P: ?Sized> {
     /// The `kafka_producer_Producer_t` view is this field's address.
     client: Arc<Client>,
     runtime: tokio::runtime::Runtime,
+    /// The submission task, awaited by `destroy` once the `_cb` tasks have
+    /// ended (see [`Self::destroy`]); kept apart from `Client::tasks` for that.
+    submission: JoinHandle<()>,
 }
 
 impl<P> ProducerHandle<P>
@@ -425,8 +428,8 @@ where
             tasks: Mutex::new(Vec::new()),
             rejects_negative_close_timeout,
         });
-        client.spawn(submission_loop(Arc::clone(&client), submit_rx));
-        Ok(Box::new(Self { producer, client, runtime }))
+        let submission = spawn_callback_task(runtime.handle(), submission_loop(Arc::clone(&client), submit_rx));
+        Ok(Box::new(Self { producer, client, runtime, submission }))
     }
 
     /// The concrete producer.
@@ -439,17 +442,24 @@ where
         &self.client as *const Arc<Client> as *const kafka_producer_Producer_t
     }
 
-    /// Stops the submission task, awaits every spawned task, fires the
-    /// pending callbacks and drops the producer (see the module docs), then
-    /// stops the runtime and fires the completions of the
-    /// `KafkaFuture_get_cb` calls still waiting, each exactly once.
+    /// Awaits every task spawned by a `_cb` call, then stops the submission
+    /// task and awaits it, fires the pending callbacks and drops the producer
+    /// (see the module docs), then stops the runtime and fires the completions
+    /// of the `KafkaFuture_get_cb` calls still waiting, each exactly once.
+    ///
+    /// The submission queue stays open until the `_cb` tasks have ended: a
+    /// task that has not reached its drain yet must still be able to queue its
+    /// barrier. A forced `close_with_timeout_cb(0)` queued behind an untimed
+    /// `close_cb` (Python's cancelled async `close()`) is such a task: closing
+    /// the queue first failed its drain, so it never closed the producer, and
+    /// the untimed close, the record it waited for and so `destroy` itself
+    /// waited out `max.block.ms`.
     ///
     /// A panic caught earlier may have poisoned `submit_tx` or `tasks`; both
     /// are taken regardless, so the handle is still freed and every pending
     /// callback still fires exactly once.
     pub(crate) fn destroy(self) {
-        let Self { producer, client, runtime } = self;
-        drop(client.submit_tx.lock().unwrap_or_else(PoisonError::into_inner).take());
+        let Self { producer, client, runtime, submission } = self;
         loop {
             let tasks: Vec<JoinHandle<()>> =
                 std::mem::take(&mut *client.tasks.lock().unwrap_or_else(PoisonError::into_inner));
@@ -462,6 +472,9 @@ where
                 }
             });
         }
+        // No `_cb` task is left, and none can start: the handle is gone.
+        drop(client.submit_tx.lock().unwrap_or_else(PoisonError::into_inner).take());
+        let _ = runtime.block_on(submission);
         client.queue.execute();
         // The producer's `Drop` force-closes it (a `KafkaProducer` needs the
         // runtime context for that) and fires the delivery callbacks of the

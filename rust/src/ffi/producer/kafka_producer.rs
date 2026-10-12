@@ -558,8 +558,9 @@ mod tests {
         kafka_producer_ProducerRecord_destroy, kafka_producer_ProducerRecord_new,
     };
     use crate::ffi::producer::{
-        kafka_producer_Producer__execute_callbacks, kafka_producer_Producer_close_with_timeout,
-        kafka_producer_Producer_close_with_timeout_cb, kafka_producer_Producer_send_cb,
+        kafka_producer_Producer__execute_callbacks, kafka_producer_Producer_close_cb,
+        kafka_producer_Producer_close_with_timeout, kafka_producer_Producer_close_with_timeout_cb,
+        kafka_producer_Producer_send_cb,
     };
     use crate::ffi::util::{box_string_map, c_str_to_string, kafka_Map_destroy};
 
@@ -707,6 +708,42 @@ mod tests {
                 kafka_producer_KafkaProducer_destroy(producer);
                 kafka_producer_ProducerRecord_destroy(record);
             }
+        }
+    }
+
+    /// A forced `close_with_timeout_cb(0)` queued behind an untimed
+    /// `close_cb`, with `_destroy` right after it (what Python's cancelled
+    /// async `close()` does), closes the producer: the record the untimed
+    /// close waits for fails at once and `_destroy` returns promptly, each
+    /// completion firing once. `_destroy` used to close the submission queue
+    /// first, which failed the forced close's drain before it closed the
+    /// producer, so `_destroy` waited out `max.block.ms` (60 s here).
+    #[test]
+    fn destroy_right_after_a_forced_close_behind_an_untimed_one_returns_promptly() {
+        let topic = CString::new("topic").unwrap();
+        let bytes = kafka_Bytes_t::from_slice(b"v");
+        let sends = std::sync::Mutex::new(Vec::<Option<String>>::new());
+        let closes = std::sync::Mutex::new(Vec::<Option<String>>::new());
+        // SAFETY: Test code: the producer and `record` are live from their constructor to their
+        // single destroy below, `view` is used only before the producer is destroyed, and `sends`
+        // and `closes` outlive the destroy that runs their callbacks.
+        unsafe {
+            let producer = unreachable_producer();
+            let view = kafka_producer_KafkaProducer__as_Producer(producer);
+            let record =
+                kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
+            kafka_producer_Producer_send_cb(view, record, record_send, &sends as *const _ as *mut c_void);
+            kafka_producer_Producer_close_cb(view, record_void, &closes as *const _ as *mut c_void);
+            // The send is in flight, waiting for the topic's metadata.
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let start = std::time::Instant::now();
+            kafka_producer_Producer_close_with_timeout_cb(view, 0, record_void, &closes as *const _ as *mut c_void);
+            kafka_producer_KafkaProducer_destroy(producer);
+            let elapsed = start.elapsed();
+            assert!(elapsed < std::time::Duration::from_secs(10), "destroy took {elapsed:?}");
+            assert_eq!(*closes.lock().unwrap(), vec![None, None]);
+            assert_eq!(sends.lock().unwrap().len(), 1);
+            kafka_producer_ProducerRecord_destroy(record);
         }
     }
 
