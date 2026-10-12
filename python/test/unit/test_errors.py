@@ -765,8 +765,6 @@ _PAYLOADS: list[tuple[type[BaseException], dict[str, Any], str, Any]] = [
     (ThrottlingQuotaExceededError, {"throttle_time_ms": 250}, "throttle_time_ms", 250),
     (DuplicateResourceError, {"resource": "r1"}, "resource", "r1"),
     (ResourceNotFoundError, {"resource": None}, "resource", None),
-    (CorrelationIdMismatchError, {"request_correlation_id": 7, "response_correlation_id": 8},
-     "response_correlation_id", 8),
     (RecordTooLargeError, {"record_too_large_partitions": {("t", 0): 99}},
      "record_too_large_partitions", {_TP: 99}),
     (RecordTooLargeError, {"record_too_large_partitions": None},
@@ -812,6 +810,19 @@ def test_from_ffi_error_keeps_the_message_when_java_needs_more(
     assert type(err) is RecordDeserializationError and str(err) == "bad record"
     clone = pickle.loads(pickle.dumps(err))
     assert type(clone) is RecordDeserializationError and str(clone) == "bad record"
+
+
+def test_a_core_correlation_id_mismatch_reads_unknown_ids(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # The core reports no payload for it (no C accessor, CLAUDE.md §4): the
+    # error is still built through its constructor, with -1 for both ids.
+    monkeypatch.setattr(errmod, "_lib", _fake_lib(CorrelationIdMismatchError._ffi_id,
+                                                  "mismatch"))
+    err = from_ffi_error(0)
+    assert type(err) is CorrelationIdMismatchError and str(err) == "mismatch"
+    assert (err.request_correlation_id(), err.response_correlation_id()) == (-1, -1)
+    clone = pickle.loads(pickle.dumps(err))
+    assert (clone.request_correlation_id(), clone.response_correlation_id()) == (-1, -1)
 
 
 def test_real_native_plain_error_has_no_payload() -> None:

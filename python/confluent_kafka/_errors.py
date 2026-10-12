@@ -158,11 +158,18 @@ _CORE_KWARGS: dict[str, Callable[[str | None, dict[str, Any]], dict[str, Any]]] 
     },
     "DuplicateResourceError": lambda m, p: {"resource": p.get("resource"), "message": m},
     "ResourceNotFoundError": lambda m, p: {"resource": p.get("resource"), "message": m},
-    "CorrelationIdMismatchError": lambda m, p: {
-        "message": m,
-        "request_correlation_id": p["request_correlation_id"],
-        "response_correlation_id": p["response_correlation_id"],
-    },
+}
+
+# Constructor arguments the core cannot report, filled with a stand-in so the
+# error is still built through its Java constructor and its getters work.
+#
+# *(deviation)* ``CorrelationIdMismatchError``: Java's class sits in
+# ``common.requests``, "not a supported API", so the Rust payload is
+# crate-private and CLAUDE.md §4 gives it no C accessor. The two correlation ids
+# are therefore unknown on this side and read as -1, a value Java's counter
+# (which starts at 0) never assigns. Goes when the C FFI exposes them.
+_CORE_DEFAULTS: dict[str, dict[str, Any]] = {
+    "CorrelationIdMismatchError": {"request_correlation_id": -1, "response_correlation_id": -1},
 }
 
 
@@ -179,7 +186,7 @@ def construct(cls: type[BaseException], message: str | None,
         if builder is not None and payload:
             error = make(**builder(message, payload))
         else:
-            error = make(message=message)
+            error = make(message=message, **_CORE_DEFAULTS.get(cls.__name__, {}))
     except (TypeError, RuntimeError):
         error = new(cls, message)
     return error

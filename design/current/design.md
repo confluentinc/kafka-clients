@@ -1242,6 +1242,10 @@ Deviations recorded in the package's module docstrings:
 - Fetched key, value and header bytes are `memoryview`s over the fetch
   batch. The extension's C-mock batch path still copies them, because its
   pinned buffers die with the consumer.
+- A `CorrelationIdMismatchError` raised by the core reads -1 for both
+  correlation ids (`_errors.py` `_CORE_DEFAULTS`): Java's class sits in
+  `common.requests`, so the Rust payload is crate-private and the C API has no
+  accessor for them (CLAUDE.md §4).
 
 `admin.py` is the older admin binding. It is paused and outside the
 conventions, and keeps its flat `KafkaError` and positional value types through
