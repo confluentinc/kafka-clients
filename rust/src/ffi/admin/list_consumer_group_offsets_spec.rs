@@ -39,10 +39,16 @@ pub(crate) struct ListConsumerGroupOffsetsSpecInner {
 ///
 /// # Safety
 ///
-/// `spec` must be a valid list-consumer-group-offsets-spec handle.
+/// `spec` must be a valid list-consumer-group-offsets-spec handle, kept
+/// alive for `'a`, during which no setter runs on it.
 pub(crate) unsafe fn list_consumer_group_offsets_spec_ref<'a>(
     spec: *const kafka_admin_ListConsumerGroupOffsetsSpec_t,
 ) -> &'a ListConsumerGroupOffsetsSpec {
+    // SAFETY: Per this function's `# Safety`, `spec` is a valid list-consumer-group-offsets-spec
+    // handle kept alive for `'a`, during which no setter runs on it. Every
+    // `kafka_admin_ListConsumerGroupOffsetsSpec_t` comes from
+    // `box_list_consumer_group_offsets_spec`, which boxes a `ListConsumerGroupOffsetsSpecInner`, so
+    // the shared reference is to a live value that nothing mutates while it is used.
     &unsafe { &*(spec as *const ListConsumerGroupOffsetsSpecInner) }.spec
 }
 
@@ -71,15 +77,24 @@ pub extern "C" fn kafka_admin_ListConsumerGroupOffsetsSpec_new() -> *mut kafka_a
 ///
 /// # Safety
 ///
-/// `self_` must be a valid spec handle and `topic_partitions` null or a
-/// valid list of topic-partition handles.
+/// `self_` must be a valid spec handle that no other call uses at the same
+/// time, and `topic_partitions` null or a valid list of topic-partition
+/// handles.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsSpec_set_topic_partitions(
     self_: *mut kafka_admin_ListConsumerGroupOffsetsSpec_t,
     topic_partitions: *const kafka_List_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `topic_partitions` is null or a valid list of
+    // topic-partition handles, and the closure runs only when it is non-null, as
+    // `list_topic_partitions` requires.
     let topic_partitions = (!topic_partitions.is_null()).then(|| unsafe { list_topic_partitions(topic_partitions) });
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid spec handle that no other call
+    // uses at the same time, so no other reference to it is live while `inner` is used. Every
+    // `kafka_admin_ListConsumerGroupOffsetsSpec_t` comes from
+    // `box_list_consumer_group_offsets_spec`, which boxes a `ListConsumerGroupOffsetsSpecInner`, so
+    // the exclusive reference is to a live value.
     let inner = unsafe { &mut *(self_ as *mut ListConsumerGroupOffsetsSpecInner) };
     inner.spec = inner.spec.clone().set_topic_partitions(topic_partitions);
 }
@@ -97,6 +112,10 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsSpec_set_topic_part
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsSpec_topic_partitions(
     self_: *const kafka_admin_ListConsumerGroupOffsetsSpec_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid spec handle, kept alive for this
+    // call; no setter runs on it meanwhile, since the setter's `# Safety` excludes any other call
+    // using the handle at the same time. That is what `list_consumer_group_offsets_spec_ref`
+    // requires.
     unsafe { list_consumer_group_offsets_spec_ref(self_) }
         .topic_partitions()
         .map_or(std::ptr::null_mut(), |tps| topic_partition_list(tps.iter().cloned()))
@@ -112,6 +131,10 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsSpec_topic_partitio
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsSpec_to_string(
     self_: *const kafka_admin_ListConsumerGroupOffsetsSpec_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid spec handle, kept alive for this
+    // call; no setter runs on it meanwhile, since the setter's `# Safety` excludes any other call
+    // using the handle at the same time. That is what `list_consumer_group_offsets_spec_ref`
+    // requires.
     into_c_string(&unsafe { list_consumer_group_offsets_spec_ref(self_) }.to_string())
 }
 
@@ -119,13 +142,18 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsSpec_to_string(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned spec handle not yet destroyed.
+/// `self_` must be null or an owned spec handle not yet destroyed, that no
+/// other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsSpec_destroy(
     self_: *mut kafka_admin_ListConsumerGroupOffsetsSpec_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null here, and per this function's `# Safety` it is an owned spec
+        // handle not yet destroyed, that no other call uses at the same time and that is not used
+        // afterwards. Every spec handle comes from `box_list_consumer_group_offsets_spec`, which
+        // boxes a `ListConsumerGroupOffsetsSpecInner`, so `Box::from_raw` reclaims that box.
         drop(unsafe { Box::from_raw(self_ as *mut ListConsumerGroupOffsetsSpecInner) });
     }
 }
@@ -147,6 +175,9 @@ mod tests {
     #[test]
     fn setter_copies_the_list_and_null_clears_it() {
         let spec = kafka_admin_ListConsumerGroupOffsetsSpec_new();
+        // SAFETY: Test code: `spec`, `tp_handle`, `list`, `out` and `s` are live handles, each
+        // destroyed once after its last use; the list holds a live topic-partition handle while the
+        // setter copies it, and null is a valid argument to the setter and the destroy.
         unsafe {
             assert!(kafka_admin_ListConsumerGroupOffsetsSpec_topic_partitions(spec).is_null());
             let tp = TopicPartition::new("orders", 1);

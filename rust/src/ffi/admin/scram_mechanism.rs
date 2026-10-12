@@ -74,6 +74,10 @@ pub(crate) fn scram_mechanism_singleton(mechanism: ScramMechanism) -> *const kaf
 ///
 /// `mechanism` must be a singleton returned by this module.
 pub(crate) unsafe fn scram_mechanism_value_of(mechanism: *const kafka_admin_ScramMechanism_t) -> ScramMechanism {
+    // SAFETY: Per this function's `# Safety`, `mechanism` is a singleton returned by this module.
+    // `scram_mechanism_singleton` is the only producer and points it at an element of the static
+    // `VARIANTS`, a `ScramMechanism` that is never freed or mutated, so the read copies a live
+    // value.
     unsafe { *(mechanism as *const ScramMechanism) }
 }
 
@@ -110,6 +114,8 @@ pub extern "C" fn kafka_admin_ScramMechanism_scram_sha_512() -> *const kafka_adm
 pub unsafe extern "C" fn kafka_admin_ScramMechanism__enum(
     self_: *const kafka_admin_ScramMechanism_t,
 ) -> kafka_admin_ScramMechanism_e {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `scram_mechanism_value_of` requires.
     enum_of(unsafe { scram_mechanism_value_of(self_) })
 }
 
@@ -133,6 +139,8 @@ pub extern "C" fn kafka_admin_ScramMechanism_from_type(r#type: i8) -> *const kaf
 pub unsafe extern "C" fn kafka_admin_ScramMechanism_from_mechanism_name(
     mechanism_name: *const c_char,
 ) -> *const kafka_admin_ScramMechanism_t {
+    // SAFETY: Per this function's `# Safety`, `mechanism_name` is a valid NUL-terminated string, as
+    // `c_str_to_string` requires.
     scram_mechanism_singleton(ScramMechanism::from_mechanism_name(&unsafe { c_str_to_string(mechanism_name) }))
 }
 
@@ -147,6 +155,9 @@ pub unsafe extern "C" fn kafka_admin_ScramMechanism_from_mechanism_name(
 pub unsafe extern "C" fn kafka_admin_ScramMechanism_mechanism_name(
     self_: *const kafka_admin_ScramMechanism_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `scram_mechanism_value_of` requires. The returned name is a `CString` in the static
+    // `MECHANISM_NAMES`, never freed.
     MECHANISM_NAMES[enum_of(unsafe { scram_mechanism_value_of(self_) }) as usize].as_ptr()
 }
 
@@ -161,6 +172,8 @@ pub unsafe extern "C" fn kafka_admin_ScramMechanism_mechanism_name(
 #[ffi_guard(fallback = -1)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ScramMechanism_type(self_: *const kafka_admin_ScramMechanism_t) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `scram_mechanism_value_of` requires.
     unsafe { scram_mechanism_value_of(self_) }.r#type()
 }
 
@@ -172,9 +185,11 @@ mod tests {
 
     #[test]
     fn singletons_round_trip_through_type_and_name() {
-        for (index, &mechanism) in VARIANTS.iter().enumerate() {
-            let handle = scram_mechanism_singleton(mechanism);
-            unsafe {
+        // SAFETY: Test code: every handle is a singleton from this module, as the reads require;
+        // each `name` is a static NUL-terminated string, and the parsed literal is one too.
+        unsafe {
+            for (index, &mechanism) in VARIANTS.iter().enumerate() {
+                let handle = scram_mechanism_singleton(mechanism);
                 assert_eq!(scram_mechanism_value_of(handle), mechanism);
                 assert_eq!(kafka_admin_ScramMechanism__enum(handle) as usize, index);
                 assert_eq!(
@@ -185,19 +200,16 @@ mod tests {
                 assert_eq!(CStr::from_ptr(name).to_str().unwrap(), mechanism.mechanism_name());
                 assert_eq!(kafka_admin_ScramMechanism_from_mechanism_name(name), handle);
             }
+            assert_eq!(
+                kafka_admin_ScramMechanism_scram_sha_512(),
+                scram_mechanism_singleton(ScramMechanism::ScramSha512)
+            );
+            assert_eq!(kafka_admin_ScramMechanism_from_type(9), kafka_admin_ScramMechanism_unknown());
+            assert_eq!(
+                kafka_admin_ScramMechanism_from_mechanism_name(c"scram-sha-256".as_ptr()),
+                kafka_admin_ScramMechanism_unknown()
+            );
+            assert_eq!(kafka_admin_ScramMechanism_type(kafka_admin_ScramMechanism_scram_sha_256()), 1);
         }
-        assert_eq!(
-            kafka_admin_ScramMechanism_scram_sha_512(),
-            scram_mechanism_singleton(ScramMechanism::ScramSha512)
-        );
-        assert_eq!(kafka_admin_ScramMechanism_from_type(9), kafka_admin_ScramMechanism_unknown());
-        assert_eq!(
-            unsafe { kafka_admin_ScramMechanism_from_mechanism_name(c"scram-sha-256".as_ptr()) },
-            kafka_admin_ScramMechanism_unknown()
-        );
-        assert_eq!(
-            unsafe { kafka_admin_ScramMechanism_type(kafka_admin_ScramMechanism_scram_sha_256()) },
-            1
-        );
     }
 }

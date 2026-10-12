@@ -84,6 +84,10 @@ pub(crate) fn upgrade_type_singleton(upgrade_type: UpgradeType) -> *const kafka_
 pub(crate) unsafe fn upgrade_type_value_of(
     upgrade_type: *const kafka_admin_FeatureUpdate_UpgradeType_t,
 ) -> UpgradeType {
+    // SAFETY: Per this function's `# Safety`, `upgrade_type` is a singleton returned by this
+    // module. `upgrade_type_singleton` is the only producer and points it at an element of the
+    // static `VARIANTS`, an `UpgradeType` that is never freed or mutated, so the read copies a live
+    // value.
     unsafe { *(upgrade_type as *const UpgradeType) }
 }
 
@@ -129,6 +133,8 @@ pub extern "C" fn kafka_admin_FeatureUpdate_UpgradeType_unsafe_downgrade()
 pub unsafe extern "C" fn kafka_admin_FeatureUpdate_UpgradeType__enum(
     self_: *const kafka_admin_FeatureUpdate_UpgradeType_t,
 ) -> kafka_admin_FeatureUpdate_UpgradeType_e {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `upgrade_type_value_of` requires.
     enum_of(unsafe { upgrade_type_value_of(self_) })
 }
 
@@ -145,6 +151,8 @@ pub unsafe extern "C" fn kafka_admin_FeatureUpdate_UpgradeType__enum(
 pub unsafe extern "C" fn kafka_admin_FeatureUpdate_UpgradeType_code(
     self_: *const kafka_admin_FeatureUpdate_UpgradeType_t,
 ) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `upgrade_type_value_of` requires.
     unsafe { upgrade_type_value_of(self_) }.code()
 }
 
@@ -177,8 +185,12 @@ pub(crate) struct FeatureUpdateInner {
 ///
 /// # Safety
 ///
-/// `update` must be a valid feature-update handle.
+/// `update` must be a valid feature-update handle, kept alive for `'a`.
 pub(crate) unsafe fn feature_update_ref<'a>(update: *const kafka_admin_FeatureUpdate_t) -> &'a FeatureUpdate {
+    // SAFETY: Per this function's `# Safety`, `update` is a valid feature-update handle kept alive
+    // for `'a`. Every `kafka_admin_FeatureUpdate_t` comes from `box_feature_update`, which boxes a
+    // `FeatureUpdateInner`, so the cast yields a valid shared reference. The type has no setters,
+    // so nothing mutates it while borrowed.
     &unsafe { &*(update as *const FeatureUpdateInner) }.update
 }
 
@@ -205,7 +217,10 @@ pub unsafe extern "C" fn kafka_admin_FeatureUpdate_new(
     upgrade_type: *const kafka_admin_FeatureUpdate_UpgradeType_t,
     out_new: *mut *mut kafka_admin_FeatureUpdate_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `upgrade_type` is an upgrade-type singleton; only
+    // this module hands those out, as `upgrade_type_value_of` requires.
     let result = FeatureUpdate::new(max_version_level, unsafe { upgrade_type_value_of(upgrade_type) });
+    // SAFETY: Per this function's `# Safety`, `out_new` is a valid slot, as `out_slot` requires.
     unsafe { out_slot(result, out_new, box_feature_update) }
 }
 
@@ -217,6 +232,8 @@ pub unsafe extern "C" fn kafka_admin_FeatureUpdate_new(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FeatureUpdate_max_version_level(self_: *const kafka_admin_FeatureUpdate_t) -> i16 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid feature-update handle, kept alive
+    // for this call, as `feature_update_ref` requires.
     unsafe { feature_update_ref(self_) }.max_version_level()
 }
 
@@ -230,6 +247,8 @@ pub unsafe extern "C" fn kafka_admin_FeatureUpdate_max_version_level(self_: *con
 pub unsafe extern "C" fn kafka_admin_FeatureUpdate_upgrade_type(
     self_: *const kafka_admin_FeatureUpdate_t,
 ) -> *const kafka_admin_FeatureUpdate_UpgradeType_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid feature-update handle, kept alive
+    // for this call, as `feature_update_ref` requires.
     upgrade_type_singleton(unsafe { feature_update_ref(self_) }.upgrade_type())
 }
 
@@ -241,6 +260,8 @@ pub unsafe extern "C" fn kafka_admin_FeatureUpdate_upgrade_type(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FeatureUpdate_to_string(self_: *const kafka_admin_FeatureUpdate_t) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid feature-update handle, kept alive
+    // for this call, as `feature_update_ref` requires.
     into_c_string(&unsafe { feature_update_ref(self_) }.to_string())
 }
 
@@ -248,11 +269,16 @@ pub unsafe extern "C" fn kafka_admin_FeatureUpdate_to_string(self_: *const kafka
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned update handle not yet destroyed.
+/// `self_` must be null or an owned update handle not yet destroyed, that
+/// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FeatureUpdate_destroy(self_: *mut kafka_admin_FeatureUpdate_t) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null here, and per this function's `# Safety` it is an owned
+        // update handle not yet destroyed, that no other call uses at the same time and that is not
+        // used afterwards. Every feature-update handle comes from `box_feature_update`, which boxes
+        // a `FeatureUpdateInner`, so `Box::from_raw` reclaims that box.
         drop(unsafe { Box::from_raw(self_ as *mut FeatureUpdateInner) });
     }
 }
@@ -270,6 +296,8 @@ mod tests {
     fn upgrade_type_singletons_codes_and_from_code() {
         for (index, &upgrade_type) in VARIANTS.iter().enumerate() {
             let handle = upgrade_type_singleton(upgrade_type);
+            // SAFETY: Test code: every handle is a singleton from `upgrade_type_singleton`, as the
+            // reads require.
             unsafe {
                 assert_eq!(upgrade_type_value_of(handle), upgrade_type);
                 assert_eq!(kafka_admin_FeatureUpdate_UpgradeType__enum(handle) as usize, index);
@@ -294,6 +322,8 @@ mod tests {
     #[test]
     fn new_validates_like_java() {
         let mut update = ptr::null_mut();
+        // SAFETY: Test code: `update` is a valid slot; `error`, `update` and `s` are live handles,
+        // each destroyed once after its last use, and destroying null is a no-op.
         unsafe {
             let error = kafka_admin_FeatureUpdate_new(0, kafka_admin_FeatureUpdate_UpgradeType_upgrade(), &mut update);
             assert!(!error.is_null());

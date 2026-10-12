@@ -66,9 +66,19 @@ impl UserScramCredentialAlterationInner {
     }
 }
 
+/// The inner value behind a handle.
+///
+/// # Safety
+///
+/// `alteration` must be a live alteration handle, kept alive for `'a`.
 unsafe fn inner_ref<'a>(
     alteration: *const kafka_admin_UserScramCredentialAlteration_t,
 ) -> &'a UserScramCredentialAlterationInner {
+    // SAFETY: Per this function's `# Safety`, `alteration` is a live alteration handle kept alive
+    // for `'a`. Every `kafka_admin_UserScramCredentialAlteration_t` comes from
+    // `box_user_scram_credential_alteration`, which boxes a `UserScramCredentialAlterationInner`,
+    // so the cast yields a valid shared reference. The type has no setters, so nothing mutates it
+    // while borrowed.
     unsafe { &*(alteration as *const UserScramCredentialAlterationInner) }
 }
 
@@ -85,10 +95,12 @@ pub(crate) fn box_user_scram_credential_alteration(
 ///
 /// # Safety
 ///
-/// `alteration` must be a live alteration handle.
+/// `alteration` must be a live alteration handle, kept alive for `'a`.
 pub(crate) unsafe fn user_scram_credential_alteration_ref<'a>(
     alteration: *const kafka_admin_UserScramCredentialAlteration_t,
 ) -> &'a UserScramCredentialAlteration {
+    // SAFETY: Per this function's `# Safety`, `alteration` is a live alteration handle kept alive
+    // for `'a`, as `inner_ref` requires.
     &unsafe { inner_ref(alteration) }.alteration
 }
 
@@ -106,6 +118,8 @@ pub(crate) unsafe fn user_scram_credential_alteration_ref<'a>(
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialAlteration__enum(
     self_: *const kafka_admin_UserScramCredentialAlteration_t,
 ) -> kafka_admin_UserScramCredentialAlteration_e {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid alteration handle, kept alive for
+    // this call, as `user_scram_credential_alteration_ref` requires.
     match unsafe { user_scram_credential_alteration_ref(self_) } {
         UserScramCredentialAlteration::Upsertion(_) => {
             kafka_admin_UserScramCredentialAlteration_e::kafka_admin_UserScramCredentialAlteration_UPSERTION
@@ -130,6 +144,9 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialAlteration_upsertion(
     value: *const kafka_admin_UserScramCredentialUpsertion_t,
 ) -> *mut kafka_admin_UserScramCredentialAlteration_t {
     box_user_scram_credential_alteration(UserScramCredentialAlteration::Upsertion(
+        // SAFETY: Per this function's `# Safety`, `value` is a valid upsertion handle, kept alive
+        // for this call, as `user_scram_credential_upsertion_ref` requires; the borrow ends with
+        // the clone.
         unsafe { user_scram_credential_upsertion_ref(value) }.clone(),
     ))
 }
@@ -148,6 +165,9 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialAlteration_deletion(
     value: *const kafka_admin_UserScramCredentialDeletion_t,
 ) -> *mut kafka_admin_UserScramCredentialAlteration_t {
     box_user_scram_credential_alteration(UserScramCredentialAlteration::Deletion(
+        // SAFETY: Per this function's `# Safety`, `value` is a valid deletion handle, kept alive
+        // for this call, as `user_scram_credential_deletion_ref` requires; the borrow ends with the
+        // clone.
         unsafe { user_scram_credential_deletion_ref(value) }.clone(),
     ))
 }
@@ -162,6 +182,9 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialAlteration_deletion(
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialAlteration_user(
     self_: *const kafka_admin_UserScramCredentialAlteration_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid alteration handle, kept alive for
+    // this call, as `inner_ref` requires. The returned string is a `CString` the handle owns, so it
+    // lives as long as the handle.
     unsafe { inner_ref(self_) }.user_c.as_ptr()
 }
 
@@ -170,13 +193,18 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialAlteration_user(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed.
+/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialAlteration_destroy(
     self_: *mut kafka_admin_UserScramCredentialAlteration_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null here, and per this function's `# Safety` it is an owned
+        // handle not yet destroyed, that no other call uses at the same time and that is not used
+        // afterwards. Every alteration handle comes from `box_user_scram_credential_alteration`,
+        // which boxes a `UserScramCredentialAlterationInner`, so `Box::from_raw` reclaims that box.
         drop(unsafe { Box::from_raw(self_ as *mut UserScramCredentialAlterationInner) });
     }
 }

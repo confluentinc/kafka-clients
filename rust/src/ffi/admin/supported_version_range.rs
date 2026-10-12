@@ -38,10 +38,15 @@ pub(crate) struct SupportedVersionRangeInner {
 ///
 /// # Safety
 ///
-/// `range` must be a valid supported-version-range handle.
+/// `range` must be a valid supported-version-range handle, kept alive for
+/// `'a`.
 pub(crate) unsafe fn supported_version_range_ref<'a>(
     range: *const kafka_admin_SupportedVersionRange_t,
 ) -> &'a SupportedVersionRange {
+    // SAFETY: Per this function's `# Safety`, `range` is a valid supported-version-range handle
+    // kept alive for `'a`. Every `kafka_admin_SupportedVersionRange_t` comes from
+    // `box_supported_version_range`, which boxes a `SupportedVersionRangeInner`, so the cast yields
+    // a valid shared reference. The type has no setters, so nothing mutates it while borrowed.
     &unsafe { &*(range as *const SupportedVersionRangeInner) }.range
 }
 
@@ -57,8 +62,12 @@ pub(crate) fn box_supported_version_range(range: SupportedVersionRange) -> *mut 
 /// # Safety
 ///
 /// `element` must be an owned supported-version-range handle not yet
-/// destroyed.
+/// destroyed, that no other call uses at the same time; it is not used
+/// afterwards.
 pub(crate) unsafe fn destroy_supported_version_range_element(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned supported-version-range handle
+    // not yet destroyed, that no other call uses at the same time and that is not used afterwards,
+    // as `kafka_admin_SupportedVersionRange_destroy` requires.
     unsafe { kafka_admin_SupportedVersionRange_destroy(element as *mut kafka_admin_SupportedVersionRange_t) };
 }
 
@@ -78,6 +87,7 @@ pub unsafe extern "C" fn kafka_admin_SupportedVersionRange_new(
     max_version: i16,
     out_new: *mut *mut kafka_admin_SupportedVersionRange_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `out_new` is a valid slot, as `out_slot` requires.
     unsafe {
         out_slot(
             SupportedVersionRange::new(min_version, max_version),
@@ -97,6 +107,8 @@ pub unsafe extern "C" fn kafka_admin_SupportedVersionRange_new(
 pub unsafe extern "C" fn kafka_admin_SupportedVersionRange_min_version(
     self_: *const kafka_admin_SupportedVersionRange_t,
 ) -> i16 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid supported-version-range handle,
+    // kept alive for this call, as `supported_version_range_ref` requires.
     unsafe { supported_version_range_ref(self_) }.min_version()
 }
 
@@ -110,6 +122,8 @@ pub unsafe extern "C" fn kafka_admin_SupportedVersionRange_min_version(
 pub unsafe extern "C" fn kafka_admin_SupportedVersionRange_max_version(
     self_: *const kafka_admin_SupportedVersionRange_t,
 ) -> i16 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid supported-version-range handle,
+    // kept alive for this call, as `supported_version_range_ref` requires.
     unsafe { supported_version_range_ref(self_) }.max_version()
 }
 
@@ -123,6 +137,8 @@ pub unsafe extern "C" fn kafka_admin_SupportedVersionRange_max_version(
 pub unsafe extern "C" fn kafka_admin_SupportedVersionRange_to_string(
     self_: *const kafka_admin_SupportedVersionRange_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid supported-version-range handle,
+    // kept alive for this call, as `supported_version_range_ref` requires.
     into_c_string(&unsafe { supported_version_range_ref(self_) }.to_string())
 }
 
@@ -130,11 +146,17 @@ pub unsafe extern "C" fn kafka_admin_SupportedVersionRange_to_string(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned range handle not yet destroyed.
+/// `self_` must be null or an owned range handle not yet destroyed, that no
+/// other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_SupportedVersionRange_destroy(self_: *mut kafka_admin_SupportedVersionRange_t) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null here, and per this function's `# Safety` it is an owned range
+        // handle not yet destroyed, that no other call uses at the same time and that is not used
+        // afterwards. Every supported-version-range handle comes from
+        // `box_supported_version_range`, which boxes a `SupportedVersionRangeInner`, so
+        // `Box::from_raw` reclaims that box.
         drop(unsafe { Box::from_raw(self_ as *mut SupportedVersionRangeInner) });
     }
 }
@@ -151,6 +173,8 @@ mod tests {
     #[test]
     fn new_validates_like_java() {
         let mut range = ptr::null_mut();
+        // SAFETY: Test code: `range` is a valid slot; `error`, `range` and `s` are live handles,
+        // each destroyed once after its last use, and destroying null is a no-op.
         unsafe {
             let error = kafka_admin_SupportedVersionRange_new(-1, 2, &mut range);
             assert!(!error.is_null());

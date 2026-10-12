@@ -48,10 +48,16 @@ pub(crate) fn member_assignment_ptr(assignment: &MemberAssignment) -> *const kaf
 ///
 /// # Safety
 ///
-/// `assignment` must be a live member-assignment handle.
+/// `assignment` must be a live member-assignment handle, kept alive for
+/// `'a`.
 pub(crate) unsafe fn member_assignment_ref<'a>(
     assignment: *const kafka_admin_MemberAssignment_t,
 ) -> &'a MemberAssignment {
+    // SAFETY: Per this function's `# Safety`, `assignment` is a live member-assignment handle kept
+    // alive for `'a`. Every `kafka_admin_MemberAssignment_t` points at a `MemberAssignment`:
+    // `box_member_assignment` boxes one and `member_assignment_ptr` borrows one inside its parent
+    // handle, so the cast yields a valid shared reference. The type has no setters, so nothing
+    // mutates it while borrowed.
     unsafe { &*(assignment as *const MemberAssignment) }
 }
 
@@ -68,6 +74,8 @@ pub(crate) unsafe fn member_assignment_ref<'a>(
 pub unsafe extern "C" fn kafka_admin_MemberAssignment_new(
     topic_partitions: *const kafka_List_t,
 ) -> *mut kafka_admin_MemberAssignment_t {
+    // SAFETY: Per this function's `# Safety`, `topic_partitions` is null or a valid list of
+    // topic-partition handles, as `list_topic_partitions` requires.
     let partitions: HashSet<TopicPartition> = unsafe { list_topic_partitions(topic_partitions) }.into_iter().collect();
     box_member_assignment(MemberAssignment::new(partitions))
 }
@@ -83,6 +91,8 @@ pub unsafe extern "C" fn kafka_admin_MemberAssignment_new(
 pub unsafe extern "C" fn kafka_admin_MemberAssignment_topic_partitions(
     self_: *const kafka_admin_MemberAssignment_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid member-assignment handle, kept
+    // alive for this call, as `member_assignment_ref` requires.
     sorted_topic_partition_list(unsafe { member_assignment_ref(self_) }.topic_partitions())
 }
 
@@ -96,6 +106,8 @@ pub unsafe extern "C" fn kafka_admin_MemberAssignment_topic_partitions(
 pub unsafe extern "C" fn kafka_admin_MemberAssignment_to_string(
     self_: *const kafka_admin_MemberAssignment_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid member-assignment handle, kept
+    // alive for this call, as `member_assignment_ref` requires.
     into_c_string(&unsafe { member_assignment_ref(self_) }.to_string())
 }
 
@@ -104,11 +116,16 @@ pub unsafe extern "C" fn kafka_admin_MemberAssignment_to_string(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed.
+/// `self_` must be null or an owned handle not yet destroyed, that no
+/// other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberAssignment_destroy(self_: *mut kafka_admin_MemberAssignment_t) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null here, and per this function's `# Safety` it is an owned
+        // handle not yet destroyed, that no other call uses at the same time and that is not used
+        // afterwards. Owned handles come only from `box_member_assignment`, which boxes a
+        // `MemberAssignment`, so `Box::from_raw` reclaims that box.
         drop(unsafe { Box::from_raw(self_ as *mut MemberAssignment) });
     }
 }

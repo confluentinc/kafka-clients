@@ -88,6 +88,10 @@ pub(crate) fn transaction_state_singleton(state: TransactionState) -> *const kaf
 ///
 /// `state` must be a singleton returned by this module.
 pub(crate) unsafe fn transaction_state_value_of(state: *const kafka_admin_TransactionState_t) -> TransactionState {
+    // SAFETY: Per this function's `# Safety`, `state` is a singleton returned by this module.
+    // `transaction_state_singleton` is the only producer and points it at an element of the static
+    // `VARIANTS`, a `TransactionState` that is never freed or mutated, so the read copies a live
+    // value.
     unsafe { *(state as *const TransactionState) }
 }
 
@@ -159,6 +163,8 @@ pub extern "C" fn kafka_admin_TransactionState_unknown() -> *const kafka_admin_T
 pub unsafe extern "C" fn kafka_admin_TransactionState__enum(
     self_: *const kafka_admin_TransactionState_t,
 ) -> kafka_admin_TransactionState_e {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `transaction_state_value_of` requires.
     enum_of(unsafe { transaction_state_value_of(self_) })
 }
 
@@ -173,6 +179,8 @@ pub unsafe extern "C" fn kafka_admin_TransactionState__enum(
 pub unsafe extern "C" fn kafka_admin_TransactionState_parse(
     name: *const c_char,
 ) -> *const kafka_admin_TransactionState_t {
+    // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
+    // `c_str_to_string` requires.
     transaction_state_singleton(TransactionState::parse(&unsafe { c_str_to_string(name) }))
 }
 
@@ -187,6 +195,8 @@ pub unsafe extern "C" fn kafka_admin_TransactionState_parse(
 pub unsafe extern "C" fn kafka_admin_TransactionState_to_string(
     self_: *const kafka_admin_TransactionState_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `transaction_state_value_of` requires.
     into_c_string(&unsafe { transaction_state_value_of(self_) }.to_string())
 }
 
@@ -199,9 +209,12 @@ mod tests {
 
     #[test]
     fn singletons_round_trip_and_match_their_enumerator() {
-        for (index, &state) in VARIANTS.iter().enumerate() {
-            let handle = transaction_state_singleton(state);
-            unsafe {
+        // SAFETY: Test code: every handle is a singleton from `transaction_state_singleton`, as
+        // the reads require; each `name` is an owned NUL-terminated string read before its
+        // destroy, and the parsed literal is a static NUL-terminated string.
+        unsafe {
+            for (index, &state) in VARIANTS.iter().enumerate() {
+                let handle = transaction_state_singleton(state);
                 assert_eq!(transaction_state_value_of(handle), state);
                 assert_eq!(kafka_admin_TransactionState__enum(handle) as usize, index);
                 let name = kafka_admin_TransactionState_to_string(handle);
@@ -209,18 +222,18 @@ mod tests {
                 assert_eq!(CStr::from_ptr(name).to_str().unwrap(), state.to_string());
                 kafka_string_destroy(name);
             }
+            assert_eq!(
+                kafka_admin_TransactionState_ongoing(),
+                transaction_state_singleton(TransactionState::Ongoing)
+            );
+            assert_eq!(
+                kafka_admin_TransactionState_prepare_epoch_fence(),
+                transaction_state_singleton(TransactionState::PrepareEpochFence)
+            );
+            assert_eq!(
+                kafka_admin_TransactionState_parse(c"NotAState".as_ptr()),
+                kafka_admin_TransactionState_unknown()
+            );
         }
-        assert_eq!(
-            kafka_admin_TransactionState_ongoing(),
-            transaction_state_singleton(TransactionState::Ongoing)
-        );
-        assert_eq!(
-            kafka_admin_TransactionState_prepare_epoch_fence(),
-            transaction_state_singleton(TransactionState::PrepareEpochFence)
-        );
-        assert_eq!(
-            unsafe { kafka_admin_TransactionState_parse(c"NotAState".as_ptr()) },
-            kafka_admin_TransactionState_unknown()
-        );
     }
 }

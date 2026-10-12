@@ -48,9 +48,19 @@ impl UserScramCredentialUpsertionInner {
     }
 }
 
+/// The inner value behind a handle.
+///
+/// # Safety
+///
+/// `upsertion` must be a live upsertion handle, kept alive for `'a`.
 unsafe fn inner_ref<'a>(
     upsertion: *const kafka_admin_UserScramCredentialUpsertion_t,
 ) -> &'a UserScramCredentialUpsertionInner {
+    // SAFETY: Per this function's `# Safety`, `upsertion` is a live upsertion handle kept alive for
+    // `'a`. Every `kafka_admin_UserScramCredentialUpsertion_t` comes from
+    // `box_user_scram_credential_upsertion`, which boxes a `UserScramCredentialUpsertionInner`, so
+    // the cast yields a valid shared reference. The type has no setters, so nothing mutates it
+    // while borrowed.
     unsafe { &*(upsertion as *const UserScramCredentialUpsertionInner) }
 }
 
@@ -67,16 +77,26 @@ pub(crate) fn box_user_scram_credential_upsertion(
 ///
 /// # Safety
 ///
-/// `upsertion` must be a live upsertion handle.
+/// `upsertion` must be a live upsertion handle, kept alive for `'a`.
 pub(crate) unsafe fn user_scram_credential_upsertion_ref<'a>(
     upsertion: *const kafka_admin_UserScramCredentialUpsertion_t,
 ) -> &'a UserScramCredentialUpsertion {
+    // SAFETY: Per this function's `# Safety`, `upsertion` is a live upsertion handle kept alive for
+    // `'a`, as `inner_ref` requires.
     &unsafe { inner_ref(upsertion) }.upsertion
 }
 
 /// Copies a borrowed `kafka_Bytes_t`; a null `data` (Java's null array) reads
 /// as empty.
+///
+/// # Safety
+///
+/// `bytes.data` must be null or point to `bytes.len` readable bytes that are
+/// not written during this call.
 unsafe fn bytes_to_vec(bytes: kafka_Bytes_t) -> Vec<u8> {
+    // SAFETY: Per this function's `# Safety`, `bytes.data` is null or points to `bytes.len`
+    // readable bytes not written during this call, as `as_slice` requires; the borrowed slice is
+    // copied before return.
     unsafe { bytes.as_slice() }.map(<[u8]>::to_vec).unwrap_or_default()
 }
 
@@ -98,8 +118,15 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_with_str(
     password: *const c_char,
 ) -> *mut kafka_admin_UserScramCredentialUpsertion_t {
     box_user_scram_credential_upsertion(UserScramCredentialUpsertion::with_str(
+        // SAFETY: Per this function's `# Safety`, `user` is a valid NUL-terminated string, as
+        // `c_str_to_string` requires.
         unsafe { c_str_to_string(user) },
+        // SAFETY: Per this function's `# Safety`, `credential_info` is a valid
+        // SCRAM-credential-info handle, kept alive for this call, as `scram_credential_info_ref`
+        // requires; the borrow ends with the clone.
         unsafe { scram_credential_info_ref(credential_info) }.clone(),
+        // SAFETY: Per this function's `# Safety`, `password` is a valid NUL-terminated string, as
+        // `c_str_to_string` requires.
         &unsafe { c_str_to_string(password) },
     ))
 }
@@ -113,7 +140,8 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_with_str(
 /// # Safety
 ///
 /// `user` must be a valid NUL-terminated string, `credential_info` a valid
-/// SCRAM-credential-info handle and `password` a view over readable bytes.
+/// SCRAM-credential-info handle and `password` a view over readable bytes
+/// that are not written during the call.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_with_bytes(
@@ -122,8 +150,15 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_with_bytes(
     password: kafka_Bytes_t,
 ) -> *mut kafka_admin_UserScramCredentialUpsertion_t {
     box_user_scram_credential_upsertion(UserScramCredentialUpsertion::with_bytes(
+        // SAFETY: Per this function's `# Safety`, `user` is a valid NUL-terminated string, as
+        // `c_str_to_string` requires.
         unsafe { c_str_to_string(user) },
+        // SAFETY: Per this function's `# Safety`, `credential_info` is a valid
+        // SCRAM-credential-info handle, kept alive for this call, as `scram_credential_info_ref`
+        // requires; the borrow ends with the clone.
         unsafe { scram_credential_info_ref(credential_info) }.clone(),
+        // SAFETY: Per this function's `# Safety`, `password` is a view over readable bytes not
+        // written during this call, as `bytes_to_vec` requires.
         unsafe { bytes_to_vec(password) },
     ))
 }
@@ -136,7 +171,7 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_with_bytes(
 /// # Safety
 ///
 /// As [`kafka_admin_UserScramCredentialUpsertion_with_bytes`], plus `salt` a
-/// view over readable bytes.
+/// view over readable bytes that are not written during the call.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_with_salt(
@@ -146,9 +181,21 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_with_salt(
     salt: kafka_Bytes_t,
 ) -> *mut kafka_admin_UserScramCredentialUpsertion_t {
     box_user_scram_credential_upsertion(UserScramCredentialUpsertion::with_salt(
+        // SAFETY: Per this function's `# Safety` (by reference to
+        // `kafka_admin_UserScramCredentialUpsertion_with_bytes`), `user` is a valid NUL-terminated
+        // string, as `c_str_to_string` requires.
         unsafe { c_str_to_string(user) },
+        // SAFETY: Per this function's `# Safety` (by reference to
+        // `kafka_admin_UserScramCredentialUpsertion_with_bytes`), `credential_info` is a valid
+        // SCRAM-credential-info handle, kept alive for this call, as `scram_credential_info_ref`
+        // requires; the borrow ends with the clone.
         unsafe { scram_credential_info_ref(credential_info) }.clone(),
+        // SAFETY: Per this function's `# Safety` (by reference to
+        // `kafka_admin_UserScramCredentialUpsertion_with_bytes`), `password` is a view over
+        // readable bytes not written during this call, as `bytes_to_vec` requires.
         unsafe { bytes_to_vec(password) },
+        // SAFETY: Per this function's `# Safety`, `salt` is a view over readable bytes not written
+        // during this call, as `bytes_to_vec` requires.
         unsafe { bytes_to_vec(salt) },
     ))
 }
@@ -163,6 +210,9 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_with_salt(
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_user(
     self_: *const kafka_admin_UserScramCredentialUpsertion_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid upsertion handle, kept alive for
+    // this call, as `inner_ref` requires. The returned string is a `CString` the handle owns, so it
+    // lives as long as the handle.
     unsafe { inner_ref(self_) }.user_c.as_ptr()
 }
 
@@ -177,6 +227,9 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_user(
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_credential_info(
     self_: *const kafka_admin_UserScramCredentialUpsertion_t,
 ) -> *const kafka_admin_ScramCredentialInfo_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid upsertion handle, kept alive for
+    // this call, as `user_scram_credential_upsertion_ref` requires. The returned view points at the
+    // `ScramCredentialInfo` inside the handle, so it lives as long as the handle.
     scram_credential_info_ptr(unsafe { user_scram_credential_upsertion_ref(self_) }.credential_info())
 }
 
@@ -191,6 +244,9 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_credential_inf
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_salt(
     self_: *const kafka_admin_UserScramCredentialUpsertion_t,
 ) -> kafka_Bytes_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid upsertion handle, kept alive for
+    // this call, as `user_scram_credential_upsertion_ref` requires. The returned view borrows the
+    // salt bytes the handle owns, so it lives as long as the handle.
     kafka_Bytes_t::from_slice(unsafe { user_scram_credential_upsertion_ref(self_) }.salt())
 }
 
@@ -205,6 +261,9 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_salt(
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_password(
     self_: *const kafka_admin_UserScramCredentialUpsertion_t,
 ) -> kafka_Bytes_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid upsertion handle, kept alive for
+    // this call, as `user_scram_credential_upsertion_ref` requires. The returned view borrows the
+    // password bytes the handle owns, so it lives as long as the handle.
     kafka_Bytes_t::from_slice(unsafe { user_scram_credential_upsertion_ref(self_) }.password())
 }
 
@@ -212,13 +271,18 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_password(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed.
+/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_destroy(
     self_: *mut kafka_admin_UserScramCredentialUpsertion_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null here, and per this function's `# Safety` it is an owned
+        // handle not yet destroyed, that no other call uses at the same time and that is not used
+        // afterwards. Every upsertion handle comes from `box_user_scram_credential_upsertion`,
+        // which boxes a `UserScramCredentialUpsertionInner`, so `Box::from_raw` reclaims that box.
         drop(unsafe { Box::from_raw(self_ as *mut UserScramCredentialUpsertionInner) });
     }
 }

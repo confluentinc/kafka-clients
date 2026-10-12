@@ -44,7 +44,16 @@ impl AbortTransactionSpecInner {
     }
 }
 
+/// The inner value behind a handle.
+///
+/// # Safety
+///
+/// `spec` must be a valid abort-transaction-spec handle, kept alive for `'a`.
 unsafe fn inner_ref<'a>(spec: *const kafka_admin_AbortTransactionSpec_t) -> &'a AbortTransactionSpecInner {
+    // SAFETY: Per this function's `# Safety`, `spec` is a valid abort-transaction-spec handle kept
+    // alive for `'a`. Every `kafka_admin_AbortTransactionSpec_t` comes from
+    // `box_abort_transaction_spec`, which boxes an `AbortTransactionSpecInner`, so the cast yields
+    // a valid shared reference. The type has no setters, so nothing mutates it while borrowed.
     unsafe { &*(spec as *const AbortTransactionSpecInner) }
 }
 
@@ -52,10 +61,12 @@ unsafe fn inner_ref<'a>(spec: *const kafka_admin_AbortTransactionSpec_t) -> &'a 
 ///
 /// # Safety
 ///
-/// `spec` must be a valid abort-transaction-spec handle.
+/// `spec` must be a valid abort-transaction-spec handle, kept alive for `'a`.
 pub(crate) unsafe fn abort_transaction_spec_ref<'a>(
     spec: *const kafka_admin_AbortTransactionSpec_t,
 ) -> &'a AbortTransactionSpec {
+    // SAFETY: Per this function's `# Safety`, `spec` is a valid abort-transaction-spec handle kept
+    // alive for `'a`, as `inner_ref` requires.
     &unsafe { inner_ref(spec) }.spec
 }
 
@@ -82,6 +93,9 @@ pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_new(
     coordinator_epoch: i32,
 ) -> *mut kafka_admin_AbortTransactionSpec_t {
     box_abort_transaction_spec(AbortTransactionSpec::new(
+        // SAFETY: Per this function's `# Safety`, `topic_partition` is a valid topic-partition
+        // handle, alive for this call, as `topic_partition_ref` requires; the borrow ends with the
+        // clone.
         unsafe { topic_partition_ref(topic_partition) }.clone(),
         producer_id,
         producer_epoch,
@@ -100,6 +114,9 @@ pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_new(
 pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_topic_partition(
     self_: *const kafka_admin_AbortTransactionSpec_t,
 ) -> *const kafka_common_TopicPartition_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid abort-transaction-spec handle,
+    // kept alive for this call, as `inner_ref` requires. The returned handle points at the
+    // `TopicPartitionInner` the spec handle owns, so it lives as long as the spec.
     unsafe { inner_ref(self_) }.topic_partition.as_ptr()
 }
 
@@ -113,6 +130,8 @@ pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_topic_partition(
 pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_producer_id(
     self_: *const kafka_admin_AbortTransactionSpec_t,
 ) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid abort-transaction-spec handle,
+    // kept alive for this call, as `abort_transaction_spec_ref` requires.
     unsafe { abort_transaction_spec_ref(self_) }.producer_id()
 }
 
@@ -126,6 +145,8 @@ pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_producer_id(
 pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_producer_epoch(
     self_: *const kafka_admin_AbortTransactionSpec_t,
 ) -> i16 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid abort-transaction-spec handle,
+    // kept alive for this call, as `abort_transaction_spec_ref` requires.
     unsafe { abort_transaction_spec_ref(self_) }.producer_epoch()
 }
 
@@ -139,6 +160,8 @@ pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_producer_epoch(
 pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_coordinator_epoch(
     self_: *const kafka_admin_AbortTransactionSpec_t,
 ) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid abort-transaction-spec handle,
+    // kept alive for this call, as `abort_transaction_spec_ref` requires.
     unsafe { abort_transaction_spec_ref(self_) }.coordinator_epoch()
 }
 
@@ -152,6 +175,8 @@ pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_coordinator_epoch(
 pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_to_string(
     self_: *const kafka_admin_AbortTransactionSpec_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid abort-transaction-spec handle,
+    // kept alive for this call, as `abort_transaction_spec_ref` requires.
     into_c_string(&unsafe { abort_transaction_spec_ref(self_) }.to_string())
 }
 
@@ -159,11 +184,16 @@ pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_to_string(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned spec handle not yet destroyed.
+/// `self_` must be null or an owned spec handle not yet destroyed, that no
+/// other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_destroy(self_: *mut kafka_admin_AbortTransactionSpec_t) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null here, and per this function's `# Safety` it is an owned spec
+        // handle not yet destroyed, that no other call uses at the same time and that is not used
+        // afterwards. Every abort-transaction-spec handle comes from `box_abort_transaction_spec`,
+        // which boxes an `AbortTransactionSpecInner`, so `Box::from_raw` reclaims that box.
         drop(unsafe { Box::from_raw(self_ as *mut AbortTransactionSpecInner) });
     }
 }
@@ -184,6 +214,9 @@ mod tests {
     fn spec_copies_its_partition_and_borrows_it_out() {
         let tp = TopicPartition::new("orders", 3);
         let tp_handle = box_topic_partition(tp.clone());
+        // SAFETY: Test code: `tp_handle`, `spec` and `s` are live handles, each destroyed once
+        // after its last use; the constructor copies the partition before `tp_handle` is destroyed,
+        // and destroying null is a no-op.
         unsafe {
             let spec = kafka_admin_AbortTransactionSpec_new(tp_handle, 100, 2, 7);
             kafka_common_TopicPartition_destroy(tp_handle);

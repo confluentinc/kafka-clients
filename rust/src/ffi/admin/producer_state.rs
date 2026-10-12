@@ -39,8 +39,12 @@ pub(crate) fn box_producer_state(state: ProducerState) -> *mut kafka_admin_Produ
 ///
 /// # Safety
 ///
-/// `state` must be a live producer-state handle.
+/// `state` must be a live producer-state handle, kept alive for `'a`.
 pub(crate) unsafe fn producer_state_ref<'a>(state: *const kafka_admin_ProducerState_t) -> &'a ProducerState {
+    // SAFETY: Per this function's `# Safety`, `state` is a live producer-state handle kept alive
+    // for `'a`. Every `kafka_admin_ProducerState_t` comes from `box_producer_state`, which boxes a
+    // `ProducerState`, so the cast yields a valid shared reference. The type has no setters, so
+    // nothing mutates it while borrowed.
     unsafe { &*(state as *const ProducerState) }
 }
 
@@ -48,8 +52,12 @@ pub(crate) unsafe fn producer_state_ref<'a>(state: *const kafka_admin_ProducerSt
 ///
 /// # Safety
 ///
-/// `element` must be an owned producer-state handle.
+/// `element` must be an owned producer-state handle not yet destroyed, that
+/// no other call uses at the same time; it is not used afterwards.
 pub(crate) unsafe fn destroy_producer_state_element(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned producer-state handle not yet
+    // destroyed, that no other call uses at the same time and that is not used afterwards, as
+    // `kafka_admin_ProducerState_destroy` requires.
     unsafe { kafka_admin_ProducerState_destroy(element as *mut kafka_admin_ProducerState_t) }
 }
 
@@ -86,6 +94,8 @@ pub extern "C" fn kafka_admin_ProducerState_new(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ProducerState_producer_id(self_: *const kafka_admin_ProducerState_t) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid producer-state handle, kept alive
+    // for this call, as `producer_state_ref` requires.
     unsafe { producer_state_ref(self_) }.producer_id()
 }
 
@@ -97,6 +107,8 @@ pub unsafe extern "C" fn kafka_admin_ProducerState_producer_id(self_: *const kaf
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ProducerState_producer_epoch(self_: *const kafka_admin_ProducerState_t) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid producer-state handle, kept alive
+    // for this call, as `producer_state_ref` requires.
     unsafe { producer_state_ref(self_) }.producer_epoch()
 }
 
@@ -108,6 +120,8 @@ pub unsafe extern "C" fn kafka_admin_ProducerState_producer_epoch(self_: *const 
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ProducerState_last_sequence(self_: *const kafka_admin_ProducerState_t) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid producer-state handle, kept alive
+    // for this call, as `producer_state_ref` requires.
     unsafe { producer_state_ref(self_) }.last_sequence()
 }
 
@@ -119,6 +133,8 @@ pub unsafe extern "C" fn kafka_admin_ProducerState_last_sequence(self_: *const k
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ProducerState_last_timestamp(self_: *const kafka_admin_ProducerState_t) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid producer-state handle, kept alive
+    // for this call, as `producer_state_ref` requires.
     unsafe { producer_state_ref(self_) }.last_timestamp()
 }
 
@@ -132,6 +148,8 @@ pub unsafe extern "C" fn kafka_admin_ProducerState_last_timestamp(self_: *const 
 #[ffi_guard(fallback = -2)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ProducerState_coordinator_epoch(self_: *const kafka_admin_ProducerState_t) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid producer-state handle, kept alive
+    // for this call, as `producer_state_ref` requires.
     unsafe { producer_state_ref(self_) }.coordinator_epoch().unwrap_or(-1)
 }
 
@@ -148,6 +166,8 @@ pub unsafe extern "C" fn kafka_admin_ProducerState_coordinator_epoch(self_: *con
 pub unsafe extern "C" fn kafka_admin_ProducerState_current_transaction_start_offset(
     self_: *const kafka_admin_ProducerState_t,
 ) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid producer-state handle, kept alive
+    // for this call, as `producer_state_ref` requires.
     unsafe { producer_state_ref(self_) }
         .current_transaction_start_offset()
         .unwrap_or(-1)
@@ -161,6 +181,8 @@ pub unsafe extern "C" fn kafka_admin_ProducerState_current_transaction_start_off
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ProducerState_to_string(self_: *const kafka_admin_ProducerState_t) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid producer-state handle, kept alive
+    // for this call, as `producer_state_ref` requires.
     into_c_string(&unsafe { producer_state_ref(self_) }.to_string())
 }
 
@@ -168,11 +190,16 @@ pub unsafe extern "C" fn kafka_admin_ProducerState_to_string(self_: *const kafka
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed.
+/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ProducerState_destroy(self_: *mut kafka_admin_ProducerState_t) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null here, and per this function's `# Safety` it is an owned
+        // handle not yet destroyed, that no other call uses at the same time and that is not used
+        // afterwards. Every producer-state handle comes from `box_producer_state`, which boxes a
+        // `ProducerState`, so `Box::from_raw` reclaims that box.
         drop(unsafe { Box::from_raw(self_ as *mut ProducerState) });
     }
 }

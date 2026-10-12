@@ -45,8 +45,12 @@ pub(crate) struct FeatureMetadataInner {
 ///
 /// # Safety
 ///
-/// `metadata` must be a valid feature-metadata handle.
+/// `metadata` must be a valid feature-metadata handle, kept alive for `'a`.
 pub(crate) unsafe fn feature_metadata_ref<'a>(metadata: *const kafka_admin_FeatureMetadata_t) -> &'a FeatureMetadata {
+    // SAFETY: Per this function's `# Safety`, `metadata` is a valid feature-metadata handle kept
+    // alive for `'a`. Every `kafka_admin_FeatureMetadata_t` comes from `box_feature_metadata`,
+    // which boxes a `FeatureMetadataInner`, so the cast yields a valid shared reference. The type
+    // has no setters, so nothing mutates it while borrowed.
     &unsafe { &*(metadata as *const FeatureMetadataInner) }.metadata
 }
 
@@ -60,8 +64,12 @@ pub(crate) fn box_feature_metadata(metadata: FeatureMetadata) -> *mut kafka_admi
 ///
 /// # Safety
 ///
-/// `element` must be an owned feature-metadata handle not yet destroyed.
+/// `element` must be an owned feature-metadata handle not yet destroyed,
+/// that no other call uses at the same time; it is not used afterwards.
 pub(crate) unsafe fn destroy_feature_metadata_element(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned feature-metadata handle not yet
+    // destroyed, that no other call uses at the same time and that is not used afterwards, as
+    // `kafka_admin_FeatureMetadata_destroy` requires.
     unsafe { kafka_admin_FeatureMetadata_destroy(element as *mut kafka_admin_FeatureMetadata_t) };
 }
 
@@ -90,6 +98,8 @@ pub unsafe extern "C" fn kafka_admin_FeatureMetadata_finalized_features(
     self_: *const kafka_admin_FeatureMetadata_t,
 ) -> *mut kafka_Map_t {
     sorted_feature_map(
+        // SAFETY: Per this function's `# Safety`, `self_` is a valid feature-metadata handle, kept
+        // alive for this call, as `feature_metadata_ref` requires.
         unsafe { feature_metadata_ref(self_) }.finalized_features(),
         |range| box_finalized_version_range(*range) as *mut c_void,
         destroy_finalized_version_range_element,
@@ -109,6 +119,8 @@ pub unsafe extern "C" fn kafka_admin_FeatureMetadata_finalized_features(
 pub unsafe extern "C" fn kafka_admin_FeatureMetadata_finalized_features_epoch(
     self_: *const kafka_admin_FeatureMetadata_t,
 ) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid feature-metadata handle, kept
+    // alive for this call, as `feature_metadata_ref` requires.
     unsafe { feature_metadata_ref(self_) }.finalized_features_epoch().unwrap_or(-1)
 }
 
@@ -125,6 +137,8 @@ pub unsafe extern "C" fn kafka_admin_FeatureMetadata_supported_features(
     self_: *const kafka_admin_FeatureMetadata_t,
 ) -> *mut kafka_Map_t {
     sorted_feature_map(
+        // SAFETY: Per this function's `# Safety`, `self_` is a valid feature-metadata handle, kept
+        // alive for this call, as `feature_metadata_ref` requires.
         unsafe { feature_metadata_ref(self_) }.supported_features(),
         |range| box_supported_version_range(*range) as *mut c_void,
         destroy_supported_version_range_element,
@@ -141,6 +155,8 @@ pub unsafe extern "C" fn kafka_admin_FeatureMetadata_supported_features(
 pub unsafe extern "C" fn kafka_admin_FeatureMetadata_to_string(
     self_: *const kafka_admin_FeatureMetadata_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid feature-metadata handle, kept
+    // alive for this call, as `feature_metadata_ref` requires.
     into_c_string(&unsafe { feature_metadata_ref(self_) }.to_string())
 }
 
@@ -148,11 +164,16 @@ pub unsafe extern "C" fn kafka_admin_FeatureMetadata_to_string(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned metadata handle not yet destroyed.
+/// `self_` must be null or an owned metadata handle not yet destroyed, that
+/// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FeatureMetadata_destroy(self_: *mut kafka_admin_FeatureMetadata_t) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null here, and per this function's `# Safety` it is an owned
+        // metadata handle not yet destroyed, that no other call uses at the same time and that is
+        // not used afterwards. Every feature-metadata handle comes from `box_feature_metadata`,
+        // which boxes a `FeatureMetadataInner`, so `Box::from_raw` reclaims that box.
         drop(unsafe { Box::from_raw(self_ as *mut FeatureMetadataInner) });
     }
 }
@@ -182,6 +203,9 @@ mod tests {
         let supported = HashMap::from([("a".to_string(), SupportedVersionRange::new(0, 3).unwrap())]);
         let metadata = FeatureMetadata::new(finalized.clone(), None, supported.clone());
         let handle = box_feature_metadata(metadata.clone());
+        // SAFETY: Test code: `handle`, `with_epoch`, both maps and `s` are live handles, each
+        // destroyed once after its last use; the map values read are range handles the maps own,
+        // the keys looked up are static NUL-terminated literals, and destroying null is a no-op.
         unsafe {
             assert_eq!(*feature_metadata_ref(handle), metadata);
             assert_eq!(kafka_admin_FeatureMetadata_finalized_features_epoch(handle), -1);
@@ -204,10 +228,8 @@ mod tests {
             kafka_string_destroy(s);
             kafka_admin_FeatureMetadata_destroy(handle);
             kafka_admin_FeatureMetadata_destroy(ptr::null_mut());
-        }
 
-        let with_epoch = box_feature_metadata(FeatureMetadata::new(HashMap::new(), Some(9), HashMap::new()));
-        unsafe {
+            let with_epoch = box_feature_metadata(FeatureMetadata::new(HashMap::new(), Some(9), HashMap::new()));
             assert_eq!(kafka_admin_FeatureMetadata_finalized_features_epoch(with_epoch), 9);
             kafka_admin_FeatureMetadata_destroy(with_epoch);
         }
