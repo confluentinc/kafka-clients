@@ -529,17 +529,22 @@ impl MapInner {
     }
 
     /// The index of the entry whose key equals `key`, by `key_eq` or, when it
-    /// is unset, by pointer identity.
+    /// is unset, by pointer identity. A null key, stored or looked up, equals
+    /// only a null key: `key_eq` never sees one, as most of them read both
+    /// keys.
     ///
     /// # Safety
     ///
-    /// When `key_eq` is set, `key` must be a key of the type it compares (the
-    /// key type the function that built the map documents): `key_eq` reads it.
+    /// When `key_eq` is set, `key` must be null or a key of the type it
+    /// compares (the key type the function that built the map documents):
+    /// `key_eq` reads it.
     unsafe fn position(&self, key: *mut c_void) -> Option<usize> {
         self.entries.iter().position(|&(k, _)| match self.key_eq {
-            // SAFETY: every stored `k` is of the type `key_eq` compares: `box_map`'s
-            // callers set `key_eq` together with such keys, and `kafka_Map_put` stores a
-            // key only under its `# Safety`, which requires one. `key` is one per this
+            Some(_) if k.is_null() || key.is_null() => k == key,
+            // SAFETY: neither key is null (the arm above took that case). Every stored
+            // non-null `k` is of the type `key_eq` compares: `box_map`'s callers set
+            // `key_eq` together with such keys, and `kafka_Map_put` stores a key only
+            // under its `# Safety`, which requires null or one. `key` is one per this
             // function's `# Safety`.
             Some(eq) => unsafe { eq(k, key) },
             None => k == key,
@@ -715,8 +720,8 @@ pub extern "C" fn kafka_Map_new() -> *mut kafka_Map_t {
 /// # Safety
 ///
 /// `self_` must be a valid map handle that no other call uses at the same
-/// time, and `key` a key of the type the map documents when Rust built the
-/// map: its keys are compared by reading them. Whether the map takes `key`
+/// time, and `key` null or a key of the type the map documents when Rust
+/// built the map: its non-null keys are compared by reading them. Whether the map takes `key`
 /// and `value` depends on how it was built, which the function that returned
 /// it documents:
 ///
@@ -736,7 +741,7 @@ pub unsafe extern "C" fn kafka_Map_put(self_: *mut kafka_Map_t, key: *mut c_void
     // at the `MapInner` `box_map` allocated, and no other call uses it meanwhile, so the
     // `&mut`, which lives only for this call, is unique.
     let inner = unsafe { &mut *(self_ as *mut MapInner) };
-    // SAFETY: per this function's `# Safety`, `key` is of the type the map's
+    // SAFETY: per this function's `# Safety`, `key` is null or of the type the map's
     // `key_eq` compares, when it has one.
     match unsafe { inner.position(key) } {
         Some(i) => {
@@ -813,8 +818,9 @@ pub unsafe extern "C" fn kafka_Map_value(self_: *const kafka_Map_t, index: i32) 
 ///
 /// # Safety
 ///
-/// `self_` must be a valid map handle, and `key` a key of the type the map
-/// documents when Rust built the map: its keys are compared by reading them.
+/// `self_` must be a valid map handle, and `key` null or a key of the type
+/// the map documents when Rust built the map: its non-null keys are compared
+/// by reading them.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_Map_get(self_: *const kafka_Map_t, key: *mut c_void) -> *mut c_void {
@@ -822,7 +828,7 @@ pub unsafe extern "C" fn kafka_Map_get(self_: *const kafka_Map_t, key: *mut c_vo
     // lasts for this call only, and the one mutator, `kafka_Map_put`, requires that no
     // other call uses the map meanwhile, so nothing writes to it during the borrow.
     let inner = unsafe { map_ref(self_) };
-    // SAFETY: per this function's `# Safety`, `key` is of the type the map's
+    // SAFETY: per this function's `# Safety`, `key` is null or of the type the map's
     // `key_eq` compares, when it has one.
     unsafe { inner.position(key) }.map_or(ptr::null_mut(), |i| inner.entries[i].1)
 }

@@ -180,3 +180,31 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_destroy(self_: *mut k
     // as `destroy_result` requires.
     unsafe { destroy_result::<DescribeConfigsResult, _>(self_) }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::config::config_resource::Type;
+    use crate::ffi::util::{kafka_Map_destroy, kafka_Map_get, kafka_Map_put, kafka_Map_size};
+
+    /// A null key in a map keyed by value equals only a null key: the
+    /// config-resource comparison, which reads both keys, never sees it.
+    #[test]
+    fn a_null_key_beside_a_config_resource_key_is_never_compared() {
+        let map = box_configs(HashMap::new());
+        let key = box_config_resource(ConfigResource::new(Type::Topic, "t".to_string())) as *mut c_void;
+        let probe = box_config_resource(ConfigResource::new(Type::Topic, "t".to_string())) as *mut c_void;
+        let config = box_config(Config::new(Vec::new())) as *mut c_void;
+        // SAFETY: Test code: `map` is live until its destroy below, which frees `key` and `config`,
+        // the map owning both once put; `probe` is live until its own destroy.
+        unsafe {
+            kafka_Map_put(map, std::ptr::null_mut(), std::ptr::null_mut());
+            kafka_Map_put(map, key, config);
+            assert_eq!(kafka_Map_size(map), 2);
+            assert!(kafka_Map_get(map, std::ptr::null_mut()).is_null());
+            assert_eq!(kafka_Map_get(map, probe), config);
+            kafka_Map_destroy(map);
+            kafka_common_config_ConfigResource_destroy(probe as *mut kafka_common_config_ConfigResource_t);
+        }
+    }
+}
