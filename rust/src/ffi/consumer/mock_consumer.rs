@@ -150,7 +150,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer__as_Consumer(
 /// `self_` must be null or an owned handle from
 /// [`kafka_consumer_MockConsumer_new`] not yet destroyed, that no other call
 /// uses at the same time; neither it nor its `__as_Consumer` view is used
-/// afterwards.
+/// afterwards, by the callbacks this call runs included.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_destroy(self_: *mut kafka_consumer_MockConsumer_t) {
@@ -159,7 +159,8 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_destroy(self_: *mut kafka_c
         // handle not yet destroyed, i.e. the `Box<ConsumerClassHandle>`
         // `kafka_consumer_MockConsumer_new` delivered, that no other call uses at the same time, so
         // taking it back frees it exactly once, through `destroy`, which awaits the tasks still
-        // holding the client.
+        // holding the client. The box is freed before `destroy` runs, so the callbacks it runs must
+        // not use `self_` or its view, which the doc's "not used afterwards" excludes.
         unsafe { Box::from_raw(self_ as *mut ConsumerClassHandle) }.destroy();
     }
 }

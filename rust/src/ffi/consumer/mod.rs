@@ -228,9 +228,15 @@ pub(crate) struct Owns {
     pub(crate) value: bool,
 }
 
-// SAFETY: the consumer is only reached through `acquire`, which hands out
-// exclusive access one caller at a time, and everything else is `Sync`.
+// SAFETY: `Send` is a bound every field already meets on its own: `UnsafeCell<ConsumerKind>` is
+// `Send` because `ConsumerKind` is, and so is every other field, so this impl only restates what
+// the compiler derives.
 unsafe impl Send for Client {}
+// SAFETY: `Sync` is the bound `UnsafeCell<ConsumerKind>` lacks; every other field is `Sync` on its
+// own. The cell is reached only through `BusyGuard::kind_mut`, and a `BusyGuard` exists only while
+// it holds `busy`: `acquire` takes the flag with a compare-and-swap (`AcqRel`) and the guard's drop
+// clears it (`Release`), so at most one thread reaches the cell at a time and each sees the
+// previous holder's writes. `ConsumerKind` is `Send`, so that thread may be any thread.
 unsafe impl Sync for Client {}
 
 /// Releases the single-owner flag when dropped.
@@ -436,6 +442,12 @@ impl ConsumerClassHandle {
 /// `kafka_consumer_MockConsumer_t` cast to `kafka_consumer_Consumer_t` (the
 /// same pointer, see [`ConsumerClassHandle::as_consumer`]).
 pub(crate) unsafe fn client_ref<'a>(consumer: *const kafka_consumer_Consumer_t) -> &'a Arc<Client> {
+    // SAFETY: Per this function's `# Safety`, `consumer` points at a live `ConsumerClassHandle`
+    // kept alive for `'a`: every pointer the doc lists is that handle's address.
+    // `ConsumerClassHandle` is `#[repr(C)]` with `client: Arc<Client>` as its first field, so the
+    // address is that field's, and a shared reference to it is valid for `'a`. Nothing takes a
+    // `&mut` to the handle while it is live: only its destroy takes it back, which the destroy docs
+    // exclude while another call uses the handle.
     unsafe { &*(consumer as *const Arc<Client>) }
 }
 
@@ -447,6 +459,9 @@ pub(crate) unsafe fn client_ref<'a>(consumer: *const kafka_consumer_Consumer_t) 
 /// `consumer` must be a live handle, as [`client_ref`] describes; the sink
 /// holds its own `Arc` to the client, so it may outlive the call.
 pub(crate) unsafe fn completion_sink(consumer: *const kafka_consumer_Consumer_t) -> impl FnOnce(CallbackJob) {
+    // SAFETY: Per this function's `# Safety`, `consumer` is a live handle, as `client_ref`
+    // requires; the reference is used only to clone the `Arc`, so the sink does not borrow the
+    // handle.
     let client = Arc::clone(unsafe { client_ref(consumer) });
     move |job| client.delivery.queue.push(job)
 }
@@ -524,6 +539,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer__set_callback_result(
     result: *mut c_void,
 ) {
     let _ = self_;
+    // SAFETY: Per this function's `# Safety`, `result` is null or a valid owned error not used
+    // afterwards, i.e. a `box_error` handle the C side hands over here, as `take_error` requires.
     let result = match unsafe { take_error(result as *mut kafka_common_Error_t) } {
         Some(error) => Err(error),
         None => Ok(()),
@@ -539,11 +556,15 @@ pub unsafe extern "C" fn kafka_consumer_Consumer__set_callback_result(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle, as [`client_ref`] describes, kept alive for
+/// this call.
 unsafe fn run<T, F>(self_: *mut kafka_consumer_Consumer_t, f: F) -> Result<T, Error>
 where
     F: for<'a> FnOnce(&'a mut DynConsumer) -> OpFuture<'a, T>,
 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `client_ref` requires. Exclusive access to the consumer comes from `acquire`, not from
+    // this reference.
     let client = unsafe { client_ref(self_) };
     let mut guard = client.acquire()?;
     client.block_on(f(guard.consumer_mut()))
@@ -557,7 +578,8 @@ where
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle, as [`client_ref`] describes, kept alive for
+/// this call; the task it spawns holds its own `Arc` to the client.
 unsafe fn run_cb<T, F, D>(fn_name: &'static str, self_: *mut kafka_consumer_Consumer_t, f: F, deliver: D)
 where
     T: Send + 'static,
@@ -566,6 +588,9 @@ where
 {
     #[cfg(test)]
     crate::ffi::common::fail_point::hit();
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call, as
+    // `client_ref` requires; the reference is used only before this function returns: `acquire`,
+    // `deliver` on a rejection, and the `Arc` clones the task holds.
     let client = unsafe { client_ref(self_) };
     match client.acquire() {
         Err(error) => deliver(client, Err(error)),
@@ -588,12 +613,30 @@ fn deliver_void(client: &Client, cb: VoidCb, opaque: SendPtr, result: Result<(),
     client
         .delivery
         .queue
+        // SAFETY: `cb` and `opaque` are the pair the C caller passed to a `_cb` entry point: every
+        // caller of `deliver_void` (the `deliver` closure a `_cb` entry point hands `run_cb` or
+        // `HandleInner::run_cb`, which run it at most once, and
+        // `kafka_consumer_MockConsumer_rebalance_cb`, on one path only) passes them on unchanged,
+        // so calling `cb` with `opaque` is the completion that caller waits for, and `cb` is still
+        // valid, as each entry point's `# Safety` requires it to stay valid until it fires.
+        // `error_slot` returns null or a fresh `box_error` handle, owned by no one else, so handing
+        // it to `cb` transfers its ownership, as the entry point's `_cb_t` documents; the job is a
+        // `FnOnce`, so `cb` fires exactly once.
         .push(Box::new(move || unsafe { cb(error_slot(result), opaque.get()) }));
 }
 
 fn deliver_i64(client: &Client, cb: I64Cb, opaque: SendPtr, result: Result<i64, Error>) {
     client.delivery.queue.push(Box::new(move || match result {
+        // SAFETY: `cb` and `opaque` are the pair the C caller passed to a `_cb` entry point: every
+        // caller of `deliver_i64` (the `deliver` closure a `_cb` entry point hands `run_cb` or
+        // `HandleInner::run_cb`, which run it at most once) passes them on unchanged, so calling
+        // `cb` with `opaque` is the completion that caller waits for, and `cb` is still valid, as
+        // each entry point's `# Safety` requires it to stay valid until it fires. The job is a
+        // `FnOnce` and runs one arm, so `cb` fires exactly once; here with the value and a null
+        // error.
         Ok(value) => unsafe { cb(value, std::ptr::null_mut(), opaque.get()) },
+        // SAFETY: As the `Ok` arm; the error is the fresh `box_error` handle, owned by no one else,
+        // so handing it to `cb` transfers its ownership, as the entry point's `_cb_t` documents.
         Err(error) => unsafe { cb(-1, box_error(error), opaque.get()) },
     }));
 }
@@ -609,7 +652,19 @@ fn deliver_ptr<T, P>(
     P: 'static,
 {
     client.delivery.queue.push(Box::new(move || match result {
+        // SAFETY: `cb` and `opaque` are the pair the C caller passed to a `_cb` entry point: every
+        // caller of `deliver_ptr` (the `deliver` closure a `_cb` entry point hands `run_cb` or
+        // `HandleInner::run_cb`, which run it at most once) passes them on unchanged, so calling
+        // `cb` with `opaque` is the completion that caller waits for, and `cb` is still valid, as
+        // each entry point's `# Safety` requires it to stay valid until it fires. Each caller's
+        // `to_ptr` boxes a fresh handle (`box_consumer_records` or one of the list and map
+        // builders), owned by no one else, so handing it to `cb` with a null error transfers its
+        // ownership, as the entry point's `_cb_t` documents. The job is a `FnOnce` and runs one
+        // arm, so `cb` fires exactly once.
         Ok(value) => unsafe { cb(to_ptr(value), std::ptr::null_mut(), opaque.get()) },
+        // SAFETY: As the `Ok` arm, with a null value; the error is the fresh `box_error` handle,
+        // owned by no one else, so handing it to `cb` transfers its ownership, as the entry point's
+        // `_cb_t` documents.
         Err(error) => unsafe { cb(std::ptr::null_mut(), box_error(error), opaque.get()) },
     }));
 }
@@ -627,6 +682,10 @@ unsafe fn out_slot<T, P>(
 ) -> *mut kafka_common_Error_t {
     match result {
         Ok(value) => {
+            // SAFETY: Per this function's `# Safety`, `out` is a valid pointer, so writing the
+            // converted value through it is sound. Every `P` this module uses is a raw pointer or
+            // an `i64`, which have no drop glue, so the assignment reads nothing from the slot,
+            // which C may leave uninitialised.
             unsafe { *out = to_value(value) };
             std::ptr::null_mut()
         },
@@ -650,13 +709,19 @@ unsafe fn out_slot<T, P>(
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+/// `partitions` must be a valid list of `kafka_common_TopicPartition_t *`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_assign(
     self_: *mut kafka_consumer_Consumer_t,
     partitions: *const kafka_List_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     error_slot(unsafe { run(self_, move |c| Box::pin(async move { c.assign(partitions).await })) })
 }
 
@@ -672,7 +737,15 @@ pub type kafka_consumer_Consumer_assign_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_void` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_assign_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -680,8 +753,13 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_assign_cb(
     cb: kafka_consumer_Consumer_assign_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_assign_cb",
@@ -705,13 +783,18 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_assign_cb(
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+/// `topics` must be a valid list of NUL-terminated `char *`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics(
     self_: *mut kafka_consumer_Consumer_t,
     topics: *const kafka_List_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `topics` is a valid list of NUL-terminated `char *`,
+    // as `list_strings` requires; the strings are copied, so the borrow lasts for this call only.
     let topics = unsafe { list_strings(topics) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     error_slot(unsafe { run(self_, move |c| Box::pin(async move { c.subscribe_with_topics(topics).await })) })
 }
 
@@ -727,7 +810,15 @@ pub type kafka_consumer_Consumer_subscribe_with_topics_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_void` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -735,8 +826,12 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics_cb(
     cb: kafka_consumer_Consumer_subscribe_with_topics_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `topics` is a valid list of NUL-terminated `char *`,
+    // as `list_strings` requires; the strings are copied, so the borrow lasts for this call only.
     let topics = unsafe { list_strings(topics) };
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_subscribe_with_topics_cb",
@@ -761,6 +856,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics_cb(
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+/// `topics` must be a valid list of NUL-terminated `char *`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics_listener(
@@ -768,9 +864,19 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics_listener(
     topics: *const kafka_List_t,
     listener: *mut kafka_consumer_ConsumerRebalanceListener_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `client_ref` requires.
     let client = unsafe { client_ref(self_) };
+    // SAFETY: Per this function's `# Safety`, `topics` is a valid list of NUL-terminated `char *`,
+    // as `list_strings` requires; the strings are copied, so the borrow lasts for this call only.
     let topics = unsafe { list_strings(topics) };
+    // SAFETY: Per this function's `# Safety`, `listener` is a live listener handle, as
+    // `listener_adapter` requires; the registration is copied, so the handle is borrowed for this
+    // call only. Its `self` stays alive until the registration is released, as
+    // `kafka_consumer_ConsumerRebalanceListener_new` documents.
     let listener = unsafe { listener_adapter(listener, Arc::clone(client.delivery())) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     error_slot(unsafe {
         run(self_, move |c| {
             Box::pin(async move { c.subscribe_with_topics_listener(topics, listener).await })
@@ -790,7 +896,15 @@ pub type kafka_consumer_Consumer_subscribe_with_topics_listener_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_void` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics_listener_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -799,10 +913,20 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics_listener_
     cb: kafka_consumer_Consumer_subscribe_with_topics_listener_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `client_ref` requires.
     let client = unsafe { client_ref(self_) };
+    // SAFETY: Per this function's `# Safety`, `topics` is a valid list of NUL-terminated `char *`,
+    // as `list_strings` requires; the strings are copied, so the borrow lasts for this call only.
     let topics = unsafe { list_strings(topics) };
+    // SAFETY: Per this function's `# Safety`, `listener` is a live listener handle, as
+    // `listener_adapter` requires; the registration is copied, so the handle is borrowed for this
+    // call only. Its `self` stays alive until the registration is released, as
+    // `kafka_consumer_ConsumerRebalanceListener_new` documents.
     let listener = unsafe { listener_adapter(listener, Arc::clone(client.delivery())) };
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_subscribe_with_topics_listener_cb",
@@ -831,7 +955,12 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_pattern(
     self_: *mut kafka_consumer_Consumer_t,
     pattern: *const kafka_consumer_SubscriptionPattern_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `pattern` is a valid subscription-pattern handle,
+    // alive for this expression, the only use of the reference, as `subscription_pattern_ref`
+    // requires; the value is cloned.
     let pattern = unsafe { subscription_pattern_ref(pattern) }.clone();
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     error_slot(unsafe { run(self_, move |c| Box::pin(async move { c.subscribe_with_pattern(pattern).await })) })
 }
 
@@ -847,7 +976,15 @@ pub type kafka_consumer_Consumer_subscribe_with_pattern_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_void` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_pattern_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -855,8 +992,13 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_pattern_cb(
     cb: kafka_consumer_Consumer_subscribe_with_pattern_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `pattern` is a valid subscription-pattern handle,
+    // alive for this expression, the only use of the reference, as `subscription_pattern_ref`
+    // requires; the value is cloned.
     let pattern = unsafe { subscription_pattern_ref(pattern) }.clone();
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_subscribe_with_pattern_cb",
@@ -886,9 +1028,20 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_pattern_listener
     pattern: *const kafka_consumer_SubscriptionPattern_t,
     listener: *mut kafka_consumer_ConsumerRebalanceListener_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `client_ref` requires.
     let client = unsafe { client_ref(self_) };
+    // SAFETY: Per this function's `# Safety`, `pattern` is a valid subscription-pattern handle,
+    // alive for this expression, the only use of the reference, as `subscription_pattern_ref`
+    // requires; the value is cloned.
     let pattern = unsafe { subscription_pattern_ref(pattern) }.clone();
+    // SAFETY: Per this function's `# Safety`, `listener` is a live listener handle, as
+    // `listener_adapter` requires; the registration is copied, so the handle is borrowed for this
+    // call only. Its `self` stays alive until the registration is released, as
+    // `kafka_consumer_ConsumerRebalanceListener_new` documents.
     let listener = unsafe { listener_adapter(listener, Arc::clone(client.delivery())) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     error_slot(unsafe {
         run(self_, move |c| {
             Box::pin(async move { c.subscribe_with_pattern_listener(pattern, listener).await })
@@ -908,7 +1061,15 @@ pub type kafka_consumer_Consumer_subscribe_with_pattern_listener_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_void` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_pattern_listener_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -917,10 +1078,21 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_pattern_listener
     cb: kafka_consumer_Consumer_subscribe_with_pattern_listener_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `client_ref` requires.
     let client = unsafe { client_ref(self_) };
+    // SAFETY: Per this function's `# Safety`, `pattern` is a valid subscription-pattern handle,
+    // alive for this expression, the only use of the reference, as `subscription_pattern_ref`
+    // requires; the value is cloned.
     let pattern = unsafe { subscription_pattern_ref(pattern) }.clone();
+    // SAFETY: Per this function's `# Safety`, `listener` is a live listener handle, as
+    // `listener_adapter` requires; the registration is copied, so the handle is borrowed for this
+    // call only. Its `self` stays alive until the registration is released, as
+    // `kafka_consumer_ConsumerRebalanceListener_new` documents.
     let listener = unsafe { listener_adapter(listener, Arc::clone(client.delivery())) };
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_subscribe_with_pattern_listener_cb",
@@ -948,6 +1120,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_pattern_listener
 pub unsafe extern "C" fn kafka_consumer_Consumer_unsubscribe(
     self_: *mut kafka_consumer_Consumer_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     error_slot(unsafe { run(self_, move |c| Box::pin(async move { c.unsubscribe().await })) })
 }
 
@@ -963,7 +1137,15 @@ pub type kafka_consumer_Consumer_unsubscribe_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_void` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_unsubscribe_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -971,6 +1153,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_unsubscribe_cb(
     opaque: *mut c_void,
 ) {
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_unsubscribe_cb",
@@ -1003,9 +1187,15 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_poll(
     timeout: i64,
     out_poll: *mut *mut kafka_consumer_ConsumerRecords_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `client_ref` requires.
     let client = unsafe { client_ref(self_) };
     let owns = client.owns();
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     let result = unsafe { run(self_, move |c| Box::pin(async move { c.poll(ms(timeout)?).await })) };
+    // SAFETY: Per this function's `# Safety`, `out_poll` is a valid pointer to write the result to,
+    // as `out_slot` requires.
     unsafe { out_slot(result, out_poll, |records| box_consumer_records(records, owns.key, owns.value)) }
 }
 
@@ -1024,7 +1214,15 @@ pub type kafka_consumer_Consumer_poll_cb_t = unsafe extern "C" fn(
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_ptr` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic_value` requires.
+    unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_poll_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1032,9 +1230,13 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_poll_cb(
     cb: kafka_consumer_Consumer_poll_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `client_ref` requires.
     let client = unsafe { client_ref(self_) };
     let owns = client.owns();
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_poll_cb",
@@ -1069,6 +1271,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_poll_cb(
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync(
     self_: *mut kafka_consumer_Consumer_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     error_slot(unsafe { run(self_, move |c| Box::pin(async move { c.commit_sync().await })) })
 }
 
@@ -1084,7 +1288,15 @@ pub type kafka_consumer_Consumer_commit_sync_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_void` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1092,6 +1304,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_cb(
     opaque: *mut c_void,
 ) {
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_commit_sync_cb",
@@ -1119,6 +1333,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_timeout(
     self_: *mut kafka_consumer_Consumer_t,
     timeout: i64,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     error_slot(unsafe {
         run(self_, move |c| {
             Box::pin(async move { c.commit_sync_with_timeout(ms(timeout)?).await })
@@ -1138,7 +1354,15 @@ pub type kafka_consumer_Consumer_commit_sync_with_timeout_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_void` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_timeout_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1147,6 +1371,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_timeout_cb(
     opaque: *mut c_void,
 ) {
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_commit_sync_with_timeout_cb",
@@ -1170,13 +1396,22 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_timeout_cb(
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+/// `offsets` must be a valid map of `kafka_common_TopicPartition_t *` to
+/// `kafka_consumer_OffsetAndMetadata_t *` that no other call mutates during
+/// this one.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets(
     self_: *mut kafka_consumer_Consumer_t,
     offsets: *const kafka_Map_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `offsets` is a valid map of
+    // `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *` that no other
+    // call mutates during this one, as `map_offset_and_metadata` requires; the entries are copied,
+    // so the borrow lasts for this call only.
     let offsets = unsafe { map_offset_and_metadata(offsets) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     error_slot(unsafe {
         run(self_, move |c| {
             Box::pin(async move { c.commit_sync_with_offsets(offsets).await })
@@ -1196,7 +1431,15 @@ pub type kafka_consumer_Consumer_commit_sync_with_offsets_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_void` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1204,8 +1447,14 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets_cb(
     cb: kafka_consumer_Consumer_commit_sync_with_offsets_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `offsets` is a valid map of
+    // `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *` that no other
+    // call mutates during this one, as `map_offset_and_metadata` requires; the entries are copied,
+    // so the borrow lasts for this call only.
     let offsets = unsafe { map_offset_and_metadata(offsets) };
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_commit_sync_with_offsets_cb",
@@ -1227,6 +1476,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets_cb(
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+/// `offsets` must be a valid map of `kafka_common_TopicPartition_t *` to
+/// `kafka_consumer_OffsetAndMetadata_t *` that no other call mutates during
+/// this one.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets_timeout(
@@ -1234,7 +1486,13 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets_timeou
     offsets: *const kafka_Map_t,
     timeout: i64,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `offsets` is a valid map of
+    // `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *` that no other
+    // call mutates during this one, as `map_offset_and_metadata` requires; the entries are copied,
+    // so the borrow lasts for this call only.
     let offsets = unsafe { map_offset_and_metadata(offsets) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     error_slot(unsafe {
         run(self_, move |c| {
             Box::pin(async move { c.commit_sync_with_offsets_timeout(offsets, ms(timeout)?).await })
@@ -1254,7 +1512,15 @@ pub type kafka_consumer_Consumer_commit_sync_with_offsets_timeout_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_void` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets_timeout_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1263,8 +1529,14 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets_timeou
     cb: kafka_consumer_Consumer_commit_sync_with_offsets_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `offsets` is a valid map of
+    // `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *` that no other
+    // call mutates during this one, as `map_offset_and_metadata` requires; the entries are copied,
+    // so the borrow lasts for this call only.
     let offsets = unsafe { map_offset_and_metadata(offsets) };
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_commit_sync_with_offsets_timeout_cb",
@@ -1291,6 +1563,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets_timeou
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async(
     self_: *mut kafka_consumer_Consumer_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     error_slot(unsafe { run(self_, move |c| Box::pin(async move { c.commit_async().await })) })
 }
 
@@ -1306,7 +1580,15 @@ pub type kafka_consumer_Consumer_commit_async_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_void` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1314,6 +1596,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_cb(
     opaque: *mut c_void,
 ) {
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_commit_async_cb",
@@ -1343,8 +1627,16 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_callback(
     self_: *mut kafka_consumer_Consumer_t,
     callback: *mut kafka_consumer_OffsetCommitCallback_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `client_ref` requires.
     let client = unsafe { client_ref(self_) };
+    // SAFETY: Per this function's `# Safety`, `callback` is a live callback handle, as
+    // `commit_callback_adapter` requires; the registration is copied, so the handle is borrowed for
+    // this call only. Its `self` stays alive until `onComplete` fires, as
+    // `kafka_consumer_OffsetCommitCallback_new` documents.
     let callback = unsafe { commit_callback_adapter(callback, Arc::clone(client.delivery())) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     error_slot(unsafe {
         run(self_, move |c| {
             Box::pin(async move { c.commit_async_with_callback(callback).await })
@@ -1364,7 +1656,15 @@ pub type kafka_consumer_Consumer_commit_async_with_callback_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_void` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_callback_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1372,9 +1672,17 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_callback_cb(
     cb: kafka_consumer_Consumer_commit_async_with_callback_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `client_ref` requires.
     let client = unsafe { client_ref(self_) };
+    // SAFETY: Per this function's `# Safety`, `callback` is a live callback handle, as
+    // `commit_callback_adapter` requires; the registration is copied, so the handle is borrowed for
+    // this call only. Its `self` stays alive until `onComplete` fires, as
+    // `kafka_consumer_OffsetCommitCallback_new` documents.
     let callback = unsafe { commit_callback_adapter(callback, Arc::clone(client.delivery())) };
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_commit_async_with_callback_cb",
@@ -1396,6 +1704,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_callback_cb(
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+/// `offsets` must be a valid map of `kafka_common_TopicPartition_t *` to
+/// `kafka_consumer_OffsetAndMetadata_t *` that no other call mutates during
+/// this one.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_offsets_callback(
@@ -1403,9 +1714,21 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_offsets_callb
     offsets: *const kafka_Map_t,
     callback: *mut kafka_consumer_OffsetCommitCallback_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `client_ref` requires.
     let client = unsafe { client_ref(self_) };
+    // SAFETY: Per this function's `# Safety`, `offsets` is a valid map of
+    // `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *` that no other
+    // call mutates during this one, as `map_offset_and_metadata` requires; the entries are copied,
+    // so the borrow lasts for this call only.
     let offsets = unsafe { map_offset_and_metadata(offsets) };
+    // SAFETY: Per this function's `# Safety`, `callback` is a live callback handle, as
+    // `commit_callback_adapter` requires; the registration is copied, so the handle is borrowed for
+    // this call only. Its `self` stays alive until `onComplete` fires, as
+    // `kafka_consumer_OffsetCommitCallback_new` documents.
     let callback = unsafe { commit_callback_adapter(callback, Arc::clone(client.delivery())) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     error_slot(unsafe {
         run(self_, move |c| {
             Box::pin(async move { c.commit_async_with_offsets_callback(offsets, callback).await })
@@ -1425,7 +1748,15 @@ pub type kafka_consumer_Consumer_commit_async_with_offsets_callback_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_void` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_offsets_callback_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1434,10 +1765,22 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_offsets_callb
     cb: kafka_consumer_Consumer_commit_async_with_offsets_callback_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `client_ref` requires.
     let client = unsafe { client_ref(self_) };
+    // SAFETY: Per this function's `# Safety`, `offsets` is a valid map of
+    // `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *` that no other
+    // call mutates during this one, as `map_offset_and_metadata` requires; the entries are copied,
+    // so the borrow lasts for this call only.
     let offsets = unsafe { map_offset_and_metadata(offsets) };
+    // SAFETY: Per this function's `# Safety`, `callback` is a live callback handle, as
+    // `commit_callback_adapter` requires; the registration is copied, so the handle is borrowed for
+    // this call only. Its `self` stays alive until `onComplete` fires, as
+    // `kafka_consumer_OffsetCommitCallback_new` documents.
     let callback = unsafe { commit_callback_adapter(callback, Arc::clone(client.delivery())) };
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_commit_async_with_offsets_callback_cb",
@@ -1470,7 +1813,12 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset(
     partition: *const kafka_common_TopicPartition_t,
     offset: i64,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, alive
+    // for this expression, the only use of the reference, as `topic_partition_ref` requires; the
+    // value is cloned.
     let partition = unsafe { topic_partition_ref(partition) }.clone();
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     error_slot(unsafe {
         run(self_, move |c| {
             Box::pin(async move { c.seek_with_offset(partition, offset).await })
@@ -1490,7 +1838,15 @@ pub type kafka_consumer_Consumer_seek_with_offset_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_void` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1499,8 +1855,13 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset_cb(
     cb: kafka_consumer_Consumer_seek_with_offset_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, alive
+    // for this expression, the only use of the reference, as `topic_partition_ref` requires; the
+    // value is cloned.
     let partition = unsafe { topic_partition_ref(partition) }.clone();
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_seek_with_offset_cb",
@@ -1529,8 +1890,16 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset_and_metadata(
     partition: *const kafka_common_TopicPartition_t,
     offset_and_metadata: *const kafka_consumer_OffsetAndMetadata_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, alive
+    // for this expression, the only use of the reference, as `topic_partition_ref` requires; the
+    // value is cloned.
     let partition = unsafe { topic_partition_ref(partition) }.clone();
+    // SAFETY: Per this function's `# Safety`, `offset_and_metadata` is a valid offset-and-metadata
+    // handle, alive for this expression, the only use of the reference, as
+    // `offset_and_metadata_ref` requires; the value is cloned.
     let offset_and_metadata = unsafe { offset_and_metadata_ref(offset_and_metadata) }.clone();
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     error_slot(unsafe {
         run(self_, move |c| {
             Box::pin(async move { c.seek_with_offset_and_metadata(partition, offset_and_metadata).await })
@@ -1550,7 +1919,15 @@ pub type kafka_consumer_Consumer_seek_with_offset_and_metadata_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_void` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset_and_metadata_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1559,9 +1936,17 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset_and_metadata_c
     cb: kafka_consumer_Consumer_seek_with_offset_and_metadata_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, alive
+    // for this expression, the only use of the reference, as `topic_partition_ref` requires; the
+    // value is cloned.
     let partition = unsafe { topic_partition_ref(partition) }.clone();
+    // SAFETY: Per this function's `# Safety`, `offset_and_metadata` is a valid offset-and-metadata
+    // handle, alive for this expression, the only use of the reference, as
+    // `offset_and_metadata_ref` requires; the value is cloned.
     let offset_and_metadata = unsafe { offset_and_metadata_ref(offset_and_metadata) }.clone();
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_seek_with_offset_and_metadata_cb",
@@ -1583,13 +1968,19 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset_and_metadata_c
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+/// `partitions` must be a valid list of `kafka_common_TopicPartition_t *`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_beginning(
     self_: *mut kafka_consumer_Consumer_t,
     partitions: *const kafka_List_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     error_slot(unsafe { run(self_, move |c| Box::pin(async move { c.seek_to_beginning(&partitions).await })) })
 }
 
@@ -1605,7 +1996,15 @@ pub type kafka_consumer_Consumer_seek_to_beginning_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_void` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_beginning_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1613,8 +2012,13 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_beginning_cb(
     cb: kafka_consumer_Consumer_seek_to_beginning_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_seek_to_beginning_cb",
@@ -1636,13 +2040,19 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_beginning_cb(
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+/// `partitions` must be a valid list of `kafka_common_TopicPartition_t *`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_end(
     self_: *mut kafka_consumer_Consumer_t,
     partitions: *const kafka_List_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     error_slot(unsafe { run(self_, move |c| Box::pin(async move { c.seek_to_end(&partitions).await })) })
 }
 
@@ -1658,7 +2068,15 @@ pub type kafka_consumer_Consumer_seek_to_end_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_void` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_end_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1666,8 +2084,13 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_end_cb(
     cb: kafka_consumer_Consumer_seek_to_end_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_seek_to_end_cb",
@@ -1694,8 +2117,15 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_position(
     partition: *const kafka_common_TopicPartition_t,
     out_position: *mut i64,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, alive
+    // for this expression, the only use of the reference, as `topic_partition_ref` requires; the
+    // value is cloned.
     let partition = unsafe { topic_partition_ref(partition) }.clone();
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     let result = unsafe { run(self_, move |c| Box::pin(async move { c.position(&partition).await })) };
+    // SAFETY: Per this function's `# Safety`, `out_position` is a valid pointer to write the result
+    // to, as `out_slot` requires.
     unsafe { out_slot(result, out_position, |v| v) }
 }
 
@@ -1711,7 +2141,15 @@ pub type kafka_consumer_Consumer_position_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic_i64(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_i64` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic_i64` requires.
+    unsafe { deliver_panic_i64(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_position_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1719,8 +2157,13 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_position_cb(
     cb: kafka_consumer_Consumer_position_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, alive
+    // for this expression, the only use of the reference, as `topic_partition_ref` requires; the
+    // value is cloned.
     let partition = unsafe { topic_partition_ref(partition) }.clone();
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_position_cb",
@@ -1748,12 +2191,19 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_position_with_timeout(
     timeout: i64,
     out_position_with_timeout: *mut i64,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, alive
+    // for this expression, the only use of the reference, as `topic_partition_ref` requires; the
+    // value is cloned.
     let partition = unsafe { topic_partition_ref(partition) }.clone();
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     let result = unsafe {
         run(self_, move |c| {
             Box::pin(async move { c.position_with_timeout(&partition, ms(timeout)?).await })
         })
     };
+    // SAFETY: Per this function's `# Safety`, `out_position_with_timeout` is a valid pointer to
+    // write the result to, as `out_slot` requires.
     unsafe { out_slot(result, out_position_with_timeout, |v| v) }
 }
 
@@ -1769,7 +2219,15 @@ pub type kafka_consumer_Consumer_position_with_timeout_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic_i64(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_i64` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic_i64` requires.
+    unsafe { deliver_panic_i64(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_position_with_timeout_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1778,8 +2236,13 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_position_with_timeout_cb(
     cb: kafka_consumer_Consumer_position_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, alive
+    // for this expression, the only use of the reference, as `topic_partition_ref` requires; the
+    // value is cloned.
     let partition = unsafe { topic_partition_ref(partition) }.clone();
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_position_with_timeout_cb",
@@ -1801,6 +2264,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_position_with_timeout_cb(
 ///
 /// `self_` must be a live consumer handle, the other parameters valid
 /// for their documented types and the `out_` pointer valid.
+/// `partitions` must be a valid list of `kafka_common_TopicPartition_t *`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_committed(
@@ -1808,8 +2272,15 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_committed(
     partitions: *const kafka_List_t,
     out_committed: *mut *mut kafka_Map_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     let result = unsafe { run(self_, move |c| Box::pin(async move { c.committed(&partitions).await })) };
+    // SAFETY: Per this function's `# Safety`, `out_committed` is a valid pointer to write the
+    // result to, as `out_slot` requires.
     unsafe { out_slot(result, out_committed, |offsets| offset_and_metadata_map(&offsets)) }
 }
 
@@ -1825,7 +2296,15 @@ pub type kafka_consumer_Consumer_committed_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_ptr` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic_value` requires.
+    unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_committed_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1833,8 +2312,13 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_committed_cb(
     cb: kafka_consumer_Consumer_committed_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_committed_cb",
@@ -1856,6 +2340,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_committed_cb(
 ///
 /// `self_` must be a live consumer handle, the other parameters valid
 /// for their documented types and the `out_` pointer valid.
+/// `partitions` must be a valid list of `kafka_common_TopicPartition_t *`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_committed_with_timeout(
@@ -1864,12 +2349,19 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_committed_with_timeout(
     timeout: i64,
     out_committed_with_timeout: *mut *mut kafka_Map_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     let result = unsafe {
         run(self_, move |c| {
             Box::pin(async move { c.committed_with_timeout(&partitions, ms(timeout)?).await })
         })
     };
+    // SAFETY: Per this function's `# Safety`, `out_committed_with_timeout` is a valid pointer to
+    // write the result to, as `out_slot` requires.
     unsafe { out_slot(result, out_committed_with_timeout, |offsets| offset_and_metadata_map(&offsets)) }
 }
 
@@ -1885,7 +2377,15 @@ pub type kafka_consumer_Consumer_committed_with_timeout_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_ptr` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic_value` requires.
+    unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_committed_with_timeout_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1894,8 +2394,13 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_committed_with_timeout_cb(
     cb: kafka_consumer_Consumer_committed_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_committed_with_timeout_cb",
@@ -1926,7 +2431,14 @@ fn topic_partition_info_map(topics: HashMap<String, Vec<crate::common::Partition
     )
 }
 
+/// Frees a list handle held as a `void *` container element.
+///
+/// # Safety
+///
+/// `element` must be an owned list handle not yet destroyed.
 unsafe fn destroy_list_element(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned list handle not yet destroyed,
+    // which is what `kafka_List_destroy` requires.
     unsafe { kafka_List_destroy(element as *mut kafka_List_t) }
 }
 
@@ -1940,6 +2452,7 @@ unsafe fn destroy_list_element(element: *mut c_void) {
 ///
 /// `self_` must be a live consumer handle, the other parameters valid
 /// for their documented types and the `out_` pointer valid.
+/// `topic` must be a NUL-terminated string.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for(
@@ -1947,8 +2460,14 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for(
     topic: *const c_char,
     out_partitions_for: *mut *mut kafka_List_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied.
     let topic = unsafe { c_str_to_string(topic) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     let result = unsafe { run(self_, move |c| Box::pin(async move { c.partitions_for(&topic).await })) };
+    // SAFETY: Per this function's `# Safety`, `out_partitions_for` is a valid pointer to write the
+    // result to, as `out_slot` requires.
     unsafe { out_slot(result, out_partitions_for, |infos| partition_info_list(&infos)) }
 }
 
@@ -1964,7 +2483,15 @@ pub type kafka_consumer_Consumer_partitions_for_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_ptr` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic_value` requires.
+    unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1972,8 +2499,12 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for_cb(
     cb: kafka_consumer_Consumer_partitions_for_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied.
     let topic = unsafe { c_str_to_string(topic) };
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_partitions_for_cb",
@@ -1993,6 +2524,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for_cb(
 ///
 /// `self_` must be a live consumer handle, the other parameters valid
 /// for their documented types and the `out_` pointer valid.
+/// `topic` must be a NUL-terminated string.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for_with_timeout(
@@ -2001,12 +2533,18 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for_with_timeout(
     timeout: i64,
     out_partitions_for_with_timeout: *mut *mut kafka_List_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied.
     let topic = unsafe { c_str_to_string(topic) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     let result = unsafe {
         run(self_, move |c| {
             Box::pin(async move { c.partitions_for_with_timeout(&topic, ms(timeout)?).await })
         })
     };
+    // SAFETY: Per this function's `# Safety`, `out_partitions_for_with_timeout` is a valid pointer
+    // to write the result to, as `out_slot` requires.
     unsafe { out_slot(result, out_partitions_for_with_timeout, |infos| partition_info_list(&infos)) }
 }
 
@@ -2022,7 +2560,15 @@ pub type kafka_consumer_Consumer_partitions_for_with_timeout_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_ptr` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic_value` requires.
+    unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for_with_timeout_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2031,8 +2577,12 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for_with_timeout_cb(
     cb: kafka_consumer_Consumer_partitions_for_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied.
     let topic = unsafe { c_str_to_string(topic) };
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_partitions_for_with_timeout_cb",
@@ -2059,7 +2609,11 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics(
     self_: *mut kafka_consumer_Consumer_t,
     out_list_topics: *mut *mut kafka_Map_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     let result = unsafe { run(self_, move |c| Box::pin(async move { c.list_topics().await })) };
+    // SAFETY: Per this function's `# Safety`, `out_list_topics` is a valid pointer to write the
+    // result to, as `out_slot` requires.
     unsafe { out_slot(result, out_list_topics, topic_partition_info_map) }
 }
 
@@ -2075,7 +2629,15 @@ pub type kafka_consumer_Consumer_list_topics_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_ptr` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic_value` requires.
+    unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2083,6 +2645,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics_cb(
     opaque: *mut c_void,
 ) {
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_list_topics_cb",
@@ -2109,11 +2673,15 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics_with_timeout(
     timeout: i64,
     out_list_topics_with_timeout: *mut *mut kafka_Map_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     let result = unsafe {
         run(self_, move |c| {
             Box::pin(async move { c.list_topics_with_timeout(ms(timeout)?).await })
         })
     };
+    // SAFETY: Per this function's `# Safety`, `out_list_topics_with_timeout` is a valid pointer to
+    // write the result to, as `out_slot` requires.
     unsafe { out_slot(result, out_list_topics_with_timeout, topic_partition_info_map) }
 }
 
@@ -2129,7 +2697,15 @@ pub type kafka_consumer_Consumer_list_topics_with_timeout_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_ptr` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic_value` requires.
+    unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics_with_timeout_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2138,6 +2714,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics_with_timeout_cb(
     opaque: *mut c_void,
 ) {
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_list_topics_with_timeout_cb",
@@ -2160,6 +2738,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics_with_timeout_cb(
 ///
 /// `self_` must be a live consumer handle, the other parameters valid
 /// for their documented types and the `out_` pointer valid.
+/// `timestamps_to_search` must be a valid map of
+/// `kafka_common_TopicPartition_t *` to `int64_t *`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times(
@@ -2167,12 +2747,19 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times(
     timestamps_to_search: *const kafka_Map_t,
     out_offsets_for_times: *mut *mut kafka_Map_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `timestamps_to_search` is a valid map of
+    // `kafka_common_TopicPartition_t *` to `int64_t *`, as `map_topic_partition_i64` requires; the
+    // entries are copied, so the borrow lasts for this call only.
     let timestamps_to_search = unsafe { map_topic_partition_i64(timestamps_to_search) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     let result = unsafe {
         run(self_, move |c| {
             Box::pin(async move { c.offsets_for_times(timestamps_to_search).await })
         })
     };
+    // SAFETY: Per this function's `# Safety`, `out_offsets_for_times` is a valid pointer to write
+    // the result to, as `out_slot` requires.
     unsafe { out_slot(result, out_offsets_for_times, |offsets| offset_and_timestamp_map(&offsets)) }
 }
 
@@ -2188,7 +2775,15 @@ pub type kafka_consumer_Consumer_offsets_for_times_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_ptr` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic_value` requires.
+    unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2196,8 +2791,13 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_cb(
     cb: kafka_consumer_Consumer_offsets_for_times_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `timestamps_to_search` is a valid map of
+    // `kafka_common_TopicPartition_t *` to `int64_t *`, as `map_topic_partition_i64` requires; the
+    // entries are copied, so the borrow lasts for this call only.
     let timestamps_to_search = unsafe { map_topic_partition_i64(timestamps_to_search) };
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_offsets_for_times_cb",
@@ -2219,6 +2819,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_cb(
 ///
 /// `self_` must be a live consumer handle, the other parameters valid
 /// for their documented types and the `out_` pointer valid.
+/// `timestamps_to_search` must be a valid map of
+/// `kafka_common_TopicPartition_t *` to `int64_t *`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_with_timeout(
@@ -2227,12 +2829,19 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_with_timeout(
     timeout: i64,
     out_offsets_for_times_with_timeout: *mut *mut kafka_Map_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `timestamps_to_search` is a valid map of
+    // `kafka_common_TopicPartition_t *` to `int64_t *`, as `map_topic_partition_i64` requires; the
+    // entries are copied, so the borrow lasts for this call only.
     let timestamps_to_search = unsafe { map_topic_partition_i64(timestamps_to_search) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     let result = unsafe {
         run(self_, move |c| {
             Box::pin(async move { c.offsets_for_times_with_timeout(timestamps_to_search, ms(timeout)?).await })
         })
     };
+    // SAFETY: Per this function's `# Safety`, `out_offsets_for_times_with_timeout` is a valid
+    // pointer to write the result to, as `out_slot` requires.
     unsafe {
         out_slot(result, out_offsets_for_times_with_timeout, |offsets| {
             offset_and_timestamp_map(&offsets)
@@ -2252,7 +2861,15 @@ pub type kafka_consumer_Consumer_offsets_for_times_with_timeout_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_ptr` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic_value` requires.
+    unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_with_timeout_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2261,8 +2878,13 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_with_timeout_
     cb: kafka_consumer_Consumer_offsets_for_times_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `timestamps_to_search` is a valid map of
+    // `kafka_common_TopicPartition_t *` to `int64_t *`, as `map_topic_partition_i64` requires; the
+    // entries are copied, so the borrow lasts for this call only.
     let timestamps_to_search = unsafe { map_topic_partition_i64(timestamps_to_search) };
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_offsets_for_times_with_timeout_cb",
@@ -2287,6 +2909,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_with_timeout_
 ///
 /// `self_` must be a live consumer handle, the other parameters valid
 /// for their documented types and the `out_` pointer valid.
+/// `partitions` must be a valid list of `kafka_common_TopicPartition_t *`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets(
@@ -2294,8 +2917,15 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets(
     partitions: *const kafka_List_t,
     out_beginning_offsets: *mut *mut kafka_Map_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     let result = unsafe { run(self_, move |c| Box::pin(async move { c.beginning_offsets(&partitions).await })) };
+    // SAFETY: Per this function's `# Safety`, `out_beginning_offsets` is a valid pointer to write
+    // the result to, as `out_slot` requires.
     unsafe { out_slot(result, out_beginning_offsets, |offsets| topic_partition_i64_map(&offsets)) }
 }
 
@@ -2311,7 +2941,15 @@ pub type kafka_consumer_Consumer_beginning_offsets_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_ptr` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic_value` requires.
+    unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2319,8 +2957,13 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_cb(
     cb: kafka_consumer_Consumer_beginning_offsets_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_beginning_offsets_cb",
@@ -2342,6 +2985,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_cb(
 ///
 /// `self_` must be a live consumer handle, the other parameters valid
 /// for their documented types and the `out_` pointer valid.
+/// `partitions` must be a valid list of `kafka_common_TopicPartition_t *`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_with_timeout(
@@ -2350,12 +2994,19 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_with_timeout(
     timeout: i64,
     out_beginning_offsets_with_timeout: *mut *mut kafka_Map_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     let result = unsafe {
         run(self_, move |c| {
             Box::pin(async move { c.beginning_offsets_with_timeout(&partitions, ms(timeout)?).await })
         })
     };
+    // SAFETY: Per this function's `# Safety`, `out_beginning_offsets_with_timeout` is a valid
+    // pointer to write the result to, as `out_slot` requires.
     unsafe {
         out_slot(result, out_beginning_offsets_with_timeout, |offsets| {
             topic_partition_i64_map(&offsets)
@@ -2375,7 +3026,15 @@ pub type kafka_consumer_Consumer_beginning_offsets_with_timeout_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_ptr` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic_value` requires.
+    unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_with_timeout_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2384,8 +3043,13 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_with_timeout_
     cb: kafka_consumer_Consumer_beginning_offsets_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_beginning_offsets_with_timeout_cb",
@@ -2408,6 +3072,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_with_timeout_
 ///
 /// `self_` must be a live consumer handle, the other parameters valid
 /// for their documented types and the `out_` pointer valid.
+/// `partitions` must be a valid list of `kafka_common_TopicPartition_t *`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets(
@@ -2415,8 +3080,15 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets(
     partitions: *const kafka_List_t,
     out_end_offsets: *mut *mut kafka_Map_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     let result = unsafe { run(self_, move |c| Box::pin(async move { c.end_offsets(&partitions).await })) };
+    // SAFETY: Per this function's `# Safety`, `out_end_offsets` is a valid pointer to write the
+    // result to, as `out_slot` requires.
     unsafe { out_slot(result, out_end_offsets, |offsets| topic_partition_i64_map(&offsets)) }
 }
 
@@ -2432,7 +3104,15 @@ pub type kafka_consumer_Consumer_end_offsets_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_ptr` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic_value` requires.
+    unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2440,8 +3120,13 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_cb(
     cb: kafka_consumer_Consumer_end_offsets_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_end_offsets_cb",
@@ -2463,6 +3148,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_cb(
 ///
 /// `self_` must be a live consumer handle, the other parameters valid
 /// for their documented types and the `out_` pointer valid.
+/// `partitions` must be a valid list of `kafka_common_TopicPartition_t *`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_with_timeout(
@@ -2471,12 +3157,19 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_with_timeout(
     timeout: i64,
     out_end_offsets_with_timeout: *mut *mut kafka_Map_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     let result = unsafe {
         run(self_, move |c| {
             Box::pin(async move { c.end_offsets_with_timeout(&partitions, ms(timeout)?).await })
         })
     };
+    // SAFETY: Per this function's `# Safety`, `out_end_offsets_with_timeout` is a valid pointer to
+    // write the result to, as `out_slot` requires.
     unsafe {
         out_slot(result, out_end_offsets_with_timeout, |offsets| {
             topic_partition_i64_map(&offsets)
@@ -2496,7 +3189,15 @@ pub type kafka_consumer_Consumer_end_offsets_with_timeout_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_ptr` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic_value` requires.
+    unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_with_timeout_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2505,8 +3206,13 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_with_timeout_cb(
     cb: kafka_consumer_Consumer_end_offsets_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_end_offsets_with_timeout_cb",
@@ -2534,13 +3240,19 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_with_timeout_cb(
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+/// `partitions` must be a valid list of `kafka_common_TopicPartition_t *`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_pause(
     self_: *mut kafka_consumer_Consumer_t,
     partitions: *const kafka_List_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     error_slot(unsafe { run(self_, move |c| Box::pin(async move { c.pause(&partitions).await })) })
 }
 
@@ -2556,7 +3268,15 @@ pub type kafka_consumer_Consumer_pause_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_void` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_pause_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2564,8 +3284,13 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_pause_cb(
     cb: kafka_consumer_Consumer_pause_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_pause_cb",
@@ -2587,13 +3312,19 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_pause_cb(
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+/// `partitions` must be a valid list of `kafka_common_TopicPartition_t *`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_resume(
     self_: *mut kafka_consumer_Consumer_t,
     partitions: *const kafka_List_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     error_slot(unsafe { run(self_, move |c| Box::pin(async move { c.resume(&partitions).await })) })
 }
 
@@ -2609,7 +3340,15 @@ pub type kafka_consumer_Consumer_resume_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_void` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_resume_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2617,8 +3356,13 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_resume_cb(
     cb: kafka_consumer_Consumer_resume_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_resume_cb",
@@ -2645,6 +3389,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_resume_cb(
 pub unsafe extern "C" fn kafka_consumer_Consumer_enforce_rebalance(
     self_: *mut kafka_consumer_Consumer_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     error_slot(unsafe { run(self_, move |c| Box::pin(async move { c.enforce_rebalance().await })) })
 }
 
@@ -2660,7 +3406,15 @@ pub type kafka_consumer_Consumer_enforce_rebalance_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_void` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_enforce_rebalance_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2668,6 +3422,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_enforce_rebalance_cb(
     opaque: *mut c_void,
 ) {
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_enforce_rebalance_cb",
@@ -2689,13 +3445,18 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_enforce_rebalance_cb(
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+/// `reason` must be a NUL-terminated string.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_enforce_rebalance_with_reason(
     self_: *mut kafka_consumer_Consumer_t,
     reason: *const c_char,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `reason` is a NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied.
     let reason = unsafe { c_str_to_string(reason) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     error_slot(unsafe {
         run(self_, move |c| {
             Box::pin(async move { c.enforce_rebalance_with_reason(&reason).await })
@@ -2715,7 +3476,15 @@ pub type kafka_consumer_Consumer_enforce_rebalance_with_reason_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_void` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_enforce_rebalance_with_reason_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2723,8 +3492,12 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_enforce_rebalance_with_reason_c
     cb: kafka_consumer_Consumer_enforce_rebalance_with_reason_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `reason` is a NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied.
     let reason = unsafe { c_str_to_string(reason) };
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_enforce_rebalance_with_reason_cb",
@@ -2752,6 +3525,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_enforce_rebalance_with_reason_c
 pub unsafe extern "C" fn kafka_consumer_Consumer_close(
     self_: *mut kafka_consumer_Consumer_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     error_slot(unsafe { run(self_, move |c| Box::pin(async move { c.close().await })) })
 }
 
@@ -2767,7 +3542,15 @@ pub type kafka_consumer_Consumer_close_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_void` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_close_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2775,6 +3558,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_close_cb(
     opaque: *mut c_void,
 ) {
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_close_cb",
@@ -2802,7 +3587,13 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_close_with_options(
     self_: *mut kafka_consumer_Consumer_t,
     options: *const kafka_consumer_CloseOptions_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `options` is a valid close-options handle, alive for
+    // this expression, the only use of the reference; no setter runs on it meanwhile, since the
+    // setters' `# Safety` excludes any other call using the handle at the same time, so
+    // `close_options_ref`'s requirement holds. The value is cloned.
     let options = unsafe { close_options_ref(options) }.clone();
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
+    // this call, as `run` requires.
     error_slot(unsafe { run(self_, move |c| Box::pin(async move { c.close_with_options(options).await })) })
 }
 
@@ -2818,7 +3609,15 @@ pub type kafka_consumer_Consumer_close_with_options_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
+    // the job `deliver_void` queues when `acquire` fails, or to the task `Client::spawn` registers;
+    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_close_with_options_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2826,8 +3625,14 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_close_with_options_cb(
     cb: kafka_consumer_Consumer_close_with_options_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `options` is a valid close-options handle, alive for
+    // this expression, the only use of the reference; no setter runs on it meanwhile, since the
+    // setters' `# Safety` excludes any other call using the handle at the same time, so
+    // `close_options_ref`'s requirement holds. The value is cloned.
     let options = unsafe { close_options_ref(options) }.clone();
     let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
+    // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
     unsafe {
         run_cb(
             "kafka_consumer_Consumer_close_with_options_cb",
@@ -2847,12 +3652,16 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_close_with_options_cb(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle, as [`client_ref`] describes, kept alive for
+/// this call.
 unsafe fn read<T>(
     self_: *const kafka_consumer_Consumer_t,
     busy: impl FnOnce() -> T,
     f: impl FnOnce(&DynConsumer) -> T,
 ) -> T {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `client_ref` requires. Exclusive access to the consumer comes from `acquire`, not from
+    // this reference.
     let client = unsafe { client_ref(self_) };
     match client.acquire() {
         Ok(mut guard) => f(guard.consumer_mut()),
@@ -2871,6 +3680,8 @@ unsafe fn read<T>(
 pub unsafe extern "C" fn kafka_consumer_Consumer_assignment(
     self_: *const kafka_consumer_Consumer_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `read` requires.
     let assignment = unsafe { read(self_, Default::default, |c| c.assignment()) };
     sorted_topic_partition_list(assignment.iter())
 }
@@ -2886,6 +3697,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_assignment(
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscription(
     self_: *const kafka_consumer_Consumer_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `read` requires.
     let subscription = unsafe { read(self_, Default::default, |c| c.subscription()) };
     sorted_string_list(subscription.iter())
 }
@@ -2899,6 +3712,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscription(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_paused(self_: *const kafka_consumer_Consumer_t) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `read` requires.
     let paused = unsafe { read(self_, Default::default, |c| c.paused()) };
     sorted_topic_partition_list(paused.iter())
 }
@@ -2911,6 +3726,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_paused(self_: *const kafka_cons
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_client_id(self_: *const kafka_consumer_Consumer_t) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this expression,
+    // as `client_ref` requires. The pointer returned is into the `CString` the client owns, which
+    // lives at least as long as the handle holds the client, as the docs above state.
     unsafe { client_ref(self_) }.client_id.as_ptr()
 }
 
@@ -2926,7 +3744,11 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_current_lag(
     self_: *const kafka_consumer_Consumer_t,
     topic_partition: *const kafka_common_TopicPartition_t,
 ) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `topic_partition` is a valid topic-partition handle,
+    // kept alive for this call, which bounds every use of `tp`, as `topic_partition_ref` requires.
     let tp: &TopicPartition = unsafe { topic_partition_ref(topic_partition) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `read` requires.
     unsafe { read(self_, || -1, |c| c.current_lag(tp).unwrap_or(-1)) }
 }
 
@@ -2940,6 +3762,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_current_lag(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_metrics(self_: *const kafka_consumer_Consumer_t) -> *mut kafka_Map_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `read` requires.
     let mut metrics: Vec<_> = unsafe { read(self_, Default::default, |c| c.metrics()) }.into_iter().collect();
     // Deterministic order for a map Java leaves unordered.
     metrics.sort_by(|(a, _), (b, _)| a.name().cmp(b.name()).then_with(|| a.group().cmp(b.group())));
@@ -2955,11 +3779,25 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_metrics(self_: *const kafka_con
     )
 }
 
+/// Frees a metric-name handle held as a `void *` container element.
+///
+/// # Safety
+///
+/// `element` must be an owned metric-name handle not yet destroyed.
 unsafe fn destroy_metric_name(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned metric-name handle not yet
+    // destroyed, which is what `kafka_common_MetricName_destroy` requires.
     unsafe { kafka_common_MetricName_destroy(element as *mut _) }
 }
 
+/// Frees a metric handle held as a `void *` container element.
+///
+/// # Safety
+///
+/// `element` must be an owned metric handle not yet destroyed.
 unsafe fn destroy_kafka_metric(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned metric handle not yet
+    // destroyed, which is what `kafka_common_metrics_KafkaMetric_destroy` requires.
     unsafe { kafka_common_metrics_KafkaMetric_destroy(element as *mut _) }
 }
 
@@ -2975,6 +3813,8 @@ unsafe fn destroy_kafka_metric(element: *mut c_void) {
 pub unsafe extern "C" fn kafka_consumer_Consumer_group_metadata(
     self_: *const kafka_consumer_Consumer_t,
 ) -> *mut kafka_consumer_ConsumerGroupMetadata_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `read` requires.
     unsafe { read(self_, std::ptr::null_mut, |c| box_group_metadata(c.group_metadata())) }
 }
 
@@ -2987,6 +3827,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_group_metadata(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_wakeup(self_: *const kafka_consumer_Consumer_t) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this expression,
+    // as `client_ref` requires. `wakeup` goes through the reentrancy handle, never the consumer, so
+    // it needs no `acquire` and may run while an operation holds the guard; `Client` is `Sync`.
     unsafe { client_ref(self_) }.handle.wakeup();
 }
 
@@ -3003,6 +3846,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_wakeup(self_: *const kafka_cons
 pub unsafe extern "C" fn kafka_consumer_Consumer_handle(
     self_: *const kafka_consumer_Consumer_t,
 ) -> *mut kafka_consumer_ConsumerHandle_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call, as
+    // `client_ref` requires; `box_consumer_handle` keeps only a `Weak` to the client, so the new
+    // handle does not borrow `self_`.
     box_consumer_handle(unsafe { client_ref(self_) })
 }
 
@@ -3025,6 +3871,10 @@ pub type kafka_consumer_Consumer_callbacks_notify_fn_t = unsafe extern "C" fn(op
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer__execute_callbacks(self_: *const kafka_consumer_Consumer_t) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `client_ref` requires; a callback that runs here and calls the consumer again takes its
+    // own reference, and none takes a `&mut` to the handle (its destroy is excluded while this call
+    // uses it).
     unsafe { client_ref(self_) }.delivery.queue.execute()
 }
 
@@ -3043,6 +3893,10 @@ pub unsafe extern "C" fn kafka_consumer_Consumer__set_callbacks_notify(
     notify: kafka_consumer_Consumer_callbacks_notify_fn_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this expression,
+    // as `client_ref` requires. `notify` and `opaque` are stored as a pair, and `opaque` stays
+    // valid while the hook is installed, which `CallbackQueue::notify_if` relies on when it fires
+    // the hook.
     unsafe { client_ref(self_) }.delivery.queue.set_notify(Some(notify), opaque);
 }
 
@@ -3055,12 +3909,20 @@ pub unsafe extern "C" fn kafka_consumer_Consumer__set_callbacks_notify(
 ///
 /// # Safety
 ///
-/// `self_` must be null or a live handle from `KafkaConsumer_new`, not
-/// used afterwards.
+/// `self_` must be null or an owned handle from
+/// `kafka_consumer_KafkaConsumer_new` not yet destroyed, that no other call
+/// uses at the same time; it is not used afterwards, by the callbacks this
+/// call runs included.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_destroy(self_: *mut kafka_consumer_Consumer_t) {
     if !self_.is_null() {
+        // SAFETY: Per this function's `# Safety`, `self_` (non-null, checked above) is an owned
+        // handle not yet destroyed, i.e. the `Box<ConsumerClassHandle>`
+        // `kafka_consumer_KafkaConsumer_new` delivered, that no other call uses at the same time,
+        // so taking it back frees it exactly once, through `destroy`, which awaits the tasks still
+        // holding the client. The box is freed before `destroy` runs, so the callbacks it runs must
+        // not use `self_`, which the doc's "not used afterwards" excludes.
         unsafe { Box::from_raw(self_ as *mut ConsumerClassHandle) }.destroy();
     }
 }
