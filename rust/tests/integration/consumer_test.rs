@@ -915,13 +915,11 @@ async fn test_client_rack_reaches_the_broker() {
     let mut ctx = TestContext::new(cluster_config_with_kip848()).await;
     let topic = ctx.topic("rack_topic");
     let group_id = ctx.group_id("g_rack");
-    let mut admin_props = HashMap::from([(
-        "bootstrap.servers".to_string(),
-        ctx.protocol_bootstrap_servers().to_string(),
-    )]);
+    let mut admin_props =
+        HashMap::from([("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string())]);
     ctx.apply_security(&mut admin_props);
-    let admin = AdminClient::create(AdminClientConfig::new(&admin_props).expect("valid admin config"))
-        .expect("admin client");
+    let admin =
+        AdminClient::create(AdminClientConfig::new(&admin_props).expect("valid admin config")).expect("admin client");
     test_utils::create_topic(admin.as_ref(), &topic, 1, 1).await;
 
     let mut props = HashMap::from([
@@ -938,15 +936,16 @@ async fn test_client_rack_reaches_the_broker() {
         Box::new(StringDeserializer),
     )
     .expect("KafkaConsumer::new should succeed");
-    consumer
-        .subscribe_with_topics(vec![topic.clone()])
-        .await
-        .expect("subscribe");
+    consumer.subscribe_with_topics(vec![topic.clone()]).await.expect("subscribe");
 
     let deadline = Instant::now() + Duration::from_secs(60);
     let rack = loop {
         let _ = consumer.poll(Duration::from_millis(200)).await;
-        let described = admin.describe_consumer_groups(std::slice::from_ref(&group_id)).all().get().await;
+        let described = admin
+            .describe_consumer_groups(std::slice::from_ref(&group_id))
+            .all()
+            .get()
+            .await;
         if let Ok(described) = described
             && let Some(desc) = described.get(&group_id)
             && desc.group_state() == GroupState::Stable
@@ -954,7 +953,10 @@ async fn test_client_rack_reaches_the_broker() {
         {
             break desc.members()[0].rack_id().map(str::to_string);
         }
-        assert!(Instant::now() < deadline, "group {group_id} never became Stable with one member");
+        assert!(
+            Instant::now() < deadline,
+            "group {group_id} never became Stable with one member"
+        );
     };
     assert_eq!(Some("rack0".to_string()), rack, "the broker reports the consumer's client.rack");
 

@@ -1721,18 +1721,27 @@ mod tests {
                     })
                 })
                 .collect();
-            let sensors: Vec<Arc<Sensor>> =
-                handles.into_iter().map(|h| h.join().expect("thread panicked").expect("sensor created")).collect();
+            let sensors: Vec<Arc<Sensor>> = handles
+                .into_iter()
+                .map(|h| h.join().expect("thread panicked").expect("sensor created"))
+                .collect();
             let registered = metrics.get_sensor("child").expect("child registered");
             for sensor in &sensors {
-                assert!(Arc::ptr_eq(sensor, &registered), "iteration {iteration}: caller got an orphaned sensor");
+                assert!(
+                    Arc::ptr_eq(sensor, &registered),
+                    "iteration {iteration}: caller got an orphaned sensor"
+                );
             }
             let children = metrics.children_sensors(&parent).expect("parent has children");
             assert_eq!(1, children.len(), "iteration {iteration}: duplicate child registration");
             assert!(Arc::ptr_eq(&children[0], &registered));
             // The shared sensor accepts a metric once and only once.
             let name = metrics.metric_name("child-count", "group");
-            assert!(registered.add_metric_name(name.clone(), Box::new(CumulativeCount::new())).expect("first add"));
+            assert!(
+                registered
+                    .add_metric_name(name.clone(), Box::new(CumulativeCount::new()))
+                    .expect("first add")
+            );
             assert!(metrics.metric(&name).is_some());
         }
     }

@@ -1673,9 +1673,13 @@ mod round_trip {
             request_latency_ms: i64,
         ) {
             let node = Node::new(node_id, "localhost".to_string(), 1969 + node_id);
-            self.mgr
-                .abstract_fetch_mut()
-                .handle_fetch_success(&node, request_data, response, version, request_latency_ms);
+            self.mgr.abstract_fetch_mut().handle_fetch_success(
+                &node,
+                request_data,
+                response,
+                version,
+                request_latency_ms,
+            );
         }
 
         /// Delivers a transport-level failure (disconnect) for `node_id`'s

@@ -78,7 +78,14 @@ impl FakeBroker {
         let topic_id = Uuid::random_uuid();
         let accept_task = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
-                tokio::spawn(serve(stream, addr, Arc::clone(&seen), cluster_id.clone(), topic.clone(), topic_id));
+                tokio::spawn(serve(
+                    stream,
+                    addr,
+                    Arc::clone(&seen),
+                    cluster_id.clone(),
+                    topic.clone(),
+                    topic_id,
+                ));
             }
         });
         Self { addr, api_versions, accept_task }

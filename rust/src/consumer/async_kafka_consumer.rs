@@ -7305,7 +7305,10 @@ mod tests {
                 Box::new(TestStringDeserializer),
             )
             .expect("constructs against the fake broker");
-            consumer.assign(vec![TopicPartition::new(TOPIC.to_string(), 0)]).await.expect("assign");
+            consumer
+                .assign(vec![TopicPartition::new(TOPIC.to_string(), 0)])
+                .await
+                .expect("assign");
             let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
             while broker.api_versions_requests().len() < 2 && tokio::time::Instant::now() < deadline {
                 let _ = consumer.poll(Duration::from_millis(50)).await;
