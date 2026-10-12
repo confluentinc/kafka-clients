@@ -4433,7 +4433,7 @@ impl Admin for KafkaAdminClient {
             let handle: KafkaFutureImpl<Vec<AclBinding>> = KafkaFutureImpl::new();
             handle.complete_with_error(Error::with_message(
                 Errors::InvalidRequest,
-                "The AclBindingFilter must not contain CreateTopicsResult::UNKNOWN elements.",
+                "The AclBindingFilter must not contain UNKNOWN elements.",
             ));
             return DescribeAclsResult::new(handle.future());
         }
@@ -4756,7 +4756,9 @@ impl Admin for KafkaAdminClient {
 
         let mut handles: HashMap<String, KafkaFutureImpl<()>> = HashMap::new();
         for feature in feature_updates.keys() {
-            if feature.is_empty() {
+            // Java's `Utils.isBlank`: `str.trim().isEmpty()`, and Java's `trim()`
+            // strips every char up to U+0020 (Rust's `trim()` is Unicode white space).
+            if feature.trim_matches(|c: char| c <= ' ').is_empty() {
                 return Err(Error::local_illegal_argument("Provided feature can not be empty."));
             }
             handles.insert(feature.clone(), KafkaFutureImpl::new());
@@ -5644,6 +5646,8 @@ mod tests {
         );
         let err = result.values().get().await.unwrap_err();
         assert_eq!(err.error(), Errors::InvalidRequest);
+        // Java's text (`KafkaAdminClient.java:2573-2574`).
+        assert_eq!(err.message(), "The AclBindingFilter must not contain UNKNOWN elements.");
     }
 
     /// Translated from `KafkaAdminClientTest.testCreateAcls`.
@@ -9838,6 +9842,30 @@ mod tests {
             .update_features_with_options(&updates, UpdateFeaturesOptions::new())
             .unwrap_err();
         assert_eq!(err.message(), "Provided feature can not be empty.");
+    }
+
+    /// `testUpdateFeaturesShouldFailRequestForInvalidFeatureName` with a blank name:
+    /// Java's `Utils.isBlank` is `trim().isEmpty()`, and Java's `trim()` strips every
+    /// char up to U+0020, so `" "` and `"\t\n"` are rejected, while a no-break space
+    /// (U+00A0, Unicode white space but above U+0020) is a name.
+    #[tokio::test]
+    async fn test_update_features_should_fail_request_for_blank_feature_name() {
+        let (admin, _runnable, _time, _nodes) = env();
+        for blank in [" ", "\t\n", "\u{0}"] {
+            let mut updates = HashMap::new();
+            updates.insert(blank.to_string(), FeatureUpdate::new(2, UpgradeType::Upgrade).unwrap());
+            let err = admin
+                .update_features_with_options(&updates, UpdateFeaturesOptions::new())
+                .unwrap_err();
+            assert_eq!(err.message(), "Provided feature can not be empty.", "{blank:?}");
+        }
+        let mut updates = HashMap::new();
+        updates.insert("\u{a0}".to_string(), FeatureUpdate::new(2, UpgradeType::Upgrade).unwrap());
+        assert!(
+            admin
+                .update_features_with_options(&updates, UpdateFeaturesOptions::new())
+                .is_ok()
+        );
     }
 
     // `testUpdateFeaturesShouldFailRequestInClientWhenDowngradeFlagIsNotSetDuringDeletion`
