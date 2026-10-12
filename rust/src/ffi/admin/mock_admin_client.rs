@@ -47,8 +47,13 @@ pub struct kafka_admin_MockAdminClient_t {
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle from `kafka_admin_MockAdminClient_create`.
+/// `self_` must be a live handle from `kafka_admin_MockAdminClient_create`,
+/// kept alive for `'a`.
 unsafe fn mock_ref<'a>(self_: *const kafka_admin_MockAdminClient_t) -> &'a MockAdminClient {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle from
+    // `kafka_admin_MockAdminClient_create`, kept alive for `'a`: the `Box<AdminClassHandle>` that
+    // function delivers, so the shared reference is to a live value. Nothing takes a `&mut` to the
+    // handle while it is live: only its destroy takes it back, after the handle's last use.
     unsafe { &*(self_ as *const AdminClassHandle) }
         .mock()
         .expect("a MockAdminClient handle is built by new_mock")
@@ -58,13 +63,20 @@ unsafe fn mock_ref<'a>(self_: *const kafka_admin_MockAdminClient_t) -> &'a MockA
 ///
 /// # Safety
 ///
-/// `map` must be null or a live map of C strings to `int16_t` values.
+/// `map` must be null or a live map of C strings to `const int16_t *`
+/// values, each pointing at an `int16_t`.
 unsafe fn map_string_i16(map: *const kafka_Map_t) -> HashMap<String, i16> {
     if map.is_null() {
         return HashMap::new();
     }
+    // SAFETY: `map` is non-null (checked above) and, per this function's `# Safety`, a live map,
+    // unmutated during the call since `kafka_Map_put`'s `# Safety` excludes another call using the
+    // map at the same time, as `map_entries` requires; the slice is dropped before the call returns.
     unsafe { map_entries(map) }
         .iter()
+        // SAFETY: Per this function's `# Safety`, each key is a C string, as `c_str_to_string`
+        // requires, and each value a live `const int16_t *` pointing at an `int16_t` no other call
+        // writes meanwhile, so reading it is sound.
         .map(|&(k, v)| (unsafe { c_str_to_string(k as *const c_char) }, unsafe { *(v as *const i16) }))
         .collect()
 }
@@ -84,6 +96,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_create(
     out_create: *mut *mut kafka_admin_MockAdminClient_t,
 ) -> *mut kafka_common_Error_t {
     let result = AdminClassHandle::new_mock(|| MockAdminClient::create(num_brokers));
+    // SAFETY: Per this function's `# Safety`, `out_create` is a valid slot, as `out_slot` requires.
     unsafe {
         out_slot(result, out_create, |handle| {
             Box::into_raw(handle) as *mut kafka_admin_MockAdminClient_t
@@ -102,6 +115,9 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_create(
 pub unsafe extern "C" fn kafka_admin_MockAdminClient__as_Admin(
     self_: *const kafka_admin_MockAdminClient_t,
 ) -> *const kafka_admin_Admin_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, i.e. the
+    // `Box<AdminClassHandle>` `kafka_admin_MockAdminClient_create` delivered, so the shared
+    // reference, used only to compute the view's address, is to a live value no `&mut` aliases.
     unsafe { &*(self_ as *const AdminClassHandle) }.as_admin()
 }
 
@@ -112,7 +128,8 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient__as_Admin(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle; the maps null or live.
+/// `self_` must be a live handle; the maps null or live maps of the types
+/// above.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_feature_levels(
@@ -121,6 +138,10 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_feature_levels(
     min_supported_feature_levels: *const kafka_Map_t,
     max_supported_feature_levels: *const kafka_Map_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle from
+    // `kafka_admin_MockAdminClient_create`, kept alive for this call, as `mock_ref` requires, and
+    // each map null or a live map of C strings to `const int16_t *` values, as `map_string_i16`
+    // requires.
     unsafe {
         mock_ref(self_).set_feature_levels(
             map_string_i16(feature_levels),
@@ -136,13 +157,18 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_feature_levels(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `new_offsets` null or a live map.
+/// `self_` must be a live handle and `new_offsets` null or a live map of
+/// the types above, each key and value live.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_beginning_offsets(
     self_: *const kafka_admin_MockAdminClient_t,
     new_offsets: *const kafka_Map_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle from
+    // `kafka_admin_MockAdminClient_create`, kept alive for this call, as `mock_ref` requires, and
+    // `new_offsets` null or a live map of `const kafka_common_TopicPartition_t *` handles to
+    // `const int64_t *` values, as `map_topic_partition_i64` requires; the entries are copied.
     unsafe { mock_ref(self_).update_beginning_offsets(map_topic_partition_i64(new_offsets)) }
 }
 
@@ -151,13 +177,18 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_beginning_offsets(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `new_offsets` null or a live map.
+/// `self_` must be a live handle and `new_offsets` null or a live map of
+/// the types above, each key and value live.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_end_offsets(
     self_: *const kafka_admin_MockAdminClient_t,
     new_offsets: *const kafka_Map_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle from
+    // `kafka_admin_MockAdminClient_create`, kept alive for this call, as `mock_ref` requires, and
+    // `new_offsets` null or a live map of `const kafka_common_TopicPartition_t *` handles to
+    // `const int64_t *` values, as `map_topic_partition_i64` requires; the entries are copied.
     unsafe { mock_ref(self_).update_end_offsets(map_topic_partition_i64(new_offsets)) }
 }
 
@@ -166,13 +197,18 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_end_offsets(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `new_offsets` null or a live map.
+/// `self_` must be a live handle and `new_offsets` null or a live map of
+/// the types above, each key and value live.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_consumer_group_offsets(
     self_: *const kafka_admin_MockAdminClient_t,
     new_offsets: *const kafka_Map_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle from
+    // `kafka_admin_MockAdminClient_create`, kept alive for this call, as `mock_ref` requires, and
+    // `new_offsets` null or a live map of `const kafka_common_TopicPartition_t *` handles to
+    // `const int64_t *` values, as `map_topic_partition_i64` requires; the entries are copied.
     unsafe { mock_ref(self_).update_consumer_group_offsets(map_topic_partition_i64(new_offsets)) }
 }
 
@@ -182,7 +218,8 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_consumer_group_offse
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `log_dirs` null or a live list.
+/// `self_` must be a live handle and `log_dirs` null or a live list of C
+/// strings.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_broker_log_dirs(
@@ -190,6 +227,9 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_broker_log_dirs(
     broker_id: i32,
     log_dirs: *const kafka_List_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle from
+    // `kafka_admin_MockAdminClient_create`, kept alive for this call, as `mock_ref` requires, and
+    // `log_dirs` null or a live list of C strings, as `list_strings` requires; they are copied.
     error_slot(unsafe { mock_ref(self_).set_broker_log_dirs(broker_id, list_strings(log_dirs)) })
 }
 
@@ -204,7 +244,8 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_broker_log_dirs(
 /// # Safety
 ///
 /// `self_` must be a live handle, `name` a C string, `partitions` null or a
-/// live list and `configs` null or a live map.
+/// live list and `configs` null or a live map, of the element types above,
+/// each element live.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_add_topic(
@@ -214,20 +255,34 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_add_topic(
     partitions: *const kafka_List_t,
     configs: *const kafka_Map_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `name` is a C string, as `c_str_to_string` requires;
+    // it is copied.
     let name = unsafe { c_str_to_string(name) };
     let partitions = if partitions.is_null() {
         Vec::new()
     } else {
+        // SAFETY: `partitions` is non-null (checked above) and, per this function's `# Safety`, a
+        // live list, unmutated during the call since `kafka_List_add`'s `# Safety` excludes another
+        // call using the list at the same time, as `list_elements` requires; the slice is dropped
+        // before the call returns.
         unsafe { list_elements(partitions) }
             .iter()
+            // SAFETY: Per this function's `# Safety`, each element is a live
+            // `const kafka_common_TopicPartitionInfo_t *` handle, alive while it is cloned, as
+            // `topic_partition_info_ref` requires.
             .map(|&p| unsafe { topic_partition_info_ref(p as *const _) }.clone())
             .collect()
     };
     let configs: Option<BTreeMap<String, String>> = if configs.is_null() {
         None
     } else {
+        // SAFETY: Per this function's `# Safety`, `configs` (non-null, checked above) is a live map
+        // of `const char *` keys and values, i.e. NUL-terminated strings, as `map_strings`
+        // requires; they are copied.
         Some(unsafe { map_strings(configs) }.into_iter().collect())
     };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle from
+    // `kafka_admin_MockAdminClient_create`, kept alive for this call, as `mock_ref` requires.
     error_slot(unsafe { mock_ref(self_) }.add_topic(internal != 0, &name, partitions, configs))
 }
 
@@ -243,7 +298,11 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_mark_topic_for_deletion(
     self_: *const kafka_admin_MockAdminClient_t,
     name: *const c_char,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `name` is a C string, as `c_str_to_string` requires;
+    // it is copied.
     let name = unsafe { c_str_to_string(name) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle from
+    // `kafka_admin_MockAdminClient_create`, kept alive for this call, as `mock_ref` requires.
     error_slot(unsafe { mock_ref(self_) }.mark_topic_for_deletion(&name))
 }
 
@@ -259,6 +318,8 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_timeout_next_request(
     self_: *const kafka_admin_MockAdminClient_t,
     number_of_requests: i32,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle from
+    // `kafka_admin_MockAdminClient_create`, kept alive for this call, as `mock_ref` requires.
     unsafe { mock_ref(self_) }.timeout_next_request(number_of_requests)
 }
 
@@ -268,11 +329,19 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_timeout_next_request(
 ///
 /// # Safety
 ///
-/// `self_` must be null or a handle not yet destroyed.
+/// `self_` must be null or a handle not yet destroyed, that no other call
+/// uses at the same time, directly or through a view; neither it nor its
+/// views are used afterwards, by the callbacks this call runs included.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_destroy(self_: *mut kafka_admin_MockAdminClient_t) {
     if !self_.is_null() {
+        // SAFETY: Per this function's `# Safety`, `self_` (non-null, checked above) is a handle not
+        // yet destroyed, i.e. the `Box<AdminClassHandle>` `kafka_admin_MockAdminClient_create`
+        // delivered, that no other call uses at the same time, directly or through a view, so
+        // taking it back frees it exactly once, through `destroy`, which awaits the tasks still
+        // holding the client. Neither it nor its views are used afterwards, by the callbacks
+        // `destroy` runs included, as the doc requires.
         unsafe { Box::from_raw(self_ as *mut AdminClassHandle) }.destroy();
     }
 }

@@ -36,7 +36,11 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create(
     config: *const kafka_admin_AdminClientConfig_t,
     out_create: *mut *mut kafka_admin_Admin_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `config` is a live handle, kept alive for this call,
+    // which is as long as the reference is used (`AdminClassHandle::new` runs the closure before
+    // returning), as `admin_client_config_ref` requires.
     let config = unsafe { admin_client_config_ref(config) };
     let result = AdminClassHandle::new(|| AdminClient::create(config.build()?));
+    // SAFETY: Per this function's `# Safety`, `out_create` is a valid slot, as `out_slot` requires.
     unsafe { out_slot(result, out_create, |handle| Box::into_raw(handle) as *mut kafka_admin_Admin_t) }
 }

@@ -55,10 +55,14 @@ impl AdminClientConfigInner {
 ///
 /// # Safety
 ///
-/// `config` must be a live handle.
+/// `config` must be a live handle, kept alive for `'a`.
 pub(crate) unsafe fn admin_client_config_ref<'a>(
     config: *const kafka_admin_AdminClientConfig_t,
 ) -> &'a AdminClientConfigInner {
+    // SAFETY: Per this function's `# Safety`, `config` is a live handle kept alive for `'a`: a
+    // `Box<AdminClientConfigInner>` from `Box::into_raw` in `kafka_admin_AdminClientConfig_new`, the
+    // only constructor. The handle has no setters and only its destroy takes the box back, so the
+    // shared reference is to a live value no `&mut` aliases.
     unsafe { &*(config as *const AdminClientConfigInner) }
 }
 
@@ -75,11 +79,17 @@ pub unsafe extern "C" fn kafka_admin_AdminClientConfig_new(
     props: *const kafka_Map_t,
     out_new: *mut *mut kafka_admin_AdminClientConfig_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `props` is a live map of C strings, i.e. a valid map
+    // whose keys and values are NUL-terminated strings, as `map_strings` requires; they are copied
+    // into owned strings.
     let props: HashMap<String, String> = unsafe { map_strings(props) }.into_iter().collect();
     if let Err(error) = AdminClientConfig::new(&props) {
         return box_error(error);
     }
     let inner = AdminClientConfigInner { props };
+    // SAFETY: Per this function's `# Safety`, `out_new` is a valid slot, so the write is sound; the
+    // handle written is the fresh box the caller owns, freed with
+    // `kafka_admin_AdminClientConfig_destroy`.
     unsafe { *out_new = Box::into_raw(Box::new(inner)) as *mut kafka_admin_AdminClientConfig_t };
     std::ptr::null_mut()
 }
@@ -88,11 +98,16 @@ pub unsafe extern "C" fn kafka_admin_AdminClientConfig_new(
 ///
 /// # Safety
 ///
-/// `self_` must be null or a handle not yet destroyed.
+/// `self_` must be null or a handle not yet destroyed, that no other call
+/// uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClientConfig_destroy(self_: *mut kafka_admin_AdminClientConfig_t) {
     if !self_.is_null() {
+        // SAFETY: Per this function's `# Safety`, `self_` (non-null, checked above) is a handle not
+        // yet destroyed, i.e. the `Box<AdminClientConfigInner>` from `Box::into_raw` in
+        // `kafka_admin_AdminClientConfig_new`, that no other call uses at the same time and that is
+        // not used afterwards, so taking it back and dropping it frees it exactly once.
         drop(unsafe { Box::from_raw(self_ as *mut AdminClientConfigInner) });
     }
 }
@@ -107,15 +122,20 @@ mod tests {
     fn new_validates_and_rebuilds_the_configuration() {
         let props = box_string_map([("bootstrap.servers", "localhost:9092"), ("request.timeout.ms", "1234")]);
         let mut config: *mut kafka_admin_AdminClientConfig_t = std::ptr::null_mut();
-        let error = unsafe { kafka_admin_AdminClientConfig_new(props, &mut config) };
-        assert!(error.is_null());
-        unsafe { kafka_Map_destroy(props) };
+        // SAFETY: Test code: `props` is the live map of C strings just built, destroyed once after
+        // `new` copied it; `config` is a valid slot, then the live handle `new` delivered, read
+        // only while alive and destroyed once at the end.
+        unsafe {
+            let error = kafka_admin_AdminClientConfig_new(props, &mut config);
+            assert!(error.is_null());
+            kafka_Map_destroy(props);
 
-        let built = unsafe { admin_client_config_ref(config) }.build().expect("rebuilt");
-        assert_eq!(built.request_timeout_ms(), 1234);
-        // The handle rebuilds a fresh value for every client created from it.
-        unsafe { admin_client_config_ref(config) }.build().expect("rebuilt twice");
-        unsafe { kafka_admin_AdminClientConfig_destroy(config) };
+            let built = admin_client_config_ref(config).build().expect("rebuilt");
+            assert_eq!(built.request_timeout_ms(), 1234);
+            // The handle rebuilds a fresh value for every client created from it.
+            admin_client_config_ref(config).build().expect("rebuilt twice");
+            kafka_admin_AdminClientConfig_destroy(config);
+        }
     }
 
     #[test]
@@ -125,12 +145,15 @@ mod tests {
             ("request.timeout.ms", "not-a-number"),
         ]);
         let mut config: *mut kafka_admin_AdminClientConfig_t = std::ptr::null_mut();
-        let error = unsafe { kafka_admin_AdminClientConfig_new(props, &mut config) };
-        assert!(!error.is_null());
-        assert!(config.is_null());
-        let message = unsafe { c_str_to_string(kafka_common_Error_message(error)) };
-        assert!(message.contains("request.timeout.ms"), "{message}");
+        // SAFETY: Test code: `props` is the live map of C strings just built, destroyed once at the
+        // end; `config` is a valid slot, left null on failure; `error` is the owned error `new`
+        // returned, its message read while it is alive and it is destroyed once.
         unsafe {
+            let error = kafka_admin_AdminClientConfig_new(props, &mut config);
+            assert!(!error.is_null());
+            assert!(config.is_null());
+            let message = c_str_to_string(kafka_common_Error_message(error));
+            assert!(message.contains("request.timeout.ms"), "{message}");
             kafka_common_Error_destroy(error);
             kafka_Map_destroy(props);
             // Null is a no-op.
