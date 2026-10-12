@@ -46,10 +46,37 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 
 /// The `kafka` git submodule, at the repository root. xtask runs from the Rust
 /// workspace (`rust/`), so the submodule is one level up.
 pub const KAFKA_SUBMODULE: &str = "../kafka";
+
+/// A `git -C` [`KAFKA_SUBMODULE`] command. Inside a git hook (the pre-commit
+/// hook runs `make verify-sandbox`) git exports the variables that name the
+/// superproject's repository, `GIT_DIR` among them when committing from a
+/// linked worktree; `-C` does not override them, so the command would read the
+/// superproject, which has none of the submodule's refs. They are cleared, as
+/// git clears them for its own submodule commands; the list is git's
+/// (`git rev-parse --local-env-vars`).
+pub fn submodule_git() -> Command {
+    static LOCAL_ENV_VARS: OnceLock<Vec<String>> = OnceLock::new();
+    let vars = LOCAL_ENV_VARS.get_or_init(|| {
+        Command::new("git")
+            .args(["rev-parse", "--local-env-vars"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).lines().map(str::to_owned).collect())
+            .unwrap_or_default()
+    });
+    let mut command = Command::new("git");
+    command.args(["-C", KAFKA_SUBMODULE]);
+    for var in vars {
+        command.env_remove(var);
+    }
+    command
+}
 
 /// Where the Java client's main sources live: the `kafka` git submodule.
 pub const JAVA_MAIN_ROOT: &str = "../kafka/clients/src/main/java/org/apache/kafka";
@@ -541,8 +568,8 @@ pub fn unsupported_packages_at_ref(reference: &str) -> Option<BTreeSet<String>> 
 /// not available (e.g. a shallow clone).
 fn ref_files(reference: &str, keep: impl Fn(&str) -> bool) -> Option<Vec<(String, Vec<u8>)>> {
     let root = JAVA_MAIN_ROOT.strip_prefix(KAFKA_SUBMODULE)?.strip_prefix('/')?;
-    let listing = Command::new("git")
-        .args(["-C", KAFKA_SUBMODULE, "ls-tree", "-r", reference, "--", root])
+    let listing = submodule_git()
+        .args(["ls-tree", "-r", reference, "--", root])
         .output()
         .ok()
         .filter(|o| o.status.success())?;
@@ -558,8 +585,8 @@ fn ref_files(reference: &str, keep: impl Fn(&str) -> bool) -> Option<Vec<(String
             files.push((sha.to_string(), path.to_string()));
         }
     }
-    let mut child = Command::new("git")
-        .args(["-C", KAFKA_SUBMODULE, "cat-file", "--batch"])
+    let mut child = submodule_git()
+        .args(["cat-file", "--batch"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -998,6 +1025,23 @@ fn is_method_decl(toks: &[Tok], i: usize, class: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The submodule command drops the variables a git hook exports, so a
+    /// `cargo xtask lint` run by the pre-commit hook reads the submodule.
+    #[test]
+    fn test_submodule_git_clears_hook_repository_variables() {
+        let command = submodule_git();
+        let removed: BTreeSet<_> = command
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_string_lossy().into_owned())
+            .collect();
+        for var in ["GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_COMMON_DIR"] {
+            assert!(removed.contains(var), "{var} is not cleared: {removed:?}");
+        }
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, ["-C", KAFKA_SUBMODULE]);
+    }
 
     #[test]
     fn scans_classes_and_methods() {
