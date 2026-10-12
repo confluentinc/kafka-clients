@@ -1,6 +1,6 @@
 ---
 name: m15-merge-review-followup
-description: Merging master's rust/ restructure into a long-lived branch (stranded new dirs, local exclude for the stale root target/, rename list, auto-merged files still break); cargo xtask lint without kafka/ (decomposed, then run in full via a stand-in); a Public-list class in an unsupported package must stay crate-private; fmt::from_fn for nested redacted Debug; sweep a defect class by type containment
+description: Merging master's rust/ restructure into a long-lived branch (stranded new dirs, a pre-move root target/ is not ignored, rename list, auto-merged files still break); cargo xtask lint without kafka/ (decomposed, then run in full via a stand-in); a Public-list class in an unsupported package must stay crate-private; fmt::from_fn for nested redacted Debug; sweep a defect class by type containment
 metadata:
   type: project
 ---
@@ -17,10 +17,9 @@ Round 4 of Milestone 15 (2026-10-02, Actor 85): `origin/master` `4eb87db1` merge
   top-level `src/` remains and that
   `git ls-files | grep -vE '^(rust|python|c|design|rfc|tools|\.claude|\.github|\.githooks|\.semaphore)/' | grep /`
   prints nothing.
-- Master's `.gitignore` ignores `/rust/target` but not the root `target/` (a ~61 GB stale
-  pre-restructure cache) or `.r2-rules/`. Put `/target` and `/.r2-rules` in `.git/info/exclude`
-  (local-only) BEFORE merging, or they show as untracked. Never delete the root `target/`.
-  Builds start cold in `rust/target`, so run the long arms in the background.
+- After the `rust/` move, a pre-move root `target/` is not ignored: master's `.gitignore`
+  ignores `/rust/target` only, so the old cache shows as untracked. Keep it out of every
+  commit. Builds start cold in `rust/target`, so run the long arms in the background.
 - Every `cargo` / `cargo xtask` command runs from `rust/`; `make` runs from the repo root.
 
 **Master's renames at `4eb87db1` (#209, public-surface restriction).**
@@ -112,17 +111,3 @@ Round 4 of Milestone 15 (2026-10-02, Actor 85): `origin/master` `4eb87db1` merge
   - FFI `*Inner` holders and the `*OptionsBuilder`s have no `Debug`.
   - Generated `*Data` types live in `OUT_DIR`, not `rust/src`.
 - Grep trap: 4-space-indented fn parameters look like struct fields.
-
-**Shell gotchas (zsh and the BSD userland on this Mac).**
-- `echo ======` fails ("= not found") because of zsh's `=word` expansion.
-- `grep -r --include=*.rs` fails with "no matches found", because zsh globs it. Quote it.
-- BSD `sed` has no `\s` and fails silently. Use `perl -pi`.
-- `git grep -E` needs `[[:space:]]`.
-- macOS `uniq` has no `-w`.
-- `grep` is ugrep here, and rejects `.{0,400}`-style patterns as too complex. Search
-  transcripts with Python instead.
-
-**Attribution.** The Manager's brief asked for a `Claude Fable 5.1` co-author line, while the
-harness reminder named the running model, `Claude Opus 5.5`. I used the harness line and
-flagged the mismatch in the report. The reminder yields only to the user's own instructions,
-not to an agent's.
