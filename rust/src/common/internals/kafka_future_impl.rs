@@ -189,7 +189,7 @@ impl<T: Clone + Send + Sync + 'static> KafkaFutureImpl<T> {
     ///
     /// Translated from the eager side of `KafkaFuture.whenComplete` — used by
     /// the admin client to chain a follow-up `Call` when a prerequisite future
-    /// (e.g. `describeCluster().nodes()`) resolves.
+    /// resolves (e.g. `describeTopics` by name on `describeCluster().nodes()`).
     #[doc(alias = "org.apache.kafka.common.internals.KafkaFutureImpl#whenComplete")]
     pub(crate) fn when_complete<F>(&self, action: F)
     where
