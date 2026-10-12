@@ -3874,10 +3874,10 @@ pub unsafe extern "C" fn kafka_producer_Producer_close_with_timeout(
 /// Converts a C close timeout for `producer` to a [`std::time::Duration`].
 ///
 /// Java's `KafkaProducer.close(Duration)` rejects a negative timeout with "The
-/// timeout cannot be negative." (`KafkaProducer.java:1393-1394`), and so does this
+/// timeout cannot be negative." (`KafkaProducer.java:1480-1481`), and so does this
 /// for a `KafkaProducer` handle (and for a null one, which is no mock).
 /// `MockProducer.close(Duration)` never reads its timeout
-/// (`MockProducer.java:436-442`), so a `MockProducer` handle accepts any value and
+/// (`MockProducer.java:438-444`), so a `MockProducer` handle accepts any value and
 /// a negative one closes as zero.
 ///
 /// # Safety
@@ -6987,7 +6987,7 @@ mod tests {
     }
 
     /// A `KafkaProducer` handle rejects a negative timeout with Java's
-    /// `KafkaProducer.close(Duration)` message (`KafkaProducer.java:1393-1394`):
+    /// `KafkaProducer.close(Duration)` message (`KafkaProducer.java:1480-1481`):
     /// the callback fires once, and the producer is still open for a real close.
     #[test]
     fn test_close_with_timeout_async_negative_timeout() {
@@ -7017,7 +7017,7 @@ mod tests {
     }
 
     /// A `MockProducer` handle closes on a negative timeout: Java's
-    /// `MockProducer.close(Duration)` never reads it (`MockProducer.java:436-442`).
+    /// `MockProducer.close(Duration)` never reads it (`MockProducer.java:438-444`).
     #[test]
     fn test_close_with_timeout_async_negative_timeout_on_mock_closes() {
         let producer = kafka_producer_MockProducer_new(true);
@@ -7937,7 +7937,7 @@ mod tests {
     /// Critic 75 F3: the single-record `send` does not hold the producer lock
     /// across its metadata wait either, so a close started meanwhile proceeds
     /// and fails the send at once, as Java's `doSend` does ("Producer closed
-    /// while send in progress", `KafkaProducer.java:988-990`).
+    /// while send in progress", `KafkaProducer.java:1069-1071`).
     #[test]
     fn test_close_proceeds_while_send_waits_for_metadata() {
         let ((future, err), elapsed) = close_while_sending(|address| {

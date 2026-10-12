@@ -1851,7 +1851,7 @@ unsafe fn error_from_code_and_message(code: i32, message: *const c_char) -> Erro
 /// Injects an error to be returned by the next `poll` on a mock consumer, or
 /// clears a pending one (mock only). Mirrors Java's
 /// `setPollException(KafkaException)`, whose `null` argument clears the field
-/// (`MockConsumer.java:344-346`).
+/// (`MockConsumer.java:385-387`).
 ///
 /// With `clear` set, `code` and `message` are ignored and a pending error is
 /// cleared. Otherwise the error is built from `code` + `message` exactly as
@@ -1905,7 +1905,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_poll_error(
 /// Injects an error to be returned by the next `beginning_offsets` /
 /// `end_offsets` on a mock consumer, or clears a pending one (mock only).
 /// Mirrors Java's `setOffsetsException(KafkaException)`, whose `null` argument
-/// clears the field (`MockConsumer.java:348-350`).
+/// clears the field (`MockConsumer.java:394-396`).
 ///
 /// `clear`, `code` and `message` work as in
 /// [`kafka_consumer_MockConsumer_set_poll_error`].

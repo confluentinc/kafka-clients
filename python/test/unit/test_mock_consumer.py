@@ -518,7 +518,7 @@ def test_set_poll_exception_raises_the_injected_instance_once() -> None:
 
 
 def test_set_poll_exception_none_clears_a_pending_one() -> None:
-    # Java: setPollException(null) clears the field (MockConsumer.java:344-346).
+    # Java: setPollException(null) clears the field (MockConsumer.java:385-387).
     consumer = earliest()
     consumer.set_poll_exception(exception=IllegalStateError(message="boom"))  # type: ignore[arg-type]
     consumer.set_poll_exception(exception=None)

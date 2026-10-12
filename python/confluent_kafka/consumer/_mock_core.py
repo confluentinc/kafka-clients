@@ -471,7 +471,7 @@ class MockConsumerCore(Generic[K, V]):
     def _c_offsets_for_times(self, timestamps_to_search: Mapping[TopicPartition, int]
                            ) -> dict[TopicPartition, OffsetAndTimestamp | None]:
         # Java's mock throws UnsupportedOperationException("Not implemented
-        # yet.") (MockConsumer.java:536), inside its synchronized body.
+        # yet.") (MockConsumer.java:611), inside its synchronized body.
         with self._lock:
             raise UnsupportedVersionError(message="Not implemented yet.")
 

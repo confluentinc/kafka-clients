@@ -2672,7 +2672,7 @@ impl KafkaProducer<Vec<u8>, Vec<u8>> {
         let (record_topic, partition, timestamp, record_headers, key, value) = record.into_parts();
 
         // Java's `doSend` appends `record.headers().toArray()`
-        // (`KafkaProducer.java:1020`, `:1029-1030`); the header bytes are
+        // (`KafkaProducer.java:1101`, `:1110-1111`); the header bytes are
         // written straight into the batch buffer, as on the typed path.
         self.do_send_bytes(
             &record_topic,
@@ -4722,8 +4722,8 @@ mod tests {
 
     /// The borrowed byte-slice `send`, the path of the C FFI's `send_batch` and
     /// single-record sends (so of the C and Python `KafkaProducer`), appends the
-    /// record's headers as Java's `doSend` does (`KafkaProducer.java:1020`,
-    /// `:1029-1030`), in order, with an empty and a null value kept apart. It
+    /// record's headers as Java's `doSend` does (`KafkaProducer.java:1101`,
+    /// `:1110-1111`), in order, with an empty and a null value kept apart. It
     /// used to append none.
     #[tokio::test]
     async fn test_borrowed_send_appends_the_record_headers() {
