@@ -370,14 +370,20 @@ fn deliver(cb: kafka_common_KafkaFuture_get_cb_t, result: Result<Arc<FfiValue>, 
 /// inline when the future has no client. A panic while resolving is
 /// delivered as the [`panic_error`](crate::ffi::common::panic_error) of
 /// `fn_name`, the entry point.
-fn get_cb(
+///
+/// # Safety
+///
+/// `future` must be a valid handle from [`box_future`], and `cb` and `opaque`
+/// the pair the C caller passed to the `_cb` entry point.
+unsafe fn get_cb(
     fn_name: &'static str,
     future: *const kafka_common_KafkaFuture_t,
     timeout: Option<Duration>,
     cb: kafka_common_KafkaFuture_get_cb_t,
     opaque: *mut c_void,
 ) {
-    // SAFETY: `future` is a valid handle (the caller's precondition).
+    // SAFETY: per this function's `# Safety`, `future` is a valid handle from
+    // `box_future`, which is what `future_arc` requires.
     let inner = unsafe { future_arc(future) };
     let opaque = SendPtr(opaque);
     #[cfg(test)]
@@ -481,7 +487,9 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_get_cb(
     cb: kafka_common_KafkaFuture_get_cb_t,
     opaque: *mut c_void,
 ) {
-    get_cb("kafka_common_KafkaFuture_get_cb", self_, None, cb, opaque);
+    // SAFETY: per this function's `# Safety`, `self_` is a valid future handle, and
+    // `cb` and `opaque` are the pair the C caller passed.
+    unsafe { get_cb("kafka_common_KafkaFuture_get_cb", self_, None, cb, opaque) };
 }
 
 /// `KafkaFuture.get(timeout, MILLISECONDS)`: like
@@ -524,13 +532,17 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_get_with_timeout_cb(
     cb: kafka_common_KafkaFuture_get_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
-    get_cb(
-        "kafka_common_KafkaFuture_get_with_timeout_cb",
-        self_,
-        Some(timeout_ms(timeout)),
-        cb,
-        opaque,
-    );
+    // SAFETY: per this function's `# Safety`, `self_` is a valid future handle, and
+    // `cb` and `opaque` are the pair the C caller passed.
+    unsafe {
+        get_cb(
+            "kafka_common_KafkaFuture_get_with_timeout_cb",
+            self_,
+            Some(timeout_ms(timeout)),
+            cb,
+            opaque,
+        )
+    };
 }
 
 /// `KafkaFuture.isDone()`: 1 when the future has resolved, 0 otherwise.

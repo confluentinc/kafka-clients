@@ -450,8 +450,18 @@ impl MapInner {
         &self.entries
     }
 
-    fn position(&self, key: *mut c_void) -> Option<usize> {
+    /// The index of the entry whose key equals `key`, by `key_eq` or, when it
+    /// is unset, by pointer identity.
+    ///
+    /// # Safety
+    ///
+    /// When `key_eq` is set, `key` must be a key of the type it compares (the
+    /// key type the function that built the map documents): `key_eq` reads it.
+    unsafe fn position(&self, key: *mut c_void) -> Option<usize> {
         self.entries.iter().position(|&(k, _)| match self.key_eq {
+            // SAFETY: `key_eq` is set only by `box_map`'s callers, together with keys
+            // of the type it compares, so every stored `k` is one; `key` is one per
+            // this function's `# Safety`.
             Some(eq) => unsafe { eq(k, key) },
             None => k == key,
         })
@@ -595,12 +605,15 @@ pub extern "C" fn kafka_Map_new() -> *mut kafka_Map_t {
 ///
 /// # Safety
 ///
-/// `self_` must be a valid map handle.
+/// `self_` must be a valid map handle, and `key` a key of the type the map
+/// documents when Rust built the map: its keys are compared by reading them.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_Map_put(self_: *mut kafka_Map_t, key: *mut c_void, value: *mut c_void) {
     let inner = unsafe { &mut *(self_ as *mut MapInner) };
-    match inner.position(key) {
+    // SAFETY: per this function's `# Safety`, `key` is of the type the map's
+    // `key_eq` compares, when it has one.
+    match unsafe { inner.position(key) } {
         Some(i) => {
             let old = std::mem::replace(&mut inner.entries[i].1, value);
             if let Some(destroy) = inner.value_destroy
@@ -662,12 +675,15 @@ pub unsafe extern "C" fn kafka_Map_value(self_: *const kafka_Map_t, index: i32) 
 ///
 /// # Safety
 ///
-/// `self_` must be a valid map handle.
+/// `self_` must be a valid map handle, and `key` a key of the type the map
+/// documents when Rust built the map: its keys are compared by reading them.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_Map_get(self_: *const kafka_Map_t, key: *mut c_void) -> *mut c_void {
     let inner = unsafe { map_ref(self_) };
-    inner.position(key).map_or(ptr::null_mut(), |i| inner.entries[i].1)
+    // SAFETY: per this function's `# Safety`, `key` is of the type the map's
+    // `key_eq` compares, when it has one.
+    unsafe { inner.position(key) }.map_or(ptr::null_mut(), |i| inner.entries[i].1)
 }
 
 /// Frees the map, and its keys and values when the map owns them.
