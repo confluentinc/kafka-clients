@@ -1830,12 +1830,6 @@ mod tests {
         ]
     }
 
-    /// Every code whose `Errors::error()` names a class reports that class's own
-    /// value, and the value equals `Errors::code()`.
-    ///
-    /// This machine-checks the faithful half of [`kafka_common_ErrorCode_e`]
-    /// against `Errors` itself, so the two cannot drift: a code renamed, renumbered
-    /// or re-pointed at a different class in `Errors` fails here.
     /// `catch_task_panic` passes a task's own result through and turns a
     /// panic, of either string payload, into the entry point's panic error.
     #[tokio::test]
@@ -1876,6 +1870,12 @@ mod tests {
         );
     }
 
+    /// Every code whose `Errors::error()` names a class reports that class's own
+    /// value, and the value equals `Errors::code()`.
+    ///
+    /// This machine-checks the faithful half of [`kafka_common_ErrorCode_e`]
+    /// against `Errors` itself, so the two cannot drift: a code renamed, renumbered
+    /// or re-pointed at a different class in `Errors` fails here.
     #[test]
     fn ffi_error_code_owned_codes_match_the_java_values() {
         let mut owned = 0;
