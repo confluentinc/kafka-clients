@@ -2119,7 +2119,12 @@ On branch `milestone-16-p9fix`, to be merged back with a merge commit.
     yet. Third, the tests for both, from the consumer-relevant cases in `DefaultRecordTest`. Rust has no
     `readPartiallyFrom`, no `skipKeyValueIterator` / `streamingIterator(…, maxRecordBodySize)` overloads and
     no legacy deep-decode (`legacy_record.rs` holds only constants), so the `AbstractLegacyRecordBatch` and
-    iterator parts of b69c07c816 have no Rust counterpart and stay out of scope.
+    iterator parts of b69c07c816 have no Rust counterpart and stay out of scope. Correction (review fix
+    round, COMMENTS.114 C6): the limit-less `streamingIterator(bufferSupplier)` does have one — the
+    compressed-batch loop of `DefaultRecordBatch::iter_records`, which applies `SOFT_MAX_ARRAY_LENGTH` — so
+    `DefaultRecordBatchTest.testStreamingIteratorRejectsForgedBodySizeExceedingArrayLengthLimit` is translated
+    (`test_streaming_iterator_rejects_forged_body_size_exceeding_array_length_limit`). Only the
+    `maxRecordBodySize` overloads (and `testCompressedIteratorsEnforceConfiguredMaxRecordBodySize`) lack one.
 - Test-only commits:
   - a5137f7c38, 624ca392ef, 7c010c7583, 1a46339e90, 16e976ac8e, 159d696005, c75e10d229 (KafkaConsumerTest
     hunks);
@@ -2191,7 +2196,9 @@ On branch `milestone-16-p9fix`, to be merged back with a merge commit.
   - Share (§20): `ShareConsumerImplTest` half of 0fd8327920.
   - Broker side: the group-coordinator tests of KAFKA-20570; b69c07c816's broker paths.
   - No Rust counterpart: `readPartiallyFrom` and its two `DefaultRecordTest` tests, the `skipKeyValueIterator` /
-    `streamingIterator(.., maxRecordBodySize)` overloads, `AbstractLegacyRecordBatch`.
+    `streamingIterator(.., maxRecordBodySize)` overloads (with
+    `testCompressedIteratorsEnforceConfiguredMaxRecordBodySize`), `AbstractLegacyRecordBatch`. The limit-less
+    `streamingIterator` test was translated in the review fix round (COMMENTS.114 C6).
   - `KafkaConsumerTest.testUnsubscribingNonExistingMetricsDoesntCauseError` (renamed by 1a46339e90): untranslated
     KIP-714 row; the old name in `kafka_consumer_metrics.rs`'s skip list was left for Phase 11, which owns that file.
 - **Deviations in the test translations (DoD #7):** the KafkaConsumerTest currentLag tests run against the
