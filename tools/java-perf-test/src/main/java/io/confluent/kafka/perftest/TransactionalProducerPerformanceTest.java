@@ -172,6 +172,8 @@ public class TransactionalProducerPerformanceTest {
     private static final long[] commitLatencyHist = new long[MAX_LATENCY_MS + 2];
     private static final long[] abortLatencyHist = new long[MAX_LATENCY_MS + 2];
     private static boolean latencyBudgetExceeded = false;
+    // Set when results.json could not be written; fails the run.
+    private static boolean resultsWriteFailed = false;
 
     // --- Transaction knobs ---
     private static final long RECORDS_PER_TRANSACTION = Math.max(1, envLong("RECORDS_PER_TRANSACTION", 100));
@@ -409,6 +411,9 @@ public class TransactionalProducerPerformanceTest {
             System.out.println("Results summary written to: " + RESULTS_FILE);
         } catch (IOException e) {
             System.err.println("Failed to write " + RESULTS_FILE + ": " + e);
+            // The machine-readable summary is the run's primary artifact:
+            // fail the run rather than exit 0 without it.
+            resultsWriteFailed = true;
         }
 
         if (!terminating) {
@@ -426,7 +431,7 @@ public class TransactionalProducerPerformanceTest {
         metrics.stopCollecting();
         System.out.println("Done");
 
-        System.exit(latencyBudgetExceeded ? 1 : 0);
+        System.exit((latencyBudgetExceeded || resultsWriteFailed) ? 1 : 0);
     }
 
     // === Per-producer worker =================================================

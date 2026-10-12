@@ -2050,10 +2050,11 @@ async fn transactional_producer_perf_test() {
         cpu = avg_cpu,
         rss = avg_rss_kib,
     );
-    match std::fs::write(&config.results_file, results_json) {
-        Ok(()) => println!("Results summary written to: {}", config.results_file),
-        Err(e) => eprintln!("Failed to write {}: {e}", config.results_file),
-    }
+    // The machine-readable summary is the run's primary artifact: fail the run
+    // rather than pass without it (as the metrics.jsonl writer does).
+    std::fs::write(&config.results_file, results_json)
+        .unwrap_or_else(|e| panic!("Failed to write {}: {e}", config.results_file));
+    println!("Results summary written to: {}", config.results_file);
 
     // === PERFORMANCE TARGET ASSERTIONS ===
     // Assertions apply to committed records only (per the plan).

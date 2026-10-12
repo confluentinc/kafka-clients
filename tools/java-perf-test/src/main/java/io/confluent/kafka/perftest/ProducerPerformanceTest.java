@@ -127,6 +127,8 @@ public class ProducerPerformanceTest {
     // single recorder thread and read after it is joined, so no locking needed.
     private static final long[] latencyHist = new long[MAX_LATENCY_MS + 2];
     private static boolean latencyBudgetExceeded = false;
+    // Set when results.json could not be written; fails the run.
+    private static boolean resultsWriteFailed = false;
 
     public static void main(String[] args) throws Exception {
         installSignalHandler();
@@ -341,6 +343,9 @@ public class ProducerPerformanceTest {
                 System.out.println("Results summary written to: " + RESULTS_FILE);
             } catch (IOException e) {
                 System.err.println("Failed to write " + RESULTS_FILE + ": " + e);
+                // The machine-readable summary is the run's primary artifact:
+                // fail the run rather than exit 0 without it.
+                resultsWriteFailed = true;
             }
 
             // Compression cross-check: the client's own compression-rate-avg
@@ -378,7 +383,7 @@ public class ProducerPerformanceTest {
         metrics.stopCollecting();
         System.out.println("Done");
 
-        int exitCode = latencyBudgetExceeded ? 1 : 0;
+        int exitCode = (latencyBudgetExceeded || resultsWriteFailed) ? 1 : 0;
         if (VERIFY_CONSUMED && !terminating && baselineEndOffsets != null) {
             long expected = warmupSent + measuredSent;
             System.out.println("Verifying consumed messages from topic '" + TOPIC_NAME
@@ -563,6 +568,11 @@ public class ProducerPerformanceTest {
                         verifyRecordMetadata(r);
                     } catch (Exception e) {
                         System.out.println("Produce call resulted in exception: " + e.getMessage());
+                        // A failed record still completes, but contributes no
+                        // latency — like the C and Rust harnesses, which only
+                        // record latency for acknowledged records.
+                        completedMessages++;
+                        continue;
                     }
                     completedMessages++;
                     // Latency is stamped at ack in the delivery callback

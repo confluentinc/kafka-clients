@@ -106,6 +106,8 @@ static long P99_LIMIT_MS = 0;
 // Machine-readable summary file, matching the other producer perf tests.
 static const char *RESULTS_FILE = "results.json";
 static bool latency_budget_exceeded = false;
+// Set when results.json could not be written; fails the run.
+static bool results_write_failed = false;
 // Latency histogram (ms resolution) for the p99 computation, mirroring the Rust
 // test. Written only by the single record-completed task and read after that
 // task is joined, so no locking is needed.
@@ -1464,6 +1466,15 @@ static void run_test() {
                 break;
             }
         }
+        // Guard the ratios: a run that completed no messages (or measured no
+        // time) must still write valid JSON, and nan / inf are not JSON numbers.
+        double results_rate = total_time_s > 0 ? message_rate : 0.0;
+        double results_mib_s = total_time_s > 0
+            ? (completed_messages * MESSAGE_SIZE / (1024.0 * 1024.0)) / total_time_s
+            : 0.0;
+        double results_avg_latency_ms = completed_messages > 0
+            ? (double)total_latency / completed_messages / 1e6
+            : 0.0;
         FILE *results_fp = fopen(RESULTS_FILE, "w");
         if (results_fp != NULL) {
             fprintf(results_fp,
@@ -1485,18 +1496,25 @@ static void run_test() {
                 TOPIC,
                 completed_messages,
                 total_time_s,
-                message_rate,
-                (completed_messages * MESSAGE_SIZE / (1024.0 * 1024.0)) / total_time_s,
+                results_rate,
+                results_mib_s,
                 min_latency_ms,
-                (double)total_latency / completed_messages / 1e6,
+                results_avg_latency_ms,
                 p50_ms, p90_ms, p95_ms, p99_ms, p999_ms,
                 (double)max_latency / 1e6,
                 average_cpu,
                 average_rss / 1024.0);
-            fclose(results_fp);
-            printf("Results summary written to: %s\n", RESULTS_FILE);
+            if (fclose(results_fp) != 0) {
+                fprintf(stderr, "Failed to write %s\n", RESULTS_FILE);
+                results_write_failed = true;
+            } else {
+                printf("Results summary written to: %s\n", RESULTS_FILE);
+            }
         } else {
+            // The machine-readable summary is the run's primary artifact:
+            // fail the run rather than exit 0 without it.
             fprintf(stderr, "Failed to write %s\n", RESULTS_FILE);
+            results_write_failed = true;
         }
     }
 
@@ -1849,5 +1867,5 @@ int main(int argc, char** argv) {
     metrics_stop_collecting(&metrics);
     printf("Done\n");
 
-    return latency_budget_exceeded ? 1 : 0;
+    return (latency_budget_exceeded || results_write_failed) ? 1 : 0;
 }

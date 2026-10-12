@@ -180,6 +180,8 @@ static long P99_LIMIT_MS = 0;
 static const char *RESULTS_FILE = "results.json";
 static const char *METRICS_FILE = "metrics.jsonl";
 static bool latency_budget_exceeded = false;
+// Set when results.json could not be written; fails the run.
+static bool results_write_failed = false;
 static bool interrupted = false;
 
 // --- shared statistics, written by all producer threads (guarded by
@@ -1862,10 +1864,17 @@ static void run_test() {
             (double)max_abort_latency / 1e6,
             average_cpu,
             average_rss / 1024.0);
-        fclose(results_fp);
-        printf("Results summary written to: %s\n", RESULTS_FILE);
+        if (fclose(results_fp) != 0) {
+            fprintf(stderr, "Failed to write %s\n", RESULTS_FILE);
+            results_write_failed = true;
+        } else {
+            printf("Results summary written to: %s\n", RESULTS_FILE);
+        }
     } else {
+        // The machine-readable summary is the run's primary artifact: fail the
+        // run rather than exit 0 without it.
         fprintf(stderr, "Failed to write %s\n", RESULTS_FILE);
+        results_write_failed = true;
     }
 
     free_message_data(messages);
@@ -2108,5 +2117,5 @@ int main(int argc, char** argv) {
     metrics_stop_collecting(&metrics);
     printf("Done\n");
 
-    return latency_budget_exceeded ? 1 : 0;
+    return (latency_budget_exceeded || results_write_failed) ? 1 : 0;
 }
