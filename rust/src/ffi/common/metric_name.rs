@@ -219,8 +219,19 @@ pub unsafe extern "C" fn kafka_common_MetricName_destroy(self_: *mut kafka_commo
     }
 }
 
+/// Frees a metric-name handle held as a `void *` container element.
+///
+/// # Safety
+///
+/// `element` must be an owned metric-name handle not yet destroyed.
+pub(crate) unsafe fn destroy_metric_name_element(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned metric-name handle not yet
+    // destroyed, which is what `kafka_common_MetricName_destroy` requires of a non-null handle.
+    unsafe { kafka_common_MetricName_destroy(element as *mut kafka_common_MetricName_t) }
+}
+
 /// Key equality for `kafka_Map_t`s keyed by `kafka_common_MetricName_t`
-/// (`metrics()` on the producer and the consumer).
+/// (the `metrics()` maps, see `ffi::common::metrics::box_metrics_map`).
 ///
 /// # Safety
 ///

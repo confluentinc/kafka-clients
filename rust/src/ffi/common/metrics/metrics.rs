@@ -30,16 +30,15 @@
 //! during `add_metric*` / `remove_*`, `close` during `close`).
 
 use std::collections::BTreeMap;
-use std::ffi::{c_char, c_void};
+use std::ffi::c_char;
 use std::sync::Arc;
 
 use crate::common::Error;
 use crate::common::metrics::{MetricConfig, Metrics, RecordingLevel, Sensor, SensorOptions, SensorOptionsBuilder};
-use crate::ffi::common::metric_name::{MetricNameInner, box_metric_name, kafka_common_MetricName_t, metric_name_ref};
+use crate::ffi::common::metric_name::{box_metric_name, kafka_common_MetricName_t, metric_name_ref};
 use crate::ffi::common::metric_name_template::{kafka_common_MetricNameTemplate_t, metric_name_template_ref};
-use crate::ffi::common::metrics::kafka_metric::{
-    box_kafka_metric, destroy_kafka_metric_element, kafka_common_metrics_KafkaMetric_t,
-};
+use crate::ffi::common::metrics::box_metrics_map;
+use crate::ffi::common::metrics::kafka_metric::{box_kafka_metric, kafka_common_metrics_KafkaMetric_t};
 use crate::ffi::common::metrics::measurable::{ArcMeasurable, kafka_common_metrics_Measurable_t, take_measurable};
 use crate::ffi::common::metrics::metric_config::{
     box_metric_config, kafka_common_metrics_MetricConfig_t, metric_config_arc, metric_config_option,
@@ -54,7 +53,7 @@ use crate::ffi::common::metrics::sensor::{
 };
 use crate::ffi::common::{box_error, kafka_common_Error_t};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_map, c_str_to_string, destroy_boxed, kafka_List_t, kafka_Map_t, list_strings, map_strings};
+use crate::ffi::util::{c_str_to_string, kafka_List_t, kafka_Map_t, list_strings, map_strings};
 
 // ---------------------------------------------------------------------------
 // Metrics
@@ -816,8 +815,8 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_add_reporter(
 
 /// `metrics()`: a snapshot of every registered metric as an owned map of
 /// owned `kafka_common_MetricName_t *` keys to owned
-/// `kafka_common_metrics_KafkaMetric_t *` values, in name order; freed with
-/// `kafka_Map_destroy`, which frees both.
+/// `kafka_common_metrics_KafkaMetric_t *` values (see `box_metrics_map`);
+/// freed with `kafka_Map_destroy`, which frees both.
 ///
 /// # Safety
 ///
@@ -830,34 +829,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metrics(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
     // requires; the reference is used only within this call. The snapshot is collected into owned
     // values.
-    let mut metrics: Vec<_> = unsafe { metrics_ref(self_) }.metrics().into_iter().collect();
-    // A `HashMap` has no order; name order makes the snapshot reproducible.
-    metrics.sort_by(|(a, _), (b, _)| (a.group(), a.name(), a.tags()).cmp(&(b.group(), b.name(), b.tags())));
-    let entries = metrics
-        .into_iter()
-        .map(|(name, metric)| (box_metric_name(name) as *mut c_void, box_kafka_metric(metric) as *mut c_void))
-        .collect();
-    box_map(
-        entries,
-        Some(destroy_boxed::<MetricNameInner>),
-        Some(destroy_kafka_metric_element),
-        Some(metric_name_key_eq),
-    )
-}
-
-/// Compares two `kafka_common_MetricName_t *` keys for `kafka_Map_get`.
-///
-/// # Safety
-///
-/// Both must be valid metric-name handles.
-unsafe fn metric_name_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
-    // SAFETY: Per this function's `# Safety`, `a` is a valid metric-name handle, as
-    // `metric_name_ref` requires; the reference is used only within this call.
-    let a = unsafe { metric_name_ref(a as *const kafka_common_MetricName_t) };
-    // SAFETY: Per this function's `# Safety`, `b` is a valid metric-name handle, as
-    // `metric_name_ref` requires; the reference is used only within this call.
-    let b = unsafe { metric_name_ref(b as *const kafka_common_MetricName_t) };
-    a == b
+    box_metrics_map(unsafe { metrics_ref(self_) }.metrics())
 }
 
 /// `metric(MetricName metricName)`: the metric registered under the name,
@@ -1254,7 +1226,7 @@ pub unsafe extern "C" fn kafka_common_metrics_SensorOptionsBuilder_destroy(
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::{CStr, CString};
+    use std::ffi::{CStr, CString, c_void};
     use std::ptr;
 
     use indexmap::IndexSet;

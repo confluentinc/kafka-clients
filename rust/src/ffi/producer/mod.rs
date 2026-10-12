@@ -113,8 +113,7 @@ use tokio::task::JoinHandle;
 use crate::common::{Error, TopicPartition};
 use crate::consumer::OffsetAndMetadata;
 use crate::ffi::callback_queue::{CallbackJob, CallbackQueue, SendPtr};
-use crate::ffi::common::metric_name::{box_metric_name, kafka_common_MetricName_destroy, metric_name_eq};
-use crate::ffi::common::metrics::kafka_metric::{box_kafka_metric, kafka_common_metrics_KafkaMetric_destroy};
+use crate::ffi::common::metrics::box_metrics_map;
 use crate::ffi::common::partition_info::{box_partition_info, kafka_common_PartitionInfo_destroy};
 use crate::ffi::common::topic_partition::topic_partition_ref;
 use crate::ffi::common::{
@@ -130,7 +129,7 @@ use crate::ffi::kafka_future::{block_on, box_future, kafka_common_KafkaFuture_t,
 use crate::ffi::producer::callback::{callback_registration, kafka_producer_Callback_t};
 use crate::ffi::producer::producer_record::{GenericRecord, kafka_producer_ProducerRecord_t, producer_record_ref};
 use crate::ffi::producer::record_metadata::{box_record_metadata, kafka_producer_RecordMetadata_destroy};
-use crate::ffi::util::{GenericValue, box_list, box_map, c_str_to_string, kafka_List_t, kafka_Map_t, map_entries};
+use crate::ffi::util::{GenericValue, box_list, c_str_to_string, kafka_List_t, kafka_Map_t, map_entries};
 use crate::producer::{Callback, DynProducer};
 
 /// The `Producer` every C handle drives: `void *` key and value.
@@ -1349,41 +1348,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_metrics(self_: *const kafka_pro
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
     // `client` is used only during the call.
     let client = unsafe { client_ref(self_) };
-    let mut metrics: Vec<_> = client.producer.metrics().into_iter().collect();
-    // Deterministic order for a map Java leaves unordered.
-    metrics.sort_by(|(a, _), (b, _)| a.name().cmp(b.name()).then_with(|| a.group().cmp(b.group())));
-    let entries = metrics
-        .into_iter()
-        .map(|(name, metric)| (box_metric_name(name) as *mut c_void, box_kafka_metric(metric) as *mut c_void))
-        .collect();
-    box_map(
-        entries,
-        Some(destroy_metric_name),
-        Some(destroy_kafka_metric),
-        Some(metric_name_eq),
-    )
-}
-
-/// Frees a metric-name handle held as a `void *` container element.
-///
-/// # Safety
-///
-/// `element` must be an owned metric-name handle not yet destroyed.
-unsafe fn destroy_metric_name(element: *mut c_void) {
-    // SAFETY: Per this function's `# Safety`, `element` is an owned metric-name handle not yet
-    // destroyed, which is what `kafka_common_MetricName_destroy` requires.
-    unsafe { kafka_common_MetricName_destroy(element as *mut _) }
-}
-
-/// Frees a metric handle held as a `void *` container element.
-///
-/// # Safety
-///
-/// `element` must be an owned metric handle not yet destroyed.
-unsafe fn destroy_kafka_metric(element: *mut c_void) {
-    // SAFETY: Per this function's `# Safety`, `element` is an owned metric handle not yet
-    // destroyed, which is what `kafka_common_metrics_KafkaMetric_destroy` requires.
-    unsafe { kafka_common_metrics_KafkaMetric_destroy(element as *mut _) }
+    box_metrics_map(client.producer.metrics())
 }
 
 /// `Producer.close()`, blocking: `close(Duration.ofMillis(Long.MAX_VALUE))`,

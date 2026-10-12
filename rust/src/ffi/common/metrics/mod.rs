@@ -34,7 +34,15 @@
 //! `MetricsReporter` callback runs synchronously on the thread calling the
 //! registry (`add_reporter`, `add_metric_*`, `remove_metric`, `close`).
 
+use std::collections::HashMap;
+use std::ffi::c_void;
 use std::sync::Arc;
+
+use crate::common::MetricName;
+use crate::common::metrics::KafkaMetric;
+use crate::ffi::common::metric_name::{box_metric_name, destroy_metric_name_element, metric_name_eq};
+use crate::ffi::common::metrics::kafka_metric::{box_kafka_metric, destroy_kafka_metric_element};
+use crate::ffi::util::{box_map, kafka_Map_t};
 
 pub(crate) mod compound_stat;
 pub(crate) mod gauge;
@@ -139,9 +147,71 @@ impl<T: ?Sized> Interface<T> {
     }
 }
 
+/// The C shape of a `metrics()` snapshot (`Producer.metrics()`,
+/// `Consumer.metrics()`, `Metrics.metrics()`): an owned `kafka_Map_t` of owned
+/// `kafka_common_MetricName_t *` to owned `kafka_common_metrics_KafkaMetric_t
+/// *`, names compared by value in `kafka_Map_get`, freed with
+/// `kafka_Map_destroy`, which frees both.
+///
+/// Java returns a `HashMap`, which has no order; the entries are sorted by
+/// group, name and tags, the whole `MetricName`, so the snapshot is
+/// reproducible (per-node and per-topic metrics share group and name and
+/// differ only in their tags).
+pub(crate) fn box_metrics_map(metrics: HashMap<MetricName, Arc<KafkaMetric>>) -> *mut kafka_Map_t {
+    let mut metrics: Vec<_> = metrics.into_iter().collect();
+    metrics.sort_by(|(a, _), (b, _)| (a.group(), a.name(), a.tags()).cmp(&(b.group(), b.name(), b.tags())));
+    let entries = metrics
+        .into_iter()
+        .map(|(name, metric)| (box_metric_name(name) as *mut c_void, box_kafka_metric(metric) as *mut c_void))
+        .collect();
+    box_map(
+        entries,
+        Some(destroy_metric_name_element),
+        Some(destroy_kafka_metric_element),
+        Some(metric_name_eq),
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
+    use crate::common::metrics::{ClosureMeasurable, Metrics};
+    use crate::ffi::common::metric_name::{kafka_common_MetricName_t, metric_name_ref};
+    use crate::ffi::util::{kafka_Map_destroy, kafka_Map_key, kafka_Map_size};
+
+    /// Metrics that share group and name, as per-node ones do, are ordered by
+    /// their tags too.
+    #[test]
+    fn a_metrics_snapshot_is_ordered_by_group_name_and_tags() {
+        let metrics = Metrics::new();
+        let mut expected = Vec::new();
+        for (group, name) in [("g", "b"), ("g", "a"), ("f", "z")] {
+            for node in (0..20).rev() {
+                let tags = BTreeMap::from([("node-id".to_string(), format!("node-{node:02}"))]);
+                let metric_name = metrics.metric_name_with_tags(name, group, tags.clone());
+                metrics
+                    .add_metric_with_measurable(metric_name, Box::new(ClosureMeasurable::new(|_, _| 0.0)))
+                    .unwrap();
+                expected.push((group.to_string(), name.to_string(), tags));
+            }
+        }
+        expected.sort();
+        let map = box_metrics_map(metrics.metrics());
+        // SAFETY: Test code: `map` is live until its destroy below, and each key is a metric-name
+        // handle it owns, read before the destroy.
+        let keys: Vec<_> = unsafe {
+            let keys = (0..kafka_Map_size(map))
+                .map(|i| metric_name_ref(kafka_Map_key(map, i) as *const kafka_common_MetricName_t))
+                .filter(|name| name.group() == "f" || name.group() == "g")
+                .map(|name| (name.group().to_string(), name.name().to_string(), name.tags().clone()))
+                .collect();
+            kafka_Map_destroy(map);
+            keys
+        };
+        assert_eq!(keys, expected);
+    }
 
     #[test]
     fn owned_handles_are_consumed_and_views_are_shared() {
