@@ -1660,10 +1660,26 @@ mod round_trip {
             response: FetchResponse,
             version: i16,
         ) {
+            self.deliver_with_latency(node_id, request_data, response, version, 0);
+        }
+
+        /// [`Self::deliver`] with an explicit `ClientResponse.requestLatencyMs()`.
+        fn deliver_with_latency(
+            &mut self,
+            node_id: i32,
+            request_data: &crate::fetch_session_handler::FetchSessionRequestData,
+            response: FetchResponse,
+            version: i16,
+            request_latency_ms: i64,
+        ) {
             let node = Node::new(node_id, "localhost".to_string(), 1969 + node_id);
-            self.mgr
-                .abstract_fetch_mut()
-                .handle_fetch_success(&node, request_data, response, version, 0);
+            self.mgr.abstract_fetch_mut().handle_fetch_success(
+                &node,
+                request_data,
+                response,
+                version,
+                request_latency_ms,
+            );
         }
 
         /// Delivers a transport-level failure (disconnect) for `node_id`'s
@@ -2226,6 +2242,52 @@ mod round_trip {
         // Position unchanged (still 0, the seek offset).
         assert_eq!(Some(0), rt.position(&tp(0)));
         let _ = topic_id;
+    }
+
+    /// Translated from `FetchRequestManagerTest.testRecordLatencyOnFetchResponseLevelError`
+    /// (KAFKA-20585, c3a830f8d2): latency is recorded on response-level errors
+    /// (e.g. `FETCH_SESSION_TOPIC_ID_ERROR`) since the round trip completed.
+    /// Java verifies `metricsManager.recordLatency(anyString(), anyLong())` on a
+    /// Mockito spy; Rust has no spy, so it asserts the effect on the real
+    /// `fetch-latency` sensor instead: exactly one sample, carrying the
+    /// response's latency. The `FetcherTest` twin exercises the classic
+    /// `Fetcher`, which is out of scope (consumer-threading §20), so it is not
+    /// translated.
+    #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testRecordLatencyOnFetchResponseLevelError"
+    )]
+    fn test_record_latency_on_fetch_response_level_error() {
+        use crate::common::Metric;
+        use crate::common::MetricValue;
+
+        let (_topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        let (built, prepared) = rt.build_fetch_requests(0);
+        assert_eq!(1, built.len());
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+
+        let mut data = FetchResponseData::new();
+        data.set_error_code(Errors::FetchSessionTopicIdError.code());
+        data.set_session_id(FetchMetadata::INVALID_SESSION_ID);
+        data.set_throttle_time_ms(0);
+        rt.deliver_with_latency(*node_id, request_data, FetchResponse::new(data), built[node_id].version(), 42);
+
+        let manager = Arc::clone(&rt.mgr.abstract_fetch().metrics_manager);
+        let metrics = manager.metrics_for_test();
+        let registry = manager.registry_for_test();
+        let value = |template| {
+            let name = metrics.metric_instance_key_value(template, &[]).expect("metric instance");
+            match metrics.metric(&name).expect("metric registered").metric_value() {
+                MetricValue::Double(v) => v,
+                other => panic!("expected Double metric value, got {other:?}"),
+            }
+        };
+        assert_eq!(1.0, value(&registry.fetch_request_total), "one latency sample recorded");
+        assert_eq!(42.0, value(&registry.fetch_latency_max));
+        assert_eq!(42.0, value(&registry.fetch_latency_avg));
     }
 
     /// Translated from `FetchRequestManagerTest.testFetchResponseWithUnexpectedPartitionIsIgnored`

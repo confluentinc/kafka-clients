@@ -61,7 +61,7 @@ reason in that phase's completion notes.
 | # | Decision | Default |
 |---|---|---|
 | D1 | Target | Start on **4.4.0-rc4** now; Phase 13 re-diffs and bumps refs to **4.4.0 final**. |
-| D2 | Java's `common.utils` → `common.utils.internals` package moves (KAFKA-20297) | **Mirror them** (M13 precedent: `record` → `record::internal`). In Rust this affects only `byte_utils`, `exponential_backoff`, `log_context`, `producer_id_and_epoch`. |
+| D2 | Java's `common.utils` → `common.utils.internals` package moves (KAFKA-20297) | **Mirror them** (M13 precedent: `record` → `record::internal`). In Rust this affects only `byte_utils`, `exponential_backoff`, `log_context`, `producer_id_and_epoch`. Correction (review fix round, COMMENTS.114 C9.8): `BufferSupplier` (moved by `4ae78a36ac`) also has a Rust counterpart, `common::memory::BufferSupplier`; it was already `pub(crate)` and outside `common::utils`, so only its Java-path docs changed. |
 | D3 | KAFKA-20864 (trunk-only fix to the 4.4 incremental-allocation code: closing the wrong batch on extension failure, unbounded retries) | **Include it** as a recorded deviation ahead of 4.4. Otherwise the 4.4 bug would be ported faithfully. |
 | D4 | Representing `UnsupportedProtocolFieldException` (crate-private, `extends UnsupportedVersionException`) | Model it as a crate-private kind on the existing `UnsupportedVersion` variant, so the public `Error` surface still matches Java's public view (§2.4). |
 
@@ -213,6 +213,12 @@ Phase 0 completion notes (agent 90):
     `assert_message_version!` rows in `message_test.rs`. No `ConcreteRequest`/`ConcreteResponse`
     variant: both fall through to the existing "not currently handled" arm, as `STREAMS_GROUP_HEARTBEAT`
     does. **Phase 12** adds the UnregisterController variants and wrappers.
+  - **Recorded skip (review fix round, COMMENTS.114 C7):** 7997c9ebe0's two new `RequestResponseTest`
+    cases, `testStreamsGroupDescribeRequestV0RejectsIncludeTopologyDescription` and
+    `testStreamsGroupDescribeResponseV0RejectsTopologyDescriptionFields`, are not translated. The Streams
+    group protocol and the Streams admin API are out of scope for this client; the `StreamsGroupDescribe`
+    specs are generated only because the whole message corpus is generated, and no client path builds or
+    parses those messages.
   - `AbortedTxn` is a broker-side data spec; the generated `AbortedTxnData` has no client caller.
   - **Byte-level tests** (DoD #3): ApiVersions request v5 (defaults, both fields set, v4 drops them,
     v5 parse), response v4 == v5; DeleteGroups request v3 == v2, response v3 (message set, null, and
@@ -1249,13 +1255,18 @@ Phase 5 completion notes (agent 95):
     responder beside the operation that does that. The `TransactionManager` tests are manager-level, so a
     helper negotiates the version the way `NetworkClient` does (`latest_usable_version_in_range` against
     node 0).
-  - The Sender / RecordAccumulator test fixtures build their `TransactionManager` before the context's
-    metadata exists, so each gets a separate empty `Metadata` (`txn_manager_metadata()`, documented). None
-    of those tests seeds an id for an offset-commit topic, and Java's shared metadata carries none either,
-    so the request is the same v0-5 one.
+  - The Sender / RecordAccumulator test fixtures originally built their `TransactionManager` before the
+    context's metadata existed, so each got a separate empty `Metadata` (`txn_manager_metadata()`).
+    Review fix round (COMMENTS.114 C10): the Sender fixtures now share the context's own `ProducerMetadata`
+    with the manager, as Java and `KafkaProducer::new` do — `SenderTestContext::with_transaction_state` and
+    `split_batch_and_send_context` take a `TxnManagerBuilder` and call it with the context's metadata.
+    The RecordAccumulator fixtures keep a separate empty `Metadata`: their tests run on a
+    `MetadataSnapshot`, as Java's `RecordAccumulatorTest` does, and that Java test builds no real
+    `TransactionManager`, so there is no shared instance to mirror.
   - Not Phase 5: the other 4.4 `ProducerMetadata` changes (36a69b49c5 `Timer` `awaitUpdate`, 9f15f3c540
     lock-free `add` fast path and `retainTopic` CAS, the constructor losing `Time`) are classified N in
-    §6 and were not touched.
+    §6 and were not touched. (9f15f3c540's `testRetainTopic` was later translated in the review fix round,
+    COMMENTS.114 C3.)
   - Pre-existing, out of scope: `KafkaProducerMetrics::record_send_offsets` has no call site in Rust
     (the module carries an `expect(dead_code)` for the transactional sensors). Java records it after the
     send-offsets wait; 6208dfc014 did not change that line.
@@ -1265,8 +1276,8 @@ Phase 5 completion notes (agent 95):
 - **For Phases 6-8 (same track):**
   - `TransactionManager::new` now takes `metadata: Arc<Metadata>` (7 parameters), and
     `KafkaProducer::configure_transaction_state` takes `&Arc<Metadata>`. Test fixtures: TM tests use
-    `test_metadata()` / `manager_with_metadata(..)`; Sender and RecordAccumulator tests use
-    `txn_manager_metadata()`.
+    `test_metadata()` / `manager_with_metadata(..)`; Sender tests pass a `TxnManagerBuilder` that the
+    context calls with its own metadata, and RecordAccumulator tests use `txn_manager_metadata()` (C10).
   - `TxnProducerContext::with_metadata_seed(extra, n, tv2, track_topic, with_topic_ids)` and the
     `topic_metadata_update` helper exist in `kafka_producer.rs` tests.
   - Phase 6 (rack-aware) touches `RecordAccumulator::PartitionerConfig` and `KafkaProducer` construction.
@@ -2118,7 +2129,12 @@ On branch `milestone-16-p9fix`, to be merged back with a merge commit.
     yet. Third, the tests for both, from the consumer-relevant cases in `DefaultRecordTest`. Rust has no
     `readPartiallyFrom`, no `skipKeyValueIterator` / `streamingIterator(…, maxRecordBodySize)` overloads and
     no legacy deep-decode (`legacy_record.rs` holds only constants), so the `AbstractLegacyRecordBatch` and
-    iterator parts of b69c07c816 have no Rust counterpart and stay out of scope.
+    iterator parts of b69c07c816 have no Rust counterpart and stay out of scope. Correction (review fix
+    round, COMMENTS.114 C6): the limit-less `streamingIterator(bufferSupplier)` does have one — the
+    compressed-batch loop of `DefaultRecordBatch::iter_records`, which applies `SOFT_MAX_ARRAY_LENGTH` — so
+    `DefaultRecordBatchTest.testStreamingIteratorRejectsForgedBodySizeExceedingArrayLengthLimit` is translated
+    (`test_streaming_iterator_rejects_forged_body_size_exceeding_array_length_limit`). Only the
+    `maxRecordBodySize` overloads (and `testCompressedIteratorsEnforceConfiguredMaxRecordBodySize`) lack one.
 - Test-only commits:
   - a5137f7c38, 624ca392ef, 7c010c7583, 1a46339e90, 16e976ac8e, 159d696005, c75e10d229 (KafkaConsumerTest
     hunks);
@@ -2190,7 +2206,9 @@ On branch `milestone-16-p9fix`, to be merged back with a merge commit.
   - Share (§20): `ShareConsumerImplTest` half of 0fd8327920.
   - Broker side: the group-coordinator tests of KAFKA-20570; b69c07c816's broker paths.
   - No Rust counterpart: `readPartiallyFrom` and its two `DefaultRecordTest` tests, the `skipKeyValueIterator` /
-    `streamingIterator(.., maxRecordBodySize)` overloads, `AbstractLegacyRecordBatch`.
+    `streamingIterator(.., maxRecordBodySize)` overloads (with
+    `testCompressedIteratorsEnforceConfiguredMaxRecordBodySize`), `AbstractLegacyRecordBatch`. The limit-less
+    `streamingIterator` test was translated in the review fix round (COMMENTS.114 C6).
   - `KafkaConsumerTest.testUnsubscribingNonExistingMetricsDoesntCauseError` (renamed by 1a46339e90): untranslated
     KIP-714 row; the old name in `kafka_consumer_metrics.rs`'s skip list was left for Phase 11, which owns that file.
 - **Deviations in the test translations (DoD #7):** the KafkaConsumerTest currentLag tests run against the
@@ -2863,6 +2881,11 @@ master merges and the one patch-equivalent commit that `--cherry-pick` drops, ma
 - **Classifications the phases changed** (the planning column is kept as it was):
   - `b69c07c816`: Broker/O → Consumer/P, partial (Phase 10; Phase 1 review, COMMENTS.91 Q2). Master's
     `a4b3311e` had already closed the stream-sizing OOM.
+  - `c3a830f8d2` (KAFKA-20585): Share/O → Consumer/P. The commit also moves
+    `AbstractFetch.handleFetchSuccess`'s `recordLatency` before both early returns (review fix round,
+    COMMENTS.114 C1).
+  - `282eef9d05`: N → P. The Rust `Metrics::sensor_options` lacked Java's double-checked critical
+    section, a pre-existing race (review fix round, COMMENTS.114 C2).
   - `28de22de34` (KAFKA-20253): planned for Phase 9, ported in Phase 3, which needed it for KAFKA-21010.
     `01f50af8b8` is a different KAFKA-20253 commit, the classic heartbeat thread, and stays out of scope.
   - `d1c0bd82c0` (KAFKA-14648 2/2) touches only `ShareConsumerImpl`: Share, out of scope (Phase 2
@@ -2926,12 +2949,12 @@ master merges and the one patch-equivalent commit that `--cherry-pick` drops, ma
 | `10805c9782` | Common | N | KAFKA-20297 | Ported | D2 mirror, P1: `LogContext` → `common::utils::internals` (`5bc7915b`, `ef3f861e`); the other classes moved have no Rust counterpart |
 | `162b3a1bcf` | Common | N | MINOR | No-op | Test typo fixes |
 | `2299a06e31` | Common | N | KAFKA-20297 | No-op | KAFKA-20297 move of iterator utilities with no Rust counterpart |
-| `282eef9d05` | Common | N | MINOR | No-op | Java double-checked-locking idiom |
+| `282eef9d05` | Common | P | MINOR | Ported | Java double-checked locking in `Metrics.sensor(...)`. Not a pure idiom: the Rust `sensor_options` (unchanged from master) created and inserted the sensor with no lock held, so two concurrent creators of one name got different sensors and a duplicate child entry. Fixed in the review fix round (COMMENTS.114 C2) with one `sensors`-guarded critical section; regression test `test_concurrent_sensor_creation_returns_one_sensor` |
 | `2ad4c7a2ef` | Common | N | MINOR | No-op | Java HashMap/`Uuid` micro-refactor |
 | `3b6c8385ca` | Common | N | MINOR | No-op | Test utilities to `testFixtures`; xtask now indexes `clients/src/testFixtures` (P0 `e84c6434`) |
 | `4048aa19fa` | Common | N | MINOR | No-op | Java `Collections` factory idiom |
 | `496ed66512` | Common | N | MINOR | No-op | Unused telemetry `MetricsEmitter` method (KIP-714 untranslated) |
-| `4ae78a36ac` | Common | N | KAFKA-20297 | No-op | KAFKA-20297 move of classes with no Rust counterpart |
+| `4ae78a36ac` | Common | N | KAFKA-20297 | No-op | KAFKA-20297 move of `ByteBufferUnmapper`, `BufferSupplier`, `ChunkedBytesStream`. Only `BufferSupplier` has a Rust counterpart (`common::memory::BufferSupplier`, already `pub(crate)`); its doc paths now name `common.utils.internals` (review fix round, COMMENTS.114 C9.8). The other two have none |
 | `5eff4ceb5f` | Common | N | MINOR | No-op | Java `Collections` factory idiom |
 | `6c3b63b825` | Common | N | MINOR | No-op | Java `RecordHeaders` constructor allocation tweak; no behaviour change |
 | `6cd450e677` | Common | N | MINOR | No-op | Java stream classes to `utils.internal`; P7 placed the new `ByteBufferOutputStream` in `common::utils::internals` to match (`14eec39c`) |
@@ -3012,7 +3035,7 @@ master merges and the one patch-equivalent commit that `--cherry-pick` drops, ma
 | `ede01b871e` | Network | P | KAFKA-20246 | Ported | P0 spec (`954a6ff2`); P4 `metadata.cluster.check.enable` (`a5269fa2`, + `1944ff3b`) |
 | `fc18c47efd` | Producer | D | KAFKA-19193 | Doc/log | Already applied in P6 (`d0171254`): the rack-aware parameter docs |
 | `36a69b49c5` | Producer | N | KAFKA-16937 | No-op | Java refactor: `Time#waitObject` inlined into `ProducerMetadata.awaitUpdate`; no behaviour change (P5 notes: left untouched) |
-| `9f15f3c540` | Producer | N | KAFKA-20804 | No-op | Java lock-contention tweak in `ProducerMetadata.add`; no behaviour change (P5 notes: left untouched) |
+| `9f15f3c540` | Producer | N | KAFKA-20804 | No-op (test ported) | Main code: Java lock-contention tweak in `ProducerMetadata.add`; no behaviour change (P5 notes: left untouched). Its new `ProducerMetadataTest.testRetainTopic` was translated in the review fix round (COMMENTS.114 C3) as `producer_metadata::tests::test_retain_topic`, against the `retain_topic_fn` closure |
 | `165d7ec933` | Producer | P | KAFKA-19193 | Ported | P6: `d0171254` |
 | `1aed299b3e` | Producer | P | KAFKA-20578 | Ported | P7 `005844bf`, `3271f906`, `14eec39c`, `2139ba84`; P8 `6442a838`, `d529098c`, `5475f4e4` (+ `77183531`, `67e85c90`) |
 | `6208dfc014` | Producer | P | KAFKA-20444 | Ported | P5: `dc43f174` (+ `335c0b67`) |
@@ -3033,7 +3056,7 @@ master merges and the one patch-equivalent commit that `--cherry-pick` drops, ma
 | `33ea66bf7e` | Share | O | KAFKA-20736 | Out of scope | Share (KIP-932), consumer-threading §20 |
 | `b4da5b66e1` | Share | O | KAFKA-20524 | Out of scope | Share (KIP-932), consumer-threading §20 |
 | `b6d2503710` | Share | O | KAFKA-20410 | Out of scope | Share (KIP-932), consumer-threading §20 |
-| `c3a830f8d2` | Share | O | KAFKA-20585 | Out of scope | Share (KIP-932), consumer-threading §20 |
+| `c3a830f8d2` | Consumer | P | KAFKA-20585 | Ported | Reclassified from Share/O in the review fix round (COMMENTS.114 C1): the commit also moves `AbstractFetch.handleFetchSuccess`'s `recordLatency` before both early returns. Ported to `AbstractFetch::handle_fetch_success`, with `FetchRequestManagerTest.testRecordLatencyOnFetchResponseLevelError` translated; the `FetcherTest` twin is classic-only (§20, skipped) and the `ShareConsumeRequestManager` half stays out of scope |
 | `cc5b632871` | Share | O | KAFKA-21106 | Out of scope | Share (KIP-932), consumer-threading §20 |
 | `d1c0bd82c0` | Share | O | KAFKA-14648 | Out of scope | Share (KIP-932), consumer-threading §20; the ShareConsumerImpl half of KAFKA-14648, recorded skip in P2 |
 | `eb8f9c916c` | Share | O | KAFKA-20720 | Out of scope | Share (KIP-932), consumer-threading §20 |
@@ -3074,7 +3097,7 @@ master merges and the one patch-equivalent commit that `--cherry-pick` drops, ma
 | `723847904b` | Wire | P | KAFKA-20444 | Ported | P5: `supports_*` (`d6593d7b`) |
 | `7340eefc48` | Wire | P | MINOR | Ported | P5: `d6593d7b` (+ `f48b1c2c`) |
 | `7562044781` | Wire | P | KAFKA-20444 | Ported | P5: spec sync (`d6593d7b`) |
-| `7997c9ebe0` | Wire | P | KAFKA-20620 | Ported | P0: specs (incl. DeleteGroups v3) and errors 134 / 135 (`954a6ff2`, `d584de7b`); the Streams RPC itself out of scope |
+| `7997c9ebe0` | Wire | P | KAFKA-20620 | Ported | P0: specs (incl. DeleteGroups v3) and errors 134 / 135 (`954a6ff2`, `d584de7b`); the Streams RPC itself out of scope, and its two `StreamsGroupDescribe` v0-rejection `RequestResponseTest` cases are a recorded skip (Streams is out of scope; COMMENTS.114 C7) |
 | `baa064e422` | Wire | P | KAFKA-20444 | Ported | P5: `d6593d7b`, `4540a340` |
 | `f66a67fcef` | Wire | P | MINOR | Ported | P1: generated-reader limits (`8f60523e`); no Rust `ArrayOf` reader |
 
@@ -3091,12 +3114,12 @@ master merges and the one patch-equivalent commit that `--cherry-pick` drops, ma
 
 | Disposition | Count | Notes |
 |---|---|---|
-| Ported | 58 | 55 planned P, minus `123ee9e45d` (N/A), plus the four D2 moves; `b69c07c816` partial |
+| Ported | 60 | 57 planned P (including the review fix round's `c3a830f8d2` and `282eef9d05` reclassifications), minus `123ee9e45d` (N/A), plus the four D2 moves; `b69c07c816` partial |
 | Test-only ported | 9 | 13 planned T, minus four CLASSIC / KIP-714-only rows |
 | Reviewed, not applicable | 5 | `123ee9e45d` (telemetry); `159d696005`, `16e976ac8e`, `c75e10d229`, `1a46339e90` |
 | Doc/log | 21 | 9 synced in P13 (`d0fc40c2`), 4 already applied in P0 / P4 / P6 / P10, 8 skipped with a reason |
-| No-op | 35 | 37 planned N, minus the four D2 moves, plus the two testFixtures-only commits |
-| Out of scope | 55 | Streams 24, Broker 11, Share 11, Classic 5, Common 2, Admin 1, Security 1 (`b69c07c816`'s broker half is a skip inside its Ported row) |
+| No-op | 34 | 36 planned N, minus the four D2 moves, plus the two testFixtures-only commits |
+| Out of scope | 54 | Streams 24, Broker 11, Share 10, Classic 5, Common 2, Admin 1, Security 1 (`b69c07c816`'s broker half is a skip inside its Ported row) |
 | Reverted in range | 6 | KAFKA-20385 / KAFKA-20684 (5); the 4.4 cherry-pick of the 2PC revert M13 had already applied (1) |
 | Already in 4.3.1 | 2 | KAFKA-20426, KAFKA-20428 (M13); plus `6be48c6e54` outside the 191 |
 | **Total** | **191** | **Gaps: none.** Plus `6be48c6e54`, D3 and the two master merges. |
@@ -3145,3 +3168,9 @@ implemented in Milestone 16. Each entry names where the detail lives.
 | F20 | **`FIXME(phase-9-sasl)`** (`async_kafka_consumer.rs:2362-2371`): production's `is_unavailable` / `maybe_auth` closures are constants, so KAFKA-20854's reconnect-backoff skip is reachable only in tests. Phase 3 handed it to Phase 10, which did not pick it up; it is also a FIXME left in the code (CLAUDE.md §7). | Phase 3 notes, "For Phase 10"; Critic 113 L5 |
 | F21 | **Transactional latency metrics are never recorded.** Java records `recordInit`, `recordBeginTxn`, `recordSendOffsets`, `recordCommitTxn` and `recordAbortTxn` (`KafkaProducer.java:715,739,808,877,912`); Rust wires none of them (only `record_metadata_wait` and `record_flush` have call sites), so `txn-*-time-ns-total` always reads 0. The `#![expect(dead_code)]` reason in `kafka_producer_metrics.rs:18-24` and the note in `kafka_producer.rs:7535-7543` are stale. | Phase 5 notes, "Pre-existing"; Critic 113 L5 |
 | F22 | **Two trims, two rules.** The config STRING arms (`client.id` ×3, `client.rack` ×2, `group.id`, `group.instance.id`, `buffer.memory.allocation.strategy`) and the int / long / bool parse helpers use Rust's Unicode `str::trim()`; Java trims every char ≤ U+0020 (`ConfigDef::trim`, `config_def.rs:53`, used only by `client_dns_lookup.rs:112`). `"\u{1}id"` stays as is in Rust where Java gives `"id"`, and Rust strips U+00A0 where Java does not. Routed to the config audit. | `COMMENTS.96.md` Notes; Critic 113 L5 |
+| F23 | **The admin client ignores `metadata.recovery.strategy`.** It always builds its `NetworkClient` with `MetadataRecoveryStrategy::None` (`kafka_admin_client.rs:484`) and has no rebootstrap path, while Java's admin defaults to `rebootstrap`. Pre-existing; the 4.4 bump only cites it (`metadata.cluster.check.enable` is a no-op on the admin while the strategy is `none`). | Phase 2 notes (PLAN ~`:602`, `:1070`); `design/current/config-audit-master-7ac1391b.md` in the master worktree (untracked) |
+| F24 | **C / Python lose the cause of producer / consumer construction errors.** `KafkaProducer::new` wraps every failure as "Failed to construct kafka producer" (`kafka_producer.rs:~880`, the consumer likewise); `box_error` keeps only the outer message (`ffi/common.rs:~194-197`), there is no cause accessor, and `kafka_common_Error_is_invalid_configuration_error` answers `false` for the wrapper. The 4.4 config errors newly reach users this way: `partitioner.rack.aware=true` without `client.rack`, and the incremental `buffer.memory.allocation.strategy` with compression. | Review of PR #232 (COMMENTS.114 C11), report 2 F-2 |
+| F25 | **Rust-only overridable `type_name()` on the public `Measurable` / `Gauge` traits** (`measurable.rs:44`, `gauge.rs:43`), Rust's stand-in for Java's reflective class name. Hide it (sealed / `#[doc(hidden)]` / crate-private helper) or keep it as public API? | COMMENTS.114 C11 |
+| F26 | **`NoBatched*` errors are detected by message substring** (`admin_api_driver.rs:~532-542`, `is_no_batched_support`). Consider carrying the distinction in `UnsupportedVersionKind`, as `UnsupportedProtocolFieldException` already is, instead of matching builder messages. | COMMENTS.114 C11 |
+| F27 | **4.5 forward note: KAFKA-20385.** `RebalanceListener`, `RebalanceConsumer`, `Consumer#setRebalanceListener` and a javadoc-only deprecation of the `subscribe(..., ConsumerRebalanceListener)` overloads landed on trunk (`05033d348c`, `a98049e989`, `dacff9c85a`) and were reverted on 4.4 (`79a29b0675`). When it ships it affects `subscribe_with_*_listener` and overlaps with `ConsumerHandle` (consumer-threading §31/§41). The deprecation lint reads only `@Deprecated` annotations, not javadoc text, so it will not flag the overloads by itself. | COMMENTS.114 C11 |
+| F28 | **`AUDIENCE_REF` / `DEPRECATION_REFS` still name `4.4.0-rc3`** (`rust/xtask/src/java.rs:68,510`). Equivalent to rc4 under `clients/src` (`git -C kafka diff 4.4.0-rc3 4.4.0-rc4 -- clients/src` is empty); bump them with 4.4.0 final, together with F13. | COMMENTS.114 C11; F13 |

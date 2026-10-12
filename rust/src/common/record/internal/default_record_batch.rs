@@ -1510,6 +1510,70 @@ mod tests {
         );
     }
 
+    /// Java's `poisonedCompressedV2Batch`: a compressed V2 batch whose records
+    /// section declares a single record with a forged body size and no body
+    /// bytes, so the guard must fire on the declared size before any
+    /// allocation is attempted.
+    fn poisoned_compressed_v2_batch(compression: Compression, forged_body_size: i32) -> DefaultRecordBatch {
+        use std::io::Write;
+
+        use crate::common::utils::internals::ByteUtils;
+
+        let mut varint = Vec::new();
+        ByteUtils::write_varint(forged_body_size, &mut varint).unwrap();
+        let mut payload = Vec::new();
+        let mut compressed = compression.wrap_for_output(&mut payload, RecordBatch::MAGIC_VALUE_V2).unwrap();
+        compressed.write_all(&varint).unwrap();
+        compressed.finish().unwrap();
+
+        let size_in_bytes = RecordBatch::RECORD_BATCH_OVERHEAD + payload.len();
+        let mut buffer = vec![0u8; RecordBatch::RECORD_BATCH_OVERHEAD];
+        buffer.extend_from_slice(&payload);
+        DefaultRecordBatch::write_header(
+            &mut buffer,
+            0,
+            0,
+            size_in_bytes,
+            RecordBatch::MAGIC_VALUE_V2,
+            compression.compression_type(),
+            TimestampType::CreateTime,
+            0,
+            0,
+            RecordBatch::NO_PRODUCER_ID,
+            RecordBatch::NO_PRODUCER_EPOCH,
+            RecordBatch::NO_SEQUENCE,
+            false,
+            false,
+            false,
+            0,
+            1,
+        );
+        DefaultRecordBatch::new(buffer)
+    }
+
+    /// Translated from `DefaultRecordBatchTest.testStreamingIteratorRejectsForgedBodySizeExceedingArrayLengthLimit`
+    /// (b69c07c816). A forged body size above the array-length ceiling is
+    /// rejected by the compressed-batch decoder, which applies
+    /// `Records.SOFT_MAX_ARRAY_LENGTH` as Java's limit-less
+    /// `streamingIterator(bufferSupplier)` does, instead of attempting a ~2 GiB
+    /// allocation. `SOFT_MAX_ARRAY_LENGTH + 1` pins the exact threshold. Java
+    /// asserts `contains`; the full message is asserted here.
+    #[test]
+    #[doc(
+        alias = "org.apache.kafka.common.record.internal.DefaultRecordBatchTest#testStreamingIteratorRejectsForgedBodySizeExceedingArrayLengthLimit"
+    )]
+    fn test_streaming_iterator_rejects_forged_body_size_exceeding_array_length_limit() {
+        let poison = poisoned_compressed_v2_batch(
+            Compression::of(CompressionType::Gzip).build(),
+            AbstractRecords::SOFT_MAX_ARRAY_LENGTH + 1,
+        );
+        let err = poison.iter_records().expect_err("the forged size must be rejected");
+        assert_eq!(
+            "Invalid record size: 2147483640 exceeds the configured maximum record size of 2147483639.",
+            err.message()
+        );
+    }
+
     /// A codec id this client does not know must fail with Java's
     /// `IllegalArgumentException` message (`CompressionType.java:144-159`,
     /// propagated by `DefaultRecordBatch.compressionType()` at

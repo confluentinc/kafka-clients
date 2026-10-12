@@ -2718,14 +2718,15 @@ impl RecordAccumulator {
 
 #[cfg(test)]
 mod tests {
-    /// The `Metadata` handed to a test's `TransactionManager` (Java passes the
-    /// test's shared `metadata`, 4.4 KIP-1319).
+    /// The `Metadata` handed to a test's `TransactionManager`.
     ///
-    /// The manager reads it only for the topic ids of a `TxnOffsetCommit`
-    /// (`txn_offset_commit_handler`). None of these fixtures' tests seeds a topic id
-    /// for an offset-commit topic, and Java's metadata carries none for them either
-    /// (`RequestTestUtils.metadataUpdateWith` sets no ids), so a separate empty
-    /// instance yields the same v0-5, name-keyed request Java's shared one does.
+    /// Unlike the `Sender` fixtures (which share the context's instance), there is
+    /// nothing to share here: the accumulator tests drive `ready` / `drain` with a
+    /// `MetadataSnapshot`, as Java's `RecordAccumulatorTest` does, and Java's test
+    /// builds no real `TransactionManager` (only a Mockito mock, `:983`) — the
+    /// idempotent-drain tests that use one are Rust-only. The manager reads its
+    /// `Metadata` only for the topic ids of a `TxnOffsetCommit`, which no test
+    /// here sends, so an empty instance is the faithful stand-in.
     fn txn_manager_metadata() -> Arc<crate::Metadata> {
         crate::producer::internals::ProducerMetadata::new(
             0,

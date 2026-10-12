@@ -1111,8 +1111,10 @@ pub unsafe extern "C" fn kafka_common_Error_is_invalid_configuration_error(error
 }
 
 /// Returns whether the error's Java class extends `UnsupportedVersionException` — the
-/// version-mismatch class, which Kafka 4.4 made intermediate with the crate-private
-/// `UnsupportedProtocolFieldException` (a request field the negotiated version cannot carry).
+/// version-mismatch class. It was already intermediate before Kafka 4.4, through
+/// `NoBatchedFindCoordinatorsException` / `NoBatchedOffsetFetchRequestException`; 4.4 adds the
+/// crate-private `UnsupportedProtocolFieldException` (a request field the negotiated version
+/// cannot carry).
 ///
 /// Mirrors `Error::is_unsupported_version_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
 /// variants, so predicates are the only way a C caller classifies an error

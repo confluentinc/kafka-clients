@@ -55,7 +55,7 @@ rel: P = port, T = test-only port, D = doc/log only, N = no-op for Rust (Java re
 | 10805c9782 | Common | N | move | 2026-05-02 | KAFKA-20297 Move SecurityUtils, ConfigUtils, LogContext, AppInfoParser into internal (#22110) | 113+/114- / 94+/93- |
 | 162b3a1bcf | Common | N |  | 2026-05-02 | MINOR: Fix various typos and formatting issues across multiple modules (#22177) | +/- / 6+/6- |
 | 2299a06e31 | Common | N | move | 2026-04-15 | KAFKA-20297: Move AbstractIterator, CircularIterator, CloseableIterator... into internal (#22052) | 25+/25- / 7+/7- |
-| 282eef9d05 | Common | N |  | 2026-04-20 | MINOR: Add DCL to improve performance (#22098) | 16+/11- / +/- |
+| 282eef9d05 | Common | P |  | 2026-04-20 | MINOR: Add DCL to improve performance (#22098) — reclassified from N in the review fix round (COMMENTS.114 C2): the Rust `Metrics::sensor_options` lacked the critical section, a pre-existing race | 16+/11- / +/- |
 | 2ad4c7a2ef | Common | N |  | 2026-06-20 | MINOR: avoid redundant HashMap lookups and simplify Uuid conversions (#22122) | 2+/8- / +/- |
 | 3b6c8385ca | Common | N |  | 2026-05-05 | MINOR: Move client test utilities to test fixtures and resolve shadow jar conflicts (#22201) | +/- / 7+/7185- |
 | 4048aa19fa | Common | N |  | 2026-06-06 | MINOR: Replace Collections factory methods with Java 11+ equivalents in clients (#22060) | 72+/130- / +/- |
@@ -141,7 +141,7 @@ rel: P = port, T = test-only port, D = doc/log only, N = no-op for Rust (Java re
 | ede01b871e | Network | P | kip1242 | 2026-04-02 | KAFKA-20246: Detection and handling of misrouted connections [1/N] (#21766) | 36+/3- / 2+/2- |
 | fc18c47efd | Producer | D | rack | 2026-06-24 | KAFKA-19193: add Javadoc for rack-aware params in BuiltInPartitioner (#22432) | 3+/0- / +/- |
 | 36a69b49c5 | Producer | N |  | 2026-07-27 | KAFKA-16937 Inline Time#waitObject to ProducerMetadata#awaitUpdate (#22083) | 31+/36- / 77+/128- |
-| 9f15f3c540 | Producer | N |  | 2026-07-24 | KAFKA-20804: Reduce lock contention in ProducerMetadata#add (#22810) | 26+/11- / 28+/0- |
+| 9f15f3c540 | Producer | N |  | 2026-07-24 | KAFKA-20804: Reduce lock contention in ProducerMetadata#add (#22810) — main code no-op; `testRetainTopic` translated in the review fix round (COMMENTS.114 C3) | 26+/11- / 28+/0- |
 | 165d7ec933 | Producer | P | rack | 2026-06-23 | KAFKA-19193: throw ConfigException if rack is empty in rack-aware mode (#22433) | 2+/1- / +/- |
 | 1aed299b3e | Producer | P | chunked | 2026-07-30 | KAFKA-20578: Initial producer incremental allocation for uncompressed data (#22654) | 1407+/120- / 1468+/3- |
 | 6208dfc014 | Producer | P | kip1319 | 2026-06-09 | KAFKA-20444: [11/N] Refresh metadata before TxnOffsetCommit (KIP-1319) (#22460) | 53+/3- / 159+/0- |
@@ -162,7 +162,7 @@ rel: P = port, T = test-only port, D = doc/log only, N = no-op for Rust (Java re
 | 33ea66bf7e | Share | O |  | 2026-07-20 | KAFKA-20736: Improve share session handling on leader change (#22766) | 267+/133- / 438+/27- |
 | b4da5b66e1 | Share | O |  | 2026-06-23 | KAFKA-20524: Improve reset offset usability (#22607) | 8+/2- / +/- |
 | b6d2503710 | Share | O |  | 2026-04-21 | KAFKA-20410: Add DLQ configuration parameters for Share Groups (KIP-1191) (#21979) | 6+/0- / +/- |
-| c3a830f8d2 | Share | O |  | 2026-07-14 | KAFKA-20585 : Share Fetch latency metric incorrectly updated during ShareAcknowledgeResponse (#22296) | 4+/7- / 51+/3- |
+| c3a830f8d2 | Consumer | P | partial | 2026-07-14 | KAFKA-20585 : Share Fetch latency metric incorrectly updated during ShareAcknowledgeResponse (#22296) — in scope partially: the `AbstractFetch.handleFetchSuccess` half (latency recorded before the early returns) is a consumer change; the Share half stays out of scope. Reclassified from Share/O in the review fix round (COMMENTS.114 C1) | 4+/7- / 51+/3- |
 | cc5b632871 | Share | O |  | 2026-09-24 | KAFKA-21106 Omit partitions with no in-flight records from ShareFetch#records (#23532) | 9+/6- / 207+/2- |
 | d1c0bd82c0 | Share | O |  | 2026-07-29 | KAFKA-14648: Do not fail clients if bootstrap servers is not immediately resolvable (2/2) (#22897) | 11+/4- / 48+/0- |
 | eb8f9c916c | Share | O |  | 2026-06-30 | KAFKA-20720: Lower level for client log on self-healing share session… (#22691) | 16+/4- / +/- |

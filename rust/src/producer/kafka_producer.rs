@@ -1638,6 +1638,8 @@ impl<K, V> KafkaProducer<K, V> {
     ///   the transaction
     /// - [`Error::Timeout`] if the combined time taken for resolving topic metadata
     ///   and sending the offsets has surpassed `max.block.ms`
+    /// - [`Error::BootstrapResolution`] if DNS resolution of the bootstrap servers
+    ///   fails within `bootstrap.resolve.timeout.ms`
     ///
     /// The producer first resolves the metadata for the topics in `offsets`
     /// (KIP-1319), so the `TxnOffsetCommit` can carry their topic ids and use v6.
@@ -8161,5 +8163,60 @@ mod tests {
             producer.abort_transaction().await.expect_err("not transactional").message(),
             EXPECTED
         );
+    }
+
+    /// `metadata.cluster.check.enable` (KIP-1242) reaches the producer's
+    /// `NetworkClient`, as `ClientUtils.createNetworkClient` passes it
+    /// (`ClientUtils.java:309`). Goes through the REAL constructor (DoD #12)
+    /// against an in-process fake broker and observes the wire: the bootstrap
+    /// connection's ApiVersions carries no cluster id (it is not known yet), and
+    /// the connection to the partition leader (node 0, learned from the Metadata
+    /// response) carries `ClusterId`/`NodeId` only when the check is enabled —
+    /// the default. Java's broker-backed analogue is
+    /// `ClientRebootstrapTest.testRebootstrapOnMetadataClusterCheckFail`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn metadata_cluster_check_enable_reaches_the_network_client() {
+        use crate::producer::Producer;
+        use crate::test_fake_broker::{FAKE_BROKER_NODE_ID, FakeBroker, ReceivedApiVersions};
+
+        const TOPIC: &str = "cluster-check-topic";
+        for (configured, check) in [(None, true), (Some("false"), false), (Some("true"), true)] {
+            let broker = FakeBroker::start("fake-cluster", TOPIC).await;
+            // Non-idempotent, so the Sender does not first wait on an
+            // InitProducerId the fake never answers.
+            let mut props = HashMap::from([
+                ("bootstrap.servers".to_string(), broker.bootstrap()),
+                ("enable.idempotence".to_string(), "false".to_string()),
+            ]);
+            if let Some(value) = configured {
+                props.insert("metadata.cluster.check.enable".to_string(), value.to_string());
+            }
+            let config = ProducerConfig::new(&props).expect("valid config");
+            let producer =
+                KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                    .expect("constructs against the fake broker");
+            // The send waits for the topic's metadata, then the batch drains to
+            // the leader, which opens the second connection. The Produce request
+            // is never answered; only the ApiVersions requests matter.
+            let _pending = producer
+                .send(ProducerRecord::new(TOPIC.to_string(), Some("value".to_string())))
+                .await
+                .expect("metadata arrives from the fake broker");
+            let seen = broker.await_api_versions_requests(2, Duration::from_secs(30)).await;
+            assert_eq!(2, seen.len(), "metadata.cluster.check.enable = {configured:?}: {seen:?}");
+            let unchecked = ReceivedApiVersions { version: 5, cluster_id: None, node_id: -1 };
+            assert_eq!(unchecked, seen[0], "bootstrap connection, check = {check}");
+            let expected_leader = if check {
+                ReceivedApiVersions {
+                    version: 5,
+                    cluster_id: Some("fake-cluster".to_string()),
+                    node_id: FAKE_BROKER_NODE_ID,
+                }
+            } else {
+                unchecked
+            };
+            assert_eq!(expected_leader, seen[1], "leader connection, check = {check}");
+            producer.close_with_timeout(Duration::ZERO).await.expect("close");
+        }
     }
 }
