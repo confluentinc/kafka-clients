@@ -430,11 +430,24 @@ case "$TEST" in
     JARGS=(--bootstrap "$BS" --topic "$TN" --duration "$DUR" --warmup "$WARM")
     if [ -n "${INTERVAL_SECONDS:-}" ]; then JARGS+=(--interval "$INTERVAL_SECONDS"); fi
     if [ -n "${CLIENT_CONFIG:-}" ]; then JARGS+=(--client-config "$CLIENT_CONFIG"); fi
+    # Capture JavaE2E's status instead of letting errexit abort here, so the
+    # background load generator is always stopped first.
+    JAVA_RC=0
     java -cp "$REPO/tools/java-perf-test/build/libs/java-perf-test-all.jar:$REPO/rust/consumer-perf/compare/build" \
-      JavaE2E "${JARGS[@]}" ${EXTRA_CONSUMER_ARGS:-} | tee "$OUT/java-e2e.log"
+      JavaE2E "${JARGS[@]}" ${EXTRA_CONSUMER_ARGS:-} | tee "$OUT/java-e2e.log" || JAVA_RC=$?
     kill "$PRODUCER_PID" 2>/dev/null || true
     wait "$PRODUCER_PID" 2>/dev/null || true
-    grep -o '{"client":"java".*}' "$OUT/java-e2e.log" | tail -n 1 > "$OUT/summary.json" || true
+    if [ "$JAVA_RC" -ne 0 ]; then
+      echo "ERROR: JavaE2E exited with status $JAVA_RC (see $OUT/java-e2e.log)" >&2
+      exit "$JAVA_RC"
+    fi
+    # Fail rather than leave a missing/empty summary.json behind a green run.
+    SUMMARY="$(grep -o '{"client":"java".*}' "$OUT/java-e2e.log" | tail -n 1 || true)"
+    if [ -z "$SUMMARY" ]; then
+      echo "ERROR: no JavaE2E summary line in $OUT/java-e2e.log" >&2
+      exit 1
+    fi
+    printf '%s\n' "$SUMMARY" > "$OUT/summary.json"
     ;;
   *)
     echo "unknown test: $TEST (expected rust-native|c-v2|c-v3|java|python-producer|python-consumer|rust-consumer|librdkafka-consumer|java-consumer)" >&2
