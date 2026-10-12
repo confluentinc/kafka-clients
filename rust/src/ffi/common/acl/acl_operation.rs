@@ -126,6 +126,9 @@ pub(crate) fn singleton(value: AclOperation) -> *const kafka_common_acl_AclOpera
 ///
 /// `value` must be a singleton returned by this module.
 pub(crate) unsafe fn value_of(value: *const kafka_common_acl_AclOperation_t) -> AclOperation {
+    // SAFETY: Per this function's `# Safety`, `value` is a singleton returned by this module, i.e.
+    // a pointer to an element of the `static` `VARIANTS` array (`singleton`), so it points at a
+    // live, initialised `AclOperation`, which is `Copy` and read out here.
     unsafe { *(value as *const AclOperation) }
 }
 
@@ -253,6 +256,8 @@ pub extern "C" fn kafka_common_acl_AclOperation_two_phase_commit() -> *const kaf
 pub unsafe extern "C" fn kafka_common_acl_AclOperation__enum(
     self_: *const kafka_common_acl_AclOperation_t,
 ) -> kafka_common_acl_AclOperation_e {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `value_of` requires; the value is copied out.
     enum_of(unsafe { value_of(self_) })
 }
 
@@ -267,6 +272,8 @@ pub unsafe extern "C" fn kafka_common_acl_AclOperation__enum(
 #[ffi_guard(fallback = -1)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclOperation_code(self_: *const kafka_common_acl_AclOperation_t) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `value_of` requires; the value is copied out.
     unsafe { value_of(self_) }.code()
 }
 
@@ -289,6 +296,9 @@ pub extern "C" fn kafka_common_acl_AclOperation_from_code(code: i8) -> *const ka
 pub unsafe extern "C" fn kafka_common_acl_AclOperation_from_string(
     str: *const c_char,
 ) -> *const kafka_common_acl_AclOperation_t {
+    // SAFETY: Per this function's `# Safety`, `str` is a valid NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // this call.
     singleton(AclOperation::from_string(&unsafe { c_str_to_string(str) }))
 }
 
@@ -300,6 +310,8 @@ pub unsafe extern "C" fn kafka_common_acl_AclOperation_from_string(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclOperation_is_unknown(self_: *const kafka_common_acl_AclOperation_t) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `value_of` requires; the value is copied out.
     i8::from(unsafe { value_of(self_) }.is_unknown())
 }
 
@@ -314,6 +326,8 @@ pub unsafe extern "C" fn kafka_common_acl_AclOperation_is_unknown(self_: *const 
 pub unsafe extern "C" fn kafka_common_acl_AclOperation_to_string(
     self_: *const kafka_common_acl_AclOperation_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `value_of` requires; the value is copied out.
     into_c_string(&unsafe { value_of(self_) }.to_string())
 }
 
@@ -328,6 +342,8 @@ mod tests {
     fn singletons_round_trip_and_match_their_enumerator() {
         for (index, &value) in VARIANTS.iter().enumerate() {
             let handle = singleton(value);
+            // SAFETY: Test code: every handle passed is a singleton from `singleton`, which points
+            // into the static `VARIANTS` array and is never freed.
             unsafe {
                 assert_eq!(value_of(handle), value);
                 assert_eq!(kafka_common_acl_AclOperation__enum(handle) as usize, index);
@@ -342,6 +358,10 @@ mod tests {
 
     #[test]
     fn methods_follow_the_rust_enum() {
+        // SAFETY: Test code: every handle passed is a singleton from `singleton` or this module's
+        // getters, which point into the static `VARIANTS` array and are never freed; each string
+        // from `to_string` is destroyed once, after `from_string` reads it; `bogus` is a `CString`
+        // that outlives the call reading it.
         unsafe {
             for &value in &VARIANTS {
                 let handle = singleton(value);

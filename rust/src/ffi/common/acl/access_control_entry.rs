@@ -59,7 +59,17 @@ impl AccessControlEntryInner {
     }
 }
 
+/// What a handle points at.
+///
+/// # Safety
+///
+/// `entry` must be a valid access-control-entry handle, alive for `'a`.
 unsafe fn inner_ref<'a>(entry: *const kafka_common_acl_AccessControlEntry_t) -> &'a AccessControlEntryInner {
+    // SAFETY: Per this function's `# Safety`, `entry` is a valid access-control-entry handle alive
+    // for `'a`, so it points at a live `AccessControlEntryInner`: the `Box::into_raw` of
+    // `box_access_control_entry`, or one a parent handle embeds and hands out a view on, which
+    // lives as long as that parent. Nothing mutates an `AccessControlEntryInner` while a handle to
+    // it exists, so the shared reference is sound for `'a`.
     unsafe { &*(entry as *const AccessControlEntryInner) }
 }
 
@@ -67,10 +77,12 @@ unsafe fn inner_ref<'a>(entry: *const kafka_common_acl_AccessControlEntry_t) -> 
 ///
 /// # Safety
 ///
-/// `entry` must be a valid access-control-entry handle.
+/// `entry` must be a valid access-control-entry handle, alive for `'a`.
 pub(crate) unsafe fn access_control_entry_ref<'a>(
     entry: *const kafka_common_acl_AccessControlEntry_t,
 ) -> &'a AccessControlEntry {
+    // SAFETY: Per this function's `# Safety`, `entry` is a valid access-control-entry handle, as
+    // `inner_ref` requires; the reference returned lives for the same `'a`.
     &unsafe { inner_ref(entry) }.entry
 }
 
@@ -100,13 +112,28 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_new(
     out_entry: *mut *mut kafka_common_acl_AccessControlEntry_t,
 ) -> *mut kafka_common_Error_t {
     let entry = AccessControlEntry::new(
+        // SAFETY: Per this function's `# Safety`, `principal` is a valid NUL-terminated string, as
+        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // after this call.
         unsafe { c_str_to_string(principal) },
+        // SAFETY: Per this function's `# Safety`, `host` is a valid NUL-terminated string, as
+        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // after this call.
         unsafe { c_str_to_string(host) },
+        // SAFETY: Per this function's `# Safety`, `operation` is a singleton of its enum, i.e. one
+        // returned by the `acl_operation` module, as `operation_of` (`acl_operation::value_of`)
+        // requires; the value is copied out.
         unsafe { operation_of(operation) },
+        // SAFETY: Per this function's `# Safety`, `permission_type` is a singleton of its enum,
+        // i.e. one returned by the `acl_permission_type` module, as `permission_type_of`
+        // (`acl_permission_type::value_of`) requires; the value is copied out.
         unsafe { permission_type_of(permission_type) },
     );
     match entry {
         Ok(entry) => {
+            // SAFETY: Per this function's `# Safety`, `out_entry` is a valid pointer, so writing
+            // through it is sound. The handle written is a fresh owned one from
+            // `box_access_control_entry`, which the caller owns.
             unsafe { *out_entry = box_access_control_entry(entry) };
             ptr::null_mut()
         },
@@ -124,6 +151,9 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_new(
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_principal(
     self_: *const kafka_common_acl_AccessControlEntry_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid access-control-entry handle, as
+    // `inner_ref` requires; the string returned is the handle's own C string, so it lives as long
+    // as the handle; that is the rustdoc's "borrowed from the handle".
     unsafe { inner_ref(self_) }.principal_c.as_ptr()
 }
 
@@ -137,6 +167,9 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_principal(
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_host(
     self_: *const kafka_common_acl_AccessControlEntry_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid access-control-entry handle, as
+    // `inner_ref` requires; the string returned is the handle's own C string, so it lives as long
+    // as the handle; that is the rustdoc's "borrowed from the handle".
     unsafe { inner_ref(self_) }.host_c.as_ptr()
 }
 
@@ -150,6 +183,9 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_host(
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_operation(
     self_: *const kafka_common_acl_AccessControlEntry_t,
 ) -> *const kafka_common_acl_AclOperation_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid access-control-entry handle, as
+    // `access_control_entry_ref` requires; the value is copied out and mapped to its static
+    // singleton, so the borrow lasts for this call only.
     operation_singleton(unsafe { access_control_entry_ref(self_) }.operation())
 }
 
@@ -163,6 +199,9 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_operation(
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_permission_type(
     self_: *const kafka_common_acl_AccessControlEntry_t,
 ) -> *const kafka_common_acl_AclPermissionType_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid access-control-entry handle, as
+    // `access_control_entry_ref` requires; the value is copied out and mapped to its static
+    // singleton, so the borrow lasts for this call only.
     permission_type_singleton(unsafe { access_control_entry_ref(self_) }.permission_type())
 }
 
@@ -177,6 +216,9 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_permission_type(
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_to_filter(
     self_: *const kafka_common_acl_AccessControlEntry_t,
 ) -> *mut kafka_common_acl_AccessControlEntryFilter_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid access-control-entry handle, as
+    // `access_control_entry_ref` requires; the result is copied into an owned value before return,
+    // so the borrow lasts for this call only.
     box_access_control_entry_filter(unsafe { access_control_entry_ref(self_) }.to_filter())
 }
 
@@ -190,6 +232,8 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_to_filter(
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_is_unknown(
     self_: *const kafka_common_acl_AccessControlEntry_t,
 ) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid access-control-entry handle, as
+    // `access_control_entry_ref` requires; the reference is used only within this call.
     i8::from(unsafe { access_control_entry_ref(self_) }.is_unknown())
 }
 
@@ -203,6 +247,9 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_is_unknown(
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_to_string(
     self_: *const kafka_common_acl_AccessControlEntry_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid access-control-entry handle, as
+    // `access_control_entry_ref` requires; the result is copied into an owned value before return,
+    // so the borrow lasts for this call only.
     into_c_string(&unsafe { access_control_entry_ref(self_) }.entry_to_string())
 }
 
@@ -228,6 +275,10 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_destroy(
     self_: *mut kafka_common_acl_AccessControlEntry_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // handle not yet destroyed, i.e. the `Box::into_raw` of an `AccessControlEntryInner` in
+        // `box_access_control_entry` (a view, which points into its parent, is never passed here),
+        // so `from_raw` reclaims that allocation, once.
         drop(unsafe { Box::from_raw(self_ as *mut AccessControlEntryInner) });
     }
 }
@@ -256,6 +307,10 @@ mod tests {
     fn constructor_getters_filter_and_to_string_follow_java() {
         let principal = CString::new("User:alice").unwrap();
         let host = CString::new("*").unwrap();
+        // SAFETY: Test code: `principal` and `host` are `CString`s that outlive every call reading
+        // them, `entry` is a local the constructor writes an owned handle into, the operation and
+        // permission-type arguments are singletons from their enums' getters, and every owned
+        // handle (the entry, the filter, the string) is destroyed once.
         unsafe {
             let mut entry = ptr::null_mut();
             assert!(
@@ -309,6 +364,10 @@ mod tests {
     fn any_operation_or_permission_type_is_rejected() {
         let principal = CString::new("User:alice").unwrap();
         let host = CString::new("*").unwrap();
+        // SAFETY: Test code: `principal` and `host` are `CString`s that outlive every call reading
+        // them, `entry` is a local out pointer the failing constructor leaves null, the operation
+        // and permission-type arguments are singletons from their enums' getters, and each returned
+        // error is destroyed once, after its message is read.
         unsafe {
             let mut entry = ptr::null_mut();
             let error = kafka_common_acl_AccessControlEntry_new(

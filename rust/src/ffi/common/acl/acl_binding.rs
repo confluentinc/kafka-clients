@@ -59,7 +59,17 @@ impl AclBindingInner {
     }
 }
 
+/// What a handle points at.
+///
+/// # Safety
+///
+/// `binding` must be a valid ACL-binding handle, alive for `'a`.
 unsafe fn inner_ref<'a>(binding: *const kafka_common_acl_AclBinding_t) -> &'a AclBindingInner {
+    // SAFETY: Per this function's `# Safety`, `binding` is a valid ACL-binding handle alive for
+    // `'a`, so it points at a live `AclBindingInner`: the `Box::into_raw` of `box_acl_binding`, or
+    // one a parent handle embeds and hands out a view on, which lives as long as that parent.
+    // Nothing mutates an `AclBindingInner` while a handle to it exists, so the shared reference is
+    // sound for `'a`.
     unsafe { &*(binding as *const AclBindingInner) }
 }
 
@@ -67,8 +77,10 @@ unsafe fn inner_ref<'a>(binding: *const kafka_common_acl_AclBinding_t) -> &'a Ac
 ///
 /// # Safety
 ///
-/// `binding` must be a valid ACL-binding handle.
+/// `binding` must be a valid ACL-binding handle, alive for `'a`.
 pub(crate) unsafe fn acl_binding_ref<'a>(binding: *const kafka_common_acl_AclBinding_t) -> &'a AclBinding {
+    // SAFETY: Per this function's `# Safety`, `binding` is a valid ACL-binding handle, as
+    // `inner_ref` requires; the reference returned lives for the same `'a`.
     &unsafe { inner_ref(binding) }.binding
 }
 
@@ -93,7 +105,12 @@ pub unsafe extern "C" fn kafka_common_acl_AclBinding_new(
     entry: *const kafka_common_acl_AccessControlEntry_t,
 ) -> *mut kafka_common_acl_AclBinding_t {
     box_acl_binding(AclBinding::new(
+        // SAFETY: Per this function's `# Safety`, `pattern` is a valid resource-pattern handle, as
+        // `resource_pattern_ref` requires; it is cloned, so the borrow lasts for this call only.
         unsafe { resource_pattern_ref(pattern) }.clone(),
+        // SAFETY: Per this function's `# Safety`, `entry` is a valid access-control-entry handle,
+        // as `access_control_entry_ref` requires; it is cloned, so the borrow lasts for this call
+        // only.
         unsafe { access_control_entry_ref(entry) }.clone(),
     ))
 }
@@ -107,6 +124,8 @@ pub unsafe extern "C" fn kafka_common_acl_AclBinding_new(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBinding_is_unknown(self_: *const kafka_common_acl_AclBinding_t) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid ACL-binding handle, as
+    // `acl_binding_ref` requires; the reference is used only within this call.
     i8::from(unsafe { acl_binding_ref(self_) }.is_unknown())
 }
 
@@ -121,6 +140,10 @@ pub unsafe extern "C" fn kafka_common_acl_AclBinding_is_unknown(self_: *const ka
 pub unsafe extern "C" fn kafka_common_acl_AclBinding_pattern(
     self_: *const kafka_common_acl_AclBinding_t,
 ) -> *const kafka_common_resource_ResourcePattern_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid ACL-binding handle, as `inner_ref`
+    // requires. The pattern handle returned points at the `ResourcePatternInner` embedded in the
+    // binding's `AclBindingInner`, so it lives as long as the binding; that is the rustdoc's "valid
+    // as long as the binding".
     unsafe { inner_ref(self_) }.pattern.as_ptr()
 }
 
@@ -135,6 +158,10 @@ pub unsafe extern "C" fn kafka_common_acl_AclBinding_pattern(
 pub unsafe extern "C" fn kafka_common_acl_AclBinding_entry(
     self_: *const kafka_common_acl_AclBinding_t,
 ) -> *const kafka_common_acl_AccessControlEntry_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid ACL-binding handle, as `inner_ref`
+    // requires. The entry handle returned points at the `AccessControlEntryInner` embedded in the
+    // binding's `AclBindingInner`, so it lives as long as the binding; that is the rustdoc's "valid
+    // as long as the binding".
     unsafe { inner_ref(self_) }.entry.as_ptr()
 }
 
@@ -149,6 +176,9 @@ pub unsafe extern "C" fn kafka_common_acl_AclBinding_entry(
 pub unsafe extern "C" fn kafka_common_acl_AclBinding_to_filter(
     self_: *const kafka_common_acl_AclBinding_t,
 ) -> *mut kafka_common_acl_AclBindingFilter_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid ACL-binding handle, as
+    // `acl_binding_ref` requires; the result is copied into an owned value before return, so the
+    // borrow lasts for this call only.
     box_acl_binding_filter(unsafe { acl_binding_ref(self_) }.to_filter())
 }
 
@@ -162,6 +192,9 @@ pub unsafe extern "C" fn kafka_common_acl_AclBinding_to_filter(
 pub unsafe extern "C" fn kafka_common_acl_AclBinding_to_string(
     self_: *const kafka_common_acl_AclBinding_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid ACL-binding handle, as
+    // `acl_binding_ref` requires; the result is copied into an owned value before return, so the
+    // borrow lasts for this call only.
     into_c_string(&unsafe { acl_binding_ref(self_) }.to_string())
 }
 
@@ -174,6 +207,10 @@ pub unsafe extern "C" fn kafka_common_acl_AclBinding_to_string(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBinding_destroy(self_: *mut kafka_common_acl_AclBinding_t) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // handle not yet destroyed, i.e. the `Box::into_raw` of an `AclBindingInner` in
+        // `box_acl_binding` (a view, which points into its parent, is never passed here), so
+        // `from_raw` reclaims that allocation, once.
         drop(unsafe { Box::from_raw(self_ as *mut AclBindingInner) });
     }
 }
@@ -203,6 +240,11 @@ mod tests {
         let entry = AccessControlEntry::new("User:alice", "*", AclOperation::Read, AclPermissionType::Allow).unwrap();
         let pattern_handle = box_resource_pattern(pattern.clone());
         let entry_handle = box_access_control_entry(entry.clone());
+        // SAFETY: Test code: `pattern_handle` and `entry_handle` come from `box_resource_pattern`
+        // and `box_access_control_entry` and are destroyed once, after the constructor copies them;
+        // the binding and the filter come from this module's functions; the pattern and entry views
+        // are used only while the binding is alive; every owned handle (the binding, the filter,
+        // the string) is destroyed once.
         unsafe {
             let binding = kafka_common_acl_AclBinding_new(pattern_handle, entry_handle);
             // The parts were copied: the caller's handles are still its own.
