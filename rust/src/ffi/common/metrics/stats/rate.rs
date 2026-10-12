@@ -40,7 +40,15 @@ pub struct kafka_common_metrics_stats_Rate_t {
     _private: [u8; 0],
 }
 
+/// The handle behind a pointer.
+///
+/// # Safety
+///
+/// `self_` must be a valid handle of this class, alive for `'a`.
 unsafe fn handle<'a>(self_: *const kafka_common_metrics_stats_Rate_t) -> &'a StatHandle<Rate> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle of this class alive for
+    // `'a`, so it points at the `StatHandle<Rate>` one of this class's constructors boxed, as
+    // `StatHandle::from_ptr` requires.
     unsafe { StatHandle::from_ptr(self_ as *const StatHandle<Rate>) }
 }
 
@@ -66,6 +74,8 @@ pub extern "C" fn kafka_common_metrics_stats_Rate_new() -> *mut kafka_common_met
 pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_with_unit(
     unit: *const kafka_common_metrics_TimeUnit_t,
 ) -> *mut kafka_common_metrics_stats_Rate_t {
+    // SAFETY: Per this function's `# Safety`, `unit` is a time-unit singleton, as `time_unit_of`
+    // (`time_unit::value_of`) requires; the value is copied out.
     boxed(Rate::with_unit(unsafe { time_unit_of(unit) }))
 }
 
@@ -79,6 +89,9 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_with_unit(
 pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_with_stat(
     stat: *const kafka_common_metrics_stats_SampledStat_t,
 ) -> *mut kafka_common_metrics_stats_Rate_t {
+    // SAFETY: Per this function's `# Safety`, `stat` is a valid sampled-stat handle, as
+    // `sampled_stat_ref` requires; the rate takes its own `Arc` of the stat, so nothing borrows the
+    // handle after this call and the handle stays valid, as the module docs state.
     boxed(Rate::with_stat(Arc::clone(unsafe { sampled_stat_ref(stat) })))
 }
 
@@ -95,7 +108,12 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_with_unit_stat(
     stat: *const kafka_common_metrics_stats_SampledStat_t,
 ) -> *mut kafka_common_metrics_stats_Rate_t {
     boxed(Rate::with_unit_stat(
+        // SAFETY: Per this function's `# Safety`, `unit` is a time-unit singleton, as
+        // `time_unit_of` (`time_unit::value_of`) requires; the value is copied out.
         unsafe { time_unit_of(unit) },
+        // SAFETY: Per this function's `# Safety`, `stat` is a valid sampled-stat handle, as
+        // `sampled_stat_ref` requires; the rate takes its own `Arc` of the stat, so nothing borrows
+        // the handle after this call and the handle stays valid, as the module docs state.
         Arc::clone(unsafe { sampled_stat_ref(stat) }),
     ))
 }
@@ -114,7 +132,12 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_with_unit_stat_window(
     window: i64,
 ) -> *mut kafka_common_metrics_stats_Rate_t {
     boxed(Rate::with_unit_stat_window(
+        // SAFETY: Per this function's `# Safety`, `unit` is a time-unit singleton, as
+        // `time_unit_of` (`time_unit::value_of`) requires; the value is copied out.
         unsafe { time_unit_of(unit) },
+        // SAFETY: Per this function's `# Safety`, `stat` is a valid sampled-stat handle, as
+        // `sampled_stat_ref` requires; the rate takes its own `Arc` of the stat, so nothing borrows
+        // the handle after this call and the handle stays valid, as the module docs state.
         Arc::clone(unsafe { sampled_stat_ref(stat) }),
         window,
     ))
@@ -130,6 +153,9 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_with_unit_stat_window(
 pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_unit_name(
     self_: *const kafka_common_metrics_stats_Rate_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle of this class, as `handle`
+    // requires; the reference is used only within this call, and the unit name is copied into an
+    // owned string.
     into_c_string(&unsafe { handle(self_) }.stat().unit_name())
 }
 
@@ -149,8 +175,12 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_window_size(
     config: *const kafka_common_metrics_MetricConfig_t,
     now: i64,
 ) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle of this class, as `handle`
+    // requires; the reference is used only within this call.
     unsafe { handle(self_) }
         .stat()
+        // SAFETY: Per this function's `# Safety`, `config` is a valid metric-config handle, as
+        // `metric_config_ref` requires; the reference is used only within this call.
         .window_size(unsafe { metric_config_ref(config) }, now)
 }
 
@@ -165,6 +195,9 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_window_size(
 pub unsafe extern "C" fn kafka_common_metrics_stats_Rate__as_Stat(
     self_: *const kafka_common_metrics_stats_Rate_t,
 ) -> *const kafka_common_metrics_Stat_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle of this class, as `handle`
+    // requires. The view returned is cached in the handle's `OnceLock`, so it lives as long as the
+    // handle; that is the rustdoc's "valid as long as the handle".
     unsafe { handle(self_) }.as_stat()
 }
 
@@ -179,6 +212,9 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate__as_Stat(
 pub unsafe extern "C" fn kafka_common_metrics_stats_Rate__as_Measurable(
     self_: *const kafka_common_metrics_stats_Rate_t,
 ) -> *const kafka_common_metrics_Measurable_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle of this class, as `handle`
+    // requires. The view returned is cached in the handle's `OnceLock`, so it lives as long as the
+    // handle; that is the rustdoc's "valid as long as the handle".
     unsafe { handle(self_) }.as_measurable()
 }
 
@@ -193,6 +229,9 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate__as_Measurable(
 pub unsafe extern "C" fn kafka_common_metrics_stats_Rate__as_MeasurableStat(
     self_: *const kafka_common_metrics_stats_Rate_t,
 ) -> *const kafka_common_metrics_MeasurableStat_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle of this class, as `handle`
+    // requires. The view returned is cached in the handle's `OnceLock`, so it lives as long as the
+    // handle; that is the rustdoc's "valid as long as the handle".
     unsafe { handle(self_) }.as_measurable_stat()
 }
 
@@ -205,6 +244,9 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate__as_MeasurableStat(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_destroy(self_: *mut kafka_common_metrics_stats_Rate_t) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned handle not yet destroyed,
+    // a `StatHandle<Rate>` from this class's constructors, as `StatHandle::destroy` requires; a
+    // sensor the stat was added to keeps its own `Arc` of the stat.
     unsafe { StatHandle::destroy(self_ as *mut StatHandle<Rate>) }
 }
 
@@ -233,6 +275,12 @@ mod tests {
     fn constructors_share_the_sampled_stat_and_follow_the_rust_rate() {
         let config = kafka_common_metrics_MetricConfig_new();
         let rust_config = MetricConfig::new();
+        // SAFETY: Test code: every rate comes from this class's constructors and is destroyed once,
+        // after the calls through it and its views; `windowed` is a sampled-stat handle boxed as
+        // `kafka_common_metrics_stats_SampledStat_new` boxes one and destroyed once, after the
+        // rates sharing it; each unit-name string is destroyed once, after it is read; `config`
+        // comes from `kafka_common_metrics_MetricConfig_new` and is destroyed once, after them; the
+        // time-unit singletons are never freed.
         unsafe {
             let plain = kafka_common_metrics_stats_Rate_new();
             let unit_name = kafka_common_metrics_stats_Rate_unit_name(plain);

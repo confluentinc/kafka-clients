@@ -56,7 +56,15 @@ pub struct kafka_common_metrics_stats_SampledStat_t {
     _private: [u8; 0],
 }
 
+/// The handle behind a pointer.
+///
+/// # Safety
+///
+/// `self_` must be a valid handle of this class, alive for `'a`.
 unsafe fn handle<'a>(self_: *const kafka_common_metrics_stats_SampledStat_t) -> &'a StatHandle<SampledStat> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle of this class alive for
+    // `'a`, so it points at the `StatHandle<SampledStat>` one of this class's constructors boxed,
+    // as `StatHandle::from_ptr` requires.
     unsafe { StatHandle::from_ptr(self_ as *const StatHandle<SampledStat>) }
 }
 
@@ -65,10 +73,12 @@ unsafe fn handle<'a>(self_: *const kafka_common_metrics_stats_SampledStat_t) -> 
 ///
 /// # Safety
 ///
-/// `stat` must be a valid sampled-stat handle.
+/// `stat` must be a valid sampled-stat handle, alive for `'a`.
 pub(crate) unsafe fn sampled_stat_ref<'a>(
     stat: *const kafka_common_metrics_stats_SampledStat_t,
 ) -> &'a Arc<SampledStat> {
+    // SAFETY: Per this function's `# Safety`, `stat` is a valid sampled-stat handle alive for `'a`,
+    // as `handle` requires; the reference returned borrows the handle's `Arc` for the same `'a`.
     unsafe { handle(stat) }.stat()
 }
 
@@ -78,13 +88,17 @@ pub(crate) unsafe fn sampled_stat_ref<'a>(
 ///
 /// # Safety
 ///
-/// `kind` must be a valid kind handle not destroyed afterwards when owned.
+/// `kind` must be a valid kind handle, not used again by the caller when it
+/// was owned.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_new(
     initial_value: f64,
     kind: *mut kafka_common_metrics_stats_SampledStatKind_t,
 ) -> *mut kafka_common_metrics_stats_SampledStat_t {
+    // SAFETY: Per this function's `# Safety`, `kind` is a valid kind handle, not used again by the
+    // caller when it was owned, as `Interface::take` requires; every
+    // `kafka_common_metrics_stats_SampledStatKind_t` is an `Interface<dyn SampledStatKind>`.
     let kind = unsafe { Interface::take(kind as *mut Interface<dyn SampledStatKind>) };
     StatHandle::boxed(SampledStat::new(initial_value, Box::new(ArcSampledStatKind(kind))))
         as *mut kafka_common_metrics_stats_SampledStat_t
@@ -101,6 +115,9 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_new(
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat__as_Stat(
     self_: *const kafka_common_metrics_stats_SampledStat_t,
 ) -> *const kafka_common_metrics_Stat_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle of this class, as `handle`
+    // requires. The view returned is cached in the handle's `OnceLock`, so it lives as long as the
+    // handle; that is the rustdoc's "valid as long as the handle".
     unsafe { handle(self_) }.as_stat()
 }
 
@@ -115,6 +132,9 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat__as_Stat(
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat__as_Measurable(
     self_: *const kafka_common_metrics_stats_SampledStat_t,
 ) -> *const kafka_common_metrics_Measurable_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle of this class, as `handle`
+    // requires. The view returned is cached in the handle's `OnceLock`, so it lives as long as the
+    // handle; that is the rustdoc's "valid as long as the handle".
     unsafe { handle(self_) }.as_measurable()
 }
 
@@ -129,6 +149,9 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat__as_Measurable(
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat__as_MeasurableStat(
     self_: *const kafka_common_metrics_stats_SampledStat_t,
 ) -> *const kafka_common_metrics_MeasurableStat_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle of this class, as `handle`
+    // requires. The view returned is cached in the handle's `OnceLock`, so it lives as long as the
+    // handle; that is the rustdoc's "valid as long as the handle".
     unsafe { handle(self_) }.as_measurable_stat()
 }
 
@@ -143,6 +166,9 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat__as_MeasurableSt
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_destroy(
     self_: *mut kafka_common_metrics_stats_SampledStat_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned handle not yet destroyed,
+    // a `StatHandle<SampledStat>` from this class's constructors, as `StatHandle::destroy`
+    // requires; a sensor the stat was added to keeps its own `Arc` of the stat.
     unsafe { StatHandle::destroy(self_ as *mut StatHandle<SampledStat>) }
 }
 
@@ -204,14 +230,31 @@ struct CSampledStatKind {
     is_windowed_sum: kafka_common_metrics_stats_SampledStatKind_is_windowed_sum_fn_t,
 }
 
-// SAFETY: `self_` is owned by the C caller, who keeps it alive and
-// thread-safe for the registration's lifetime (CLAUDE.md §4, "Traits").
+// SAFETY: `self_` and the function pointers are what the C caller registered through
+// `kafka_common_metrics_stats_SampledStatKind_new`: the C user is responsible for the thread-safety
+// of `self_`, which that function's rustdoc states, and the function pointers are trivially
+// shareable. `CSampledStatKind` itself never dereferences `self_`; it only passes it back to the
+// functions registered with it.
 unsafe impl Send for CSampledStatKind {}
+// SAFETY: `Sync` is required by the `SampledStatKind` trait, whose implementations are shared
+// behind an `Arc` and called through `&self` from any thread. A `&CSampledStatKind` exposes only
+// the opaque `self_` and the function pointers, which the type never dereferences;
+// `kafka_common_metrics_stats_SampledStatKind_new`'s rustdoc lets them be called from any thread,
+// concurrently, and the C user is responsible for the thread-safety of `self_` under those calls.
 unsafe impl Sync for CSampledStatKind {}
 
 impl SampledStatKind for CSampledStatKind {
     fn update(&self, sample: &mut Sample, config: &MetricConfig, value: f64, time_ms: i64) {
         let config = MetricConfigInner::borrowed(config);
+        // SAFETY: `self.update` and `self.self_` are the pair the C caller registered together
+        // through `kafka_common_metrics_stats_SampledStatKind_new`, whose rustdoc has the caller
+        // keep `self_` alive until the kind handle is destroyed or, once consumed, until the stat
+        // built over it is destroyed together with every sensor, rate or meter it was shared with,
+        // which is after this `&self` call, and allows the call to come from any thread,
+        // concurrently with others. `sample` is the `&mut Sample` this method holds, cast to the
+        // sample handle the function type's rustdoc lends for the call, and `config` is the handle
+        // `MetricConfigInner::borrowed` made from the `&MetricConfig` this method holds, valid for
+        // the call, which is all the function type's rustdoc promises the C side.
         unsafe {
             (self.update)(
                 self.self_,
@@ -229,13 +272,32 @@ impl SampledStatKind for CSampledStatKind {
             samples.iter().map(|sample| sample as *const Sample as *mut c_void).collect(),
             None,
         );
+        // SAFETY: `self.combine` and `self.self_` are the pair the C caller registered together
+        // through `kafka_common_metrics_stats_SampledStatKind_new`, whose rustdoc has the caller
+        // keep `self_` alive until the kind handle is destroyed or, once consumed, until the stat
+        // built over it is destroyed together with every sensor, rate or meter it was shared with,
+        // which is after this `&self` call, and allows the call to come from any thread,
+        // concurrently with others. `list` is the view `box_list(.., None)` built over this
+        // method's `&[Sample]`, with no element destructor and destroyed only after the call, which
+        // is the function type's "borrowed for the call"; `config` is the handle
+        // `MetricConfigInner::borrowed` made from the `&MetricConfig` this method holds, valid for
+        // the call, which is all the function type's rustdoc promises the C side.
         let combined = unsafe { (self.combine)(self.self_, list, config.as_ptr(), now) };
+        // SAFETY: `list` is the `box_list` handle built above, not yet destroyed and used by
+        // nothing else; it has no element destructor, so destroying it frees the list only, leaving
+        // the borrowed samples alone.
         unsafe { kafka_List_destroy(list) };
         combined
     }
 
     fn is_windowed_count(&self) -> bool {
         match self.is_windowed_count {
+            // SAFETY: `is_windowed_count` is the non-null function the C caller registered with
+            // `self.self_` through `kafka_common_metrics_stats_SampledStatKind_new`, whose rustdoc
+            // has the caller keep `self_` alive until the kind handle is destroyed or, once
+            // consumed, until the stat built over it is destroyed together with every sensor, rate
+            // or meter it was shared with, which is after this `&self` call, and allows the call to
+            // come from any thread, concurrently with others.
             Some(is_windowed_count) => unsafe { is_windowed_count(self.self_) != 0 },
             None => false,
         }
@@ -243,6 +305,12 @@ impl SampledStatKind for CSampledStatKind {
 
     fn is_windowed_sum(&self) -> bool {
         match self.is_windowed_sum {
+            // SAFETY: `is_windowed_sum` is the non-null function the C caller registered with
+            // `self.self_` through `kafka_common_metrics_stats_SampledStatKind_new`, whose rustdoc
+            // has the caller keep `self_` alive until the kind handle is destroyed or, once
+            // consumed, until the stat built over it is destroyed together with every sensor, rate
+            // or meter it was shared with, which is after this `&self` call, and allows the call to
+            // come from any thread, concurrently with others.
             Some(is_windowed_sum) => unsafe { is_windowed_sum(self.self_) != 0 },
             None => false,
         }
@@ -274,17 +342,25 @@ impl SampledStatKind for ArcSampledStatKind {
 ///
 /// # Safety
 ///
-/// `kind` must be a valid kind handle.
+/// `kind` must be a valid kind handle, alive for `'a`.
 pub(crate) unsafe fn sampled_stat_kind_ref<'a>(
     kind: *const kafka_common_metrics_stats_SampledStatKind_t,
 ) -> &'a dyn SampledStatKind {
+    // SAFETY: Per this function's `# Safety`, `kind` is a valid kind handle alive for `'a`, as
+    // `Interface::from_ptr` requires: every `kafka_common_metrics_stats_SampledStatKind_t` is an
+    // `Interface<dyn SampledStatKind>`; the reference returned lives for the same `'a`.
     unsafe { Interface::from_ptr(kind as *const Interface<dyn SampledStatKind>) }.get()
 }
 
-/// Builds a kind from a C implementation: `self_` is owned by the caller and
-/// kept alive until the stat built over it is destroyed; the two `is_*`
-/// methods may be null for the Java default (`false`). Owned, consumed by
-/// [`kafka_common_metrics_stats_SampledStat_new`] or freed with
+/// Builds a kind from a C implementation. The caller owns `self_` and keeps
+/// it alive until the handle is destroyed with
+/// [`kafka_common_metrics_stats_SampledStatKind_destroy`] or, once
+/// [`kafka_common_metrics_stats_SampledStat_new`] consumed it, until the stat
+/// built over it is destroyed together with every sensor, rate or meter it
+/// was shared with. The two `is_*` methods may be null for the Java default
+/// (`false`). The functions may be called from any thread, concurrently, so
+/// the C caller is responsible for their thread-safety on `self_`. Owned,
+/// consumed by [`kafka_common_metrics_stats_SampledStat_new`] or freed with
 /// [`kafka_common_metrics_stats_SampledStatKind_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -305,8 +381,10 @@ pub extern "C" fn kafka_common_metrics_stats_SampledStatKind_new(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid kind handle, `sample` a valid sample handle and
-/// `config` a valid metric-config handle.
+/// `self_` must be a valid kind handle, `sample` a valid sample handle that
+/// no other call uses at the same time and that is not one of the read-only
+/// samples a kind's `combine` receives, and `config` a valid metric-config
+/// handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStatKind_update(
@@ -316,8 +394,16 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStatKind_update(
     value: f64,
     time_ms: i64,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid kind handle, as
+    // `sampled_stat_kind_ref` requires; the reference is used only within this call.
     unsafe { sampled_stat_kind_ref(self_) }.update(
+        // SAFETY: Per this function's `# Safety`, `sample` is a valid sample handle that no other
+        // call uses at the same time and not one of the read-only samples `combine` lends: an owned
+        // one, the `Box::into_raw` of a `Sample`, or the one a kind's `update` lends for its call,
+        // a `&mut Sample` cast; so the exclusive reference aliases nothing for this call.
         unsafe { &mut *(sample as *mut Sample) },
+        // SAFETY: Per this function's `# Safety`, `config` is a valid metric-config handle, as
+        // `metric_config_ref` requires; the reference is used only within this call.
         unsafe { metric_config_ref(config) },
         value,
         time_ms,
@@ -340,10 +426,19 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStatKind_combine(
     config: *const kafka_common_metrics_MetricConfig_t,
     now: i64,
 ) -> f64 {
+    // SAFETY: Per this function's `# Safety`, `samples` is null or a valid list handle, alive and
+    // not mutated during this call, as `list_elements` requires; the slice is used only within this
+    // call, its samples being cloned before return.
     let samples: Vec<Sample> = unsafe { list_elements(samples) }
         .iter()
+        // SAFETY: Per this function's `# Safety`, every element of `samples` is a valid sample
+        // handle: an owned one, the `Box::into_raw` of a `Sample`, or one a kind's `update` or
+        // `combine` lends for its call; the reference lives only until `clone` copies the sample.
         .map(|&sample| unsafe { &*(sample as *const Sample) }.clone())
         .collect();
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid kind handle, as
+    // `sampled_stat_kind_ref` requires, and `config` a valid metric-config handle, as
+    // `metric_config_ref` requires; both references are used only within this call.
     unsafe { sampled_stat_kind_ref(self_) }.combine(&samples, unsafe { metric_config_ref(config) }, now)
 }
 
@@ -357,6 +452,8 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStatKind_combine(
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStatKind_is_windowed_count(
     self_: *const kafka_common_metrics_stats_SampledStatKind_t,
 ) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid kind handle, as
+    // `sampled_stat_kind_ref` requires; the reference is used only within this call.
     i8::from(unsafe { sampled_stat_kind_ref(self_) }.is_windowed_count())
 }
 
@@ -370,6 +467,8 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStatKind_is_windowed_
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStatKind_is_windowed_sum(
     self_: *const kafka_common_metrics_stats_SampledStatKind_t,
 ) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid kind handle, as
+    // `sampled_stat_kind_ref` requires; the reference is used only within this call.
     i8::from(unsafe { sampled_stat_kind_ref(self_) }.is_windowed_sum())
 }
 
@@ -383,6 +482,9 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStatKind_is_windowed_
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStatKind_destroy(
     self_: *mut kafka_common_metrics_stats_SampledStatKind_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned kind handle not yet
+    // consumed or destroyed, as `Interface::destroy` requires;
+    // `kafka_common_metrics_stats_SampledStatKind_new` hands out only owned kind handles.
     unsafe { Interface::destroy(self_ as *mut Interface<dyn SampledStatKind>) }
 }
 
@@ -396,11 +498,32 @@ pub struct kafka_common_metrics_stats_SampledStat_Sample_t {
     _private: [u8; 0],
 }
 
+/// The sample behind a handle.
+///
+/// # Safety
+///
+/// `self_` must be a valid sample handle, alive and not mutated for `'a`.
 unsafe fn sample_ref<'a>(self_: *const kafka_common_metrics_stats_SampledStat_Sample_t) -> &'a Sample {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid sample handle alive for `'a` and
+    // not mutated during it: an owned one, the `Box::into_raw` of a `Sample` in its constructors,
+    // or one a kind's `update` or `combine` lends for its call, a `&mut Sample` or `&Sample` cast;
+    // so the shared reference is sound for `'a`.
     unsafe { &*(self_ as *const Sample) }
 }
 
+/// The sample behind a handle, for a setter.
+///
+/// # Safety
+///
+/// `self_` must be a valid sample handle, alive for `'a` and used by no other
+/// call during it, and not one of the read-only samples a kind's `combine`
+/// receives.
 unsafe fn sample_mut<'a>(self_: *mut kafka_common_metrics_stats_SampledStat_Sample_t) -> &'a mut Sample {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid sample handle alive for `'a`, used
+    // by no other call during it and not one of the read-only samples `combine` lends: an owned
+    // one, the `Box::into_raw` of a `Sample` in its constructors, or the one a kind's `update`
+    // lends for its call, a `&mut Sample` cast; so the exclusive reference aliases nothing for
+    // `'a`.
     unsafe { &mut *(self_ as *mut Sample) }
 }
 
@@ -431,13 +554,18 @@ pub extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_with_time_window
 ///
 /// # Safety
 ///
-/// `self_` must be a valid sample handle.
+/// `self_` must be a valid sample handle that no other call uses at the
+/// same time, and not one of the read-only samples a kind's `combine`
+/// receives.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_reset(
     self_: *mut kafka_common_metrics_stats_SampledStat_Sample_t,
     now: i64,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid sample handle that no other call
+    // uses at the same time and not one of the read-only samples `combine` lends, as `sample_mut`
+    // requires; the exclusive reference is used only within this call.
     unsafe { sample_mut(self_) }.reset(now)
 }
 
@@ -455,6 +583,9 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_is_comple
     time_ms: i64,
     config: *const kafka_common_metrics_MetricConfig_t,
 ) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid sample handle, as `sample_ref`
+    // requires, and `config` a valid metric-config handle, as `metric_config_ref` requires; both
+    // references are used only within this call.
     i8::from(unsafe { sample_ref(self_) }.is_complete(time_ms, unsafe { metric_config_ref(config) }))
 }
 
@@ -468,6 +599,8 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_is_comple
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_initial_value(
     self_: *const kafka_common_metrics_stats_SampledStat_Sample_t,
 ) -> f64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid sample handle, as `sample_ref`
+    // requires; the value is copied out.
     unsafe { sample_ref(self_) }.initial_value()
 }
 
@@ -483,6 +616,8 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_initial_v
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_event_count(
     self_: *const kafka_common_metrics_stats_SampledStat_Sample_t,
 ) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid sample handle, as `sample_ref`
+    // requires; the value is copied out.
     unsafe { sample_ref(self_) }.event_count()
 }
 
@@ -496,6 +631,8 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_event_cou
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_start_time_ms(
     self_: *const kafka_common_metrics_stats_SampledStat_Sample_t,
 ) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid sample handle, as `sample_ref`
+    // requires; the value is copied out.
     unsafe { sample_ref(self_) }.start_time_ms()
 }
 
@@ -509,6 +646,8 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_start_tim
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_last_event_ms(
     self_: *const kafka_common_metrics_stats_SampledStat_Sample_t,
 ) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid sample handle, as `sample_ref`
+    // requires; the value is copied out.
     unsafe { sample_ref(self_) }.last_event_ms()
 }
 
@@ -522,6 +661,8 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_last_even
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_value(
     self_: *const kafka_common_metrics_stats_SampledStat_Sample_t,
 ) -> f64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid sample handle, as `sample_ref`
+    // requires; the value is copied out.
     unsafe { sample_ref(self_) }.value()
 }
 
@@ -535,6 +676,8 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_value(
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_time_window_ms(
     self_: *const kafka_common_metrics_stats_SampledStat_Sample_t,
 ) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid sample handle, as `sample_ref`
+    // requires; the value is copied out.
     unsafe { sample_ref(self_) }.time_window_ms()
 }
 
@@ -542,13 +685,18 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_time_wind
 ///
 /// # Safety
 ///
-/// `self_` must be a valid sample handle.
+/// `self_` must be a valid sample handle that no other call uses at the
+/// same time, and not one of the read-only samples a kind's `combine`
+/// receives.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_set_event_count(
     self_: *mut kafka_common_metrics_stats_SampledStat_Sample_t,
     event_count: i64,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid sample handle that no other call
+    // uses at the same time and not one of the read-only samples `combine` lends, as `sample_mut`
+    // requires; the exclusive reference is used only within this call.
     unsafe { sample_mut(self_) }.set_event_count(event_count)
 }
 
@@ -556,13 +704,18 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_set_event
 ///
 /// # Safety
 ///
-/// `self_` must be a valid sample handle.
+/// `self_` must be a valid sample handle that no other call uses at the
+/// same time, and not one of the read-only samples a kind's `combine`
+/// receives.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_set_last_event_ms(
     self_: *mut kafka_common_metrics_stats_SampledStat_Sample_t,
     last_event_ms: i64,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid sample handle that no other call
+    // uses at the same time and not one of the read-only samples `combine` lends, as `sample_mut`
+    // requires; the exclusive reference is used only within this call.
     unsafe { sample_mut(self_) }.set_last_event_ms(last_event_ms)
 }
 
@@ -570,13 +723,18 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_set_last_
 ///
 /// # Safety
 ///
-/// `self_` must be a valid sample handle.
+/// `self_` must be a valid sample handle that no other call uses at the
+/// same time, and not one of the read-only samples a kind's `combine`
+/// receives.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_set_value(
     self_: *mut kafka_common_metrics_stats_SampledStat_Sample_t,
     value: f64,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid sample handle that no other call
+    // uses at the same time and not one of the read-only samples `combine` lends, as `sample_mut`
+    // requires; the exclusive reference is used only within this call.
     unsafe { sample_mut(self_) }.set_value(value)
 }
 
@@ -591,6 +749,10 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_destroy(
     self_: *mut kafka_common_metrics_stats_SampledStat_Sample_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // sample handle not yet destroyed, i.e. the `Box::into_raw` of a `Sample` in its
+        // constructors, so `from_raw` reclaims that allocation, once; a sample a kind lends is not
+        // owned, so it is never passed here.
         drop(unsafe { Box::from_raw(self_ as *mut Sample) });
     }
 }
@@ -616,6 +778,8 @@ mod tests {
         value: f64,
         _time_ms: i64,
     ) {
+        // SAFETY: Test code: `sample` is the `&mut Sample` cast `CSampledStatKind::update` lends
+        // for this call, used by nothing else meanwhile.
         unsafe {
             let current = kafka_common_metrics_stats_SampledStat_Sample_value(sample);
             kafka_common_metrics_stats_SampledStat_Sample_set_value(sample, current.max(value));
@@ -629,6 +793,9 @@ mod tests {
         _now: i64,
     ) -> f64 {
         let mut max = f64::NEG_INFINITY;
+        // SAFETY: Test code: `self_` is the `combines` counter the test registered, which outlives
+        // the stat and is read by nothing else during the call; `samples` is the borrowed list
+        // `CSampledStatKind::combine` lends, whose read-only samples are only read here.
         unsafe {
             *(self_ as *mut i32) += 1;
             for i in 0..kafka_List_size(samples) {
@@ -665,6 +832,11 @@ mod tests {
     fn a_c_kind_drives_a_sampled_stat_and_null_predicates_are_the_java_default() {
         let mut combines = 0i32;
         let config = kafka_common_metrics_MetricConfig_new();
+        // SAFETY: Test code: `kind` comes from `kafka_common_metrics_stats_SampledStatKind_new`
+        // over the `combines` local, which outlives it, and
+        // `kafka_common_metrics_stats_SampledStat_new` consumes it, after which it is not used;
+        // `stat` and `config` come from their constructors and are destroyed once, after their last
+        // use.
         unsafe {
             let kind = kafka_common_metrics_stats_SampledStatKind_new(
                 &mut combines as *mut i32 as *mut c_void,
@@ -700,6 +872,11 @@ mod tests {
     #[test]
     fn invokers_reach_a_rust_kind_through_sample_handles() {
         let config = kafka_common_metrics_MetricConfig_new();
+        // SAFETY: Test code: `kind` is an owned `Interface` from `Interface::owned` and is
+        // destroyed once, near the end; `first` and `second` come from the `Sample` constructors,
+        // are used by one call at a time and are destroyed once; `samples` is a
+        // `box_list(.., None)` view over them, destroyed before them; `config` comes from
+        // `kafka_common_metrics_MetricConfig_new` and is destroyed once.
         unsafe {
             let kind = Interface::owned(Arc::new(SumKind) as Arc<dyn SampledStatKind>)
                 as *mut kafka_common_metrics_stats_SampledStatKind_t;

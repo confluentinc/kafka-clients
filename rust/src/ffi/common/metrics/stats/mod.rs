@@ -75,8 +75,13 @@ impl<T> StatHandle<T> {
     ///
     /// # Safety
     ///
-    /// `ptr` must be a valid handle of this class.
+    /// `ptr` must be a valid handle of this class, alive for `'a`.
     pub(crate) unsafe fn from_ptr<'a>(ptr: *const Self) -> &'a Self {
+        // SAFETY: Per this function's `# Safety`, `ptr` is a valid handle of this class alive for
+        // `'a`, i.e. the `Box::into_raw` of a `StatHandle<T>` in `boxed`, which only `destroy`
+        // takes back. The handle is never mutated through a pointer: the views are filled in
+        // through their `OnceLock`s and the stat is shared through its `Arc`, so the shared
+        // reference is sound for `'a`.
         unsafe { &*ptr }
     }
 
@@ -92,6 +97,10 @@ impl<T> StatHandle<T> {
     /// `ptr` must be null or an owned handle not yet destroyed.
     pub(crate) unsafe fn destroy(ptr: *mut Self) {
         if !ptr.is_null() {
+            // SAFETY: `ptr` is non-null (checked above) and, per this function's `# Safety`, an
+            // owned handle not yet destroyed, i.e. the `Box::into_raw` of `boxed`, so
+            // `Box::from_raw` reclaims it exactly once. Dropping it releases the handle's `Arc` and
+            // the views' `Arc`s only; a sensor the stat was added to keeps its own.
             drop(unsafe { Box::from_raw(ptr) });
         }
     }
@@ -150,6 +159,10 @@ mod tests {
     fn views_are_cached_and_share_the_stat() {
         let handle = StatHandle::boxed(Avg::new());
         let config = MetricConfig::new();
+        // SAFETY: Test code: `handle` comes from `StatHandle::boxed` and is destroyed once, after
+        // the last use of `h`, the reference borrowed from it; the views come from `h` and are used
+        // while it is alive, and `take_measurable_stat` clones the stat out of the view without
+        // taking the view.
         unsafe {
             let h = StatHandle::from_ptr(handle);
             assert_eq!(h.as_stat(), h.as_stat());

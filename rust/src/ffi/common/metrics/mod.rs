@@ -89,8 +89,13 @@ impl<T: ?Sized> Interface<T> {
     ///
     /// # Safety
     ///
-    /// `ptr` must be a valid handle of this interface.
+    /// `ptr` must be a valid handle of this interface, alive for `'a`.
     pub(crate) unsafe fn from_ptr<'a>(ptr: *const Self) -> &'a Self {
+        // SAFETY: Per this function's `# Safety`, `ptr` is a valid handle of this interface alive
+        // for `'a`: an owned one, the `Box::into_raw` of `Interface::owned`, or a view a class
+        // handle caches, which lives as long as that class handle. An `Interface` is never mutated
+        // once built (only `take` and `destroy` free an owned one), so the shared reference is
+        // sound for `'a`.
         unsafe { &*ptr }
     }
 
@@ -103,9 +108,17 @@ impl<T: ?Sized> Interface<T> {
     /// `ptr` must be a valid handle of this interface, not used again by the
     /// caller when it was owned.
     pub(crate) unsafe fn take(ptr: *mut Self) -> Arc<T> {
+        // SAFETY: Per this function's `# Safety`, `ptr` is a valid handle of this interface, owned
+        // or a view; the reference only reads `owned` and ends with this expression.
         if unsafe { &*ptr }.owned {
+            // SAFETY: `owned` is set only by `Interface::owned`, so `ptr` is the `Box::into_raw` of
+            // that function, and per this function's `# Safety` the caller does not use an owned
+            // handle again, so `from_raw` reclaims that allocation, once.
             unsafe { Box::from_raw(ptr) }.imp
         } else {
+            // SAFETY: Per this function's `# Safety`, `ptr` is a valid handle of this interface,
+            // here a view, which its class handle keeps alive and which is not freed here; the
+            // reference lasts only while the `Arc` is cloned.
             Arc::clone(&unsafe { &*ptr }.imp)
         }
     }
@@ -117,6 +130,10 @@ impl<T: ?Sized> Interface<T> {
     /// `ptr` must be null or an owned handle not yet destroyed.
     pub(crate) unsafe fn destroy(ptr: *mut Self) {
         if !ptr.is_null() {
+            // SAFETY: `ptr` is non-null (checked above) and, per this function's `# Safety`, an
+            // owned handle not yet destroyed, i.e. the `Box::into_raw` of `Interface::owned` (a
+            // view, which its class handle caches, is never passed here), so `from_raw` reclaims
+            // that allocation, once.
             drop(unsafe { Box::from_raw(ptr) });
         }
     }
@@ -131,6 +148,8 @@ mod tests {
         let imp: Arc<str> = Arc::from("imp");
         let owned = Interface::owned(Arc::clone(&imp));
         assert_eq!(Arc::strong_count(&imp), 2);
+        // SAFETY: Test code: `owned` comes from `Interface::owned` and is not used after `take`
+        // frees it.
         let taken = unsafe { Interface::take(owned) };
         assert!(Arc::ptr_eq(&taken, &imp));
         assert_eq!(Arc::strong_count(&imp), 2, "the owned handle was freed");
@@ -138,12 +157,15 @@ mod tests {
 
         let mut view = Interface::view(Arc::clone(&imp));
         assert_eq!(view.get(), "imp");
+        // SAFETY: Test code: `view` is a live local view, which `take` only reads and leaves in
+        // place.
         let shared = unsafe { Interface::take(&mut view) };
         assert!(Arc::ptr_eq(&shared, &imp));
         assert_eq!(Arc::strong_count(&imp), 3, "the view keeps its own reference");
         drop(view);
         drop(shared);
         assert_eq!(Arc::strong_count(&imp), 1);
+        // SAFETY: Test code: null is a no-op for `destroy`.
         unsafe { Interface::<str>::destroy(std::ptr::null_mut()) };
     }
 }

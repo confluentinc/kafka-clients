@@ -31,7 +31,15 @@ pub struct kafka_common_metrics_stats_SimpleRate_t {
     _private: [u8; 0],
 }
 
+/// The handle behind a pointer.
+///
+/// # Safety
+///
+/// `self_` must be a valid handle of this class, alive for `'a`.
 unsafe fn handle<'a>(self_: *const kafka_common_metrics_stats_SimpleRate_t) -> &'a StatHandle<SimpleRate> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle of this class alive for
+    // `'a`, so it points at the `StatHandle<SimpleRate>` one of this class's constructors boxed, as
+    // `StatHandle::from_ptr` requires.
     unsafe { StatHandle::from_ptr(self_ as *const StatHandle<SimpleRate>) }
 }
 
@@ -59,8 +67,12 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate_window_size(
     config: *const kafka_common_metrics_MetricConfig_t,
     now: i64,
 ) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle of this class, as `handle`
+    // requires; the reference is used only within this call.
     unsafe { handle(self_) }
         .stat()
+        // SAFETY: Per this function's `# Safety`, `config` is a valid metric-config handle, as
+        // `metric_config_ref` requires; the reference is used only within this call.
         .window_size(unsafe { metric_config_ref(config) }, now)
 }
 
@@ -75,6 +87,9 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate_window_size(
 pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate__as_Stat(
     self_: *const kafka_common_metrics_stats_SimpleRate_t,
 ) -> *const kafka_common_metrics_Stat_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle of this class, as `handle`
+    // requires. The view returned is cached in the handle's `OnceLock`, so it lives as long as the
+    // handle; that is the rustdoc's "valid as long as the handle".
     unsafe { handle(self_) }.as_stat()
 }
 
@@ -89,6 +104,9 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate__as_Stat(
 pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate__as_Measurable(
     self_: *const kafka_common_metrics_stats_SimpleRate_t,
 ) -> *const kafka_common_metrics_Measurable_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle of this class, as `handle`
+    // requires. The view returned is cached in the handle's `OnceLock`, so it lives as long as the
+    // handle; that is the rustdoc's "valid as long as the handle".
     unsafe { handle(self_) }.as_measurable()
 }
 
@@ -103,6 +121,9 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate__as_Measurable(
 pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate__as_MeasurableStat(
     self_: *const kafka_common_metrics_stats_SimpleRate_t,
 ) -> *const kafka_common_metrics_MeasurableStat_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle of this class, as `handle`
+    // requires. The view returned is cached in the handle's `OnceLock`, so it lives as long as the
+    // handle; that is the rustdoc's "valid as long as the handle".
     unsafe { handle(self_) }.as_measurable_stat()
 }
 
@@ -117,6 +138,9 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate__as_MeasurableSta
 pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate_destroy(
     self_: *mut kafka_common_metrics_stats_SimpleRate_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned handle not yet destroyed,
+    // a `StatHandle<SimpleRate>` from this class's constructors, as `StatHandle::destroy` requires;
+    // a sensor the stat was added to keeps its own `Arc` of the stat.
     unsafe { StatHandle::destroy(self_ as *mut StatHandle<SimpleRate>) }
 }
 
@@ -137,6 +161,9 @@ mod tests {
         let stat = kafka_common_metrics_stats_SimpleRate_new();
         let reference = SimpleRate::new();
         let config = kafka_common_metrics_MetricConfig_new();
+        // SAFETY: Test code: `stat` comes from `kafka_common_metrics_stats_SimpleRate_new` and is
+        // destroyed once, after the calls through it and the views it caches; `config` comes from
+        // `kafka_common_metrics_MetricConfig_new` and is destroyed once, after them.
         unsafe {
             kafka_common_metrics_Stat_record(kafka_common_metrics_stats_SimpleRate__as_Stat(stat), config, 2.0, 0);
             kafka_common_metrics_Stat_record(kafka_common_metrics_stats_SimpleRate__as_Stat(stat), config, 4.0, 1_000);

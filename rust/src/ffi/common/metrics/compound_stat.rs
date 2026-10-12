@@ -73,29 +73,63 @@ struct CCompoundStat {
     stats: kafka_common_metrics_CompoundStat_stats_fn_t,
 }
 
-// SAFETY: `self_` is what the C caller registered, whose thread-safety is
-// the caller's responsibility as for every interface implementation
-// (CLAUDE.md §4).
+// SAFETY: `self_` and the function pointers are what the C caller registered through
+// `kafka_common_metrics_CompoundStat_new`: the C user is responsible for the thread-safety of
+// `self_`, which that function's rustdoc states, and the function pointers are trivially shareable.
+// `CCompoundStat` itself never dereferences `self_`; it only passes it back to the functions
+// registered with it.
 unsafe impl Send for CCompoundStat {}
+// SAFETY: `Sync` is required by the `Stat` trait, the supertrait of `CompoundStat`, whose
+// implementations are shared behind an `Arc` and called through `&self` from any thread. A
+// `&CCompoundStat` exposes only the opaque `self_` and the function pointers, which the type never
+// dereferences; `kafka_common_metrics_CompoundStat_new`'s rustdoc lets them be called from any
+// thread, concurrently, and the C user is responsible for the thread-safety of `self_` under those
+// calls.
 unsafe impl Sync for CCompoundStat {}
 
 impl Stat for CCompoundStat {
     fn record(&self, config: &MetricConfig, value: f64, time_ms: i64) {
         let config = MetricConfigInner::borrowed(config);
+        // SAFETY: `self.record` and `self.self_` are the pair the C caller registered together
+        // through `kafka_common_metrics_CompoundStat_new`, whose rustdoc has the caller keep
+        // `self_` alive until the handle is destroyed or, once consumed, until the sensor it went
+        // into is destroyed with its registry, which is after this `&self` call, and allows the
+        // call to come from any thread, concurrently with others. `config` is the handle
+        // `MetricConfigInner::borrowed` made from the `&MetricConfig` this method holds, valid for
+        // the call, which is all the function type's rustdoc promises the C side.
         unsafe { (self.record)(self.self_, config.as_ptr(), value, time_ms) }
     }
 }
 
 impl CompoundStat for CCompoundStat {
     fn stats(&self) -> Vec<NamedMeasurable> {
+        // SAFETY: `self.stats` and `self.self_` are the pair the C caller registered together
+        // through `kafka_common_metrics_CompoundStat_new`, whose rustdoc has the caller keep
+        // `self_` alive until the handle is destroyed or, once consumed, until the sensor it went
+        // into is destroyed with its registry, which is after this `&self` call, and allows the
+        // call to come from any thread, concurrently with others. It takes no other argument; what
+        // it returns is handled below.
         let list = unsafe { (self.stats)(self.self_) };
         if list.is_null() {
             return Vec::new();
         }
+        // SAFETY: `list` is non-null (checked above) and, per
+        // `kafka_common_metrics_CompoundStat_stats_fn_t`'s rustdoc, a list from `kafka_List_new`
+        // that Rust now owns, so it stays alive and unmutated until it is destroyed below, after
+        // the last use of the slice.
         let stats = unsafe { list_elements(list) }
             .iter()
+            // SAFETY: Per `kafka_common_metrics_CompoundStat_stats_fn_t`'s rustdoc, each element is
+            // an owned named-measurable handle from
+            // `kafka_common_metrics_CompoundStat_NamedMeasurable_new`, the `Box::into_raw` of a
+            // `NamedMeasurableInner` in `box_named_measurable`, that Rust takes over, so `from_raw`
+            // reclaims that allocation, once; the `kafka_List_new` list holding it has no element
+            // destructor and never frees it.
             .map(|&element| unsafe { Box::from_raw(element as *mut NamedMeasurableInner) }.named)
             .collect();
+        // SAFETY: `list` is the non-null list from `kafka_List_new` the C function returned, which
+        // Rust owns and has not destroyed; it has no element destructor, so this frees the list
+        // alone, after its elements were moved out above.
         unsafe { kafka_List_destroy(list) };
         stats
     }
@@ -120,8 +154,12 @@ impl CompoundStat for ArcCompoundStat {
 ///
 /// # Safety
 ///
-/// `stat` must be a valid compound-stat handle.
+/// `stat` must be a valid compound-stat handle, alive for `'a`.
 pub(crate) unsafe fn compound_stat_ref<'a>(stat: *const kafka_common_metrics_CompoundStat_t) -> &'a dyn CompoundStat {
+    // SAFETY: Per this function's `# Safety`, `stat` is a valid compound-stat handle alive for
+    // `'a`, as `Interface::from_ptr` requires: every `kafka_common_metrics_CompoundStat_t` is an
+    // `Interface<dyn CompoundStat>`, owned or a view; the reference returned lives for the same
+    // `'a`.
     unsafe { Interface::<dyn CompoundStat>::from_ptr(stat as *const Interface<dyn CompoundStat>) }.get()
 }
 
@@ -133,6 +171,9 @@ pub(crate) unsafe fn compound_stat_ref<'a>(stat: *const kafka_common_metrics_Com
 /// `stat` must be a valid compound-stat handle, not used again by the
 /// caller when it was owned.
 pub(crate) unsafe fn take_compound_stat(stat: *mut kafka_common_metrics_CompoundStat_t) -> Box<dyn CompoundStat> {
+    // SAFETY: Per this function's `# Safety`, `stat` is a valid compound-stat handle, not used
+    // again by the caller when it was owned, as `Interface::take` requires; every such handle is an
+    // `Interface` of this trait object.
     Box::new(ArcCompoundStat(unsafe {
         Interface::take(stat as *mut Interface<dyn CompoundStat>)
     }))
@@ -142,7 +183,8 @@ pub(crate) unsafe fn take_compound_stat(stat: *mut kafka_common_metrics_Compound
 /// and keeps it alive until the handle is destroyed with
 /// [`kafka_common_metrics_CompoundStat_destroy`] or, once a `*mut` parameter
 /// consumed it, until the sensor it went into is destroyed with its
-/// registry.
+/// registry. The functions may be called from any thread, concurrently, so
+/// the C caller is responsible for their thread-safety on `self_`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_CompoundStat_new(
@@ -168,6 +210,9 @@ pub unsafe extern "C" fn kafka_common_metrics_CompoundStat_record(
     value: f64,
     time_ms: i64,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid compound-stat handle, as
+    // `compound_stat_ref` requires, and `config` a valid metric-config handle, as
+    // `metric_config_ref` requires; both references are used only within this call.
     unsafe { compound_stat_ref(self_) }.record(unsafe { metric_config_ref(config) }, value, time_ms);
 }
 
@@ -183,6 +228,9 @@ pub unsafe extern "C" fn kafka_common_metrics_CompoundStat_record(
 pub unsafe extern "C" fn kafka_common_metrics_CompoundStat_stats(
     self_: *const kafka_common_metrics_CompoundStat_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid compound-stat handle, as
+    // `compound_stat_ref` requires; the reference is used only within this call, and each pair
+    // `stats` returns is boxed into an owned handle the returned list owns.
     let stats = unsafe { compound_stat_ref(self_) }
         .stats()
         .into_iter()
@@ -200,6 +248,9 @@ pub unsafe extern "C" fn kafka_common_metrics_CompoundStat_stats(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_CompoundStat_destroy(self_: *mut kafka_common_metrics_CompoundStat_t) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned compound-stat handle not
+    // yet destroyed, as `Interface::destroy` requires; a view a class handle caches is never passed
+    // here.
     unsafe { Interface::<dyn CompoundStat>::destroy(self_ as *mut Interface<dyn CompoundStat>) }
 }
 
@@ -220,9 +271,19 @@ fn box_named_measurable(named: NamedMeasurable) -> *mut kafka_common_metrics_Com
         as *mut kafka_common_metrics_CompoundStat_NamedMeasurable_t
 }
 
+/// What a handle points at.
+///
+/// # Safety
+///
+/// `self_` must be a valid named-measurable handle, alive for `'a`.
 unsafe fn named_inner<'a>(
     self_: *const kafka_common_metrics_CompoundStat_NamedMeasurable_t,
 ) -> &'a NamedMeasurableInner {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid named-measurable handle alive for
+    // `'a`, so it points at a live `NamedMeasurableInner`, the `Box::into_raw` of
+    // `box_named_measurable`: an owned handle, or an element of the owning list
+    // `kafka_common_metrics_CompoundStat_stats` returns, which lives as long as that list. No call
+    // mutates a `NamedMeasurableInner`, so the shared reference is sound for `'a`.
     unsafe { &*(self_ as *const NamedMeasurableInner) }
 }
 
@@ -241,7 +302,12 @@ pub unsafe extern "C" fn kafka_common_metrics_CompoundStat_NamedMeasurable_new(
     name: *const kafka_common_MetricName_t,
     stat: *mut kafka_common_metrics_Measurable_t,
 ) -> *mut kafka_common_metrics_CompoundStat_NamedMeasurable_t {
+    // SAFETY: Per this function's `# Safety`, `name` is a valid metric-name handle, as
+    // `metric_name_ref` requires; the name is cloned, so the borrow lasts for this call only.
     let name = unsafe { metric_name_ref(name) }.clone();
+    // SAFETY: Per this function's `# Safety`, `stat` is a valid measurable handle, not used again
+    // by the caller when it was owned, as `take_measurable` requires; the `Arc` it returns is
+    // owned.
     let stat = unsafe { take_measurable(stat) };
     box_named_measurable(NamedMeasurable::new(name, stat))
 }
@@ -256,6 +322,10 @@ pub unsafe extern "C" fn kafka_common_metrics_CompoundStat_NamedMeasurable_new(
 pub unsafe extern "C" fn kafka_common_metrics_CompoundStat_NamedMeasurable_name(
     self_: *const kafka_common_metrics_CompoundStat_NamedMeasurable_t,
 ) -> *const kafka_common_MetricName_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid named-measurable handle, as
+    // `named_inner` requires; the handle returned is a view on the `MetricNameInner` the named
+    // measurable embeds, so it lives as long as the named-measurable handle; that is the rustdoc's
+    // "borrowed from the handle, valid as long as it is".
     unsafe { named_inner(self_) }.name.as_ptr()
 }
 
@@ -270,6 +340,9 @@ pub unsafe extern "C" fn kafka_common_metrics_CompoundStat_NamedMeasurable_name(
 pub unsafe extern "C" fn kafka_common_metrics_CompoundStat_NamedMeasurable_stat(
     self_: *const kafka_common_metrics_CompoundStat_NamedMeasurable_t,
 ) -> *mut kafka_common_metrics_Measurable_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid named-measurable handle, as
+    // `named_inner` requires; `stat` clones the `Arc`, which is boxed into an owned handle, so the
+    // borrow lasts for this call only.
     box_measurable(unsafe { named_inner(self_) }.named.stat())
 }
 
@@ -284,6 +357,10 @@ pub unsafe extern "C" fn kafka_common_metrics_CompoundStat_NamedMeasurable_destr
     self_: *mut kafka_common_metrics_CompoundStat_NamedMeasurable_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // handle not yet destroyed, i.e. the `Box::into_raw` of a `NamedMeasurableInner` in
+        // `box_named_measurable` (an element of a list Rust returned belongs to that list and is
+        // never passed here), so `from_raw` reclaims that allocation, once.
         drop(unsafe { Box::from_raw(self_ as *mut NamedMeasurableInner) });
     }
 }
@@ -315,6 +392,8 @@ mod tests {
         _config: *const kafka_common_metrics_MetricConfig_t,
         _now: i64,
     ) -> f64 {
+        // SAFETY: Test code: `self_` is the `reading` local the test registered, which outlives
+        // every call.
         unsafe { *(self_ as *const f64) }
     }
 
@@ -325,12 +404,17 @@ mod tests {
         value: f64,
         _time_ms: i64,
     ) {
+        // SAFETY: Test code: `self_` is the `sum` mutex the test registered, which outlives every
+        // call.
         *unsafe { &*(self_ as *const Mutex<f64>) }.lock().unwrap() += value;
     }
     unsafe extern "C" fn c_stats(self_: *mut c_void) -> *mut kafka_List_t {
         let name = box_metric_name(MetricName::new("sum", "g", "d", BTreeMap::new()));
         let stat = kafka_common_metrics_Measurable_new(self_, c_measure_sum);
         let list = kafka_List_new();
+        // SAFETY: Test code: `list` comes from `kafka_List_new` and takes the owned pair, which
+        // takes over `stat` and copies `name`; `name` comes from `box_metric_name` and is destroyed
+        // once, after the copy; Rust takes over the list.
         unsafe {
             kafka_List_add(
                 list,
@@ -345,6 +429,8 @@ mod tests {
         _config: *const kafka_common_metrics_MetricConfig_t,
         _now: i64,
     ) -> f64 {
+        // SAFETY: Test code: `self_` is the `sum` mutex the test registered, which outlives every
+        // call.
         *unsafe { &*(self_ as *const Mutex<f64>) }.lock().unwrap()
     }
 
@@ -354,6 +440,11 @@ mod tests {
         let mut reading = 2.5_f64;
         let stat = kafka_common_metrics_Measurable_new(&mut reading as *mut f64 as *mut c_void, c_measure);
         let config = kafka_common_metrics_MetricConfig_new();
+        // SAFETY: Test code: `name` comes from `box_metric_name` and is destroyed once, after the
+        // constructor copies it; `stat` comes from `kafka_common_metrics_Measurable_new` over the
+        // `reading` local, which outlives it, and the constructor consumes it; `borrowed` is read
+        // while `named` lives; `shared`, `named` and `config` are each destroyed once, after their
+        // last use.
         unsafe {
             let named = kafka_common_metrics_CompoundStat_NamedMeasurable_new(name, stat);
             kafka_common_MetricName_destroy(name);
@@ -373,6 +464,11 @@ mod tests {
         let sum = Mutex::new(0.0_f64);
         let handle = kafka_common_metrics_CompoundStat_new(&sum as *const Mutex<f64> as *mut c_void, c_record, c_stats);
         let config = MetricConfig::new();
+        // SAFETY: Test code: `handle` comes from `kafka_common_metrics_CompoundStat_new` over the
+        // `sum` local, which outlives it, and `take_compound_stat` consumes it, after which it is
+        // not used; `config_handle` comes from `kafka_common_metrics_MetricConfig_new`; `named` is
+        // read while `list`, which owns it, lives; `stat`, `list` and `config_handle` are each
+        // destroyed once, after their last use.
         unsafe {
             let config_handle = kafka_common_metrics_MetricConfig_new();
             kafka_common_metrics_CompoundStat_record(handle, config_handle, 4.0, 0);
@@ -420,6 +516,9 @@ mod tests {
         }
         let stat: Arc<dyn CompoundStat> = Arc::new(TwoStats);
         let handle = Interface::owned(stat) as *mut kafka_common_metrics_CompoundStat_t;
+        // SAFETY: Test code: `handle` comes from `Interface::owned` and is destroyed once, at the
+        // end; `second` and its name view are read while `list`, which owns them, lives; `list` is
+        // destroyed once.
         unsafe {
             let list = kafka_common_metrics_CompoundStat_stats(handle);
             assert_eq!(kafka_List_size(list), 2);

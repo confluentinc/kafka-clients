@@ -85,6 +85,9 @@ pub(crate) fn singleton(unit: TimeUnit) -> *const kafka_common_metrics_TimeUnit_
 ///
 /// `unit` must be a singleton returned by this module.
 pub(crate) unsafe fn value_of(unit: *const kafka_common_metrics_TimeUnit_t) -> TimeUnit {
+    // SAFETY: Per this function's `# Safety`, `unit` is a singleton returned by this module, i.e. a
+    // pointer to an element of the `static` `VARIANTS` array (`singleton`), so it points at a live,
+    // initialised `TimeUnit`, which is `Copy` and read out here.
     unsafe { *(unit as *const TimeUnit) }
 }
 
@@ -151,6 +154,8 @@ pub extern "C" fn kafka_common_metrics_TimeUnit_days() -> *const kafka_common_me
 pub unsafe extern "C" fn kafka_common_metrics_TimeUnit__enum(
     self_: *const kafka_common_metrics_TimeUnit_t,
 ) -> kafka_common_metrics_TimeUnit_e {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `value_of` requires; the value is copied out.
     enum_of(unsafe { value_of(self_) })
 }
 
@@ -166,6 +171,9 @@ pub unsafe extern "C" fn kafka_common_metrics_TimeUnit_name(
 ) -> *const c_char {
     // Every name is a plain ASCII literal; the table keeps the trailing NUL
     // the C side needs while `name()` stays the Java string.
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `value_of` requires; the value is copied out, and the names returned are static C-string
+    // literals, never freed, as the rustdoc states.
     match unsafe { value_of(self_) } {
         TimeUnit::Nanoseconds => c"NANOSECONDS".as_ptr(),
         TimeUnit::Microseconds => c"MICROSECONDS".as_ptr(),
@@ -188,6 +196,8 @@ pub unsafe extern "C" fn kafka_common_metrics_TimeUnit_to_millis(
     self_: *const kafka_common_metrics_TimeUnit_t,
     window: i64,
 ) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `value_of` requires; the value is copied out.
     unsafe { value_of(self_) }.to_millis(window)
 }
 
@@ -201,6 +211,8 @@ mod tests {
     fn singletons_round_trip_and_match_their_enumerator() {
         for (index, &unit) in VARIANTS.iter().enumerate() {
             let handle = singleton(unit);
+            // SAFETY: Test code: `handle` is a singleton from `singleton`, which points into the
+            // static `VARIANTS` array and is never freed, and the names read are static literals.
             unsafe {
                 assert_eq!(value_of(handle), unit);
                 assert_eq!(kafka_common_metrics_TimeUnit__enum(handle) as usize, index);
@@ -218,6 +230,8 @@ mod tests {
         assert_eq!(kafka_common_metrics_TimeUnit_minutes(), singleton(TimeUnit::Minutes));
         assert_eq!(kafka_common_metrics_TimeUnit_hours(), singleton(TimeUnit::Hours));
         assert_eq!(kafka_common_metrics_TimeUnit_days(), singleton(TimeUnit::Days));
+        // SAFETY: Test code: the singleton from `kafka_common_metrics_TimeUnit_seconds` points into
+        // the static `VARIANTS` array and is never freed.
         unsafe {
             assert_eq!(
                 kafka_common_metrics_TimeUnit_to_millis(kafka_common_metrics_TimeUnit_seconds(), 3),

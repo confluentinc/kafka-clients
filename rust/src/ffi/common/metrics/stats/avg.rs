@@ -29,7 +29,15 @@ pub struct kafka_common_metrics_stats_Avg_t {
     _private: [u8; 0],
 }
 
+/// The handle behind a pointer.
+///
+/// # Safety
+///
+/// `self_` must be a valid handle of this class, alive for `'a`.
 unsafe fn handle<'a>(self_: *const kafka_common_metrics_stats_Avg_t) -> &'a StatHandle<Avg> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle of this class alive for
+    // `'a`, so it points at the `StatHandle<Avg>` one of this class's constructors boxed, as
+    // `StatHandle::from_ptr` requires.
     unsafe { StatHandle::from_ptr(self_ as *const StatHandle<Avg>) }
 }
 
@@ -51,6 +59,9 @@ pub extern "C" fn kafka_common_metrics_stats_Avg_new() -> *mut kafka_common_metr
 pub unsafe extern "C" fn kafka_common_metrics_stats_Avg__as_Stat(
     self_: *const kafka_common_metrics_stats_Avg_t,
 ) -> *const kafka_common_metrics_Stat_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle of this class, as `handle`
+    // requires. The view returned is cached in the handle's `OnceLock`, so it lives as long as the
+    // handle; that is the rustdoc's "valid as long as the handle".
     unsafe { handle(self_) }.as_stat()
 }
 
@@ -65,6 +76,9 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Avg__as_Stat(
 pub unsafe extern "C" fn kafka_common_metrics_stats_Avg__as_Measurable(
     self_: *const kafka_common_metrics_stats_Avg_t,
 ) -> *const kafka_common_metrics_Measurable_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle of this class, as `handle`
+    // requires. The view returned is cached in the handle's `OnceLock`, so it lives as long as the
+    // handle; that is the rustdoc's "valid as long as the handle".
     unsafe { handle(self_) }.as_measurable()
 }
 
@@ -81,6 +95,9 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Avg__as_Measurable(
 pub unsafe extern "C" fn kafka_common_metrics_stats_Avg__as_MeasurableStat(
     self_: *const kafka_common_metrics_stats_Avg_t,
 ) -> *const kafka_common_metrics_MeasurableStat_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle of this class, as `handle`
+    // requires. The view returned is cached in the handle's `OnceLock`, so it lives as long as the
+    // handle; that is the rustdoc's "valid as long as the handle".
     unsafe { handle(self_) }.as_measurable_stat()
 }
 
@@ -93,6 +110,9 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Avg__as_MeasurableStat(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Avg_destroy(self_: *mut kafka_common_metrics_stats_Avg_t) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned handle not yet destroyed,
+    // a `StatHandle<Avg>` from this class's constructors, as `StatHandle::destroy` requires; a
+    // sensor the stat was added to keeps its own `Arc` of the stat.
     unsafe { StatHandle::destroy(self_ as *mut StatHandle<Avg>) }
 }
 
@@ -112,6 +132,9 @@ mod tests {
     fn records_through_the_stat_view_and_measures_through_the_measurable_views() {
         let stat = kafka_common_metrics_stats_Avg_new();
         let config = kafka_common_metrics_MetricConfig_new();
+        // SAFETY: Test code: every stat handle comes from this class's constructors and is
+        // destroyed once, after the calls through the views it caches; `config` comes from
+        // `kafka_common_metrics_MetricConfig_new` and is destroyed once, after them.
         unsafe {
             kafka_common_metrics_Stat_record(kafka_common_metrics_stats_Avg__as_Stat(stat), config, 2.0, 0);
             kafka_common_metrics_Stat_record(kafka_common_metrics_stats_Avg__as_Stat(stat), config, 4.0, 1);

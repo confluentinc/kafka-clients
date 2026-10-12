@@ -76,10 +76,17 @@ struct CMetricsReporter {
     close: kafka_common_metrics_MetricsReporter_close_fn_t,
 }
 
-// SAFETY: `self_` is what the C caller registered, whose thread-safety is
-// the caller's responsibility as for every interface implementation
-// (CLAUDE.md §4).
+// SAFETY: `self_` and the nullable function pointers are what the C caller registered through
+// `kafka_common_metrics_MetricsReporter_new`: the C user is responsible for the thread-safety of
+// `self_`, which that function's rustdoc states, and the nullable function pointers are trivially
+// shareable. `CMetricsReporter` itself never dereferences `self_`; it only passes it back to the
+// functions registered with it.
 unsafe impl Send for CMetricsReporter {}
+// SAFETY: `Sync` is required by the `MetricsReporter` trait, whose implementations are shared
+// behind an `Arc` and called through `&self` from any thread. A `&CMetricsReporter` exposes only
+// the opaque `self_` and the nullable function pointers, which the type never dereferences;
+// `kafka_common_metrics_MetricsReporter_new`'s rustdoc lets them be called from any thread,
+// concurrently, and the C user is responsible for the thread-safety of `self_` under those calls.
 unsafe impl Sync for CMetricsReporter {}
 
 impl MetricsReporter for CMetricsReporter {
@@ -89,7 +96,17 @@ impl MetricsReporter for CMetricsReporter {
         let handles: Vec<KafkaMetricInner> =
             metrics.iter().map(|metric| KafkaMetricInner::new(Arc::clone(metric))).collect();
         let list = box_list(handles.iter().map(|handle| handle.as_ptr() as *mut c_void).collect(), None);
+        // SAFETY: `init` is the non-null function the C caller registered together with
+        // `self.self_` through `kafka_common_metrics_MetricsReporter_new`, whose rustdoc has the
+        // caller keep `self_` alive until the handle is destroyed or, once `Metrics_add_reporter`
+        // consumed it, until that registry is, which is after this `&self` call, and allows the
+        // call to come from any thread. `list` is the view list `box_list` built over the `handles`
+        // local without an element destructor, and both live until after the call, so the metric
+        // handles are borrowed for the call, as the function type's rustdoc states.
         unsafe { init(self.self_, list) };
+        // SAFETY: `list` is the list `box_list` returned above, not yet destroyed and given no
+        // element destructor, so this frees the list alone; the `KafkaMetricInner`s it pointed at
+        // are dropped with `handles`.
         unsafe { kafka_List_destroy(list) };
     }
 
@@ -98,6 +115,12 @@ impl MetricsReporter for CMetricsReporter {
             return;
         };
         let handle = KafkaMetricInner::new(Arc::clone(metric));
+        // SAFETY: `metric_change` is the non-null function the C caller registered together with
+        // `self.self_` through `kafka_common_metrics_MetricsReporter_new`, whose rustdoc has the
+        // caller keep `self_` alive until the handle is destroyed or, once `Metrics_add_reporter`
+        // consumed it, until that registry is, which is after this `&self` call, and allows the
+        // call to come from any thread. `handle` is a local that outlives the call, so the metric
+        // handle is borrowed for the call, as the function type's rustdoc states.
         unsafe { metric_change(self.self_, handle.as_ptr()) };
     }
 
@@ -106,11 +129,22 @@ impl MetricsReporter for CMetricsReporter {
             return;
         };
         let handle = KafkaMetricInner::new(Arc::clone(metric));
+        // SAFETY: `metric_removal` is the non-null function the C caller registered together with
+        // `self.self_` through `kafka_common_metrics_MetricsReporter_new`, whose rustdoc has the
+        // caller keep `self_` alive until the handle is destroyed or, once `Metrics_add_reporter`
+        // consumed it, until that registry is, which is after this `&self` call, and allows the
+        // call to come from any thread. `handle` is a local that outlives the call, so the metric
+        // handle is borrowed for the call, as the function type's rustdoc states.
         unsafe { metric_removal(self.self_, handle.as_ptr()) };
     }
 
     fn close(&self) {
         let Some(close) = self.close else { return };
+        // SAFETY: `close` is the non-null function the C caller registered together with
+        // `self.self_` through `kafka_common_metrics_MetricsReporter_new`, whose rustdoc has the
+        // caller keep `self_` alive until the handle is destroyed or, once `Metrics_add_reporter`
+        // consumed it, until that registry is, which is after this `&self` call, and allows the
+        // call to come from any thread. It takes no other argument.
         unsafe { close(self.self_) };
     }
 }
@@ -119,10 +153,14 @@ impl MetricsReporter for CMetricsReporter {
 ///
 /// # Safety
 ///
-/// `reporter` must be a valid metrics-reporter handle.
+/// `reporter` must be a valid metrics-reporter handle, alive for `'a`.
 pub(crate) unsafe fn metrics_reporter_ref<'a>(
     reporter: *const kafka_common_metrics_MetricsReporter_t,
 ) -> &'a dyn MetricsReporter {
+    // SAFETY: Per this function's `# Safety`, `reporter` is a valid metrics-reporter handle alive
+    // for `'a`, as `Interface::from_ptr` requires: every `kafka_common_metrics_MetricsReporter_t`
+    // is an `Interface<dyn MetricsReporter>`, owned or a view; the reference returned lives for the
+    // same `'a`.
     unsafe { Interface::<dyn MetricsReporter>::from_ptr(reporter as *const Interface<dyn MetricsReporter>) }.get()
 }
 
@@ -136,6 +174,9 @@ pub(crate) unsafe fn metrics_reporter_ref<'a>(
 pub(crate) unsafe fn take_metrics_reporter(
     reporter: *mut kafka_common_metrics_MetricsReporter_t,
 ) -> Arc<dyn MetricsReporter> {
+    // SAFETY: Per this function's `# Safety`, `reporter` is a valid metrics-reporter handle, not
+    // used again by the caller when it was owned, as `Interface::take` requires; every such handle
+    // is an `Interface` of this trait object.
     unsafe { Interface::take(reporter as *mut Interface<dyn MetricsReporter>) }
 }
 
@@ -144,6 +185,9 @@ pub(crate) unsafe fn take_metrics_reporter(
 /// keeps it alive until the handle is destroyed with
 /// [`kafka_common_metrics_MetricsReporter_destroy`] or, once
 /// `Metrics_add_reporter` consumed it, until that registry is destroyed.
+/// The methods run on whichever thread calls the registry, possibly
+/// concurrently, so the C caller is responsible for their thread-safety on
+/// `self_`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_MetricsReporter_new(
@@ -171,10 +215,18 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricsReporter_init(
     self_: *const kafka_common_metrics_MetricsReporter_t,
     metrics: *const kafka_List_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `metrics` is null or a valid list, which the caller
+    // keeps alive and does not mutate for this call, as `list_elements` requires; the slice is used
+    // only within this call.
     let metrics: Vec<Arc<KafkaMetric>> = unsafe { list_elements(metrics) }
         .iter()
+        // SAFETY: Per this function's `# Safety`, each element of `metrics` is a valid metric
+        // handle, as `kafka_metric_ref` requires; the `Arc` is cloned, so the borrow lasts for this
+        // call only.
         .map(|&element| Arc::clone(unsafe { kafka_metric_ref(element as *const kafka_common_metrics_KafkaMetric_t) }))
         .collect();
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid metrics-reporter handle, as
+    // `metrics_reporter_ref` requires; the reference is used only within this call.
     unsafe { metrics_reporter_ref(self_) }.init(&metrics);
 }
 
@@ -190,6 +242,9 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricsReporter_metric_change(
     self_: *const kafka_common_metrics_MetricsReporter_t,
     metric: *const kafka_common_metrics_KafkaMetric_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid metrics-reporter handle, as
+    // `metrics_reporter_ref` requires, and `metric` a valid metric handle, as `kafka_metric_ref`
+    // requires; both references are used only within this call.
     unsafe { metrics_reporter_ref(self_) }.metric_change(unsafe { kafka_metric_ref(metric) });
 }
 
@@ -205,6 +260,9 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricsReporter_metric_removal(
     self_: *const kafka_common_metrics_MetricsReporter_t,
     metric: *const kafka_common_metrics_KafkaMetric_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid metrics-reporter handle, as
+    // `metrics_reporter_ref` requires, and `metric` a valid metric handle, as `kafka_metric_ref`
+    // requires; both references are used only within this call.
     unsafe { metrics_reporter_ref(self_) }.metric_removal(unsafe { kafka_metric_ref(metric) });
 }
 
@@ -218,6 +276,8 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricsReporter_metric_removal(
 pub unsafe extern "C" fn kafka_common_metrics_MetricsReporter_close(
     self_: *const kafka_common_metrics_MetricsReporter_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid metrics-reporter handle, as
+    // `metrics_reporter_ref` requires; the reference is used only within this call.
     unsafe { metrics_reporter_ref(self_) }.close();
 }
 
@@ -232,6 +292,9 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricsReporter_close(
 pub unsafe extern "C" fn kafka_common_metrics_MetricsReporter_destroy(
     self_: *mut kafka_common_metrics_MetricsReporter_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned metrics-reporter handle
+    // not yet destroyed, as `Interface::destroy` requires; a view a class handle caches is never
+    // passed here.
     unsafe { Interface::<dyn MetricsReporter>::destroy(self_ as *mut Interface<dyn MetricsReporter>) }
 }
 
@@ -257,9 +320,13 @@ mod tests {
         events: Mutex<Vec<String>>,
     }
     fn log<'a>(self_: *mut c_void) -> &'a Log {
+        // SAFETY: Test code: `self_` is the `log` local the test registered, which outlives every
+        // callback.
         unsafe { &*(self_ as *const Log) }
     }
     fn name_of(metric: *const kafka_common_metrics_KafkaMetric_t) -> String {
+        // SAFETY: Test code: `metric` is the handle a callback received, valid for the callback;
+        // the views read from it are used before it returns.
         unsafe {
             let name = kafka_common_Metric_metric_name(kafka_common_metrics_KafkaMetric__as_Metric(metric));
             CStr::from_ptr(kafka_common_MetricName_name(name)).to_str().unwrap().to_string()
@@ -268,7 +335,10 @@ mod tests {
     unsafe extern "C" fn c_init(self_: *mut c_void, metrics: *const kafka_List_t) {
         // The registry hands over every existing metric, its built-in `count`
         // included, in map order: sort to make the log deterministic.
+        // SAFETY: Test code: `metrics` is the list the callback received, valid for the callback.
         let mut names: Vec<String> = (0..unsafe { kafka_List_size(metrics) })
+            // SAFETY: Test code: `i` is below the list's size, and the element read is valid for
+            // the callback.
             .map(|i| name_of(unsafe { kafka_List_get(metrics, i) } as *const kafka_common_metrics_KafkaMetric_t))
             .collect();
         names.sort();
@@ -300,6 +370,8 @@ mod tests {
             .add_with_metric_name(metrics.metric_name("a", "g"), Box::new(Avg::new()))
             .unwrap();
         // Consumed by the registry: `init` runs before `add_reporter` returns.
+        // SAFETY: Test code: `handle` comes from `kafka_common_metrics_MetricsReporter_new` over
+        // the `log` local, which outlives the registry, and `take_metrics_reporter` consumes it.
         metrics.add_reporter(unsafe { take_metrics_reporter(handle) });
         sensor
             .add_with_metric_name(metrics.metric_name("b", "g"), Box::new(Avg::new()))
@@ -321,6 +393,9 @@ mod tests {
             None,
             crate::common::metrics::MetricValueProvider::Measurable(Box::new(Avg::new())),
         ));
+        // SAFETY: Test code: `silent` and `handle` are owned reporter handles, each destroyed once,
+        // at the end of its use; `list` is a view list over `metric`, an owned metric handle; both
+        // are destroyed once, after the last call reading them.
         unsafe {
             // No-ops: nothing to observe, nothing crashes.
             let list = box_list(vec![metric as *mut c_void], None);

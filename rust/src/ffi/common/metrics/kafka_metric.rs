@@ -87,7 +87,17 @@ pub(crate) fn box_kafka_metric(metric: Arc<KafkaMetric>) -> *mut kafka_common_me
     Box::into_raw(Box::new(KafkaMetricInner::new(metric))) as *mut kafka_common_metrics_KafkaMetric_t
 }
 
+/// What a handle points at.
+///
+/// # Safety
+///
+/// `self_` must be a valid metric handle, alive for `'a`.
 unsafe fn inner<'a>(self_: *const kafka_common_metrics_KafkaMetric_t) -> &'a KafkaMetricInner {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid metric handle alive for `'a`, so
+    // it points at a live `KafkaMetricInner`: an owned one, the `Box::into_raw` of
+    // `box_kafka_metric`, or the local a `CMetricsReporter` callback borrows to C for the call
+    // (`KafkaMetricInner::as_ptr`). Nothing takes a `&mut KafkaMetricInner` (the cached views are
+    // filled through `OnceLock`), so the shared reference is sound for `'a`.
     unsafe { &*(self_ as *const KafkaMetricInner) }
 }
 
@@ -95,8 +105,10 @@ unsafe fn inner<'a>(self_: *const kafka_common_metrics_KafkaMetric_t) -> &'a Kaf
 ///
 /// # Safety
 ///
-/// `metric` must be a valid metric handle.
+/// `metric` must be a valid metric handle, alive for `'a`.
 pub(crate) unsafe fn kafka_metric_ref<'a>(metric: *const kafka_common_metrics_KafkaMetric_t) -> &'a Arc<KafkaMetric> {
+    // SAFETY: Per this function's `# Safety`, `metric` is a valid metric handle alive for `'a`, as
+    // `inner` requires; the reference returned lives for the same `'a`.
     unsafe { inner(metric) }.metric()
 }
 
@@ -106,6 +118,9 @@ pub(crate) unsafe fn kafka_metric_ref<'a>(metric: *const kafka_common_metrics_Ka
 ///
 /// `element` must be an owned metric handle not yet destroyed.
 pub(crate) unsafe fn destroy_kafka_metric_element(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned metric handle not yet
+    // destroyed, which is what `kafka_common_metrics_KafkaMetric_destroy` requires of a non-null
+    // handle.
     unsafe { kafka_common_metrics_KafkaMetric_destroy(element as *mut kafka_common_metrics_KafkaMetric_t) }
 }
 
@@ -121,9 +136,16 @@ pub(crate) unsafe fn destroy_kafka_metric_element(element: *mut c_void) {
 pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric__as_Metric(
     self_: *const kafka_common_metrics_KafkaMetric_t,
 ) -> *const kafka_common_Metric_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid metric handle, as `inner`
+    // requires; `inner` is used only within this call, and the view returned lives in the handle's
+    // own `as_metric` cell.
     let inner = unsafe { inner(self_) };
     inner
         .as_metric
+        // SAFETY: `&*inner.metric` points at the `KafkaMetric` the handle's `Arc` keeps alive, and
+        // the `MetricInner` built over it is stored in the same handle's `as_metric` cell, so the
+        // metric outlives the view, as `MetricInner::new` requires. The view is dropped with the
+        // handle, which is the rustdoc's "valid as long as the handle".
         .get_or_init(|| unsafe { MetricInner::new(&*inner.metric as *const dyn Metric) })
         .as_ptr()
 }
@@ -140,6 +162,9 @@ pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric__as_Metric(
 pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_config(
     self_: *const kafka_common_metrics_KafkaMetric_t,
 ) -> *mut kafka_common_metrics_MetricConfig_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid metric handle, as
+    // `kafka_metric_ref` requires; the config `Arc` is cloned into an owned handle, so the borrow
+    // lasts for this call only.
     box_metric_config(unsafe { kafka_metric_ref(self_) }.config())
 }
 
@@ -156,6 +181,10 @@ pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_set_config(
     self_: *const kafka_common_metrics_KafkaMetric_t,
     config: *const kafka_common_metrics_MetricConfig_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid metric handle, as
+    // `kafka_metric_ref` requires, and `config` a valid metric-config handle, as
+    // `metric_config_arc` requires; both references are used only within this call, and the metric
+    // keeps the `Arc` returned.
     unsafe { kafka_metric_ref(self_) }.set_config(unsafe { metric_config_arc(config) });
 }
 
@@ -169,6 +198,8 @@ pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_set_config(
 pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_is_measurable(
     self_: *const kafka_common_metrics_KafkaMetric_t,
 ) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid metric handle, as
+    // `kafka_metric_ref` requires; the reference is used only within this call.
     i8::from(unsafe { kafka_metric_ref(self_) }.is_measurable())
 }
 
@@ -187,6 +218,9 @@ pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_measurable(
     self_: *const kafka_common_metrics_KafkaMetric_t,
     out_measurable: *mut *const kafka_common_metrics_Measurable_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid metric handle, as `inner`
+    // requires; `inner` is used only within this call, and the view written out lives in the
+    // handle's own `measurable` cell.
     let inner = unsafe { inner(self_) };
     if let Err(error) = inner.metric.measurable() {
         return box_error(error);
@@ -195,6 +229,10 @@ pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_measurable(
         let measurable: Arc<dyn Measurable> = Arc::new(MetricMeasurable(Arc::clone(&inner.metric)));
         Interface::view(measurable)
     });
+    // SAFETY: Per this function's `# Safety`, `out_measurable` is a valid pointer, so the write is
+    // sound. The view written is the `Interface` cached in the handle's `measurable` cell, so it
+    // lives as long as the handle; that is the rustdoc's "a view borrowed from the handle (valid as
+    // long as it is".
     unsafe { *out_measurable = view as *const Interface<dyn Measurable> as *const kafka_common_metrics_Measurable_t };
     ptr::null_mut()
 }
@@ -208,6 +246,10 @@ pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_measurable(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_destroy(self_: *mut kafka_common_metrics_KafkaMetric_t) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // handle not yet destroyed, i.e. the `Box::into_raw` of a `KafkaMetricInner` in
+        // `box_kafka_metric` (the local a reporter callback borrows to C is never passed here), so
+        // `from_raw` reclaims that allocation, once.
         drop(unsafe { Box::from_raw(self_ as *mut KafkaMetricInner) });
     }
 }
@@ -247,6 +289,11 @@ mod tests {
             .unwrap();
         sensor.record_with_value_time_ms(4.0, 0);
         let handle = box_kafka_metric(metrics.metric(&metrics.metric_name("avg", "g")).unwrap());
+        // SAFETY: Test code: `handle` comes from `box_kafka_metric` and is destroyed once, after
+        // the views read from it (`as_metric`, its name, `measurable`); `value` and each `config`
+        // are owned and destroyed once, after their last use; `measurable` is a view, which
+        // `take_measurable` shares without freeing; `config` is an owned config handle only this
+        // test uses.
         unsafe {
             let as_metric = kafka_common_metrics_KafkaMetric__as_Metric(handle);
             assert_eq!(
@@ -299,6 +346,9 @@ mod tests {
             MetricValueProvider::Gauge(Box::new(ClosureGauge::new(|_: &MetricConfig, _| MetricValue::Int(1)))),
         );
         let handle = box_kafka_metric(metric);
+        // SAFETY: Test code: `handle` comes from `box_kafka_metric` and is destroyed once, at the
+        // end; `measurable` is a valid local out slot; the error and `config` are owned and each
+        // destroyed once.
         unsafe {
             assert_eq!(kafka_common_metrics_KafkaMetric_is_measurable(handle), 0);
             let mut measurable = ptr::null();

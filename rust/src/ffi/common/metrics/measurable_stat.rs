@@ -61,15 +61,30 @@ struct CMeasurableStat {
     measure: kafka_common_metrics_MeasurableStat_measure_fn_t,
 }
 
-// SAFETY: `self_` is what the C caller registered, whose thread-safety is
-// the caller's responsibility as for every interface implementation
-// (CLAUDE.md §4).
+// SAFETY: `self_` and the function pointers are what the C caller registered through
+// `kafka_common_metrics_MeasurableStat_new`: the C user is responsible for the thread-safety of
+// `self_`, which that function's rustdoc states, and the function pointers are trivially shareable.
+// `CMeasurableStat` itself never dereferences `self_`; it only passes it back to the functions
+// registered with it.
 unsafe impl Send for CMeasurableStat {}
+// SAFETY: `Sync` is required by the `Stat` and `Measurable` traits, the supertraits of
+// `MeasurableStat`, whose implementations are shared behind an `Arc` and called through `&self`
+// from any thread. A `&CMeasurableStat` exposes only the opaque `self_` and the function pointers,
+// which the type never dereferences; `kafka_common_metrics_MeasurableStat_new`'s rustdoc lets them
+// be called from any thread, concurrently, and the C user is responsible for the thread-safety of
+// `self_` under those calls.
 unsafe impl Sync for CMeasurableStat {}
 
 impl Stat for CMeasurableStat {
     fn record(&self, config: &MetricConfig, value: f64, time_ms: i64) {
         let config = MetricConfigInner::borrowed(config);
+        // SAFETY: `self.record` and `self.self_` are the pair the C caller registered together
+        // through `kafka_common_metrics_MeasurableStat_new`, whose rustdoc has the caller keep
+        // `self_` alive until the handle is destroyed or, once consumed, until the sensor it went
+        // into is destroyed with its registry, which is after this `&self` call, and allows the
+        // call to come from any thread, concurrently with others. `config` is the handle
+        // `MetricConfigInner::borrowed` made from the `&MetricConfig` this method holds, valid for
+        // the call, which is all the function type's rustdoc promises the C side.
         unsafe { (self.record)(self.self_, config.as_ptr(), value, time_ms) }
     }
 }
@@ -77,6 +92,13 @@ impl Stat for CMeasurableStat {
 impl Measurable for CMeasurableStat {
     fn measure(&self, config: &MetricConfig, now: i64) -> f64 {
         let config = MetricConfigInner::borrowed(config);
+        // SAFETY: `self.measure` and `self.self_` are the pair the C caller registered together
+        // through `kafka_common_metrics_MeasurableStat_new`, whose rustdoc has the caller keep
+        // `self_` alive until the handle is destroyed or, once consumed, until the sensor it went
+        // into is destroyed with its registry, which is after this `&self` call, and allows the
+        // call to come from any thread, concurrently with others. `config` is the handle
+        // `MetricConfigInner::borrowed` made from the `&MetricConfig` this method holds, valid for
+        // the call, which is all the function type's rustdoc promises the C side.
         unsafe { (self.measure)(self.self_, config.as_ptr(), now) }
     }
 }
@@ -100,10 +122,14 @@ impl Measurable for ArcMeasurableStat {
 ///
 /// # Safety
 ///
-/// `stat` must be a valid measurable-stat handle.
+/// `stat` must be a valid measurable-stat handle, alive for `'a`.
 pub(crate) unsafe fn measurable_stat_ref<'a>(
     stat: *const kafka_common_metrics_MeasurableStat_t,
 ) -> &'a dyn MeasurableStat {
+    // SAFETY: Per this function's `# Safety`, `stat` is a valid measurable-stat handle alive for
+    // `'a`, as `Interface::from_ptr` requires: every `kafka_common_metrics_MeasurableStat_t` is an
+    // `Interface<dyn MeasurableStat>`, owned or a view; the reference returned lives for the same
+    // `'a`.
     unsafe { Interface::<dyn MeasurableStat>::from_ptr(stat as *const Interface<dyn MeasurableStat>) }.get()
 }
 
@@ -115,6 +141,9 @@ pub(crate) unsafe fn measurable_stat_ref<'a>(
 /// `stat` must be a valid measurable-stat handle, not used again by the
 /// caller when it was owned.
 pub(crate) unsafe fn take_measurable_stat(stat: *mut kafka_common_metrics_MeasurableStat_t) -> Box<dyn MeasurableStat> {
+    // SAFETY: Per this function's `# Safety`, `stat` is a valid measurable-stat handle, not used
+    // again by the caller when it was owned, as `Interface::take` requires; every such handle is an
+    // `Interface` of this trait object.
     Box::new(ArcMeasurableStat(unsafe {
         Interface::take(stat as *mut Interface<dyn MeasurableStat>)
     }))
@@ -124,7 +153,8 @@ pub(crate) unsafe fn take_measurable_stat(stat: *mut kafka_common_metrics_Measur
 /// and keeps it alive until the handle is destroyed with
 /// [`kafka_common_metrics_MeasurableStat_destroy`] or, once a `*mut`
 /// parameter consumed it, until the sensor it went into is destroyed with
-/// its registry.
+/// its registry. The functions may be called from any thread, concurrently,
+/// so the C caller is responsible for their thread-safety on `self_`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_MeasurableStat_new(
@@ -150,6 +180,9 @@ pub unsafe extern "C" fn kafka_common_metrics_MeasurableStat_record(
     value: f64,
     time_ms: i64,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid measurable-stat handle, as
+    // `measurable_stat_ref` requires, and `config` a valid metric-config handle, as
+    // `metric_config_ref` requires; both references are used only within this call.
     unsafe { measurable_stat_ref(self_) }.record(unsafe { metric_config_ref(config) }, value, time_ms);
 }
 
@@ -166,6 +199,9 @@ pub unsafe extern "C" fn kafka_common_metrics_MeasurableStat_measure(
     config: *const kafka_common_metrics_MetricConfig_t,
     now: i64,
 ) -> f64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid measurable-stat handle, as
+    // `measurable_stat_ref` requires, and `config` a valid metric-config handle, as
+    // `metric_config_ref` requires; both references are used only within this call.
     unsafe { measurable_stat_ref(self_) }.measure(unsafe { metric_config_ref(config) }, now)
 }
 
@@ -181,6 +217,9 @@ pub unsafe extern "C" fn kafka_common_metrics_MeasurableStat_measure(
 pub unsafe extern "C" fn kafka_common_metrics_MeasurableStat_destroy(
     self_: *mut kafka_common_metrics_MeasurableStat_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned measurable-stat handle
+    // not yet destroyed, as `Interface::destroy` requires; a view a class handle caches is never
+    // passed here.
     unsafe { Interface::<dyn MeasurableStat>::destroy(self_ as *mut Interface<dyn MeasurableStat>) }
 }
 
@@ -201,6 +240,8 @@ mod tests {
         value: f64,
         _time_ms: i64,
     ) {
+        // SAFETY: Test code: `self_` is the `sum` mutex the test registered, which outlives every
+        // call.
         *unsafe { &*(self_ as *const Mutex<f64>) }.lock().unwrap() += value;
     }
     unsafe extern "C" fn c_measure(
@@ -208,6 +249,8 @@ mod tests {
         _config: *const kafka_common_metrics_MetricConfig_t,
         _now: i64,
     ) -> f64 {
+        // SAFETY: Test code: `self_` is the `sum` mutex the test registered, which outlives every
+        // call.
         *unsafe { &*(self_ as *const Mutex<f64>) }.lock().unwrap()
     }
 
@@ -217,6 +260,10 @@ mod tests {
         let handle =
             kafka_common_metrics_MeasurableStat_new(&sum as *const Mutex<f64> as *mut c_void, c_record, c_measure);
         let config = MetricConfig::new();
+        // SAFETY: Test code: `handle` comes from `kafka_common_metrics_MeasurableStat_new` over the
+        // `sum` local, which outlives it, and `take_measurable_stat` consumes it, after which it is
+        // not used; `config_handle` comes from `kafka_common_metrics_MetricConfig_new` and is
+        // destroyed once.
         unsafe {
             measurable_stat_ref(handle).record(&config, 1.5, 0);
             let config_handle = kafka_common_metrics_MetricConfig_new();
