@@ -271,8 +271,8 @@ pub unsafe extern "C" fn kafka_common_Error_new(code: i32, message: *const c_cha
 /// its documentation for the mapping).
 pub(crate) fn error_for_code(code: i32, message: String) -> Error {
     use crate::common::errors::{
-        ApiError, AuthenticationError, AuthorizationError, AuthorizerNotReadyError, DisconnectError, InterruptError,
-        InvalidOffsetError, SslAuthenticationError,
+        ApiError, AuthenticationError, AuthorizationError, AuthorizerNotReadyError, BootstrapResolutionError,
+        DisconnectError, InterruptError, InvalidOffsetError, SslAuthenticationError,
     };
     use crate::common::network::InvalidReceiveError;
     use crate::consumer::{
@@ -318,6 +318,7 @@ pub(crate) fn error_for_code(code: i32, message: String) -> Error {
         -23 => Error::ConsumerRetriableCommitFailed(ConsumerRetriableCommitFailedError::new(message)),
         -25 => Error::InvalidReceive(InvalidReceiveError::new(message)),
         -28 => Error::buffer_exhausted(message),
+        -29 => Error::BootstrapResolution(BootstrapResolutionError::new(message)),
         // -21, -24, -26, -27: every Java constructor takes a payload the code
         // cannot carry; any other value is no enumerator.
         _ => Error::with_message(Errors::UnknownServerError, message),
@@ -3520,7 +3521,7 @@ mod tests {
         for (value, expected) in [
             (-1, kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR),
             (7, kafka_common_ErrorCode_REQUEST_TIMED_OUT),
-            (-29, kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR),
+            (-30, kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR),
             (i32::MIN, kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR),
             (40_000, kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR),
         ] {
