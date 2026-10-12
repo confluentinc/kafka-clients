@@ -2065,10 +2065,10 @@ fn java_deprecated() -> anyhow::Result<()> {
 /// reads those refs and fails without them.
 fn fetch_java_refs() -> anyhow::Result<()> {
     let refs = java::lint_refs();
-    let mut args = vec!["-C", java::KAFKA_SUBMODULE, "fetch", "--depth=1", "--no-tags", "origin"];
+    let mut args = vec!["fetch", "--depth=1", "--no-tags", "origin"];
     let specs: Vec<String> = refs.iter().map(|r| format!("+refs/tags/{r}:refs/tags/{r}")).collect();
     args.extend(specs.iter().map(String::as_str));
-    let status = Command::new("git").args(&args).status()?;
+    let status = java::submodule_git().args(&args).status()?;
     if !status.success() {
         anyhow::bail!("fetching {} into `{}` failed", refs.join(", "), java::KAFKA_SUBMODULE);
     }
