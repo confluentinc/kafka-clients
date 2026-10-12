@@ -96,7 +96,8 @@ impl UserScramCredentialUpsertion {
 
 /// Java has no `toString()` here, so there is no Java rendering to mirror; a
 /// derived `Debug` would print the password (and the salt, keyed material for
-/// the stored credential) as their byte values, so both are hidden.
+/// the stored credential) as their byte values, so both are hidden. Each renders
+/// as [`Password::HIDDEN`] with no quotes, as a [`Password`]'s own `Debug` does.
 impl fmt::Debug for UserScramCredentialUpsertion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Destructured exhaustively, so a field added to the struct must be
@@ -105,8 +106,8 @@ impl fmt::Debug for UserScramCredentialUpsertion {
         f.debug_struct("UserScramCredentialUpsertion")
             .field("user", user)
             .field("info", info)
-            .field("salt", &Password::HIDDEN)
-            .field("password", &Password::HIDDEN)
+            .field("salt", &format_args!("{}", Password::HIDDEN))
+            .field("password", &format_args!("{}", Password::HIDDEN))
             .finish()
     }
 }
@@ -158,9 +159,10 @@ mod tests {
         assert_eq!(upsertion.password(), b"secret");
     }
 
-    /// New test, no Java original (Java has no `toString()`): `{:?}` shows
-    /// the user and the credential info but neither the password nor the salt,
-    /// which a derived `Debug` would print as their byte values.
+    /// New test, no Java original (Java has no `toString()`): `{:?}` and
+    /// `{:#?}` show the user and the credential info but neither the password
+    /// nor the salt, which a derived `Debug` would print as their byte values.
+    /// Both render as `[hidden]` with no quotes, as a `Password`'s `Debug` does.
     #[test]
     fn debug_hides_password_and_salt() {
         let password = b"alice-S3cr3t-pw";
@@ -175,7 +177,7 @@ mod tests {
         assert_eq!(
             rendered,
             format!(
-                "UserScramCredentialUpsertion {{ user: \"alice\", info: {:?}, salt: \"[hidden]\", password: \"[hidden]\" }}",
+                "UserScramCredentialUpsertion {{ user: \"alice\", info: {:?}, salt: [hidden], password: [hidden] }}",
                 upsertion.credential_info()
             )
         );
@@ -188,8 +190,15 @@ mod tests {
 
         let pretty = format!("{upsertion:#?}");
         assert!(pretty.contains("\"alice\""), "{pretty}");
+        assert!(
+            pretty.ends_with("\n    salt: [hidden],\n    password: [hidden],\n}"),
+            "{pretty}"
+        );
         assert_eq!(pretty.matches(Password::HIDDEN).count(), 2, "{pretty}");
-        assert!(!pretty.contains("S3cr3t"), "{pretty}");
+        assert!(!pretty.contains("\"[hidden]\""), "{pretty}");
+        for secret in [&password[..], &salt[..]] {
+            assert!(!pretty.contains(std::str::from_utf8(secret).unwrap()), "{pretty}");
+        }
     }
 
     #[test]
