@@ -236,14 +236,16 @@ impl HeadersInner {
 // `headers_view` points at the `&dyn Headers` a `Deserializer` call was given; it is a local of
 // that call that the Rust side never sends to another task, and a C callee that passes it to
 // another thread during the call does so under its own synchronisation. The owned `CHeaders`
-// holds what the C caller registered, whose thread-safety is the caller's responsibility, as for
-// every interface implementation (CLAUDE.md §4). `views` holds `RecordHeaderInner`s, which are
-// `Send + Sync`. The deserializer case rests on that call-local use, not on a type bound.
+// holds the `self_` and function pointers the C caller registered: the C user is responsible for
+// the thread-safety of `self_`, and the function pointers are trivially shareable. `views` holds
+// `RecordHeaderInner`s, which are `Send + Sync`. The deserializer case rests on that call-local
+// use, not on a type bound.
 unsafe impl Send for HeadersInner {}
 // SAFETY: As for `Send`: through a shared `HeadersInner` the Rust side only reads the
 // implementation and fills `views` through `OnceLock`, which is `Sync`; the `RecordHeaders` and
 // `RecordHeaderInner` it reaches are `Sync`, the deserializer's view is never shared across tasks
-// by the Rust side, and sharing a C implementation is the C caller's responsibility (CLAUDE.md §4).
+// by the Rust side, and the C user is responsible for the thread-safety of a C implementation's
+// `self_`.
 unsafe impl Sync for HeadersInner {}
 
 /// Reads a C implementation's error slot back into the trait's error type:
