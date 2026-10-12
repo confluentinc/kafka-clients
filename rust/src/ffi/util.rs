@@ -436,9 +436,17 @@ pub extern "C" fn kafka_List_new() -> *mut kafka_List_t {
 /// # Safety
 ///
 /// `self_` must be a valid list handle that no other call uses at the same
-/// time. A list from `kafka_List_new` only borrows `element`; a list Rust
-/// returned owns its elements, so `element` must then be null or of the type
-/// the list documents, and the list takes ownership of it.
+/// time. Whether the list takes `element` depends on how it was built, which
+/// the function that returned it documents:
+///
+/// - A list from `kafka_List_new`, or a list Rust returned as a view (its
+///   elements borrowed, or static singletons), only borrows `element`: the
+///   caller keeps owning it and frees it after the list.
+/// - A list Rust returned that owns its elements takes ownership of
+///   `element`, which must then be null or of the type that list documents.
+///
+/// A list Rust returned is meant to be read; add to one only when its
+/// documentation says so.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_List_add(self_: *mut kafka_List_t, element: *mut c_void) {
@@ -708,10 +716,19 @@ pub extern "C" fn kafka_Map_new() -> *mut kafka_Map_t {
 ///
 /// `self_` must be a valid map handle that no other call uses at the same
 /// time, and `key` a key of the type the map documents when Rust built the
-/// map: its keys are compared by reading them. A map from `kafka_Map_new`
-/// only borrows `key` and `value`; a map Rust returned owns its entries, so
-/// `value` must then be null or of the type the map documents, the map takes
-/// ownership of it, and of `key` when no equal key is present.
+/// map: its keys are compared by reading them. Whether the map takes `key`
+/// and `value` depends on how it was built, which the function that returned
+/// it documents:
+///
+/// - A map from `kafka_Map_new` only borrows `key` and `value`: the caller
+///   keeps owning them and frees them after the map.
+/// - A map Rust returned takes ownership of `value` when it owns its values,
+///   and of `key` when it owns its keys and no equal key is present; what it
+///   takes must be null or of the type that map documents. What it does not
+///   own stays the caller's, as for `kafka_Map_new`.
+///
+/// A map Rust returned is meant to be read; put into one only when its
+/// documentation says so.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_Map_put(self_: *mut kafka_Map_t, key: *mut c_void, value: *mut c_void) {
