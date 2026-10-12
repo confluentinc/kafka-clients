@@ -3201,6 +3201,7 @@ mod tests {
             1000,
             120_000,
             PartitionerConfig::new(true, 0, false, "").unwrap(),
+            default_time(),
             Arc::new(BufferPool::new_for_test(32 * 1024 * 1024, 16384)),
             None,
         ))
@@ -5236,6 +5237,7 @@ mod tests {
             1000,
             120_000,
             PartitionerConfig::new(true, 0, false, "").unwrap(),
+            default_time(),
             Arc::new(BufferPool::new_for_test(BATCH_SIZE as i64, BATCH_SIZE as usize)),
             None,
         ));
@@ -5766,6 +5768,7 @@ mod tests {
                 1000,
                 120_000,
                 PartitionerConfig::new(true, 0, false, "").unwrap(),
+                default_time(),
                 Arc::new(BufferPool::new_for_test(32 * 1024 * 1024, 1024 * 1024)),
                 transaction_manager.clone(),
             ));
@@ -5872,6 +5875,7 @@ mod tests {
                 1000,
                 120_000,
                 PartitionerConfig::new(true, 0, false, "").unwrap(),
+                default_time(),
                 Arc::new(BufferPool::new_for_test(32 * 1024 * 1024, 1024 * 1024)),
                 None,
             ));
