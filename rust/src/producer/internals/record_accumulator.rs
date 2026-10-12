@@ -2038,6 +2038,7 @@ impl RecordAccumulator {
             return Ok(ready);
         }
 
+        // To make starvation less likely each node has its own drain index.
         let mut drain_index = self.get_drain_index(node.id());
         drain_index %= parts.len();
         let start = drain_index;
@@ -2046,6 +2047,11 @@ impl RecordAccumulator {
             let part = &parts[drain_index];
             let tp = TopicPartition::new(part.topic(), part.partition());
 
+            // Record the partition being visited before advancing, as Java does
+            // (`RecordAccumulator.java:865`). When the request fills up at this partition,
+            // the next drain starts from it, so a partition whose batch did not fit is not
+            // skipped again.
+            self.update_drain_index(node.id(), drain_index);
             drain_index = (drain_index + 1) % parts.len();
 
             if self.is_muted(&tp) {
@@ -2134,7 +2140,6 @@ impl RecordAccumulator {
                 break;
             }
         }
-        self.update_drain_index(node.id(), drain_index);
         Ok(ready)
     }
 
@@ -3381,49 +3386,6 @@ mod tests {
         assert!(result.ready_nodes.contains(&n1), "ready once the linger elapses");
     }
 
-    /// Translated from a subset of `RecordAccumulatorTest.testDrainBatches`.
-    #[tokio::test]
-    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testDrainBatches")]
-    async fn test_drain_batches() {
-        let n1 = node1();
-        let n2 = node2();
-        let now: i64 = 0;
-
-        let k = key();
-        let v = value();
-        let batch_size = v.len() as i32 + RecordBatch::RECORD_BATCH_OVERHEAD as i32;
-
-        let accum = create_test_accumulator(batch_size, i64::MAX, Compression::none().build(), 10);
-
-        let metadata =
-            make_metadata_snapshot(&[n1.clone(), n2.clone()], TOPIC, &[(0, Some(0)), (1, Some(0)), (2, Some(1))]);
-        let cluster = metadata.cluster().clone();
-
-        // Append to all partitions.
-        accum
-            .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
-            .await
-            .unwrap();
-        accum
-            .append(TOPIC, 1, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
-            .await
-            .unwrap();
-        accum
-            .append(TOPIC, 2, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
-            .await
-            .unwrap();
-
-        // Drain from both nodes with batch_size limit -- should get one batch per node.
-        let mut nodes = HashSet::new();
-        nodes.insert(n1.clone());
-        nodes.insert(n2.clone());
-        let batches = accum.drain(&metadata, &nodes, batch_size, now).expect("drain");
-
-        // Each node should have at least one batch.
-        let total: usize = batches.values().map(|v| v.len()).sum();
-        assert!(total >= 2, "Expected at least 2 batches, got {}", total);
-    }
-
     /// Test mute/unmute functionality.
     #[test]
     fn test_mute_unmute() {
@@ -4242,76 +4204,158 @@ mod tests {
         );
     }
 
-    /// Translated from `RecordAccumulatorTest.testDrainBatches` (full version).
+    /// Asserts that `node_batches` holds exactly `expected` batches, in order, for each node.
     ///
-    /// Tests drain order across nodes and partitions, including muting.
+    /// Translated from `RecordAccumulatorTest.verifyTopicPartitionInBatches`. Java concatenates
+    /// the batches of every node in the iteration order of its `HashMap`, which for the test's
+    /// two node ids is node order; Rust's `HashMap` has no fixed order, so the batches are
+    /// compared node by node.
+    fn verify_topic_partition_in_batches(
+        node_batches: &HashMap<i32, Vec<ProducerBatch>>,
+        expected: &[(&Node, &[&TopicPartition])],
+    ) {
+        let all_tp_batch_count: usize = node_batches.values().map(|batches| batches.len()).sum();
+        let expected_count: usize = expected.iter().map(|(_, tps)| tps.len()).sum();
+        assert_eq!(expected_count, all_tp_batch_count);
+        for (node, tps) in expected {
+            let drained: Vec<&TopicPartition> = node_batches
+                .get(&node.id())
+                .map(|batches| batches.iter().map(|batch| &batch.topic_partition).collect())
+                .unwrap_or_default();
+            assert_eq!(*tps, drained.as_slice(), "batches drained for node {}", node.id());
+        }
+    }
+
+    /// Translated from `RecordAccumulatorTest.testDrainBatches`.
+    ///
+    /// Java builds the `Cluster` from an ordered partition list so that each node drains its
+    /// partitions in a known order. The Rust test snapshot does not preserve that order, so the
+    /// test reads each node's drain order from the cluster: `tp1`/`tp2` are node1's partitions
+    /// and `tp3`/`tp4` are node2's, in the order they are drained.
     #[tokio::test]
-    async fn test_drain_batches_full() {
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testDrainBatches")]
+    async fn test_drain_batches() {
+        // test case: node1(tp1,tp2) , node2(tp3,tp4)
         let n1 = node1();
         let n2 = node2();
-        let now: i64 = 0;
-
-        let k = key();
         let v = value();
         let batch_size = v.len() as i32 + RecordBatch::RECORD_BATCH_OVERHEAD as i32;
 
-        let accum = create_test_accumulator(batch_size, i64::MAX, Compression::none().build(), 10);
+        let accum = create_test_accumulator(batch_size, i32::MAX as i64, Compression::none().build(), 10);
 
-        // 4 partitions: tp1->n1, tp2->n1, tp3->n2, tp4->n2
         let metadata = make_metadata_snapshot(
             &[n1.clone(), n2.clone()],
             TOPIC,
             &[(0, Some(0)), (1, Some(0)), (2, Some(1)), (3, Some(1))],
         );
         let cluster = metadata.cluster().clone();
+        let drain_order = |node: &Node| -> Vec<TopicPartition> {
+            cluster
+                .partitions_for_node(node.id())
+                .iter()
+                .map(|part| TopicPartition::new(part.topic(), part.partition()))
+                .collect()
+        };
+        let (n1_parts, n2_parts) = (drain_order(&n1), drain_order(&n2));
+        let (tp1, tp2, tp3, tp4) = (&n1_parts[0], &n1_parts[1], &n2_parts[0], &n2_parts[1]);
+        let nodes = HashSet::from([n1.clone(), n2.clone()]);
 
-        // Initial data for all 4 partitions
-        for p in 0..4 {
+        async fn append(accum: &RecordAccumulator, cluster: &Cluster, tp: &TopicPartition) {
             accum
-                .append(TOPIC, p, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+                .append(TOPIC, tp.partition(), 0, Some(&key()), Some(&value()), &[], None, 0, 0, cluster)
                 .await
                 .unwrap();
         }
 
-        // drain with batch_size limit: should get one batch per node
-        let nodes_set = HashSet::from([n1.clone(), n2.clone()]);
-        let batches1 = accum.drain(&metadata, &nodes_set, batch_size, now).expect("drain");
-        let total1: usize = batches1.values().map(|v| v.len()).sum();
-        assert_eq!(2, total1, "Should drain exactly one batch per node");
-
-        // drain with max size: should get remaining batches
-        let batches2 = accum.drain(&metadata, &nodes_set, batch_size, now).expect("drain");
-        let total2: usize = batches2.values().map(|v| v.len()).sum();
-        assert_eq!(2, total2, "Should drain remaining batches");
-
-        // Add records for partitions, mute tp3
-        accum
-            .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
-            .await
-            .unwrap();
-        accum
-            .append(TOPIC, 2, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
-            .await
-            .unwrap();
-        accum
-            .append(TOPIC, 3, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
-            .await
-            .unwrap();
-        let tp4 = TopicPartition::new(TOPIC.to_string(), 3);
-        accum.mute_partition(tp4.clone());
-
-        // Drain: node2 should skip tp4 because it's muted
-        let batches4 = accum.drain(&metadata, &nodes_set, batch_size, now).expect("drain");
-        let n2_batches = batches4.get(&n2.id()).unwrap();
-        for b in n2_batches {
-            assert_ne!(3, b.topic_partition.partition(), "Muted partition 3 should not be drained");
+        // initial data
+        for tp in [tp1, tp2, tp3, tp4] {
+            append(&accum, &cluster, tp).await;
         }
 
-        // Unmute and drain with max size
-        accum.unmute_partition(&tp4);
-        let batches5 = accum.drain(&metadata, &nodes_set, i32::MAX, now).expect("drain");
-        let total5: usize = batches5.values().map(|v| v.len()).sum();
-        assert!(total5 >= 1, "Should drain remaining batches after unmute");
+        // drain batches from 2 nodes: node1 => tp1, node2 => tp3, because the max request size
+        // is full after the first batch drained
+        let batches1 = accum.drain(&metadata, &nodes, batch_size, 0).unwrap();
+        verify_topic_partition_in_batches(&batches1, &[(&n1, &[tp1]), (&n2, &[tp3])]);
+
+        // add record for tp1, tp3
+        append(&accum, &cluster, tp1).await;
+        append(&accum, &cluster, tp3).await;
+
+        // drain batches from 2 nodes: node1 => tp2, node2 => tp4, because the max request size
+        // is full after the first batch drained
+        // The drain index should start from next topic partition, that is, node1 => tp2,
+        // node2 => tp4
+        let batches2 = accum.drain(&metadata, &nodes, batch_size, 0).unwrap();
+        verify_topic_partition_in_batches(&batches2, &[(&n1, &[tp2]), (&n2, &[tp4])]);
+
+        // make sure in next run, the drain index will start from the beginning
+        let batches3 = accum.drain(&metadata, &nodes, batch_size, 0).unwrap();
+        verify_topic_partition_in_batches(&batches3, &[(&n1, &[tp1]), (&n2, &[tp3])]);
+
+        // add record for tp2, tp3, tp4 and mute the tp4
+        append(&accum, &cluster, tp2).await;
+        append(&accum, &cluster, tp3).await;
+        append(&accum, &cluster, tp4).await;
+        accum.mute_partition(tp4.clone());
+        // drain batches from 2 nodes: node1 => tp2, node2 => tp3 (because tp4 is muted)
+        let batches4 = accum.drain(&metadata, &nodes, batch_size, 0).unwrap();
+        verify_topic_partition_in_batches(&batches4, &[(&n1, &[tp2]), (&n2, &[tp3])]);
+
+        // add record for tp1, tp2, tp3, and unmute tp4
+        append(&accum, &cluster, tp1).await;
+        append(&accum, &cluster, tp2).await;
+        append(&accum, &cluster, tp3).await;
+        accum.unmute_partition(tp4);
+        // set maxSize as a max value, so that the all partitions in 2 nodes should be drained:
+        // node1 => [tp1, tp2], node2 => [tp3, tp4]
+        let batches5 = accum.drain(&metadata, &nodes, i32::MAX, 0).unwrap();
+        verify_topic_partition_in_batches(&batches5, &[(&n1, &[tp1, tp2]), (&n2, &[tp3, tp4])]);
+    }
+
+    /// Under constant load, every partition of a node gets an equal share of the requests when
+    /// only one batch fits in each.
+    ///
+    /// Not a translation of a Java test. `testDrainBatches` checks a single rotation; this test
+    /// keeps a batch waiting on every partition across many drains, so a drain index that skips
+    /// the partition that did not fit leaves some partitions with no requests at all.
+    #[tokio::test]
+    async fn test_drain_batches_rotates_across_partitions_under_constant_load() {
+        const DRAINS: usize = 12;
+        for num_partitions in [2, 3, 4] {
+            let n1 = node1();
+            let k = key();
+            let v = value();
+            let batch_size = v.len() as i32 + RecordBatch::RECORD_BATCH_OVERHEAD as i32;
+            let accum = create_test_accumulator(batch_size, i64::MAX, Compression::none().build(), 10);
+            let partitions: Vec<(i32, Option<i32>)> = (0..num_partitions).map(|p| (p, Some(0))).collect();
+            let metadata = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &partitions);
+            let cluster = metadata.cluster().clone();
+            let nodes = HashSet::from([n1.clone()]);
+
+            let mut drained_per_partition: HashMap<i32, usize> = (0..num_partitions).map(|p| (p, 0)).collect();
+            for _ in 0..DRAINS {
+                for p in 0..num_partitions {
+                    if accum.deque_size(&TopicPartition::new(TOPIC.to_string(), p)) == 0 {
+                        accum
+                            .append(TOPIC, p, 0, Some(&k), Some(&v), &[], None, 0, 0, &cluster)
+                            .await
+                            .unwrap();
+                    }
+                }
+                // The max request size fits one batch, as in `testDrainBatches`.
+                let mut batches = accum.drain(&metadata, &nodes, batch_size, 0).unwrap();
+                for batch in batches.remove(&n1.id()).unwrap_or_default() {
+                    *drained_per_partition.get_mut(&batch.topic_partition.partition()).unwrap() += 1;
+                }
+            }
+
+            let expected: HashMap<i32, usize> =
+                (0..num_partitions).map(|p| (p, DRAINS / num_partitions as usize)).collect();
+            assert_eq!(
+                expected, drained_per_partition,
+                "batches drained per partition with {num_partitions} partitions"
+            );
+        }
     }
 
     #[expect(dead_code)]
