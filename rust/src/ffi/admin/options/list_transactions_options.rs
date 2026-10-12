@@ -59,7 +59,17 @@ impl ListTransactionsOptionsInner {
     }
 }
 
+/// Shared access to the handle's state.
+///
+/// # Safety
+///
+/// `options` must be a live handle, kept alive for `'a`, during which no
+/// setter runs on it.
 unsafe fn inner_ref<'a>(options: *const kafka_admin_ListTransactionsOptions_t) -> &'a ListTransactionsOptionsInner {
+    // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`,
+    // during which no setter runs on it. Every `kafka_admin_ListTransactionsOptions_t` is the
+    // `Box::into_raw` of a `Box<ListTransactionsOptionsInner>` (`boxed`), so the shared reference
+    // is to a live `ListTransactionsOptionsInner` that nothing mutates while it is used.
     unsafe { &*(options as *const ListTransactionsOptionsInner) }
 }
 
@@ -67,8 +77,13 @@ unsafe fn inner_ref<'a>(options: *const kafka_admin_ListTransactionsOptions_t) -
 ///
 /// # Safety
 ///
-/// `options` must be a live handle and no other reference to it may be live.
+/// `options` must be a live handle, kept alive for `'a`, to which no other
+/// reference is live meanwhile.
 unsafe fn inner_mut<'a>(options: *mut kafka_admin_ListTransactionsOptions_t) -> &'a mut ListTransactionsOptionsInner {
+    // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`, to
+    // which no other reference is live meanwhile. Every `kafka_admin_ListTransactionsOptions_t` is
+    // the `Box::into_raw` of a `Box<ListTransactionsOptionsInner>` (`boxed`), so the exclusive
+    // reference is to a live `ListTransactionsOptionsInner`.
     unsafe { &mut *(options as *mut ListTransactionsOptionsInner) }
 }
 
@@ -76,10 +91,13 @@ unsafe fn inner_mut<'a>(options: *mut kafka_admin_ListTransactionsOptions_t) -> 
 ///
 /// # Safety
 ///
-/// `options` must be a live handle.
+/// `options` must be a live handle, kept alive for `'a`, during which no
+/// setter runs on it.
 pub(crate) unsafe fn list_transactions_options_ref<'a>(
     options: *const kafka_admin_ListTransactionsOptions_t,
 ) -> &'a ListTransactionsOptions {
+    // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`,
+    // during which no setter runs on it, as `inner_ref` requires.
     &unsafe { inner_ref(options) }.options
 }
 
@@ -100,13 +118,16 @@ pub extern "C" fn kafka_admin_ListTransactionsOptions_new() -> *mut kafka_admin_
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle that no other call uses at the same time.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_set_timeout_ms(
     self_: *mut kafka_admin_ListTransactionsOptions_t,
     timeout_ms: i32,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
+    // the same time, so no other reference to it is live while the options are replaced, as
+    // `inner_mut` requires.
     unsafe { inner_mut(self_) }.replace(|options| options.set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms)));
 }
 
@@ -121,6 +142,9 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_set_timeout_ms(
 pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_timeout_ms(
     self_: *const kafka_admin_ListTransactionsOptions_t,
 ) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
+    // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
+    // the handle at the same time. That is what `list_transactions_options_ref` requires.
     unsafe { list_transactions_options_ref(self_) }.timeout_ms().unwrap_or(-1)
 }
 
@@ -130,18 +154,26 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_timeout_ms(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle; `states` must be `NULL` or a list of
-/// transaction-state singletons.
+/// `self_` must be a live handle that no other call uses at the same time;
+/// `states` must be `NULL` or a valid list, not mutated during the call,
+/// whose elements are `kafka_admin_TransactionState_t` singletons.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filter_states(
     self_: *mut kafka_admin_ListTransactionsOptions_t,
     states: *const kafka_List_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `states` is null or a valid list, not mutated during
+    // the call, which is as long as the borrowed elements are used, as `list_elements` requires.
     let states: Vec<TransactionState> = unsafe { list_elements(states) }
         .iter()
+        // SAFETY: Per this function's `# Safety`, every element of `states` is a
+        // `kafka_admin_TransactionState_t` singleton, as `transaction_state_value_of` requires.
         .map(|&element| unsafe { transaction_state_value_of(element as *const kafka_admin_TransactionState_t) })
         .collect();
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
+    // the same time, so no other reference to it is live while the options are replaced, as
+    // `inner_mut` requires.
     unsafe { inner_mut(self_) }.replace(|options| options.filter_states(states));
 }
 
@@ -151,18 +183,27 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filter_states(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle; `producer_ids` must be `NULL` or a list of
-/// pointers to `int64_t`.
+/// `self_` must be a live handle that no other call uses at the same time;
+/// `producer_ids` must be `NULL` or a valid list, not mutated during the
+/// call, whose elements point at readable, aligned `int64_t`s.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filter_producer_ids(
     self_: *mut kafka_admin_ListTransactionsOptions_t,
     producer_ids: *const kafka_List_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `producer_ids` is null or a valid list, not mutated
+    // during the call, which is as long as the borrowed elements are used, as `list_elements`
+    // requires.
     let producer_ids: Vec<i64> = unsafe { list_elements(producer_ids) }
         .iter()
+        // SAFETY: Per this function's `# Safety`, every element of `producer_ids` points at a
+        // readable, aligned `int64_t`, which is copied out.
         .map(|&element| unsafe { *(element as *const i64) })
         .collect();
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
+    // the same time, so no other reference to it is live while the options are replaced, as
+    // `inner_mut` requires.
     unsafe { inner_mut(self_) }.replace(|options| options.filter_producer_ids(producer_ids));
 }
 
@@ -172,13 +213,16 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filter_producer_ids
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle that no other call uses at the same time.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filter_on_duration(
     self_: *mut kafka_admin_ListTransactionsOptions_t,
     duration_ms: i64,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
+    // the same time, so no other reference to it is live while the options are replaced, as
+    // `inner_mut` requires.
     unsafe { inner_mut(self_) }.replace(|options| options.filter_on_duration(duration_ms));
 }
 
@@ -188,15 +232,20 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filter_on_duration(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle; `pattern` must be `NULL` or a
-/// NUL-terminated string.
+/// `self_` must be a live handle that no other call uses at the same time;
+/// `pattern` must be `NULL` or a valid NUL-terminated string.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filter_on_transactional_id_pattern(
     self_: *mut kafka_admin_ListTransactionsOptions_t,
     pattern: *const c_char,
 ) {
+    // SAFETY: Per this function's `# Safety`, `pattern` is null or a valid NUL-terminated string,
+    // as `c_str_to_option` requires; it is copied.
     let pattern = unsafe { c_str_to_option(pattern) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
+    // the same time, so no other reference to it is live while the options are replaced, as
+    // `inner_mut` requires.
     unsafe { inner_mut(self_) }.replace(|options| options.filter_on_transactional_id_pattern(pattern));
 }
 
@@ -213,6 +262,9 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filter_on_transacti
 pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filtered_states(
     self_: *const kafka_admin_ListTransactionsOptions_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
+    // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
+    // the handle at the same time. That is what `list_transactions_options_ref` requires.
     let mut states: Vec<TransactionState> = unsafe { list_transactions_options_ref(self_) }
         .filtered_states()
         .iter()
@@ -240,6 +292,9 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filtered_states(
 pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filtered_producer_ids(
     self_: *const kafka_admin_ListTransactionsOptions_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
+    // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
+    // the handle at the same time. That is what `list_transactions_options_ref` requires.
     let mut producer_ids: Vec<i64> = unsafe { list_transactions_options_ref(self_) }
         .filtered_producer_ids()
         .iter()
@@ -266,6 +321,9 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filtered_producer_i
 pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filtered_duration(
     self_: *const kafka_admin_ListTransactionsOptions_t,
 ) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
+    // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
+    // the handle at the same time. That is what `list_transactions_options_ref` requires.
     unsafe { list_transactions_options_ref(self_) }.filtered_duration()
 }
 
@@ -281,6 +339,11 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filtered_duration(
 pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filtered_transactional_id_pattern(
     self_: *const kafka_admin_ListTransactionsOptions_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
+    // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
+    // the handle at the same time. That is what `inner_ref` requires. The returned pointer borrows
+    // the cached pattern, which stays put until the handle is destroyed or the pattern is set
+    // again, as documented above.
     unsafe { inner_ref(self_) }
         .pattern_c
         .as_ref()
@@ -291,13 +354,19 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filtered_transactio
 ///
 /// # Safety
 ///
-/// `self_` must be `NULL` or a handle not yet destroyed.
+/// `self_` must be `NULL` or a handle not yet destroyed, that no other call
+/// uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_destroy(
     self_: *mut kafka_admin_ListTransactionsOptions_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, a handle
+        // not yet destroyed, that no other call uses at the same time and that is not used
+        // afterwards. Every `kafka_admin_ListTransactionsOptions_t` is the `Box::into_raw` of a
+        // `Box<ListTransactionsOptionsInner>` (`boxed`), so `from_raw` reclaims that allocation,
+        // once.
         drop(unsafe { Box::from_raw(self_ as *mut ListTransactionsOptionsInner) });
     }
 }

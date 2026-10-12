@@ -33,10 +33,15 @@ pub struct kafka_admin_AlterReplicaLogDirsOptions_t {
 ///
 /// # Safety
 ///
-/// `options` must be a live handle.
+/// `options` must be a live handle, kept alive for `'a`, during which no
+/// setter runs on it.
 pub(crate) unsafe fn alter_replica_log_dirs_options_ref<'a>(
     options: *const kafka_admin_AlterReplicaLogDirsOptions_t,
 ) -> &'a AlterReplicaLogDirsOptions {
+    // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`,
+    // during which no setter runs on it. Every `kafka_admin_AlterReplicaLogDirsOptions_t` is the
+    // `Box::into_raw` of a `Box<AlterReplicaLogDirsOptions>` (`boxed`), so the shared reference is
+    // to a live `AlterReplicaLogDirsOptions` that nothing mutates while it is used.
     unsafe { &*(options as *const AlterReplicaLogDirsOptions) }
 }
 
@@ -44,10 +49,15 @@ pub(crate) unsafe fn alter_replica_log_dirs_options_ref<'a>(
 ///
 /// # Safety
 ///
-/// `options` must be a live handle and no other reference to it may be live.
+/// `options` must be a live handle, kept alive for `'a`, to which no other
+/// reference is live meanwhile.
 unsafe fn options_mut<'a>(
     options: *mut kafka_admin_AlterReplicaLogDirsOptions_t,
 ) -> &'a mut AlterReplicaLogDirsOptions {
+    // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`, to
+    // which no other reference is live meanwhile. Every `kafka_admin_AlterReplicaLogDirsOptions_t`
+    // is the `Box::into_raw` of a `Box<AlterReplicaLogDirsOptions>` (`boxed`), so the exclusive
+    // reference is to a live `AlterReplicaLogDirsOptions`.
     unsafe { &mut *(options as *mut AlterReplicaLogDirsOptions) }
 }
 
@@ -68,13 +78,16 @@ pub extern "C" fn kafka_admin_AlterReplicaLogDirsOptions_new() -> *mut kafka_adm
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle that no other call uses at the same time.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsOptions_set_timeout_ms(
     self_: *mut kafka_admin_AlterReplicaLogDirsOptions_t,
     timeout_ms: i32,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
+    // the same time, so no other reference to it is live while `options` is used, as `options_mut`
+    // requires.
     let options = unsafe { options_mut(self_) };
     *options = std::mem::take(options).set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms));
 }
@@ -90,6 +103,9 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsOptions_set_timeout_ms(
 pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsOptions_timeout_ms(
     self_: *const kafka_admin_AlterReplicaLogDirsOptions_t,
 ) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
+    // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
+    // the handle at the same time. That is what `alter_replica_log_dirs_options_ref` requires.
     unsafe { alter_replica_log_dirs_options_ref(self_) }.timeout_ms().unwrap_or(-1)
 }
 
@@ -97,13 +113,19 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsOptions_timeout_ms(
 ///
 /// # Safety
 ///
-/// `self_` must be `NULL` or a handle not yet destroyed.
+/// `self_` must be `NULL` or a handle not yet destroyed, that no other call
+/// uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsOptions_destroy(
     self_: *mut kafka_admin_AlterReplicaLogDirsOptions_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, a handle
+        // not yet destroyed, that no other call uses at the same time and that is not used
+        // afterwards. Every `kafka_admin_AlterReplicaLogDirsOptions_t` is the `Box::into_raw` of a
+        // `Box<AlterReplicaLogDirsOptions>` (`boxed`), so `from_raw` reclaims that allocation,
+        // once.
         drop(unsafe { Box::from_raw(self_ as *mut AlterReplicaLogDirsOptions) });
     }
 }

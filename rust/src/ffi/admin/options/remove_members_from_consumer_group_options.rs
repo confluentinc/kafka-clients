@@ -64,9 +64,20 @@ impl RemoveMembersFromConsumerGroupOptionsInner {
     }
 }
 
+/// Shared access to the handle's state.
+///
+/// # Safety
+///
+/// `options` must be a live handle, kept alive for `'a`, during which no
+/// setter runs on it.
 unsafe fn inner_ref<'a>(
     options: *const kafka_admin_RemoveMembersFromConsumerGroupOptions_t,
 ) -> &'a RemoveMembersFromConsumerGroupOptionsInner {
+    // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`,
+    // during which no setter runs on it. Every
+    // `kafka_admin_RemoveMembersFromConsumerGroupOptions_t` is the `Box::into_raw` of a
+    // `Box<RemoveMembersFromConsumerGroupOptionsInner>` (`boxed`), so the shared reference is to a
+    // live `RemoveMembersFromConsumerGroupOptionsInner` that nothing mutates while it is used.
     unsafe { &*(options as *const RemoveMembersFromConsumerGroupOptionsInner) }
 }
 
@@ -74,10 +85,16 @@ unsafe fn inner_ref<'a>(
 ///
 /// # Safety
 ///
-/// `options` must be a live handle and no other reference to it may be live.
+/// `options` must be a live handle, kept alive for `'a`, to which no other
+/// reference is live meanwhile.
 unsafe fn inner_mut<'a>(
     options: *mut kafka_admin_RemoveMembersFromConsumerGroupOptions_t,
 ) -> &'a mut RemoveMembersFromConsumerGroupOptionsInner {
+    // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`, to
+    // which no other reference is live meanwhile. Every
+    // `kafka_admin_RemoveMembersFromConsumerGroupOptions_t` is the `Box::into_raw` of a
+    // `Box<RemoveMembersFromConsumerGroupOptionsInner>` (`boxed`), so the exclusive reference is to
+    // a live `RemoveMembersFromConsumerGroupOptionsInner`.
     unsafe { &mut *(options as *mut RemoveMembersFromConsumerGroupOptionsInner) }
 }
 
@@ -85,10 +102,13 @@ unsafe fn inner_mut<'a>(
 ///
 /// # Safety
 ///
-/// `options` must be a live handle.
+/// `options` must be a live handle, kept alive for `'a`, during which no
+/// setter runs on it.
 pub(crate) unsafe fn remove_members_from_consumer_group_options_ref<'a>(
     options: *const kafka_admin_RemoveMembersFromConsumerGroupOptions_t,
 ) -> &'a RemoveMembersFromConsumerGroupOptions {
+    // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`,
+    // during which no setter runs on it, as `inner_ref` requires.
     &unsafe { inner_ref(options) }.options
 }
 
@@ -118,18 +138,26 @@ pub extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_new()
 ///
 /// # Safety
 ///
-/// `members` must be `NULL` or a list of live member handles;
-/// `out_with_members` must be a valid slot.
+/// `members` must be `NULL` or a valid list, not mutated during the call,
+/// whose elements are live member-to-remove handles; `out_with_members`
+/// must be a valid slot.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_with_members(
     members: *const kafka_List_t,
     out_with_members: *mut *mut kafka_admin_RemoveMembersFromConsumerGroupOptions_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `members` is null or a valid list, not mutated during
+    // the call, which is as long as the borrowed elements are used, as `list_elements` requires.
     let members: Vec<MemberToRemove> = unsafe { list_elements(members) }
         .iter()
+        // SAFETY: Per this function's `# Safety`, every element of `members` is a live
+        // member-to-remove handle, as `member_to_remove_ref` requires; the borrow ends with the
+        // clone, during this call, while the caller keeps the handle alive.
         .map(|&element| unsafe { member_to_remove_ref(element as *const kafka_admin_MemberToRemove_t) }.clone())
         .collect();
+    // SAFETY: Per this function's `# Safety`, `out_with_members` is a valid slot, as `out_slot`
+    // requires.
     unsafe {
         out_slot(
             RemoveMembersFromConsumerGroupOptions::with_members(members),
@@ -145,15 +173,20 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_with_
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle; `reason` must be `NULL` or a
-/// NUL-terminated string.
+/// `self_` must be a live handle that no other call uses at the same time;
+/// `reason` must be `NULL` or a valid NUL-terminated string.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_set_reason(
     self_: *mut kafka_admin_RemoveMembersFromConsumerGroupOptions_t,
     reason: *const c_char,
 ) {
+    // SAFETY: Per this function's `# Safety`, `reason` is null or a valid NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied.
     let reason = unsafe { c_str_to_string(reason) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
+    // the same time, so no other reference to it is live while the options are replaced, as
+    // `inner_mut` requires.
     unsafe { inner_mut(self_) }.replace(|mut options| {
         options.set_reason(reason);
         options
@@ -165,13 +198,16 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_set_r
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle that no other call uses at the same time.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_set_timeout_ms(
     self_: *mut kafka_admin_RemoveMembersFromConsumerGroupOptions_t,
     timeout_ms: i32,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
+    // the same time, so no other reference to it is live while the options are replaced, as
+    // `inner_mut` requires.
     unsafe { inner_mut(self_) }.replace(|options| options.set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms)));
 }
 
@@ -187,6 +223,10 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_set_t
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_members(
     self_: *const kafka_admin_RemoveMembersFromConsumerGroupOptions_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
+    // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
+    // the handle at the same time. That is what `remove_members_from_consumer_group_options_ref`
+    // requires.
     let mut members: Vec<&MemberToRemove> = unsafe { remove_members_from_consumer_group_options_ref(self_) }
         .members()
         .iter()
@@ -213,6 +253,11 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_membe
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_reason(
     self_: *const kafka_admin_RemoveMembersFromConsumerGroupOptions_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
+    // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
+    // the handle at the same time. That is what `inner_ref` requires. The returned pointer borrows
+    // the cached reason, which stays put until the handle is destroyed or the reason is set again,
+    // as documented above.
     unsafe { inner_ref(self_) }
         .reason_c
         .as_ref()
@@ -230,6 +275,10 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_reaso
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_remove_all(
     self_: *const kafka_admin_RemoveMembersFromConsumerGroupOptions_t,
 ) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
+    // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
+    // the handle at the same time. That is what `remove_members_from_consumer_group_options_ref`
+    // requires.
     i8::from(unsafe { remove_members_from_consumer_group_options_ref(self_) }.remove_all())
 }
 
@@ -244,6 +293,10 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_remov
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_timeout_ms(
     self_: *const kafka_admin_RemoveMembersFromConsumerGroupOptions_t,
 ) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
+    // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
+    // the handle at the same time. That is what `remove_members_from_consumer_group_options_ref`
+    // requires.
     unsafe { remove_members_from_consumer_group_options_ref(self_) }
         .timeout_ms()
         .unwrap_or(-1)
@@ -253,13 +306,19 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_timeo
 ///
 /// # Safety
 ///
-/// `self_` must be `NULL` or a handle not yet destroyed.
+/// `self_` must be `NULL` or a handle not yet destroyed, that no other call
+/// uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_destroy(
     self_: *mut kafka_admin_RemoveMembersFromConsumerGroupOptions_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, a handle
+        // not yet destroyed, that no other call uses at the same time and that is not used
+        // afterwards. Every `kafka_admin_RemoveMembersFromConsumerGroupOptions_t` is the
+        // `Box::into_raw` of a `Box<RemoveMembersFromConsumerGroupOptionsInner>` (`boxed`), so
+        // `from_raw` reclaims that allocation, once.
         drop(unsafe { Box::from_raw(self_ as *mut RemoveMembersFromConsumerGroupOptionsInner) });
     }
 }

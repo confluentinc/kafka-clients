@@ -33,10 +33,16 @@ pub struct kafka_admin_DeleteConsumerGroupOffsetsOptions_t {
 ///
 /// # Safety
 ///
-/// `options` must be a live handle.
+/// `options` must be a live handle, kept alive for `'a`, during which no
+/// setter runs on it.
 pub(crate) unsafe fn delete_consumer_group_offsets_options_ref<'a>(
     options: *const kafka_admin_DeleteConsumerGroupOffsetsOptions_t,
 ) -> &'a DeleteConsumerGroupOffsetsOptions {
+    // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`,
+    // during which no setter runs on it. Every `kafka_admin_DeleteConsumerGroupOffsetsOptions_t` is
+    // the `Box::into_raw` of a `Box<DeleteConsumerGroupOffsetsOptions>` (`boxed`), so the shared
+    // reference is to a live `DeleteConsumerGroupOffsetsOptions` that nothing mutates while it is
+    // used.
     unsafe { &*(options as *const DeleteConsumerGroupOffsetsOptions) }
 }
 
@@ -44,10 +50,16 @@ pub(crate) unsafe fn delete_consumer_group_offsets_options_ref<'a>(
 ///
 /// # Safety
 ///
-/// `options` must be a live handle and no other reference to it may be live.
+/// `options` must be a live handle, kept alive for `'a`, to which no other
+/// reference is live meanwhile.
 unsafe fn options_mut<'a>(
     options: *mut kafka_admin_DeleteConsumerGroupOffsetsOptions_t,
 ) -> &'a mut DeleteConsumerGroupOffsetsOptions {
+    // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`, to
+    // which no other reference is live meanwhile. Every
+    // `kafka_admin_DeleteConsumerGroupOffsetsOptions_t` is the `Box::into_raw` of a
+    // `Box<DeleteConsumerGroupOffsetsOptions>` (`boxed`), so the exclusive reference is to a live
+    // `DeleteConsumerGroupOffsetsOptions`.
     unsafe { &mut *(options as *mut DeleteConsumerGroupOffsetsOptions) }
 }
 
@@ -69,13 +81,16 @@ pub extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsOptions_new()
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle that no other call uses at the same time.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsOptions_set_timeout_ms(
     self_: *mut kafka_admin_DeleteConsumerGroupOffsetsOptions_t,
     timeout_ms: i32,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
+    // the same time, so no other reference to it is live while `options` is used, as `options_mut`
+    // requires.
     let options = unsafe { options_mut(self_) };
     *options = std::mem::take(options).set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms));
 }
@@ -91,6 +106,10 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsOptions_set_timeo
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsOptions_timeout_ms(
     self_: *const kafka_admin_DeleteConsumerGroupOffsetsOptions_t,
 ) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
+    // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
+    // the handle at the same time. That is what `delete_consumer_group_offsets_options_ref`
+    // requires.
     unsafe { delete_consumer_group_offsets_options_ref(self_) }
         .timeout_ms()
         .unwrap_or(-1)
@@ -100,13 +119,19 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsOptions_timeout_m
 ///
 /// # Safety
 ///
-/// `self_` must be `NULL` or a handle not yet destroyed.
+/// `self_` must be `NULL` or a handle not yet destroyed, that no other call
+/// uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsOptions_destroy(
     self_: *mut kafka_admin_DeleteConsumerGroupOffsetsOptions_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, a handle
+        // not yet destroyed, that no other call uses at the same time and that is not used
+        // afterwards. Every `kafka_admin_DeleteConsumerGroupOffsetsOptions_t` is the
+        // `Box::into_raw` of a `Box<DeleteConsumerGroupOffsetsOptions>` (`boxed`), so `from_raw`
+        // reclaims that allocation, once.
         drop(unsafe { Box::from_raw(self_ as *mut DeleteConsumerGroupOffsetsOptions) });
     }
 }
