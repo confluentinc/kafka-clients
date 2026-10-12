@@ -25,3 +25,5 @@ happens, leaving the tree staged but uncommitted.
     the status, which hid a lint failure earlier in Milestone 11.
   - `docker ps -q | wc -l` is read-only and safe; use it before and after to prove you
     orphaned nothing. Do not run `make verify-sandbox` or any integration test.
+
+**Check first (2026-09-29):** the hook exists only if `core.hooksPath` is set, which `make init-hooks` (a prerequisite of `make build`) does. In a clone where that never ran, `git config core.hooksPath` is empty and a plain `git commit` runs no hook.

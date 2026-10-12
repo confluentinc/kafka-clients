@@ -27,6 +27,8 @@
 //! - `SASL_CLIENT_CALLBACK_HANDLER_CLASS` — No pluggable callback handlers
 //! - `SASL_LOGIN_CLASS` — No pluggable login implementations
 
+use crate::common::config::types::Password;
+
 // ---------------------------------------------------------------------------
 // Config key constants (matching Java SaslConfigs constant values)
 // ---------------------------------------------------------------------------
@@ -85,7 +87,11 @@ pub struct SaslConfigs {
     ///
     /// If set, `username` and `password` can be extracted from this string
     /// via [`SaslConfigs::resolve_username`] and [`SaslConfigs::resolve_password`].
-    pub(crate) jaas_config: Option<String>,
+    ///
+    /// A [`Password`] because Java defines `sasl.jaas.config` as
+    /// `ConfigDef.Type.PASSWORD` (`SaslConfigs.java:380`): the string embeds
+    /// the credentials, so every rendering of it is `[hidden]`.
+    pub(crate) jaas_config: Option<Password>,
 
     /// Username for PLAIN authentication.
     /// Convenience field — used when `jaas_config` is not set.
@@ -93,7 +99,11 @@ pub struct SaslConfigs {
 
     /// Password for PLAIN authentication.
     /// Convenience field — used when `jaas_config` is not set.
-    pub(crate) password: Option<String>,
+    ///
+    /// Rust-only (set programmatically, no config key is parsed into it); a
+    /// [`Password`] like every other secret, so every rendering of it is
+    /// `[hidden]`. [`SaslConfigs::resolve_password`] yields the plaintext.
+    pub(crate) password: Option<Password>,
 }
 
 impl Default for SaslConfigs {
@@ -235,19 +245,22 @@ impl SaslConfigs {
             return Some(u.as_str());
         }
         if let Some(ref jaas) = self.jaas_config {
-            return SaslConfigs::parse_jaas_option(jaas, "username");
+            return SaslConfigs::parse_jaas_option(jaas.value(), "username");
         }
         None
     }
 
     /// Resolve the effective password, checking the `password` field first,
     /// then parsing from `jaas_config` if present.
+    ///
+    /// Returns the **plaintext**: the authenticator must send it, just as
+    /// Java's `PlainLoginModule` yields a plain `String`. Never log the result.
     pub fn resolve_password(&self) -> Option<&str> {
         if let Some(ref p) = self.password {
-            return Some(p.as_str());
+            return Some(p.value());
         }
         if let Some(ref jaas) = self.jaas_config {
-            return SaslConfigs::parse_jaas_option(jaas, "password");
+            return SaslConfigs::parse_jaas_option(jaas.value(), "password");
         }
         None
     }
@@ -274,18 +287,17 @@ mod tests {
 
     #[test]
     fn test_resolve_password_from_direct_field() {
-        let config = SaslConfigs { password: Some("secret".to_owned()), ..SaslConfigs::default() };
+        let config = SaslConfigs { password: Some(Password::new("secret")), ..SaslConfigs::default() };
         assert_eq!(config.resolve_password(), Some("secret"));
     }
 
     #[test]
     fn test_resolve_username_from_jaas_config() {
         let config = SaslConfigs {
-            jaas_config: Some(
+            jaas_config: Some(Password::new(
                 "org.apache.kafka.common.security.plain.PlainLoginModule required \
-                 username=\"alice\" password=\"secret\";"
-                    .to_owned(),
-            ),
+                 username=\"alice\" password=\"secret\";",
+            )),
             ..SaslConfigs::default()
         };
         assert_eq!(config.resolve_username(), Some("alice"));
@@ -294,11 +306,10 @@ mod tests {
     #[test]
     fn test_resolve_password_from_jaas_config() {
         let config = SaslConfigs {
-            jaas_config: Some(
+            jaas_config: Some(Password::new(
                 "org.apache.kafka.common.security.plain.PlainLoginModule required \
-                 username=\"alice\" password=\"secret\";"
-                    .to_owned(),
-            ),
+                 username=\"alice\" password=\"secret\";",
+            )),
             ..SaslConfigs::default()
         };
         assert_eq!(config.resolve_password(), Some("secret"));
@@ -307,13 +318,12 @@ mod tests {
     #[test]
     fn test_direct_fields_take_precedence_over_jaas() {
         let config = SaslConfigs {
-            jaas_config: Some(
+            jaas_config: Some(Password::new(
                 "org.apache.kafka.common.security.plain.PlainLoginModule required \
-                 username=\"jaas_user\" password=\"jaas_pass\";"
-                    .to_owned(),
-            ),
+                 username=\"jaas_user\" password=\"jaas_pass\";",
+            )),
             username: Some("direct_user".to_owned()),
-            password: Some("direct_pass".to_owned()),
+            password: Some(Password::new("direct_pass")),
             ..SaslConfigs::default()
         };
         assert_eq!(config.resolve_username(), Some("direct_user"));
@@ -330,7 +340,7 @@ mod tests {
     #[test]
     fn test_jaas_config_unquoted_values() {
         let config = SaslConfigs {
-            jaas_config: Some("PlainLoginModule required username=alice password=secret;".to_owned()),
+            jaas_config: Some(Password::new("PlainLoginModule required username=alice password=secret;")),
             ..SaslConfigs::default()
         };
         assert_eq!(config.resolve_username(), Some("alice"));
@@ -340,7 +350,7 @@ mod tests {
     #[test]
     fn test_jaas_config_missing_field() {
         let config = SaslConfigs {
-            jaas_config: Some("PlainLoginModule required username=\"alice\";".to_owned()),
+            jaas_config: Some(Password::new("PlainLoginModule required username=\"alice\";")),
             ..SaslConfigs::default()
         };
         assert_eq!(config.resolve_username(), Some("alice"));
@@ -350,7 +360,7 @@ mod tests {
     #[test]
     fn test_jaas_config_malformed_no_closing_quote() {
         let config = SaslConfigs {
-            jaas_config: Some("PlainLoginModule required username=\"alice password=\"secret\";".to_owned()),
+            jaas_config: Some(Password::new("PlainLoginModule required username=\"alice password=\"secret\";")),
             ..SaslConfigs::default()
         };
         // The first quote for username opens, and the next quote is in " password=" —
@@ -361,7 +371,7 @@ mod tests {
 
     #[test]
     fn test_jaas_config_empty_string() {
-        let config = SaslConfigs { jaas_config: Some(String::new()), ..SaslConfigs::default() };
+        let config = SaslConfigs { jaas_config: Some(Password::new("")), ..SaslConfigs::default() };
         assert_eq!(config.resolve_username(), None);
         assert_eq!(config.resolve_password(), None);
     }
@@ -369,7 +379,7 @@ mod tests {
     #[test]
     fn test_jaas_config_no_options() {
         let config = SaslConfigs {
-            jaas_config: Some("PlainLoginModule required;".to_owned()),
+            jaas_config: Some(Password::new("PlainLoginModule required;")),
             ..SaslConfigs::default()
         };
         assert_eq!(config.resolve_username(), None);
@@ -379,7 +389,9 @@ mod tests {
     #[test]
     fn test_jaas_config_with_extra_whitespace() {
         let config = SaslConfigs {
-            jaas_config: Some("PlainLoginModule   required   username=\"bob\"   password=\"pass123\"  ;".to_owned()),
+            jaas_config: Some(Password::new(
+                "PlainLoginModule   required   username=\"bob\"   password=\"pass123\"  ;",
+            )),
             ..SaslConfigs::default()
         };
         assert_eq!(config.resolve_username(), Some("bob"));
@@ -390,7 +402,9 @@ mod tests {
     fn test_jaas_config_key_as_substring_not_matched() {
         // Ensure that "myusername" is not matched when searching for "username"
         let config = SaslConfigs {
-            jaas_config: Some("PlainLoginModule required myusername=\"wrong\" username=\"right\";".to_owned()),
+            jaas_config: Some(Password::new(
+                "PlainLoginModule required myusername=\"wrong\" username=\"right\";",
+            )),
             ..SaslConfigs::default()
         };
         assert_eq!(config.resolve_username(), Some("right"));
@@ -400,7 +414,9 @@ mod tests {
     fn test_jaas_config_spaces_around_equals() {
         // A JAAS string legally carries spaces around '='.
         let config = SaslConfigs {
-            jaas_config: Some("PlainLoginModule required username = \"alice\" password = \"secret\";".to_owned()),
+            jaas_config: Some(Password::new(
+                "PlainLoginModule required username = \"alice\" password = \"secret\";",
+            )),
             ..SaslConfigs::default()
         };
         assert_eq!(config.resolve_username(), Some("alice"));
@@ -410,7 +426,7 @@ mod tests {
     #[test]
     fn test_jaas_config_single_quoted_values() {
         let config = SaslConfigs {
-            jaas_config: Some("PlainLoginModule required username='alice' password='secret';".to_owned()),
+            jaas_config: Some(Password::new("PlainLoginModule required username='alice' password='secret';")),
             ..SaslConfigs::default()
         };
         assert_eq!(config.resolve_username(), Some("alice"));
@@ -420,7 +436,9 @@ mod tests {
     #[test]
     fn test_jaas_config_single_quoted_with_spaces() {
         let config = SaslConfigs {
-            jaas_config: Some("PlainLoginModule required username = 'alice' password = 'secret';".to_owned()),
+            jaas_config: Some(Password::new(
+                "PlainLoginModule required username = 'alice' password = 'secret';",
+            )),
             ..SaslConfigs::default()
         };
         assert_eq!(config.resolve_username(), Some("alice"));
@@ -430,7 +448,7 @@ mod tests {
     #[test]
     fn test_jaas_config_bare_value_with_spaces_around_equals() {
         let config = SaslConfigs {
-            jaas_config: Some("PlainLoginModule required username = alice password = secret;".to_owned()),
+            jaas_config: Some(Password::new("PlainLoginModule required username = alice password = secret;")),
             ..SaslConfigs::default()
         };
         assert_eq!(config.resolve_username(), Some("alice"));
@@ -442,12 +460,11 @@ mod tests {
         // `serviceName=` must not be picked up when searching for `name`, and a
         // dotted-prefix `something.username=` must not match `username=`.
         let config = SaslConfigs {
-            jaas_config: Some(
+            jaas_config: Some(Password::new(
                 "com.sun.security.auth.module.Krb5LoginModule required \
                  serviceName=\"kafka\" foo.username=\"wrong\" username=\"right\" \
-                 password=\"pass\";"
-                    .to_owned(),
-            ),
+                 password=\"pass\";",
+            )),
             ..SaslConfigs::default()
         };
         assert_eq!(config.resolve_username(), Some("right"));
@@ -472,7 +489,9 @@ mod tests {
         // wholesale. Here the real `username` option must resolve to `right`,
         // not the `username=x` embedded in the password value.
         let config = SaslConfigs {
-            jaas_config: Some("PlainLoginModule required password=\"username=x\" username=\"right\";".to_owned()),
+            jaas_config: Some(Password::new(
+                "PlainLoginModule required password=\"username=x\" username=\"right\";",
+            )),
             ..SaslConfigs::default()
         };
         assert_eq!(config.resolve_username(), Some("right"));
@@ -487,7 +506,9 @@ mod tests {
         // resolve to `right`, and the password slice must include the whole
         // escaped run (raw, not expanded).
         let config = SaslConfigs {
-            jaas_config: Some("PlainLoginModule required password=\"a\\\"b\" username=\"right\";".to_owned()),
+            jaas_config: Some(Password::new(
+                "PlainLoginModule required password=\"a\\\"b\" username=\"right\";",
+            )),
             ..SaslConfigs::default()
         };
         assert_eq!(config.resolve_username(), Some("right"));
@@ -506,14 +527,64 @@ mod tests {
     fn test_clone() {
         let config = SaslConfigs {
             mechanism: "SCRAM-SHA-256".to_owned(),
-            jaas_config: Some("ScramLoginModule required;".to_owned()),
+            jaas_config: Some(Password::new("ScramLoginModule required;")),
             username: Some("user".to_owned()),
-            password: Some("pass".to_owned()),
+            password: Some(Password::new("pass")),
         };
         let cloned = config.clone();
         assert_eq!(config.mechanism, cloned.mechanism);
         assert_eq!(config.jaas_config, cloned.jaas_config);
         assert_eq!(config.username, cloned.username);
         assert_eq!(config.password, cloned.password);
+    }
+
+    /// The finding's requested test: `{:?}` of a config holding credentials
+    /// renders neither the password nor the JAAS string, while the non-secret
+    /// fields stay visible and `resolve_*` still yield the plaintext.
+    #[test]
+    fn test_debug_redacts_jaas_config_and_password() {
+        let config = SaslConfigs {
+            mechanism: "PLAIN".to_owned(),
+            jaas_config: Some(Password::new(
+                "org.apache.kafka.common.security.plain.PlainLoginModule required \
+                 username=\"jaas-user\" password=\"jaas-S3cr3t-Pa55\";",
+            )),
+            username: Some("direct-user".to_owned()),
+            password: Some(Password::new("direct-S3cr3t-Pa55")),
+        };
+
+        let rendered = format!("{config:?}");
+        assert_eq!(
+            rendered,
+            "SaslConfigs { mechanism: \"PLAIN\", jaas_config: Some([hidden]), \
+             username: Some(\"direct-user\"), password: Some([hidden]) }"
+        );
+        for secret in [
+            "direct-S3cr3t-Pa55",
+            "jaas-S3cr3t-Pa55",
+            "PlainLoginModule",
+            "jaas-user",
+        ] {
+            assert!(!rendered.contains(secret), "{secret:?} leaked: {rendered}");
+        }
+        let pretty = format!("{config:#?}");
+        assert!(pretty.contains("mechanism: \"PLAIN\""), "{pretty}");
+        assert!(pretty.contains("username: Some("), "{pretty}");
+        assert!(!pretty.contains("S3cr3t"), "{pretty}");
+        assert!(!pretty.contains("PlainLoginModule"), "{pretty}");
+
+        // The authenticator still receives the plaintext.
+        assert_eq!(config.resolve_username(), Some("direct-user"));
+        assert_eq!(config.resolve_password(), Some("direct-S3cr3t-Pa55"));
+
+        // Credentials carried only by the JAAS string are hidden as well, and
+        // still resolve to plaintext.
+        let jaas_only = SaslConfigs { username: None, password: None, ..config };
+        let rendered = format!("{jaas_only:?}");
+        assert!(!rendered.contains("jaas-S3cr3t-Pa55"), "{rendered}");
+        assert!(!rendered.contains("jaas-user"), "{rendered}");
+        assert!(rendered.contains("jaas_config: Some([hidden])"), "{rendered}");
+        assert_eq!(jaas_only.resolve_username(), Some("jaas-user"));
+        assert_eq!(jaas_only.resolve_password(), Some("jaas-S3cr3t-Pa55"));
     }
 }

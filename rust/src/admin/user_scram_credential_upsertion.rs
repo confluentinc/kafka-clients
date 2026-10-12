@@ -16,14 +16,20 @@
 //!
 //! Corresponds to `org.apache.kafka.clients.admin.UserScramCredentialUpsertion`.
 
+use std::fmt;
+
 use rand::Rng;
 
 use super::ScramCredentialInfo;
+use crate::common::config::types::Password;
 
 /// A request to update/insert a SASL/SCRAM credential for a user.
 ///
 /// See [KIP-554: Add Broker-side SCRAM Config API](https://cwiki.apache.org/confluence/display/KAFKA/KIP-554%3A+Add+Broker-side+SCRAM+Config+API).
-#[derive(Debug, Clone)]
+///
+/// `Debug` renders the user and the credential info, and
+/// `Password::HIDDEN` in place of the salt and the password.
+#[derive(Clone)]
 #[doc(alias = "org.apache.kafka.clients.admin.UserScramCredentialUpsertion")]
 pub struct UserScramCredentialUpsertion {
     user: String,
@@ -88,6 +94,23 @@ impl UserScramCredentialUpsertion {
     }
 }
 
+/// Java has no `toString()` here, so there is no Java rendering to mirror; a
+/// derived `Debug` would print the password (and the salt, keyed material for
+/// the stored credential) as their byte values, so both are hidden.
+impl fmt::Debug for UserScramCredentialUpsertion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Destructured exhaustively, so a field added to the struct must be
+        // considered here; the two secrets are bound to `_` deliberately.
+        let Self { user, info, salt: _, password: _ } = self;
+        f.debug_struct("UserScramCredentialUpsertion")
+            .field("user", user)
+            .field("info", info)
+            .field("salt", &Password::HIDDEN)
+            .field("password", &Password::HIDDEN)
+            .finish()
+    }
+}
+
 /// Generates a random salt.
 ///
 /// Mirrors `ScramFormatter.secureRandomBytes(new SecureRandom())` in spirit:
@@ -133,6 +156,40 @@ mod tests {
         );
         assert_eq!(upsertion.salt(), b"my-salt");
         assert_eq!(upsertion.password(), b"secret");
+    }
+
+    /// New test, no Java original (Java has no `toString()`): `{:?}` shows
+    /// the user and the credential info but neither the password nor the salt,
+    /// which a derived `Debug` would print as their byte values.
+    #[test]
+    fn debug_hides_password_and_salt() {
+        let password = b"alice-S3cr3t-pw";
+        let salt = b"alice-salt-bytes";
+        let upsertion = UserScramCredentialUpsertion::with_salt(
+            "alice",
+            ScramCredentialInfo::new(ScramMechanism::ScramSha512, 8192),
+            password.to_vec(),
+            salt.to_vec(),
+        );
+        let rendered = format!("{upsertion:?}");
+        assert_eq!(
+            rendered,
+            format!(
+                "UserScramCredentialUpsertion {{ user: \"alice\", info: {:?}, salt: \"[hidden]\", password: \"[hidden]\" }}",
+                upsertion.credential_info()
+            )
+        );
+        for secret in [&password[..], &salt[..]] {
+            assert!(!rendered.contains(&format!("{secret:?}")), "{rendered}");
+            assert!(!rendered.contains(std::str::from_utf8(secret).unwrap()), "{rendered}");
+        }
+        assert!(rendered.contains("ScramSha512"), "{rendered}");
+        assert!(rendered.contains("8192"), "{rendered}");
+
+        let pretty = format!("{upsertion:#?}");
+        assert!(pretty.contains("\"alice\""), "{pretty}");
+        assert_eq!(pretty.matches(Password::HIDDEN).count(), 2, "{pretty}");
+        assert!(!pretty.contains("S3cr3t"), "{pretty}");
     }
 
     #[test]
