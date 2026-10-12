@@ -924,6 +924,9 @@ struct SharedState {
     committed_transactions: Arc<AtomicU64>,
     aborted_transactions: Arc<AtomicU64>,
     aborted_records: Arc<AtomicU64>,
+    // Set by a producer task that stops early because `begin_transaction`
+    // failed; fails the run.
+    worker_failed: Arc<AtomicBool>,
 }
 
 /// One producer task's produce-mode loop (`TXN_MODE=produce`).
@@ -972,6 +975,7 @@ async fn run_producer(
         let begin_time = Instant::now();
         if let Err(e) = producer.begin_transaction() {
             eprintln!("begin_transaction error: {e:?}");
+            shared.worker_failed.store(true, Ordering::Relaxed);
             break;
         }
 
@@ -1170,6 +1174,7 @@ async fn run_eos_producer(
         let begin_time = Instant::now();
         if let Err(e) = producer.begin_transaction() {
             eprintln!("begin_transaction error: {e:?}");
+            shared.worker_failed.store(true, Ordering::Relaxed);
             break;
         }
 
@@ -1821,11 +1826,19 @@ async fn transactional_producer_perf_test() {
     } else {
         0
     };
-    let per_producer_num_messages = if config.num_messages > 0 {
-        config.num_messages / num_producers
-    } else {
-        0
-    };
+    // With a message target, the first `num_messages % num_producers` producers
+    // get one extra record so the shares sum to the target. A producer whose
+    // share is 0 (fewer messages than producers) is not started: 0 means "run
+    // for the duration" to the producer loop.
+    let shares: Vec<u64> = (0..num_producers)
+        .map(|k| {
+            if config.num_messages > 0 {
+                config.num_messages / num_producers + u64::from(k < config.num_messages % num_producers)
+            } else {
+                0
+            }
+        })
+        .collect();
 
     let shared = Arc::new(SharedState {
         metrics: Arc::clone(&metrics),
@@ -1837,13 +1850,19 @@ async fn transactional_producer_perf_test() {
         committed_transactions: Arc::new(AtomicU64::new(0)),
         aborted_transactions: Arc::new(AtomicU64::new(0)),
         aborted_records: Arc::new(AtomicU64::new(0)),
+        worker_failed: Arc::new(AtomicBool::new(false)),
     });
 
     // Bound each EOS consumer poll so a run with no source data cannot block
     // forever; it simply loops back to the duration / message-target check.
     let poll_timeout = Duration::from_millis(500);
     let mut handles = Vec::with_capacity(num_producers as usize);
-    for producer in producers.into_iter() {
+    for (producer, &per_producer_num_messages) in producers.into_iter().zip(&shares) {
+        if config.num_messages > 0 && per_producer_num_messages == 0 {
+            // Keep the one-consumer-per-producer pairing for the started ones.
+            consumers.pop_front();
+            continue;
+        }
         let topic = topic.clone();
         let shared = Arc::clone(&shared);
         let abort_rate = config.abort_rate;
@@ -1890,8 +1909,12 @@ async fn transactional_producer_perf_test() {
         }
     }
     for h in handles {
-        let _ = h.await;
+        h.await.expect("transactional producer task panicked");
     }
+    assert!(
+        !shared.worker_failed.load(Ordering::Relaxed),
+        "one or more transactional producer tasks failed (see above)"
+    );
     // The last commit has completed; mark the end of the measured interval.
     meas_end.store(now_ms() as u64, Ordering::Relaxed);
     let measured_secs = test_start.elapsed().as_secs_f64();
@@ -2109,8 +2132,7 @@ async fn transactional_producer_perf_test() {
         // not be a multiple of records_per_transaction).
         if config.num_messages > 0 && config.abort_rate == 0.0 {
             let n = config.records_per_transaction;
-            let txns_per_producer = per_producer_num_messages.div_ceil(n);
-            let target = num_producers * txns_per_producer * n;
+            let target: u64 = shares.iter().map(|share| share.div_ceil(n) * n).sum();
             assert_eq!(
                 committed_records, target,
                 "committed ({committed_records}) must match produced target ({target})"

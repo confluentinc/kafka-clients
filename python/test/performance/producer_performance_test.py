@@ -119,6 +119,8 @@ POST_TEST_AWAIT_SECONDS = 10
 latency_hist = [0] * (MAX_LATENCY_MS + 2)
 # Set True when P99_LIMIT_MS > 0 and the measured p99 exceeds it.
 latency_budget_exceeded = False
+# Set True when results.json could not be written; fails the run.
+results_write_failed = False
 
 
 def _is_queue_full(exc):
@@ -563,7 +565,11 @@ def print_measurement_summary(completed_messages, total_latency_ms,
             json.dump(results, fh, indent=2)
         print(f"Results summary written to: {results_file}")
     except OSError as e:
+        # The machine-readable summary is the run's primary artifact: fail the
+        # run rather than exit 0 without it.
+        global results_write_failed
         print(f"Failed to write {results_file}: {e}")
+        results_write_failed = True
 
     if p99_limit_ms > 0 and p99 > p99_limit_ms:
         global latency_budget_exceeded
@@ -623,7 +629,10 @@ def main(v2=False):
         # deadline.
         try:
             if exception is not None:
+                # A failed record counts as completed (in `finally`) but adds no
+                # latency or throughput, like the other producer harnesses.
                 print(f"Produce call resulted in exception: {exception}")
+                return
             else:
                 try:
                     verification_function(metadata)
@@ -823,7 +832,9 @@ async def async_main():
         # even if the accounting raises.
         try:
             if exc is not None:
+                # Counted as completed (in `finally`), no latency or throughput.
                 print(f"Produce call resulted in exception: {exc}")
+                return
             elif not fut.cancelled():
                 try:
                     verification_function(fut.result())
@@ -1081,7 +1092,7 @@ if __name__ == "__main__":
         print("Consumer verification skipped (baseline capture failed)")
 
     # Fail the run if the p99 latency budget was exceeded (matches C/Rust/Java).
-    if latency_budget_exceeded:
+    if latency_budget_exceeded or results_write_failed:
         exit_code = 1
 
     sys.exit(exit_code)

@@ -121,8 +121,8 @@ if(RDKAFKA_FOUND)
         ${CONFLUENT_KAFKA_RUST} ${RDKAFKA_LIBRARIES} ${SYSTEM_LIBS} pthread m)
     message(STATUS "producer_perf_test enabled (librdkafka ${RDKAFKA_VERSION})")
 
-    # Transactional producer performance test (librdkafka only; the Rust C-FFI
-    # has no transactional API; see the file header). Same
+    # Transactional producer performance test (librdkafka backend only; see the
+    # file header). Same
     # opt-in convention as producer_perf_test (not registered with CTest).
     add_executable(transactional_producer_perf_test tests/transactional_producer_perf_test.c)
     target_include_directories(transactional_producer_perf_test

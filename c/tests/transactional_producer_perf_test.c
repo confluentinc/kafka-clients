@@ -24,8 +24,8 @@
 // implementations.
 //
 // SCOPE: this harness supports the librdkafka backend ONLY.
-// The Rust client C-FFI (CLIENT_VERSION=3) has no transactional entry points,
-// so a v3 transactional path is impossible. CLIENT_VERSION defaults to 2
+// A transactional path over the Rust client C-FFI (CLIENT_VERSION=3) is not
+// implemented in this harness. CLIENT_VERSION defaults to 2
 // (librdkafka); if CLIENT_VERSION=3 is requested the harness prints an
 // explanatory message and exits NON-ZERO — it does NOT silently run a
 // non-transactional path.
@@ -182,6 +182,9 @@ static const char *METRICS_FILE = "metrics.jsonl";
 static bool latency_budget_exceeded = false;
 // Set when results.json could not be written; fails the run.
 static bool results_write_failed = false;
+// Set by a producer thread that exits early (client creation,
+// init_transactions or begin_transaction failed); fails the run.
+static atomic_bool worker_failed = false;
 static bool interrupted = false;
 
 // --- shared statistics, written by all producer threads (guarded by
@@ -978,10 +981,12 @@ static void* producer_thread_func(void* arg) {
 
     rd_kafka_t* rk = create_producer(txn_id);
     if (!rk) {
+        atomic_store(&worker_failed, true);
         return NULL;
     }
 
     if (check_txn_error(rd_kafka_init_transactions(rk, 60000), "init_transactions")) {
+        atomic_store(&worker_failed, true);
         rd_kafka_destroy(rk);
         return NULL;
     }
@@ -1001,6 +1006,7 @@ static void* producer_thread_func(void* arg) {
     while (continue_sending) {
         long begin_ns = current_time_ns();
         if (check_txn_error(rd_kafka_begin_transaction(rk), "begin_transaction")) {
+            atomic_store(&worker_failed, true);
             break;
         }
 
@@ -1027,6 +1033,14 @@ static void* producer_thread_func(void* arg) {
                     rd_kafka_poll(rk, 100);
                 }
             } while (err == RD_KAFKA_RESP_ERR__QUEUE_FULL && !interrupted);
+            if (err != RD_KAFKA_RESP_ERR_NO_ERROR) {
+                // Never enqueued, so no delivery report will fire for it:
+                // complete the future here as failed instead of leaving the
+                // drain below waiting on it forever.
+                fprintf(stderr, "producev failed: %s\n", rd_kafka_err2str(err));
+                f->err = err;
+                atomic_store_explicit(&f->done, true, memory_order_release);
+            }
 
             records_sent++;
             if (per_producer_rps > 0 && records_sent >= next_checkpoint) {
@@ -1170,14 +1184,17 @@ static void* eos_producer_thread_func(void* arg) {
 
     rd_kafka_t* producer = create_producer(txn_id);
     if (!producer) {
+        atomic_store(&worker_failed, true);
         return NULL;
     }
     if (check_txn_error(rd_kafka_init_transactions(producer, 60000), "init_transactions")) {
+        atomic_store(&worker_failed, true);
         rd_kafka_destroy(producer);
         return NULL;
     }
     rd_kafka_t* consumer = create_consumer(GROUP_ID);
     if (!consumer) {
+        atomic_store(&worker_failed, true);
         rd_kafka_destroy(producer);
         return NULL;
     }
@@ -1223,6 +1240,7 @@ static void* eos_producer_thread_func(void* arg) {
             if (batch == 0) {
                 begin_ns = current_time_ns();
                 if (check_txn_error(rd_kafka_begin_transaction(producer), "begin_transaction")) {
+                    atomic_store(&worker_failed, true);
                     rd_kafka_message_destroy(msg);
                     rd_kafka_topic_partition_list_destroy(offsets);
                     goto cleanup;
@@ -1248,6 +1266,13 @@ static void* eos_producer_thread_func(void* arg) {
                     rd_kafka_poll(producer, 100);
                 }
             } while (perr == RD_KAFKA_RESP_ERR__QUEUE_FULL && !interrupted);
+            if (perr != RD_KAFKA_RESP_ERR_NO_ERROR) {
+                // Never enqueued: complete the future as failed (no delivery
+                // report will fire for it) so the drain cannot hang on it.
+                fprintf(stderr, "producev failed: %s\n", rd_kafka_err2str(perr));
+                f->err = perr;
+                atomic_store_explicit(&f->done, true, memory_order_release);
+            }
             futures[batch] = f;
 
             // Track the max consumed offset + 1 per (topic, partition).
@@ -1721,22 +1746,31 @@ static void run_test() {
     metrics_set_measurement_start_ms(&metrics, before_ms);
     printf("Starting measured interval at %ld ms\n", before_ms);
 
-    // Split the total message target evenly across producers.
-    long per_producer_num_messages = NUM_MESSAGES > 0 ? NUM_MESSAGES / NUM_TRANSACTIONAL_PRODUCERS : 0;
+    // Split the total message target across producers; the first
+    // NUM_MESSAGES % NUM_TRANSACTIONAL_PRODUCERS get one extra record so the
+    // shares sum to NUM_MESSAGES. A producer whose share is 0 (fewer messages
+    // than producers) is not started: 0 means "run for the duration" to it.
+    long share_base = NUM_MESSAGES > 0 ? NUM_MESSAGES / NUM_TRANSACTIONAL_PRODUCERS : 0;
+    long share_extra = NUM_MESSAGES > 0 ? NUM_MESSAGES % NUM_TRANSACTIONAL_PRODUCERS : 0;
 
     pthread_t* threads = malloc(sizeof(pthread_t) * NUM_TRANSACTIONAL_PRODUCERS);
     ProducerArgs* args = malloc(sizeof(ProducerArgs) * NUM_TRANSACTIONAL_PRODUCERS);
     void* (*worker)(void*) = EOS_MODE ? eos_producer_thread_func : producer_thread_func;
+    bool* started = calloc((size_t)NUM_TRANSACTIONAL_PRODUCERS, sizeof(bool));
     for (long k = 0; k < NUM_TRANSACTIONAL_PRODUCERS; k++) {
+        long share = share_base + (k < share_extra ? 1 : 0);
+        if (NUM_MESSAGES > 0 && share == 0) continue;
         args[k].index = (int)k;
         args[k].messages = messages;
         args[k].first_message_time_ns = first_message_time_ns;
-        args[k].num_messages = per_producer_num_messages;
+        args[k].num_messages = share;
         pthread_create(&threads[k], NULL, worker, &args[k]);
+        started[k] = true;
     }
     for (long k = 0; k < NUM_TRANSACTIONAL_PRODUCERS; k++) {
-        pthread_join(threads[k], NULL);
+        if (started[k]) pthread_join(threads[k], NULL);
     }
+    free(started);
     free(threads);
     free(args);
 
@@ -1899,13 +1933,13 @@ int main(int argc, char** argv) {
     if (client_version_env != NULL) {
         CLIENT_VERSION = atoi(client_version_env);
     }
-    // The Rust C-FFI (v3) has no transactional API. This harness is
-    // librdkafka-only. Refuse v3 loudly rather than run a non-transactional path.
+    // A v3 (Rust C-FFI) transactional path is not implemented in this harness.
+    // Refuse v3 loudly rather than run a non-transactional path.
     if (CLIENT_VERSION == 3) {
         fprintf(stderr,
             "CLIENT_VERSION=3 (Rust client C-FFI) is not supported by the transactional "
-            "producer performance test: the Rust C-FFI exposes no transactional API "
-            "(init/begin/commit/abort transactions). This harness supports the "
+            "producer performance test: this harness implements the librdkafka "
+            "transactional path only. It supports the "
             "librdkafka backend only (CLIENT_VERSION=2, the default). Aborting.\n");
         return 2;
     }
@@ -2126,5 +2160,8 @@ int main(int argc, char** argv) {
     metrics_stop_collecting(&metrics);
     printf("Done\n");
 
-    return (latency_budget_exceeded || results_write_failed) ? 1 : 0;
+    if (atomic_load(&worker_failed)) {
+        fprintf(stderr, "One or more transactional producer threads failed (see above)\n");
+    }
+    return (latency_budget_exceeded || results_write_failed || atomic_load(&worker_failed)) ? 1 : 0;
 }
