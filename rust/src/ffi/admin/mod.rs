@@ -624,12 +624,14 @@ pub(crate) unsafe fn result_ref<'a, R, P>(handle: *const P) -> &'a ResultHandle<
 /// # Safety
 ///
 /// `handle` must be null or a handle built by `box_result::<R, P>` and not
-/// yet destroyed.
+/// yet destroyed, that no other call uses at the same time; it is not used
+/// afterwards.
 pub(crate) unsafe fn destroy_result<R, P>(handle: *mut P) {
     if !handle.is_null() {
         // SAFETY: `handle` is non-null (checked above) and, per this function's `# Safety`, a
         // handle built by `box_result::<R, P>` and not yet destroyed, i.e. the `Box::into_raw` of a
-        // `Box<ResultHandle<R>>`, so `from_raw` reclaims that allocation, once.
+        // `Box<ResultHandle<R>>`, so `from_raw` reclaims that allocation, once. No other call uses
+        // it meanwhile or afterwards, so no reference from `result_ref` outlives the drop.
         drop(unsafe { Box::from_raw(handle as *mut ResultHandle<R>) });
     }
 }
