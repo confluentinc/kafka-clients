@@ -1466,7 +1466,9 @@ def _admin_members_to_remove(request):
 #   - describe_user_scram_credentials is per-user, and a user the broker reports
 #     as having *no* credential is a success with an empty credential_infos —
 #     never an error. That is Java's `all()` treating RESOURCE_NOT_FOUND as a
-#     success, which admin.py already implements.
+#     success; the extension's `assemble_scram` (`_confluentkafka.c`) reads
+#     `all()` first and falls back to `users()` + `description(user)` only
+#     when `all()` fails, as the Rust and C backends do.
 #   - update_features raises for an empty map against a real client (Java's
 #     IllegalArgumentException) while a mock yields an empty result. Both are
 #     faithful; the raise becomes the top-level error.
@@ -1714,8 +1716,9 @@ def _admin_describe_user_scram_credentials_response(outcomes):
 
     A user with an *empty* credential_infos is a successful description ("the
     broker reports no credential"), not an error — Java's `all()` treats
-    RESOURCE_NOT_FOUND that way. The broker never returns the salted password or
-    the salt, so neither has a field to carry.
+    RESOURCE_NOT_FOUND that way, and admin.py's result comes from `all()` when
+    it succeeds (`assemble_scram` in `_confluentkafka.c`). The broker never
+    returns the salted password or the salt, so neither has a field to carry.
     """
     entries = []
     for user, outcome in outcomes.items():

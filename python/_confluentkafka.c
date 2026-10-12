@@ -8032,8 +8032,47 @@ fail:
 
 // ---- SCRAM --------------------------------------------------------------------------
 
-// Second stage of describeUserScramCredentials: once `users()` delivered, one
-// owned `description(user)` future per user, keyed by it (tag 1).
+// Java's three views of describeUserScramCredentials, composed into the
+// per-user shape the way the Rust test backend (rust/tests/common/
+// admin_backend.rs) and the C gRPC server (c/grpc_server/server.cc) compose
+// them, so every backend answers with the same key set and the same errors:
+//
+//   - all() (tag 0) succeeds only when every user's error is NONE or
+//     RESOURCE_NOT_FOUND, and then its keys are the complete user set, a user
+//     the broker reports as having no credential described with an empty list
+//     rather than as an error;
+//   - when it fails, users() (tag 2) still lists every user whose error is not
+//     RESOURCE_NOT_FOUND -- necessarily including the one that failed all() --
+//     and description(user) (tag 1) yields that user's own outcome;
+//   - if that leaves no row at all, all()'s error is the whole-call error
+//     rather than an empty, successful-looking result.
+//
+// description(user) alone is not enough: for a user with no credential it
+// fails with RESOURCE_NOT_FOUND, which all() does not treat as an error.
+enum { SCRAM_ALL = 0, SCRAM_DESCRIPTION = 1, SCRAM_USERS = 2 };
+
+// all()'s Map<String, UserScramCredentialsDescription> ->
+// {user: (None, [(mechanism, iterations)])}, in the map's (sorted) order.
+static PyObject* conv_scram_all(AdminJob* job, AdminSlot* slot, void* v) {
+    const kafka_Map_t* m = (const kafka_Map_t*)v;
+    PyObject* d = PyDict_New();
+    if (d == NULL) return NULL;
+    int32_t n = m ? kafka_Map_size(m) : 0;
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* user = PyUnicode_FromString((const char*)kafka_Map_key(m, i));
+        if (user == NULL) { Py_DECREF(d); return NULL; }
+        PyObject* infos = conv_scram_description(job, slot, kafka_Map_value(m, i));
+        PyObject* pair = infos ? Py_BuildValue("(ON)", Py_None, infos) : NULL;
+        if (pair == NULL || PyDict_SetItem(d, user, pair) < 0) {
+            Py_XDECREF(pair); Py_DECREF(user); Py_DECREF(d); return NULL;
+        }
+        Py_DECREF(pair); Py_DECREF(user);
+    }
+    return d;
+}
+
+// Third stage, after users() delivered: one owned `description(user)` future
+// per listed user, keyed by it.
 static int cont_scram_users(AdminJob* job, AdminSlot* slot) {
     if (slot->error != NULL) return 0;  // users() failed: nothing to describe
     PyObject* users = slot->value;      // [str] from conv_str_list
@@ -8047,24 +8086,39 @@ static int cont_scram_users(AdminJob* job, AdminSlot* slot) {
         if (name == NULL) return -1;
         kafka_common_KafkaFuture_t* f = kafka_admin_DescribeUserScramCredentialsResult_description(r, name);
         Py_INCREF(user);
-        if (job_add_slot(job, f, 1, user, conv_scram_description, NULL, 1) == NULL) return -1;
+        if (job_add_slot(job, f, 1, user, conv_scram_description, NULL, SCRAM_DESCRIPTION) == NULL) return -1;
     }
     return 0;
 }
 
-// (users_error | None, {user: (error, [(mechanism, iterations)])})
+// Second stage, after all() delivered: nothing more when it succeeded;
+// otherwise the users() fallback.
+static int cont_scram_all(AdminJob* job, AdminSlot* slot) {
+    if (slot->error == NULL) return 0;
+    const kafka_admin_DescribeUserScramCredentialsResult_t* r =
+        (const kafka_admin_DescribeUserScramCredentialsResult_t*)job->result;
+    if (job_add_slot(job, kafka_admin_DescribeUserScramCredentialsResult_users(r), 1, NULL,
+                     conv_str_list, cont_scram_users, SCRAM_USERS) == NULL) return -1;
+    return 0;
+}
+
+// (error | None, {user: (error | None, [(mechanism, iterations)])}), composed
+// as described above.
 static PyObject* assemble_scram(AdminJob* job) {
+    AdminSlot* all = job->slots[0];
+    if (all->error == NULL) return Py_BuildValue("(OO)", Py_None, all->value);
     PyObject* d = PyDict_New();
     if (d == NULL) return NULL;
-    PyObject* err = Py_None;
-    for (int i = 0; i < job->n; i++) {
+    PyObject* err = NULL;
+    for (int i = 1; i < job->n; i++) {
         AdminSlot* s = job->slots[i];
-        if (s->tag == 0) { if (s->error) err = s->error; continue; }
+        if (s->tag == SCRAM_USERS) { if (s->error) err = s->error; continue; }
         PyObject* pair = Py_BuildValue("(OO)", s->error ? s->error : Py_None, s->value);
         if (pair == NULL || PyDict_SetItem(d, s->key, pair) < 0) { Py_XDECREF(pair); Py_DECREF(d); return NULL; }
         Py_DECREF(pair);
     }
-    return Py_BuildValue("(ON)", err, d);
+    if (err == NULL && PyDict_Size(d) == 0) err = all->error;
+    return Py_BuildValue("(ON)", err ? err : Py_None, d);
 }
 
 // Admin_describe_user_scram_credentials(h, [user], timeout_ms) -> (job, err).
@@ -8083,7 +8137,7 @@ static PyObject* py_Admin_describe_user_scram_credentials(PyObject* self, PyObje
     str_list_free(&l);
     AdminJob* job = job_new(r, JOB_RESULT_DESTROY(DescribeUserScramCredentials), assemble_scram);
     if (job == NULL) { kafka_admin_DescribeUserScramCredentialsResult_destroy(r); return NULL; }
-    if (job_add_slot(job, kafka_admin_DescribeUserScramCredentialsResult_users(r), 1, NULL, conv_str_list, cont_scram_users, 0) == NULL) {
+    if (job_add_slot(job, kafka_admin_DescribeUserScramCredentialsResult_all(r), 1, NULL, conv_scram_all, cont_scram_all, SCRAM_ALL) == NULL) {
         job_free(job); return NULL;
     }
     return job_or_error(job, NULL);
