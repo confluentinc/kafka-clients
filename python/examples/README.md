@@ -8,6 +8,8 @@
 | `consumer_context_manager.py` | The same, in a `with` block: leaving the block closes the consumer. |
 | `async_producer.py` | `producer_context_manager.py` on asyncio: `AsyncKafkaProducer` in an `async with` block. |
 | `async_consumer.py` | `consumer_context_manager.py` on asyncio: `AsyncKafkaConsumer` in an `async with` block, with a listener whose methods are coroutines. |
+| `admin.py` | Creates a topic with `Admin`, waits on each topic's future (`TopicExistsError` is caught as a class), and lists the topics. |
+| `async_admin.py` | The same on asyncio: `AsyncAdmin` in an `async with` block; awaiting a call returns a result whose futures are complete. |
 
 ## Running them
 
@@ -23,6 +25,8 @@ cd python/examples
 ../../venv/bin/python consumer.py localhost:9092 my-group demo      # Ctrl+C to stop
 echo "hello" | ../../venv/bin/python producer.py localhost:9092 demo
 ```
+
+`admin.py` and `async_admin.py` take `<bootstrap-brokers> <topic>`, as `producer.py` does.
 
 The other producers take the same arguments as `producer.py`, and the other consumers the same as
 `consumer.py`.
