@@ -715,7 +715,7 @@ def _resolve_admin_futures(futures):
     for key, fut in futures.items():
         try:
             out[key] = fut.result()
-        except kp.KafkaError as e:
+        except _AdminKafkaError as e:
             out[key] = e
     return out
 
@@ -728,7 +728,7 @@ async def _resolve_admin_futures_async(futures):
     for key, fut in futures.items():
         try:
             out[key] = await fut
-        except kp.KafkaError as e:
+        except _AdminKafkaError as e:
             out[key] = e
     return out
 
@@ -759,7 +759,7 @@ def _admin_remove_members_response(outcomes):
     """
     if None in outcomes:
         whole_op = outcomes.pop(None)
-        if isinstance(whole_op, kp.KafkaError):
+        if isinstance(whole_op, _AdminKafkaError):
             return apb.VoidKeyedResponse(error=_kafka_error_to_proto(whole_op))
         # removeAll success: no per-member outcome to report.
     return _admin_void_response(outcomes, _admin_name_key)
@@ -1804,7 +1804,7 @@ def _admin_describe_user_scram_credentials_response(result):
         for user in result.all().keys():
             if user not in candidates:
                 candidates.append(user)
-    except kp.KafkaError:
+    except _AdminKafkaError:
         # all() faults on a hard user-level error; RNF users are then not
         # enumerable, but every non-RNF user is already in `candidates`.
         pass
@@ -1819,7 +1819,7 @@ def _admin_describe_user_scram_credentials_response(result):
                     apb.ScramCredentialInfo(mechanism=info.mechanism, iterations=info.iterations)
                     for info in description.credential_infos
                 ]))
-        except kp.KafkaError as e:
+        except _AdminKafkaError as e:
             entries.append(apb.DescribeUserScramCredentialsEntry(
                 user=user, error_code=e.code, error_message=e.message or ""))
     return apb.DescribeUserScramCredentialsResponse(entries=entries)
