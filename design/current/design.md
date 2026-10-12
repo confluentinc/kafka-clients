@@ -1226,9 +1226,6 @@ Deviations recorded in the package's module docstrings:
   `begin_transaction`, `send_offsets_to_transaction`, `commit_transaction`,
   `abort_transaction` and `partitions_for` raise `TimeoutError` after
   `max.block.ms`; the operation itself may still complete.
-- A failure the core reports before the partition is chosen carries partition
-  -1, even when the record names one. The binding fills in the record's
-  partition, as Java's `AppendCallbacks.topicPartition()` gives it.
 - Inside a consumer callback, a listener re-enters the consumer through the
   guard-free `ConsumerHandle`, since the outer call holds the single-owner
   guard. Two calls raise `ConcurrentModificationError` at once, because their

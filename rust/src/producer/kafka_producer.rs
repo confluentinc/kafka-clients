@@ -1693,7 +1693,10 @@ impl<K, V> KafkaProducer<K, V> {
                 // outer catches dispatch on the resulting class.
                 let e = self.relabel_if_closed_while_sending(e);
                 if e.is_api_error() {
-                    return self.handle_api_error(e, record.topic(), RecordMetadata::UNKNOWN_PARTITION, callback);
+                    // Java's `AppendCallbacks.topicPartition()` (`KafkaProducer.java:1613-1621`):
+                    // no partition is computed yet, so the record's own, if it names one.
+                    let partition = record.partition().unwrap_or(RecordMetadata::UNKNOWN_PARTITION);
+                    return self.handle_api_error(e, record.topic(), partition, callback);
                 }
                 return Err(e);
             },
@@ -1734,7 +1737,9 @@ impl<K, V> KafkaProducer<K, V> {
                 {
                     Ok(bytes) => bytes,
                     Err(e) if e.is_api_error() => {
-                        return self.handle_api_error(e, &record_topic, RecordMetadata::UNKNOWN_PARTITION, callback);
+                        // `AppendCallbacks.topicPartition()`, as for the metadata wait.
+                        let partition = partition_opt.unwrap_or(RecordMetadata::UNKNOWN_PARTITION);
+                        return self.handle_api_error(e, &record_topic, partition, callback);
                     },
                     Err(e) => return Err(e),
                 };
@@ -1746,7 +1751,9 @@ impl<K, V> KafkaProducer<K, V> {
                 {
                     Ok(bytes) => bytes,
                     Err(e) if e.is_api_error() => {
-                        return self.handle_api_error(e, &record_topic, RecordMetadata::UNKNOWN_PARTITION, callback);
+                        // `AppendCallbacks.topicPartition()`, as for the metadata wait.
+                        let partition = partition_opt.unwrap_or(RecordMetadata::UNKNOWN_PARTITION);
+                        return self.handle_api_error(e, &record_topic, partition, callback);
                     },
                     Err(e) => return Err(e),
                 };
@@ -1788,7 +1795,9 @@ impl<K, V> KafkaProducer<K, V> {
                 {
                     Ok(bytes) => bytes,
                     Err(e) if e.is_api_error() => {
-                        return self.handle_api_error(e, &record_topic, RecordMetadata::UNKNOWN_PARTITION, callback);
+                        // `AppendCallbacks.topicPartition()`, as for the metadata wait.
+                        let partition = partition_opt.unwrap_or(RecordMetadata::UNKNOWN_PARTITION);
+                        return self.handle_api_error(e, &record_topic, partition, callback);
                     },
                     Err(e) => return Err(e),
                 };
@@ -1800,7 +1809,9 @@ impl<K, V> KafkaProducer<K, V> {
                 {
                     Ok(bytes) => bytes,
                     Err(e) if e.is_api_error() => {
-                        return self.handle_api_error(e, &record_topic, RecordMetadata::UNKNOWN_PARTITION, callback);
+                        // `AppendCallbacks.topicPartition()`, as for the metadata wait.
+                        let partition = partition_opt.unwrap_or(RecordMetadata::UNKNOWN_PARTITION);
+                        return self.handle_api_error(e, &record_topic, partition, callback);
                     },
                     Err(e) => return Err(e),
                 };
@@ -2424,7 +2435,10 @@ impl KafkaProducer<Vec<u8>, Vec<u8>> {
                 // Java 993-998, as in `do_send`.
                 let e = self.relabel_if_closed_while_sending(e);
                 if e.is_api_error() {
-                    return self.handle_api_error(e, record.topic(), RecordMetadata::UNKNOWN_PARTITION, callback);
+                    // Java's `AppendCallbacks.topicPartition()` (`KafkaProducer.java:1613-1621`):
+                    // no partition is computed yet, so the record's own, if it names one.
+                    let partition = record.partition().unwrap_or(RecordMetadata::UNKNOWN_PARTITION);
+                    return self.handle_api_error(e, record.topic(), partition, callback);
                 }
                 return Err(e);
             },
@@ -2833,6 +2847,111 @@ mod tests {
 
         let invoked = callback_error.lock().unwrap().take().expect("the callback must be invoked");
         assert!(invoked.is_timeout_error(), "got {invoked:?}");
+    }
+
+    /// The callback partition of a pre-append API error: Java's `catch (ApiException e)`
+    /// (`KafkaProducer.java:1049-1057`) builds its null metadata from
+    /// `AppendCallbacks.topicPartition()` (`:1613-1621`), which, before a partition is
+    /// computed, names the record's own partition when the record names one, and
+    /// `UNKNOWN_PARTITION` only otherwise. Covers a serializer failure on both
+    /// serialization paths (built-in and custom partitioner) and the metadata wait on both
+    /// `send` paths (typed and borrowed bytes), each with and without a record partition.
+    #[tokio::test]
+    async fn a_pre_append_api_error_reports_the_record_partition() {
+        use crate::common::serialization::ByteArraySerializer;
+
+        fn recording_callback(slot: &Arc<Mutex<Option<(String, i32)>>>) -> Callback {
+            let slot = Arc::clone(slot);
+            Box::new(move |metadata, error| {
+                assert!(error.is_some(), "the callback is handed the error");
+                let metadata = metadata.expect("Java passes a non-null RecordMetadata here");
+                *slot.lock().unwrap() = Some((metadata.topic().to_string(), metadata.partition()));
+            })
+        }
+
+        // A serializer API error, on the built-in partitioner's zero-copy path.
+        for (partition, expected) in [(Some(2), 2), (None, RecordMetadata::UNKNOWN_PARTITION)] {
+            let producer = create_producer_with_key_serializer(
+                create_metadata_with_topic(TOPIC, 3),
+                create_accumulator(),
+                Box::new(FailingSerializer(Error::timeout("schema registry lookup timed out"))),
+            );
+            let seen = Arc::new(Mutex::new(None));
+            let record =
+                ProducerRecord::with_partition_key(TOPIC.to_string(), partition, Some("k".to_string()), None).unwrap();
+            let future = producer
+                .send_with_callback(record, Some(recording_callback(&seen)))
+                .await
+                .expect("an API error comes back as a failed future");
+            assert!(future.get().await.unwrap_err().is_timeout_error());
+            assert_eq!(seen.lock().unwrap().take(), Some((TOPIC.to_string(), expected)));
+        }
+
+        // The same on the custom partitioner's borrowing path.
+        for (partition, expected) in [(Some(2), 2), (None, RecordMetadata::UNKNOWN_PARTITION)] {
+            let producer: KafkaProducer<String, String> = KafkaProducer::with_options(
+                KafkaProducerOptionsBuilder::new()
+                    .set_config(&ProducerConfig::default())
+                    .set_key_serializer(Box::new(FailingSerializer(Error::timeout("schema registry lookup timed out"))))
+                    .set_value_serializer(Box::new(StringSerializer))
+                    .set_metadata(create_metadata_with_topic(TOPIC, 3))
+                    .set_accumulator(create_accumulator())
+                    .set_time(default_time())
+                    .set_pending_requests(Arc::new(Mutex::new(PendingRequests::new())))
+                    .set_partitioner(Some(Box::new(RoundRobinPartitioner::new())))
+                    .build()
+                    .expect("KafkaProducerOptionsBuilder::build: every mandatory parameter is set above"),
+            )
+            .unwrap();
+            let seen = Arc::new(Mutex::new(None));
+            let record =
+                ProducerRecord::with_partition_key(TOPIC.to_string(), partition, Some("k".to_string()), None).unwrap();
+            let future = producer
+                .send_with_callback(record, Some(recording_callback(&seen)))
+                .await
+                .expect("an API error comes back as a failed future");
+            assert!(future.get().await.unwrap_err().is_timeout_error());
+            assert_eq!(seen.lock().unwrap().take(), Some((TOPIC.to_string(), expected)));
+        }
+
+        // A metadata-wait timeout: the record names a partition the topic does not have,
+        // and `max.block.ms = 0` fails the wait at once.
+        let config = || ProducerConfig { max_block_ms: 0, ..Default::default() };
+        let producer =
+            create_producer_with_config(config(), create_metadata_with_topic(TOPIC, 1), create_accumulator());
+        let seen = Arc::new(Mutex::new(None));
+        let record =
+            ProducerRecord::with_partition_key(TOPIC.to_string(), Some(5), None, Some("v".to_string())).unwrap();
+        let future = producer
+            .send_with_callback(record, Some(recording_callback(&seen)))
+            .await
+            .expect("a metadata timeout comes back as a failed future");
+        assert!(future.get().await.unwrap_err().is_timeout_error());
+        assert_eq!(seen.lock().unwrap().take(), Some((TOPIC.to_string(), 5)));
+
+        // The same on the borrowed byte-slice `send`.
+        let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::with_options(
+            KafkaProducerOptionsBuilder::new()
+                .set_config(&config())
+                .set_key_serializer(Box::new(ByteArraySerializer))
+                .set_value_serializer(Box::new(ByteArraySerializer))
+                .set_metadata(create_metadata_with_topic(TOPIC, 1))
+                .set_accumulator(create_accumulator())
+                .set_time(default_time())
+                .set_pending_requests(Arc::new(Mutex::new(PendingRequests::new())))
+                .build()
+                .expect("KafkaProducerOptionsBuilder::build: every mandatory parameter is set above"),
+        )
+        .unwrap();
+        let seen = Arc::new(Mutex::new(None));
+        let record =
+            ProducerRecord::with_partition_key(TOPIC.to_string(), Some(5), None, Some(b"v".as_slice())).unwrap();
+        let future = producer
+            .send(record, Some(recording_callback(&seen)))
+            .await
+            .expect("a metadata timeout comes back as a failed future");
+        assert!(future.get().await.unwrap_err().is_timeout_error());
+        assert_eq!(seen.lock().unwrap().take(), Some((TOPIC.to_string(), 5)));
     }
 
     /// The other half of the same dispatch: a `SerializationException` — which

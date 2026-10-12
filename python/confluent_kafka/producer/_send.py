@@ -71,22 +71,18 @@ def completion_to_python(metadata_tuple: MetadataTuple | None, error: int, topic
     callback returns).
 
     Both may be given: a failure the core raises before the record reaches a
-    batch carries Java's -1 metadata beside the error. Its partition is the one
-    Java's ``AppendCallbacks.topicPartition()`` gives: the partition chosen for
-    the record, else the record's own, else -1. The core reports -1 for a
-    failure before the partition is chosen even when the record names one, so
-    the record's own is filled in here. A failure with no metadata (a
-    broker-side or delivery failure) gets :func:`failure_metadata`, as Java's
-    ``AppendCallbacks`` replaces the null metadata of
-    ``ProducerBatch.completeFutureAndFireCallbacks``; the FFI does not report
-    the partition a batch had, so it is the record's own, or -1.
+    batch carries Java's -1 metadata beside the error, its partition the one
+    Java's ``AppendCallbacks.topicPartition()`` gives (the partition chosen for
+    the record, else the record's own, else -1), as the core reports it. A
+    failure with no metadata (a broker-side or delivery failure) gets
+    :func:`failure_metadata`, as Java's ``AppendCallbacks`` replaces the null
+    metadata of ``ProducerBatch.completeFutureAndFireCallbacks``; the FFI does
+    not report the partition a batch had, so it is the record's own, or -1.
     """
     exception = cast("Exception", from_ffi_error(error, owned=False)) if error else None
     if metadata_tuple is None:
         return failure_metadata(topic, partition), exception
     (topic_, partition_, offset, timestamp, key_size, value_size) = metadata_tuple
-    if exception is not None and partition_ == -1 and partition is not None:
-        partition_ = partition
     metadata = RecordMetadata._from_ffi(
         topic=topic_, partition=partition_, offset=offset, timestamp=timestamp,
         serialized_key_size=key_size, serialized_value_size=value_size)
