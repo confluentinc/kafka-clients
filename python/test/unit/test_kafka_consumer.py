@@ -136,7 +136,7 @@ import uuid
 import warnings
 import weakref
 from datetime import timedelta
-from typing import Any
+from typing import Any, Callable
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 import pytest
@@ -1301,8 +1301,17 @@ def test_async_concurrent_use_on_one_loop_meets_the_guard() -> None:
         await consumer.subscribe(topics=[TOPIC])
         poll = asyncio.ensure_future(consumer.poll(timeout=5))
         await asyncio.sleep(0.5)
-        with pytest.raises(ConcurrentModificationError):
-            consumer.assignment()
+        # The core's single-owner guard refuses every read Java's
+        # acquireAndEnsureOpen() guards, with Java's message.
+        reads: list[Callable[[], object]] = [
+            consumer.assignment, consumer.subscription, consumer.paused,
+            consumer.group_metadata, lambda: consumer.current_lag(topic_partition=TP0)]
+        for read in reads:
+            with pytest.raises(ConcurrentModificationError) as e:
+                read()
+            assert str(e.value) == "KafkaConsumer is not safe for multi-threaded access."
+        # Java's metrics() takes no acquire(): it answers.
+        assert isinstance(consumer.metrics(), dict)
         consumer.wakeup()
         with pytest.raises(WakeupError):
             await poll

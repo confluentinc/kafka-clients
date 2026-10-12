@@ -211,6 +211,8 @@ pub(crate) struct AsyncConsumerHandleState {
     time: Arc<dyn Time>,
     /// Cached `default.api.timeout.ms`.
     default_api_timeout_ms: i64,
+    /// The consumer's metrics registry, read by [`ConsumerHandle::metrics`].
+    metrics: Arc<Metrics>,
 }
 
 #[derive(Clone)]
@@ -265,6 +267,19 @@ impl ConsumerHandle {
         match &self.inner {
             ConsumerHandleInner::Async(state) => state.subscriptions.lock().unwrap().paused_partitions(),
             ConsumerHandleInner::Mock { .. } => HashSet::new(),
+        }
+    }
+
+    /// [`Consumer::metrics`](crate::consumer::Consumer::metrics) via the shared metrics
+    /// registry; an empty map for a `MockConsumer`, whose `metrics()` is one.
+    ///
+    /// Crate-private: the C binding's `kafka_consumer_Consumer_metrics` reads
+    /// through it so that, as Java's `AsyncKafkaConsumer.metrics()` (which takes
+    /// no `acquire()`), it answers while another call holds the consumer.
+    pub(crate) fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+        match &self.inner {
+            ConsumerHandleInner::Async(state) => state.metrics.metrics(),
+            ConsumerHandleInner::Mock { .. } => HashMap::new(),
         }
     }
 
@@ -2952,6 +2967,7 @@ where
             fetch_buffer: Arc::clone(&self.fetch_buffer),
             time: Arc::clone(&self.time),
             default_api_timeout_ms: self.default_api_timeout_ms,
+            metrics: Arc::clone(&self.metrics),
         })
     }
 

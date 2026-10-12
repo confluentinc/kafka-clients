@@ -126,7 +126,9 @@
 //! functions under their prefix; the numeric error code ([`C_ONLY_ERROR_CODE`])
 //! is the C caller's discriminator and has no Rust item behind it; the
 //! queued twins of sync methods whose C form drains the submission queue
-//! ([`C_ONLY_DRAINING_CB_TWINS`]) have no async Rust method behind them; a trait
+//! ([`C_ONLY_DRAINING_CB_TWINS`]) have no async Rust method behind them; the
+//! consumer state reads the C handle's single-owner guard can refuse
+//! ([`C_GUARDED_READS`]) are fallible in C only; a trait
 //! method with `where Self: Sized`
 //! cannot be called through the interface handle and expects nothing;
 //! associated consts expect nothing (cbindgen exports no constants); a
@@ -197,6 +199,21 @@ const C_ONLY_DRAINING_CB_TWINS: &[&str] = &[
     "kafka_producer_KafkaProducer_begin_transaction_cb_t",
     "kafka_producer_Producer_begin_transaction_cb",
     "kafka_producer_Producer_begin_transaction_cb_t",
+];
+
+/// Consumer state reads that are infallible in Rust and Java's `Consumer`
+/// interface but fallible in C: the C consumer handle adds a single-owner guard
+/// (Java's `acquire()`, which `AsyncKafkaConsumer`'s `assignment()`,
+/// `subscription()`, `paused()`, `currentLag()` and `groupMetadata()` take
+/// through `acquireAndEnsureOpen()`), so the C form reports a refusal as
+/// `LOCAL_CONCURRENT_MODIFICATION` and delivers the value through `out_<name>`.
+/// `metrics()` is not here: Java's takes no `acquire()`.
+const C_GUARDED_READS: &[&str] = &[
+    "kafka_consumer_Consumer_assignment",
+    "kafka_consumer_Consumer_current_lag",
+    "kafka_consumer_Consumer_group_metadata",
+    "kafka_consumer_Consumer_paused",
+    "kafka_consumer_Consumer_subscription",
 ];
 
 /// The handle over `common::Error`.
@@ -2004,7 +2021,12 @@ fn expect_method(
     let output = output.unwrap_or(Output::Unit);
 
     let mut blocking = Sig { params: params.clone(), ret: None };
+    let guarded_read = C_GUARDED_READS.contains(&name.as_str());
     match (&output, &value) {
+        (Output::Value(_), Some(v)) if guarded_read => {
+            blocking.params.push(Param::out(&m.name, v.out_slot()));
+            blocking.ret = Some(CType::error());
+        },
         (Output::Fallible(_), v) => {
             if let Some(v) = v {
                 blocking.params.push(Param::out(&m.name, v.out_slot()));
@@ -4042,6 +4064,40 @@ mod tests {
                 .iter()
                 .any(|(k, _)| k == "missing kafka_common_Error_resource_not_found_error"),
             "{findings:#?}"
+        );
+    }
+
+    /// A consumer state read listed in `C_GUARDED_READS` is expected in its
+    /// fallible C form (the C handle's single-owner guard can refuse it); any
+    /// other infallible method keeps the plain form.
+    #[test]
+    fn test_guarded_consumer_reads_are_fallible_in_c() {
+        let rust = r#"
+            pub mod consumer {
+                #[doc(alias = "org.apache.kafka.clients.consumer.Consumer")]
+                pub trait Consumer: Send + Sync {
+                    fn current_lag(&self, partition: i32) -> i64;
+                    fn client_lag(&self, partition: i32) -> i64;
+                }
+            }
+        "#;
+        let ffi = r#"
+            #[repr(C)] pub struct kafka_common_Error_t { _p: [u8; 0] }
+            #[repr(C)] pub struct kafka_consumer_Consumer_t { _p: [u8; 0] }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_consumer_Consumer_current_lag(self_: *const kafka_consumer_Consumer_t, partition: i32) -> i64 { 0 }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_consumer_Consumer_client_lag(self_: *const kafka_consumer_Consumer_t, partition: i32, out_client_lag: *mut i64) -> *mut kafka_common_Error_t { std::ptr::null_mut() }
+        "#;
+        let findings = run("guarded-reads", rust, ffi);
+        assert_eq!(
+            detail(&findings, "shape kafka_consumer_Consumer_current_lag"),
+            "expected `fn(self: *const kafka_consumer_Consumer_t, partition: i32, out_current_lag: *mut i64) \
+             -> *mut kafka_common_Error_t`, found `fn(self_: *const kafka_consumer_Consumer_t, partition: i32) -> i64`"
+        );
+        assert_eq!(
+            detail(&findings, "shape kafka_consumer_Consumer_client_lag"),
+            "expected `fn(self: *const kafka_consumer_Consumer_t, partition: i32) -> i64`, \
+             found `fn(self_: *const kafka_consumer_Consumer_t, partition: i32, out_client_lag: *mut i64) \
+             -> *mut kafka_common_Error_t`"
         );
     }
 

@@ -3337,41 +3337,75 @@ static PyObject* py_Consumer_wakeup(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
-// ---- sync state reads (return Python objects directly) ---------------------
+// ---- sync state reads -------------------------------------------------------
+//
+// Each returns (value | None, err | None), as poll does: assignment,
+// subscription, paused, current_lag and group_metadata fail with
+// LOCAL_CONCURRENT_MODIFICATION while another call holds the consumer (Java's
+// acquire() throws ConcurrentModificationException); metrics, which Java reads
+// without acquire(), answers directly.
 
+// A (value, err) pair for an owned list read: the error when `err` is set,
+// else `convert(list)` (which frees the list).
+static PyObject* list_read_result(kafka_common_Error_t* err, kafka_List_t* list,
+                                  PyObject* (*convert)(kafka_List_t*)) {
+    if (err != NULL) {
+        if (list) kafka_List_destroy(list);
+        return cvalue_error(Py_None, err);
+    }
+    PyObject* value = convert(list);
+    if (value == NULL) return NULL;
+    PyObject* ret = cvalue_error(value, NULL);
+    Py_DECREF(value);
+    return ret;
+}
+
+// Consumer_assignment(h) -> (list[(topic, partition)] | None, err | None)
 static PyObject* py_Consumer_assignment(PyObject* self, PyObject* args) {
     unsigned long long h;
     if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
-    return tp_list_to_py(kafka_consumer_Consumer_assignment(consumer_self(h)));
+    kafka_List_t* list = NULL;
+    kafka_common_Error_t* err = kafka_consumer_Consumer_assignment(consumer_self(h), &list);
+    return list_read_result(err, list, tp_list_to_py);
 }
 
+// Consumer_paused(h) -> (list[(topic, partition)] | None, err | None)
 static PyObject* py_Consumer_paused(PyObject* self, PyObject* args) {
     unsigned long long h;
     if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
-    return tp_list_to_py(kafka_consumer_Consumer_paused(consumer_self(h)));
+    kafka_List_t* list = NULL;
+    kafka_common_Error_t* err = kafka_consumer_Consumer_paused(consumer_self(h), &list);
+    return list_read_result(err, list, tp_list_to_py);
 }
 
+// Consumer_subscription(h) -> (list[str] | None, err | None)
 static PyObject* py_Consumer_subscription(PyObject* self, PyObject* args) {
     unsigned long long h;
     if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
-    return string_list_to_py(kafka_consumer_Consumer_subscription(consumer_self(h)));
+    kafka_List_t* list = NULL;
+    kafka_common_Error_t* err = kafka_consumer_Consumer_subscription(consumer_self(h), &list);
+    return list_read_result(err, list, string_list_to_py);
 }
 
 // Consumer_metrics -> list[dict] (name/group/description/tags/value/kind), the
-// same shape as Producer_metrics; empty while an operation is in flight.
+// same shape as Producer_metrics; answers while an operation is in flight.
 static PyObject* py_Consumer_metrics(PyObject* self, PyObject* args) {
     unsigned long long h;
     if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
     return metrics_map_to_py(kafka_consumer_Consumer_metrics(consumer_self(h)));
 }
 
-// Returns a ConsumerGroupMetadata object that RETAINS the owned Rust handle
-// (freed in its tp_dealloc), or None while an operation is in flight.
+// Consumer_group_metadata(h) -> (ConsumerGroupMetadata | None, err | None); the
+// object RETAINS the owned Rust handle (freed in its tp_dealloc).
 static PyObject* py_Consumer_group_metadata(PyObject* self, PyObject* args) {
     unsigned long long h;
     if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
-    kafka_consumer_ConsumerGroupMetadata_t* m = kafka_consumer_Consumer_group_metadata(consumer_self(h));
-    if (m == NULL) Py_RETURN_NONE;
+    kafka_consumer_ConsumerGroupMetadata_t* m = NULL;
+    kafka_common_Error_t* err = kafka_consumer_Consumer_group_metadata(consumer_self(h), &m);
+    if (err != NULL) {
+        if (m) kafka_consumer_ConsumerGroupMetadata_destroy(m);
+        return cvalue_error(Py_None, err);
+    }
     ConsumerGroupMetadataObject* obj =
         PyObject_New(ConsumerGroupMetadataObject, &ConsumerGroupMetadataType);
     if (obj == NULL) {
@@ -3379,7 +3413,9 @@ static PyObject* py_Consumer_group_metadata(PyObject* self, PyObject* args) {
         return NULL;
     }
     obj->handle = m;
-    return (PyObject*)obj;
+    PyObject* ret = cvalue_error((PyObject*)obj, NULL);
+    Py_DECREF(obj);
+    return ret;
 }
 
 static PyObject* py_Consumer_client_id(PyObject* self, PyObject* args) {
@@ -3390,15 +3426,22 @@ static PyObject* py_Consumer_client_id(PyObject* self, PyObject* args) {
     return PyUnicode_FromString(s);
 }
 
-// Consumer_current_lag(handle, topic, partition) -> int | None (-1 = empty)
+// Consumer_current_lag(handle, topic, partition) -> (int | None, err | None),
+// None for an empty lag (-1)
 static PyObject* py_Consumer_current_lag(PyObject* self, PyObject* args) {
     unsigned long long h; const char* topic; int partition;
     if (!PyArg_ParseTuple(args, "Ksi", &h, &topic, &partition)) return NULL;
     kafka_common_TopicPartition_t* tp = kafka_common_TopicPartition_new(topic, (int32_t)partition);
-    int64_t lag = kafka_consumer_Consumer_current_lag(consumer_self(h), tp);
+    int64_t lag = -1;
+    kafka_common_Error_t* err = kafka_consumer_Consumer_current_lag(consumer_self(h), tp, &lag);
     kafka_common_TopicPartition_destroy(tp);
-    if (lag < 0) Py_RETURN_NONE;
-    return PyLong_FromLongLong((long long)lag);
+    if (err != NULL) return cvalue_error(Py_None, err);
+    if (lag < 0) return cvalue_error(Py_None, NULL);
+    PyObject* value = PyLong_FromLongLong((long long)lag);
+    if (value == NULL) return NULL;
+    PyObject* ret = cvalue_error(value, NULL);
+    Py_DECREF(value);
+    return ret;
 }
 
 // ---- `_cb` completion trampolines ------------------------------------------
@@ -8783,13 +8826,13 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Consumer__execute_callbacks", py_Consumer__execute_callbacks, METH_VARARGS, "Run the queued callbacks on this thread; returns how many ran"},
     {"Consumer__set_callbacks_notify", py_Consumer__set_callbacks_notify, METH_VARARGS, "Register the callable fired when callbacks become pending"},
     {"Consumer__set_callback_result", py_Consumer__set_callback_result, METH_VARARGS, "Report a deferred listener result: (h, callback_id, exception | message | None)"},
-    {"Consumer_assignment", py_Consumer_assignment, METH_VARARGS, "Current assignment as list[(topic, partition)]"},
-    {"Consumer_subscription", py_Consumer_subscription, METH_VARARGS, "Current subscription as list[str]"},
-    {"Consumer_paused", py_Consumer_paused, METH_VARARGS, "Paused partitions as list[(topic, partition)]"},
+    {"Consumer_assignment", py_Consumer_assignment, METH_VARARGS, "(list[(topic, partition)] | None, err | None)"},
+    {"Consumer_subscription", py_Consumer_subscription, METH_VARARGS, "(list[str] | None, err | None)"},
+    {"Consumer_paused", py_Consumer_paused, METH_VARARGS, "(list[(topic, partition)] | None, err | None)"},
     {"Consumer_metrics", py_Consumer_metrics, METH_VARARGS, "Metrics snapshot as list[dict] with name/group/description/tags/value"},
-    {"Consumer_group_metadata", py_Consumer_group_metadata, METH_VARARGS, "ConsumerGroupMetadata, or None while an operation is in flight"},
+    {"Consumer_group_metadata", py_Consumer_group_metadata, METH_VARARGS, "(ConsumerGroupMetadata | None, err | None)"},
     {"Consumer_client_id", py_Consumer_client_id, METH_VARARGS, "Client id string"},
-    {"Consumer_current_lag", py_Consumer_current_lag, METH_VARARGS, "Current lag int or None"},
+    {"Consumer_current_lag", py_Consumer_current_lag, METH_VARARGS, "(lag int | None, err | None)"},
     {"Consumer_poll", py_Consumer_poll, METH_VARARGS, "poll(h, timeout_ms) -> (ConsumerRecords | None, err | None)"},
     {"Consumer_poll_cb", py_Consumer_poll_cb, METH_VARARGS, "poll twin; cb(ConsumerRecords | None, err | None)"},
     {"Consumer_subscribe", py_Consumer_subscribe, METH_VARARGS, "subscribe(h, topics, listener_adapter | None) -> err | None"},

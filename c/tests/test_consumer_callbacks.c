@@ -767,7 +767,7 @@ static void test_rebalance_listener_assigned_then_revoked(void) {
     TEST_ASSERT_EQUAL_INT(0, atomic_load(&probe.revoked));
     TEST_ASSERT_EQUAL_INT(2, probe.last_count);
     TEST_ASSERT_EQUAL_STRING("t-0,t-1", probe.last_partitions);
-    kafka_List_t *asg = kafka_consumer_Consumer_assignment(f.consumer);
+    kafka_List_t *asg = consumer_assignment(f.consumer);
     TEST_ASSERT_EQUAL_INT32(2, kafka_List_size(asg));
     kafka_List_destroy(asg);
 
@@ -785,7 +785,7 @@ static void test_rebalance_listener_assigned_then_revoked(void) {
     TEST_ASSERT_EQUAL_INT(2, atomic_load(&probe.revoked));
     TEST_ASSERT_EQUAL_STRING("t-0", probe.last_revoked_partitions);
     TEST_ASSERT_EQUAL_INT(0, atomic_load(&probe.lost));
-    asg = kafka_consumer_Consumer_assignment(f.consumer);
+    asg = consumer_assignment(f.consumer);
     TEST_ASSERT_EQUAL_INT32(0, kafka_List_size(asg));
     kafka_List_destroy(asg);
     fixture_destroy(&f);
@@ -905,7 +905,7 @@ static void test_rebalance_cb_queues_the_listener_for_the_pump(void) {
     TEST_ASSERT_TRUE(pthread_equal(pthread_self(), completion.thread));
     TEST_ASSERT_EQUAL_INT32(0, callback_pump_execute(&f.pump));
 
-    kafka_List_t *asg = kafka_consumer_Consumer_assignment(f.consumer);
+    kafka_List_t *asg = consumer_assignment(f.consumer);
     TEST_ASSERT_EQUAL_INT32(1, kafka_List_size(asg));
     kafka_List_destroy(asg);
     tp_list_destroy(list);
@@ -1034,7 +1034,7 @@ static void test_listener_error_propagates(void) {
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&probe.assigned));
 
     /* Java replaces the assignment before onPartitionsAssigned runs. */
-    kafka_List_t *asg = kafka_consumer_Consumer_assignment(f.consumer);
+    kafka_List_t *asg = consumer_assignment(f.consumer);
     TEST_ASSERT_EQUAL_INT32(1, kafka_List_size(asg));
     kafka_List_destroy(asg);
 
@@ -1090,7 +1090,7 @@ static void test_subscribe_with_topics_listener_cb(void) {
     kafka_List_destroy(topics);
     kafka_consumer_ConsumerRebalanceListener_destroy(listener);
 
-    kafka_List_t *subs = kafka_consumer_Consumer_subscription(f.consumer);
+    kafka_List_t *subs = consumer_subscription(f.consumer);
     TEST_ASSERT_EQUAL_INT32(1, kafka_List_size(subs));
     TEST_ASSERT_EQUAL_STRING("t", (const char *)kafka_List_get(subs, 0));
     kafka_List_destroy(subs);

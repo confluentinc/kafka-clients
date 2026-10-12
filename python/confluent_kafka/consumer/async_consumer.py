@@ -195,12 +195,8 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         return await self._a_committed(partitions)
 
     def metrics(self) -> dict[MetricName, Metric]:
-        """See :meth:`Consumer.metrics`.
-
-        While a ``commit_nowait()`` still finishes in a task (a coroutine listener
-        it delivered is being awaited), this raises ``ConcurrentModificationError``:
-        that commit holds the consumer, and the core's ``ConsumerHandle`` has no
-        ``metrics``."""
+        """See :meth:`Consumer.metrics`. Like Java's ``metrics()`` it takes no
+        ``acquire()``, so it answers while a call is in flight."""
         return self._c_metrics()
 
     async def partitions_for(self, *, topic: str) -> list[PartitionInfo]:

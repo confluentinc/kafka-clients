@@ -642,7 +642,7 @@ void test_transaction_methods_on_non_transactional_producer(void) {
     kafka_consumer_MockConsumer_t *mock_consumer = NULL;
     TEST_ASSERT_NULL(kafka_consumer_MockConsumer_new("earliest", &mock_consumer));
     kafka_consumer_Consumer_t *consumer = kafka_consumer_MockConsumer__as_Consumer(mock_consumer);
-    kafka_consumer_ConsumerGroupMetadata_t *group_metadata = kafka_consumer_Consumer_group_metadata(consumer);
+    kafka_consumer_ConsumerGroupMetadata_t *group_metadata = consumer_group_metadata(consumer);
     TEST_ASSERT_NOT_NULL(group_metadata);
     kafka_common_TopicPartition_t *tp = kafka_common_TopicPartition_new("input-topic", 0);
     kafka_consumer_OffsetAndMetadata_t *oam = NULL;

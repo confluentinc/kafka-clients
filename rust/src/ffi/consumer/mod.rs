@@ -36,11 +36,13 @@
 //! the calling thread, the `_cb` form until its operation ends, released just
 //! before the completion is queued, so a caller that runs the completion and
 //! makes its next call never finds the flag still held. The
-//! sync getters (`assignment`, `metrics`, ...) take the flag for the call
-//! and, when an operation is in flight, return the empty value
-//! (`-1` / `NULL` for scalars and handles), there being no error slot to
-//! report the Java exception through. `wakeup` and the `ConsumerHandle`
-//! never touch the consumer itself and are callable at any time.
+//! sync getters Java guards with `acquire()` (`assignment`, `subscription`,
+//! `paused`, `currentLag`, `groupMetadata`) take the flag for the call and,
+//! when another call holds it, fail with the same
+//! `LOCAL_CONCURRENT_MODIFICATION`, delivering their value through an `out_`
+//! parameter otherwise. `metrics`, which Java does not guard, reads through
+//! the `ConsumerHandle`. `wakeup` and the `ConsumerHandle` never touch the
+//! consumer itself and are callable at any time.
 //!
 //! # Callbacks (CLAUDE.md §4 rule 5)
 //!
@@ -3651,75 +3653,87 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_close_with_options_cb(
 // Sync methods
 // ---------------------------------------------------------------------------
 
-/// Reads the consumer under the single-owner flag, or returns `busy` when an
-/// operation is in flight (see the module docs).
+/// Reads the consumer under the single-owner flag, or fails with the
+/// `LOCAL_CONCURRENT_MODIFICATION` Java's `acquire()` throws when another
+/// call holds it (see the module docs).
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle, as [`client_ref`] describes, kept alive for
 /// this call.
-unsafe fn read<T>(
-    self_: *const kafka_consumer_Consumer_t,
-    busy: impl FnOnce() -> T,
-    f: impl FnOnce(&DynConsumer) -> T,
-) -> T {
+unsafe fn read<T>(self_: *const kafka_consumer_Consumer_t, f: impl FnOnce(&DynConsumer) -> T) -> Result<T, Error> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `client_ref` requires. Exclusive access to the consumer comes from `acquire`, not from
     // this reference.
     let client = unsafe { client_ref(self_) };
-    match client.acquire() {
-        Ok(mut guard) => f(guard.consumer_mut()),
-        Err(_) => busy(),
-    }
+    let mut guard = client.acquire()?;
+    Ok(f(guard.consumer_mut()))
 }
 
 /// `assignment()`: an owned list of owned `kafka_common_TopicPartition_t *`,
-/// sorted by topic and partition; empty while an operation is in flight.
+/// sorted by topic and partition, delivered through `out_assignment`; fails
+/// with `LOCAL_CONCURRENT_MODIFICATION` while another call holds the consumer,
+/// as Java's `acquire()` throws `ConcurrentModificationException`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle and `out_assignment` a valid pointer.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_assignment(
     self_: *const kafka_consumer_Consumer_t,
-) -> *mut kafka_List_t {
+    out_assignment: *mut *mut kafka_List_t,
+) -> *mut kafka_common_Error_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `read` requires.
-    let assignment = unsafe { read(self_, Default::default, |c| c.assignment()) };
-    sorted_topic_partition_list(assignment.iter())
+    let assignment = unsafe { read(self_, |c| c.assignment()) };
+    // SAFETY: Per this function's `# Safety`, `out_assignment` is a valid pointer to write the
+    // result to, as `out_slot` requires.
+    unsafe { out_slot(assignment, out_assignment, |a| sorted_topic_partition_list(a.iter())) }
 }
 
-/// `subscription()`: an owned list of owned `char *`, sorted; empty while an
-/// operation is in flight.
+/// `subscription()`: an owned list of owned `char *`, sorted, delivered
+/// through `out_subscription`; fails with `LOCAL_CONCURRENT_MODIFICATION`
+/// while another call holds the consumer, as Java's `acquire()` throws
+/// `ConcurrentModificationException`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle and `out_subscription` a valid pointer.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscription(
     self_: *const kafka_consumer_Consumer_t,
-) -> *mut kafka_List_t {
+    out_subscription: *mut *mut kafka_List_t,
+) -> *mut kafka_common_Error_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `read` requires.
-    let subscription = unsafe { read(self_, Default::default, |c| c.subscription()) };
-    sorted_string_list(subscription.iter())
+    let subscription = unsafe { read(self_, |c| c.subscription()) };
+    // SAFETY: Per this function's `# Safety`, `out_subscription` is a valid pointer to write the
+    // result to, as `out_slot` requires.
+    unsafe { out_slot(subscription, out_subscription, |s| sorted_string_list(s.iter())) }
 }
 
 /// `paused()`: an owned list of owned `kafka_common_TopicPartition_t *`,
-/// sorted; empty while an operation is in flight.
+/// sorted, delivered through `out_paused`; fails with
+/// `LOCAL_CONCURRENT_MODIFICATION` while another call holds the consumer, as
+/// Java's `acquire()` throws `ConcurrentModificationException`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle and `out_paused` a valid pointer.
 #[ffi_guard]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_Consumer_paused(self_: *const kafka_consumer_Consumer_t) -> *mut kafka_List_t {
+pub unsafe extern "C" fn kafka_consumer_Consumer_paused(
+    self_: *const kafka_consumer_Consumer_t,
+    out_paused: *mut *mut kafka_List_t,
+) -> *mut kafka_common_Error_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `read` requires.
-    let paused = unsafe { read(self_, Default::default, |c| c.paused()) };
-    sorted_topic_partition_list(paused.iter())
+    let paused = unsafe { read(self_, |c| c.paused()) };
+    // SAFETY: Per this function's `# Safety`, `out_paused` is a valid pointer to write the result
+    // to, as `out_slot` requires.
+    unsafe { out_slot(paused, out_paused, |p| sorted_topic_partition_list(p.iter())) }
 }
 
 /// `clientId()`: borrowed from the handle for its lifetime.
@@ -3737,28 +3751,37 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_client_id(self_: *const kafka_c
 }
 
 /// `currentLag(TopicPartition topicPartition)`: the lag, or `-1` for
-/// `OptionalLong.empty()` (and while an operation is in flight).
+/// `OptionalLong.empty()`, delivered through `out_current_lag`; fails with
+/// `LOCAL_CONCURRENT_MODIFICATION` while another call holds the consumer, as
+/// Java's `acquire()` throws `ConcurrentModificationException`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `topic_partition` a valid handle.
+/// `self_` must be a live handle, `topic_partition` a valid handle and
+/// `out_current_lag` a valid pointer.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_current_lag(
     self_: *const kafka_consumer_Consumer_t,
     topic_partition: *const kafka_common_TopicPartition_t,
-) -> i64 {
+    out_current_lag: *mut i64,
+) -> *mut kafka_common_Error_t {
     // SAFETY: Per this function's `# Safety`, `topic_partition` is a valid topic-partition handle,
     // kept alive for this call, which bounds every use of `tp`, as `topic_partition_ref` requires.
     let tp: &TopicPartition = unsafe { topic_partition_ref(topic_partition) };
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `read` requires.
-    unsafe { read(self_, || -1, |c| c.current_lag(tp).unwrap_or(-1)) }
+    let lag = unsafe { read(self_, |c| c.current_lag(tp).unwrap_or(-1)) };
+    // SAFETY: Per this function's `# Safety`, `out_current_lag` is a valid pointer to write the
+    // result to, as `out_slot` requires.
+    unsafe { out_slot(lag, out_current_lag, |l| l) }
 }
 
 /// `metrics()`: an owned `kafka_Map_t` of owned `kafka_common_MetricName_t *`
 /// to owned `kafka_common_metrics_KafkaMetric_t *`, names compared by value
-/// in `kafka_Map_get`; empty while an operation is in flight.
+/// in `kafka_Map_get`. Read through the consumer's handle, not the
+/// single-owner flag, so it answers while another call holds the consumer:
+/// Java's `AsyncKafkaConsumer.metrics()` takes no `acquire()`.
 ///
 /// # Safety
 ///
@@ -3766,26 +3789,33 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_current_lag(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_metrics(self_: *const kafka_consumer_Consumer_t) -> *mut kafka_Map_t {
-    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
-    // as `read` requires.
-    box_metrics_map(unsafe { read(self_, Default::default, |c| c.metrics()) })
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this expression,
+    // as `client_ref` requires; the handle it reads through is shared state, never the consumer an
+    // operation may be borrowing.
+    box_metrics_map(unsafe { client_ref(self_) }.handle().metrics())
 }
 
 /// `groupMetadata()`: an owned handle freed with
-/// `kafka_consumer_ConsumerGroupMetadata_destroy`, or `NULL` while an
-/// operation is in flight.
+/// `kafka_consumer_ConsumerGroupMetadata_destroy`, delivered through
+/// `out_group_metadata`; fails with `LOCAL_CONCURRENT_MODIFICATION` while
+/// another call holds the consumer, as Java's `acquire()` throws
+/// `ConcurrentModificationException`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle and `out_group_metadata` a valid pointer.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_group_metadata(
     self_: *const kafka_consumer_Consumer_t,
-) -> *mut kafka_consumer_ConsumerGroupMetadata_t {
+    out_group_metadata: *mut *mut kafka_consumer_ConsumerGroupMetadata_t,
+) -> *mut kafka_common_Error_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `read` requires.
-    unsafe { read(self_, std::ptr::null_mut, |c| box_group_metadata(c.group_metadata())) }
+    let metadata = unsafe { read(self_, |c| box_group_metadata(c.group_metadata())) };
+    // SAFETY: Per this function's `# Safety`, `out_group_metadata` is a valid pointer to write the
+    // result to, as `out_slot` requires.
+    unsafe { out_slot(metadata, out_group_metadata, |m| m) }
 }
 
 /// `wakeup()`: interrupts the operation in flight (or the next one) with

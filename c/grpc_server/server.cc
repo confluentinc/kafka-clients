@@ -1947,7 +1947,14 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
           "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
-    fill_tp_list(kafka_consumer_Consumer_assignment(c), resp);
+    // Fails (LOCAL_CONCURRENT_MODIFICATION) while another operation holds the
+    // consumer, as Java's acquire() throws ConcurrentModificationException.
+    kafka_List_t* list = nullptr;
+    if (kafka_common_Error_t* err = kafka_consumer_Consumer_assignment(c, &list)) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+    fill_tp_list(list, resp);
     return grpc::Status::OK;
   }
 
@@ -1959,7 +1966,12 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
           "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
-    fill_tp_list(kafka_consumer_Consumer_paused(c), resp);
+    kafka_List_t* list = nullptr;
+    if (kafka_common_Error_t* err = kafka_consumer_Consumer_paused(c, &list)) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+    fill_tp_list(list, resp);
     return grpc::Status::OK;
   }
 
@@ -1972,8 +1984,8 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
       return grpc::Status::OK;
     }
     // An owned map of owned MetricName -> KafkaMetric handles, the same shape
-    // the producer returns; EMPTY (not null) while another operation holds the
-    // consumer's single-owner flag.
+    // the producer returns. Like Java's AsyncKafkaConsumer.metrics() it takes
+    // no single-owner flag, so it answers while another operation is in flight.
     kafka_Map_t* map = kafka_consumer_Consumer_metrics(c);
     if (map == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
@@ -1993,7 +2005,12 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
       return grpc::Status::OK;
     }
     // An owned, sorted list of owned `char *`; destroying the list frees them.
-    kafka_List_t* list = kafka_consumer_Consumer_subscription(c);
+    // Fails while another operation holds the consumer, as Assignment does.
+    kafka_List_t* list = nullptr;
+    if (kafka_common_Error_t* err = kafka_consumer_Consumer_subscription(c, &list)) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
     StringList* out = resp->mutable_topics();
     if (list != nullptr) {
       const int32_t n = kafka_List_size(list);
@@ -2017,17 +2034,12 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
           "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
-    // An OWNED handle (its deleter is the GroupMetadataStore's), or NULL while
-    // another operation holds the consumer's single-owner flag — the
-    // ConcurrentModificationException Java would throw, which the sync getter
-    // has no error slot to return.
-    kafka_consumer_ConsumerGroupMetadata_t* handle =
-        kafka_consumer_Consumer_group_metadata(c);
-    if (handle == nullptr) {
-      *resp->mutable_error() = make_synthetic_error(
-          "KafkaConsumer is not safe for multi-threaded access (consumer " +
-              std::to_string(req->consumer_id()) + " is busy)",
-          kafka_common_ErrorCode_LOCAL_CONCURRENT_MODIFICATION);
+    // An OWNED handle (its deleter is the GroupMetadataStore's); the call
+    // fails with LOCAL_CONCURRENT_MODIFICATION while another operation holds
+    // the consumer, as Java's acquire() throws ConcurrentModificationException.
+    kafka_consumer_ConsumerGroupMetadata_t* handle = nullptr;
+    if (kafka_common_Error_t* err = kafka_consumer_Consumer_group_metadata(c, &handle)) {
+      fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
     ConsumerGroupMetadata* fields = resp->mutable_group_metadata();
@@ -5742,13 +5754,17 @@ extern "C" void chaos_on_commit_async(void* self, const kafka_Map_t* /*offsets*/
 
 // committed() of the current assignment, as Committed events (grpc_chaos.py
 // `read_back`). Callers invoke it only right after a successful sync commit
-// with no poll in between. assignment() is empty while another operation is in
+// with no poll in between. assignment() fails while another operation is in
 // flight on the consumer, which cannot be the case here: the workload thread
-// is the consumer's only caller.
+// is the consumer's only caller; it is reported like committed()'s error.
 void chaos_read_back(kafka_consumer_Consumer_t* consumer, ChaosEventQueue& events) {
   // An owned list of owned TopicPartition handles: the shape committed()
   // takes, so it is passed on directly, then destroyed with its elements.
-  kafka_List_t* assigned = kafka_consumer_Consumer_assignment(consumer);
+  kafka_List_t* assigned = nullptr;
+  if (kafka_common_Error_t* err = kafka_consumer_Consumer_assignment(consumer, &assigned)) {
+    events.push(chaos_consumer_error(CONSUMER_OP_READ_COMMITTED, chaos_error(err)));
+    return;
+  }
   kafka_Map_t* map = nullptr;
   kafka_common_Error_t* err = kafka_consumer_Consumer_committed(consumer, assigned, &map);
   kafka_List_destroy(assigned);

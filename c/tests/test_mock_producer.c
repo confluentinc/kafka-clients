@@ -1255,7 +1255,7 @@ static void group_init(group_fixture_t *g) {
     TEST_ASSERT_NULL(kafka_consumer_MockConsumer_new("earliest", &g->mock));
     g->consumer = kafka_consumer_MockConsumer__as_Consumer(g->mock);
     TEST_ASSERT_NOT_NULL(g->consumer);
-    g->group_metadata = kafka_consumer_Consumer_group_metadata(g->consumer);
+    g->group_metadata = consumer_group_metadata(g->consumer);
     TEST_ASSERT_NOT_NULL(g->group_metadata);
 }
 

@@ -35,7 +35,9 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <time.h>
+#include "unity.h"
 
 /* Spins up to ~5s for `*flag` to reach `expected`. Returns 1 on success. */
 static inline int wait_for(atomic_int *flag, int expected) {
@@ -173,6 +175,52 @@ static inline int callback_pump_until(callback_pump_t *pump, atomic_int *flag, i
         }
     }
     return 1;
+}
+
+/* The consumer's state reads (`assignment`, `subscription`, `paused`,
+ * `current_lag`, `group_metadata`) fail with LOCAL_CONCURRENT_MODIFICATION
+ * only while another call holds the consumer, as Java's `acquire()` throws
+ * `ConcurrentModificationException`. These wrappers are for a test reading
+ * with nothing else in flight: any error fails the test. */
+static inline void consumer_read_ok(kafka_common_Error_t *err, const char *what) {
+    if (err != NULL) {
+        char msg[256];
+        snprintf(msg, sizeof msg, "%s failed: %s", what, kafka_common_Error_message(err));
+        kafka_common_Error_destroy(err);
+        TEST_FAIL_MESSAGE(msg);
+    }
+}
+
+static inline kafka_List_t *consumer_assignment(const kafka_consumer_Consumer_t *consumer) {
+    kafka_List_t *out = NULL;
+    consumer_read_ok(kafka_consumer_Consumer_assignment(consumer, &out), "assignment");
+    return out;
+}
+
+static inline kafka_List_t *consumer_subscription(const kafka_consumer_Consumer_t *consumer) {
+    kafka_List_t *out = NULL;
+    consumer_read_ok(kafka_consumer_Consumer_subscription(consumer, &out), "subscription");
+    return out;
+}
+
+static inline kafka_List_t *consumer_paused(const kafka_consumer_Consumer_t *consumer) {
+    kafka_List_t *out = NULL;
+    consumer_read_ok(kafka_consumer_Consumer_paused(consumer, &out), "paused");
+    return out;
+}
+
+static inline int64_t consumer_current_lag(const kafka_consumer_Consumer_t *consumer,
+                                           const kafka_common_TopicPartition_t *tp) {
+    int64_t out = 0;
+    consumer_read_ok(kafka_consumer_Consumer_current_lag(consumer, tp, &out), "current_lag");
+    return out;
+}
+
+static inline kafka_consumer_ConsumerGroupMetadata_t *consumer_group_metadata(
+    const kafka_consumer_Consumer_t *consumer) {
+    kafka_consumer_ConsumerGroupMetadata_t *out = NULL;
+    consumer_read_ok(kafka_consumer_Consumer_group_metadata(consumer, &out), "group_metadata");
+    return out;
 }
 
 #endif /* CONFLUENT_KAFKA_TEST_SUPPORT_H */

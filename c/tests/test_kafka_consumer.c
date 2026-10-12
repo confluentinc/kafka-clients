@@ -162,7 +162,7 @@ static void test_kafka_consumer_subscribe(void) {
     TEST_ASSERT_NULL(kafka_consumer_Consumer_subscribe_with_topics(consumer, topics));
     kafka_List_destroy(topics);
 
-    kafka_List_t *subs = kafka_consumer_Consumer_subscription(consumer);
+    kafka_List_t *subs = consumer_subscription(consumer);
     TEST_ASSERT_EQUAL_INT32(1, kafka_List_size(subs));
     TEST_ASSERT_EQUAL_STRING("test-topic", (const char *)kafka_List_get(subs, 0));
     kafka_List_destroy(subs);
@@ -265,7 +265,7 @@ static void test_kafka_consumer_poll_cb_interrupted_by_wakeup(void) {
     kafka_common_Error_destroy(completion.error);
 
     /* Free again. */
-    kafka_List_t *subs = kafka_consumer_Consumer_subscription(consumer);
+    kafka_List_t *subs = consumer_subscription(consumer);
     TEST_ASSERT_EQUAL_INT32(1, kafka_List_size(subs));
     kafka_List_destroy(subs);
     kafka_consumer_Consumer_destroy(consumer);

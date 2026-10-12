@@ -1119,7 +1119,11 @@ The consumer handle keeps its `ConsumerKind` behind a non-reentrant
 single-owner guard: a second thread that enters while another holds it gets
 `LocalConcurrentModification` ("KafkaConsumer is not safe for multi-threaded
 access.") rather than being serialized, Java's `acquire()/release()` contract;
-`wakeup()` bypasses the guard. `ConsumerHandle_t` is the reentrant-safe path a
+`wakeup()` bypasses the guard. The state reads (`assignment`, `subscription`,
+`paused`, `current_lag`, `group_metadata`) take it too and report a refusal
+through their error result, as Java's `acquireAndEnsureOpen()` throws;
+`metrics()` reads through the handle without it, as Java's `metrics()` takes no
+`acquire()`. `ConsumerHandle_t` is the reentrant-safe path a
 C rebalance listener uses to call back into the consumer while `poll` holds
 the guard (consumer-threading.md §31/§41).
 
@@ -1242,10 +1246,6 @@ Deviations recorded in the package's module docstrings:
   - a `commit_nowait()` with a callback.
 
   A coroutine listener on the sync `Consumer` raises `TypeError`.
-- While an operation is in flight, the C API's state reads (`assignment`,
-  `subscription`, `paused`, `metrics`) answer empty instead of busy. Python
-  checks its own awaiting calls before reading, so it keeps raising
-  `ConcurrentModificationError`.
 - Fetched key, value and header bytes are `memoryview`s over the fetch
   batch. The extension's C-mock batch path still copies them, because its
   pinned buffers die with the consumer.

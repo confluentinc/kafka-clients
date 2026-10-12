@@ -540,9 +540,12 @@ mod tests {
     use crate::ffi::consumer::{
         kafka_consumer_Consumer__execute_callbacks, kafka_consumer_Consumer__set_callback_result,
         kafka_consumer_Consumer__set_callbacks_notify, kafka_consumer_Consumer_assign,
-        kafka_consumer_Consumer_commit_sync, kafka_consumer_Consumer_commit_sync_cb, kafka_consumer_Consumer_handle,
-        kafka_consumer_Consumer_poll, kafka_consumer_Consumer_poll_cb, kafka_consumer_Consumer_position_cb,
-        kafka_consumer_Consumer_subscribe_with_topics_listener,
+        kafka_consumer_Consumer_assignment, kafka_consumer_Consumer_commit_sync,
+        kafka_consumer_Consumer_commit_sync_cb, kafka_consumer_Consumer_current_lag,
+        kafka_consumer_Consumer_group_metadata, kafka_consumer_Consumer_handle, kafka_consumer_Consumer_metrics,
+        kafka_consumer_Consumer_paused, kafka_consumer_Consumer_poll, kafka_consumer_Consumer_poll_cb,
+        kafka_consumer_Consumer_position_cb, kafka_consumer_Consumer_subscribe_with_topics_listener,
+        kafka_consumer_Consumer_subscription,
     };
     use crate::ffi::util::{
         kafka_Bytes_t, kafka_List_add, kafka_List_destroy, kafka_List_get, kafka_List_new, kafka_List_size,
@@ -897,6 +900,35 @@ mod tests {
             -1,
             "getters answer -1 meanwhile"
         );
+        // The reads Java guards with `acquire()` fail the same way, so a caller
+        // can tell "busy" from an empty answer.
+        let mut list = ptr::null_mut();
+        let mut lag = 0i64;
+        let mut metadata = ptr::null_mut();
+        // SAFETY: Test code: `consumer` and `tp` are live handles, the out-pointers valid, and each
+        // returned error is owned.
+        let busy = unsafe {
+            [
+                take_error(kafka_consumer_Consumer_assignment(consumer, &mut list)),
+                take_error(kafka_consumer_Consumer_subscription(consumer, &mut list)),
+                take_error(kafka_consumer_Consumer_paused(consumer, &mut list)),
+                take_error(kafka_consumer_Consumer_current_lag(consumer, tp, &mut lag)),
+                take_error(kafka_consumer_Consumer_group_metadata(consumer, &mut metadata)),
+            ]
+        };
+        for error in busy {
+            let error = error.expect("refused while the rebalance is in flight");
+            assert!(error.is_local_concurrent_modification_error());
+            assert_eq!(error.message(), "KafkaConsumer is not safe for multi-threaded access.");
+        }
+        assert!(list.is_null() && metadata.is_null() && lag == 0, "no out_ value is written");
+        // Java's `metrics()` takes no `acquire()`: it still answers.
+        // SAFETY: Test code: `consumer` is a live handle; the map is owned and destroyed once.
+        unsafe {
+            let metrics = kafka_consumer_Consumer_metrics(consumer);
+            assert!(!metrics.is_null());
+            kafka_Map_destroy(metrics);
+        }
 
         wait_until("the listener invocation to run", || {
             // SAFETY: Test code: `consumer` is a live handle.
@@ -914,6 +946,13 @@ mod tests {
         });
         // SAFETY: Test code: `consumer` is a live handle.
         assert!(unsafe { kafka_consumer_Consumer_commit_sync(consumer) }.is_null(), "free again");
+        // SAFETY: Test code: `consumer` is a live handle, `list` a valid out-pointer, and the
+        // delivered list is owned and destroyed once.
+        unsafe {
+            assert!(kafka_consumer_Consumer_assignment(consumer, &mut list).is_null(), "free again");
+            assert_eq!(kafka_List_size(list), 1);
+            kafka_List_destroy(list);
+        }
 
         // SAFETY: Test code: each handle is live and destroyed once, after its last use.
         unsafe {

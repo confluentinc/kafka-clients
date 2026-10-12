@@ -925,45 +925,45 @@ class _ConsumerState:
         return self._void_spec(_lib.Consumer_close_cb, timeout_ms, operation_code)
 
     # ---- calls that do not wait (both families) ---------------------------
-    def _read(self, fn: Callable[[int], _T], h: int) -> _T:
-        """``fn(h)``, a read the core's single-owner guard refuses while a call
-        on this consumer is in flight. Its entry point answers such a refusal
-        with an empty value, not an error, so the binding raises the guard's
-        ``ConcurrentModificationError`` itself when an awaiting call of this
-        thread's event loop is in flight (another thread is refused by
-        ``_use()`` already, and a read from inside a callback goes through the
-        ConsumerHandle)."""
-        self._release_abandoned()
-        if self._async_waiters:
-            raise ConcurrentModificationError(message=CONCURRENT_MESSAGE)
-        return fn(h)
+    @staticmethod
+    def _read(pair: tuple[Any, int]) -> Any:
+        """The value of a state read's ``(value, error)`` pair. The core's
+        single-owner guard refuses the read while a call on this consumer is in
+        flight, as Java's ``acquire()`` does, and the error raised here is its
+        ``ConcurrentModificationError`` (a read from inside a callback goes
+        through the ConsumerHandle instead)."""
+        value, error = pair
+        raise_if_error(error)
+        return value
 
     def _c_assignment(self) -> set[TopicPartition]:
         with self._use() as h:
             raw = (_lib.ConsumerHandle_assignment(self._handle()) if self._inside_own_call()
-                   else self._read(_lib.Consumer_assignment, h))
+                   else self._read(_lib.Consumer_assignment(h)))
         return {TopicPartition(topic=t, partition=p) for (t, p) in raw}
 
     def _c_subscription(self) -> set[str]:
         with self._use() as h:
             raw = (_lib.ConsumerHandle_subscription(self._handle()) if self._inside_own_call()
-                   else self._read(_lib.Consumer_subscription, h))
+                   else self._read(_lib.Consumer_subscription(h)))
         return set(raw)
 
     def _c_paused(self) -> set[TopicPartition]:
         with self._use() as h:
             raw = (_lib.ConsumerHandle_paused(self._handle()) if self._inside_own_call()
-                   else self._read(_lib.Consumer_paused, h))
+                   else self._read(_lib.Consumer_paused(h)))
         return {TopicPartition(topic=t, partition=p) for (t, p) in raw}
 
     def _c_metrics(self) -> dict[MetricName, Metric]:
-        with self._use() as h:
-            raw = self._read(_lib.Consumer_metrics, h)
+        # Java's metrics() takes no acquire(): the core answers while a call is
+        # in flight.
+        raw = self._call(_lib.Consumer_metrics)
         return to_metrics_map(raw)
 
     def _c_current_lag(self, topic_partition: TopicPartition) -> int | None:
-        lag: int | None = self._call(_lib.Consumer_current_lag, topic_partition.topic(),
-                                     topic_partition.partition())
+        with self._use() as h:
+            lag: int | None = self._read(_lib.Consumer_current_lag(
+                h, topic_partition.topic(), topic_partition.partition()))
         return lag
 
     def _assign_partitions(self, partitions: Iterable[TopicPartition]) -> list[TopicPartition]:
@@ -998,9 +998,7 @@ class _ConsumerState:
                 pass
             raise InvalidGroupIdError(message=GROUP_ID_NOT_DEFINED_MESSAGE)
         with self._use() as h:
-            native = self._read(_lib.Consumer_group_metadata, h)
-        if native is None:
-            raise ConcurrentModificationError(message=CONCURRENT_MESSAGE)
+            native = self._read(_lib.Consumer_group_metadata(h))
         return ConsumerGroupMetadata._of(
             group_id=native.group_id, generation_id=native.generation_id,
             member_id=native.member_id, group_instance_id=native.group_instance_id,
