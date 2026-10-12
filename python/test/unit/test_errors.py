@@ -160,7 +160,9 @@ def _bridge() -> dict[str, str]:
 
 
 def _ffi_enum() -> dict[str, int]:
-    """``kafka_common_ErrorCode_t``, from its generated Rust mirror."""
+    """The FFI enum ``kafka_common_ErrorCode_e`` (``rust/src/ffi/common.rs``),
+    from its generated Rust mirror, which ``cargo xtask check-generated``
+    keeps in step with it."""
     text = (_REPO_ROOT / "rust/tests/common/error_code.rs").read_text()
     return {n: int(v) for n, v in re.findall(r"pub const (\w+): i32 = (-?\d+);", text)}
 
@@ -826,6 +828,18 @@ def test_real_native_round_trip() -> None:
     err = from_ffi_error(lib.KafkaError_new(TopicAuthorizationError._ffi_id, "no access"))
     assert type(err) is TopicAuthorizationError
     assert str(err) == "no access"
+
+
+def test_real_native_payload_is_read_through_the_sub_handle() -> None:
+    # Java's TopicAuthorizationException(String message) passes emptySet().
+    lib = pytest.importorskip("_confluentkafka")
+    handle = lib.KafkaError_new(TopicAuthorizationError._ffi_id, "no access")
+    try:
+        assert lib.KafkaError_payload(handle) == {"unauthorized_topics": []}
+    finally:
+        lib.KafkaError_destroy(handle)
+    err = from_ffi_error(lib.KafkaError_new(TopicAuthorizationError._ffi_id, "no access"))
+    assert isinstance(err, TopicAuthorizationError) and err.unauthorized_topics() == set()
 
 
 # ----------------------------------------------------------------------------

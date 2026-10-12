@@ -1719,10 +1719,12 @@ static PyObject* py_Producer_metrics(PyObject* self, PyObject* args) {
 
 // ---- MockProducer hooks ----------------------------------------------------
 
-// Builds the error a mock test hook injects. There is no factory from a
-// numeric code -- an error is a class, built by the kafka_common_Error_*
-// factory of that class -- so the codes the Python tests use are mapped to
-// their class here; anything else raises ValueError. `message` may be NULL.
+// Builds the error a mock test hook injects, or one `KafkaError_new` hands
+// the core. There is no factory from a numeric code -- an error is a class,
+// built by the kafka_common_Error_* factory of that class -- so each code
+// whose class has a factory taking a message (Java's `(String message)`
+// constructor) is mapped to it here; anything else raises ValueError.
+// `message` may be NULL.
 static kafka_common_Error_t* mock_error_from_code(int code, const char* message) {
     switch (code) {
         case kafka_common_ErrorCode_LOCAL_TIMEOUT:
@@ -1745,6 +1747,28 @@ static kafka_common_Error_t* mock_error_from_code(int code, const char* message)
             return kafka_common_Error_unsupported_version(message);
         case kafka_common_ErrorCode_THROTTLING_QUOTA_EXCEEDED:
             return kafka_common_Error_throttling_quota_exceeded(0, message);
+        // The (String message) constructors of the classes whose factory
+        // takes a payload too: Java passes an empty set / null for it.
+        case kafka_common_ErrorCode_TOPIC_AUTHORIZATION_FAILED:
+            return kafka_common_Error_topic_authorization_message(NULL, message);
+        case kafka_common_ErrorCode_INVALID_TOPIC_ERROR:
+            return kafka_common_Error_invalid_topics_message(NULL, message);
+        case kafka_common_ErrorCode_GROUP_AUTHORIZATION_FAILED:
+            return kafka_common_Error_group_authorization_with_message(NULL, message);
+        case kafka_common_ErrorCode_PRODUCER_BUFFER_EXHAUSTED:
+            return kafka_common_Error_buffer_exhausted(message);
+        case kafka_common_ErrorCode_CONFIG:
+            return kafka_common_Error_config_message(message);
+        case kafka_common_ErrorCode_INVALID_RECEIVE:
+            return kafka_common_Error_invalid_receive(message);
+        case kafka_common_ErrorCode_SCHEMA:
+            return kafka_common_Error_schema(message);
+        case kafka_common_ErrorCode_SERIALIZATION:
+            return kafka_common_Error_serialization(message);
+        case kafka_common_ErrorCode_WAKEUP:
+            return kafka_common_Error_wakeup(message);
+        case kafka_common_ErrorCode_TRANSACTION_ABORTED:
+            return kafka_common_Error_transaction_aborted_message(message);
         default:
             PyErr_Format(PyExc_ValueError,
                          "no kafka_common_Error_* factory is mapped for error code %d; "
@@ -2264,6 +2288,127 @@ static PyObject* oat_map_to_py(kafka_Map_t* map) {
         Py_DECREF(key); Py_DECREF(val);
     }
     kafka_Map_destroy(map);
+    return d;
+}
+
+// ---- Error payloads ---------------------------------------------------------
+//
+// A Java exception with payload getters (`TopicAuthorizationException.
+// unauthorizedTopics()`, `LogTruncationException.divergentOffsets()`, ...) is
+// read through the two-step pattern of CLAUDE.md §4: the borrowed sub-handle
+// `kafka_common_Error_<type>(err)` (NULL when the error is not of that class),
+// then `kafka_common_<Type>Error_<getter>(sub)`. `KafkaError_payload` returns
+// the raw payload as a dict keyed by accessor name, which `_errors.py` turns
+// into the Java constructor's arguments, or None when the error has none.
+
+// dict[key] = value, taking `value`'s reference; -1 on failure (value NULL too).
+static int payload_set(PyObject* d, const char* key, PyObject* value) {
+    if (value == NULL) return -1;
+    int rc = PyDict_SetItemString(d, key, value);
+    Py_DECREF(value);
+    return rc;
+}
+
+// A borrowed C string, or None for NULL; a new reference.
+static PyObject* str_or_none(const char* s) {
+    if (s == NULL) Py_RETURN_NONE;
+    return PyUnicode_FromString(s);
+}
+
+// KafkaError_payload(err) -> dict | None. The handle is not consumed: owned or
+// borrowed, its owner still frees it.
+static PyObject* py_KafkaError_payload(PyObject* self, PyObject* args) {
+    (void)self;
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    const kafka_common_Error_t* e = (const kafka_common_Error_t*)(uintptr_t)ptr;
+    if (e == NULL) Py_RETURN_NONE;
+
+    PyObject* d = PyDict_New();
+    if (d == NULL) return NULL;
+    int ok;
+
+    const kafka_common_TopicAuthorizationError_t* ta = kafka_common_Error_topic_authorization_error(e);
+    if (ta != NULL) {
+        ok = payload_set(d, "unauthorized_topics",
+                         string_list_to_py(kafka_common_TopicAuthorizationError_unauthorized_topics(ta))) == 0;
+        goto done;
+    }
+    const kafka_common_GroupAuthorizationError_t* ga = kafka_common_Error_group_authorization_error(e);
+    if (ga != NULL) {
+        ok = payload_set(d, "group_id", str_or_none(kafka_common_GroupAuthorizationError_group_id(ga))) == 0;
+        goto done;
+    }
+    const kafka_common_InvalidTopicError_t* it = kafka_common_Error_invalid_topic(e);
+    if (it != NULL) {
+        ok = payload_set(d, "invalid_topics",
+                         string_list_to_py(kafka_common_InvalidTopicError_invalid_topics(it))) == 0;
+        goto done;
+    }
+    const kafka_common_ThrottlingQuotaExceededError_t* tq =
+        kafka_common_Error_throttling_quota_exceeded_error(e);
+    if (tq != NULL) {
+        ok = payload_set(d, "throttle_time_ms",
+                         PyLong_FromLong(kafka_common_ThrottlingQuotaExceededError_throttle_time_ms(tq))) == 0;
+        goto done;
+    }
+    const kafka_common_QuotaViolationError_t* qv = kafka_common_Error_quota_violation(e);
+    if (qv != NULL) {
+        const kafka_common_MetricName_t* mn = kafka_common_QuotaViolationError_metric_name(qv);
+        ok = payload_set(d, "metric_name", str_or_none(mn ? kafka_common_MetricName_name(mn) : NULL)) == 0
+          && payload_set(d, "metric_group", str_or_none(mn ? kafka_common_MetricName_group(mn) : NULL)) == 0
+          && payload_set(d, "value", PyFloat_FromDouble(kafka_common_QuotaViolationError_value(qv))) == 0
+          && payload_set(d, "bound", PyFloat_FromDouble(kafka_common_QuotaViolationError_bound(qv))) == 0;
+        goto done;
+    }
+    // LogTruncationException extends OffsetOutOfRangeException: probe it
+    // first, so a truncation reports its own (larger) payload.
+    const kafka_common_ConsumerLogTruncationError_t* lt = kafka_common_Error_consumer_log_truncation(e);
+    if (lt != NULL) {
+        ok = payload_set(d, "offset_out_of_range_partitions",
+                         long_map_to_py(kafka_common_ConsumerLogTruncationError_offset_out_of_range_partitions(lt))) == 0
+          && payload_set(d, "divergent_offsets",
+                         oam_map_to_py(kafka_common_ConsumerLogTruncationError_divergent_offsets(lt))) == 0;
+        goto done;
+    }
+    const kafka_common_ConsumerOffsetOutOfRangeError_t* oor = kafka_common_Error_consumer_offset_out_of_range(e);
+    if (oor != NULL) {
+        ok = payload_set(d, "offset_out_of_range_partitions",
+                         long_map_to_py(kafka_common_ConsumerOffsetOutOfRangeError_offset_out_of_range_partitions(oor))) == 0;
+        goto done;
+    }
+    const kafka_common_ConsumerNoOffsetForPartitionError_t* no =
+        kafka_common_Error_consumer_no_offset_for_partition(e);
+    if (no != NULL) {
+        ok = payload_set(d, "partitions",
+                         tp_list_to_py(kafka_common_ConsumerNoOffsetForPartitionError_partitions(no))) == 0;
+        goto done;
+    }
+    const kafka_common_RecordTooLargeError_t* rtl = kafka_common_Error_record_too_large_error(e);
+    if (rtl != NULL) {
+        // NULL is Java's null field (no partitions recorded), not an empty map.
+        kafka_Map_t* m = kafka_common_RecordTooLargeError_record_too_large_partitions(rtl);
+        ok = payload_set(d, "record_too_large_partitions",
+                         m != NULL ? long_map_to_py(m) : (Py_INCREF(Py_None), Py_None)) == 0;
+        goto done;
+    }
+    const kafka_common_DuplicateResourceError_t* dr = kafka_common_Error_duplicate_resource(e);
+    if (dr != NULL) {
+        ok = payload_set(d, "resource", str_or_none(kafka_common_DuplicateResourceError_resource(dr))) == 0;
+        goto done;
+    }
+    const kafka_common_ResourceNotFoundError_t* rnf = kafka_common_Error_resource_not_found(e);
+    if (rnf != NULL) {
+        ok = payload_set(d, "resource", str_or_none(kafka_common_ResourceNotFoundError_resource(rnf))) == 0;
+        goto done;
+    }
+
+    // No typed payload for this error.
+    Py_DECREF(d);
+    Py_RETURN_NONE;
+
+done:
+    if (!ok) { Py_DECREF(d); return NULL; }
     return d;
 }
 
@@ -8473,6 +8618,8 @@ static PyMethodDef ProducerNativeMethods[] = {
      "The opaque of the first foreign callback error in the cause chain, or None"},
     {"KafkaError_new", py_KafkaError_new, METH_VARARGS,
      "KafkaError_new(code, message | None) -> owned error handle (-1 = bare KafkaException)"},
+    {"KafkaError_payload", py_KafkaError_payload, METH_VARARGS,
+     "KafkaError_payload(handle) -> dict of the Java payload getters, or None"},
     // ---- Consumer ----
     //
     // Every blocking operation `X(h, ...)` has a `X_cb(h, ..., cb)` twin that
