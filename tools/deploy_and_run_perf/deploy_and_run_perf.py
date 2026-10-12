@@ -429,6 +429,7 @@ case "$TEST" in
     PRODUCER_PID=$!
     JARGS=(--bootstrap "$BS" --topic "$TN" --duration "$DUR" --warmup "$WARM")
     if [ -n "${INTERVAL_SECONDS:-}" ]; then JARGS+=(--interval "$INTERVAL_SECONDS"); fi
+    if [ -n "${GROUP_ID:-}" ]; then JARGS+=(--group-id "$GROUP_ID"); fi
     if [ -n "${CLIENT_CONFIG:-}" ]; then JARGS+=(--client-config "$CLIENT_CONFIG"); fi
     # Capture JavaE2E's status instead of letting errexit abort here, so the
     # background load generator is always stopped first.

@@ -42,6 +42,7 @@ import java.util.Properties;
 import java.util.Random;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -174,6 +175,8 @@ public class TransactionalProducerPerformanceTest {
     private static boolean latencyBudgetExceeded = false;
     // Set when results.json could not be written; fails the run.
     private static boolean resultsWriteFailed = false;
+    // Set when a producer worker fails (e.g. initTransactions throws); fails the run.
+    private static final AtomicBoolean workerFailed = new AtomicBoolean(false);
 
     // --- Transaction knobs ---
     private static final long RECORDS_PER_TRANSACTION = Math.max(1, envLong("RECORDS_PER_TRANSACTION", 100));
@@ -272,13 +275,22 @@ public class TransactionalProducerPerformanceTest {
         metrics.measurementStartMs = beforeMs;
         System.out.println("Starting measured interval at " + beforeMs + " ms");
 
-        // Split the total rate / message target evenly across producers.
-        final long perProducerNumMessages = NUM_MESSAGES > 0 ? NUM_MESSAGES / NUM_TRANSACTIONAL_PRODUCERS : 0;
+        // Split the total rate / message target across producers. The first
+        // NUM_MESSAGES % NUM_TRANSACTIONAL_PRODUCERS get one extra record so the
+        // shares sum to NUM_MESSAGES; a producer whose share is 0 (fewer
+        // messages than producers) is not started, since 0 means "run for the
+        // duration" to the worker.
+        final long shareBase = NUM_MESSAGES > 0 ? NUM_MESSAGES / NUM_TRANSACTIONAL_PRODUCERS : 0;
+        final long shareExtra = NUM_MESSAGES > 0 ? NUM_MESSAGES % NUM_TRANSACTIONAL_PRODUCERS : 0;
         final long perProducerRps = LIMIT_RPS > 0 ? Math.max(LIMIT_RPS / NUM_TRANSACTIONAL_PRODUCERS, 1) : 0;
 
         List<Thread> threads = new ArrayList<>();
         for (int k = 0; k < NUM_TRANSACTIONAL_PRODUCERS; k++) {
             final int index = k;
+            final long perProducerNumMessages = shareBase + (k < shareExtra ? 1 : 0);
+            if (NUM_MESSAGES > 0 && perProducerNumMessages == 0) {
+                continue;
+            }
             Runnable body = EOS_MODE
                 ? () -> runEosProducer(index, baseConf, metrics, firstMessageNs,
                     perProducerNumMessages, perProducerRps)
@@ -431,7 +443,10 @@ public class TransactionalProducerPerformanceTest {
         metrics.stopCollecting();
         System.out.println("Done");
 
-        System.exit((latencyBudgetExceeded || resultsWriteFailed) ? 1 : 0);
+        if (workerFailed.get()) {
+            System.err.println("One or more transactional producer workers failed (see above)");
+        }
+        System.exit((latencyBudgetExceeded || resultsWriteFailed || workerFailed.get()) ? 1 : 0);
     }
 
     // === Per-producer worker =================================================
@@ -550,6 +565,7 @@ public class TransactionalProducerPerformanceTest {
             }
         } catch (Exception e) {
             System.err.println("Producer " + index + " failed: " + e.getMessage());
+            workerFailed.set(true);
         }
     }
 
@@ -743,6 +759,7 @@ public class TransactionalProducerPerformanceTest {
             }
         } catch (Exception e) {
             System.err.println("EOS producer " + index + " failed: " + e.getMessage());
+            workerFailed.set(true);
         }
     }
 

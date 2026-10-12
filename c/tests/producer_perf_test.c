@@ -205,8 +205,8 @@ static test_Future_t (*test_send) (test_Producer_t producer,
 // Blocks until the future completes, verifies it, and reports the completion
 // timestamp (CLOCK_MONOTONIC ns) through done_ns_out so latency is measured
 // send -> completion, independent of how far behind the completion thread is.
-// v2 reports the delivery-report timestamp; v3 reports the time its blocking
-// get() returned.
+// Both backends report the timestamp taken in their delivery callback (v2: the
+// librdkafka delivery report; v3: the send_with_callback callback).
 static bool (*test_verify_future) (test_Future_t future, long *done_ns_out);
 
 static long current_time_ms() {
@@ -263,20 +263,45 @@ static bool verify_record_metadata(kafka_producer_RecordMetadata_t* metadata) {
 }
 
 // Rust client C bindings backend (v3): KafkaProducer over confluent_kafka.h.
-// The producer owns an internal async runtime, so no polling thread is needed;
-// send returns a KafkaFuture_RecordMetadata whose _get blocks for the result.
+// The producer owns an internal async runtime, so no polling thread is needed.
+// Each send carries a delivery callback that stamps the ack time, so latency
+// does not depend on when the completion thread reaches the record's future
+// (head-of-line blocking on an earlier future would otherwise inflate it).
+typedef struct {
+    kafka_common_KafkaFuture_RecordMetadata_t *future;
+    // Ack timestamp (CLOCK_MONOTONIC ns), release-stored by test_v3_dr; 0 until
+    // the callback has fired.
+    atomic_long done_ns;
+} V3Future;
+
+// Delivery callback, run once per record on the producer's dispatcher thread.
+// It owns the metadata / error handles; the result itself is read through the
+// future. The store of done_ns is its last access to the V3Future.
+static void test_v3_dr(kafka_producer_RecordMetadata_t *metadata,
+                       kafka_common_Error_t *error, void *user_data) {
+    V3Future *f = (V3Future *)user_data;
+    long now = current_time_ns();
+    if (metadata) kafka_producer_RecordMetadata_destroy(metadata);
+    if (error) kafka_common_Error_destroy(error);
+    atomic_store_explicit(&f->done_ns, now, memory_order_release);
+}
+
 static test_Future_t test_v3_send(test_Producer_t producer, Message *message) {
     kafka_producer_Producer_t *p = (kafka_producer_Producer_t *)producer;
     kafka_common_Error_t *error = NULL;
-    kafka_common_KafkaFuture_RecordMetadata_t *future = NULL;
     const uint8_t *key = KEY_SIZE > 0 ? message->key : NULL;
     int32_t key_len = KEY_SIZE > 0 ? (int32_t)KEY_SIZE : -1;
+    V3Future *f = calloc(1, sizeof(V3Future));
+    atomic_init(&f->done_ns, 0);
     do {
         error = NULL;
-        future = kafka_producer_Producer_send(
+        // On a synchronous failure (error set) the callback is not invoked, so
+        // the same V3Future can be reused for the retry.
+        f->future = kafka_producer_Producer_send_with_callback(
             p, TOPIC, -1, -1,
             key, key_len,
             message->value, (int32_t)VALUE_SIZE,
+            test_v3_dr, f,
             &error);
 
         if (error) {
@@ -285,18 +310,38 @@ static test_Future_t test_v3_send(test_Producer_t producer, Message *message) {
             kafka_common_Error_destroy(error);
         }
     } while (error && !interrupted);
-    return future;
+    if (f->future == NULL) {
+        free(f);
+        return NULL;
+    }
+    return f;
 }
 
 static bool test_v3_verify_future(test_Future_t future, long *done_ns_out) {
-    kafka_common_KafkaFuture_RecordMetadata_t *f =
-        (kafka_common_KafkaFuture_RecordMetadata_t *)future;
+    V3Future *v3 = (V3Future *)future;
+    kafka_common_KafkaFuture_RecordMetadata_t *f = v3->future;
     kafka_common_Error_t* error = NULL;
     kafka_producer_RecordMetadata_t* metadata =
         kafka_common_KafkaFuture_RecordMetadata_get(f, &error);
-    // The blocking get() returns when the future resolves; take the completion
-    // timestamp here (the closest observable point to the client's ack).
-    *done_ns_out = current_time_ns();
+    // The callback fires on the dispatcher thread and may land just after the
+    // future resolves: wait for its ack timestamp (bounded, falling back to
+    // now if it never arrives) before releasing the V3Future it writes to.
+    long deadline = current_time_ns() + 10L * 1000000000L;
+    long done_ns;
+    while ((done_ns = atomic_load_explicit(&v3->done_ns, memory_order_acquire)) == 0) {
+        if (current_time_ns() > deadline) {
+            fprintf(stderr, "Delivery callback did not fire within 10 s\n");
+            done_ns = current_time_ns();
+            break;
+        }
+        struct timespec pause = {0, 20000};
+        nanosleep(&pause, NULL);
+    }
+    *done_ns_out = done_ns;
+    bool callback_fired = atomic_load_explicit(&v3->done_ns, memory_order_acquire) != 0;
+    // Only free the V3Future once the callback is done with it; if it never
+    // fired, leak it rather than risk a late write to freed memory.
+    if (callback_fired) free(v3);
 
     if (error) {
         const char* msg = kafka_common_Error_message(error);
@@ -1093,6 +1138,9 @@ static long percentile_from_hist(const long* hist, size_t len, double p) {
 static void record_completed_calls(ProducedMessage* pm) {
     long done_ns = 0;
     if (!test_verify_future(pm->future, &done_ns)) {
+        // A failed record still completes, but contributes no latency — like
+        // the Rust and Java harnesses.
+        completed_messages++;
         return;
     }
 

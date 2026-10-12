@@ -522,6 +522,27 @@ class RateLimiter:
                 time.sleep((self.next_check_ns - now) / 1e9)
             self.next_check_ns += 100_000_000
 
+    async def maybe_wait_async(self, records_sent):
+        """maybe_wait for the async workers: yields to the event loop
+        (asyncio.sleep) instead of blocking it, so concurrent producer tasks keep
+        progressing while one waits out its pacing checkpoint."""
+        if not self.per_producer_rps or self.checkpoint == 0:
+            return
+        if records_sent % self.checkpoint == 0:
+            now = time.time_ns()
+            if now < self.next_check_ns:
+                await asyncio.sleep((self.next_check_ns - now) / 1e9)
+            self.next_check_ns += 100_000_000
+
+
+def _producer_shares(total, producers):
+    """Split a NUM_MESSAGES target across producers: the first ``total %
+    producers`` get one extra record, so the shares sum to ``total``. A share
+    of 0 (fewer records than producers) means that producer has nothing to
+    send — not the duration-based sentinel, so the caller must not start it."""
+    base, extra = divmod(total, producers)
+    return [base + (1 if k < extra else 0) for k in range(producers)]
+
 
 def _time_bound_reached(measured_start_ns):
     return (time.time_ns() - measured_start_ns) > (test_duration_s + 1) * 1e9
@@ -903,7 +924,7 @@ def print_summary(measured_secs):
 
     client = ("python-librdkafka" if v2 else "python-rust") + "-txn"
     results = {
-        "test": "transactional-producer",
+        "test": "producer",
         "client": client,
         "topic": topic_name,
         "messages_measured": completed_messages,
@@ -927,7 +948,10 @@ def print_summary(measured_secs):
             json.dump(results, fh, indent=2)
         print(f"Results summary written to: {results_file}")
     except OSError as e:
+        # The machine-readable summary is the run's primary artifact: fail the
+        # run rather than exit 0 without it.
         print(f"Failed to write {results_file}: {e}")
+        latency_budget_exceeded = True
 
     if p99_limit_ms > 0 and p99 > p99_limit_ms:
         latency_budget_exceeded = True
@@ -1107,7 +1131,7 @@ async def run_producer_async(index, bootstrap_servers, measured_start_ns,
                 produce_ms.append(now_ms())
                 futures.append(await _async_send(producer, key, value))
                 records_sent += 1
-                rate.maybe_wait(records_sent)
+                await rate.maybe_wait_async(records_sent)
             if should_abort(txn_index, abort_rate):
                 await producer.abort_transaction()
                 abort_ms = now_ms()
@@ -1147,7 +1171,10 @@ async def run_eos_producer_async(index, bootstrap_servers, measured_start_ns,
         cont = records_sent < per_producer_num_messages \
             if per_producer_num_messages > 0 else not terminating
         while cont:
-            batch = _eos_poll(consumer)
+            # The consumer poll blocks for up to EOS_POLL_TIMEOUT_MS: run it on a
+            # worker thread so it doesn't stall the other producer tasks on the
+            # event loop. Each consumer is only ever polled by its own task.
+            batch = await asyncio.to_thread(_eos_poll, consumer)
             if not batch:
                 consecutive_empty_polls += 1
                 if consecutive_empty_polls >= 10 and not starvation_warned:
@@ -1177,7 +1204,7 @@ async def run_eos_producer_async(index, bootstrap_servers, measured_start_ns,
                 if cur is None or nxt > cur:
                     offsets[(rtopic, rpart)] = nxt
                 records_sent += 1
-                rate.maybe_wait(records_sent)
+                await rate.maybe_wait_async(records_sent)
             batch_records = len(batch)
             try:
                 await _send_offsets_async(producer, consumer, offsets)
@@ -1213,12 +1240,11 @@ async def run_eos_producer_async(index, bootstrap_servers, measured_start_ns,
 
 
 async def _amain(bootstrap_servers, measured_start_ns,
-                 per_producer_num_messages, per_producer_rps):
+                 producer_ids, shares, per_producer_rps):
     worker = run_eos_producer_async if eos_mode else run_producer_async
     await asyncio.gather(*[
-        worker(k, bootstrap_servers, measured_start_ns,
-               per_producer_num_messages, per_producer_rps)
-        for k in range(num_transactional_producers)
+        worker(k, bootstrap_servers, measured_start_ns, shares[k], per_producer_rps)
+        for k in producer_ids
     ])
 
 
@@ -1273,9 +1299,15 @@ def main():
     print(f"Starting measured interval at {metrics.measurement_start_ms} ms: "
           f"{datetime.datetime.now(tz=datetime.timezone.utc)}")
 
-    # Split the total rate / message target evenly across producers.
-    per_producer_num_messages = num_messages // num_transactional_producers \
-        if num_messages > 0 else 0
+    # Split the total rate / message target across producers. With a message
+    # target, producers whose share is 0 are not started (0 means "run for the
+    # duration" to the workers).
+    if num_messages > 0:
+        shares = _producer_shares(num_messages, num_transactional_producers)
+        producer_ids = [k for k in range(num_transactional_producers) if shares[k] > 0]
+    else:
+        shares = [0] * num_transactional_producers
+        producer_ids = list(range(num_transactional_producers))
     per_producer_rps = max(limit_rps // num_transactional_producers, 1) \
         if limit_rps else 0
 
@@ -1283,14 +1315,14 @@ def main():
         # Async transaction API: one asyncio task per producer (awaited control
         # ops + async sends). Exercises the async drain-before-control-ops path.
         asyncio.run(_amain(bootstrap_servers, measured_start_ns,
-                           per_producer_num_messages, per_producer_rps))
+                           producer_ids, shares, per_producer_rps))
     else:
         worker = run_eos_producer if eos_mode else run_producer
         threads = []
-        for k in range(num_transactional_producers):
+        for k in producer_ids:
             t = Thread(target=worker,
                        args=(k, bootstrap_servers, measured_start_ns,
-                             per_producer_num_messages, per_producer_rps),
+                             shares[k], per_producer_rps),
                        name=f"txn-producer-{k}")
             threads.append(t)
             t.start()
