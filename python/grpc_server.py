@@ -32,10 +32,12 @@ The server listens on GRPC_HOST:GRPC_PORT (default 127.0.0.1:50051; the
 Docker image sets GRPC_HOST=0.0.0.0 and the test pool maps 50051 to a
 random host port via testcontainers). GRPC_PORT=0 binds an ephemeral port.
 
-Sync grpc.server + thread pool is used because the sync clients are
-thread-based: their C extension (``_confluentkafka``) completes each
-concurrent.futures.Future on a background completion thread, and
-Future.result() blocks the calling thread until the future fires.
+Sync grpc.server + thread pool is used because the sync clients block the
+calling thread: KafkaProducer completes each concurrent.futures.Future on its
+background completion thread, which runs the C API's queued callbacks
+(``__execute_callbacks``), and Future.result() blocks the handler thread until
+the future fires; KafkaConsumer's waiting calls drain their completions and
+callbacks on the handler thread itself.
 """
 
 import datetime as _dt

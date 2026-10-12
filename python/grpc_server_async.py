@@ -24,8 +24,9 @@ Python client. It exercises the async API through the full integration matrix
 against a real broker (the sync server covers the sync client).
 
 Uses grpc.aio (asyncio server) rather than a thread pool: the async client's
-completions already marshal onto the event loop (loop.call_soon_threadsafe from
-the C dispatcher thread), so awaiting the coroutines is the natural fit. All RPC
+completions already run on the event loop (the C API's notify hook schedules,
+through loop.call_soon_threadsafe, a drain of the queued callbacks there), so
+awaiting the coroutines is the natural fit. All RPC
 handlers run as tasks on a single event loop, so the producer/consumer id maps
 need no lock — id allocation and dict pops happen without an intervening await.
 
@@ -230,8 +231,8 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
             LOG.exception("send raised")
             return pb.SendResponse(error=_kafka_error_to_proto(e))
 
-        # Await the record future on the event loop; completions hop onto the
-        # loop from the C dispatcher thread. Bounded like the sync server's 120s.
+        # Await the record future on the event loop, where the producer drains
+        # its queued completions. Bounded like the sync server's 120s.
         try:
             metadata = await asyncio.wait_for(future, timeout=120)
         except KafkaError as e:

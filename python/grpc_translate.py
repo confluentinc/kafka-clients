@@ -67,7 +67,7 @@ import admin_service_pb2 as apb  # noqa: E402  (generated)
 
 # Error codes formerly imported from the generated ``_error_code.py`` module
 # (retired in P6). The proto's ``KafkaError.code`` is the FFI error code
-# (``kafka_common_ErrorCode_t``), so a synthetic server-side error stamps the
+# (``kafka_common_ErrorCode_e``), so a synthetic server-side error stamps the
 # code by reading the typed error class' private ``_ffi_id`` — the same value
 # the generator wrote into ``_error_code.py``. These are the only codes the
 # servers manufacture (LOCAL_ILLEGAL_ARGUMENT / LOCAL_ILLEGAL_STATE /
@@ -140,7 +140,7 @@ def _kafka_error_to_proto(err):
     proto KafkaError.
 
     `code` is the only discriminator the proto carries, and that is enough:
-    it is the FFI error code (kafka_common_ErrorCode_t), which is injective
+    it is the FFI error code (kafka_common_ErrorCode_e), which is injective
     over the client's error classes, so the Rust client derives the class from
     it. This is what retired `_guess_variant`, which substring-matched the
     message text to recover a class the code could not carry back when several
