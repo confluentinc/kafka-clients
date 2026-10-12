@@ -24,14 +24,6 @@ Without `kafka/`, `cargo xtask lint` cannot run three of the six `lint-custom` r
    - The **master control run** is what turns "fails" into "this branch introduced it".
 6. Trial a fix. Edit a third copy, then run the full `xtask lint` there, now reachable past lint-custom, plus `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features`. This is CI's separate doc-check job.
 
-**Shell traps hit while doing this.**
-- `g` is a zsh alias in this user's shell; a function named `g` fails to parse.
-- zsh does not word-split `$CMD` strings; use a function.
-- `git add` has no `-q`.
-- `rm` or `rmdir` with `$VAR` paths is refused by the safety check. Use literal absolute paths or `"${P:?}"`.
-- A word starting with `=` (e.g. `echo =====`) triggers zsh `=cmd` expansion and errors; use dashes for separators.
-- `grep --include=*.rs` is globbed by zsh ("no matches found"); quote it: `--include='*.rs'`.
-
 **Re-running in a later round (M15 round 5).**
 - The stand-in is an ordinary git repo: within a session, symlink it into fresh `git archive` copies instead of
   rebuilding it. Across sessions the scratchpad may be gone; rebuild by the recipe.
