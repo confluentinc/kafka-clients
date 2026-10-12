@@ -185,8 +185,12 @@ def construct(cls: type[BaseException], message: str | None,
     return error
 
 
-def from_ffi_error(handle: int, *, cause: BaseException | None = None) -> BaseException:
-    """The Python error for a C ``kafka_common_Error_t`` handle (consumed).
+def from_ffi_error(handle: int, *, cause: BaseException | None = None,
+                   owned: bool = True) -> BaseException:
+    """The Python error for a C ``kafka_common_Error_t`` handle, freed here when
+    ``owned`` (an operation's result) and left alone when borrowed (a delivery
+    callback's error, or a source: ``kafka_common_Error_source`` returns a
+    borrowed handle, which its owner frees).
 
     The class is the one of the error's FFI id (unknown -> ``KafkaError``),
     built with the payload the FFI accessors expose. The cause chain
@@ -206,7 +210,7 @@ def from_ffi_error(handle: int, *, cause: BaseException | None = None) -> BaseEx
         if error_source is not None:
             source_handle: int = error_source(handle)
             if source_handle:
-                source_cause = from_ffi_error(source_handle)
+                source_cause = from_ffi_error(source_handle, owned=False)
     payload: dict[str, Any] | None = None
     error_payload = getattr(_lib, "KafkaError_payload", None)
     if error_payload is not None:
@@ -219,7 +223,8 @@ def from_ffi_error(handle: int, *, cause: BaseException | None = None) -> BaseEx
         from .common.kafka_error import KafkaError
 
         cls = KafkaError
-    _lib.KafkaError_destroy(handle)
+    if owned:
+        _lib.KafkaError_destroy(handle)
     error = construct(cls, message, payload)
     # Set after construction, so the constructor arguments do not carry it;
     # ``__reduce__`` (``_throwable.reduce``) keeps it for ``copy`` / ``pickle``.
