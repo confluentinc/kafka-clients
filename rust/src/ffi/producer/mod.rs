@@ -519,7 +519,7 @@ where
     }
     let _guard = TxnControlGuard(Arc::clone(client));
     let producer = Arc::clone(&client.producer);
-    error_slot(block_on(Some(&client.runtime), async {
+    error_slot(block_on(&client.runtime, async {
         client.drain_submitted_sends().await?;
         op(producer).await
     }))
@@ -567,7 +567,7 @@ where
     Fut: Future<Output = Result<(), Error>>,
 {
     let producer = Arc::clone(&client.producer);
-    error_slot(block_on(Some(&client.runtime), async {
+    error_slot(block_on(&client.runtime, async {
         client.drain_submitted_sends().await?;
         op(producer).await
     }))
@@ -998,9 +998,10 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
     // `delivery_callback` requires.
     let callback = unsafe { delivery_callback(client, callback) };
     let producer = Arc::clone(&client.producer);
-    match block_on(Some(&client.runtime), async move {
-        producer.send_with_callback(record, callback).await
-    }) {
+    match block_on(
+        &client.runtime,
+        async move { producer.send_with_callback(record, callback).await },
+    ) {
         Ok(future) => {
             // SAFETY: Per this function's `# Safety`, `out_send_with_callback` is a valid slot, so
             // the write is sound; the handle written is the fresh `box_future` the caller owns,
@@ -1155,7 +1156,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for(
     // `c_str_to_string` requires.
     let topic = unsafe { c_str_to_string(topic) };
     let producer = Arc::clone(&client.producer);
-    match block_on(Some(&client.runtime), async move { producer.partitions_for(&topic).await }) {
+    match block_on(&client.runtime, async move { producer.partitions_for(&topic).await }) {
         Ok(infos) => {
             // SAFETY: Per this function's `# Safety`, `out_partitions_for` is a valid slot, so the
             // write is sound; the list written is the fresh `box_list` the caller owns, freed with

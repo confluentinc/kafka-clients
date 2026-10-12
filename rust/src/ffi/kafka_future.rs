@@ -35,12 +35,14 @@
 //! # Threads
 //!
 //! `get` blocks the calling thread. When the future came from a client it is
-//! driven on that client's runtime; a future C created itself
-//! (`completed_future`, `all_of` over such futures) is driven on a small
-//! process-wide runtime, so `get` works outside any client. `get_cb` queues its
-//! callback on the owning client's callbacks vector (drained by that client's
-//! `__execute_callbacks`); a future with no client invokes the callback inline,
-//! on the calling thread, before `get_cb` returns.
+//! driven on that client's runtime. A future that belongs to no client can only
+//! be built from `completed_future`, directly or through `then_apply` and
+//! `all_of` over such futures, so it is already complete: `get` answers it on
+//! the calling thread without waiting and without any runtime, and a timeout
+//! never elapses. `get_cb` queues its callback on the owning client's callbacks
+//! vector (drained by that client's `__execute_callbacks`); a future with no
+//! client invokes the callback inline, on the calling thread, before `get_cb`
+//! returns.
 //!
 //! A future may outlive its client. The client's `_destroy` fires the callback
 //! of every `get_cb` still waiting, exactly once, before it returns: with the
@@ -191,7 +193,9 @@ pub(crate) struct FutureInner {
     /// The value `get` returned, cached so every `get` answers the same
     /// pointer and the value lives as long as the handle.
     result: OnceLock<Arc<FfiValue>>,
-    /// The runtime of the client that produced the future, when any.
+    /// The runtime of the client that produced the future, when any. A
+    /// future without one is already complete (module docs), so nothing drives
+    /// it.
     runtime: Option<tokio::runtime::Handle>,
     /// The callbacks vector of that client, when any.
     queue: Option<Arc<CallbackQueue>>,
@@ -203,8 +207,15 @@ impl FutureInner {
         if let Some(cached) = self.result.get() {
             return Ok(cached.clone());
         }
-        let value = block_on(self.runtime.as_ref(), self.resolve_future(timeout))?;
-        Ok(self.result.get_or_init(|| value).clone())
+        match &self.runtime {
+            Some(runtime) => {
+                let value = block_on(runtime, self.resolve_future(timeout))?;
+                Ok(self.result.get_or_init(|| value).clone())
+            },
+            // Already complete (module docs): answered on this thread, with no
+            // runtime, so the timeout, which needs a timer, is not armed.
+            None => self.resolve_ready(NOT_COMPLETE_WITHOUT_CLIENT),
+        }
     }
 
     /// Resolves the future on the current task.
@@ -220,6 +231,19 @@ impl FutureInner {
     /// destroyed: nothing is left to complete it, so it answers its value
     /// when it has one and [`CLIENT_DESTROYED`] otherwise.
     fn resolve_now(&self) -> Result<Arc<FfiValue>, Error> {
+        self.resolve_ready(CLIENT_DESTROYED)
+    }
+
+    /// Answers the future's value, or its failure, when it already has one,
+    /// on the calling thread and without a runtime; a future still pending
+    /// fails with a `LocalIllegalState` error carrying `pending`, because
+    /// nothing is left that could complete it.
+    ///
+    /// `get` is polled once, never `get_with_timeout`: the timeout of a
+    /// derived future (`then_apply`, `all_of`) arms a Tokio timer, which
+    /// panics outside a runtime, and a future that is already complete
+    /// cannot time out.
+    fn resolve_ready(&self, pending: &'static str) -> Result<Arc<FfiValue>, Error> {
         if let Some(cached) = self.result.get() {
             return Ok(cached.clone());
         }
@@ -228,7 +252,7 @@ impl FutureInner {
                 let value = result?;
                 Ok(self.result.get_or_init(|| value).clone())
             },
-            None => Err(Error::local_illegal_state(CLIENT_DESTROYED)),
+            None => Err(Error::local_illegal_state(pending)),
         }
     }
 
@@ -240,31 +264,10 @@ impl FutureInner {
     }
 }
 
-/// Drives `future` to completion on `handle`, or on the process-wide fallback
-/// runtime when the future belongs to no client.
-pub(crate) fn block_on<F: Future>(handle: Option<&tokio::runtime::Handle>, future: F) -> F::Output {
-    match handle {
-        Some(handle) => handle.block_on(future),
-        None => fallback_runtime().block_on(future),
-    }
-}
-
-/// The runtime driving futures C built outside any client.
-///
-/// Multi-threaded with one worker so that its timer driver runs while a C
-/// thread blocks in `Runtime::block_on` (a current-thread runtime's drivers
-/// are only driven by the thread inside `block_on`, which is fine too, but
-/// `Handle::block_on` would not drive them).
-fn fallback_runtime() -> &'static tokio::runtime::Runtime {
-    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .thread_name("kafka-ffi-future")
-            .enable_all()
-            .build()
-            .expect("the FFI future runtime cannot be built")
-    })
+/// Drives `future` to completion on `handle`, the runtime of the client the
+/// operation belongs to, blocking the calling thread.
+pub(crate) fn block_on<F: Future>(handle: &tokio::runtime::Handle, future: F) -> F::Output {
+    handle.block_on(future)
 }
 
 /// Opaque handle to a [`KafkaFuture`] whose value is a `void *` (CLAUDE.md
@@ -340,6 +343,12 @@ pub type kafka_common_KafkaFuture_get_with_timeout_cb_t =
 /// destroyed before the future resolved. No Java counterpart: a Java
 /// `KafkaFuture` outlives its client.
 const CLIENT_DESTROYED: &str = "The client was destroyed before the future completed";
+
+/// The error `get` answers for a future that belongs to no client and is not
+/// complete. Only crate code can build one: every future C builds without a
+/// client is complete (module docs). No Java counterpart: a Java `KafkaFuture`
+/// is completed by whoever holds its `KafkaFutureImpl`.
+const NOT_COMPLETE_WITHOUT_CLIENT: &str = "A KafkaFuture that belongs to no client must already be complete";
 
 /// The completion a `get_cb` task owes its caller, delivered exactly once: by
 /// [`complete`](Self::complete) when the task resolves the future, or, when the
@@ -434,6 +443,8 @@ unsafe fn get_cb(
                 pending.complete(result);
             });
         },
+        // No client: the future is already complete (module docs), so it is
+        // answered on this thread.
         _ => deliver(cb, inner.resolve(timeout), opaque),
     }
 }
@@ -463,6 +474,10 @@ fn timeout_ms(timeout: i64) -> Duration {
 /// `KafkaFuture.completedFuture(value)`: a future already resolved with
 /// `result`, or failed with `result_error` when that is non-null.
 ///
+/// The future belongs to no client, nor does a `then_apply` or `all_of` built
+/// only from such futures: `get`, `get_with_timeout` and their `_cb` forms
+/// answer it on the calling thread without waiting.
+///
 /// `result` is a `void *` the caller owns and keeps alive while the future may
 /// still deliver it; Rust never frees it. `result_error` is consumed: the
 /// caller must not destroy it.
@@ -486,7 +501,9 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_completed_future(
 }
 
 /// `KafkaFuture.get()`: blocks until the future resolves and stores its value
-/// in `*out_get`, borrowed as described in the module docs.
+/// in `*out_get`, borrowed as described in the module docs. A future that
+/// belongs to no client (see [`kafka_common_KafkaFuture_completed_future`]) is
+/// already complete and is answered without blocking.
 ///
 /// Returns `NULL` on success, otherwise the error the operation failed with,
 /// owned by the caller.
@@ -545,7 +562,10 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_get_cb(
 /// `KafkaFuture.get(timeout, MILLISECONDS)`: like
 /// [`kafka_common_KafkaFuture_get`], failing with the translation of
 /// `java.util.concurrent.TimeoutException` (`kafka_common_Error_is_local_timeout_error`)
-/// when `timeout` milliseconds elapse first. A negative timeout is zero.
+/// when `timeout` milliseconds elapse first. A negative timeout is zero. A
+/// future that belongs to no client (see
+/// [`kafka_common_KafkaFuture_completed_future`]) is already complete: it is
+/// answered at once, and the timeout never elapses.
 ///
 /// # Safety
 ///
@@ -969,10 +989,23 @@ mod tests {
         }
     }
 
+    /// The runtime a client drives its futures on: multi-threaded, so its timer
+    /// runs while a C thread blocks in `Handle::block_on`.
+    fn client_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
     #[test]
     fn get_with_timeout_times_out_with_the_local_timeout_error() {
+        // Only a client's future can be pending, so this one has a client's
+        // runtime (and no callbacks vector, which `get` does not use).
+        let runtime = client_runtime();
         let pending = KafkaFutureImpl::<i64>::new();
-        let f = box_future(map_future(&pending.future()), None, None);
+        let f = box_future(map_future(&pending.future()), Some(runtime.handle().clone()), None);
         let mut out: *mut c_void = std::ptr::null_mut();
         // SAFETY: Test code: `f` is the fresh `box_future` handle, destroyed once at the end;
         // `out` is a live local. Each `err` is the fresh, non-null error handle a timed-out
@@ -997,8 +1030,9 @@ mod tests {
 
     #[test]
     fn get_blocks_until_another_thread_completes_the_future() {
+        let runtime = client_runtime();
         let pending = KafkaFutureImpl::<i64>::new();
-        let f = box_future(map_future(&pending.future()), None, None);
+        let f = box_future(map_future(&pending.future()), Some(runtime.handle().clone()), None);
         let completer = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(20));
             pending.complete(11);
@@ -1009,6 +1043,111 @@ mod tests {
             assert_eq!(*(get(f).unwrap() as *const i64), 11);
             completer.join().unwrap();
             kafka_common_KafkaFuture_destroy(f);
+        }
+    }
+
+    #[test]
+    fn a_future_without_a_client_is_answered_with_no_runtime() {
+        assert!(
+            tokio::runtime::Handle::try_current().is_err(),
+            "the test thread is outside any runtime"
+        );
+        let value = 5i64;
+        let doubler = Doubler { calls: AtomicUsize::new(0), output: Mutex::new(0) };
+        // SAFETY: Test code: `completed`, `failed`, `derived` and `all` are fresh future
+        // handles and `function` a fresh function handle over `doubler`, a live local that
+        // outlives `derived`; each handle is destroyed once after its last use. `completed`
+        // borrows `value`, a live local, and `failed` consumes a fresh `box_error` handle;
+        // each `err` is the fresh error handle a failed get returned, destroyed once. `out`
+        // is a live local, and every value read through it points at `value` or into
+        // `doubler`.
+        unsafe {
+            let completed =
+                kafka_common_KafkaFuture_completed_future(&value as *const i64 as *const c_void, std::ptr::null_mut());
+            let function = kafka_common_KafkaFuture_BaseFunction_new(&doubler as *const _ as *mut c_void, double);
+            let derived = kafka_common_KafkaFuture_then_apply(completed, function);
+            kafka_common_KafkaFuture_BaseFunction_destroy(function);
+            let list = kafka_List_new();
+            kafka_List_add(list, completed as *mut c_void);
+            kafka_List_add(list, derived as *mut c_void);
+            let all = kafka_common_KafkaFuture_all_of(list);
+            kafka_List_destroy(list);
+
+            for timeout in [None, Some(0), Some(1000)] {
+                let started = std::time::Instant::now();
+                for (f, expected) in [(completed, 5), (derived, 10)] {
+                    let mut out: *mut c_void = std::ptr::null_mut();
+                    let err = match timeout {
+                        None => kafka_common_KafkaFuture_get(f, &mut out),
+                        Some(ms) => kafka_common_KafkaFuture_get_with_timeout(f, ms, &mut out),
+                    };
+                    assert!(err.is_null(), "{timeout:?}");
+                    assert_eq!(*(out as *const i64), expected, "{timeout:?}");
+                }
+                let mut out: *mut c_void = std::ptr::null_mut();
+                let err = match timeout {
+                    None => kafka_common_KafkaFuture_get(all, &mut out),
+                    Some(ms) => kafka_common_KafkaFuture_get_with_timeout(all, ms, &mut out),
+                };
+                assert!(err.is_null() && out.is_null(), "{timeout:?}: a Void future delivers NULL");
+                assert!(started.elapsed() < Duration::from_millis(500), "{timeout:?}: nothing waits");
+            }
+            assert_eq!(doubler.calls.load(Ordering::SeqCst), 1, "Java runs the function once");
+
+            let failed = kafka_common_KafkaFuture_completed_future(std::ptr::null(), box_error(Error::timeout("late")));
+            let mut out: *mut c_void = std::ptr::null_mut();
+            let err = kafka_common_KafkaFuture_get_with_timeout(failed, 1000, &mut out);
+            assert_eq!(CStr::from_ptr(kafka_common_Error_message(err)).to_str().unwrap(), "late");
+            kafka_common_Error_destroy(err);
+            assert_eq!(get(failed), Err("late".to_string()));
+
+            for f in [completed, derived, all, failed] {
+                kafka_common_KafkaFuture_destroy(f);
+            }
+        }
+    }
+
+    #[test]
+    fn a_pending_future_without_a_client_fails_instead_of_waiting() {
+        // Only crate code can build one; it fails rather than block a thread
+        // nothing would wake.
+        let pending = KafkaFutureImpl::<i64>::new();
+        let f = box_future(map_future(&pending.future()), None, None);
+        let seen: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        // SAFETY: Test code: `f` is the fresh `box_future` handle, destroyed once at the end;
+        // `out` is a live local, and `err` the fresh error handle the get returned,
+        // destroyed once. `opaque` is `seen`, the `Mutex<Vec<String>>` `record_error`
+        // expects, which outlives the inline delivery.
+        unsafe {
+            let mut out: *mut c_void = std::ptr::null_mut();
+            let err = kafka_common_KafkaFuture_get_with_timeout(f, 1000, &mut out);
+            assert!(!err.is_null());
+            assert_eq!(
+                kafka_common_Error_is_local_timeout_error(err),
+                0,
+                "not a timeout: it never waited"
+            );
+            kafka_common_Error_destroy(err);
+            assert_eq!(get(f), Err(NOT_COMPLETE_WITHOUT_CLIENT.to_string()));
+            kafka_common_KafkaFuture_get_cb(f, record_error, &seen as *const _ as *mut c_void);
+            assert_eq!(*seen.lock().unwrap(), [NOT_COMPLETE_WITHOUT_CLIENT], "delivered inline");
+            kafka_common_KafkaFuture_destroy(f);
+        }
+    }
+
+    /// Records the message of the error a `_cb` delivery carries, which it
+    /// owns and destroys.
+    unsafe extern "C" fn record_error(value: *mut c_void, error: *mut kafka_common_Error_t, opaque: *mut c_void) {
+        assert!(value.is_null() && !error.is_null());
+        // SAFETY: Test code: every registration of this callback passes a live
+        // `Mutex<Vec<String>>` as `opaque`, which outlives the delivery; `error` is the
+        // non-null owned handle the delivery hands over, read and then destroyed once.
+        unsafe {
+            let seen = &*(opaque as *const Mutex<Vec<String>>);
+            seen.lock()
+                .unwrap()
+                .push(CStr::from_ptr(kafka_common_Error_message(error)).to_str().unwrap().to_string());
+            kafka_common_Error_destroy(error);
         }
     }
 

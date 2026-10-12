@@ -314,7 +314,7 @@ impl Client {
     /// The flag is cleared even when `future` panics.
     pub(crate) fn block_on<F: Future>(&self, future: F) -> F::Output {
         let _blocking = BlockingGuard::set(&self.delivery);
-        block_on(Some(&self.runtime), future)
+        block_on(&self.runtime, future)
     }
 }
 

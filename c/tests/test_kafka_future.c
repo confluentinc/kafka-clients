@@ -24,6 +24,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef __linux__
+#include <dirent.h>
+#endif
+
 #include "unity.h"
 
 void setUp(void) {}
@@ -197,6 +201,78 @@ static void test_then_apply_fails_with_the_functions_error_or_the_sources(void) 
     kafka_common_KafkaFuture_destroy(failed_source);
 }
 
+#ifdef __linux__
+// The number of threads in this process, from /proc/self/task.
+static int thread_count(void) {
+    DIR *dir = opendir("/proc/self/task");
+    TEST_ASSERT_NOT_NULL(dir);
+    int count = 0;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] != '.') count++;
+    }
+    closedir(dir);
+    return count;
+}
+#endif
+
+typedef struct {
+    void *value;
+    int calls;
+} seen_t;
+
+static void record_value(void *value, kafka_common_Error_t *error, void *opaque) {
+    seen_t *seen = opaque;
+    TEST_ASSERT_NULL(error);
+    seen->value = value;
+    seen->calls++;
+}
+
+// A future with no client (completed_future, and then_apply / all_of over
+// such futures) is already complete: every get answers it on this thread,
+// before returning, and none starts a thread to drive it.
+static void test_a_future_without_a_client_starts_no_thread(void) {
+#ifdef __linux__
+    int threads = thread_count();
+#endif
+    int64_t value = 4;
+    doubler_t doubler = {0, 0};
+    kafka_common_KafkaFuture_t *source = kafka_common_KafkaFuture_completed_future(&value, NULL);
+    kafka_common_KafkaFuture_BaseFunction_t *function = kafka_common_KafkaFuture_BaseFunction_new(&doubler, double_apply);
+    kafka_common_KafkaFuture_t *derived = kafka_common_KafkaFuture_then_apply(source, function);
+    kafka_common_KafkaFuture_BaseFunction_destroy(function);
+    kafka_List_t *futures = kafka_List_new();
+    kafka_List_add(futures, source);
+    kafka_List_add(futures, derived);
+    kafka_common_KafkaFuture_t *all = kafka_common_KafkaFuture_all_of(futures);
+    kafka_List_destroy(futures);
+
+    void *out = NULL;
+    TEST_ASSERT_NULL(kafka_common_KafkaFuture_get_with_timeout(derived, 0, &out));
+    TEST_ASSERT_EQUAL_INT64(8, *(int64_t *)out);
+    TEST_ASSERT_NULL(kafka_common_KafkaFuture_get_with_timeout(derived, 1000, &out));
+    TEST_ASSERT_EQUAL_PTR(&doubler.output, out);
+    out = &value;
+    TEST_ASSERT_NULL(kafka_common_KafkaFuture_get_with_timeout(all, 1000, &out));
+    TEST_ASSERT_NULL(out);
+
+    seen_t seen = {NULL, 0};
+    kafka_common_KafkaFuture_get_with_timeout_cb(derived, 1000, record_value, &seen);
+    TEST_ASSERT_EQUAL_INT(1, seen.calls);
+    TEST_ASSERT_EQUAL_PTR(&doubler.output, seen.value);
+    kafka_common_KafkaFuture_get_cb(source, record_value, &seen);
+    TEST_ASSERT_EQUAL_INT(2, seen.calls);
+    TEST_ASSERT_EQUAL_PTR(&value, seen.value);
+    TEST_ASSERT_EQUAL_INT(1, doubler.calls);
+
+#ifdef __linux__
+    TEST_ASSERT_EQUAL_INT(threads, thread_count());
+#endif
+    kafka_common_KafkaFuture_destroy(all);
+    kafka_common_KafkaFuture_destroy(derived);
+    kafka_common_KafkaFuture_destroy(source);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_completed_future_delivers_the_value_or_the_error);
@@ -204,5 +280,6 @@ int main(void) {
     RUN_TEST(test_base_function_is_reached_through_the_invoker);
     RUN_TEST(test_then_apply_runs_the_function_once_and_borrows_its_result);
     RUN_TEST(test_then_apply_fails_with_the_functions_error_or_the_sources);
+    RUN_TEST(test_a_future_without_a_client_starts_no_thread);
     return UNITY_END();
 }

@@ -239,7 +239,7 @@ impl Client {
     where
         F: Future,
     {
-        block_on(Some(&self.runtime), op)
+        block_on(&self.runtime, op)
     }
 
     /// Runs `op` on the runtime and queues `cb(opaque)` once it completes.
