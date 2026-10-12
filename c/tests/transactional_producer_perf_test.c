@@ -15,11 +15,11 @@
 // Transactional producer performance test for the C bindings (Phase 1,
 // TXN_MODE=produce).
 //
-// Mirrors bindings/c/tests/producer_perf_test.c's v2 (librdkafka) path, driving
+// Mirrors c/tests/producer_perf_test.c's v2 (librdkafka) path, driving
 // the librdkafka transactional producer API. It shares the configuration
 // contract, message shape and metrics-file schema (metrics.jsonl / results.json)
 // of the sibling transactional producer performance tests
-// (tests/performance/transactional_producer_perf_test.rs and
+// (rust/tests/performance/transactional_producer_perf_test.rs and
 // TransactionalProducerPerformanceTest.java) so results are comparable across
 // implementations.
 //

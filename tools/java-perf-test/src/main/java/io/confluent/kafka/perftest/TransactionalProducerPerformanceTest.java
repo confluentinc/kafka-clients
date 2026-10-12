@@ -51,8 +51,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * producer API. It shares the configuration contract, message shape and
  * metrics-file schema (metrics.jsonl / results.json, via {@link
  * TransactionalMetrics}) of the sibling transactional producer performance
- * tests (tests/performance/transactional_producer_perf_test.rs and
- * bindings/c/tests/transactional_producer_perf_test.c) so results are
+ * tests (rust/tests/performance/transactional_producer_perf_test.rs and
+ * c/tests/transactional_producer_perf_test.c) so results are
  * comparable across implementations.
  *
  * <p>Two modes selected by {@code TXN_MODE}:
@@ -90,8 +90,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * librdkafka-C / Java / Python) — is to spawn Kafka's standard
  * {@code kafka-producer-perf-test.sh} (a plain Java producer) from
  * {@code $KAFKA_BIN} BEFORE the measured interval, exactly as the consumer-perf
- * harnesses seed their input ({@code consumer-perf/src/main.rs} {@code spawn_producer},
- * {@code bindings/python/test/performance/consumer_performance_test.py}). It runs
+ * harnesses seed their input ({@code rust/consumer-perf/src/main.rs} {@code spawn_producer},
+ * {@code python/test/performance/consumer_performance_test.py}). It runs
  * at peak ({@code --throughput -1}) by default with {@code --num-records} sized to
  * cover the window ({@code SEED_COUNT}/{@code SEED_THROUGHPUT} override), forwarding
  * SASL via a {@code --producer.config} properties file. Seed-then-run: the harness
@@ -1037,9 +1037,9 @@ public class TransactionalProducerPerformanceTest {
      * Seed {@code SOURCE_TOPIC} by spawning Kafka's standard
      * {@code kafka-producer-perf-test.sh} (a plain Java producer) from
      * {@code KAFKA_BIN} — the SAME mechanism the consumer-perf harnesses use to
-     * generate their input load (see {@code consumer-perf/src/main.rs}
+     * generate their input load (see {@code rust/consumer-perf/src/main.rs}
      * {@code spawn_producer} and
-     * {@code bindings/python/test/performance/consumer_performance_test.py}). This
+     * {@code python/test/performance/consumer_performance_test.py}). This
      * is the canonical, cross-language-identical EOS seeding path. Seed-then-run:
      * spawn, then {@code waitFor()} so the source is fully populated before the
      * measured clock starts. SASL/security is forwarded through a

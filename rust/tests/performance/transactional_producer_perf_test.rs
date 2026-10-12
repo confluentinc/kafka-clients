@@ -21,7 +21,7 @@
 //!    `send_offsets_to_transaction` -> `commit`/`abort`.
 //!
 //! IMPORTANT: this test MUST be kept in sync with the sibling transactional
-//! producer performance tests in the project (`bindings/c/tests/
+//! producer performance tests in the project (`c/tests/
 //! transactional_producer_perf_test.c` and
 //! `tools/java-perf-test/.../TransactionalProducerPerformanceTest.java`) — the
 //! same configuration contract, message shape, metrics-file schema, and
@@ -69,7 +69,7 @@
 //! from `$KAFKA_BIN` BEFORE the measured interval, exactly as the consumer-perf
 //! harnesses seed their input (`consumer-perf/src/main.rs` `spawn_producer`,
 //! `consumer-perf/compare/librdkafka_e2e.c`,
-//! `bindings/python/test/performance/consumer_performance_test.py`). It runs at
+//! `python/test/performance/consumer_performance_test.py`). It runs at
 //! peak (`--throughput -1`) by default with `--num-records` sized to cover the
 //! window, and forwards SASL/security through a `--producer.config` properties
 //! file. Seed-then-run: the harness waits for the seeder to finish, so the source
@@ -82,6 +82,7 @@
 //!    Java on PATH.
 //!  * Fallback (no `KAFKA_BIN`, external broker): the caller is assumed to have
 //!    pre-populated `SOURCE_TOPIC` by equivalent means.
+//!
 //! In every case the consumer never hangs on an under-fed source (bounded poll +
 //! a one-time "source starved" warning).
 //!
@@ -131,7 +132,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use confluent_kafka::common::Metric;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::{ByteArrayDeserializer, ByteArraySerializer};
-use confluent_kafka::consumer::{Consumer, ConsumerConfig, OffsetAndMetadata, new_consumer};
+use confluent_kafka::consumer::{Consumer, ConsumerConfig, KafkaConsumer, OffsetAndMetadata};
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
@@ -165,6 +166,9 @@ const USER_HZ: f64 = 100.0;
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
+
+/// A pre-generated `(key, value)` message.
+type KeyValue = (Option<Vec<u8>>, Vec<u8>);
 
 #[derive(Clone)]
 struct PerfTestConfig {
@@ -765,7 +769,7 @@ fn bucket_json(average: f64, max: f64, total: f64, count: u64) -> serde_json::Va
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn rollover_line(
     snap: &MetricsSnapshot,
     cpu: f64,
@@ -913,10 +917,10 @@ struct SharedState {
 /// producer, records are produced inline) and §9.6 (no `MutexGuard` held across
 /// an `.await`: this task holds no lock; the `KafkaProducer` manages the
 /// `TransactionManager` lock internally).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 async fn run_producer(
     producer: KafkaProducer<Vec<u8>, Vec<u8>>,
-    messages: Arc<Vec<(Option<Vec<u8>>, Vec<u8>)>>,
+    messages: Arc<Vec<KeyValue>>,
     topic: String,
     message_size: u64,
     records_per_transaction: u64,
@@ -1019,7 +1023,7 @@ async fn run_producer(
                     shared.commit_latency_hist[cms.min(MAX_LATENCY_MS + 1)].fetch_add(1, Ordering::Relaxed);
 
                     // Per-record latency = each record's produce() -> commit completes.
-                    for (ts, produce_call) in produce_ts.iter().zip(produce_calls.into_iter()) {
+                    for (ts, produce_call) in produce_ts.iter().zip(produce_calls) {
                         let latency_us = commit_completion.duration_since(*ts).as_micros() as u64;
                         shared.metrics.record_success(latency_us, message_size);
                         let ms = (latency_us / 1000) as usize;
@@ -1027,7 +1031,7 @@ async fn run_producer(
 
                         // Verification: the commit already flushed, so the future
                         // is resolved; await is immediate.
-                        match produce_call.get_timeout(Duration::from_secs(60)).await {
+                        match produce_call.get_with_timeout(Duration::from_secs(60)).await {
                             Ok(md) => {
                                 if !do_verify || verify_record_metadata(&md, &topic) {
                                     shared.verified.fetch_add(1, Ordering::Relaxed);
@@ -1083,7 +1087,7 @@ async fn run_producer(
 /// inline in this single per-producer task) and §9.6 (this task holds no lock
 /// across an `.await`; the `KafkaProducer` manages the `TransactionManager`
 /// lock internally, and the `Consumer` its own `SubscriptionState` lock).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 async fn run_eos_producer(
     producer: KafkaProducer<Vec<u8>, Vec<u8>>,
     mut consumer: Box<dyn Consumer<Vec<u8>, Vec<u8>>>,
@@ -1208,7 +1212,7 @@ async fn run_eos_producer(
                 Err(e) => eprintln!("offset error for {tp:?}: {e:?}"),
             }
         }
-        if let Err(e) = producer.send_offsets_to_transaction(offset_map, group_metadata).await {
+        if let Err(e) = producer.send_offsets_to_transaction(offset_map, group_metadata.as_ref()).await {
             eprintln!("send_offsets_to_transaction error: {e:?}");
             if let Err(ae) = producer.abort_transaction().await {
                 eprintln!("abort_transaction error: {ae:?}");
@@ -1252,13 +1256,13 @@ async fn run_eos_producer(
                     shared.commit_latency_hist[cms.min(MAX_LATENCY_MS + 1)].fetch_add(1, Ordering::Relaxed);
 
                     // Per-record latency = each record's produce() -> commit completes.
-                    for (ts, produce_call) in produce_ts.iter().zip(produce_calls.into_iter()) {
+                    for (ts, produce_call) in produce_ts.iter().zip(produce_calls) {
                         let latency_us = commit_completion.duration_since(*ts).as_micros() as u64;
                         shared.metrics.record_success(latency_us, message_size);
                         let ms = (latency_us / 1000) as usize;
                         shared.latency_hist[ms.min(MAX_LATENCY_MS + 1)].fetch_add(1, Ordering::Relaxed);
 
-                        match produce_call.get_timeout(Duration::from_secs(60)).await {
+                        match produce_call.get_with_timeout(Duration::from_secs(60)).await {
                             Ok(md) => {
                                 if !do_verify || verify_record_metadata(&md, &dest_topic) {
                                     shared.verified.fetch_add(1, Ordering::Relaxed);
@@ -1327,11 +1331,11 @@ async fn seed_source_topic(
         ("batch.size".to_string(), (1024 * 1024).to_string()),
         ("linger.ms".to_string(), "100".to_string()),
     ]);
-    let producer_config = ProducerConfig::from_properties(&props).expect("Invalid seed producer config");
-    let producer = KafkaProducer::<Vec<u8>, Vec<u8>>::from_config(
+    let producer_config = ProducerConfig::new(&props).expect("Invalid seed producer config");
+    let producer = KafkaProducer::<Vec<u8>, Vec<u8>>::new(
         producer_config,
-        Box::new(ByteArraySerializer),
-        Box::new(ByteArraySerializer),
+        Box::new(ByteArraySerializer::new()),
+        Box::new(ByteArraySerializer::new()),
     )
     .expect("Failed to create seed producer");
 
@@ -1346,7 +1350,7 @@ async fn seed_source_topic(
         }
     }
     for call in calls {
-        let _ = call.get_timeout(Duration::from_secs(60)).await;
+        let _ = call.get_with_timeout(Duration::from_secs(60)).await;
     }
     let _ = producer.close().await;
 }
@@ -1355,7 +1359,7 @@ async fn seed_source_topic(
 /// (a plain Java producer) from `$KAFKA_BIN`, the SAME mechanism the consumer-perf
 /// harnesses use to generate their input load (see `consumer-perf/src/main.rs`
 /// `spawn_producer`, `consumer-perf/compare/librdkafka_e2e.c`, and
-/// `bindings/python/test/performance/consumer_performance_test.py`). This is the
+/// `python/test/performance/consumer_performance_test.py`). This is the
 /// canonical, cross-language-identical EOS seeding path: one standard Java
 /// producer, filling the source at high throughput before the measured interval
 /// so the EOS consumer is never starved.
@@ -1603,11 +1607,11 @@ async fn transactional_producer_perf_test() {
     for k in 0..num_producers {
         let txn_id = format!("{}-{}", config.transactional_id, k);
         let props = config.producer_props(&bootstrap_servers, &txn_id);
-        let producer_config = ProducerConfig::from_properties(&props).expect("Invalid producer config");
-        let producer = KafkaProducer::<Vec<u8>, Vec<u8>>::from_config(
+        let producer_config = ProducerConfig::new(&props).expect("Invalid producer config");
+        let producer = KafkaProducer::<Vec<u8>, Vec<u8>>::new(
             producer_config,
-            Box::new(ByteArraySerializer),
-            Box::new(ByteArraySerializer),
+            Box::new(ByteArraySerializer::new()),
+            Box::new(ByteArraySerializer::new()),
         )
         .expect("Failed to create producer");
         producer.init_transactions().await.expect("init_transactions failed");
@@ -1704,7 +1708,7 @@ async fn transactional_producer_perf_test() {
                     .await
                     .expect("warmup commit_transaction failed");
                 let md = produce_call
-                    .get_timeout(Duration::from_secs(30))
+                    .get_with_timeout(Duration::from_secs(30))
                     .await
                     .expect("warmup send failed");
                 assert!(
@@ -1766,15 +1770,15 @@ async fn transactional_producer_perf_test() {
         }
         for _ in 0..num_producers {
             let props = config.consumer_props(&bootstrap_servers, &config.consumer_group_id);
-            let consumer_config = ConsumerConfig::from_properties(&props).expect("Invalid consumer config");
-            let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+            let consumer_config = ConsumerConfig::new(&props).expect("Invalid consumer config");
+            let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
                 consumer_config,
-                Box::new(ByteArrayDeserializer),
-                Box::new(ByteArrayDeserializer),
+                Box::new(ByteArrayDeserializer::new()),
+                Box::new(ByteArrayDeserializer::new()),
             )
             .expect("Failed to create consumer");
             consumer
-                .subscribe(vec![source.clone()])
+                .subscribe_with_topics(vec![source.clone()])
                 .await
                 .expect("consumer subscribe failed");
             consumers.push_back(consumer);

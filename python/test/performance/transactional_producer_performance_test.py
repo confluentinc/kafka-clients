@@ -19,8 +19,8 @@ API. It shares the configuration contract, message shape, warmup/measured/
 cooldown scaffolding, 100 ms rate pacing, CPU/RSS aggregation and the
 ``metrics.jsonl`` / ``results.json`` schema of the sibling transactional
 producer performance tests
-(``tests/performance/transactional_producer_perf_test.rs``,
-``bindings/c/tests/transactional_producer_perf_test.c`` and
+(``rust/tests/performance/transactional_producer_perf_test.rs``,
+``c/tests/transactional_producer_perf_test.c`` and
 ``tools/java-perf-test/.../TransactionalProducerPerformanceTest.java``) so
 results are comparable across implementations, plus the transaction-specific
 schema additions (``committed_transactions`` / ``aborted_transactions`` /
@@ -61,8 +61,8 @@ throughput is understated. The CANONICAL mechanism — identical across all four
 transactional harnesses (Rust / librdkafka-C / Java / Python) — is to spawn
 Kafka's standard ``kafka-producer-perf-test.sh`` (a plain Java producer) from
 ``$KAFKA_BIN`` BEFORE the measured interval, exactly as the consumer perf tests
-seed their input load (``bindings/python/test/performance/consumer_performance_test.py``
-``spawn_producer``, ``consumer-perf/src/main.rs``). It runs at peak
+seed their input load (``python/test/performance/consumer_performance_test.py``
+``spawn_producer``, ``rust/consumer-perf/src/main.rs``). It runs at peak
 (``--throughput -1``) by default with ``--num-records`` sized to cover the window
 (``SEED_COUNT`` / ``SEED_THROUGHPUT`` override), forwarding SASL through a
 ``--producer.config`` properties file. Seed-then-run: the harness waits for the
@@ -457,8 +457,8 @@ def create_producer(bootstrap_servers, txn_id):
     if v2:
         from confluent_kafka import Producer as CKProducer
         return CKProducer(conf)
-    from producer import KafkaProducer
-    return KafkaProducer({k: str(val) for k, val in conf.items()})
+    from confluent_kafka.producer import KafkaProducer
+    return KafkaProducer(configs={k: str(val) for k, val in conf.items()})
 
 
 def create_consumer(bootstrap_servers):
@@ -468,9 +468,9 @@ def create_consumer(bootstrap_servers):
         c = CKConsumer(conf)
         c.subscribe([source_topic])
         return c
-    from consumer import KafkaConsumer
-    c = KafkaConsumer({k: str(val) for k, val in conf.items()})
-    c.subscribe([source_topic])
+    from confluent_kafka.consumer import KafkaConsumer
+    c = KafkaConsumer(configs={k: str(val) for k, val in conf.items()})
+    c.subscribe(topics=[source_topic])
     return c
 
 
@@ -553,9 +553,9 @@ def run_producer(index, bootstrap_servers, measured_start_ns,
                 if v2:
                     _v2_produce(producer, topic_name, key, value, delivered)
                 else:
-                    from producer import ProducerRecord
+                    from confluent_kafka.producer import ProducerRecord
                     futures.append(producer.send(
-                        ProducerRecord(topic=topic_name, key=key, value=value)))
+                        record=ProducerRecord(topic=topic_name, key=key, value=value)))
                 records_sent += 1
                 rate.maybe_wait(records_sent)
 
@@ -643,9 +643,9 @@ def run_eos_producer(index, bootstrap_servers, measured_start_ns,
                 if v2:
                     _v2_produce(producer, topic_name, key, value, delivered)
                 else:
-                    from producer import ProducerRecord
+                    from confluent_kafka.producer import ProducerRecord
                     futures.append(producer.send(
-                        ProducerRecord(topic=topic_name, key=key, value=value)))
+                        record=ProducerRecord(topic=topic_name, key=key, value=value)))
                 nxt = roff + 1
                 cur = offsets.get((rtopic, rpart))
                 if cur is None or nxt > cur:
@@ -766,12 +766,12 @@ def _eos_poll(consumer):
             out.append((msg.key(), msg.value(), msg.topic(),
                         msg.partition(), msg.offset()))
     else:
-        records = consumer.poll(EOS_POLL_TIMEOUT_MS / 1000.0)
+        records = consumer.poll(timeout=EOS_POLL_TIMEOUT_MS / 1000.0)
         if records is not None and not records.is_empty():
             for rec in records:
-                key = bytes(rec.key) if rec.key is not None else None
-                value = bytes(rec.value) if rec.value is not None else None
-                out.append((key, value, rec.topic, rec.partition, rec.offset))
+                key = bytes(rec.key()) if rec.key() is not None else None
+                value = bytes(rec.value()) if rec.value() is not None else None
+                out.append((key, value, rec.topic(), rec.partition(), rec.offset()))
     return out
 
 
@@ -785,10 +785,12 @@ def _send_offsets(producer, consumer, offsets):
         producer.send_offsets_to_transaction(
             offsets_list, consumer.consumer_group_metadata())
     else:
-        from consumer import TopicPartition, OffsetAndMetadata
-        offset_map = {TopicPartition(t, p): OffsetAndMetadata(off)
+        from confluent_kafka.common import TopicPartition
+        from confluent_kafka.consumer import OffsetAndMetadata
+        offset_map = {TopicPartition(topic=t, partition=p): OffsetAndMetadata(offset=off)
                       for (t, p), off in offsets.items()}
-        producer.send_offsets_to_transaction(offset_map, consumer.group_metadata())
+        producer.send_offsets_to_transaction(
+            offsets=offset_map, group_metadata=consumer.group_metadata())
 
 
 def _close_producer(producer):
@@ -829,8 +831,8 @@ def run_warmup(bootstrap_servers):
                 producer.commit_transaction()
                 _drain_committed(producer, delivered, 1)
             else:
-                from producer import ProducerRecord
-                fut = producer.send(ProducerRecord(topic=topic_name, key=key, value=value))
+                from confluent_kafka.producer import ProducerRecord
+                fut = producer.send(record=ProducerRecord(topic=topic_name, key=key, value=value))
                 producer.commit_transaction()
                 try:
                     fut.result()
@@ -952,7 +954,7 @@ def spawn_seed_producer(bootstrap_servers, total_records):
     """Seed SOURCE_TOPIC by spawning Kafka's standard kafka-producer-perf-test.sh
     (a plain Java producer) from ``$KAFKA_BIN`` — the SAME mechanism the consumer
     perf tests use to generate their input load (consumer_performance_test.py
-    ``spawn_producer``, consumer-perf/src/main.rs). Canonical, cross-language
+    ``spawn_producer``, rust/consumer-perf/src/main.rs). Canonical, cross-language
     EOS seeding: fill the source at high throughput before the measured interval.
 
     Seed-then-run: waits for the child to finish so the source is fully populated
@@ -1027,8 +1029,8 @@ def create_async_producer(bootstrap_servers, txn_id):
     if v2:
         from confluent_kafka.aio.producer import AIOProducer
         return AIOProducer({k: str(val) for k, val in conf.items()})
-    from producer import AsyncKafkaProducer
-    return AsyncKafkaProducer({k: str(val) for k, val in conf.items()})
+    from confluent_kafka.producer import AsyncKafkaProducer
+    return AsyncKafkaProducer(configs={k: str(val) for k, val in conf.items()})
 
 
 async def _async_send(producer, key, value):
@@ -1036,8 +1038,8 @@ async def _async_send(producer, key, value):
     / v3 AsyncKafkaProducer.send)."""
     if v2:
         return await producer.produce(topic=topic_name, key=key, value=value)
-    from producer import ProducerRecord
-    return await producer.send(ProducerRecord(topic=topic_name, key=key, value=value))
+    from confluent_kafka.producer import ProducerRecord
+    return await producer.send(record=ProducerRecord(topic=topic_name, key=key, value=value))
 
 
 async def _send_offsets_async(producer, consumer, offsets):
@@ -1047,10 +1049,12 @@ async def _send_offsets_async(producer, consumer, offsets):
         await producer.send_offsets_to_transaction(
             offsets_list, consumer.consumer_group_metadata())
     else:
-        from consumer import TopicPartition, OffsetAndMetadata
-        offset_map = {TopicPartition(t, p): OffsetAndMetadata(off)
+        from confluent_kafka.common import TopicPartition
+        from confluent_kafka.consumer import OffsetAndMetadata
+        offset_map = {TopicPartition(topic=t, partition=p): OffsetAndMetadata(offset=off)
                       for (t, p), off in offsets.items()}
-        await producer.send_offsets_to_transaction(offset_map, consumer.group_metadata())
+        await producer.send_offsets_to_transaction(
+            offsets=offset_map, group_metadata=consumer.group_metadata())
 
 
 def _verify_async_result(res):
