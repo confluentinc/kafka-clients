@@ -905,8 +905,8 @@ impl<K, V> KafkaProducer<K, V> {
 
         // 5. Create ProducerMetadata and bootstrap it with the resolved addresses
         let metadata = Arc::new(ProducerMetadata::with_log_context(
-            config.reconnect_backoff_ms,
-            config.reconnect_backoff_max_ms,
+            config.retry_backoff_ms,
+            config.retry_backoff_max_ms,
             config.metadata_max_age_ms,
             config.metadata_max_idle_ms,
             ClusterResourceListeners::new(),
@@ -3947,6 +3947,38 @@ mod tests {
         );
     }
 
+    /// `new` gives the producer's metadata the `retry.backoff.ms` / `retry.backoff.max.ms`
+    /// refresh backoff, as Java's constructor does (`KafkaProducer.java:456-457`), not the
+    /// `reconnect.backoff.*` values that only the `NetworkClient` takes.
+    ///
+    /// Not a translation of a Java test. Each backoff has its initial value equal to its
+    /// maximum, so `ExponentialBackoff` returns exactly the configured value with no jitter,
+    /// and right after a failed refresh `time_to_allow_update` is that backoff. The
+    /// producer is closed first, so the Sender task cannot record a refresh of its own
+    /// while the metadata is read.
+    #[tokio::test]
+    async fn test_metadata_refresh_backoff_follows_retry_backoff() {
+        let props = guard_props(&[
+            ("retry.backoff.ms", "1000"),
+            ("retry.backoff.max.ms", "1000"),
+            ("reconnect.backoff.ms", "50"),
+            ("reconnect.backoff.max.ms", "50"),
+        ]);
+        let config = ProducerConfig::new(&props).expect("valid config");
+        let producer =
+            KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                .expect("constructs");
+        producer.close_with_timeout(Duration::ZERO).await.expect("close");
+
+        let now = SystemTime.milliseconds();
+        producer.metadata.failed_update(now);
+        assert_eq!(
+            1000,
+            producer.metadata.time_to_allow_update(now),
+            "the metadata refresh backoff must be retry.backoff.ms"
+        );
+    }
+
     /// `partitioner.type=RoundRobinPartitioner` is resolved by `new` into a live
     /// `partitioner`, and a
     /// resolved partitioner turns OFF adaptive partitioning in the accumulator (Java
@@ -5328,8 +5360,8 @@ mod tests {
             let pending_requests = Arc::new(Mutex::new(PendingRequests::new()));
 
             let metadata = Arc::new(ProducerMetadata::with_log_context(
-                config.reconnect_backoff_ms,
-                config.reconnect_backoff_max_ms,
+                config.retry_backoff_ms,
+                config.retry_backoff_max_ms,
                 config.metadata_max_age_ms,
                 config.metadata_max_idle_ms,
                 ClusterResourceListeners::new(),
@@ -6935,8 +6967,8 @@ mod tests {
                 .expect("these tests always enable idempotence");
 
         let metadata = Arc::new(ProducerMetadata::with_log_context(
-            config.reconnect_backoff_ms,
-            config.reconnect_backoff_max_ms,
+            config.retry_backoff_ms,
+            config.retry_backoff_max_ms,
             config.metadata_max_age_ms,
             config.metadata_max_idle_ms,
             ClusterResourceListeners::new(),
