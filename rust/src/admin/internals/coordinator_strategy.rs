@@ -114,12 +114,16 @@ impl CoordinatorStrategy {
         let mut mapped_keys = std::collections::HashMap::new();
         let mut failed_keys = std::collections::HashMap::new();
 
+        // Java keys off `coordinator.key() == null` (old version without
+        // batching). Only the entry `FindCoordinatorResponse.coordinators()`
+        // synthesises from the top-level fields has a null key, and it does so
+        // exactly when the wire `coordinators` list is empty; a v4+ entry's key
+        // is a non-nullable string. The Rust response gives the synthesised
+        // entry an empty key, which a batched lookup for the group id "" also
+        // has, so the old form is recognised by the empty wire list instead.
+        let old_version = response.data().coordinators.is_empty();
         for coordinator in response.coordinators() {
-            // Java keys off `coordinator.key() == null` (old version without
-            // batching). The Rust `FindCoordinatorResponse` synthesizes an
-            // empty-string key for the v<=3 single-coordinator representation,
-            // so an empty key signals the old-version path here.
-            let key = if coordinator.key.is_empty() {
+            let key = if old_version {
                 self.require_singleton_and_type(keys)?.clone()
             } else if self.coordinator_type == CoordinatorType::Group {
                 CoordinatorKey::by_group_id(coordinator.key.clone())
@@ -496,6 +500,50 @@ mod tests {
         data.set_coordinators(vec![coordinator("foo", Errors::None, 1), coordinator("bar", Errors::None, 2)]);
         let result = run_lookup(keys(&[group1.clone(), group2.clone()]), data);
         assert_eq!(result.mapped_keys, HashMap::from([(group1, 1), (group2, 2)]));
+        assert!(result.failed_keys.is_empty());
+    }
+
+    /// An empty group id is a real key in a batched (v4+) lookup. Java tells the
+    /// old single-coordinator form apart by `coordinator.key() == null`, which
+    /// only the entry `FindCoordinatorResponse.coordinators()` synthesises for a
+    /// response without a `coordinators` list has; a wire entry whose key is ""
+    /// is mapped to `CoordinatorKey.byGroupId("")` like any other. So "" fails
+    /// with its own error and "g" is still mapped.
+    #[test]
+    fn test_batched_lookup_with_an_empty_group_id_is_not_the_old_form() {
+        let empty = CoordinatorKey::by_group_id("");
+        let group = CoordinatorKey::by_group_id("g");
+        let mut data = FindCoordinatorResponseData::new();
+        data.set_coordinators(vec![
+            coordinator("", Errors::InvalidGroupId, -1),
+            coordinator("g", Errors::None, 2),
+        ]);
+        let result = run_lookup(keys(&[empty.clone(), group.clone()]), data);
+        assert_eq!(result.mapped_keys, HashMap::from([(group, 2)]));
+        assert_eq!(
+            result.failed_keys.keys().cloned().collect::<HashSet<_>>(),
+            keys(std::slice::from_ref(&empty))
+        );
+        let err = &result.failed_keys[&empty];
+        assert!(matches!(err, Error::InvalidGroupId(_)), "got {err:?}");
+        assert_eq!(
+            err.message(),
+            format!("FindCoordinator request for key `{empty}` failed due to an unexpected error")
+        );
+    }
+
+    /// The old form keeps working when the single key is itself "": a response
+    /// with no `coordinators` list is still read from its top-level fields.
+    #[test]
+    fn test_old_lookup_for_an_empty_group_id() {
+        let empty = CoordinatorKey::by_group_id("");
+        let mut data = FindCoordinatorResponseData::new();
+        data.set_error_code(Errors::None.code())
+            .set_host("localhost".to_string())
+            .set_port(9092)
+            .set_node_id(3);
+        let result = run_old_lookup(empty.clone(), data);
+        assert_eq!(result.mapped_keys, HashMap::from([(empty, 3)]));
         assert!(result.failed_keys.is_empty());
     }
 
