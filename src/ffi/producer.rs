@@ -68,9 +68,17 @@
 //! the topic yet, `buffer.memory` exhausted) waits up to `max.block.ms` on a task of
 //! its own ([`send_waiter`]), not on the submission task, so N callers waiting at the
 //! same time wait concurrently — as N Java threads blocked in `send()` do — and a
-//! record that needs no wait is never held up behind one that does. The handle also
-//! carries the producer's *refusal* where Java's `send()` throws (closed producer,
-//! transaction state), so the binding can raise it from its `send`. For a caller
+//! record that needs no wait is never held up behind one that does. Such a waiting
+//! record is a `send()` still in progress, and is treated as Java treats one:
+//! `flush`, `close` and the transaction-control calls hand over the records still
+//! *queued* ahead of them ([`drain_submitted_sends_await`]) but do not wait for a
+//! record waiting inside the producer — Java's `flush()` / `commitTransaction()` do
+//! not wait for another thread's blocked `send()` either — and `close` fails it the
+//! way Java's `close()` does ("Producer closed while allocating memory" / "Producer
+//! closed while send in progress"), the refusal arriving on its acceptance handle.
+//! The handle also carries the producer's *refusal* where Java's `send()` throws
+//! (closed producer, transaction state), so the binding can raise it from its
+//! `send`. For a caller
 //! that wants to bound its own memory, [`kafka_producer_Producer_on_space_available`]
 //! still offers a one-shot bell that rings — on the dispatcher thread — once the
 //! number of records queued, in flight or waiting drops back below
@@ -1066,7 +1074,8 @@ unsafe fn producer_static_ref(ptr: usize) -> ProducerStaticRef {
 /// the submission task, or on the per-record [`send_waiter`] it was moved into —
 /// whether it was produced, refused, discarded, or panicked on. Keeping it in a
 /// `Drop` means the counter cannot drift, and a drifted counter would make every
-/// later barrier wait for a request that no longer exists.
+/// later drain push a barrier for a request that no longer exists and could leave
+/// the space bell below silent.
 ///
 /// It also rings the "space available" bell: when the decrement brings the depth
 /// back below [`MAX_QUEUED_SENDS`], every waiter registered through
@@ -1105,73 +1114,61 @@ impl Drop for QueueDepthGuard<'_> {
     }
 }
 
-/// The per-record waiters ([`send_waiter`]) currently alive, so a drain
-/// ([`drain_submitted_sends_await`]) can wait for the ones that existed when it
-/// began and `destroy` for all of them.
+/// The per-record waiters ([`send_waiter`]) currently alive, for `destroy` to join:
+/// each holds a `&'static` reference into the producer, so the handle cannot be
+/// freed while one lives.
 ///
-/// Ids are handed out in registration order, which is submission order — a waiter
-/// is registered on the submission task before it takes the next item — so "every
-/// waiter registered before the barrier was acked" is "every live id below the
-/// counter read after the ack". A snapshot: waiters created by sends racing the
-/// drain are not waited for, the boundary the drain documents.
+/// Nothing else waits on them. A waiter is Java's `send()` in progress on another
+/// thread, and the `flush`/`close`/transaction-control drains stop at the
+/// submission queue's barrier ([`drain_submitted_sends_await`]), as Java's
+/// `flush()` and `commitTransaction()` do not wait for such a `send()` and Java's
+/// `close()` fails it — which the producer's own `close()` does here too.
 #[derive(Default)]
 struct SendWaiters {
-    inner: std::sync::Mutex<SendWaitersInner>,
+    live: std::sync::atomic::AtomicUsize,
     /// Signalled (`notify_waiters`) whenever a waiter finishes.
     finished: tokio::sync::Notify,
 }
-#[derive(Default)]
-struct SendWaitersInner {
-    next_id: u64,
-    live: std::collections::BTreeSet<u64>,
-}
 impl SendWaiters {
     fn register(&self) -> WaiterRegistration<'_> {
-        let mut inner = self.inner.lock().unwrap();
-        let id = inner.next_id;
-        inner.next_id += 1;
-        inner.live.insert(id);
-        WaiterRegistration { waiters: self, id }
+        self.live.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        WaiterRegistration { waiters: self }
     }
 
-    /// The id the next registration gets: every waiter registered so far has a
-    /// smaller one.
-    fn threshold(&self) -> u64 {
-        self.inner.lock().unwrap().next_id
+    /// How many waiters are alive right now.
+    fn live(&self) -> usize {
+        self.live.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    /// Resolves once no waiter registered before `threshold` is alive.
-    async fn wait_for_registered_before(&self, threshold: u64) {
+    /// Resolves once no waiter is alive. A join only once no further waiter can be
+    /// registered, which `destroy` ensures by ending the submission task — the
+    /// sole registrant — first.
+    async fn wait_until_empty(&self) {
         loop {
             // Created before the check so a finish between the check and the await
             // is not lost: a `Notified` receives `notify_waiters` from creation on.
             let finished = self.finished.notified();
-            let done = {
-                let inner = self.inner.lock().unwrap();
-                inner.live.first().is_none_or(|&oldest| oldest >= threshold)
-            };
-            if done {
+            if self.live() == 0 {
                 return;
             }
             finished.await;
         }
     }
 
-    fn finish(&self, id: u64) {
-        self.inner.lock().unwrap().live.remove(&id);
+    fn finish(&self) {
+        self.live.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
         self.finished.notify_waiters();
     }
 }
 
 /// A live entry in [`SendWaiters`]; removed on drop, so a waiter that panics still
-/// lets a drain — and `destroy` — through.
+/// lets `destroy` through.
 struct WaiterRegistration<'a> {
     waiters: &'a SendWaiters,
-    id: u64,
 }
 impl Drop for WaiterRegistration<'_> {
     fn drop(&mut self) {
-        self.waiters.finish(self.id);
+        self.waiters.finish();
     }
 }
 
@@ -1182,7 +1179,12 @@ impl Drop for WaiterRegistration<'_> {
 /// behind one that does, and N callers waiting at the same time wait
 /// *concurrently* — as N Java threads blocked in `send()` do — not one after
 /// another. The record's queue-depth count and its [`SendWaiters`] registration
-/// travel with it, so the `flush`/`close`/transaction-control drains wait for it.
+/// travel with it: the count keeps the space bell honest, the registration lets
+/// `destroy` join it. The `flush`/`close`/transaction-control drains do not wait
+/// for it — it is a `send()` in progress, which Java's `flush()` and
+/// `commitTransaction()` do not wait for either — and `close` ends its wait through
+/// the producer's own close, with the refusal Java's `send()` throws then
+/// ("Producer closed while send in progress"), settled on the acceptance handle.
 ///
 /// A per-record spawn, but on the slow path only: the fast path
 /// ([`kafka_producer_Producer_try_send`]) never reaches the submission task, and a
@@ -1240,11 +1242,11 @@ async fn submission_loop(ptr: usize, mut rx: tokio::sync::mpsc::UnboundedReceive
             SubmitRequest::Send(send) => send,
             SubmitRequest::Barrier { ack } => {
                 // FIFO delivery means reaching this marker proves every send ahead
-                // of it has been handed over — or handed to a `send_waiter`, which
-                // is registered before this task takes the next item, so a drain
-                // that sees this ack knows to wait for it too; acking it is what
-                // lets `flush`/`close` wait for the non-transactional async queue
-                // to drain (see `drain_submitted_sends_await`).
+                // of it has been handed to the producer — accepted, refused, or
+                // moved to a `send_waiter`, Java's `send()` now in progress inside
+                // the producer; acking it is what lets `flush`/`close` and the
+                // transaction-control calls order themselves after the queue (see
+                // `drain_submitted_sends_await`).
                 if let Some(ack) = ack {
                     let _ = ack.send(());
                 }
@@ -1253,8 +1255,7 @@ async fn submission_loop(ptr: usize, mut rx: tokio::sync::mpsc::UnboundedReceive
         };
         // Decremented only once the send has fully settled — here, or on the
         // waiter it is moved into — so the counter means "queued, in flight or
-        // waiting": a barrier has to wait for a waiting record too, not merely for
-        // the queue to empty.
+        // waiting", the depth the space bell (`QueueDepthGuard`) is about.
         let depth = QueueDepthGuard(handle);
         // The record's callback and the bookkeeping that tells, after an `Err`,
         // whether a batch still owns it (see `CallbackState`).
@@ -1277,8 +1278,7 @@ async fn submission_loop(ptr: usize, mut rx: tokio::sync::mpsc::UnboundedReceive
                     Err(e) => settlement.settle(Err(e), &handle.completion_tx),
                     // Java's blocking `send()`: wait up to `max.block.ms` on a task
                     // of the record's own, so this loop moves on to the next record.
-                    // Registered before the next item is taken, so a barrier acked
-                    // after this point knows to wait for it (`SendWaiters`).
+                    // Registered (`SendWaiters`) so `destroy` can join it.
                     Ok(TrySendOutcome::WouldBlock(callback)) => {
                         let registration = handle.send_waiters.register();
                         tokio::spawn(send_waiter(handle, kp, retry, callback, settlement, depth, registration));
@@ -1349,8 +1349,8 @@ struct ProducerHandle {
     /// costs `flush`/`close` one atomic load instead of a channel round-trip
     /// through the submission task. See [`drain_submitted_sends_await`].
     queued_sends: std::sync::atomic::AtomicUsize,
-    /// The per-record waiters alive right now, for the drains and `destroy` to
-    /// wait on. See [`SendWaiters`].
+    /// The per-record waiters alive right now, for `destroy` to join. See
+    /// [`SendWaiters`].
     send_waiters: SendWaiters,
     /// "Space available" bells registered while `queued_sends` was at or above
     /// [`MAX_QUEUED_SENDS`]; fired once and cleared by [`QueueDepthGuard`] when the
@@ -1712,12 +1712,12 @@ pub unsafe extern "C" fn kafka_producer_Producer_destroy(producer: *mut kafka_pr
     //     producer's `send`; each holds the same kind of `&'static` reference. They
     //     are not in `pending_tasks` — a flood of waiting records would make its
     //     per-registration prune quadratic — but leave the `send_waiters` registry
-    //     as their last act, so an empty registry is the join. The threshold is
-    //     read with the submission task gone, so no waiter can register after it.
-    kind.lock()
-        .unwrap()
-        .runtime()
-        .block_on(handle.send_waiters.wait_for_registered_before(handle.send_waiters.threshold()));
+    //     as their last act, so an empty registry is the join. With the submission
+    //     task gone no waiter can register after this. A producer closed first —
+    //     the documented order — has already failed them ("Producer closed while
+    //     send in progress"), so this is normally instant; otherwise each waits
+    //     out its `max.block.ms`.
+    kind.lock().unwrap().runtime().block_on(handle.send_waiters.wait_until_empty());
     // 3. Ring any "space available" bell still registered. With every task joined
     //    nothing else touches `space_waiters`, and a waiter that never fires would
     //    leave a caller parked forever (and leak its `user_data`). Goes on the
@@ -3381,6 +3381,12 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_destroy(metadata: *mut ka
 
 /// Flushes all pending records.
 ///
+/// Records queued by [`kafka_producer_Producer_send_async`] that had returned
+/// before this call are handed to the producer first, so the flush covers them.
+/// One the producer could not take at once and that is still waiting (metadata
+/// for its topic, buffer memory) is a `send()` in progress and is not waited for,
+/// as Java's `flush()` does not wait for another thread's blocked `send()`.
+///
 /// # Parameters
 ///
 /// - `producer`: Non-null producer handle.
@@ -3406,6 +3412,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_flush(
     // `flush` observes them — Java's `flush()` blocks until every prior send
     // completes, and a queued record has not reached the accumulator `flush`
     // drains. Without this the FFI flush could return "done" with records unsent.
+    // A record already *waiting* inside the producer (`send_waiter`: metadata,
+    // buffer memory) is a `send()` still in progress on another thread, which
+    // Java's `flush()` does not wait for either; the drain stops at the queue.
     // The drain must run without holding the `kind` lock: the submission task
     // takes that lock to hand over the sends ahead of the barrier, so blocking on
     // the barrier while holding it would deadlock. Grab a runtime handle under a
@@ -3413,8 +3422,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_flush(
     let handle = unsafe { producer_handle(producer) };
     let producer_mtx = unsafe { producer_ref(producer) };
     let rt_handle = producer_mtx.lock().unwrap().runtime().handle().clone();
-    if let Err(e) = drain_submitted_sends_via(&handle.queued_sends, &handle.submit_tx, &handle.send_waiters, &rt_handle)
-    {
+    if let Err(e) = drain_submitted_sends_via(&handle.queued_sends, &handle.submit_tx, &rt_handle) {
         if !out_error.is_null() {
             unsafe { *out_error = box_error(e) };
         }
@@ -3709,6 +3717,13 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for(
 ///
 /// After closing, further send calls will fail.
 ///
+/// Records queued by [`kafka_producer_Producer_send_async`] that had returned
+/// before this call are handed to the producer first and flushed with the rest.
+/// One the producer could not take at once and that is still waiting (metadata
+/// for its topic, buffer memory) is failed instead, as Java's `close()` fails a
+/// `send()` blocked there ("Producer closed while send in progress"): its
+/// acceptance handle reports the refusal, with no delivery callback to come.
+///
 /// # Parameters
 ///
 /// - `producer`: Producer handle, or null (no-op).
@@ -3735,14 +3750,19 @@ pub unsafe extern "C" fn kafka_producer_Producer_close(
     // FFI exposes only the flushing form), so queued records must be produced, not
     // dropped. Without this, close would race the queued `send`s: the producer
     // shuts down, each queued `send` then fails `ensure_not_closed`, and the
-    // record is lost. As in `flush`, drain without holding the `kind` lock.
+    // record is lost. A record already *waiting* inside the producer
+    // (`send_waiter`: metadata, buffer memory) is not waited for: Java's `close()`
+    // fails a `send()` blocked there ("Producer closed while allocating memory" /
+    // "Producer closed while send in progress"), and so does the producer's own
+    // `close()` below — the refusal reaches the caller on the record's acceptance
+    // handle, where Java's `send()` throws. As in `flush`, drain without holding
+    // the `kind` lock.
     let handle = unsafe { producer_handle(producer) };
     // A test-paused submission task would never reach the drain's barrier.
     release_test_pause(handle);
     let producer_mtx = unsafe { producer_ref(producer) };
     let rt_handle = producer_mtx.lock().unwrap().runtime().handle().clone();
-    if let Err(e) = drain_submitted_sends_via(&handle.queued_sends, &handle.submit_tx, &handle.send_waiters, &rt_handle)
-    {
+    if let Err(e) = drain_submitted_sends_via(&handle.queued_sends, &handle.submit_tx, &rt_handle) {
         if !out_error.is_null() {
             unsafe { *out_error = box_error(e) };
         }
@@ -3807,8 +3827,10 @@ fn flush_or_close_async(
         // `close` flushes) rather than race them, so a drain failure aborts the
         // operation with the error rather than reporting false success. Awaiting
         // the barrier holds no lock, so the submission task processing the sends
-        // ahead of it is free to take the `kind` lock (no deadlock).
-        let result = match drain_submitted_sends_await(&h.queued_sends, &h.submit_tx, &h.send_waiters).await {
+        // ahead of it is free to take the `kind` lock (no deadlock). As on the sync
+        // path, a record already waiting inside the producer is not waited for —
+        // `close` fails it as Java's does, `flush` leaves it waiting as Java's does.
+        let result = match drain_submitted_sends_await(&h.queued_sends, &h.submit_tx).await {
             Err(e) => Err(e),
             // Brief lock to extend a reference to the inner producer; the guard is
             // dropped before the `.await` (CLAUDE.md §9.6).
@@ -3841,7 +3863,8 @@ fn flush_or_close_async(
 }
 
 /// Asynchronously flushes all pending records, invoking `callback` on
-/// completion (the async counterpart of [`kafka_producer_Producer_flush`]).
+/// completion (the async counterpart of [`kafka_producer_Producer_flush`], with
+/// the same handling of records queued or waiting via `send_async`).
 ///
 /// Returns immediately; `callback` fires on the producer's dispatcher thread
 /// with a null error on success or a non-null [`kafka_common_Error_t`] the
@@ -3860,7 +3883,8 @@ pub unsafe extern "C" fn kafka_producer_Producer_flush_async(
 }
 
 /// Asynchronously closes the producer, invoking `callback` on completion (the
-/// async counterpart of [`kafka_producer_Producer_close`]).
+/// async counterpart of [`kafka_producer_Producer_close`], with the same
+/// handling of records queued or waiting via `send_async`).
 ///
 /// Returns immediately; `callback` fires on the producer's dispatcher thread
 /// with a null error on success or a non-null [`kafka_common_Error_t`] the
@@ -4061,6 +4085,12 @@ impl Drop for TxnControlAsyncGuard {
 /// guarantee is "everything already submitted when this call began", which is the
 /// strongest claim that can be ordered.
 ///
+/// Nor is a record the producer could not take at once and that is still waiting
+/// inside it ([`send_waiter`]: metadata, buffer memory): that is Java's `send()` in
+/// progress on another thread, which Java's `flush()` / `commitTransaction()` do not
+/// wait for, and which Java's `close()` fails — as the producer's own `close()` does
+/// here. "Handed to the producer" is the guarantee, not "appended".
+///
 /// Split out from [`drain_submitted_sends_await`] for testability: both failure
 /// paths require a dead submission task, which cannot be arranged through the C API
 /// without destroying the handle, and they are the paths where returning `Ok` would
@@ -4068,26 +4098,27 @@ impl Drop for TxnControlAsyncGuard {
 fn drain_submitted_sends_via(
     queued_sends: &std::sync::atomic::AtomicUsize,
     submit_tx: &tokio::sync::mpsc::UnboundedSender<SubmitRequest>,
-    send_waiters: &SendWaiters,
     runtime: &tokio::runtime::Handle,
 ) -> Result<(), Error> {
-    runtime.block_on(drain_submitted_sends_await(queued_sends, submit_tx, send_waiters))
+    runtime.block_on(drain_submitted_sends_await(queued_sends, submit_tx))
 }
 
 /// The `.await` form of the drain, shared by the sync path (via `block_on` above)
 /// and the async `flush`/`close` path, which awaits it directly rather than
 /// nesting a `block_on` inside a spawned task.
 ///
-/// Returns immediately when nothing is queued (the normal case — one atomic
-/// load). Otherwise pushes a barrier and awaits it, then waits for every
-/// per-record waiter ([`send_waiter`]) that existed when the barrier was acked, so
-/// every already-queued send has been settled by the producer when it resolves —
-/// including one still waiting for metadata or buffer memory, exactly as when the
-/// submission task did that wait inline.
+/// Returns immediately when nothing is queued or waiting (the normal case — one
+/// atomic load). Otherwise pushes a barrier and awaits it, so every already-queued
+/// send has been handed to the producer when it resolves: accepted, refused, or —
+/// for a record the producer could not take at once — moved to a [`send_waiter`],
+/// Java's `send()` now in progress inside the producer. The drain does not wait
+/// for those: Java's `flush()` and `commitTransaction()` do not wait for another
+/// thread's blocked `send()`, and Java's `close()` fails it ("Producer closed while
+/// allocating memory" / "Producer closed while send in progress") — which the
+/// producer's own `close()`, run right after this drain, does here too.
 async fn drain_submitted_sends_await(
     queued_sends: &std::sync::atomic::AtomicUsize,
     submit_tx: &tokio::sync::mpsc::UnboundedSender<SubmitRequest>,
-    send_waiters: &SendWaiters,
 ) -> Result<(), Error> {
     if queued_sends.load(std::sync::atomic::Ordering::Acquire) == 0 {
         return Ok(());
@@ -4105,13 +4136,7 @@ async fn drain_submitted_sends_await(
             "the producer's send-submission task stopped while ordering queued \
              sends; records queued by send_async may not have been produced",
         )
-    })?;
-    // Everything ahead of the barrier has been handed over, or handed to a waiter
-    // registered before the ack — so all of those have ids below the counter read
-    // now (`SendWaiters`). Waiters for sends racing this drain may have higher ids
-    // and are not waited for: the documented boundary.
-    send_waiters.wait_for_registered_before(send_waiters.threshold()).await;
-    Ok(())
+    })
 }
 
 /// Runs one transaction-control operation under the transaction-control flag.
@@ -4134,8 +4159,12 @@ async fn drain_submitted_sends_await(
 /// supported inside a transaction — `commit_transaction` then includes those records
 /// and `abort_transaction` discards them, through the producer's own accumulator
 /// handling. Sends racing concurrently on another thread are not covered (the same
-/// boundary [`drain_submitted_sends_await`] documents), and the normal case with
-/// nothing queued costs one atomic load.
+/// boundary [`drain_submitted_sends_await`] documents), nor is a record the producer
+/// could not take at once and that is still waiting (metadata, buffer memory) when
+/// the control op runs: that is a `send()` in progress on another thread, which
+/// Java's `commitTransaction()` / `abortTransaction()` do not wait for either — the
+/// producer settles it on its own terms. The normal case with nothing queued costs
+/// one atomic load.
 ///
 /// Taking a closure rather than returning the guard to the caller is deliberate: a
 /// returned guard is only held for as long as each caller keeps a binding alive,
@@ -4197,13 +4226,15 @@ where
     // via `producer.send()` before `op` runs, so `commit_transaction` includes those
     // records and `abort_transaction` discards them — the producer's own Java-faithful
     // accumulator handling then does the right thing. Sends racing concurrently on
-    // another thread are not covered, the same boundary the drain already documents.
+    // another thread are not covered, nor is a record still waiting inside the
+    // producer (a `send()` in progress — see `drain_submitted_sends_await`), the
+    // same boundaries the drain already documents.
     // The normal case — no async send outstanding — is a single atomic load. A drain
     // failure means the submission task is gone and its queued records vanished, so
     // the control op is aborted with that error rather than reporting a commit/abort
     // that silently dropped records; `_guard` still releases `txn_control_busy` on
     // this early return.
-    if let Err(e) = drain_submitted_sends_via(&handle.queued_sends, &handle.submit_tx, &handle.send_waiters, &runtime) {
+    if let Err(e) = drain_submitted_sends_via(&handle.queued_sends, &handle.submit_tx, &runtime) {
         return box_error(e);
     }
 
@@ -4650,7 +4681,7 @@ unsafe fn with_txn_control_async<Prepare, Run, Fut>(
         // Hand over records still queued by `send_async` before the op, exactly as
         // the sync path and `flush`/`close` do (see `drain_submitted_sends_await`).
         // Await it directly — we are already async — never `block_on` in a task.
-        let result = match drain_submitted_sends_await(&h.queued_sends, &h.submit_tx, &h.send_waiters).await {
+        let result = match drain_submitted_sends_await(&h.queued_sends, &h.submit_tx).await {
             Err(e) => Err(e),
             // `producer_static_ref` takes the `kind` lock only to extend the
             // reference and drops it before returning, so no lock is held across the
@@ -5746,34 +5777,38 @@ mod tests {
         dispatcher.join().expect("dispatcher thread joins");
     }
 
-    /// The drain's snapshot (`SendWaiters`): it resolves once every waiter
-    /// registered before the threshold has finished — and not before — while a
-    /// waiter registered after it (a send racing the drain) is left alone.
+    /// `SendWaiters::wait_until_empty`, the join `destroy` relies on: it resolves
+    /// once every waiter has finished — and not before — including one registered
+    /// after the wait began.
     #[test]
-    fn test_send_waiters_drain_waits_for_the_snapshot_only() {
+    fn test_send_waiters_wait_until_empty_joins_every_waiter() {
         let runtime = test_runtime();
         let waiters = std::sync::Arc::new(SendWaiters::default());
         let a = waiters.register();
         let b = waiters.register();
-        let threshold = waiters.threshold();
-        let c = waiters.register();
+        assert_eq!(waiters.live(), 2);
 
         let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let snapshot = std::sync::Arc::clone(&waiters);
+        let join = std::sync::Arc::clone(&waiters);
         runtime.spawn(async move {
-            snapshot.wait_for_registered_before(threshold).await;
+            join.wait_until_empty().await;
             done_tx.send(()).unwrap();
         });
         let short = std::time::Duration::from_millis(100);
         assert!(done_rx.recv_timeout(short).is_err(), "a and b are still waiting");
         drop(a);
-        assert!(done_rx.recv_timeout(short).is_err(), "b is still waiting");
+        let c = waiters.register();
         drop(b);
+        assert!(
+            done_rx.recv_timeout(short).is_err(),
+            "c, registered after the wait began, is still waiting"
+        );
+        drop(c);
         done_rx
             .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("resolves once a and b have finished, with c (registered after the snapshot) still alive");
-        drop(c);
-        runtime.block_on(waiters.wait_for_registered_before(waiters.threshold()));
+            .expect("resolves once every waiter has finished");
+        assert_eq!(waiters.live(), 0);
+        runtime.block_on(waiters.wait_until_empty());
     }
 
     // -- try_send tests ------------------------------------------------------
@@ -5833,6 +5868,22 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         panic!("timed out waiting for the record callback to fire");
+    }
+
+    /// Spins up to ~5s until exactly `n` per-record waiters (`send_waiter`) are
+    /// alive, i.e. until the submission task has moved the records that have to
+    /// wait onto tasks of their own.
+    fn wait_for_live_waiters(handle: &ProducerHandle, n: usize) {
+        for _ in 0..5000 {
+            if handle.send_waiters.live() == n {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!(
+            "timed out waiting for {n} record waiter(s): {} alive",
+            handle.send_waiters.live()
+        );
     }
 
     /// Spins up to ~5s until the submission task has fully handed over every
@@ -6209,48 +6260,41 @@ mod tests {
         }
     }
 
-    /// `flush` — and `close`, and every transaction-control call, which share the
-    /// drain — waits for a record still waiting on the slow path, exactly as when
-    /// the submission task did that wait inline; otherwise a `flush` could return
-    /// with a `send_async` record not yet handed to the producer.
+    /// `flush` — and every transaction-control call, which shares the drain — hands
+    /// over the records still queued but does not wait for a record already waiting
+    /// inside the producer on the slow path: that is a `send()` in progress on
+    /// another thread, which Java's `flush()` does not wait for either. The record
+    /// stays waiting and later reports its own outcome — here the metadata timeout,
+    /// as in Java.
     #[test]
-    fn test_flush_waits_for_a_record_still_waiting_for_metadata() {
+    fn test_flush_does_not_wait_for_a_record_still_waiting_for_metadata() {
         let topic = CString::new("topic").unwrap();
         let queued = CapturedRecordResult::new();
         unsafe {
-            let producer = broker_less_kafka_producer("1000");
+            let producer = broker_less_kafka_producer("2000");
             let handle = producer_handle(producer);
             kafka_producer_SendAccepted_destroy(send_async_value(producer, &topic, b"value", &queued));
             // Until the record is on a waiter of its own.
-            for _ in 0..5000 {
-                if handle.send_waiters.inner.lock().unwrap().live.len() == 1 {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
-            assert_eq!(
-                handle.send_waiters.inner.lock().unwrap().live.len(),
-                1,
-                "the record waits on its own task"
-            );
+            wait_for_live_waiters(handle, 1);
 
             let started = std::time::Instant::now();
             let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
             kafka_producer_Producer_flush(producer, &mut err);
             assert_success(err);
-            // The drain returned only once the waiter was done with the record ...
+            // An empty accumulator's instant flush, not the record's wait ...
             assert!(
-                handle.send_waiters.inner.lock().unwrap().live.is_empty(),
-                "no waiter outlives the flush"
-            );
-            assert_eq!(handle.queued_sends.load(std::sync::atomic::Ordering::Acquire), 0);
-            // ... which took the record's wait, not an empty accumulator's instant flush.
-            assert!(
-                started.elapsed() >= std::time::Duration::from_millis(500),
-                "flush returned before the record's max.block.ms wait: {:?}",
+                started.elapsed() < std::time::Duration::from_millis(1000),
+                "flush waited for the record's max.block.ms: {:?}",
                 started.elapsed()
             );
+            // ... and the record is still waiting, still counted.
+            assert_eq!(handle.send_waiters.live(), 1, "the waiting record outlives the flush");
+            assert_eq!(handle.queued_sends.load(std::sync::atomic::Ordering::Acquire), 1);
+
+            // Left alone, it times out on its own terms.
             wait_for_record_fired(&queued);
+            wait_for_live_waiters(handle, 0);
+            assert_eq!(handle.queued_sends.load(std::sync::atomic::Ordering::Acquire), 0);
 
             let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
             kafka_producer_Producer_close(producer, &mut err);
@@ -6265,6 +6309,67 @@ mod tests {
             .clone()
             .expect("the metadata timeout is the error");
         assert!(message.contains("not present in metadata"), "{message}");
+    }
+
+    /// The two refusals Java's `send()` throws when it races `close()`: the
+    /// `KafkaException` for a send already waiting inside the producer, the
+    /// `IllegalStateException` for one that reaches `throwIfProducerClosed()` only
+    /// once the close has begun.
+    fn is_closed_producer_refusal(message: &str) -> bool {
+        message.contains("Producer closed while send in progress")
+            || message.contains("Cannot perform operation after producer has been closed")
+    }
+
+    /// `close` hands over the records still queued but does not wait for a record
+    /// already waiting inside the producer: Java's `close()` fails a `send()`
+    /// blocked on metadata ("Producer closed while send in progress") rather than
+    /// waiting for it, and so does the producer's own `close()` here. The refusal
+    /// is not an `ApiException`, so it reaches the caller on the acceptance handle
+    /// — where Java's `send()` throws — and the delivery callback never fires.
+    ///
+    /// Which of Java's two closed-producer refusals it is depends on how far the
+    /// record's `send()` had got when the close began, a race Java has too: the
+    /// waiter is registered on the submission task before its own task is first
+    /// polled, so under load the close can begin in between, and the send then
+    /// fails at `throwIfProducerClosed()` instead of inside the metadata wait.
+    #[test]
+    fn test_close_fails_a_record_still_waiting_for_metadata() {
+        let topic = CString::new("topic").unwrap();
+        let queued = CapturedRecordResult::new();
+        unsafe {
+            // Long enough that a close waiting for the record would show.
+            let producer = broker_less_kafka_producer("10000");
+            let handle = producer_handle(producer);
+            let accepted = send_async_value(producer, &topic, b"value", &queued);
+            wait_for_live_waiters(handle, 1);
+
+            let started = std::time::Instant::now();
+            let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+            kafka_producer_Producer_close(producer, &mut err);
+            assert_success(err);
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(5),
+                "close waited for the record's max.block.ms: {:?}",
+                started.elapsed()
+            );
+
+            // The producer's close ended the record's wait with Java's refusal.
+            assert!(
+                kafka_producer_SendAccepted_wait_timeout(accepted, 5000),
+                "the acceptance settles once the producer has closed"
+            );
+            let message = take_error_message(kafka_producer_SendAccepted_take_error(accepted));
+            assert!(is_closed_producer_refusal(&message), "{message}");
+            assert!(
+                !kafka_producer_SendAccepted_callback_pending(accepted),
+                "the record was never appended, so no delivery callback is coming"
+            );
+            kafka_producer_SendAccepted_destroy(accepted);
+            wait_for_live_waiters(handle, 0);
+
+            kafka_producer_Producer_destroy(producer);
+        }
+        assert_eq!(queued.fired(), 0, "a refused record never reaches the delivery callback");
     }
 
     /// Synchronous validation failures are `ERROR` with `out_error` set and the
@@ -6468,7 +6573,7 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SubmitRequest>();
         drop(rx);
         let queued = std::sync::atomic::AtomicUsize::new(0);
-        assert!(drain_submitted_sends_via(&queued, &tx, &SendWaiters::default(), runtime.handle()).is_ok());
+        assert!(drain_submitted_sends_via(&queued, &tx, runtime.handle()).is_ok());
     }
 
     /// A dead submission task must be reported, never silently treated as
@@ -6482,7 +6587,7 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SubmitRequest>();
         drop(rx);
         let queued = std::sync::atomic::AtomicUsize::new(1);
-        let err = drain_submitted_sends_via(&queued, &tx, &SendWaiters::default(), runtime.handle())
+        let err = drain_submitted_sends_via(&queued, &tx, runtime.handle())
             .expect_err("a dead submission task must not be reported as success");
         assert!(err.message().contains("send-submission task has stopped"), "{}", err.message());
     }
@@ -6499,7 +6604,7 @@ mod tests {
             let _ = rx.recv().await;
         });
         let queued = std::sync::atomic::AtomicUsize::new(1);
-        let err = drain_submitted_sends_via(&queued, &tx, &SendWaiters::default(), runtime.handle())
+        let err = drain_submitted_sends_via(&queued, &tx, runtime.handle())
             .expect_err("a dropped acknowledgement must not be reported as success");
         assert!(
             err.message().contains("stopped while ordering queued sends"),

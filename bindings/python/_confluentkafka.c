@@ -615,7 +615,11 @@ static void accepted_trampoline(kafka_common_Error_t* error, bool callback_pendi
 // Rust submission task hands it to the producer -- on a task of the record's
 // own when that means waiting up to max.block.ms, so concurrent callers wait
 // concurrently -- and then settles the record: accepted, or refused where
-// Java's send() throws (closed producer, transaction state, ...).
+// Java's send() throws (closed producer, transaction state, ...). While it
+// waits it is a send() in progress, treated as Java treats one: flush/close
+// and the transaction ops hand over what is still queued on the outbox but do
+// not wait for it, and close fails it ("Producer closed while send in
+// progress") -- a refusal like any other, raised from that send.
 //
 // Returns True when the producer had already accepted the record by the time
 // this returns (accepted_cb is not kept), None when the answer is still to
@@ -923,10 +927,14 @@ static void producer_partitions_for_trampoline(kafka_consumer_PartitionInfoList_
 //                            rejected. Does NOT touch the Rust producer.
 //   2. Producer_close_async — drive kafka_producer_Producer_close_async, which
 //                            first drains the outbox (every send that had
-//                            returned is produced) and then closes; the
-//                            Python wrapper waits on it via _run_sync /
-//                            _run_async (interruptible), like flush. Space
-//                            waiters are rung by Rust as the outbox drains.
+//                            returned is handed to the producer) and then
+//                            closes, failing a send still waiting inside the
+//                            producer for metadata or buffer memory as Java's
+//                            close() does ("Producer closed while send in
+//                            progress", raised from that send); the Python
+//                            wrapper waits on it via _run_sync / _run_async
+//                            (interruptible), like flush. Space waiters are
+//                            rung by Rust as the outbox drains.
 //   3. Producer_destroy    — free the Rust producer handle (its dispatcher
 //                            has by then delivered every completion to
 //                            send_direct_trampoline), stop and join the C

@@ -1858,3 +1858,80 @@ async def test_async_send_cancelled_at_the_yield_hands_nothing_over():
         assert p.history_count() == 1, "a send cancelled at its yield produced its record"
     finally:
         await p.close()
+
+
+# -- close vs a send() still waiting inside the producer ----------------------
+#
+# Java: flush(), commitTransaction() and abortTransaction() do not wait for a
+# send() another thread has blocked on metadata or buffer memory, and close()
+# fails such a send() ("Producer closed while send in progress") instead of
+# waiting for it. The Rust close hands over what is still queued on the outbox
+# (every send() that had returned) and then closes; a record already waiting
+# inside the producer is failed by that close and its send() raises. No broker
+# listens on port 1, so the record cannot be taken at once, goes to the outbox
+# and would wait max.block.ms there; close() must end that well before.
+#
+# Which of Java's two closed-producer refusals the send() raises depends on
+# how far it had got when the close began -- Java's own race: a send() already
+# waiting for metadata gets "Producer closed while send in progress", one that
+# reaches throwIfProducerClosed() only once the close has begun gets "Cannot
+# perform operation after producer has been closed".
+
+CLOSED_PRODUCER_REFUSALS = ("Producer closed while send in progress",
+                            "Cannot perform operation after producer has been closed")
+
+
+def _is_closed_producer_refusal(error):
+    return any(text in str(error) for text in CLOSED_PRODUCER_REFUSALS)
+
+
+def test_close_fails_a_send_still_waiting_inside_the_producer():
+    queued = []
+    real_send = _spy("Producer_send", queued)
+    p = KafkaProducer({"bootstrap.servers": "localhost:1",
+                       "max.block.ms": "10000"})
+    outcome = []
+
+    def blocked_send():
+        try:
+            outcome.append(p.send(ProducerRecord("test-topic", b"v")))
+        except KafkaError as e:
+            outcome.append(e)
+
+    sender = threading.Thread(target=blocked_send)
+    try:
+        sender.start()
+        # Queued, with the producer's answer still to come: send() is blocked.
+        _wait_until(lambda: queued == [None])
+        started = time.monotonic()
+        p.close()
+        assert time.monotonic() - started < 5, "close() waited for the blocked send()"
+    finally:
+        _lib.Producer_send = real_send
+        sender.join(timeout=FUTURE_TIMEOUT)
+        p.close()
+    assert not sender.is_alive(), "the blocked send() did not return after close()"
+    assert len(outcome) == 1 and isinstance(outcome[0], KafkaError), outcome
+    assert _is_closed_producer_refusal(outcome[0]), str(outcome[0])
+
+
+async def test_async_close_fails_a_send_still_waiting_inside_the_producer():
+    queued = []
+    real_send = _spy("Producer_send", queued)
+    p = AsyncKafkaProducer({"bootstrap.servers": "localhost:1",
+                            "max.block.ms": "10000"})
+    try:
+        blocked = asyncio.ensure_future(p.send(ProducerRecord("test-topic", b"v")))
+        deadline = time.monotonic() + FUTURE_TIMEOUT
+        while queued != [None]:
+            assert time.monotonic() < deadline, "the send did not reach the outbox in time"
+            await asyncio.sleep(0.005)
+        started = time.monotonic()
+        await p.close()
+        assert time.monotonic() - started < 5, "close() waited for the blocked send()"
+        with pytest.raises(KafkaError) as refused:
+            await asyncio.wait_for(blocked, timeout=FUTURE_TIMEOUT)
+        assert _is_closed_producer_refusal(refused.value), str(refused.value)
+    finally:
+        _lib.Producer_send = real_send
+        await p.close()

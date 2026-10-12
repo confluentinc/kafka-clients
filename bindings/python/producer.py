@@ -176,7 +176,11 @@ class _ProducerBase:
     task of the record's own so that concurrent callers wait concurrently;
     ``send`` then waits for the producer's answer, Java's ``send()`` return
     point -- and raises its refusal as a :class:`KafkaError`, where Java's
-    ``send()`` throws. Either way one C callback thread per producer reports
+    ``send()`` throws. While it waits it is a ``send()`` in progress, treated
+    as Java treats one: ``flush``, ``close`` and the transaction methods hand
+    over the records still queued on the outbox but do not wait for it, and
+    ``close`` fails it ("Producer closed while send in progress"), raised
+    from that ``send``. Either way one C callback thread per producer reports
     completions by invoking a Python callback ``cb(result, error)`` with the
     GIL held — taking the GIL once per burst of completions rather than once
     per record. Both the sync :class:`Producer` and the async
@@ -412,9 +416,11 @@ class Producer(_ProducerBase):
         # with the answer and resolves `accepted`, on which this thread waits.
         # A record that has to wait (metadata, buffer memory) does so on a Rust
         # task of its own for up to max.block.ms, so concurrent callers wait
-        # concurrently, as Java threads blocked in send() do. The wait is
-        # Python's own lock wait, so Ctrl+C is handled by Python. Backpressure
-        # is buffer.memory / max.block.ms only; there is no outbox cap.
+        # concurrently, as Java threads blocked in send() do; flush()/close()
+        # and the transaction methods do not wait for it, and close() fails it
+        # as Java's does, raised here. The wait is Python's own lock wait, so
+        # Ctrl+C is handled by Python. Backpressure is buffer.memory /
+        # max.block.ms only; there is no outbox cap.
         accepted = Future()
 
         def accepted_cb(error):
@@ -480,12 +486,15 @@ class Producer(_ProducerBase):
     # KeyboardInterrupt on the main thread. _resolve_void raises KafkaError on a
     # non-null completion error (0 = success).
     #
-    # Records produced inside a transaction use send(): Python's send() queues
-    # the record on the Rust outbox (send_async), and every transaction-control
-    # op drains the outbox before it runs -- the same guarantee flush()/close()
-    # give -- so every send() that had returned before commit/abort is part of
-    # the transaction (committed on commit, discarded on abort). A send() racing
-    # the control call on another thread is not ordered against it, as in Java.
+    # Records produced inside a transaction use send(): a record the producer
+    # could not take at once goes via the Rust outbox (send_async), and every
+    # transaction-control op drains the outbox before it runs -- the same
+    # guarantee flush()/close() give -- so every send() that had returned
+    # before commit/abort is part of the transaction (committed on commit,
+    # discarded on abort). A send() racing the control call on another thread
+    # is not ordered against it, as in Java; nor is a send() still waiting
+    # inside the producer (metadata, buffer memory) waited for -- Java's
+    # commitTransaction() does not wait for another thread's blocked send().
 
     def init_transactions(self):
         """Initialize transactions (Java ``initTransactions()``).
@@ -610,12 +619,13 @@ class Producer(_ProducerBase):
         self._cancel()
         # Split teardown (see _confluentkafka.c): reject further sends, then
         # drive the Rust-side close (which first drains the outbox, so every
-        # send() that returned is produced) through the interruptible _run_sync
-        # path (same as flush), then free -- destroy also joins the C callback
-        # thread once Rust has delivered every completion. Keeping the Rust
-        # close in _run_sync means a stuck close stays responsive to
-        # KeyboardInterrupt on the main thread rather than blocking in a native
-        # wait.
+        # send() that returned is produced, and fails a send() still waiting
+        # inside the producer as Java's close() does, so it raises there)
+        # through the interruptible _run_sync path (same as flush), then free
+        # -- destroy also joins the C callback thread once Rust has delivered
+        # every completion. Keeping the Rust close in _run_sync means a stuck
+        # close stays responsive to KeyboardInterrupt on the main thread rather
+        # than blocking in a native wait.
         _lib.Producer_shutdown(self.c_producer)
         self._run_sync(
             lambda cb: _lib.Producer_close_async(self.c_producer, cb),
@@ -637,7 +647,9 @@ class AsyncProducer(_ProducerBase):
     where Java's ``send()`` throws — yielding the event loop to the completion
     drain so a flooding ``await producer.send(...)`` loop does not starve
     completions. Records waiting at the same time wait concurrently, each on a
-    Rust task of its own, as Java threads blocked in ``send()`` do. In the
+    Rust task of its own, as Java threads blocked in ``send()`` do; ``flush``,
+    ``close`` and the transaction methods do not wait for such a record, and
+    ``close`` fails it as Java's does, raised from that ``send``. In the
     common case the record is appended on the calling thread without
     suspending. A run of such sends gives the loop no turn, so ``send`` yields
     it once every ``_YIELD_EVERY`` sends while completions are waiting to be
@@ -896,12 +908,15 @@ class AsyncProducer(_ProducerBase):
     # handle if the loop is gone before delivery.
     #
     # Records produced inside a transaction use send() (``await
-    # producer.send(rec)``): Python's send() queues the record on the Rust
-    # outbox (send_async), and every transaction-control op drains the outbox
-    # before it runs -- the same guarantee flush()/close() give -- so every
-    # send() that had returned before commit/abort is part of the transaction
-    # (committed on commit, discarded on abort). A send() racing the control
-    # call from another task is not ordered against it, as in Java.
+    # producer.send(rec)``): a record the producer could not take at once goes
+    # via the Rust outbox (send_async), and every transaction-control op
+    # drains the outbox before it runs -- the same guarantee flush()/close()
+    # give -- so every send() that had returned before commit/abort is part of
+    # the transaction (committed on commit, discarded on abort). A send()
+    # racing the control call from another task is not ordered against it, as
+    # in Java; nor is a send() still waiting inside the producer (metadata,
+    # buffer memory) waited for -- Java's commitTransaction() does not wait
+    # for another thread's blocked send().
 
     async def init_transactions(self):
         """Initialize transactions (Java ``initTransactions()``).
@@ -1030,10 +1045,12 @@ class AsyncProducer(_ProducerBase):
         loop = asyncio.get_running_loop()
         # Split teardown (see _confluentkafka.c): reject further sends (a flag
         # flip, so it runs inline); the Rust-side close -- which first drains
-        # the outbox, so every send() that returned is produced -- is awaited
-        # via the async FFI (_run_async) so it is cooperative with the loop and
-        # cancellable, like flush; the final destroy joins the Rust dispatcher
-        # and the C callback thread, a blocking C call, so it runs off the loop.
+        # the outbox, so every send() that returned is produced, and fails a
+        # send() still waiting inside the producer as Java's close() does, so
+        # it raises there -- is awaited via the async FFI (_run_async) so it is
+        # cooperative with the loop and cancellable, like flush; the final
+        # destroy joins the Rust dispatcher and the C callback thread, a
+        # blocking C call, so it runs off the loop.
         _lib.Producer_shutdown(self.c_producer)
         await self._run_async(
             lambda cb: _lib.Producer_close_async(self.c_producer, cb),
