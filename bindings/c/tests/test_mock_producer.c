@@ -387,12 +387,12 @@ void test_close_then_send(void) {
 // ---------------------------------------------------------------------------
 
 void test_send_async_on_closed_producer_reports_refusal_on_acceptance(void) {
-    /* B1: send_async queues the record; the submission task then calls the
-     * producer's send, which returns Err (closed) -- where Java's send()
-     * throws -- WITHOUT firing the callback. The refusal travels on the
-     * acceptance handle: wait_timeout returns, take_error hands the error over
-     * (once), callback_pending is false, and the delivery callback never fires,
-     * so user_data stays the caller's. */
+    /* B1: send_async hands the record to the producer on this thread; the
+     * producer's send returns Err (closed) -- where Java's send() throws --
+     * WITHOUT firing the callback. The refusal travels on the acceptance
+     * handle, returned already settled: wait_timeout returns at once,
+     * take_error hands the error over (once), callback_pending is false, and
+     * the delivery callback never fires, so user_data stays the caller's. */
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
     kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_close(producer, &err);
@@ -406,12 +406,12 @@ void test_send_async_on_closed_producer_reports_refusal_on_acceptance(void) {
         producer, "topic", -1, -1, NULL, -1,
         value, (int32_t)sizeof(value) - 1,
         on_record, &result, &err);
-    /* The submit itself succeeds (the record is queued); the refusal surfaces
-     * through the acceptance handle, not out_error. */
+    /* The call itself succeeds; the refusal surfaces through the acceptance
+     * handle, not out_error, and the handle is already settled. */
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(accepted);
 
-    TEST_ASSERT_TRUE(kafka_producer_SendAccepted_wait_timeout(accepted, 5000));
+    TEST_ASSERT_TRUE(kafka_producer_SendAccepted_wait_timeout(accepted, 0));
     TEST_ASSERT_FALSE(kafka_producer_SendAccepted_callback_pending(accepted));
     kafka_common_Error_t *refusal = kafka_producer_SendAccepted_take_error(accepted);
     TEST_ASSERT_NOT_NULL(refusal);
@@ -450,57 +450,91 @@ static void on_accepted(kafka_common_Error_t *error, bool callback_pending, void
     atomic_fetch_add(&r->fired, 1);
 }
 
+/* A KafkaProducer with no broker to answer it: no record can be taken at once
+ * (no metadata for the topic), so send_async queues every record, and the
+ * record then waits max.block.ms for metadata that never comes. */
+static kafka_producer_Producer_t *broker_less_kafka_producer(const char *max_block_ms) {
+    kafka_producer_ProducerProperties_t *props = kafka_producer_ProducerProperties_new();
+    /* A port nothing listens on. */
+    kafka_producer_ProducerProperties_put(props, "bootstrap.servers", "localhost:1");
+    kafka_producer_ProducerProperties_put(props, "max.block.ms", max_block_ms);
+    kafka_common_Error_t *err = NULL;
+    kafka_producer_Producer_t *producer = kafka_producer_KafkaProducer_new(props, &err);
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(producer);
+    kafka_producer_ProducerProperties_destroy(props);
+    return producer;
+}
+
+/* The two refusals Java's send() throws when it races close(): the
+ * KafkaException for a send already waiting inside the producer, the
+ * IllegalStateException for one that reaches throwIfProducerClosed() only once
+ * the close has begun. */
+static int is_closed_producer_refusal(const char *message) {
+    return strstr(message, "Producer closed while send in progress") != NULL
+        || strstr(message, "Cannot perform operation after producer has been closed") != NULL;
+}
+
 void test_send_accepted_get_async_reports_settlement(void) {
     /* get_async on a not-yet-settled handle stores the callback (false) and
      * fires it exactly once when the producer settles the record: a null error
      * for an accepted one, the refusal for a refused one. The handle may be
-     * destroyed meanwhile -- the signal lives on with the queued send. */
-    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
+     * destroyed meanwhile -- the signal lives on with the queued send. A mock
+     * never queues (it takes every record at once), so this needs a
+     * KafkaProducer whose records have to wait. */
     static const uint8_t value[] = "v";
     kafka_common_Error_t *err = NULL;
 
-    /* Accepted: parked, registered, resumed. */
+    /* Accepted: the record's wait for metadata ends in Java's ApiException --
+     * a failed future and the callback fired with the error, send() returning
+     * normally. */
     async_record_result_t delivered = {0};
     acceptance_result_t acceptance = {0};
-    kafka_producer_Producer_test_set_paused(producer, true);
+    kafka_producer_Producer_t *producer = broker_less_kafka_producer("500");
     kafka_producer_SendAccepted_t *accepted = kafka_producer_Producer_send_async(
         producer, "topic", -1, -1, NULL, -1,
         value, (int32_t)sizeof(value) - 1,
         on_record, &delivered, &err);
     TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(accepted);  /* queued: the metadata is not there yet */
     TEST_ASSERT_FALSE(kafka_producer_SendAccepted_get_async(accepted, on_accepted, &acceptance));
     kafka_producer_SendAccepted_destroy(accepted);
-    TEST_ASSERT_EQUAL_INT(0, atomic_load(&acceptance.fired));
-    kafka_producer_Producer_test_set_paused(producer, false);
     TEST_ASSERT_TRUE(wait_for(&acceptance.fired, 1));
     TEST_ASSERT_FALSE(acceptance.had_error);
     TEST_ASSERT_FALSE(acceptance.callback_pending);
     TEST_ASSERT_TRUE(wait_for(&delivered.fired, 1));
-    TEST_ASSERT_TRUE(delivered.had_metadata);
-
-    /* Refused: the producer is closed before the parked record reaches it. */
+    TEST_ASSERT_TRUE(delivered.had_error);
+    err = NULL;
     kafka_producer_Producer_close(producer, &err);
     TEST_ASSERT_NULL(err);
+    kafka_producer_Producer_destroy(producer);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&acceptance.fired));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&delivered.fired));
+
+    /* Refused: the producer is closed while the record is still waiting inside
+     * it, which fails the record the way Java's close() does. */
     async_record_result_t refused = {0};
     acceptance_result_t refusal = {0};
-    kafka_producer_Producer_test_set_paused(producer, true);
+    producer = broker_less_kafka_producer("10000");
+    err = NULL;
     accepted = kafka_producer_Producer_send_async(
         producer, "topic", -1, -1, NULL, -1,
         value, (int32_t)sizeof(value) - 1,
         on_record, &refused, &err);
     TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(accepted);
     TEST_ASSERT_FALSE(kafka_producer_SendAccepted_get_async(accepted, on_accepted, &refusal));
     kafka_producer_SendAccepted_destroy(accepted);
-    kafka_producer_Producer_test_set_paused(producer, false);
+    err = NULL;
+    kafka_producer_Producer_close(producer, &err);
+    TEST_ASSERT_NULL(err);
     TEST_ASSERT_TRUE(wait_for(&refusal.fired, 1));
     TEST_ASSERT_TRUE(refusal.had_error);
-    TEST_ASSERT_EQUAL_STRING("MockProducer is already closed.", refusal.message);
+    TEST_ASSERT_TRUE_MESSAGE(is_closed_producer_refusal(refusal.message), refusal.message);
     TEST_ASSERT_FALSE(refusal.callback_pending);
 
     kafka_producer_Producer_destroy(producer);
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&acceptance.fired));
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&refusal.fired));
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&delivered.fired));
     TEST_ASSERT_EQUAL_INT(0, atomic_load(&refused.fired));
 }
 
@@ -2117,31 +2151,33 @@ void test_send_with_callback_validation_error_no_callback(void) {
 }
 
 // ---------------------------------------------------------------------------
-// try_send: the non-blocking front door
+// send_async: fast path on the caller's thread
 //
-// ACCEPTED means the record was handed to the producer and `callback` fires
-// exactly once; WOULD_BLOCK means nothing happened (no callback, nothing
-// freed) and the caller queues the record with send_async instead; ERROR is a
-// synchronous validation failure, or the producer's refusal where Java's
-// send() throws, reported through out_error with the callback not invoked;
-// ERROR_CALLBACK_PENDING is a refusal after the record reached a batch, with
-// the callback still to fire once.
+// send_async hands the record to the producer on the calling thread and
+// returns NULL when the producer took it at once -- the callback fires exactly
+// once, nothing was queued, no handle was allocated. Only where Java's send()
+// would block is the record queued and a (pending) acceptance handle returned;
+// a refusal on the calling thread comes back on an already-settled handle
+// (see test_send_async_on_closed_producer_reports_refusal_on_acceptance), and a
+// validation error as out_error with NULL (see test_send_async_validation_error).
 // ---------------------------------------------------------------------------
 
-void test_try_send_accepted_fires_callback(void) {
+void test_send_async_takes_record_at_once_without_handle(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
     const uint8_t key[] = "my-key";
     const uint8_t value[] = "my-value";
 
     async_record_result_t result = {0};
     kafka_common_Error_t *err = NULL;
-    kafka_producer_TrySendOutcome_t outcome = kafka_producer_Producer_try_send(
-        producer, "try-topic", 3, -1,
+    kafka_producer_SendAccepted_t *accepted = kafka_producer_Producer_send_async(
+        producer, "fast-topic", 3, -1,
         key, (int32_t)sizeof(key) - 1,
         value, (int32_t)sizeof(value) - 1,
         on_record, &result, &err);
     TEST_ASSERT_NULL(err);
-    TEST_ASSERT_EQUAL_INT(kafka_producer_TrySendOutcome_ACCEPTED, outcome);
+    TEST_ASSERT_NULL(accepted);  /* taken at once: nothing to wait for */
+    /* Appended before the call returned. */
+    TEST_ASSERT_EQUAL_INT32(1, kafka_producer_MockProducer_history_count(producer));
 
     TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&result.fired));
@@ -2149,107 +2185,55 @@ void test_try_send_accepted_fires_callback(void) {
     TEST_ASSERT_FALSE(result.had_error);
     TEST_ASSERT_EQUAL_INT64(0, result.offset);
     TEST_ASSERT_EQUAL_INT32(3, result.partition);
-    TEST_ASSERT_EQUAL_STRING("try-topic", result.topic);
-    TEST_ASSERT_EQUAL_INT32(1, kafka_producer_MockProducer_history_count(producer));
+    TEST_ASSERT_EQUAL_STRING("fast-topic", result.topic);
 
     kafka_producer_Producer_destroy(producer);
 }
 
-void test_try_send_on_closed_producer_reports_error_without_callback(void) {
-    /* A refusal by the producer itself -- where Java's send() throws -- is
-     * neither a would-block nor an acceptance: the outcome is ERROR with the
-     * refusal in out_error, and the callback never fires, so user_data stays
-     * the caller's (a binding raises this from its send). The closed mock drops
-     * the callback before any batch sees it, hence ERROR and not
-     * ERROR_CALLBACK_PENDING. */
-    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
-    kafka_common_Error_t *err = NULL;
-    kafka_producer_Producer_close(producer, &err);
-    TEST_ASSERT_NULL(err);
-
-    static const uint8_t value[] = "v";
-    async_record_result_t result;
-    memset(&result, 0, sizeof(result));
-    err = NULL;
-    kafka_producer_TrySendOutcome_t outcome = kafka_producer_Producer_try_send(
-        producer, "topic", -1, -1, NULL, -1,
-        value, (int32_t)sizeof(value) - 1,
-        on_record, &result, &err);
-    TEST_ASSERT_EQUAL_INT(kafka_producer_TrySendOutcome_ERROR, outcome);
-    TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_EQUAL_STRING("MockProducer is already closed.", kafka_common_Error_message(err));
-    kafka_common_Error_destroy(err);
-
-    /* Destroy joins the dispatcher, so a callback that had been enqueued
-     * would have run by now. */
-    kafka_producer_Producer_destroy(producer);
-    TEST_ASSERT_EQUAL_INT(0, atomic_load(&result.fired));
-}
-
-void test_try_send_validation_error_no_callback(void) {
-    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
-    const uint8_t value[] = "v";
-
-    async_record_result_t result = {0};
-    kafka_common_Error_t *err = NULL;
-    /* NULL topic: synchronous validation error, reported through out_error as
-     * the protocol INVALID_REQUEST (same as send_async); no callback. */
-    kafka_producer_TrySendOutcome_t outcome = kafka_producer_Producer_try_send(
-        producer, NULL, -1, -1,
-        NULL, -1,
-        value, (int32_t)sizeof(value) - 1,
-        on_record, &result, &err);
-    TEST_ASSERT_EQUAL_INT(kafka_producer_TrySendOutcome_ERROR, outcome);
-    TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_INVALID_REQUEST,
-                            kafka_common_Error_code(err));
-    kafka_common_Error_destroy(err);
-    TEST_ASSERT_EQUAL_INT(0, atomic_load(&result.fired));
-
-    kafka_producer_Producer_destroy(producer);
-}
-
-void test_try_send_overtakes_queued_async_send(void) {
-    /* A record another caller has waiting on the outbox does not hold try_send
+void test_send_async_not_held_behind_queued_record(void) {
+    /* A record another caller has waiting on the outbox does not hold send_async
      * up -- as one Java thread's send() is not held behind another's wait for
-     * metadata. Park the submission task so the queued record stays queued,
-     * then check that try_send hands its own record over at once: ACCEPTED,
-     * callback fired, history grown. The parked record follows on resume. */
+     * metadata. send_batch_async always queues, so park the submission task with
+     * a batch record on it, then check that send_async hands its own record over
+     * at once: NULL, callback fired, history grown. The parked record follows on
+     * resume. */
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
     static const uint8_t first[] = "first";
     static const uint8_t second[] = "second";
-    async_record_result_t queued = {0};
+    async_record_result_t parked = {0};
     async_record_result_t direct = {0};
     kafka_common_Error_t *err = NULL;
 
     kafka_producer_Producer_test_set_paused(producer, true);
-    kafka_producer_SendAccepted_t *accepted = kafka_producer_Producer_send_async(
-        producer, "topic", -1, -1, NULL, -1,
-        first, (int32_t)sizeof(first) - 1,
-        on_record, &queued, &err);
-    TEST_ASSERT_NULL(err);
-    /* The handle is only a view on the acceptance state; the queued send keeps
-     * that state alive, so it can be freed right away. */
-    kafka_producer_SendAccepted_destroy(accepted);
+    kafka_producer_ProducerRecord_t record = {
+        .topic = "topic", .partition = -1, .timestamp = -1,
+        .key = NULL, .key_len = -1,
+        .value = first, .value_len = (int32_t)sizeof(first) - 1,
+    };
+    kafka_common_Error_t *batch_err = NULL;
+    int32_t queued = kafka_producer_Producer_send_batch_async(
+        producer, &record, 1, on_record, &parked, &batch_err);
+    TEST_ASSERT_NULL(batch_err);
+    TEST_ASSERT_EQUAL_INT32(1, queued);
 
-    kafka_producer_TrySendOutcome_t outcome = kafka_producer_Producer_try_send(
+    kafka_producer_SendAccepted_t *accepted = kafka_producer_Producer_send_async(
         producer, "topic", -1, -1, NULL, -1,
         second, (int32_t)sizeof(second) - 1,
         on_record, &direct, &err);
     TEST_ASSERT_NULL(err);
-    TEST_ASSERT_EQUAL_INT(kafka_producer_TrySendOutcome_ACCEPTED, outcome);
+    TEST_ASSERT_NULL(accepted);  /* taken at once, not queued behind the parked record */
     TEST_ASSERT_TRUE(wait_for(&direct.fired, 1));
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&direct.fired));
     TEST_ASSERT_TRUE(direct.had_metadata);
     TEST_ASSERT_FALSE(direct.had_error);
     TEST_ASSERT_EQUAL_INT64(0, direct.offset);
-    TEST_ASSERT_EQUAL_INT(0, atomic_load(&queued.fired));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&parked.fired));
     TEST_ASSERT_EQUAL_INT32(1, kafka_producer_MockProducer_history_count(producer));
 
     kafka_producer_Producer_test_set_paused(producer, false);
-    TEST_ASSERT_TRUE(wait_for(&queued.fired, 1));
-    TEST_ASSERT_TRUE(queued.had_metadata);
-    TEST_ASSERT_EQUAL_INT64(1, queued.offset);
+    TEST_ASSERT_TRUE(wait_for(&parked.fired, 1));
+    TEST_ASSERT_TRUE(parked.had_metadata);
+    TEST_ASSERT_EQUAL_INT64(1, parked.offset);
     TEST_ASSERT_EQUAL_INT32(2, kafka_producer_MockProducer_history_count(producer));
 
     kafka_producer_Producer_destroy(producer);
@@ -2345,11 +2329,9 @@ int main(void) {
     RUN_TEST(test_send_with_callback_runs_on_dispatcher_thread);
     RUN_TEST(test_send_with_callback_validation_error_no_callback);
 
-    /* try_send (non-blocking front door) */
-    RUN_TEST(test_try_send_accepted_fires_callback);
-    RUN_TEST(test_try_send_on_closed_producer_reports_error_without_callback);
-    RUN_TEST(test_try_send_validation_error_no_callback);
-    RUN_TEST(test_try_send_overtakes_queued_async_send);
+    /* send_async: fast path on the caller's thread */
+    RUN_TEST(test_send_async_takes_record_at_once_without_handle);
+    RUN_TEST(test_send_async_not_held_behind_queued_record);
 
     return UNITY_END();
 }

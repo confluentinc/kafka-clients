@@ -1527,20 +1527,23 @@ async def test_async_txn_cancelled_await_frees_late_error_handle():
         await p.close()
 
 
-# -- Send path: fast path on the caller's thread, queued fallback -------------
+# -- Send path: one FFI call, fast path on the caller's thread ----------------
 #
-# `send` first calls `_lib.Producer_try_send`, which appends the record on the
-# calling thread when the producer can take it without waiting and otherwise
-# does nothing and returns False; `send` then queues the record on the outbox
-# (`_lib.Producer_send`) and waits for the producer's answer, as it always did.
-# The mock producer takes any record at once, so here the fast path is the
-# normal case and the fallback is forced by faking a would-block answer. A
-# record another caller has waiting on the outbox does not hold a send up (one
-# Java thread's send() is not held behind another's wait), shown by parking the
-# submission task with a record queued. A refusal by the producer -- where
-# Java's send() throws -- is raised from send() on both paths; the mock's
+# `send` is a single `_lib.Producer_send` call. Rust hands the record to the
+# producer on the calling thread and reports True when the producer took it at
+# once; where Java's send() would block (no metadata for the topic, buffer
+# memory exhausted) Rust queues the record on the outbox instead and reports
+# None, and `send` then waits for the producer's answer, which arrives on the
+# same callback as `cb(None, error)`. A refusal by the producer -- where Java's
+# send() throws -- is raised from send(): as an error handle returned by the
+# call when the producer refused the record on the calling thread (the mock's
 # "already closed" refusal stands in for it, with the Rust producer closed
-# behind the wrapper's back so the record reaches it.
+# behind the wrapper's back so the record reaches it), or through the
+# acceptance callback for a queued record (covered by the close tests below).
+# The mock producer takes any record at once, so the queued path is driven with
+# a broker-less KafkaProducer: no broker listens on port 1, so the record waits
+# max.block.ms for metadata and the wait ends in Java's ApiException -- the
+# send() returns normally and the future fails with the timeout.
 
 def _spy(sym, calls):
     """Wrap `_lib.<sym>` so each return value is appended to `calls`; returns
@@ -1554,28 +1557,6 @@ def _spy(sym, calls):
 
     setattr(_lib, sym, wrapper)
     return real
-
-
-def _seed_queued_send(p, record):
-    """Queue `record` on the outbox directly, bypassing the fast path, and
-    return a concurrent Future resolving to its RecordMetadata. With the
-    submission task paused the record stays queued, so the next `send` finds
-    another caller's record waiting on the outbox."""
-    done = Future()
-
-    def cb(result, error):
-        metadata, exception = _completion_to_python(result, error)
-        if exception is not None:
-            done.set_exception(exception)
-        else:
-            done.set_result(metadata)
-
-    def accepted_cb(error):
-        if error:  # never expected here; consume the handle all the same
-            _lib.KafkaError_destroy(error)
-
-    _lib.Producer_send(p.c_producer, record, cb, accepted_cb)
-    return done
 
 
 def _close_rust_producer_behind_the_wrapper(p):
@@ -1598,65 +1579,48 @@ def _wait_until(predicate, timeout=FUTURE_TIMEOUT):
         time.sleep(0.005)
 
 
-def test_send_takes_the_fast_path_when_the_producer_can_accept_at_once():
-    tries, queued = [], []
-    real_try = _spy("Producer_try_send", tries)
-    real_send = _spy("Producer_send", queued)
+def _broker_less_config(max_block_ms):
+    return {"bootstrap.servers": "localhost:1", "max.block.ms": str(max_block_ms)}
+
+
+def test_send_takes_the_record_at_once_on_the_callers_thread():
+    answers = []
+    real_send = _spy("Producer_send", answers)
     try:
         with MockProducer(auto_complete=True) as p:
             future = p.send(ProducerRecord("test-topic", b"value"))
+            assert answers == [True], "the producer did not take the record at once"
             assert future.result(timeout=FUTURE_TIMEOUT).offset() == 0
     finally:
-        _lib.Producer_try_send = real_try
         _lib.Producer_send = real_send
-    assert tries == [True], "try_send did not take the record on the caller's thread"
-    assert queued == [], "send queued the record although try_send had taken it"
 
 
-def test_send_falls_back_to_the_outbox_when_try_send_would_block():
-    queued = []
-    real_try = _lib.Producer_try_send
-    real_send = _spy("Producer_send", queued)
+def test_send_waits_for_the_producers_answer_when_the_record_is_queued():
+    answers = []
+    real_send = _spy("Producer_send", answers)
+    p = KafkaProducer(_broker_less_config(300))
     try:
-        # "Would block; nothing happened" -- the record must go via the outbox.
-        _lib.Producer_try_send = lambda *args: False
-        with MockProducer(auto_complete=True) as p:
-            future = p.send(ProducerRecord("test-topic", b"value"))
-            assert future.result(timeout=FUTURE_TIMEOUT).offset() == 0
+        delivered = []
+        started = time.monotonic()
+        # Queued (None), then Java's blocking send(): the metadata wait ends in
+        # an ApiException, so send() returns the future and the record's
+        # outcome is the timeout.
+        future = p.send(ProducerRecord("test-topic", b"value"),
+                        on_delivery=lambda m, e: delivered.append((m, e)))
+        assert answers == [None], "the record did not go through the outbox"
+        assert time.monotonic() - started >= 0.25, "send() returned before the producer answered"
+        with pytest.raises(KafkaError, match="not present in metadata"):
+            future.result(timeout=FUTURE_TIMEOUT)
+        _wait_until(lambda: len(delivered) == 1)
+        assert delivered[0][0] is None and "not present in metadata" in str(delivered[0][1])
     finally:
-        _lib.Producer_try_send = real_try
         _lib.Producer_send = real_send
-    assert len(queued) == 1, "would-block did not route the record to the outbox"
-
-
-def test_send_does_not_wait_behind_a_record_another_caller_has_queued():
-    tries = []
-    real_try = _spy("Producer_try_send", tries)
-    p = MockProducer(auto_complete=True)
-    try:
-        _lib.Producer_test_set_paused(p.c_producer, True)
-        first = _seed_queued_send(p, ProducerRecord("test-topic", b"first"))
-
-        # The fast path takes the record although another record is still
-        # waiting on the outbox: one caller's wait is not another's, as one
-        # Java thread's send() is not held behind another's wait for metadata.
-        second = p.send(ProducerRecord("test-topic", b"second"))
-        assert tries == [True]
-        assert second.result(timeout=FUTURE_TIMEOUT).offset() == 0
-        assert p.history_count() == 1
-        assert not first.done(), "the parked record is still parked"
-
-        _lib.Producer_test_set_paused(p.c_producer, False)
-        assert first.result(timeout=FUTURE_TIMEOUT).offset() == 1
-    finally:
-        _lib.Producer_try_send = real_try
-        _lib.Producer_test_set_paused(p.c_producer, False)
         p.close()
 
 
 def test_send_raises_the_producers_refusal_from_the_fast_path():
-    tries = []
-    real_try = _spy("Producer_try_send", tries)
+    answers = []
+    real_send = _spy("Producer_send", answers)
     p = MockProducer(auto_complete=True)
     try:
         _close_rust_producer_behind_the_wrapper(p)
@@ -1664,94 +1628,53 @@ def test_send_raises_the_producers_refusal_from_the_fast_path():
         with pytest.raises(KafkaError, match="MockProducer is already closed"):
             p.send(ProducerRecord("test-topic", b"value"),
                    on_delivery=lambda m, e: delivered.append((m, e)))
-        # The refusal came back from try_send as an error handle (not True/False)
-        assert len(tries) == 1 and tries[0] not in (True, False)
+        # The refusal came back from the call as an error handle (not True/None)
+        assert len(answers) == 1 and answers[0] not in (True, None)
         assert p.futures == set(), "no future is left behind for a refused record"
         time.sleep(0.05)
         assert delivered == [], "a refused record has no delivery report"
     finally:
-        _lib.Producer_try_send = real_try
+        _lib.Producer_send = real_send
         p.close()
 
 
-def test_send_raises_the_producers_refusal_from_the_queued_path():
-    real_try = _lib.Producer_try_send
-    p = MockProducer(auto_complete=True)
+async def test_async_send_takes_the_record_at_once_on_the_callers_thread():
+    answers = []
+    real_send = _spy("Producer_send", answers)
     try:
-        _close_rust_producer_behind_the_wrapper(p)
-        # Force the outbox: the refusal then arrives through the acceptance
-        # callback, and send() raises it just the same.
-        _lib.Producer_try_send = lambda *args: False
+        async with AsyncMockProducer(auto_complete=True) as p:
+            future = await p.send(ProducerRecord("test-topic", b"value"))
+            assert answers == [True], "the producer did not take the record at once"
+            meta = await asyncio.wait_for(future, timeout=FUTURE_TIMEOUT)
+            assert meta.offset() == 0
+    finally:
+        _lib.Producer_send = real_send
+
+
+async def test_async_send_awaits_the_producers_answer_when_the_record_is_queued():
+    answers = []
+    real_send = _spy("Producer_send", answers)
+    p = AsyncKafkaProducer(_broker_less_config(300))
+    try:
         delivered = []
-        with pytest.raises(KafkaError, match="MockProducer is already closed"):
-            p.send(ProducerRecord("test-topic", b"value"),
-                   on_delivery=lambda m, e: delivered.append((m, e)))
-        assert p.futures == set(), "no future is left behind for a refused record"
-        time.sleep(0.05)
-        assert delivered == [], "a refused record has no delivery report"
+        turns = []
+        asyncio.get_running_loop().call_soon(turns.append, "loop turn")
+        future = await p.send(ProducerRecord("test-topic", b"value"),
+                              on_delivery=lambda m, e: delivered.append((m, e)))
+        assert answers == [None], "the record did not go through the outbox"
+        assert turns == ["loop turn"], "awaiting the producer's answer did not yield the loop"
+        with pytest.raises(KafkaError, match="not present in metadata"):
+            await asyncio.wait_for(future, timeout=FUTURE_TIMEOUT)
+        assert len(delivered) == 1
+        assert delivered[0][0] is None and "not present in metadata" in str(delivered[0][1])
     finally:
-        _lib.Producer_try_send = real_try
-        p.close()
-
-
-async def test_async_send_takes_the_fast_path_when_the_producer_can_accept_at_once():
-    tries, queued = [], []
-    real_try = _spy("Producer_try_send", tries)
-    real_send = _spy("Producer_send", queued)
-    try:
-        async with AsyncMockProducer(auto_complete=True) as p:
-            future = await p.send(ProducerRecord("test-topic", b"value"))
-            meta = await asyncio.wait_for(future, timeout=FUTURE_TIMEOUT)
-            assert meta.offset() == 0
-    finally:
-        _lib.Producer_try_send = real_try
         _lib.Producer_send = real_send
-    assert tries == [True], "try_send did not take the record on the caller's thread"
-    assert queued == [], "send queued the record although try_send had taken it"
-
-
-async def test_async_send_falls_back_to_the_outbox_when_try_send_would_block():
-    queued = []
-    real_try = _lib.Producer_try_send
-    real_send = _spy("Producer_send", queued)
-    try:
-        _lib.Producer_try_send = lambda *args: False
-        async with AsyncMockProducer(auto_complete=True) as p:
-            future = await p.send(ProducerRecord("test-topic", b"value"))
-            meta = await asyncio.wait_for(future, timeout=FUTURE_TIMEOUT)
-            assert meta.offset() == 0
-    finally:
-        _lib.Producer_try_send = real_try
-        _lib.Producer_send = real_send
-    assert len(queued) == 1, "would-block did not route the record to the outbox"
-
-
-async def test_async_send_does_not_suspend_behind_a_record_another_caller_has_queued():
-    tries = []
-    real_try = _spy("Producer_try_send", tries)
-    p = AsyncMockProducer(auto_complete=True)
-    try:
-        _lib.Producer_test_set_paused(p.c_producer, True)
-        first = _seed_queued_send(p, ProducerRecord("test-topic", b"first"))
-
-        # Taken on the fast path, without suspending, although another record
-        # is still waiting on the outbox.
-        future = await p.send(ProducerRecord("test-topic", b"second"))
-        assert tries == [True]
-        meta = await asyncio.wait_for(future, timeout=FUTURE_TIMEOUT)
-        assert meta.offset() == 0
-        assert p.history_count() == 1
-        assert not first.done(), "the parked record is still parked"
-
-        _lib.Producer_test_set_paused(p.c_producer, False)
-        assert first.result(timeout=FUTURE_TIMEOUT).offset() == 1
-    finally:
-        _lib.Producer_try_send = real_try
-        _lib.Producer_test_set_paused(p.c_producer, False)
         await p.close()
 
 
 async def test_async_send_raises_the_producers_refusal_from_the_fast_path():
+    answers = []
+    real_send = _spy("Producer_send", answers)
     p = AsyncMockProducer(auto_complete=True)
     try:
         _close_rust_producer_behind_the_wrapper(p)
@@ -1759,30 +1682,39 @@ async def test_async_send_raises_the_producers_refusal_from_the_fast_path():
         with pytest.raises(KafkaError, match="MockProducer is already closed"):
             await p.send(ProducerRecord("test-topic", b"value"),
                          on_delivery=lambda m, e: delivered.append((m, e)))
+        assert len(answers) == 1 and answers[0] not in (True, None)
         assert p.futures == set(), "no future is left behind for a refused record"
         await asyncio.sleep(0.05)
         assert delivered == [], "a refused record has no delivery report"
     finally:
+        _lib.Producer_send = real_send
         await p.close()
 
 
-async def test_async_send_raises_the_producers_refusal_from_the_queued_path():
-    real_try = _lib.Producer_try_send
-    p = AsyncMockProducer(auto_complete=True)
+async def test_async_send_cancelled_while_queued_leaves_no_future_behind():
+    answers = []
+    real_send = _spy("Producer_send", answers)
+    p = AsyncKafkaProducer(_broker_less_config(10000))
     try:
-        _close_rust_producer_behind_the_wrapper(p)
-        _lib.Producer_try_send = lambda *args: False
-        delivered = []
-        with pytest.raises(KafkaError, match="MockProducer is already closed"):
-            await p.send(ProducerRecord("test-topic", b"value"),
-                         on_delivery=lambda m, e: delivered.append((m, e)))
+        blocked = asyncio.ensure_future(p.send(ProducerRecord("test-topic", b"v")))
+        deadline = time.monotonic() + FUTURE_TIMEOUT
+        while answers != [None]:
+            assert time.monotonic() < deadline, "the send did not reach the outbox in time"
+            await asyncio.sleep(0.005)
+        blocked.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await blocked
         # The future registered for the wait was cancelled and dropped again
         # (the done-callback that removes it is scheduled, not run inline).
         await asyncio.sleep(0.05)
-        assert p.futures == set(), "no future is left behind for a refused record"
-        assert delivered == [], "a refused record has no delivery report"
+        assert p.futures == set(), "no future is left behind for a cancelled send"
+        # The record stays queued (a retry would duplicate it); close() fails
+        # it as Java's does, and its answer, with nobody waiting, is consumed.
+        started = time.monotonic()
+        await p.close()
+        assert time.monotonic() - started < 5, "close() waited for the cancelled send's record"
     finally:
-        _lib.Producer_try_send = real_try
+        _lib.Producer_send = real_send
         await p.close()
 
 

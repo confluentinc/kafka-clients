@@ -33,7 +33,11 @@ mod record_metadata;
 mod round_robin_partitioner;
 
 pub use callback::Callback;
-pub use kafka_producer::{KafkaProducer, TrySendOutcome};
+pub use kafka_producer::KafkaProducer;
+// The non-blocking outcome is consumed only by the C FFI's `send_async` fast
+// path and submission task; without the `ffi` feature nothing else names it.
+#[cfg(feature = "ffi")]
+pub(crate) use kafka_producer::TrySendOutcome;
 #[cfg(test)]
 pub(crate) use mock_partitioner::MockPartitioner;
 pub use mock_producer::{MockProducer, MockProducerOptions, MockProducerOptionsBuilder};

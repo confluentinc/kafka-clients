@@ -93,8 +93,9 @@ struct ClusterAndWaitTime {
 /// Java's `KafkaProducer.send` blocks for up to `max.block.ms` at two points
 /// before `RecordAccumulator.append` succeeds: `waitOnMetadata`
 /// (`KafkaProducer.java:983`) and `BufferPool.allocate`. This enum has no Java
-/// counterpart (DoD #7): it exists so [`KafkaProducer::try_send`] can share the
-/// whole `send` path and differ from it only at those two points.
+/// counterpart (DoD #7): it exists so the crate-internal
+/// [`KafkaProducer::try_send`] can share the whole `send` path and differ from
+/// it only at those two points.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SendWait {
     /// Block for up to `max.block.ms`, as Java does.
@@ -110,11 +111,12 @@ enum SendWait {
 /// blocks for up to `max.block.ms` at its two pre-append wait points —
 /// `waitOnMetadata` (`KafkaProducer.java:983`) and `BufferPool.allocate` inside
 /// `RecordAccumulator.append` — and a caller who cannot afford to block has no
-/// way to ask for anything else. The bindings need exactly that: their fast path
-/// appends on the caller's own thread and must fall back to a queue, rather than
-/// stall that thread, whenever the producer would have to wait. This enum is how
-/// the producer reports which of the two happened.
-pub enum TrySendOutcome {
+/// way to ask for anything else. The C FFI's `send_async` needs exactly that: it
+/// appends on the caller's own thread when the producer is ready and must fall
+/// back to its submission queue, rather than stall that thread, whenever the
+/// producer would have to wait. This enum is how the producer reports which of
+/// the two happened. Crate-internal: the public surface stays Java's `send`.
+pub(crate) enum TrySendOutcome {
     /// The record was handed to the producer and resolved the way `send` would
     /// have resolved it: appended to a batch, or rejected with an `ApiException`
     /// (a record too large, say) — in which case the future is already failed
@@ -2552,10 +2554,11 @@ impl KafkaProducer<Vec<u8>, Vec<u8>> {
     /// `WouldBlock` **and** a metadata request has been issued; the next attempt,
     /// once the response is in, is `Accepted`.
     ///
-    /// There is no Java counterpart. The bindings use this as the fast path of
-    /// their `send`: append on the caller's own thread when the producer is ready,
-    /// and fall back to a queue — rather than stall the caller — when it is not.
-    pub async fn try_send(
+    /// There is no Java counterpart, which is why it is crate-internal. The C
+    /// FFI's `send_async` uses it as the fast path of its `send`: append on the
+    /// caller's own thread when the producer is ready, and fall back to its
+    /// submission queue — rather than stall the caller — when it is not.
+    pub(crate) async fn try_send(
         &self,
         record: ProducerRecord<&[u8], &[u8]>,
         callback: Option<Callback>,
