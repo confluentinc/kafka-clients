@@ -191,6 +191,14 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(
     value_serializer: *mut kafka_common_serialization_Serializer_t,
     out_new: *mut *mut kafka_producer_KafkaProducer_t,
 ) -> *mut kafka_common_Error_t {
+    // The serializers are taken first, so that a configuration error below
+    // drops (and so frees) the owned ones the caller handed over.
+    // SAFETY: Per this function's `# Safety`, `key_serializer` is null or a live handle, not used
+    // again by the caller when owned, as `serializer_from` requires.
+    let key_serializer = unsafe { serializer_from(key_serializer) };
+    // SAFETY: Per this function's `# Safety`, `value_serializer` is null or a live handle, not used
+    // again by the caller when owned, as `serializer_from` requires.
+    let value_serializer = unsafe { serializer_from(value_serializer) };
     // SAFETY: Per this function's `# Safety`, `config` is a live handle; no
     // `kafka_producer_ProducerConfig_set_partitioner` call can run on it meanwhile, since that
     // function's `# Safety` excludes any other call using the handle at the same time, so
@@ -199,12 +207,6 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(
         Ok(config) => config,
         Err(error) => return box_error(error),
     };
-    // SAFETY: Per this function's `# Safety`, `key_serializer` is null or a live handle, not used
-    // again by the caller when owned, as `serializer_from` requires.
-    let key_serializer = unsafe { serializer_from(key_serializer) };
-    // SAFETY: Per this function's `# Safety`, `value_serializer` is null or a live handle, not used
-    // again by the caller when owned, as `serializer_from` requires.
-    let value_serializer = unsafe { serializer_from(value_serializer) };
     match ProducerHandle::new(|| KafkaProducer::new(config, key_serializer, value_serializer), true) {
         Ok(handle) => {
             // SAFETY: Per this function's `# Safety`, `out_new` is a valid slot, so the write is
@@ -530,6 +532,31 @@ mod tests {
         kafka_producer_Producer_close_with_timeout_cb, kafka_producer_Producer_send_cb,
     };
     use crate::ffi::util::{box_string_map, c_str_to_string, kafka_Map_destroy};
+
+    /// An owned serializer is the producer's from the call on, so a
+    /// configuration the constructor cannot build frees it rather than
+    /// leaking it.
+    #[test]
+    fn a_configuration_error_frees_the_owned_serializers() {
+        let imp: Arc<DynSerializer> = Arc::new(BytesPassthrough);
+        let props = [("bootstrap.servers".to_string(), String::new())].into_iter().collect();
+        let config = crate::ffi::producer::producer_config::ProducerConfigInner::unvalidated_for_test(props);
+        // SAFETY: Test code: `config` and the two owned serializers are live handles, the
+        // serializers handed over to the constructor and not used again, and `config` is destroyed
+        // once below.
+        unsafe {
+            let key = crate::ffi::common::serialization::serializer::SerializerInner::owned(Arc::clone(&imp));
+            let value = crate::ffi::common::serialization::serializer::SerializerInner::owned(Arc::clone(&imp));
+            assert_eq!(Arc::strong_count(&imp), 3);
+            let mut producer = std::ptr::null_mut();
+            let error = kafka_producer_KafkaProducer_new(config, key, value, &raw mut producer);
+            assert!(!error.is_null(), "the empty bootstrap.servers is rejected");
+            assert!(producer.is_null());
+            kafka_common_Error_destroy(error);
+            kafka_producer_ProducerConfig_destroy(config);
+        }
+        assert_eq!(Arc::strong_count(&imp), 1, "both owned serializers were freed");
+    }
 
     /// A `KafkaProducer` that can never fetch metadata, so a send waits out
     /// `max.block.ms` (60 s) for it.

@@ -52,6 +52,14 @@ pub(crate) struct ProducerConfigInner {
 }
 
 impl ProducerConfigInner {
+    /// A handle over `props` that skipped `kafka_producer_ProducerConfig_new`'s
+    /// validation, so that [`Self::build`] fails on invalid ones: a test-only
+    /// way to reach the build error path of the constructors that take it.
+    #[cfg(test)]
+    pub(crate) fn unvalidated_for_test(props: HashMap<String, String>) -> *mut kafka_producer_ProducerConfig_t {
+        Box::into_raw(Box::new(Self { props, partitioner: None })) as *mut kafka_producer_ProducerConfig_t
+    }
+
     /// The Rust configuration this handle stands for.
     pub(crate) fn build(&self) -> Result<ProducerConfig, Error> {
         let config = ProducerConfig::new(&self.props)?;
