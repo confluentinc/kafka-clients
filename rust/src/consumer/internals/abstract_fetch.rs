@@ -360,6 +360,15 @@ impl AbstractFetch {
         request_latency_ms: i64,
     ) {
         let session_id = request_data.metadata.session_id();
+        // Record the fetch request latency FIRST, before either early return
+        // below (KAFKA-20585, `AbstractFetch.java:158`): the round trip
+        // completed even when the response carries a session-level error such
+        // as `FETCH_SESSION_TOPIC_ID_ERROR`. Java passes `resp.destination()`
+        // (the broker node id as a string); we pass the node id likewise so
+        // the per-node `node-{id}.latency` sensor matches.
+        self.metrics_manager
+            .record_latency(&fetch_target.id().to_string(), request_latency_ms);
+
         // Java's `handler == null` `return` sits INSIDE the `try`, so the
         // `finally { removePendingFetchRequest(...) }` (`AbstractFetch.java:253-255`)
         // still runs. Leaking the node id here would be permanent, not a
@@ -575,12 +584,6 @@ impl AbstractFetch {
                 }
             }
         }
-
-        // Record the fetch request latency. Java uses
-        // `resp.destination()` (the broker node id as a string); we pass the
-        // node id likewise so the per-node `node-{id}.latency` sensor matches.
-        self.metrics_manager
-            .record_latency(&fetch_target.id().to_string(), request_latency_ms);
 
         self.remove_pending_fetch_request(fetch_target, session_id);
     }

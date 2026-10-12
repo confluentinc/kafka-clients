@@ -3033,7 +3033,7 @@ master merges and the one patch-equivalent commit that `--cherry-pick` drops, ma
 | `33ea66bf7e` | Share | O | KAFKA-20736 | Out of scope | Share (KIP-932), consumer-threading §20 |
 | `b4da5b66e1` | Share | O | KAFKA-20524 | Out of scope | Share (KIP-932), consumer-threading §20 |
 | `b6d2503710` | Share | O | KAFKA-20410 | Out of scope | Share (KIP-932), consumer-threading §20 |
-| `c3a830f8d2` | Share | O | KAFKA-20585 | Out of scope | Share (KIP-932), consumer-threading §20 |
+| `c3a830f8d2` | Consumer | P | KAFKA-20585 | Ported | Reclassified from Share/O in the review fix round (COMMENTS.114 C1): the commit also moves `AbstractFetch.handleFetchSuccess`'s `recordLatency` before both early returns. Ported to `AbstractFetch::handle_fetch_success`, with `FetchRequestManagerTest.testRecordLatencyOnFetchResponseLevelError` translated; the `FetcherTest` twin is classic-only (§20, skipped) and the `ShareConsumeRequestManager` half stays out of scope |
 | `cc5b632871` | Share | O | KAFKA-21106 | Out of scope | Share (KIP-932), consumer-threading §20 |
 | `d1c0bd82c0` | Share | O | KAFKA-14648 | Out of scope | Share (KIP-932), consumer-threading §20; the ShareConsumerImpl half of KAFKA-14648, recorded skip in P2 |
 | `eb8f9c916c` | Share | O | KAFKA-20720 | Out of scope | Share (KIP-932), consumer-threading §20 |

@@ -162,7 +162,7 @@ rel: P = port, T = test-only port, D = doc/log only, N = no-op for Rust (Java re
 | 33ea66bf7e | Share | O |  | 2026-07-20 | KAFKA-20736: Improve share session handling on leader change (#22766) | 267+/133- / 438+/27- |
 | b4da5b66e1 | Share | O |  | 2026-06-23 | KAFKA-20524: Improve reset offset usability (#22607) | 8+/2- / +/- |
 | b6d2503710 | Share | O |  | 2026-04-21 | KAFKA-20410: Add DLQ configuration parameters for Share Groups (KIP-1191) (#21979) | 6+/0- / +/- |
-| c3a830f8d2 | Share | O |  | 2026-07-14 | KAFKA-20585 : Share Fetch latency metric incorrectly updated during ShareAcknowledgeResponse (#22296) | 4+/7- / 51+/3- |
+| c3a830f8d2 | Consumer | P | partial | 2026-07-14 | KAFKA-20585 : Share Fetch latency metric incorrectly updated during ShareAcknowledgeResponse (#22296) — in scope partially: the `AbstractFetch.handleFetchSuccess` half (latency recorded before the early returns) is a consumer change; the Share half stays out of scope. Reclassified from Share/O in the review fix round (COMMENTS.114 C1) | 4+/7- / 51+/3- |
 | cc5b632871 | Share | O |  | 2026-09-24 | KAFKA-21106 Omit partitions with no in-flight records from ShareFetch#records (#23532) | 9+/6- / 207+/2- |
 | d1c0bd82c0 | Share | O |  | 2026-07-29 | KAFKA-14648: Do not fail clients if bootstrap servers is not immediately resolvable (2/2) (#22897) | 11+/4- / 48+/0- |
 | eb8f9c916c | Share | O |  | 2026-06-30 | KAFKA-20720: Lower level for client log on self-healing share session… (#22691) | 16+/4- / +/- |
