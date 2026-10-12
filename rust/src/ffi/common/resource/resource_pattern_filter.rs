@@ -56,9 +56,19 @@ impl ResourcePatternFilterInner {
     }
 }
 
+/// What a handle points at.
+///
+/// # Safety
+///
+/// `filter` must be a valid resource-pattern-filter handle, alive for `'a`.
 unsafe fn inner_ref<'a>(
     filter: *const kafka_common_resource_ResourcePatternFilter_t,
 ) -> &'a ResourcePatternFilterInner {
+    // SAFETY: Per this function's `# Safety`, `filter` is a valid resource-pattern-filter handle
+    // alive for `'a`, so it points at a live `ResourcePatternFilterInner`: the `Box::into_raw` of
+    // `box_resource_pattern_filter`, or one a parent handle embeds and hands out a view on, which
+    // lives as long as that parent. Nothing mutates a `ResourcePatternFilterInner` while a handle
+    // to it exists, so the shared reference is sound for `'a`.
     unsafe { &*(filter as *const ResourcePatternFilterInner) }
 }
 
@@ -66,10 +76,12 @@ unsafe fn inner_ref<'a>(
 ///
 /// # Safety
 ///
-/// `filter` must be a valid resource-pattern-filter handle.
+/// `filter` must be a valid resource-pattern-filter handle, alive for `'a`.
 pub(crate) unsafe fn resource_pattern_filter_ref<'a>(
     filter: *const kafka_common_resource_ResourcePatternFilter_t,
 ) -> &'a ResourcePatternFilter {
+    // SAFETY: Per this function's `# Safety`, `filter` is a valid resource-pattern-filter handle,
+    // as `inner_ref` requires; the reference returned lives for the same `'a`.
     &unsafe { inner_ref(filter) }.filter
 }
 
@@ -98,8 +110,17 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_new(
     pattern_type: *const kafka_common_resource_PatternType_t,
 ) -> *mut kafka_common_resource_ResourcePatternFilter_t {
     box_resource_pattern_filter(ResourcePatternFilter::new(
+        // SAFETY: Per this function's `# Safety`, `resource_type` is a singleton of its enum, i.e.
+        // one returned by the `resource_type` module, as `resource_type_of`
+        // (`resource_type::value_of`) requires; the value is copied out.
         unsafe { resource_type_of(resource_type) },
+        // SAFETY: Per this function's `# Safety`, `name` is null or a valid NUL-terminated string,
+        // as `c_str_to_option` requires; it is copied into an owned value, so nothing borrows it
+        // after this call.
         unsafe { c_str_to_option(name) },
+        // SAFETY: Per this function's `# Safety`, `pattern_type` is a singleton of its enum, i.e.
+        // one returned by the `pattern_type` module, as `pattern_type_of`
+        // (`pattern_type::value_of`) requires; the value is copied out.
         unsafe { pattern_type_of(pattern_type) },
     ))
 }
@@ -124,6 +145,8 @@ pub extern "C" fn kafka_common_resource_ResourcePatternFilter_any() -> *mut kafk
 pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_is_unknown(
     self_: *const kafka_common_resource_ResourcePatternFilter_t,
 ) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid resource-pattern-filter handle, as
+    // `resource_pattern_filter_ref` requires; the reference is used only within this call.
     i8::from(unsafe { resource_pattern_filter_ref(self_) }.is_unknown())
 }
 
@@ -137,6 +160,9 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_is_unknown(
 pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_resource_type(
     self_: *const kafka_common_resource_ResourcePatternFilter_t,
 ) -> *const kafka_common_resource_ResourceType_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid resource-pattern-filter handle, as
+    // `resource_pattern_filter_ref` requires; the value is copied out and mapped to its static
+    // singleton, so the borrow lasts for this call only.
     resource_type_singleton(unsafe { resource_pattern_filter_ref(self_) }.resource_type())
 }
 
@@ -150,6 +176,9 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_resource_ty
 pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_name(
     self_: *const kafka_common_resource_ResourcePatternFilter_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid resource-pattern-filter handle, as
+    // `inner_ref` requires; the string returned, when there is one, is the handle's own C string,
+    // so it lives as long as the handle; that is the rustdoc's "borrowed from the handle, or null".
     unsafe { inner_ref(self_) }.name_c.as_ref().map_or(ptr::null(), |s| s.as_ptr())
 }
 
@@ -163,6 +192,9 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_name(
 pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_pattern_type(
     self_: *const kafka_common_resource_ResourcePatternFilter_t,
 ) -> *const kafka_common_resource_PatternType_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid resource-pattern-filter handle, as
+    // `resource_pattern_filter_ref` requires; the value is copied out and mapped to its static
+    // singleton, so the borrow lasts for this call only.
     pattern_type_singleton(unsafe { resource_pattern_filter_ref(self_) }.pattern_type())
 }
 
@@ -180,6 +212,9 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_matches(
     self_: *const kafka_common_resource_ResourcePatternFilter_t,
     pattern: *const kafka_common_resource_ResourcePattern_t,
 ) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid resource-pattern-filter handle and
+    // `pattern` a valid resource-pattern handle, as `resource_pattern_filter_ref` and
+    // `resource_pattern_ref` require. Both borrows last for this call only.
     i8::from(unsafe { resource_pattern_filter_ref(self_) }.matches(unsafe { resource_pattern_ref(pattern) }))
 }
 
@@ -193,6 +228,8 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_matches(
 pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_matches_at_most_one(
     self_: *const kafka_common_resource_ResourcePatternFilter_t,
 ) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid resource-pattern-filter handle, as
+    // `resource_pattern_filter_ref` requires; the reference is used only within this call.
     i8::from(unsafe { resource_pattern_filter_ref(self_) }.matches_at_most_one())
 }
 
@@ -208,6 +245,9 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_matches_at_
 pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_find_indefinite_field(
     self_: *const kafka_common_resource_ResourcePatternFilter_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid resource-pattern-filter handle, as
+    // `resource_pattern_filter_ref` requires; the result is copied into an owned value before
+    // return, so the borrow lasts for this call only.
     unsafe { resource_pattern_filter_ref(self_) }
         .find_indefinite_field()
         .map_or(ptr::null_mut(), |field| into_c_string(&field))
@@ -223,6 +263,9 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_find_indefi
 pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_to_string(
     self_: *const kafka_common_resource_ResourcePatternFilter_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid resource-pattern-filter handle, as
+    // `resource_pattern_filter_ref` requires; the result is copied into an owned value before
+    // return, so the borrow lasts for this call only.
     into_c_string(&unsafe { resource_pattern_filter_ref(self_) }.to_string())
 }
 
@@ -238,6 +281,10 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_destroy(
     self_: *mut kafka_common_resource_ResourcePatternFilter_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // handle not yet destroyed, i.e. the `Box::into_raw` of a `ResourcePatternFilterInner` in
+        // `box_resource_pattern_filter` (a view, which points into its parent, is never passed
+        // here), so `from_raw` reclaims that allocation, once.
         drop(unsafe { Box::from_raw(self_ as *mut ResourcePatternFilterInner) });
     }
 }
@@ -267,6 +314,11 @@ mod tests {
         let prefixed =
             box_resource_pattern(ResourcePattern::new(ResourceType::Topic, "ord", PatternType::Prefixed).unwrap());
         let name = CString::new("orders").unwrap();
+        // SAFETY: Test code: `literal` and `prefixed` come from `box_resource_pattern`, the filters
+        // from this module's constructors, the enum arguments are singletons from their getters,
+        // `name` is a `CString` that outlives the constructors copying it, the name views are read
+        // only while their filter is alive, and every owned handle (the filters, the strings, the
+        // patterns) is destroyed once.
         unsafe {
             let by_type = kafka_common_resource_ResourcePatternFilter_new(
                 kafka_common_resource_ResourceType_topic(),

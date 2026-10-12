@@ -44,7 +44,16 @@ impl ResourceInner {
     }
 }
 
+/// What a handle points at.
+///
+/// # Safety
+///
+/// `resource` must be a valid resource handle, alive for `'a`.
 unsafe fn inner_ref<'a>(resource: *const kafka_common_resource_Resource_t) -> &'a ResourceInner {
+    // SAFETY: Per this function's `# Safety`, `resource` is a valid resource handle alive for `'a`,
+    // so it points at a live `ResourceInner`, the `Box::into_raw` of `box_resource` (no view of
+    // this type is handed out). Nothing mutates a `ResourceInner` while a handle to it exists, so
+    // the shared reference is sound for `'a`.
     unsafe { &*(resource as *const ResourceInner) }
 }
 
@@ -52,8 +61,10 @@ unsafe fn inner_ref<'a>(resource: *const kafka_common_resource_Resource_t) -> &'
 ///
 /// # Safety
 ///
-/// `resource` must be a valid resource handle.
+/// `resource` must be a valid resource handle, alive for `'a`.
 pub(crate) unsafe fn resource_ref<'a>(resource: *const kafka_common_resource_Resource_t) -> &'a Resource {
+    // SAFETY: Per this function's `# Safety`, `resource` is a valid resource handle, as `inner_ref`
+    // requires; the reference returned lives for the same `'a`.
     &unsafe { inner_ref(resource) }.resource
 }
 
@@ -76,6 +87,10 @@ pub unsafe extern "C" fn kafka_common_resource_Resource_new(
     resource_type: *const kafka_common_resource_ResourceType_t,
     name: *const c_char,
 ) -> *mut kafka_common_resource_Resource_t {
+    // SAFETY: Per this function's `# Safety`, `resource_type` is a resource-type singleton, as
+    // `resource_type_of` requires, and its value is copied out; `name` is a valid NUL-terminated
+    // string, as `c_str_to_string` requires, and is copied into an owned `String`. Nothing borrows
+    // either argument after this call.
     box_resource(Resource::new(unsafe { resource_type_of(resource_type) }, unsafe {
         c_str_to_string(name)
     }))
@@ -99,6 +114,9 @@ pub extern "C" fn kafka_common_resource_Resource_cluster() -> *mut kafka_common_
 pub unsafe extern "C" fn kafka_common_resource_Resource_resource_type(
     self_: *const kafka_common_resource_Resource_t,
 ) -> *const kafka_common_resource_ResourceType_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid resource handle, as `resource_ref`
+    // requires; the value is copied out and mapped to its static singleton, so the borrow lasts for
+    // this call only.
     resource_type_singleton(unsafe { resource_ref(self_) }.resource_type())
 }
 
@@ -112,6 +130,9 @@ pub unsafe extern "C" fn kafka_common_resource_Resource_resource_type(
 pub unsafe extern "C" fn kafka_common_resource_Resource_name(
     self_: *const kafka_common_resource_Resource_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid resource handle, as `inner_ref`
+    // requires; the string returned is the handle's own C string, so it lives as long as the
+    // handle; that is the rustdoc's "borrowed from the handle".
     unsafe { inner_ref(self_) }.name_c.as_ptr()
 }
 
@@ -125,6 +146,8 @@ pub unsafe extern "C" fn kafka_common_resource_Resource_name(
 pub unsafe extern "C" fn kafka_common_resource_Resource_is_unknown(
     self_: *const kafka_common_resource_Resource_t,
 ) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid resource handle, as `resource_ref`
+    // requires; the reference is used only within this call.
     i8::from(unsafe { resource_ref(self_) }.is_unknown())
 }
 
@@ -138,6 +161,9 @@ pub unsafe extern "C" fn kafka_common_resource_Resource_is_unknown(
 pub unsafe extern "C" fn kafka_common_resource_Resource_to_string(
     self_: *const kafka_common_resource_Resource_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid resource handle, as `resource_ref`
+    // requires; the result is copied into an owned value before return, so the borrow lasts for
+    // this call only.
     into_c_string(&unsafe { resource_ref(self_) }.to_string())
 }
 
@@ -150,6 +176,9 @@ pub unsafe extern "C" fn kafka_common_resource_Resource_to_string(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_Resource_destroy(self_: *mut kafka_common_resource_Resource_t) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // handle not yet destroyed, i.e. the `Box::into_raw` of a `ResourceInner` in
+        // `box_resource`, so `from_raw` reclaims that allocation, once.
         drop(unsafe { Box::from_raw(self_ as *mut ResourceInner) });
     }
 }
@@ -170,6 +199,10 @@ mod tests {
     #[test]
     fn constructor_cluster_and_getters_follow_java() {
         let name = CString::new("orders").unwrap();
+        // SAFETY: Test code: the resource-type arguments are singletons from their getters, `name`
+        // is a `CString` that outlives the constructors copying it, the name views are read only
+        // while their resource is alive, and every owned handle (the resources, the string) is
+        // destroyed once.
         unsafe {
             let topic = kafka_common_resource_Resource_new(kafka_common_resource_ResourceType_topic(), name.as_ptr());
             assert_eq!(*resource_ref(topic), Resource::new(ResourceType::Topic, "orders"));

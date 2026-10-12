@@ -57,7 +57,17 @@ impl ResourcePatternInner {
     }
 }
 
+/// What a handle points at.
+///
+/// # Safety
+///
+/// `pattern` must be a valid resource-pattern handle, alive for `'a`.
 unsafe fn inner_ref<'a>(pattern: *const kafka_common_resource_ResourcePattern_t) -> &'a ResourcePatternInner {
+    // SAFETY: Per this function's `# Safety`, `pattern` is a valid resource-pattern handle alive
+    // for `'a`, so it points at a live `ResourcePatternInner`: the `Box::into_raw` of
+    // `box_resource_pattern`, or one a parent handle embeds and hands out a view on, which lives as
+    // long as that parent. Nothing mutates a `ResourcePatternInner` while a handle to it exists, so
+    // the shared reference is sound for `'a`.
     unsafe { &*(pattern as *const ResourcePatternInner) }
 }
 
@@ -65,10 +75,12 @@ unsafe fn inner_ref<'a>(pattern: *const kafka_common_resource_ResourcePattern_t)
 ///
 /// # Safety
 ///
-/// `pattern` must be a valid resource-pattern handle.
+/// `pattern` must be a valid resource-pattern handle, alive for `'a`.
 pub(crate) unsafe fn resource_pattern_ref<'a>(
     pattern: *const kafka_common_resource_ResourcePattern_t,
 ) -> &'a ResourcePattern {
+    // SAFETY: Per this function's `# Safety`, `pattern` is a valid resource-pattern handle, as
+    // `inner_ref` requires; the reference returned lives for the same `'a`.
     &unsafe { inner_ref(pattern) }.pattern
 }
 
@@ -96,12 +108,24 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_new(
     out_pattern: *mut *mut kafka_common_resource_ResourcePattern_t,
 ) -> *mut kafka_common_Error_t {
     let pattern = ResourcePattern::new(
+        // SAFETY: Per this function's `# Safety`, `resource_type` is a singleton of its enum, i.e.
+        // one returned by the `resource_type` module, as `resource_type_of`
+        // (`resource_type::value_of`) requires; the value is copied out.
         unsafe { resource_type_of(resource_type) },
+        // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
+        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // after this call.
         unsafe { c_str_to_string(name) },
+        // SAFETY: Per this function's `# Safety`, `pattern_type` is a singleton of its enum, i.e.
+        // one returned by the `pattern_type` module, as `pattern_type_of`
+        // (`pattern_type::value_of`) requires; the value is copied out.
         unsafe { pattern_type_of(pattern_type) },
     );
     match pattern {
         Ok(pattern) => {
+            // SAFETY: Per this function's `# Safety`, `out_pattern` is a valid pointer, so writing
+            // through it is sound. The handle written is a fresh owned one from
+            // `box_resource_pattern`, which the caller owns.
             unsafe { *out_pattern = box_resource_pattern(pattern) };
             ptr::null_mut()
         },
@@ -119,6 +143,9 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_new(
 pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_resource_type(
     self_: *const kafka_common_resource_ResourcePattern_t,
 ) -> *const kafka_common_resource_ResourceType_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid resource-pattern handle, as
+    // `resource_pattern_ref` requires; the value is copied out and mapped to its static singleton,
+    // so the borrow lasts for this call only.
     resource_type_singleton(unsafe { resource_pattern_ref(self_) }.resource_type())
 }
 
@@ -132,6 +159,9 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_resource_type(
 pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_name(
     self_: *const kafka_common_resource_ResourcePattern_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid resource-pattern handle, as
+    // `inner_ref` requires; the string returned is the handle's own C string, so it lives as long
+    // as the handle; that is the rustdoc's "borrowed from the handle".
     unsafe { inner_ref(self_) }.name_c.as_ptr()
 }
 
@@ -145,6 +175,9 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_name(
 pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_pattern_type(
     self_: *const kafka_common_resource_ResourcePattern_t,
 ) -> *const kafka_common_resource_PatternType_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid resource-pattern handle, as
+    // `resource_pattern_ref` requires; the value is copied out and mapped to its static singleton,
+    // so the borrow lasts for this call only.
     pattern_type_singleton(unsafe { resource_pattern_ref(self_) }.pattern_type())
 }
 
@@ -159,6 +192,9 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_pattern_type(
 pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_to_filter(
     self_: *const kafka_common_resource_ResourcePattern_t,
 ) -> *mut kafka_common_resource_ResourcePatternFilter_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid resource-pattern handle, as
+    // `resource_pattern_ref` requires; the result is copied into an owned value before return, so
+    // the borrow lasts for this call only.
     box_resource_pattern_filter(unsafe { resource_pattern_ref(self_) }.to_filter())
 }
 
@@ -173,6 +209,8 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_to_filter(
 pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_is_unknown(
     self_: *const kafka_common_resource_ResourcePattern_t,
 ) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid resource-pattern handle, as
+    // `resource_pattern_ref` requires; the reference is used only within this call.
     i8::from(unsafe { resource_pattern_ref(self_) }.is_unknown())
 }
 
@@ -186,6 +224,9 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_is_unknown(
 pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_to_string(
     self_: *const kafka_common_resource_ResourcePattern_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid resource-pattern handle, as
+    // `resource_pattern_ref` requires; the result is copied into an owned value before return, so
+    // the borrow lasts for this call only.
     into_c_string(&unsafe { resource_pattern_ref(self_) }.to_string())
 }
 
@@ -201,6 +242,10 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_destroy(
     self_: *mut kafka_common_resource_ResourcePattern_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // handle not yet destroyed, i.e. the `Box::into_raw` of a `ResourcePatternInner` in
+        // `box_resource_pattern` (a view, which points into its parent, is never passed here), so
+        // `from_raw` reclaims that allocation, once.
         drop(unsafe { Box::from_raw(self_ as *mut ResourcePatternInner) });
     }
 }
@@ -229,6 +274,10 @@ mod tests {
     #[test]
     fn constructor_getters_and_filter_follow_java() {
         let name = CString::new("orders-").unwrap();
+        // SAFETY: Test code: the enum arguments are singletons from their getters, `name` is a
+        // `CString` that outlives the constructor copying it, `pattern` is a local the constructor
+        // writes an owned handle into, the name view is read only while `pattern` is alive, and
+        // every owned handle (the pattern, the filter, the string) is destroyed once.
         unsafe {
             let mut pattern = ptr::null_mut();
             assert!(
@@ -273,6 +322,10 @@ mod tests {
     #[test]
     fn any_resource_type_and_filter_pattern_types_are_rejected() {
         let name = CString::new("orders").unwrap();
+        // SAFETY: Test code: the enum arguments are singletons from their getters, `name` is a
+        // `CString` that outlives the calls reading it, `pattern` is a local out pointer the
+        // failing constructor leaves null, and each returned error is destroyed once, after its
+        // message is read.
         unsafe {
             let mut pattern = ptr::null_mut();
             let error = kafka_common_resource_ResourcePattern_new(
