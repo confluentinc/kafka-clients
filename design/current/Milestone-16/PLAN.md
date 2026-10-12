@@ -1255,7 +1255,8 @@ Phase 5 completion notes (agent 95):
     so the request is the same v0-5 one.
   - Not Phase 5: the other 4.4 `ProducerMetadata` changes (36a69b49c5 `Timer` `awaitUpdate`, 9f15f3c540
     lock-free `add` fast path and `retainTopic` CAS, the constructor losing `Time`) are classified N in
-    §6 and were not touched.
+    §6 and were not touched. (9f15f3c540's `testRetainTopic` was later translated in the review fix round,
+    COMMENTS.114 C3.)
   - Pre-existing, out of scope: `KafkaProducerMetrics::record_send_offsets` has no call site in Rust
     (the module carries an `expect(dead_code)` for the transactional sensors). Java records it after the
     send-offsets wait; 6208dfc014 did not change that line.
@@ -3012,7 +3013,7 @@ master merges and the one patch-equivalent commit that `--cherry-pick` drops, ma
 | `ede01b871e` | Network | P | KAFKA-20246 | Ported | P0 spec (`954a6ff2`); P4 `metadata.cluster.check.enable` (`a5269fa2`, + `1944ff3b`) |
 | `fc18c47efd` | Producer | D | KAFKA-19193 | Doc/log | Already applied in P6 (`d0171254`): the rack-aware parameter docs |
 | `36a69b49c5` | Producer | N | KAFKA-16937 | No-op | Java refactor: `Time#waitObject` inlined into `ProducerMetadata.awaitUpdate`; no behaviour change (P5 notes: left untouched) |
-| `9f15f3c540` | Producer | N | KAFKA-20804 | No-op | Java lock-contention tweak in `ProducerMetadata.add`; no behaviour change (P5 notes: left untouched) |
+| `9f15f3c540` | Producer | N | KAFKA-20804 | No-op (test ported) | Main code: Java lock-contention tweak in `ProducerMetadata.add`; no behaviour change (P5 notes: left untouched). Its new `ProducerMetadataTest.testRetainTopic` was translated in the review fix round (COMMENTS.114 C3) as `producer_metadata::tests::test_retain_topic`, against the `retain_topic_fn` closure |
 | `165d7ec933` | Producer | P | KAFKA-19193 | Ported | P6: `d0171254` |
 | `1aed299b3e` | Producer | P | KAFKA-20578 | Ported | P7 `005844bf`, `3271f906`, `14eec39c`, `2139ba84`; P8 `6442a838`, `d529098c`, `5475f4e4` (+ `77183531`, `67e85c90`) |
 | `6208dfc014` | Producer | P | KAFKA-20444 | Ported | P5: `dc43f174` (+ `335c0b67`) |

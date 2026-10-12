@@ -141,7 +141,7 @@ rel: P = port, T = test-only port, D = doc/log only, N = no-op for Rust (Java re
 | ede01b871e | Network | P | kip1242 | 2026-04-02 | KAFKA-20246: Detection and handling of misrouted connections [1/N] (#21766) | 36+/3- / 2+/2- |
 | fc18c47efd | Producer | D | rack | 2026-06-24 | KAFKA-19193: add Javadoc for rack-aware params in BuiltInPartitioner (#22432) | 3+/0- / +/- |
 | 36a69b49c5 | Producer | N |  | 2026-07-27 | KAFKA-16937 Inline Time#waitObject to ProducerMetadata#awaitUpdate (#22083) | 31+/36- / 77+/128- |
-| 9f15f3c540 | Producer | N |  | 2026-07-24 | KAFKA-20804: Reduce lock contention in ProducerMetadata#add (#22810) | 26+/11- / 28+/0- |
+| 9f15f3c540 | Producer | N |  | 2026-07-24 | KAFKA-20804: Reduce lock contention in ProducerMetadata#add (#22810) — main code no-op; `testRetainTopic` translated in the review fix round (COMMENTS.114 C3) | 26+/11- / 28+/0- |
 | 165d7ec933 | Producer | P | rack | 2026-06-23 | KAFKA-19193: throw ConfigException if rack is empty in rack-aware mode (#22433) | 2+/1- / +/- |
 | 1aed299b3e | Producer | P | chunked | 2026-07-30 | KAFKA-20578: Initial producer incremental allocation for uncompressed data (#22654) | 1407+/120- / 1468+/3- |
 | 6208dfc014 | Producer | P | kip1319 | 2026-06-09 | KAFKA-20444: [11/N] Refresh metadata before TxnOffsetCommit (KIP-1319) (#22460) | 53+/3- / 159+/0- |

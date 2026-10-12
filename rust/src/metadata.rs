@@ -1652,6 +1652,18 @@ impl Metadata {
         true
     }
 
+    /// Test seam for Java's `protected boolean retainTopic(String, boolean, long)`:
+    /// dispatches to the subclass override (`retain_topic_fn`) or the default,
+    /// exactly as the name-only `retain` closure in [`Metadata::update`] does.
+    /// Java tests call the protected method directly (`ProducerMetadataTest.testRetainTopic`).
+    #[cfg(test)]
+    pub(crate) fn retain_topic(&self, topic: &str, is_internal: bool, now_ms: i64) -> bool {
+        match &self.retain_topic_fn {
+            Some(f) => f(topic, is_internal, now_ms),
+            None => Self::retain_topic_default(topic, is_internal, now_ms),
+        }
+    }
+
     /// Returns the cluster resource for the current metadata snapshot.
     pub fn fetch_cluster_resource(&self) -> ClusterResource {
         let inner = self.inner.lock().unwrap();
