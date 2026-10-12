@@ -367,9 +367,16 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_check_quotas_with_time_ms(
     }
 }
 
-fn deliver_added(added: Result<bool, crate::common::Error>, out: *mut i8) -> *mut kafka_common_Error_t {
+/// Stores the outcome of an `add` call in `out` as `0` or `1`, or returns
+/// the owned translation of its error.
+///
+/// # Safety
+///
+/// `out` must be a valid pointer.
+unsafe fn deliver_added(added: Result<bool, crate::common::Error>, out: *mut i8) -> *mut kafka_common_Error_t {
     match added {
         Ok(added) => {
+            // SAFETY: Per this function's `# Safety`, `out` is a valid pointer, so the write is sound.
             unsafe { *out = i8::from(added) };
             ptr::null_mut()
         },
@@ -399,10 +406,10 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_add_with_metric_name(
 ) -> *mut kafka_common_Error_t {
     let metric_name = unsafe { metric_name_ref(metric_name) }.clone();
     let stat = unsafe { take_measurable_stat(stat) };
-    deliver_added(
-        unsafe { sensor_ref(self_) }.add_with_metric_name(metric_name, stat),
-        out_add_with_metric_name,
-    )
+    let added = unsafe { sensor_ref(self_) }.add_with_metric_name(metric_name, stat);
+    // SAFETY: Per this function's `# Safety`, `out_add_with_metric_name` is a valid pointer, as
+    // `deliver_added` requires.
+    unsafe { deliver_added(added, out_add_with_metric_name) }
 }
 
 /// `add(MetricName metricName, MeasurableStat stat, MetricConfig config)`:
@@ -424,10 +431,10 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_add_with_metric_name_config
     let metric_name = unsafe { metric_name_ref(metric_name) }.clone();
     let stat = unsafe { take_measurable_stat(stat) };
     let config = unsafe { metric_config_option(config) };
-    deliver_added(
-        unsafe { sensor_ref(self_) }.add_with_metric_name_config(metric_name, stat, config),
-        out_add_with_metric_name_config,
-    )
+    let added = unsafe { sensor_ref(self_) }.add_with_metric_name_config(metric_name, stat, config);
+    // SAFETY: Per this function's `# Safety`, `out_add_with_metric_name_config` is a valid pointer,
+    // as `deliver_added` requires.
+    unsafe { deliver_added(added, out_add_with_metric_name_config) }
 }
 
 /// `add(CompoundStat stat)`: `stat` is consumed (an owned handle is freed,
@@ -447,7 +454,10 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_add(
     out_add: *mut i8,
 ) -> *mut kafka_common_Error_t {
     let stat = unsafe { take_compound_stat(stat) };
-    deliver_added(unsafe { sensor_ref(self_) }.add(stat), out_add)
+    let added = unsafe { sensor_ref(self_) }.add(stat);
+    // SAFETY: Per this function's `# Safety`, `out_add` is a valid pointer, as `deliver_added`
+    // requires.
+    unsafe { deliver_added(added, out_add) }
 }
 
 /// `add(CompoundStat stat, MetricConfig config)`: `config` is copied, null
@@ -467,7 +477,10 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_add_with_config(
 ) -> *mut kafka_common_Error_t {
     let stat = unsafe { take_compound_stat(stat) };
     let config = unsafe { metric_config_option(config) };
-    deliver_added(unsafe { sensor_ref(self_) }.add_with_config(stat, config), out_add_with_config)
+    let added = unsafe { sensor_ref(self_) }.add_with_config(stat, config);
+    // SAFETY: Per this function's `# Safety`, `out_add_with_config` is a valid pointer, as
+    // `deliver_added` requires.
+    unsafe { deliver_added(added, out_add_with_config) }
 }
 
 /// `hasMetrics()`.
