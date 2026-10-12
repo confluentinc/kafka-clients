@@ -60,9 +60,22 @@ impl TokenInformationInner {
     }
 }
 
+/// What a handle points at.
+///
+/// # Safety
+///
+/// `info` must be a valid token-information handle, alive for `'a`.
 unsafe fn inner_ref<'a>(
     info: *const kafka_common_security_token_delegation_TokenInformation_t,
 ) -> &'a TokenInformationInner {
+    // SAFETY: Per this function's `# Safety`, `info` is a valid token-information handle alive for
+    // `'a`, so it points at a live `TokenInformationInner`: the `Box::into_raw` of
+    // `box_token_information`, or the one a `DelegationTokenInner` embeds and hands out through
+    // `TokenInformationInner::as_ptr`, which lives as long as that token. The only call that
+    // mutates a `TokenInformationInner`,
+    // `kafka_common_security_token_delegation_TokenInformation_set_expiry_timestamp`, takes an
+    // owned handle that no other call uses at the same time, so the shared reference is sound for
+    // `'a`.
     unsafe { &*(info as *const TokenInformationInner) }
 }
 
@@ -70,10 +83,12 @@ unsafe fn inner_ref<'a>(
 ///
 /// # Safety
 ///
-/// `info` must be a valid token-information handle.
+/// `info` must be a valid token-information handle, alive for `'a`.
 pub(crate) unsafe fn token_information_ref<'a>(
     info: *const kafka_common_security_token_delegation_TokenInformation_t,
 ) -> &'a TokenInformation {
+    // SAFETY: Per this function's `# Safety`, `info` is a valid token-information handle, as
+    // `inner_ref` requires; the reference returned lives for the same `'a`.
     &unsafe { inner_ref(info) }.info
 }
 
@@ -107,8 +122,16 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
     expiry_timestamp: i64,
 ) -> *mut kafka_common_security_token_delegation_TokenInformation_t {
     box_token_information(TokenInformation::new(
+        // SAFETY: Per this function's `# Safety`, `token_id` is a valid NUL-terminated string, as
+        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // after this call.
         unsafe { c_str_to_string(token_id) },
+        // SAFETY: Per this function's `# Safety`, `owner` is a valid principal handle, as
+        // `kafka_principal_ref` requires; it is cloned, so the borrow lasts for this call only.
         unsafe { kafka_principal_ref(owner) }.clone(),
+        // SAFETY: Per this function's `# Safety`, `renewers` is null or a valid list of principal
+        // handles, as `list_kafka_principals` requires; the principals are cloned, so nothing
+        // borrows the list after this call.
         unsafe { list_kafka_principals(renewers) },
         issue_timestamp,
         max_timestamp,
@@ -138,9 +161,19 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
     expiry_timestamp: i64,
 ) -> *mut kafka_common_security_token_delegation_TokenInformation_t {
     box_token_information(TokenInformation::with_token_requester(
+        // SAFETY: Per this function's `# Safety`, `token_id` is a valid NUL-terminated string, as
+        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // after this call.
         unsafe { c_str_to_string(token_id) },
+        // SAFETY: Per this function's `# Safety`, `owner` is a valid principal handle, as
+        // `kafka_principal_ref` requires; it is cloned, so the borrow lasts for this call only.
         unsafe { kafka_principal_ref(owner) }.clone(),
+        // SAFETY: Per this function's `# Safety`, `token_requester` is a valid principal handle, as
+        // `kafka_principal_ref` requires; it is cloned, so the borrow lasts for this call only.
         unsafe { kafka_principal_ref(token_requester) }.clone(),
+        // SAFETY: Per this function's `# Safety`, `renewers` is null or a valid list of principal
+        // handles, as `list_kafka_principals` requires; the principals are cloned, so nothing
+        // borrows the list after this call.
         unsafe { list_kafka_principals(renewers) },
         issue_timestamp,
         max_timestamp,
@@ -158,6 +191,10 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
 pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_owner(
     self_: *const kafka_common_security_token_delegation_TokenInformation_t,
 ) -> *const kafka_common_security_auth_KafkaPrincipal_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid token-information handle, as
+    // `inner_ref` requires. The handle returned is a view on the `KafkaPrincipalInner` the
+    // information embeds as its owner, so it lives as long as the information handle; that is the
+    // rustdoc's "borrowed from the handle; never destroyed".
     unsafe { inner_ref(self_) }.owner.as_ptr()
 }
 
@@ -172,6 +209,9 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
 pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_owner_as_string(
     self_: *const kafka_common_security_token_delegation_TokenInformation_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid token-information handle, as
+    // `token_information_ref` requires; the result is copied into an owned value before return, so
+    // the borrow lasts for this call only.
     into_c_string(&unsafe { token_information_ref(self_) }.owner_as_string())
 }
 
@@ -186,6 +226,10 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
 pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_token_requester(
     self_: *const kafka_common_security_token_delegation_TokenInformation_t,
 ) -> *const kafka_common_security_auth_KafkaPrincipal_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid token-information handle, as
+    // `inner_ref` requires. The handle returned is a view on the `KafkaPrincipalInner` the
+    // information embeds as its token requester, so it lives as long as the information handle;
+    // that is the rustdoc's "borrowed from the handle; never destroyed".
     unsafe { inner_ref(self_) }.token_requester.as_ptr()
 }
 
@@ -200,6 +244,9 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
 pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_token_requester_as_string(
     self_: *const kafka_common_security_token_delegation_TokenInformation_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid token-information handle, as
+    // `token_information_ref` requires; the result is copied into an owned value before return, so
+    // the borrow lasts for this call only.
     into_c_string(&unsafe { token_information_ref(self_) }.token_requester_as_string())
 }
 
@@ -216,6 +263,9 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
 pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_renewers(
     self_: *const kafka_common_security_token_delegation_TokenInformation_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid token-information handle, as
+    // `token_information_ref` requires; the result is copied into an owned value before return, so
+    // the borrow lasts for this call only.
     let elements = unsafe { token_information_ref(self_) }
         .renewers()
         .iter()
@@ -235,6 +285,9 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
 pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_renewers_as_string(
     self_: *const kafka_common_security_token_delegation_TokenInformation_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid token-information handle, as
+    // `token_information_ref` requires; the result is copied into an owned value before return, so
+    // the borrow lasts for this call only.
     box_string_list(unsafe { token_information_ref(self_) }.renewers_as_string())
 }
 
@@ -248,6 +301,8 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
 pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_issue_timestamp(
     self_: *const kafka_common_security_token_delegation_TokenInformation_t,
 ) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid token-information handle, as
+    // `token_information_ref` requires; the reference is used only within this call.
     unsafe { token_information_ref(self_) }.issue_timestamp()
 }
 
@@ -261,6 +316,8 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
 pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_expiry_timestamp(
     self_: *const kafka_common_security_token_delegation_TokenInformation_t,
 ) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid token-information handle, as
+    // `token_information_ref` requires; the reference is used only within this call.
     unsafe { token_information_ref(self_) }.expiry_timestamp()
 }
 
@@ -268,13 +325,20 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
 ///
 /// # Safety
 ///
-/// `self_` must be a valid owned token-information handle.
+/// `self_` must be a valid owned token-information handle that no other call
+/// uses at the same time.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_set_expiry_timestamp(
     self_: *mut kafka_common_security_token_delegation_TokenInformation_t,
     expiry_timestamp: i64,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid owned token-information handle,
+    // the `Box::into_raw` of a `TokenInformationInner` in `box_token_information`, that no other
+    // call uses at the same time, so the exclusive reference to its `info` field aliases nothing
+    // for the length of this call. The reference covers only `info`: the principal views and the
+    // token-id string earlier getters returned point at the other fields, which this leaves
+    // untouched.
     unsafe { &mut (*(self_ as *mut TokenInformationInner)).info }.set_expiry_timestamp(expiry_timestamp);
 }
 
@@ -288,6 +352,9 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
 pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_token_id(
     self_: *const kafka_common_security_token_delegation_TokenInformation_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid token-information handle, as
+    // `inner_ref` requires; the string returned is the handle's own C string, so it lives as long
+    // as the handle; that is the rustdoc's "borrowed from the handle".
     unsafe { inner_ref(self_) }.token_id_c.as_ptr()
 }
 
@@ -302,6 +369,8 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
 pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_max_timestamp(
     self_: *const kafka_common_security_token_delegation_TokenInformation_t,
 ) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid token-information handle, as
+    // `token_information_ref` requires; the reference is used only within this call.
     unsafe { token_information_ref(self_) }.max_timestamp()
 }
 
@@ -318,6 +387,9 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
     self_: *const kafka_common_security_token_delegation_TokenInformation_t,
     principal: *const kafka_common_security_auth_KafkaPrincipal_t,
 ) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid token-information handle, as
+    // `token_information_ref` requires, and `principal` a valid principal handle, as
+    // `kafka_principal_ref` requires; both references are used only within this call.
     i8::from(unsafe { token_information_ref(self_) }.owner_or_renewer(unsafe { kafka_principal_ref(principal) }))
 }
 
@@ -331,6 +403,9 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
 pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_to_string(
     self_: *const kafka_common_security_token_delegation_TokenInformation_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid token-information handle, as
+    // `token_information_ref` requires; the result is copied into an owned value before return, so
+    // the borrow lasts for this call only.
     into_c_string(&unsafe { token_information_ref(self_) }.to_string())
 }
 
@@ -348,6 +423,10 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
     self_: *mut kafka_common_security_token_delegation_TokenInformation_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // handle not yet destroyed, i.e. the `Box::into_raw` of a `TokenInformationInner` in
+        // `box_token_information` (a view, which points into its parent, is never passed here), so
+        // `from_raw` reclaims that allocation, once.
         drop(unsafe { Box::from_raw(self_ as *mut TokenInformationInner) });
     }
 }
@@ -383,7 +462,11 @@ mod tests {
     }
 
     unsafe fn principal_text(principal: *const kafka_common_security_auth_KafkaPrincipal_t) -> (String, String) {
+        // SAFETY: Test code: callers pass a live principal handle, whose type string lives as long
+        // as it does and is copied before return.
         let t = unsafe { CStr::from_ptr(kafka_common_security_auth_KafkaPrincipal_principal_type(principal)) };
+        // SAFETY: Test code: callers pass a live principal handle, whose name string lives as long
+        // as it does and is copied before return.
         let n = unsafe { CStr::from_ptr(kafka_common_security_auth_KafkaPrincipal_name(principal)) };
         (t.to_str().unwrap().to_string(), n.to_str().unwrap().to_string())
     }
@@ -392,6 +475,11 @@ mod tests {
     fn getters_expose_the_whole_java_chain() {
         let expected = sample_info();
         let handle = box_token_information(expected.clone());
+        // SAFETY: Test code: `handle` comes from `box_token_information` and is destroyed once,
+        // after the views read from it (the token id, the owner, the requester); `stranger` comes
+        // from `box_kafka_principal` and is destroyed once; every owned string and list is
+        // destroyed once, after it is read; the setter is called on the owned `handle` while no
+        // other call uses it.
         unsafe {
             assert_eq!(
                 CStr::from_ptr(kafka_common_security_token_delegation_TokenInformation_token_id(handle)).to_str(),
@@ -481,6 +569,10 @@ mod tests {
         let owner_name = CString::new("owner").unwrap();
         let requester_name = CString::new("requester").unwrap();
         let renewer_name = CString::new("renewer").unwrap();
+        // SAFETY: Test code: the `CString`s outlive the calls reading them; the principals come
+        // from `kafka_common_security_auth_KafkaPrincipal_new` and the list from `kafka_List_new`,
+        // which borrows `renewer` and is destroyed before it, after both constructors copy their
+        // inputs; each owned handle is destroyed once.
         unsafe {
             let owner = kafka_common_security_auth_KafkaPrincipal_new(user.as_ptr(), owner_name.as_ptr());
             let requester = kafka_common_security_auth_KafkaPrincipal_new(user.as_ptr(), requester_name.as_ptr());
@@ -550,6 +642,8 @@ mod tests {
             30,
             20,
         ));
+        // SAFETY: Test code: `handle` comes from `box_token_information` and is destroyed once,
+        // after the owned list from `renewers`, itself destroyed once.
         unsafe {
             let renewers = kafka_common_security_token_delegation_TokenInformation_renewers(handle);
             assert_eq!(kafka_List_size(renewers), 0);

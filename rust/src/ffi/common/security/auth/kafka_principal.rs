@@ -48,7 +48,20 @@ impl KafkaPrincipalInner {
     }
 }
 
+/// What a handle points at.
+///
+/// # Safety
+///
+/// `principal` must be a valid principal handle, alive for `'a`.
 unsafe fn inner_ref<'a>(principal: *const kafka_common_security_auth_KafkaPrincipal_t) -> &'a KafkaPrincipalInner {
+    // SAFETY: Per this function's `# Safety`, `principal` is a valid principal handle alive for
+    // `'a`, so it points at a live `KafkaPrincipalInner`: the `Box::into_raw` of
+    // `box_kafka_principal`, or one a parent embeds and hands out through
+    // `KafkaPrincipalInner::as_ptr` (a `TokenInformation`'s owner or token requester, a
+    // `CreateDelegationTokenOptions`' owner), which lives as long as that parent. The only call
+    // that mutates a `KafkaPrincipalInner`,
+    // `kafka_common_security_auth_KafkaPrincipal_set_token_authenticated`, takes an owned handle
+    // that no other call uses at the same time, so the shared reference is sound for `'a`.
     unsafe { &*(principal as *const KafkaPrincipalInner) }
 }
 
@@ -56,10 +69,12 @@ unsafe fn inner_ref<'a>(principal: *const kafka_common_security_auth_KafkaPrinci
 ///
 /// # Safety
 ///
-/// `principal` must be a valid principal handle.
+/// `principal` must be a valid principal handle, alive for `'a`.
 pub(crate) unsafe fn kafka_principal_ref<'a>(
     principal: *const kafka_common_security_auth_KafkaPrincipal_t,
 ) -> &'a KafkaPrincipal {
+    // SAFETY: Per this function's `# Safety`, `principal` is a valid principal handle, as
+    // `inner_ref` requires; the reference returned lives for the same `'a`.
     &unsafe { inner_ref(principal) }.principal
 }
 
@@ -75,9 +90,15 @@ pub(crate) fn box_kafka_principal(principal: KafkaPrincipal) -> *mut kafka_commo
 ///
 /// `list` must be null or a valid list whose elements are principal handles.
 pub(crate) unsafe fn list_kafka_principals(list: *const kafka_List_t) -> Vec<KafkaPrincipal> {
+    // SAFETY: Per this function's `# Safety`, `list` is null or a valid list, which the caller
+    // keeps alive and does not mutate for this call, as `list_elements` requires; the borrow of its
+    // elements ends when the principals are collected.
     unsafe { list_elements(list) }
         .iter()
         .map(|&element| {
+            // SAFETY: Per this function's `# Safety`, every element of `list` is a principal
+            // handle, as `kafka_principal_ref` requires; the principal is cloned, so the borrow
+            // lasts for this call only.
             unsafe { kafka_principal_ref(element as *const kafka_common_security_auth_KafkaPrincipal_t) }.clone()
         })
         .collect()
@@ -97,6 +118,9 @@ pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_new(
     principal_type: *const c_char,
     name: *const c_char,
 ) -> *mut kafka_common_security_auth_KafkaPrincipal_t {
+    // SAFETY: Per this function's `# Safety`, `principal_type` and `name` are each a valid
+    // NUL-terminated string, as `c_str_to_string` requires; both are copied into owned `String`s,
+    // so nothing borrows them after this call.
     box_kafka_principal(KafkaPrincipal::new(unsafe { c_str_to_string(principal_type) }, unsafe {
         c_str_to_string(name)
     }))
@@ -116,7 +140,13 @@ pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_with_token_au
     token_authenticated: i8,
 ) -> *mut kafka_common_security_auth_KafkaPrincipal_t {
     box_kafka_principal(KafkaPrincipal::with_token_authenticated(
+        // SAFETY: Per this function's `# Safety`, `principal_type` is a valid NUL-terminated
+        // string, as `c_str_to_string` requires; it is copied into an owned `String`, so nothing
+        // borrows it after this call.
         unsafe { c_str_to_string(principal_type) },
+        // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
+        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // after this call.
         unsafe { c_str_to_string(name) },
         token_authenticated != 0,
     ))
@@ -140,6 +170,9 @@ pub extern "C" fn kafka_common_security_auth_KafkaPrincipal_anonymous()
 pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_name(
     self_: *const kafka_common_security_auth_KafkaPrincipal_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid principal handle, as `inner_ref`
+    // requires; the string returned is the handle's own C string, so it lives as long as the
+    // handle; that is the rustdoc's "borrowed from the handle".
     unsafe { inner_ref(self_) }.name_c.as_ptr()
 }
 
@@ -153,6 +186,9 @@ pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_name(
 pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_principal_type(
     self_: *const kafka_common_security_auth_KafkaPrincipal_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid principal handle, as `inner_ref`
+    // requires; the string returned is the handle's own C string, so it lives as long as the
+    // handle; that is the rustdoc's "borrowed from the handle".
     unsafe { inner_ref(self_) }.principal_type_c.as_ptr()
 }
 
@@ -161,13 +197,19 @@ pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_principal_typ
 ///
 /// # Safety
 ///
-/// `self_` must be a valid owned principal handle.
+/// `self_` must be a valid owned principal handle that no other call uses at
+/// the same time.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_set_token_authenticated(
     self_: *mut kafka_common_security_auth_KafkaPrincipal_t,
     token_authenticated: i8,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid owned principal handle, the
+    // `Box::into_raw` of a `KafkaPrincipalInner` in `box_kafka_principal`, that no other call uses
+    // at the same time, so the exclusive reference aliases nothing for the length of this call.
+    // Only the `principal` field is written; the C strings earlier getters returned point into the
+    // `CString` heap buffers, which this does not touch.
     unsafe { &mut *(self_ as *mut KafkaPrincipalInner) }
         .principal
         .set_token_authenticated(token_authenticated != 0);
@@ -184,6 +226,8 @@ pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_set_token_aut
 pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_token_authenticated(
     self_: *const kafka_common_security_auth_KafkaPrincipal_t,
 ) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid principal handle, as
+    // `kafka_principal_ref` requires; the reference is used only within this call.
     i8::from(unsafe { kafka_principal_ref(self_) }.token_authenticated())
 }
 
@@ -198,6 +242,9 @@ pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_token_authent
 pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_to_string(
     self_: *const kafka_common_security_auth_KafkaPrincipal_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid principal handle, as
+    // `kafka_principal_ref` requires; the result is copied into an owned value before return, so
+    // the borrow lasts for this call only.
     into_c_string(&unsafe { kafka_principal_ref(self_) }.to_string())
 }
 
@@ -214,6 +261,10 @@ pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_destroy(
     self_: *mut kafka_common_security_auth_KafkaPrincipal_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // handle not yet destroyed, i.e. the `Box::into_raw` of a `KafkaPrincipalInner` in
+        // `box_kafka_principal` (a view, which points into its parent, is never passed here), so
+        // `from_raw` reclaims that allocation, once.
         drop(unsafe { Box::from_raw(self_ as *mut KafkaPrincipalInner) });
     }
 }
@@ -230,6 +281,11 @@ mod tests {
     fn constructors_getters_and_setter_follow_java() {
         let user = CString::new("User").unwrap();
         let alice = CString::new("alice").unwrap();
+        // SAFETY: Test code: `user` and `alice` are `CString`s that outlive the constructors
+        // copying them, every principal comes from this module's constructors and is destroyed
+        // once, the name and type views are read only while their principal is alive, the setter is
+        // called on an owned handle no other call uses, and the string from `to_string` is
+        // destroyed once.
         unsafe {
             let plain = kafka_common_security_auth_KafkaPrincipal_new(user.as_ptr(), alice.as_ptr());
             assert_eq!(*kafka_principal_ref(plain), KafkaPrincipal::new("User", "alice"));
