@@ -28,6 +28,7 @@ use tokio::sync::mpsc;
 
 use crate::ClientResponse;
 use crate::KafkaClient;
+use crate::MetadataRecoveryStrategy;
 use crate::admin::KafkaAdminClient;
 use crate::common::errors::{DisconnectError, TimeoutError, UnsupportedEndpointTypeError};
 use crate::common::protocol::Errors;
@@ -61,9 +62,13 @@ struct InFlightCall {
 /// Shared shutdown signalling between the `KafkaAdminClient` (app side) and the
 /// background task.
 pub(crate) struct ShutdownSignal {
-    /// Set once `close` has begun.
+    /// Java's `AdminClientRunnable.closing`: set only once the I/O task's loop
+    /// has exited (`run()`'s `finally`, `KafkaAdminClient.java:1473-1474`), never
+    /// by `close()`. While it is set `fail_call` does not retry.
     pub(crate) closing: AtomicBool,
-    /// The hard-shutdown deadline in epoch ms, or [`KafkaAdminClient::NO_HARD_SHUTDOWN`].
+    /// Java's `hardShutdownTimeMs`: the hard-shutdown deadline in epoch ms, or
+    /// [`KafkaAdminClient::NO_HARD_SHUTDOWN`]. `close()` publishes it; once set,
+    /// new calls are rejected and the loop starts checking `threadShouldExit`.
     pub(crate) hard_shutdown_deadline_ms: AtomicI64,
 }
 
@@ -92,10 +97,9 @@ impl ShutdownSignal {
     ///    serve (`:1602-1605`).
     pub(crate) fn admit_new_call(&self, using_bootstrap_controllers: bool, mut call: Call) -> Option<Call> {
         // Java checks `hardShutdownTimeMs`, not the runnable's `closing` flag: the
-        // latter is only set by the I/O task's `finally` and gates `enqueue`.
-        // Rust's `ShutdownSignal::closing` is set by both `close()` and
-        // `fail_all_remaining`, so gating on it would answer a call submitted after
-        // a panicked loop with this error instead of Java's "thread has exited".
+        // latter is only set by the I/O task's `finally` (`fail_all_remaining`
+        // here), and gating on it would answer a call submitted after a panicked
+        // loop with this error instead of Java's "thread has exited".
         if self.hard_shutdown_deadline_ms.load(Ordering::Acquire) != KafkaAdminClient::NO_HARD_SHUTDOWN {
             // Java's text verbatim (finding 247a).
             call.handle_failure(&Error::local_illegal_state(
@@ -171,6 +175,10 @@ pub(crate) struct AdminClientRunnable<C: KafkaClient> {
     retry_backoff_ms: i64,
     max_retries: i32,
     request_timeout_ms: i32,
+    /// Java: `KafkaAdminClient`'s `private final MetadataRecoveryStrategy
+    /// metadataRecoveryStrategy` (`KafkaAdminClient.java:411`), read by
+    /// `MetadataUpdateNodeIdProvider`.
+    metadata_recovery_strategy: MetadataRecoveryStrategy,
     /// Java: `KafkaAdminClient`'s `private final Time time`.
     time: Arc<dyn Time>,
     shutdown: Arc<ShutdownSignal>,
@@ -194,6 +202,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         retry_backoff_ms: i64,
         max_retries: i32,
         request_timeout_ms: i32,
+        metadata_recovery_strategy: MetadataRecoveryStrategy,
         time: Arc<dyn Time>,
         shutdown: Arc<ShutdownSignal>,
         log_context: LogContext,
@@ -211,6 +220,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
             retry_backoff_ms,
             max_retries,
             request_timeout_ms,
+            metadata_recovery_strategy,
             time,
             shutdown,
             log_context,
@@ -328,10 +338,17 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         }
     }
 
-    /// Whether the loop should terminate. Translated from
-    /// `AdminClientRunnable.threadShouldExit`.
+    /// Whether the loop should terminate: `processRequests`'
+    /// `curHardShutdownTimeMs != INVALID_SHUTDOWN_TIME && threadShouldExit(now,
+    /// curHardShutdownTimeMs)` (`KafkaAdminClient.java:1501-1504`, `:1455-1466`).
+    ///
+    /// It keys off the hard-shutdown deadline `close()` publishes, not
+    /// `ShutdownSignal::closing`: Java sets `closing` only once the loop has
+    /// exited, so during the `close(timeout)` grace period `fail_call` still
+    /// retries retriable failures.
     fn should_exit(&self, now: i64) -> bool {
-        if !self.shutdown.closing.load(Ordering::Acquire) {
+        let cur_hard_shutdown_time_ms = self.shutdown.hard_shutdown_deadline_ms.load(Ordering::Acquire);
+        if cur_hard_shutdown_time_ms == KafkaAdminClient::NO_HARD_SHUTDOWN {
             return false;
         }
         if !self.has_active_external_calls() {
@@ -341,14 +358,14 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
             );
             return true;
         }
-        let deadline = self.shutdown.hard_shutdown_deadline_ms.load(Ordering::Acquire);
-        if deadline != KafkaAdminClient::NO_HARD_SHUTDOWN && now >= deadline {
+        if now >= cur_hard_shutdown_time_ms {
             kafka_info!(
                 self.log_context,
                 "Forcing a hard I/O task shutdown. Requests in progress will be aborted."
             );
             return true;
         }
+        kafka_debug!(self.log_context, "Hard shutdown in {} ms.", cur_hard_shutdown_time_ms - now);
         false
     }
 
@@ -548,7 +565,10 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
     ///
     /// Translated from `maybeDrainPendingCall`.
     fn maybe_drain_pending_call(&mut self, mut call: Call, now: i64, still_pending: &mut Vec<Call>) {
-        match call.node_provider.provide(&self.metadata_manager, &self.client, now) {
+        match call
+            .node_provider
+            .provide(&self.metadata_manager, &self.client, self.metadata_recovery_strategy, now)
+        {
             Ok(Some(node)) => {
                 kafka_trace!(self.log_context, "Assigned {} to node {}", call.call_name, node);
                 call.cur_node = Some(node.clone());
@@ -881,7 +901,8 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
     /// Fails all remaining calls (finally-block on shutdown).
     fn fail_all_remaining(&mut self, now: i64) {
         let msg = "The AdminClient thread has exited.";
-        // Ensure the closing flag is set so fail_call routes to handle_failure.
+        // finally: `closing = true` (`KafkaAdminClient.java:1474`). This is the
+        // only place it is set; from here on `fail_call` does not retry.
         self.shutdown.closing.store(true, Ordering::Release);
 
         self.drain_new_calls();
@@ -942,7 +963,13 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                         "Expected a Metadata response for the internal metadata call",
                     ));
                 };
-                mm_ok.update(metadata_response.build_cluster(), now);
+                // KIP-1102 (`KafkaAdminClient.java:1684-1687`): the broker asks the
+                // client to rebootstrap instead of handing it metadata.
+                if metadata_response.top_level_error() == Errors::RebootstrapRequired {
+                    mm_ok.initiate_rebootstrap();
+                } else {
+                    mm_ok.update(metadata_response.build_cluster(), now);
+                }
                 HandleResult::Done
             }),
             Box::new(move |error| {

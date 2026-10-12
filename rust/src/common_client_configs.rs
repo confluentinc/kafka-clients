@@ -51,6 +51,45 @@ impl CommonClientConfigs {
     /// Config key: `security.protocol`
     pub const SECURITY_PROTOCOL_CONFIG: &str = "security.protocol";
 
+    /// Config key: `metadata.recovery.strategy`
+    ///
+    /// Controls how the client recovers when none of the brokers known to it is
+    /// available. If set to `none`, the client fails. If set to `rebootstrap`, the
+    /// client repeats the bootstrap process using `bootstrap.servers`.
+    /// Rebootstrapping is useful when a client communicates with brokers so
+    /// infrequently that the set of brokers may change entirely before the client
+    /// refreshes metadata. Metadata recovery is triggered when all last-known
+    /// brokers appear unavailable simultaneously. Brokers appear unavailable when
+    /// disconnected and no current retry attempt is in-progress. Consider
+    /// increasing `reconnect.backoff.ms` and `reconnect.backoff.max.ms` and
+    /// decreasing `socket.connection.setup.timeout.ms` and
+    /// `socket.connection.setup.timeout.max.ms` for the client. Rebootstrap is
+    /// also triggered if connection cannot be established to any of the brokers
+    /// for `metadata.recovery.rebootstrap.trigger.ms` milliseconds or if server
+    /// requests rebootstrap.
+    ///
+    /// (Text of Java's `CommonClientConfigs.METADATA_RECOVERY_STRATEGY_DOC`,
+    /// carried as rustdoc for the reason given at
+    /// [`CLIENT_DNS_LOOKUP_CONFIG`](Self::CLIENT_DNS_LOOKUP_CONFIG). The parsed
+    /// value is a [`crate::MetadataRecoveryStrategy`].)
+    pub const METADATA_RECOVERY_STRATEGY_CONFIG: &str = "metadata.recovery.strategy";
+
+    /// The default `metadata.recovery.strategy`: `MetadataRecoveryStrategy.REBOOTSTRAP.name`.
+    pub const DEFAULT_METADATA_RECOVERY_STRATEGY: &str = "rebootstrap";
+
+    /// Config key: `metadata.recovery.rebootstrap.trigger.ms`
+    ///
+    /// If a client configured to rebootstrap using
+    /// `metadata.recovery.strategy=rebootstrap` is unable to obtain metadata from
+    /// any of the brokers in the last known metadata for this interval, client
+    /// repeats the bootstrap process using `bootstrap.servers` configuration.
+    ///
+    /// (Text of Java's `CommonClientConfigs.METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_DOC`.)
+    pub const METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG: &str = "metadata.recovery.rebootstrap.trigger.ms";
+
+    /// The default `metadata.recovery.rebootstrap.trigger.ms`: 5 minutes.
+    pub const DEFAULT_METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS: i64 = 300 * 1000;
+
     /// The base for exponential retry backoff.
     pub const RETRY_BACKOFF_EXP_BASE: i32 = 2;
 

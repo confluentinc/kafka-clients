@@ -23,7 +23,7 @@ use crate::admin::TransactionState;
 /// Options for `Admin::list_transactions`.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.ListTransactionsOptions`.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsOptions")]
 pub struct ListTransactionsOptions {
     timeout_ms: Option<i32>,
@@ -33,11 +33,26 @@ pub struct ListTransactionsOptions {
     filtered_transactional_id_pattern: Option<String>,
 }
 
+/// Java's `new ListTransactionsOptions()`; a derived `Default` would set
+/// `filtered_duration_ms` to `0` instead of Java's `-1L`
+/// (`ListTransactionsOptions.java:33`), and `Admin::list_transactions()` uses it.
+impl Default for ListTransactionsOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ListTransactionsOptions {
     /// Creates default options: no filters, and `filtered_duration_ms == -1`
     /// (no duration filtering), matching Java's defaults.
     pub fn new() -> Self {
-        Self { filtered_duration_ms: -1, ..Default::default() }
+        Self {
+            timeout_ms: None,
+            filtered_states: HashSet::new(),
+            filtered_producer_ids: HashSet::new(),
+            filtered_duration_ms: -1,
+            filtered_transactional_id_pattern: None,
+        }
     }
 
     /// Set the timeout in milliseconds for this operation, or `None` to use the
@@ -132,6 +147,14 @@ mod tests {
         assert!(options.filtered_producer_ids().is_empty());
         assert_eq!(options.filtered_duration(), -1);
         assert_eq!(options.filtered_transactional_id_pattern(), None);
+    }
+
+    /// `Default` gives Java's `new ListTransactionsOptions()`, including
+    /// `filteredDuration = -1L` (`ListTransactionsOptions.java:33`).
+    #[test]
+    fn default_is_new() {
+        assert_eq!(ListTransactionsOptions::default(), ListTransactionsOptions::new());
+        assert_eq!(ListTransactionsOptions::default().filtered_duration(), -1);
     }
 
     #[test]
