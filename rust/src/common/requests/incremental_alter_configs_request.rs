@@ -106,10 +106,11 @@ impl IncrementalAlterConfigsRequest {
     /// `"REDACTED"`, for rendering: it is not safe to print all config values.
     ///
     /// Mirrors Java's private `maskData`
-    /// (`IncrementalAlterConfigsRequest.java:111-118`), which
-    /// `Builder.toString()` (`:74-75`) renders. Like Java's `setValue("REDACTED")`
-    /// it replaces a null value too. Java returns the copy's `toString()`, and
-    /// the caller here renders the copy.
+    /// (`IncrementalAlterConfigsRequest.java:111-118`), shared, as in Java, by
+    /// the request's `toString()` (`:122-123`) and `Builder.toString()`
+    /// (`:74-75`). Like Java's `setValue("REDACTED")` it replaces a null value
+    /// too. Java returns the copy's `toString()`, and the callers here render
+    /// the copy.
     fn mask_data(data: &IncrementalAlterConfigsRequestData) -> IncrementalAlterConfigsRequestData {
         let mut temp_data = data.clone();
         for resource in &mut temp_data.resources {
@@ -123,13 +124,15 @@ impl IncrementalAlterConfigsRequest {
 
 impl std::fmt::Display for IncrementalAlterConfigsRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Config values are not printed (they may be sensitive), mirroring
-        // Java's `maskData`.
+        // Mirrors Java's `toString()` (`IncrementalAlterConfigsRequest.java:121-124`),
+        // which renders `maskData(data)`: the data with every config value
+        // replaced by "REDACTED", because "it is not safe to print all config
+        // values" (`:110`).
         write!(
             f,
-            "IncrementalAlterConfigsRequest(version={}, resources={})",
+            "IncrementalAlterConfigsRequest(version={}, data={:?})",
             self.version,
-            self.data.resources.len()
+            Self::mask_data(&self.data)
         )
     }
 }
@@ -251,14 +254,33 @@ mod tests {
         data
     }
 
-    /// New test, no Java original: the redacting `Display` counts the resources
-    /// and prints no config value.
+    /// New test, no Java original: the redacting `Display` renders the data
+    /// with every config value replaced by `"REDACTED"`, as Java's `toString()`
+    /// renders `maskData(data)` (`IncrementalAlterConfigsRequest.java:122-123`),
+    /// the null value of the deleted config included, while the resource and
+    /// config names still show.
     #[test]
     fn display_redacts_config_values() {
         let request = IncrementalAlterConfigsRequest::new(data_with_secret(), 1);
         let rendered = request.to_string();
-        assert_eq!(rendered, "IncrementalAlterConfigsRequest(version=1, resources=2)");
-        assert!(!rendered.contains(SECRET_VALUE), "{rendered}");
+        let mut masked = data_with_secret();
+        for resource in &mut masked.resources {
+            for config in &mut resource.configs {
+                config.set_value(Some("REDACTED".to_string()));
+            }
+        }
+        assert_eq!(rendered, format!("IncrementalAlterConfigsRequest(version=1, data={masked:?})"));
+        // Every value is masked, the null one included.
+        assert_eq!(rendered.matches("value: Some(\"REDACTED\")").count(), 2, "{rendered}");
+        // The resource and config names still show.
+        assert!(rendered.contains("resource_name: \"0\""), "{rendered}");
+        assert!(rendered.contains("resource_name: \"orders\""), "{rendered}");
+        assert!(
+            rendered.contains("name: \"listener.name.sasl.plain.sasl.jaas.config\""),
+            "{rendered}"
+        );
+        assert!(rendered.contains("name: \"retention.ms\""), "{rendered}");
+        assert!(!rendered.contains(SECRET_VALUE), "secret leaked: {rendered}");
     }
 
     /// New test, no Java original: `Debug` renders exactly what `Display` does
@@ -269,7 +291,8 @@ mod tests {
         assert_eq!(request.data().resources[0].configs[0].value.as_deref(), Some(SECRET_VALUE));
         for rendered in [format!("{request:?}"), format!("{request:#?}")] {
             assert_eq!(rendered, request.to_string());
-            assert!(rendered.contains("resources=2"), "{rendered}");
+            assert_eq!(rendered.matches("value: Some(\"REDACTED\")").count(), 2, "{rendered}");
+            assert!(rendered.contains("resource_name: \"orders\""), "{rendered}");
             assert!(!rendered.contains(SECRET_VALUE), "secret leaked: {rendered}");
         }
     }

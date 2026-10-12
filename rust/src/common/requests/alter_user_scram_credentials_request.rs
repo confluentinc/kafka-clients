@@ -111,9 +111,10 @@ impl AlterUserScramCredentialsRequest {
     /// password emptied, for rendering.
     ///
     /// Mirrors Java's private `maskData`
-    /// (`AlterUserScramCredentialsRequest.java:85-91`), which
-    /// `Builder.toString()` (`:45-46`) renders; Java returns the copy's
-    /// `toString()`, and the caller here renders the copy.
+    /// (`AlterUserScramCredentialsRequest.java:85-91`), shared, as in Java, by
+    /// the request's `toString()` (`:96-97`) and `Builder.toString()`
+    /// (`:45-46`). Java returns the copy's `toString()`, and the callers here
+    /// render the copy.
     fn mask_data(data: &AlterUserScramCredentialsRequestData) -> AlterUserScramCredentialsRequestData {
         let mut temp_data = data.clone();
         for upsertion in &mut temp_data.upsertions {
@@ -126,14 +127,14 @@ impl AlterUserScramCredentialsRequest {
 
 impl std::fmt::Display for AlterUserScramCredentialsRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Mirrors Java's toString, which redacts salt/password rather than
-        // printing credential secrets.
+        // Mirrors Java's `toString()` (`AlterUserScramCredentialsRequest.java:94-98`),
+        // which renders `maskData(data)`: the data with every salt and salted
+        // password emptied ("Do not print salt or saltedPassword").
         write!(
             f,
-            "AlterUserScramCredentialsRequest(version={}, deletions={}, upsertions={})",
+            "AlterUserScramCredentialsRequest(version={}, data={:?})",
             self.version,
-            self.data.deletions.len(),
-            self.data.upsertions.len()
+            Self::mask_data(&self.data)
         )
     }
 }
@@ -288,15 +289,27 @@ mod tests {
         }
     }
 
-    /// New test, no Java original: the redacting `Display` counts the
-    /// deletions and upsertions and prints no salt or salted password.
+    /// New test, no Java original: the redacting `Display` renders the data
+    /// with every salt and salted password emptied, as Java's `toString()`
+    /// renders `maskData(data)` (`AlterUserScramCredentialsRequest.java:96-97`),
+    /// so the user names, mechanisms and iterations still show.
     #[test]
     fn display_redacts_salt_and_salted_password() {
         let request = AlterUserScramCredentialsRequest::new(data_with_secrets(), 0);
         let rendered = request.to_string();
+        let mut masked = data_with_secrets();
+        masked.upsertions[0].set_salt(Vec::new()).set_salted_password(Vec::new());
         assert_eq!(
             rendered,
-            "AlterUserScramCredentialsRequest(version=0, deletions=1, upsertions=1)"
+            format!("AlterUserScramCredentialsRequest(version=0, data={masked:?})")
+        );
+        // The masked fields are empty.
+        assert!(rendered.contains("salt: [], salted_password: []"), "{rendered}");
+        // The fields that are not secret still show.
+        assert!(rendered.contains("name: \"alice\", mechanism: 1,"), "{rendered}");
+        assert!(
+            rendered.contains("name: \"bob\", mechanism: 2, iterations: 8192,"),
+            "{rendered}"
         );
         assert_no_secret(&rendered);
     }
@@ -311,7 +324,11 @@ mod tests {
         assert_eq!(request.data().upsertions[0].salted_password, SALTED_PASSWORD);
         for rendered in [format!("{request:?}"), format!("{request:#?}")] {
             assert_eq!(rendered, request.to_string());
-            assert!(rendered.contains("upsertions=1"), "{rendered}");
+            assert!(rendered.contains("salt: [], salted_password: []"), "{rendered}");
+            assert!(
+                rendered.contains("name: \"bob\", mechanism: 2, iterations: 8192,"),
+                "{rendered}"
+            );
             assert_no_secret(&rendered);
         }
     }
