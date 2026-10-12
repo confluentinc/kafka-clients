@@ -100,7 +100,7 @@ pub struct SaslConfigs {
     /// Password for PLAIN authentication.
     /// Convenience field — used when `jaas_config` is not set.
     ///
-    /// Rust-only (set programmatically, no config key is parsed into it); a
+    /// Rust-only. No config key is parsed into it; tests set it directly. A
     /// [`Password`] like every other secret, so every rendering of it is
     /// `[hidden]`. [`SaslConfigs::resolve_password`] yields the plaintext.
     pub(crate) password: Option<Password>,
