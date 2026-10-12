@@ -2884,24 +2884,14 @@ struct RequestBatchInfo {
 
 #[cfg(test)]
 mod tests {
-    /// The `Metadata` handed to a test's `TransactionManager` (Java passes the
-    /// test's shared `metadata`, 4.4 KIP-1319).
+    /// Builds a test's `TransactionManager` over the context's own `Metadata`.
     ///
-    /// The manager reads it only for the topic ids of a `TxnOffsetCommit`
-    /// (`txn_offset_commit_handler`). None of these fixtures' tests seeds a topic id
-    /// for an offset-commit topic, and Java's metadata carries none for them either
-    /// (`RequestTestUtils.metadataUpdateWith` sets no ids), so a separate empty
-    /// instance yields the same v0-5, name-keyed request Java's shared one does.
-    fn txn_manager_metadata() -> Arc<crate::Metadata> {
-        crate::producer::internals::ProducerMetadata::new(
-            0,
-            0,
-            i64::MAX,
-            i64::MAX,
-            crate::common::internals::ClusterResourceListeners::new(),
-        )
-        .metadata_arc()
-    }
+    /// Java's fixtures hand the test's one shared `metadata` to the
+    /// `TransactionManager` (4.4 KIP-1319) as well as to the `Sender`, and so does
+    /// production (`KafkaProducer::new` passes `metadata.metadata_arc()`). The
+    /// context creates its `ProducerMetadata` first and then calls the builder with
+    /// it, so the manager reads the same instance the `Sender` updates (DoD #12).
+    type TxnManagerBuilder = Box<dyn FnOnce(Arc<crate::Metadata>) -> Arc<Mutex<TransactionManager>>>;
 
     use super::*;
     use crate::MockClient;
@@ -2970,14 +2960,14 @@ mod tests {
     /// only from `handleCoordinatorReady` (Java 1104) and
     /// `maybeUpdateTransactionV2Enabled` (493), and both are reached only through
     /// transactional entry points — so an empty instance is sufficient here.
-    fn idempotent_transaction_manager() -> Arc<Mutex<TransactionManager>> {
+    fn idempotent_transaction_manager(metadata: Arc<crate::Metadata>) -> Arc<Mutex<TransactionManager>> {
         Arc::new(Mutex::new(TransactionManager::new(
             LogContext::empty(),
             None,
             TRANSACTION_TIMEOUT_MS,
             RETRY_BACKOFF_MS,
             Arc::new(crate::ApiVersions::new()),
-            txn_manager_metadata(),
+            metadata,
             false,
         )))
     }
@@ -2991,7 +2981,7 @@ mod tests {
     /// Node `"0"` is registered with `INIT_PRODUCER_ID` v6 as Java's helper does
     /// (Java 186-189), so `handleCoordinatorReady` finds epoch-bump support once
     /// the coordinator connection is ready.
-    fn transactional_transaction_manager() -> Arc<Mutex<TransactionManager>> {
+    fn transactional_transaction_manager(metadata: Arc<crate::Metadata>) -> Arc<Mutex<TransactionManager>> {
         use crate::api_versions_response_data::ApiVersion;
 
         let api_versions = Arc::new(crate::ApiVersions::new());
@@ -3016,7 +3006,7 @@ mod tests {
             TRANSACTION_TIMEOUT_MS,
             RETRY_BACKOFF_MS,
             api_versions,
-            txn_manager_metadata(),
+            metadata,
             false,
         )))
     }
@@ -3070,26 +3060,26 @@ mod tests {
         /// `Sender` and the `RecordAccumulator`, mirroring Java's
         /// `setupWithTransactionState(transactionManager)`.
         fn idempotent() -> Self {
-            Self::with_transaction_state(false, i32::MAX, Some(idempotent_transaction_manager()), None, None)
+            Self::with_transaction_state(false, i32::MAX, Some(Box::new(idempotent_transaction_manager)), None, None)
         }
 
         /// Setup with a transactional [`TransactionManager`], mirroring
         /// `TransactionManagerTest.setup()` (Java 161-169).
         fn transactional() -> Self {
-            Self::with_transaction_state(false, i32::MAX, Some(transactional_transaction_manager()), None, None)
+            Self::with_transaction_state(false, i32::MAX, Some(Box::new(transactional_transaction_manager)), None, None)
         }
 
         /// Idempotent setup with `guarantee_message_order` and a bounded retry count,
         /// mirroring the bespoke `Sender` several `SenderTest` methods build with
         /// `guaranteeOrder = true`.
         fn idempotent_in_order(retries: i32) -> Self {
-            Self::with_transaction_state(true, retries, Some(idempotent_transaction_manager()), None, None)
+            Self::with_transaction_state(true, retries, Some(Box::new(idempotent_transaction_manager)), None, None)
         }
 
         /// Idempotent setup with a bounded retry count, mirroring Java's
         /// `setupWithTransactionState(transactionManager, false, null, true, retries, 0)`.
         fn idempotent_with_retries(retries: i32) -> Self {
-            Self::with_transaction_state(false, retries, Some(idempotent_transaction_manager()), None, None)
+            Self::with_transaction_state(false, retries, Some(Box::new(idempotent_transaction_manager)), None, None)
         }
 
         /// Idempotent setup with explicit timeouts and no retry backoff, mirroring the
@@ -3101,7 +3091,7 @@ mod tests {
             Self::with_transaction_state(
                 false,
                 i32::MAX,
-                Some(idempotent_transaction_manager()),
+                Some(Box::new(idempotent_transaction_manager)),
                 Some(SenderTestTimeouts {
                     request_timeout_ms,
                     delivery_timeout_ms,
@@ -3122,7 +3112,7 @@ mod tests {
         fn with_transaction_state(
             guarantee_message_order: bool,
             retries: i32,
-            transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
+            transaction_manager: Option<TxnManagerBuilder>,
             timeouts: Option<SenderTestTimeouts>,
             buffer_pool: Option<Arc<BufferPool>>,
         ) -> Self {
@@ -3157,6 +3147,7 @@ mod tests {
                 TOPIC_IDLE_MS,
                 ClusterResourceListeners::new(),
             ));
+            let transaction_manager = transaction_manager.map(|build| build(metadata.metadata_arc()));
 
             let accumulator = Arc::new(RecordAccumulator::new_for_test(
                 batch_size,
@@ -8856,7 +8847,7 @@ mod tests {
     ///     `Sender` (`.claude/rules/producer-transactions.md` §2), so replacing the
     ///     `Sender` mid-test would *lose* it and the driver's first `run_once` would
     ///     re-issue FindCoordinator — a divergence the swap is supposed to avoid.
-    fn split_batch_and_send_context(transaction_manager: Arc<Mutex<TransactionManager>>) -> SenderTestContext {
+    fn split_batch_and_send_context(transaction_manager: TxnManagerBuilder) -> SenderTestContext {
         let time = mock_time(1000);
         let clock: Arc<dyn Time> = Arc::clone(&time) as Arc<dyn Time>;
 
@@ -8873,6 +8864,7 @@ mod tests {
             TOPIC_IDLE_MS,
             ClusterResourceListeners::new(),
         ));
+        let transaction_manager = transaction_manager(metadata.metadata_arc());
 
         // Java 2417-2419: `deliveryTimeoutMs = 3000`, gzip, `lingerMs = 0`, both
         // retry backoffs `0`.
@@ -9214,7 +9206,7 @@ mod tests {
         let _serialised = SPLIT_BATCH_AND_SEND_LOCK.lock().await;
 
         // Java 2376-2377: `createTransactionManager()` — no transactional id.
-        let mut ctx = split_batch_and_send_context(idempotent_transaction_manager());
+        let mut ctx = split_batch_and_send_context(Box::new(idempotent_transaction_manager));
         let tp = ctx.tp1.clone();
 
         // Java 2379-2381: `prepareAndReceiveInitProducerId(123456L, Errors.NONE)`.
@@ -9234,8 +9226,7 @@ mod tests {
 
         // Java 2392: `new TransactionManager(logContext, "testSplitBatchAndSend",
         // 60000, 100, apiVersions, false)`.
-        let manager = split_transactional_manager();
-        let mut ctx = split_batch_and_send_context(Arc::clone(&manager));
+        let mut ctx = split_batch_and_send_context(Box::new(split_transactional_manager));
         let tp = ctx.tp1.clone();
 
         // Java 2395: `doInitTransactions(txnManager, producerIdAndEpoch)`.
@@ -9253,7 +9244,7 @@ mod tests {
     ///
     /// Not [`sender_test_transactional_context`], because that helper also builds the
     /// default rig and this test needs the driver's bespoke one.
-    fn split_transactional_manager() -> Arc<Mutex<TransactionManager>> {
+    fn split_transactional_manager(metadata: Arc<crate::Metadata>) -> Arc<Mutex<TransactionManager>> {
         use crate::api_versions_response_data::ApiVersion;
 
         let api_versions = Arc::new(crate::ApiVersions::new());
@@ -9278,7 +9269,7 @@ mod tests {
             60000,
             100,
             api_versions,
-            txn_manager_metadata(),
+            metadata,
             false,
         )))
     }
@@ -9406,14 +9397,14 @@ mod tests {
     /// throw here (`Sender.java:269-271`) and force-closes on it.
     #[tokio::test]
     async fn test_sender_begin_abort_poisons_the_state_machine() {
-        let transaction_manager = transactional_transaction_manager();
         let mut ctx = SenderTestContext::with_transaction_state(
             false,
             i32::MAX,
-            Some(Arc::clone(&transaction_manager)),
+            Some(Box::new(transactional_transaction_manager)),
             None,
             None,
         );
+        let transaction_manager = ctx.transaction_manager();
         run_init_transactions(&mut ctx).await;
         assert!(transaction_manager.lock().unwrap().is_ready());
 
@@ -10620,7 +10611,10 @@ mod tests {
     /// The `finalizedFeaturesEpoch` Java increments per call (Java 207) is always `0`
     /// here: no test in this group calls the initializer twice, and the tests that do
     /// re-publish features mid-run pass their own epoch.
-    fn txn_mgr_test_manager(transaction_v2_enabled: bool) -> Arc<Mutex<TransactionManager>> {
+    fn txn_mgr_test_manager(
+        transaction_v2_enabled: bool,
+        metadata: Arc<crate::Metadata>,
+    ) -> Arc<Mutex<TransactionManager>> {
         use crate::api_versions_response_data::{ApiVersion, FinalizedFeatureKey, SupportedFeatureKey};
         use crate::common::protocol::ApiKeys;
 
@@ -10679,7 +10673,7 @@ mod tests {
             TRANSACTION_TIMEOUT_MS,
             TXN_MGR_DEFAULT_RETRY_BACKOFF_MS,
             api_versions,
-            txn_manager_metadata(),
+            metadata,
             false,
         )))
     }
@@ -10697,7 +10691,7 @@ mod tests {
         SenderTestContext::with_transaction_state(
             true,
             i32::MAX,
-            Some(txn_mgr_test_manager(transaction_v2_enabled)),
+            Some(Box::new(move |metadata| txn_mgr_test_manager(transaction_v2_enabled, metadata))),
             Some(SenderTestTimeouts {
                 request_timeout_ms: TXN_MGR_REQUEST_TIMEOUT,
                 delivery_timeout_ms: TXN_MGR_DELIVERY_TIMEOUT_MS,
@@ -14202,7 +14196,7 @@ mod tests {
         let mut ctx = SenderTestContext::with_transaction_state(
             false,
             i32::MAX,
-            Some(txn_mgr_test_manager(false)),
+            Some(Box::new(|metadata| txn_mgr_test_manager(false, metadata))),
             Some(SenderTestTimeouts {
                 request_timeout_ms: TXN_MGR_REQUEST_TIMEOUT,
                 delivery_timeout_ms: TXN_MGR_DELIVERY_TIMEOUT_MS,
@@ -14417,15 +14411,18 @@ mod tests {
             ),
         );
 
-        let manager = Arc::new(Mutex::new(TransactionManager::new(
-            LogContext::empty(),
-            Some(transactional_id.to_string()),
-            60000,
-            manager_retry_backoff_ms,
-            api_versions,
-            txn_manager_metadata(),
-            false,
-        )));
+        let transactional_id = transactional_id.to_string();
+        let manager: TxnManagerBuilder = Box::new(move |metadata| {
+            Arc::new(Mutex::new(TransactionManager::new(
+                LogContext::empty(),
+                Some(transactional_id),
+                60000,
+                manager_retry_backoff_ms,
+                api_versions,
+                metadata,
+                false,
+            )))
+        });
         SenderTestContext::with_transaction_state(
             false,
             retries,

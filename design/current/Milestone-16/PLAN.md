@@ -1255,10 +1255,14 @@ Phase 5 completion notes (agent 95):
     responder beside the operation that does that. The `TransactionManager` tests are manager-level, so a
     helper negotiates the version the way `NetworkClient` does (`latest_usable_version_in_range` against
     node 0).
-  - The Sender / RecordAccumulator test fixtures build their `TransactionManager` before the context's
-    metadata exists, so each gets a separate empty `Metadata` (`txn_manager_metadata()`, documented). None
-    of those tests seeds an id for an offset-commit topic, and Java's shared metadata carries none either,
-    so the request is the same v0-5 one.
+  - The Sender / RecordAccumulator test fixtures originally built their `TransactionManager` before the
+    context's metadata existed, so each got a separate empty `Metadata` (`txn_manager_metadata()`).
+    Review fix round (COMMENTS.114 C10): the Sender fixtures now share the context's own `ProducerMetadata`
+    with the manager, as Java and `KafkaProducer::new` do — `SenderTestContext::with_transaction_state` and
+    `split_batch_and_send_context` take a `TxnManagerBuilder` and call it with the context's metadata.
+    The RecordAccumulator fixtures keep a separate empty `Metadata`: their tests run on a
+    `MetadataSnapshot`, as Java's `RecordAccumulatorTest` does, and that Java test builds no real
+    `TransactionManager`, so there is no shared instance to mirror.
   - Not Phase 5: the other 4.4 `ProducerMetadata` changes (36a69b49c5 `Timer` `awaitUpdate`, 9f15f3c540
     lock-free `add` fast path and `retainTopic` CAS, the constructor losing `Time`) are classified N in
     §6 and were not touched. (9f15f3c540's `testRetainTopic` was later translated in the review fix round,
@@ -1272,8 +1276,8 @@ Phase 5 completion notes (agent 95):
 - **For Phases 6-8 (same track):**
   - `TransactionManager::new` now takes `metadata: Arc<Metadata>` (7 parameters), and
     `KafkaProducer::configure_transaction_state` takes `&Arc<Metadata>`. Test fixtures: TM tests use
-    `test_metadata()` / `manager_with_metadata(..)`; Sender and RecordAccumulator tests use
-    `txn_manager_metadata()`.
+    `test_metadata()` / `manager_with_metadata(..)`; Sender tests pass a `TxnManagerBuilder` that the
+    context calls with its own metadata, and RecordAccumulator tests use `txn_manager_metadata()` (C10).
   - `TxnProducerContext::with_metadata_seed(extra, n, tv2, track_topic, with_topic_ids)` and the
     `topic_metadata_update` helper exist in `kafka_producer.rs` tests.
   - Phase 6 (rack-aware) touches `RecordAccumulator::PartitionerConfig` and `KafkaProducer` construction.
