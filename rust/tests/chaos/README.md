@@ -87,7 +87,8 @@ e.g. a Rust producer feeding a C consumer):
 
 - **roles**: `producer`, `consumer`
 - **backends**: `rust` (in-process, async-native), `python` (sync binding),
-  `python-async` (asyncio binding), `c` (C FFI). The non-Rust backends run
+  `python-async` (asyncio binding), `c` (C FFI), `dotnet` (sync .NET binding),
+  `dotnet-async` (async .NET binding). The non-Rust backends run
   the real binding in its own container over the gRPC bridge; requesting one
   makes `xtask` build with `--features multilanguage-tests` automatically
   (their gRPC-server Docker images must be built first — see
@@ -669,9 +670,11 @@ cargo xtask chaos --scenario simple_flow_clean_broker_roll
 
 - **Docker** running (the harness manages `kafka-*` containers on a private
   network; image `apache/kafka:4.2.0`).
-- For `python` / `python-async` / `c` workloads, the gRPC-server images:
-  `make build-grpc-images-c`, `make build-grpc-images-python` (built once;
-  reused across runs).
+- For `python` / `python-async` / `c` / `dotnet` / `dotnet-async` workloads,
+  the gRPC-server images: `make build-grpc-images-c`,
+  `make build-grpc-images-python`, `make build-grpc-images-dotnet` (built
+  once; reused across runs). For a natively launched .NET server
+  (`MULTILANG_BACKEND_MODE=native`), `make build-grpc-native-dotnet` instead.
 
 The harness is excluded from `cargo test` (`test = false` in `Cargo.toml`
 plus `#[ignore]` on every scenario) because it is slow and destructive to its

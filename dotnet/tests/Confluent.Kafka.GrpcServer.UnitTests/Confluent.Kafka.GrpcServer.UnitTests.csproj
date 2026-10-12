@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Unit tests for the .NET gRPC server's chaos-harness service (M18/P1, PLAN §7.1, D10):
+    ChaosWorkloadServiceImpl (and, from S3, AsyncChaosWorkloadServiceImpl) driven through
+    their internal client-factory constructor over MockProducer / MockConsumer, plus the
+    shared Chaos/* plumbing (event encoding and texts, the settle-once outcomes, the rate
+    schedule, the listener). No broker, no Docker.
+
+    A LOCAL GATE, NOT RUN IN CI (PLAN Q2, matching Python, whose chaos and gRPC servers
+    have no tests in CI either): run it with dotnet/Makefile's `test-grpc-server-dotnet`,
+    which `test-dotnet` deliberately does not call. The Actor and the PM run it per
+    §7.4 gate 2.
+
+    Target net10.0 only: the server is a Microsoft.NET.Sdk.Web app, and the ASP.NET Core 8
+    runtime is absent locally and in CI (M17/P1 D3); the net8.0 server leg is covered by the
+    container smoke run (§7.5 c1). Kept OUT of Confluent.Kafka.sln, like the server, the soak
+    and the perf projects.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Confluent.Kafka.GrpcServer.UnitTests</RootNamespace>
+    <AssemblyName>Confluent.Kafka.GrpcServer.UnitTests</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../grpc-server/Confluent.Kafka.GrpcServer.csproj" />
+  </ItemGroup>
+
+</Project>
