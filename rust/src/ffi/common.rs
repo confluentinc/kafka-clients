@@ -242,8 +242,13 @@ pub(crate) unsafe fn deliver_panic(
 ) {
     let error = SendPtr(box_error(error) as *mut c_void);
     let opaque = SendPtr(opaque);
-    complete(Box::new(move || unsafe {
-        cb(error.get() as *mut kafka_common_Error_t, opaque.get())
+    complete(Box::new(move || {
+        // SAFETY: Per this function's `# Safety`, `cb` and `opaque` are the pair the C caller
+        // passed to the entry point, which has not fired `cb`, so calling `cb` with `opaque`
+        // is the completion the caller is waiting for. `error` is the fresh `box_error` handle
+        // above, owned by no one else, so handing it to `cb` transfers its ownership; the job
+        // is a `FnOnce`, so `cb` fires exactly once.
+        unsafe { cb(error.get() as *mut kafka_common_Error_t, opaque.get()) }
     }));
 }
 
@@ -261,8 +266,13 @@ pub(crate) unsafe fn deliver_panic_value<P: 'static>(
 ) {
     let error = SendPtr(box_error(error) as *mut c_void);
     let opaque = SendPtr(opaque);
-    complete(Box::new(move || unsafe {
-        cb(std::ptr::null_mut(), error.get() as *mut kafka_common_Error_t, opaque.get())
+    complete(Box::new(move || {
+        // SAFETY: Per this function's `# Safety`, `cb` and `opaque` are the pair the C caller
+        // passed to the entry point, which has not fired `cb`, so calling `cb` with `opaque`
+        // is the completion the caller is waiting for. `error` is the fresh `box_error` handle
+        // above, owned by no one else, so handing it to `cb` transfers its ownership; the job
+        // is a `FnOnce`, so `cb` fires exactly once.
+        unsafe { cb(std::ptr::null_mut(), error.get() as *mut kafka_common_Error_t, opaque.get()) }
     }));
 }
 
@@ -280,8 +290,13 @@ pub(crate) unsafe fn deliver_panic_i64(
 ) {
     let error = SendPtr(box_error(error) as *mut c_void);
     let opaque = SendPtr(opaque);
-    complete(Box::new(move || unsafe {
-        cb(-1, error.get() as *mut kafka_common_Error_t, opaque.get())
+    complete(Box::new(move || {
+        // SAFETY: Per this function's `# Safety`, `cb` and `opaque` are the pair the C caller
+        // passed to the entry point, which has not fired `cb`, so calling `cb` with `opaque`
+        // is the completion the caller is waiting for. `error` is the fresh `box_error` handle
+        // above, owned by no one else, so handing it to `cb` transfers its ownership; the job
+        // is a `FnOnce`, so `cb` fires exactly once.
+        unsafe { cb(-1, error.get() as *mut kafka_common_Error_t, opaque.get()) }
     }));
 }
 
@@ -300,7 +315,13 @@ pub(crate) unsafe fn deliver_panic_opaque(
 ) {
     drop(error);
     let opaque = SendPtr(opaque);
-    complete(Box::new(move || unsafe { cb(opaque.get()) }));
+    complete(Box::new(move || {
+        // SAFETY: Per this function's `# Safety`, `cb` and `opaque` are the pair the C caller
+        // passed to the entry point, which has not fired `cb`, so calling `cb` with `opaque`
+        // is the completion the caller is waiting for; the job is a `FnOnce`, so `cb` fires
+        // exactly once.
+        unsafe { cb(opaque.get()) }
+    }));
 }
 
 /// The completion sink of a handle with no callbacks vector: runs the
@@ -419,36 +440,61 @@ pub(crate) mod panic_probe {
 
         /// Records `error`, which must be the `LocalIllegalState` a panic is
         /// reported as.
+        ///
+        /// # Safety
+        ///
+        /// `error` must be an owned error handle not yet destroyed; it is consumed.
         unsafe fn record(&self, error: *mut kafka_common_Error_t) {
+            // SAFETY: Test code: per this function's `# Safety`, `error` is an owned handle not
+            // yet destroyed, which `take_error` consumes here, its final use.
             let error = unsafe { take_error(error) }.expect("a panic completion carries an error");
             assert!(error.is_local_illegal_state_error(), "{error:?}");
             self.fired.lock().unwrap().push(error.message().to_string());
         }
     }
 
+    /// The [`Probe`] behind a completion's `opaque`.
+    ///
+    /// # Safety
+    ///
+    /// `opaque` must be [`Probe::as_opaque`] of a `Probe` that outlives `'a`.
     unsafe fn probe<'a>(opaque: *mut c_void) -> &'a Probe {
+        // SAFETY: Test code: per this function's `# Safety`, `opaque` came from
+        // `Probe::as_opaque` of a live `Probe` that outlives `'a`; the reference is shared, and
+        // `Probe` mutates only through its `Mutex`.
         unsafe { &*(opaque as *const Probe) }
     }
 
     /// An `(error, opaque)` completion.
     pub(crate) unsafe extern "C" fn on_error(error: *mut kafka_common_Error_t, opaque: *mut c_void) {
+        // SAFETY: Test code: every test registering this completion passes `Probe::as_opaque`
+        // of a `Probe` it keeps alive until the completion has fired, and a completion owns
+        // the error handle it receives.
         unsafe { probe(opaque).record(error) }
     }
 
     /// A `(value *, error, opaque)` completion: a failure has a NULL value.
     pub(crate) unsafe extern "C" fn on_value<P>(value: *mut P, error: *mut kafka_common_Error_t, opaque: *mut c_void) {
         assert!(value.is_null());
+        // SAFETY: Test code: every test registering this completion passes `Probe::as_opaque`
+        // of a `Probe` it keeps alive until the completion has fired, and a completion owns
+        // the error handle it receives.
         unsafe { probe(opaque).record(error) }
     }
 
     /// An `(int64_t value, error, opaque)` completion: a failure has -1.
     pub(crate) unsafe extern "C" fn on_i64(value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void) {
         assert_eq!(value, -1);
+        // SAFETY: Test code: every test registering this completion passes `Probe::as_opaque`
+        // of a `Probe` it keeps alive until the completion has fired, and a completion owns
+        // the error handle it receives.
         unsafe { probe(opaque).record(error) }
     }
 
     /// An `(opaque)` completion, which carries no error.
     pub(crate) unsafe extern "C" fn on_opaque(opaque: *mut c_void) {
+        // SAFETY: Test code: every test registering this completion passes `Probe::as_opaque`
+        // of a `Probe` it keeps alive until the completion has fired.
         unsafe { probe(opaque) }.fired.lock().unwrap().push("<no error>".to_string());
     }
 }
@@ -525,15 +571,17 @@ pub(crate) fn box_error(error: Error) -> *mut kafka_common_Error_t {
 ///
 /// # Safety
 ///
-/// The pointer must be non-null and must have been created by [`box_error`].
+/// The pointer must be non-null and must have been created by [`box_error`],
+/// and the handle must stay alive (not passed to [`kafka_common_Error_destroy`]
+/// nor consumed by [`take_error`]) for as long as the returned reference, or
+/// anything borrowed from it, is used: the `'static` lifetime is not real.
 pub(crate) unsafe fn error_ref(error: *const kafka_common_Error_t) -> &'static ErrorInner {
     // SAFETY: Per this function's `# Safety`, `error` is non-null and was created by
     // `box_error`, whose `Box::into_raw` of an `ErrorInner` is the single allocation behind
     // every `kafka_common_Error_t`, so the cast targets a live, correctly typed
-    // `ErrorInner`. The `&'static` is a convenience only: every caller is a
-    // `kafka_common_Error_*` accessor in this module that uses the reference for the
-    // duration of its own call, during which the C caller keeps the handle alive (not yet
-    // passed to `kafka_common_Error_destroy`), and none of them stores or returns it.
+    // `ErrorInner`. The `&'static` is a convenience only: the same contract makes the caller
+    // keep the handle alive while it uses the reference, which is shared, so nothing writes
+    // the `ErrorInner` under it (its lazy slots are `OnceLock`s).
     unsafe { &*(error as *const ErrorInner) }
 }
 
@@ -565,6 +613,9 @@ pub(crate) unsafe fn error_ref(error: *const kafka_common_Error_t) -> &'static E
 ///
 /// `source` must be null or an owned error handle not yet destroyed.
 unsafe fn owned_source(source: *mut kafka_common_Error_t) -> Error {
+    // SAFETY: Per this function's `# Safety`, `source` is null or an owned error handle not
+    // yet destroyed, as `take_error` requires; the caller hands it over, so consuming it
+    // here is its final use.
     unsafe { take_error(source) }.unwrap_or_else(Error::kafka)
 }
 
@@ -574,6 +625,9 @@ unsafe fn owned_source(source: *mut kafka_common_Error_t) -> Error {
 ///
 /// `topics` must be null or a valid list of NUL-terminated strings.
 unsafe fn topic_set(topics: *const kafka_List_t) -> HashSet<String> {
+    // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list of
+    // NUL-terminated strings, as `list_strings` requires; the names are copied out, so
+    // nothing borrows the list after this call.
     unsafe { list_strings(topics) }.into_iter().collect()
 }
 
@@ -592,6 +646,9 @@ pub extern "C" fn kafka_common_Error_kafka() -> *mut kafka_common_Error_t {
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_kafka_message(message: *const c_char) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
     box_error(Error::kafka_message(unsafe { c_str_to_string(message) }))
 }
 
@@ -606,6 +663,9 @@ pub unsafe extern "C" fn kafka_common_Error_kafka_message(message: *const c_char
 pub unsafe extern "C" fn kafka_common_Error_kafka_source(
     source: *mut kafka_common_Error_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `source` is an owned error handle not yet
+    // destroyed, as `owned_source` requires. The caller hands `source` over, so taking it here
+    // is its single, final use.
     box_error(Error::kafka_source(unsafe { owned_source(source) }))
 }
 
@@ -622,6 +682,11 @@ pub unsafe extern "C" fn kafka_common_Error_kafka_message_source(
     message: *const c_char,
     source: *mut kafka_common_Error_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires, and `source` is an owned error handle not yet
+    // destroyed, as `owned_source` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call; the caller hands `source` over, so taking it here is
+    // its single, final use.
     box_error(Error::kafka_message_source(unsafe { c_str_to_string(message) }, unsafe {
         owned_source(source)
     }))
@@ -639,6 +704,9 @@ pub unsafe extern "C" fn kafka_common_Error_kafka_message_source(
 pub unsafe extern "C" fn kafka_common_Error_topic_authorization(
     topics: *const kafka_List_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list of
+    // NUL-terminated strings, as `topic_set` requires. `topics` is only read here, into owned
+    // values, so nothing borrows it after this call.
     box_error(Error::topic_authorization(unsafe { topic_set(topics) }))
 }
 
@@ -656,6 +724,10 @@ pub unsafe extern "C" fn kafka_common_Error_topic_authorization_message(
     topics: *const kafka_List_t,
     message: *const c_char,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list of
+    // NUL-terminated strings, as `topic_set` requires, and `message` is null or a valid
+    // NUL-terminated C string, as `c_str_to_string` requires. `topics` and `message` are only
+    // read here, into owned values, so nothing borrows them after this call.
     box_error(Error::topic_authorization_message(unsafe { topic_set(topics) }, unsafe {
         c_str_to_string(message)
     }))
@@ -671,6 +743,9 @@ pub unsafe extern "C" fn kafka_common_Error_topic_authorization_message(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_invalid_topics(topics: *const kafka_List_t) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list of
+    // NUL-terminated strings, as `topic_set` requires. `topics` is only read here, into owned
+    // values, so nothing borrows it after this call.
     box_error(Error::invalid_topics(unsafe { topic_set(topics) }))
 }
 
@@ -688,6 +763,10 @@ pub unsafe extern "C" fn kafka_common_Error_invalid_topics_message(
     topics: *const kafka_List_t,
     message: *const c_char,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list of
+    // NUL-terminated strings, as `topic_set` requires, and `message` is null or a valid
+    // NUL-terminated C string, as `c_str_to_string` requires. `topics` and `message` are only
+    // read here, into owned values, so nothing borrows them after this call.
     box_error(Error::invalid_topics_message(unsafe { topic_set(topics) }, unsafe {
         c_str_to_string(message)
     }))
@@ -701,6 +780,9 @@ pub unsafe extern "C" fn kafka_common_Error_invalid_topics_message(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_group_authorization(group_id: *const c_char) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `group_id` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `group_id` is only read here, into owned values,
+    // so nothing borrows it after this call.
     box_error(Error::group_authorization(unsafe { c_str_to_string(group_id) }))
 }
 
@@ -717,7 +799,13 @@ pub unsafe extern "C" fn kafka_common_Error_group_authorization_with_message(
     message: *const c_char,
 ) -> *mut kafka_common_Error_t {
     box_error(Error::group_authorization_with_message(
+        // SAFETY: Per this function's `# Safety`, `group_id` is null or a valid NUL-terminated
+        // C string, as `c_str_to_string` requires. `group_id` is only read here, into owned
+        // values, so nothing borrows it after this call.
         unsafe { c_str_to_string(group_id) },
+        // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+        // string, as `c_str_to_string` requires. `message` is only read here, into owned
+        // values, so nothing borrows it after this call.
         unsafe { c_str_to_string(message) },
     ))
 }
@@ -730,6 +818,9 @@ pub unsafe extern "C" fn kafka_common_Error_group_authorization_with_message(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_invalid_group_id(message: *const c_char) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
     box_error(Error::invalid_group_id(unsafe { c_str_to_string(message) }))
 }
 
@@ -744,6 +835,9 @@ pub unsafe extern "C" fn kafka_common_Error_throttling_quota_exceeded(
     throttle_time_ms: i32,
     message: *const c_char,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
     box_error(Error::throttling_quota_exceeded(throttle_time_ms, unsafe {
         c_str_to_string(message)
     }))
@@ -757,6 +851,9 @@ pub unsafe extern "C" fn kafka_common_Error_throttling_quota_exceeded(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_buffer_exhausted(message: *const c_char) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
     box_error(Error::buffer_exhausted(unsafe { c_str_to_string(message) }))
 }
 
@@ -770,6 +867,9 @@ pub unsafe extern "C" fn kafka_common_Error_buffer_exhausted(message: *const c_c
 pub unsafe extern "C" fn kafka_common_Error_local_illegal_argument(
     message: *const c_char,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
     box_error(Error::local_illegal_argument(unsafe { c_str_to_string(message) }))
 }
 
@@ -781,6 +881,9 @@ pub unsafe extern "C" fn kafka_common_Error_local_illegal_argument(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_config_message(message: *const c_char) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
     box_error(Error::config_message(unsafe { c_str_to_string(message) }))
 }
 
@@ -795,6 +898,10 @@ pub unsafe extern "C" fn kafka_common_Error_config_name_value(
     name: *const c_char,
     value: *const c_char,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `name` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires, and `value` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `name` and `value` are only read here, into owned
+    // values, so nothing borrows them after this call.
     box_error(Error::config_name_value(unsafe { c_str_to_string(name) }, unsafe {
         c_str_to_string(value)
     }))
@@ -815,8 +922,17 @@ pub unsafe extern "C" fn kafka_common_Error_config_name_value_message(
     message: *const c_char,
 ) -> *mut kafka_common_Error_t {
     box_error(Error::config_name_value_message(
+        // SAFETY: Per this function's `# Safety`, `name` is null or a valid NUL-terminated C
+        // string, as `c_str_to_string` requires. `name` is only read here, into owned values,
+        // so nothing borrows it after this call.
         unsafe { c_str_to_string(name) },
+        // SAFETY: Per this function's `# Safety`, `value` is null or a valid NUL-terminated C
+        // string, as `c_str_to_string` requires. `value` is only read here, into owned values,
+        // so nothing borrows it after this call.
         unsafe { c_str_to_string(value) },
+        // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+        // string, as `c_str_to_string` requires. `message` is only read here, into owned
+        // values, so nothing borrows it after this call.
         unsafe { c_str_to_string(message) },
     ))
 }
@@ -829,6 +945,9 @@ pub unsafe extern "C" fn kafka_common_Error_config_name_value_message(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_local_illegal_state(message: *const c_char) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
     box_error(Error::local_illegal_state(unsafe { c_str_to_string(message) }))
 }
 
@@ -841,6 +960,9 @@ pub unsafe extern "C" fn kafka_common_Error_local_illegal_state(message: *const 
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_timeout(message: *const c_char) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
     box_error(Error::timeout(unsafe { c_str_to_string(message) }))
 }
 
@@ -852,6 +974,9 @@ pub unsafe extern "C" fn kafka_common_Error_timeout(message: *const c_char) -> *
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_record_too_large(message: *const c_char) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
     box_error(Error::record_too_large(unsafe { c_str_to_string(message) }))
 }
 
@@ -868,6 +993,9 @@ pub unsafe extern "C" fn kafka_common_Error_correlation_id_mismatch(
     response_correlation_id: i32,
 ) -> *mut kafka_common_Error_t {
     box_error(Error::correlation_id_mismatch(
+        // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+        // string, as `c_str_to_string` requires. `message` is only read here, into owned
+        // values, so nothing borrows it after this call.
         unsafe { c_str_to_string(message) },
         request_correlation_id,
         response_correlation_id,
@@ -882,6 +1010,9 @@ pub unsafe extern "C" fn kafka_common_Error_correlation_id_mismatch(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_invalid_receive(message: *const c_char) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
     box_error(Error::invalid_receive(unsafe { c_str_to_string(message) }))
 }
 
@@ -893,6 +1024,9 @@ pub unsafe extern "C" fn kafka_common_Error_invalid_receive(message: *const c_ch
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_schema(message: *const c_char) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
     box_error(Error::schema(unsafe { c_str_to_string(message) }))
 }
 
@@ -909,6 +1043,11 @@ pub unsafe extern "C" fn kafka_common_Error_schema_source(
     message: *const c_char,
     source: *mut kafka_common_Error_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires, and `source` is an owned error handle not yet
+    // destroyed, as `owned_source` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call; the caller hands `source` over, so taking it here is
+    // its single, final use.
     box_error(Error::schema_source(unsafe { c_str_to_string(message) }, unsafe {
         owned_source(source)
     }))
@@ -922,6 +1061,9 @@ pub unsafe extern "C" fn kafka_common_Error_schema_source(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_serialization(message: *const c_char) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
     box_error(Error::serialization(unsafe { c_str_to_string(message) }))
 }
 
@@ -933,6 +1075,9 @@ pub unsafe extern "C" fn kafka_common_Error_serialization(message: *const c_char
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_unsupported_version(message: *const c_char) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
     box_error(Error::unsupported_version(unsafe { c_str_to_string(message) }))
 }
 
@@ -944,6 +1089,9 @@ pub unsafe extern "C" fn kafka_common_Error_unsupported_version(message: *const 
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_wakeup(message: *const c_char) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
     box_error(Error::wakeup(unsafe { c_str_to_string(message) }))
 }
 
@@ -957,6 +1105,9 @@ pub unsafe extern "C" fn kafka_common_Error_wakeup(message: *const c_char) -> *m
 pub unsafe extern "C" fn kafka_common_Error_local_concurrent_modification(
     message: *const c_char,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
     box_error(Error::local_concurrent_modification(unsafe { c_str_to_string(message) }))
 }
 
@@ -969,6 +1120,9 @@ pub unsafe extern "C" fn kafka_common_Error_local_concurrent_modification(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_local_timeout(message: *const c_char) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
     box_error(Error::local_timeout(unsafe { c_str_to_string(message) }))
 }
 
@@ -992,6 +1146,9 @@ pub unsafe extern "C" fn kafka_common_Error_local_callback(
     message: *const c_char,
     opaque: *mut std::ffi::c_void,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
     box_error(Error::local_callback(unsafe { c_str_to_string(message) }, opaque))
 }
 
@@ -1012,6 +1169,9 @@ pub extern "C" fn kafka_common_Error_transaction_aborted() -> *mut kafka_common_
 pub unsafe extern "C" fn kafka_common_Error_transaction_aborted_message(
     message: *const c_char,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
     box_error(Error::transaction_aborted_message(unsafe { c_str_to_string(message) }))
 }
 
@@ -1025,6 +1185,9 @@ pub unsafe extern "C" fn kafka_common_Error_transaction_aborted_message(
 pub unsafe extern "C" fn kafka_common_Error_record_batch_too_large(
     message: *const c_char,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
     box_error(Error::record_batch_too_large(unsafe { c_str_to_string(message) }))
 }
 
@@ -1620,6 +1783,11 @@ pub unsafe extern "C" fn kafka_common_Error_source(error: *const kafka_common_Er
     if error.is_null() {
         return std::ptr::null();
     }
+    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
+    // valid handle from a function that returned an error, i.e. created by `box_error` and
+    // not yet destroyed, which is `error_ref`'s precondition. The returned cause handle is
+    // owned by that `ErrorInner` (its `source` slot), so, as this function's rustdoc states,
+    // it stays valid until `kafka_common_Error_destroy` is called on `error`.
     unsafe { error_ref(error) }.source_ptr()
 }
 
@@ -1640,6 +1808,10 @@ pub unsafe extern "C" fn kafka_common_Error_throttle_time_ms(error: *const kafka
     if error.is_null() {
         return -1;
     }
+    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
+    // valid handle from a function that returned an error, i.e. created by `box_error` and
+    // not yet destroyed, which is `error_ref`'s precondition. The borrow lasts only for this
+    // call, while the caller keeps the handle alive.
     unsafe { error_ref(error) }.error.throttle_time_ms().unwrap_or(-1)
 }
 
@@ -2035,6 +2207,8 @@ mod tests {
             let export = predicates
                 .get(own.as_str())
                 .unwrap_or_else(|| panic!("no C export for `{own}`"));
+            // SAFETY: Test code: `handle` is a live `box_error` handle from `errors`, destroyed
+            // only by the final loop below.
             assert_eq!(unsafe { export(*handle) }, 1, "`{own}` is false for its own class");
         }
 
@@ -2053,12 +2227,15 @@ mod tests {
             for (own, handle) in &errors {
                 let expected = own == name || LEAF_SUBCLASSES.contains(&(*name, own.as_str()));
                 assert_eq!(
+                    // SAFETY: Test code: `handle` is a live `box_error` handle from `errors`,
+                    // destroyed only by the final loop below.
                     unsafe { export(*handle) },
                     i8::from(expected),
                     "`{name}` on an instance of the class `{own}` names"
                 );
             }
             assert_eq!(
+                // SAFETY: Test code: every predicate export accepts a null handle.
                 unsafe { export(std::ptr::null()) },
                 0,
                 "`{name}` must be false for a null handle"
@@ -2066,6 +2243,8 @@ mod tests {
         }
 
         for (_, handle) in errors {
+            // SAFETY: Test code: each `handle` is a `box_error` handle from `errors`, consumed
+            // by this loop, so it is destroyed exactly once and not used afterwards.
             unsafe { kafka_common_Error_destroy(handle) };
         }
     }

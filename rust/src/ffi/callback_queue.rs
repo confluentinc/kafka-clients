@@ -66,6 +66,9 @@ impl SendPtr {
 // for the thread-safety of what it points at (the C side documents that
 // callbacks may be executed from any thread the caller chooses).
 unsafe impl Send for SendPtr {}
+// SAFETY: as for `Send`: a shared `&SendPtr` only copies the pointer value out
+// (`get`, the public field); Rust never reads or writes through it, so sharing
+// the wrapper gives another thread nothing beyond the copy `Send` already allows.
 unsafe impl Sync for SendPtr {}
 
 /// The callbacks vector of one client handle.
@@ -252,6 +255,9 @@ mod tests {
     unsafe extern "C" fn count_notify(opaque: *mut c_void) {
         NOTIFIES.fetch_add(1, Ordering::SeqCst);
         // The opaque is the registered pointer, handed back untouched.
+        // SAFETY: Test code: the only registration of this hook passes the boxed
+        // `AtomicI32` of `notify_fires_once_per_empty_to_non_empty_transition`, which
+        // outlives every push that can fire it (the hook is cleared before the box drops).
         let counter = unsafe { &*(opaque as *const AtomicI32) };
         counter.fetch_add(1, Ordering::SeqCst);
     }
