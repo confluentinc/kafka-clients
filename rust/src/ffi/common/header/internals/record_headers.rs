@@ -159,7 +159,7 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_with_record
 pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_set_read_only(
     self_: *mut kafka_common_header_internals_RecordHeaders_t,
 ) {
-    unsafe { &mut *(self_ as *mut RecordHeadersInner) }.headers.set_read_only();
+    unsafe { &mut (*(self_ as *mut RecordHeadersInner)).headers }.set_read_only();
 }
 
 /// `isReadOnly()`, as `0` / `1`.
