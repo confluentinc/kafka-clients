@@ -116,25 +116,41 @@ mod tests {
         ])
     }
 
-    /// New test, no Java original: `Display` renders each entry through its
-    /// redacting `Display`, as Java's `toString()` does.
+    /// Translated from `ConfigTest.shouldImplementToStringProperly`
+    /// (`ConfigTest.java:77-81`): the rendering contains each entry's own
+    /// rendering. Java's fixture holds two plain entries (`a=b`, `c=d`); this
+    /// one makes the first entry sensitive, so the test also shows that
+    /// `Display` renders it through the entry's redacting `Display`, as Java's
+    /// `toString()` does, and the secret does not appear.
     #[test]
     fn display_redacts_sensitive_values() {
         let config = config_with_secret();
-        assert_eq!(config.get("ssl.truststore.password").unwrap().value(), Some(SECRET));
+        let sensitive = config.get("ssl.truststore.password").unwrap();
+        assert_eq!(sensitive.value(), Some(SECRET));
         let rendered = config.to_string();
+        // Java's two assertions: the rendering contains each entry's `toString()`.
+        assert!(rendered.contains(&sensitive.to_string()), "{rendered}");
+        assert!(
+            rendered.contains(&config.get("retention.ms").unwrap().to_string()),
+            "{rendered}"
+        );
         assert!(rendered.starts_with("Config(entries=["), "{rendered}");
         assert!(rendered.contains("name=ssl.truststore.password, value=Redacted"), "{rendered}");
         assert!(rendered.contains("name=retention.ms, value=604800000"), "{rendered}");
         assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
     }
 
-    /// New test, no Java original: the derived `Debug` renders each entry
-    /// through its redacting `Debug`, while a non-sensitive value still prints.
+    /// The `Debug` counterpart of `ConfigTest.shouldImplementToStringProperly`
+    /// (`ConfigTest.java:77-81`): the derived `Debug` renders each entry through
+    /// its `Debug`, which is the entry's redacting `Display`, so it contains
+    /// each entry's `to_string()`, while a non-sensitive value still prints.
     #[test]
     fn debug_redacts_sensitive_values() {
         let config = config_with_secret();
         for rendered in [format!("{config:?}"), format!("{config:#?}")] {
+            for entry in config.entries() {
+                assert!(rendered.contains(&entry.to_string()), "{rendered}");
+            }
             assert!(rendered.starts_with("Config"), "{rendered}");
             assert!(rendered.contains("name=ssl.truststore.password, value=Redacted"), "{rendered}");
             assert!(rendered.contains("name=retention.ms, value=604800000"), "{rendered}");
