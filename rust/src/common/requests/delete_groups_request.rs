@@ -145,8 +145,11 @@ impl RequestBuilder for Builder {
         ApiKeys::DELETE_GROUPS.oldest_version()
     }
 
+    // Java's `super(ApiKeys.DELETE_GROUPS)` resolves to `latestVersion(false)`
+    // (`AbstractRequest.java:46-51`): released versions only
+    // (producer-transactions §12).
     fn latest_allowed_version(&self) -> i16 {
-        ApiKeys::DELETE_GROUPS.latest_version()
+        ApiKeys::DELETE_GROUPS.latest_version_enable_unstable_last_version(false)
     }
 
     fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
@@ -186,6 +189,19 @@ mod tests {
             },
             other => panic!("expected DeleteGroups, got {}", other.api_key().name()),
         }
+    }
+
+    /// The builder's upper bound is Java's `super(ApiKeys.DELETE_GROUPS)`, i.e.
+    /// `latestVersion(false)`: the latest released version, v3 as of 4.4.
+    #[test]
+    fn latest_allowed_version_is_the_latest_released_version() {
+        let builder = Builder::new(DeleteGroupsRequestData::new());
+        assert_eq!(
+            ApiKeys::DELETE_GROUPS.latest_version_enable_unstable_last_version(false),
+            builder.latest_allowed_version()
+        );
+        assert_eq!(3, builder.latest_allowed_version());
+        assert_eq!(0, builder.oldest_allowed_version());
     }
 
     /// `build_version` rejects a version outside the supported range.
