@@ -431,8 +431,10 @@ impl ConsumerClassHandle {
 ///
 /// # Safety
 ///
-/// `consumer` must be a live handle from `KafkaConsumer_new` or an
-/// `__as_Consumer` view.
+/// `consumer` must point at a live [`ConsumerClassHandle`], kept alive for
+/// `'a`: a handle from `KafkaConsumer_new`, an `__as_Consumer` view, or a
+/// `kafka_consumer_MockConsumer_t` cast to `kafka_consumer_Consumer_t` (the
+/// same pointer, see [`ConsumerClassHandle::as_consumer`]).
 pub(crate) unsafe fn client_ref<'a>(consumer: *const kafka_consumer_Consumer_t) -> &'a Arc<Client> {
     unsafe { &*(consumer as *const Arc<Client>) }
 }
@@ -442,8 +444,8 @@ pub(crate) unsafe fn client_ref<'a>(consumer: *const kafka_consumer_Consumer_t) 
 ///
 /// # Safety
 ///
-/// `consumer` must be a live handle from `KafkaConsumer_new` or an
-/// `__as_Consumer` view.
+/// `consumer` must be a live handle, as [`client_ref`] describes; the sink
+/// holds its own `Arc` to the client, so it may outlive the call.
 pub(crate) unsafe fn completion_sink(consumer: *const kafka_consumer_Consumer_t) -> impl FnOnce(CallbackJob) {
     let client = Arc::clone(unsafe { client_ref(consumer) });
     move |job| client.delivery.queue.push(job)

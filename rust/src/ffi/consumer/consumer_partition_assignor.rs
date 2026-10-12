@@ -83,9 +83,21 @@ impl SubscriptionInner {
     }
 }
 
+/// What a subscription handle points at.
+///
+/// # Safety
+///
+/// `sub` must be a valid subscription handle, kept alive for `'a`, during
+/// which nothing takes a `&mut` to it: only
+/// [`kafka_consumer_ConsumerPartitionAssignor_Subscription_set_group_instance_id`]
+/// takes one, and it requires that no other call uses the handle at the same
+/// time.
 unsafe fn subscription_inner<'a>(
     sub: *const kafka_consumer_ConsumerPartitionAssignor_Subscription_t,
 ) -> &'a SubscriptionInner {
+    // SAFETY: Per this function's `# Safety`, `sub` is a `Box<SubscriptionInner>` from
+    // `SubscriptionInner::boxed`, the only constructor, kept alive for `'a`, during which nothing
+    // takes a `&mut` to it, so the shared reference is valid for `'a`.
     unsafe { &*(sub as *const SubscriptionInner) }
 }
 
@@ -93,10 +105,13 @@ unsafe fn subscription_inner<'a>(
 ///
 /// # Safety
 ///
-/// `sub` must be a valid subscription handle.
+/// `sub` must be a valid subscription handle kept alive for `'a`, during
+/// which nothing takes a `&mut` to it (see `subscription_inner`).
 pub(crate) unsafe fn subscription_ref<'a>(
     sub: *const kafka_consumer_ConsumerPartitionAssignor_Subscription_t,
 ) -> &'a Subscription {
+    // SAFETY: Per this function's `# Safety`, `sub` is a valid subscription handle kept alive for
+    // `'a`, during which nothing takes a `&mut` to it, as `subscription_inner` requires.
     &unsafe { subscription_inner(sub) }.sub
 }
 
@@ -104,10 +119,13 @@ pub(crate) unsafe fn subscription_ref<'a>(
 ///
 /// # Safety
 ///
-/// `assignment` must be a valid assignment handle.
+/// `assignment` must be a valid assignment handle kept alive for `'a`.
 pub(crate) unsafe fn assignment_ref<'a>(
     assignment: *const kafka_consumer_ConsumerPartitionAssignor_Assignment_t,
 ) -> &'a Assignment {
+    // SAFETY: Per this function's `# Safety`, `assignment` is a `Box<Assignment>` from one of the
+    // `Assignment` constructors here, kept alive for `'a`, and no handle to an assignment is ever
+    // mutated, so the shared reference is valid for `'a`.
     unsafe { &*(assignment as *const Assignment) }
 }
 
@@ -115,8 +133,12 @@ pub(crate) unsafe fn assignment_ref<'a>(
 ///
 /// # Safety
 ///
-/// `user_data` must be null or point at `len` readable bytes.
+/// `user_data`'s `data` must be null or point to `len` readable bytes not
+/// written during the call.
 unsafe fn user_data_of(user_data: kafka_Bytes_t) -> Option<Vec<u8>> {
+    // SAFETY: Per this function's `# Safety`, `user_data`'s `data` is null or points to `len`
+    // readable bytes not written during the call; the bytes are copied before return, so the
+    // slice's `'a` is this call, as `as_slice` requires.
     unsafe { user_data.as_slice() }.map(<[u8]>::to_vec)
 }
 
@@ -136,6 +158,9 @@ unsafe fn user_data_of(user_data: kafka_Bytes_t) -> Option<Vec<u8>> {
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_new(
     topics: *const kafka_List_t,
 ) -> *mut kafka_consumer_ConsumerPartitionAssignor_Subscription_t {
+    // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list whose elements are
+    // NUL-terminated strings, as `list_strings` requires; the strings are copied, so the borrow
+    // lasts for this call only.
     SubscriptionInner::boxed(Subscription::new(unsafe { list_strings(topics) }))
 }
 
@@ -143,14 +168,18 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_n
 ///
 /// # Safety
 ///
-/// `topics` must be null or a valid list of strings; `user_data` null or
-/// readable for its length.
+/// `topics` must be null or a valid list of strings; `user_data`'s `data`
+/// null or pointing to `len` readable bytes not written during the call.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_with_user_data(
     topics: *const kafka_List_t,
     user_data: kafka_Bytes_t,
 ) -> *mut kafka_consumer_ConsumerPartitionAssignor_Subscription_t {
+    // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list whose elements are
+    // NUL-terminated strings, as `list_strings` requires; the strings are copied, so the borrow
+    // lasts for this call only. Per this function's `# Safety`, `user_data`'s `data` is null or
+    // points to `len` readable bytes not written during the call, as `user_data_of` requires.
     SubscriptionInner::boxed(Subscription::with_user_data(unsafe { list_strings(topics) }, unsafe {
         user_data_of(user_data)
     }))
@@ -163,7 +192,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_w
 /// # Safety
 ///
 /// `topics` and `owned_partitions` must be null or valid lists of the
-/// documented element types; `user_data` null or readable for its length.
+/// documented element types; `user_data`'s `data` null or pointing to `len`
+/// readable bytes not written during the call.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_with_user_data_owned_partitions(
@@ -172,8 +202,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_w
     owned_partitions: *const kafka_List_t,
 ) -> *mut kafka_consumer_ConsumerPartitionAssignor_Subscription_t {
     SubscriptionInner::boxed(Subscription::with_user_data_owned_partitions(
+        // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list whose elements
+        // are NUL-terminated strings, as `list_strings` requires; the strings are copied, so the
+        // borrow lasts for this call only.
         unsafe { list_strings(topics) },
+        // SAFETY: Per this function's `# Safety`, `user_data`'s `data` is null or points to `len`
+        // readable bytes not written during the call, as `user_data_of` requires.
         unsafe { user_data_of(user_data) },
+        // SAFETY: Per this function's `# Safety`, `owned_partitions` is null or a valid list whose
+        // elements are topic-partition handles, as `list_topic_partitions` requires; the values are
+        // cloned, so the borrow lasts for this call only.
         unsafe { list_topic_partitions(owned_partitions) },
     ))
 }
@@ -190,6 +228,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_w
     options: *const kafka_consumer_SubscriptionOptions_t,
 ) -> *mut kafka_consumer_ConsumerPartitionAssignor_Subscription_t {
     SubscriptionInner::boxed(Subscription::with_options(
+        // SAFETY: Per this function's `# Safety`, `options` is a valid options handle, a
+        // `Box<SubscriptionOptions>` from `kafka_consumer_SubscriptionOptionsBuilder_build`, which
+        // nothing mutates; the value is cloned, so the borrow lasts for this call only.
         unsafe { &*(options as *const SubscriptionOptions) }.clone(),
     ))
 }
@@ -204,6 +245,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_w
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_topics(
     self_: *const kafka_consumer_ConsumerPartitionAssignor_Subscription_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
+    // the only use of the reference, as `subscription_ref` requires.
     box_string_list(unsafe { subscription_ref(self_) }.topics())
 }
 
@@ -217,6 +260,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_t
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_owned_partitions(
     self_: *const kafka_consumer_ConsumerPartitionAssignor_Subscription_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
+    // the only use of the reference, as `subscription_ref` requires.
     topic_partition_list(unsafe { subscription_ref(self_) }.owned_partitions().iter().cloned())
 }
 
@@ -230,6 +275,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_o
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_user_data(
     self_: *const kafka_consumer_ConsumerPartitionAssignor_Subscription_t,
 ) -> kafka_Bytes_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
+    // the only use of the reference, as `subscription_ref` requires. The returned view borrows the
+    // handle's bytes, which the rustdoc tells the caller.
     kafka_Bytes_t::from_option(unsafe { subscription_ref(self_) }.user_data())
 }
 
@@ -244,6 +292,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_u
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_group_instance_id(
     self_: *const kafka_consumer_ConsumerPartitionAssignor_Subscription_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
+    // the only use of the reference; only `set_group_instance_id` takes a `&mut` to it, and it
+    // requires that no other call uses the handle at the same time, as `subscription_inner`
+    // requires.
     unsafe { subscription_inner(self_) }
         .group_instance_id_c
         .lock()
@@ -256,15 +308,20 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_g
 ///
 /// # Safety
 ///
-/// `self_` must be a valid handle; `group_instance_id` null or a valid
-/// NUL-terminated string.
+/// `self_` must be a valid handle that no other call uses at the same time;
+/// `group_instance_id` null or a valid NUL-terminated string.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_set_group_instance_id(
     self_: *mut kafka_consumer_ConsumerPartitionAssignor_Subscription_t,
     group_instance_id: *const c_char,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, a `Box<SubscriptionInner>`
+    // from `SubscriptionInner::boxed`, that no other call uses at the same time, so the exclusive
+    // reference, used only within this call, aliases nothing.
     let inner = unsafe { &mut *(self_ as *mut SubscriptionInner) };
+    // SAFETY: Per this function's `# Safety`, `group_instance_id` is null or a valid NUL-terminated
+    // string, as `c_str_to_option` requires.
     let id = unsafe { c_str_to_option(group_instance_id) };
     *inner.group_instance_id_c.lock().unwrap() = id.as_deref().map(owned_c_string);
     inner.sub.set_group_instance_id(id);
@@ -280,6 +337,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_s
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_rack_id(
     self_: *const kafka_consumer_ConsumerPartitionAssignor_Subscription_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
+    // the only use of the reference, as `subscription_inner` requires.
     unsafe { subscription_inner(self_) }
         .rack_id_c
         .as_ref()
@@ -298,6 +357,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_r
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_generation_id(
     self_: *const kafka_consumer_ConsumerPartitionAssignor_Subscription_t,
 ) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
+    // the only use of the reference, as `subscription_ref` requires.
     unsafe { subscription_ref(self_) }.generation_id().unwrap_or(-1)
 }
 
@@ -305,13 +366,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_g
 ///
 /// # Safety
 ///
-/// `self_` must be null or a valid handle not used afterwards.
+/// `self_` must be null or an owned handle not yet destroyed, not used
+/// afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_destroy(
     self_: *mut kafka_consumer_ConsumerPartitionAssignor_Subscription_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: Per this function's `# Safety`, `self_` (non-null, checked above) is an owned
+        // handle not yet destroyed, i.e. a `Box<SubscriptionInner>` from
+        // `SubscriptionInner::boxed`, so taking it back and dropping it frees it exactly once.
         unsafe { drop(Box::from_raw(self_ as *mut SubscriptionInner)) };
     }
 }
@@ -333,6 +398,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_d
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_new(
     partitions: *const kafka_List_t,
 ) -> *mut kafka_consumer_ConsumerPartitionAssignor_Assignment_t {
+    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list whose elements
+    // are topic-partition handles, as `list_topic_partitions` requires; the values are cloned, so
+    // the borrow lasts for this call only.
     Box::into_raw(Box::new(Assignment::new(unsafe { list_topic_partitions(partitions) })))
         as *mut kafka_consumer_ConsumerPartitionAssignor_Assignment_t
 }
@@ -342,7 +410,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_new
 /// # Safety
 ///
 /// `partitions` must be null or a valid list of topic-partition handles;
-/// `user_data` null or readable for its length.
+/// `user_data`'s `data` null or pointing to `len` readable bytes not written
+/// during the call.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_with_user_data(
@@ -350,7 +419,12 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_wit
     user_data: kafka_Bytes_t,
 ) -> *mut kafka_consumer_ConsumerPartitionAssignor_Assignment_t {
     Box::into_raw(Box::new(Assignment::with_user_data(
+        // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list whose
+        // elements are topic-partition handles, as `list_topic_partitions` requires; the values are
+        // cloned, so the borrow lasts for this call only.
         unsafe { list_topic_partitions(partitions) },
+        // SAFETY: Per this function's `# Safety`, `user_data`'s `data` is null or points to `len`
+        // readable bytes not written during the call, as `user_data_of` requires.
         unsafe { user_data_of(user_data) },
     ))) as *mut kafka_consumer_ConsumerPartitionAssignor_Assignment_t
 }
@@ -365,6 +439,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_wit
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_partitions(
     self_: *const kafka_consumer_ConsumerPartitionAssignor_Assignment_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
+    // the only use of the reference, as `assignment_ref` requires.
     topic_partition_list(unsafe { assignment_ref(self_) }.partitions().iter().cloned())
 }
 
@@ -378,6 +454,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_par
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_user_data(
     self_: *const kafka_consumer_ConsumerPartitionAssignor_Assignment_t,
 ) -> kafka_Bytes_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
+    // the only use of the reference, as `assignment_ref` requires. The returned view borrows the
+    // handle's bytes, which the rustdoc tells the caller.
     kafka_Bytes_t::from_option(unsafe { assignment_ref(self_) }.user_data())
 }
 
@@ -385,13 +464,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_use
 ///
 /// # Safety
 ///
-/// `self_` must be null or a valid handle not used afterwards.
+/// `self_` must be null or an owned handle not yet destroyed, not used
+/// afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_destroy(
     self_: *mut kafka_consumer_ConsumerPartitionAssignor_Assignment_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: Per this function's `# Safety`, `self_` (non-null, checked above) is an owned
+        // handle not yet destroyed, i.e. a `Box<Assignment>` from one of the `Assignment`
+        // constructors here, so taking it back and dropping it frees it exactly once.
         unsafe { drop(Box::from_raw(self_ as *mut Assignment)) };
     }
 }
@@ -402,10 +485,19 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_des
 
 /// Applies a by-value fluent setter to the builder behind a handle; after
 /// `build` consumed it a setter is a no-op.
+///
+/// # Safety
+///
+/// `builder` must be a valid builder handle that no other call uses at the
+/// same time.
 unsafe fn with_builder(
     builder: *mut kafka_consumer_SubscriptionOptionsBuilder_t,
     f: impl FnOnce(SubscriptionOptionsBuilder) -> SubscriptionOptionsBuilder,
 ) {
+    // SAFETY: Per this function's `# Safety`, `builder` is the `Box::into_raw` of an
+    // `Option<SubscriptionOptionsBuilder>` in `kafka_consumer_SubscriptionOptionsBuilder_new`, the
+    // only constructor, that no other call uses at the same time, so the exclusive reference, used
+    // only within this call, aliases nothing.
     let slot = unsafe { &mut *(builder as *mut Option<SubscriptionOptionsBuilder>) };
     if let Some(b) = slot.take() {
         *slot = Some(f(b));
@@ -424,15 +516,20 @@ pub extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_new() -> *mut kafka_
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle and `topics` null or a valid list
-/// of strings.
+/// `self_` must be a valid builder handle that no other call uses at the
+/// same time, and `topics` null or a valid list of strings.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_topics(
     self_: *mut kafka_consumer_SubscriptionOptionsBuilder_t,
     topics: *const kafka_List_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list whose elements are
+    // NUL-terminated strings, as `list_strings` requires; the strings are copied, so the borrow
+    // lasts for this call only.
     let topics = unsafe { list_strings(topics) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
+    // uses at the same time, as `with_builder` requires.
     unsafe { with_builder(self_, |b| b.set_topics(topics)) }
 }
 
@@ -440,15 +537,20 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_topics(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle; `user_data` null or readable for
-/// its length.
+/// `self_` must be a valid builder handle that no other call uses at the
+/// same time; `user_data`'s `data` null or pointing to `len` readable bytes
+/// not written during the call.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_user_data(
     self_: *mut kafka_consumer_SubscriptionOptionsBuilder_t,
     user_data: kafka_Bytes_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `user_data`'s `data` is null or points to `len`
+    // readable bytes not written during the call, as `user_data_of` requires.
     let user_data = unsafe { user_data_of(user_data) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
+    // uses at the same time, as `with_builder` requires.
     unsafe { with_builder(self_, |b| b.set_user_data(user_data)) }
 }
 
@@ -457,15 +559,21 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_user_data
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle and `owned_partitions` null or a
-/// valid list of topic-partition handles.
+/// `self_` must be a valid builder handle that no other call uses at the
+/// same time, and `owned_partitions` null or a valid list of
+/// topic-partition handles.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_owned_partitions(
     self_: *mut kafka_consumer_SubscriptionOptionsBuilder_t,
     owned_partitions: *const kafka_List_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `owned_partitions` is null or a valid list whose
+    // elements are topic-partition handles, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let owned_partitions = unsafe { list_topic_partitions(owned_partitions) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
+    // uses at the same time, as `with_builder` requires.
     unsafe { with_builder(self_, |b| b.set_owned_partitions(owned_partitions)) }
 }
 
@@ -473,13 +581,16 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_owned_par
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle.
+/// `self_` must be a valid builder handle that no other call uses at the
+/// same time.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_generation_id(
     self_: *mut kafka_consumer_SubscriptionOptionsBuilder_t,
     generation_id: i32,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
+    // uses at the same time, as `with_builder` requires.
     unsafe { with_builder(self_, |b| b.set_generation_id(generation_id)) }
 }
 
@@ -487,15 +598,19 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_generatio
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle; `rack_id` null or a valid
-/// NUL-terminated string.
+/// `self_` must be a valid builder handle that no other call uses at the
+/// same time; `rack_id` null or a valid NUL-terminated string.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_rack_id(
     self_: *mut kafka_consumer_SubscriptionOptionsBuilder_t,
     rack_id: *const c_char,
 ) {
+    // SAFETY: Per this function's `# Safety`, `rack_id` is null or a valid NUL-terminated string,
+    // as `c_str_to_option` requires.
     let rack_id = unsafe { c_str_to_option(rack_id) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
+    // uses at the same time, as `with_builder` requires.
     unsafe { with_builder(self_, |b| b.set_rack_id(rack_id)) }
 }
 
@@ -505,19 +620,26 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_rack_id(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle and `out_build` a valid pointer.
+/// `self_` must be a valid builder handle that no other call uses at the
+/// same time, and `out_build` a valid pointer.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_build(
     self_: *mut kafka_consumer_SubscriptionOptionsBuilder_t,
     out_build: *mut *mut kafka_consumer_SubscriptionOptions_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is the `Box::into_raw` of an
+    // `Option<SubscriptionOptionsBuilder>` in `kafka_consumer_SubscriptionOptionsBuilder_new`, the
+    // only constructor, that no other call uses at the same time, so the exclusive reference, used
+    // only within this call, aliases nothing.
     let slot = unsafe { &mut *(self_ as *mut Option<SubscriptionOptionsBuilder>) };
     let Some(builder) = slot.take() else {
         return box_error(Error::local_illegal_state("SubscriptionOptionsBuilder already built"));
     };
     match builder.build() {
         Ok(options) => {
+            // SAFETY: Per this function's `# Safety`, `out_build` is a valid pointer to write the
+            // result to.
             unsafe { *out_build = Box::into_raw(Box::new(options)) as *mut kafka_consumer_SubscriptionOptions_t };
             std::ptr::null_mut()
         },
@@ -529,13 +651,18 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_build(
 ///
 /// # Safety
 ///
-/// `self_` must be null or a valid builder handle not used afterwards.
+/// `self_` must be null or an owned builder handle not yet destroyed, not
+/// used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_destroy(
     self_: *mut kafka_consumer_SubscriptionOptionsBuilder_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: Per this function's `# Safety`, `self_` (non-null, checked above) is an owned
+        // builder handle not yet destroyed, i.e. a `Box<Option<SubscriptionOptionsBuilder>>` from
+        // `kafka_consumer_SubscriptionOptionsBuilder_new`, so taking it back and dropping it frees
+        // it exactly once.
         unsafe { drop(Box::from_raw(self_ as *mut Option<SubscriptionOptionsBuilder>)) };
     }
 }
@@ -544,11 +671,16 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_destroy(
 ///
 /// # Safety
 ///
-/// `self_` must be null or a valid options handle not used afterwards.
+/// `self_` must be null or an owned options handle not yet destroyed, not
+/// used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_SubscriptionOptions_destroy(self_: *mut kafka_consumer_SubscriptionOptions_t) {
     if !self_.is_null() {
+        // SAFETY: Per this function's `# Safety`, `self_` (non-null, checked above) is an owned
+        // options handle not yet destroyed, i.e. a `Box<SubscriptionOptions>` from
+        // `kafka_consumer_SubscriptionOptionsBuilder_build`, so taking it back and dropping it
+        // frees it exactly once.
         unsafe { drop(Box::from_raw(self_ as *mut SubscriptionOptions)) };
     }
 }
@@ -567,12 +699,15 @@ mod tests {
     #[test]
     fn subscription_round_trip() {
         let topics = topics();
+        // SAFETY: Test code: `topics` is a live list of strings and the bytes are a static literal.
         let sub = unsafe {
             kafka_consumer_ConsumerPartitionAssignor_Subscription_with_user_data(
                 topics,
                 kafka_Bytes_t::from_slice(b"ud"),
             )
         };
+        // SAFETY: Test code: every handle is live and owned by this test, used on this thread only,
+        // and each is destroyed once, after its last use.
         unsafe {
             kafka_List_destroy(topics);
             let got = kafka_consumer_ConsumerPartitionAssignor_Subscription_topics(sub);
@@ -602,6 +737,8 @@ mod tests {
         let builder = kafka_consumer_SubscriptionOptionsBuilder_new();
         let topics = topics();
         let mut options = std::ptr::null_mut();
+        // SAFETY: Test code: every handle is live and owned by this test, used on this thread only,
+        // `options` is a valid out-pointer, and each handle is destroyed once, after its last use.
         unsafe {
             kafka_consumer_SubscriptionOptionsBuilder_set_topics(builder, topics);
             kafka_consumer_SubscriptionOptionsBuilder_set_generation_id(builder, 9);
