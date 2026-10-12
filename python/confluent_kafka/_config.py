@@ -32,7 +32,7 @@ Conventions, Configuration):
   role's serde keys among them).
 
 The keys and types are generated from Java's ``ProducerConfig`` /
-``ConsumerConfig`` into ``_config_types``.
+``ConsumerConfig`` / ``AdminClientConfig`` into ``_config_types``.
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
 __all__ = ["coerce", "convert_to_string", "duration_to_ms", "prepare"]
 
-Client = Literal["producer", "consumer"]
+Client = Literal["producer", "consumer", "admin"]
 
 # Java's Long.MAX_VALUE, the largest Duration.toMillis().
 _LONG_MAX = (1 << 63) - 1
@@ -57,6 +57,7 @@ _LONG_MAX = (1 << 63) - 1
 _TYPES: dict[str, dict[str, str]] = {
     "producer": _config_types.PRODUCER,
     "consumer": _config_types.CONSUMER,
+    "admin": _config_types.ADMIN,
 }
 
 # The serializer keys of each client's own role: resolved by the binding
@@ -66,6 +67,8 @@ _SERDE_KEYS: dict[str, frozenset[str]] = {
                            "key.serializer.encoding", "value.serializer.encoding"}),
     "consumer": frozenset({"key.deserializer", "value.deserializer", "deserializer.encoding",
                            "key.deserializer.encoding", "value.deserializer.encoding"}),
+    # The admin client has no serdes.
+    "admin": frozenset(),
 }
 _INT_BITS = {"INT": 32, "SHORT": 16, "LONG": 64}
 _INT_LABELS = {"INT": "a 32-bit integer", "SHORT": "a 16-bit integer (short)",

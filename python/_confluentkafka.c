@@ -1602,13 +1602,6 @@ static PyObject* py_KafkaError_source(PyObject* self, PyObject* args) {
     return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)src);
 }
 
-static PyObject* py_KafkaError_is_retriable(PyObject* self, PyObject* args) {
-    unsigned long long ptr;
-    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    kafka_common_Error_t *e = (kafka_common_Error_t*)(uintptr_t)ptr;
-    return PyBool_FromLong(kafka_common_Error_is_retriable_error(e) ? 1 : 0);
-}
-
 // Whether the error is an ApiException. The core reports a bare KafkaException
 // (e.g. the producer's "Failed to construct kafka producer") with the id of
 // UNKNOWN_SERVER_ERROR, which is an ApiException; this tells them apart, so
@@ -1628,8 +1621,8 @@ static PyObject* py_KafkaError_is_api_error(PyObject* self, PyObject* args) {
 //
 // The composition mirrors `request_utils::is_fatal_error` term for term — the
 // two authorization/authentication predicates, plus the five coded classes it
-// lists — so `KafkaError.is_fatal`, which this backs, keeps answering exactly
-// what it did before.
+// lists — so the fatal flag of the error tuple keeps answering exactly what it
+// did before.
 static int error_is_fatal(const kafka_common_Error_t* e) {
     if (e == NULL) return 0;
     if (kafka_common_Error_is_authentication_error(e)) return 1;
@@ -1644,23 +1637,6 @@ static int error_is_fatal(const kafka_common_Error_t* e) {
         default:
             return 0;
     }
-}
-
-static PyObject* py_KafkaError_is_fatal(PyObject* self, PyObject* args) {
-    unsigned long long ptr;
-    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    kafka_common_Error_t *e = (kafka_common_Error_t*)(uintptr_t)ptr;
-    return PyBool_FromLong(error_is_fatal(e) ? 1 : 0);
-}
-
-// Java's `TransactionAbortableException` test. The Python-visible name stays
-// `txn_requires_abort` (librdkafka's spelling, and the public API); only the
-// FFI symbol it calls was renamed by the error redesign.
-static PyObject* py_KafkaError_txn_requires_abort(PyObject* self, PyObject* args) {
-    unsigned long long ptr;
-    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    kafka_common_Error_t *e = (kafka_common_Error_t*)(uintptr_t)ptr;
-    return PyBool_FromLong(kafka_common_Error_is_transaction_abortable_error(e) ? 1 : 0);
 }
 
 static PyObject* py_KafkaError_destroy(PyObject* self, PyObject* args) {
@@ -3275,12 +3251,10 @@ static int payload_set(PyObject* d, const char* key, PyObject* value) {
     return rc;
 }
 
-// KafkaError_payload(err) -> dict of raw payload keyed by accessor name, or None.
-// The error handle is NOT consumed (the caller still destroys it).
-static PyObject* py_KafkaError_payload(PyObject* self, PyObject* args) {
-    unsigned long long ptr;
-    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    const kafka_common_Error_t* e = (const kafka_common_Error_t*)(uintptr_t)ptr;
+// The raw payload of an error, owned or borrowed, as a dict keyed by FFI
+// accessor name, or None when it has no typed payload (NULL with an exception
+// set on failure). The error is only read.
+static PyObject* error_payload_to_py(const kafka_common_Error_t* e) {
     if (e == NULL) Py_RETURN_NONE;
 
     PyObject* d = PyDict_New();
@@ -3397,6 +3371,14 @@ static PyObject* py_KafkaError_payload(PyObject* self, PyObject* args) {
 done:
     if (!ok) { Py_DECREF(d); return NULL; }
     return d;
+}
+
+// KafkaError_payload(err) -> dict of raw payload keyed by accessor name, or None.
+// The error handle is NOT consumed (the caller still destroys it).
+static PyObject* py_KafkaError_payload(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    return error_payload_to_py((const kafka_common_Error_t*)(uintptr_t)ptr);
 }
 
 static PyObject* py_PartitionInfoList_drain(PyObject* self, PyObject* args) {
@@ -3795,27 +3777,19 @@ static void admin_delete_records_trampoline(kafka_admin_DeleteRecordsResult_t* r
 
 // ---- constructors / lifecycle ----------------------------------------------
 
-static PyObject* py_Admin_MockAdminClient_new(PyObject* self, PyObject* args) {
-    int num_brokers;
-    if (!PyArg_ParseTuple(args, "i", &num_brokers)) return NULL;
-    kafka_admin_AdminClient_t* a = kafka_admin_MockAdminClient_new(num_brokers);
-    if (a == NULL) {
-        PyErr_SetString(PyExc_RuntimeError, "Failed to create MockAdminClient");
-        return NULL;
-    }
-    return PyLong_FromVoidPtr(a);
-}
-
-static PyObject* py_Admin_AdminClient_new(PyObject* self, PyObject* args) {
-    PyObject* config_dict;
-    if (!PyArg_ParseTuple(args, "O", &config_dict)) return NULL;
+// Builds an AdminClient from a dict of str -> str configs. Returns the handle,
+// or NULL with *err set to the core's owned error (or NULL with a Python
+// exception set and *err NULL when the arguments are not a dict of strings).
+static kafka_admin_AdminClient_t* admin_client_from_dict(PyObject* config_dict,
+                                                         kafka_common_Error_t** err) {
+    *err = NULL;
     if (!PyDict_Check(config_dict)) {
         PyErr_SetString(PyExc_TypeError, "config must be a dict");
         return NULL;
     }
     kafka_admin_AdminClientProperties_t* props = kafka_admin_AdminClientProperties_new();
     if (props == NULL) {
-        PyErr_SetString(PyExc_RuntimeError, "Failed to create AdminClientProperties");
+        PyErr_NoMemory();
         return NULL;
     }
     PyObject *key, *value;
@@ -3830,16 +3804,26 @@ static PyObject* py_Admin_AdminClient_new(PyObject* self, PyObject* args) {
         }
         kafka_admin_AdminClientProperties_put(props, k, v);
     }
-    kafka_common_Error_t* err = NULL;
-    kafka_admin_AdminClient_t* a = kafka_admin_AdminClient_new(props, &err);
+    kafka_admin_AdminClient_t* a;
+    // Construction resolves the bootstrap addresses (DNS): release the GIL.
+    Py_BEGIN_ALLOW_THREADS
+    a = kafka_admin_AdminClient_new(props, err);
+    Py_END_ALLOW_THREADS
     kafka_admin_AdminClientProperties_destroy(props);
-    if (a == NULL) {
-        const char* msg = err ? kafka_common_Error_message(err) : NULL;
-        PyErr_SetString(PyExc_RuntimeError, msg ? msg : "Failed to create AdminClient");
-        if (err) kafka_common_Error_destroy(err);
-        return NULL;
-    }
-    return PyLong_FromVoidPtr(a);
+    return a;
+}
+
+// Admin_AdminClient_new(config) -> (handle_int, error_int), like
+// KafkaProducer_new and Consumer_KafkaConsumer_new_typed: exactly one is
+// non-zero; the error handle is owned (Python's from_ffi_error consumes it).
+static PyObject* py_Admin_AdminClient_new(PyObject* self, PyObject* args) {
+    PyObject* config_dict;
+    if (!PyArg_ParseTuple(args, "O", &config_dict)) return NULL;
+    kafka_common_Error_t* err = NULL;
+    kafka_admin_AdminClient_t* a = admin_client_from_dict(config_dict, &err);
+    if (a == NULL && err == NULL) return NULL;
+    return Py_BuildValue("KK", (unsigned long long)(uintptr_t)a,
+                         (unsigned long long)(uintptr_t)err);
 }
 
 static PyObject* py_Admin_destroy(PyObject* self, PyObject* args) {
@@ -3859,62 +3843,6 @@ static PyObject* py_Admin_close_async(PyObject* self, PyObject* args) {
     kafka_admin_AdminClient_close_async((kafka_admin_AdminClient_t*)(uintptr_t)h,
                                         timeout_ms, admin_op_trampoline, cb);
     Py_RETURN_NONE;
-}
-
-static PyObject* py_MockAdminClient_timeout_next_request(PyObject* self, PyObject* args) {
-    unsigned long long h; int n;
-    if (!PyArg_ParseTuple(args, "Ki", &h, &n)) return NULL;
-    kafka_common_Error_t* e = kafka_admin_MockAdminClient_timeout_next_request(
-        (kafka_admin_AdminClient_t*)(uintptr_t)h, n);
-    return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)e);
-}
-
-// Mock: seed beginning/end offsets. `spec` is a sequence of
-// (topic:str, partition:int, offset:int); returns the error handle as an int.
-static PyObject* mock_update_offsets(PyObject* args,
-                                     kafka_common_Error_t* (*update)(
-                                         const kafka_admin_AdminClient_t*,
-                                         const char* const*, const int32_t*, const int64_t*,
-                                         int32_t)) {
-    unsigned long long h; PyObject* spec;
-    if (!PyArg_ParseTuple(args, "KO", &h, &spec)) return NULL;
-    Py_ssize_t n = PySequence_Size(spec);
-    if (n < 0) return NULL;
-    size_t slots = (size_t)(n > 0 ? n : 1);
-    const char** topics = PyMem_Malloc(slots * sizeof(char*));
-    int32_t* partitions = PyMem_Malloc(slots * sizeof(int32_t));
-    int64_t* offsets = PyMem_Malloc(slots * sizeof(int64_t));
-    if (topics == NULL || partitions == NULL || offsets == NULL) {
-        PyMem_Free(topics); PyMem_Free(partitions); PyMem_Free(offsets);
-        PyErr_NoMemory(); return NULL;
-    }
-    for (Py_ssize_t i = 0; i < n; i++) {
-        PyObject* item = PySequence_GetItem(spec, i);  // new ref
-        const char* topic = NULL; int p = 0; long long off = 0;
-        int ok = item && PyArg_ParseTuple(item, "siL", &topic, &p, &off);
-        Py_XDECREF(item);
-        if (!ok) {
-            PyMem_Free(topics); PyMem_Free(partitions); PyMem_Free(offsets);
-            return NULL;
-        }
-        topics[i] = topic; partitions[i] = (int32_t)p; offsets[i] = (int64_t)off;
-    }
-    kafka_common_Error_t* e = update((kafka_admin_AdminClient_t*)(uintptr_t)h, topics,
-                                          partitions, offsets, (int32_t)n);
-    PyMem_Free(topics); PyMem_Free(partitions); PyMem_Free(offsets);
-    return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)e);
-}
-
-static PyObject* py_MockAdminClient_update_beginning_offsets(PyObject* self, PyObject* args) {
-    return mock_update_offsets(args, kafka_admin_MockAdminClient_update_beginning_offsets);
-}
-
-static PyObject* py_MockAdminClient_update_end_offsets(PyObject* self, PyObject* args) {
-    return mock_update_offsets(args, kafka_admin_MockAdminClient_update_end_offsets);
-}
-
-static PyObject* py_MockAdminClient_update_consumer_group_offsets(PyObject* self, PyObject* args) {
-    return mock_update_offsets(args, kafka_admin_MockAdminClient_update_consumer_group_offsets);
 }
 
 // ---- createTopics ----------------------------------------------------------
@@ -4249,16 +4177,37 @@ static PyObject* py_Admin_delete_records_async(PyObject* self, PyObject* args) {
 
 // ---- result drains ---------------------------------------------------------
 
-// Copies a *borrowed* per-key error into (code, message, is_retriable, is_fatal),
-// or None when the key succeeded. Borrowed errors die with their result handle,
-// so they must be copied before the drain destroys it — and must NOT be passed
-// to KafkaError_destroy.
+// Copies a *borrowed* per-key error into the borrowed form `from_ffi_error`
+// reads (`_errors.from_borrowed_ffi_error`):
+//   (ffi_id, message, is_retriable, is_fatal, payload, is_api_error, cause)
+// or None when the key succeeded. `payload` is what KafkaError_payload gives;
+// `cause` is the same tuple for kafka_common_Error_source's error, or None, read
+// here and its owned handle destroyed. `is_retriable` / `is_fatal` are unused by the
+// package, kept so the tuple shape (and the format-arity tests) stay stable. Borrowed
+// errors die with their result handle, so they are copied before the drain
+// destroys it -- and must NOT be passed to KafkaError_destroy.
 static PyObject* borrowed_error_to_py(const kafka_common_Error_t* e) {
     if (e == NULL) Py_RETURN_NONE;
-    return Py_BuildValue("(isii)", kafka_common_Error_code(e),
+    PyObject* payload = error_payload_to_py(e);
+    if (payload == NULL) return NULL;
+    PyObject* cause;
+    kafka_common_Error_t* source = kafka_common_Error_source(e);
+    if (source != NULL) {
+        cause = borrowed_error_to_py(source);
+        kafka_common_Error_destroy(source);
+        if (cause == NULL) { Py_DECREF(payload); return NULL; }
+    } else {
+        Py_INCREF(Py_None);
+        cause = Py_None;
+    }
+    // 'N' steals payload and cause even when the build fails (see error_value_pair).
+    return Py_BuildValue("(iziiNiN)", (int)kafka_common_Error_code(e),
                          kafka_common_Error_message(e),
                          kafka_common_Error_is_retriable_error(e) ? 1 : 0,
-                         error_is_fatal(e) ? 1 : 0);
+                         error_is_fatal(e) ? 1 : 0,
+                         payload,
+                         kafka_common_Error_is_api_error(e) ? 1 : 0,
+                         cause);
 }
 
 // Builds the (error, value) pair every admin `*_drain` maps a key to, consuming
@@ -6075,7 +6024,7 @@ static PyObject* py_RemoveMembersFromConsumerGroupResult_drain(PyObject* self, P
 // Java's MockAdminClient throws for all five RPCs, so the success branch of
 // every drain below is unreachable from the test suite. Their Py_BuildValue
 // arity is instead checked statically by `test/static/test_format_arity.py`, and the
-// field *order* by review against the matching `_to_*` unpacker in admin.py.
+// field *order* by review against the matching converter in `confluent_kafka/admin/_conversions.py`.
 // ---------------------------------------------------------------------------
 
 static void admin_create_acls_trampoline(kafka_admin_CreateAclsResult_t* r,
@@ -6457,7 +6406,7 @@ static PyObject* py_DescribeAclsResult_drain(PyObject* self, PyObject* args) {
     return list;
 }
 
-// {filter_tuple: (error_or_None, [(binding_or_None, error_or_None)])}
+// {filter_tuple: (error_or_None, [(error_or_None, binding_or_None)])}
 //
 // Two levels, because Java's FilterResults holds one FilterResult per matched
 // ACL and each carries either a binding or its own exception. The outer error
@@ -6569,9 +6518,9 @@ static PyObject* py_AlterClientQuotasResult_drain(PyObject* self, PyObject* args
 // (MockAdminClient.java:1251-1259), so the success branch of those two drains
 // is unreachable from the test suite; their Py_BuildValue arity is checked
 // statically by `test/static/test_format_arity.py` and their field order by review
-// against the matching `_to_*` unpacker in admin.py. The mock *does* implement
+// against the matching converter in `confluent_kafka/admin/_conversions.py`. The mock *does* implement
 // the four delegation-token RPCs and both feature RPCs, so those drains are
-// exercised end to end by test_admin.py.
+// exercised end to end by the mock admin tests.
 // ---------------------------------------------------------------------------
 
 static void admin_describe_user_scram_credentials_trampoline(
@@ -6894,45 +6843,6 @@ static PyObject* py_Admin_update_features_async(PyObject* self, PyObject* args) 
     Py_RETURN_NONE;
 }
 
-// Mock-only: seed the three feature-level maps `describeFeatures` reports and
-// `updateFeatures` validates against. `spec` is [(feature, level, min, max)].
-static PyObject* py_MockAdminClient_set_feature_levels(PyObject* self, PyObject* args) {
-    unsigned long long h; PyObject* spec;
-    if (!PyArg_ParseTuple(args, "KO", &h, &spec)) return NULL;
-    Py_ssize_t n = PySequence_Size(spec);
-    if (n < 0) return NULL;
-    size_t slots = (size_t)(n > 0 ? n : 1);
-    const char** features = PyMem_Malloc(slots * sizeof(char*));
-    int16_t* levels = PyMem_Malloc(slots * sizeof(int16_t));
-    int16_t* min_levels = PyMem_Malloc(slots * sizeof(int16_t));
-    int16_t* max_levels = PyMem_Malloc(slots * sizeof(int16_t));
-    if (!features || !levels || !min_levels || !max_levels) {
-        PyMem_Free((void*)features); PyMem_Free(levels); PyMem_Free(min_levels);
-        PyMem_Free(max_levels);
-        PyErr_NoMemory(); return NULL;
-    }
-    for (Py_ssize_t i = 0; i < n; i++) {
-        PyObject* item = PySequence_GetItem(spec, i);  // new ref
-        const char* feature = NULL; int level = 0; int min_level = 0; int max_level = 0;
-        int ok = item && PyArg_ParseTuple(item, "siii", &feature, &level, &min_level, &max_level);
-        Py_XDECREF(item);
-        if (!ok) {
-            PyMem_Free((void*)features); PyMem_Free(levels); PyMem_Free(min_levels);
-            PyMem_Free(max_levels);
-            return NULL;
-        }
-        features[i] = feature;
-        levels[i] = (int16_t)level;
-        min_levels[i] = (int16_t)min_level;
-        max_levels[i] = (int16_t)max_level;
-    }
-    kafka_common_Error_t* e = kafka_admin_MockAdminClient_set_feature_levels(
-        (kafka_admin_AdminClient_t*)(uintptr_t)h, features, levels, min_levels, max_levels,
-        (int32_t)n);
-    PyMem_Free((void*)features); PyMem_Free(levels); PyMem_Free(min_levels); PyMem_Free(max_levels);
-    return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)e);
-}
-
 // ---- drains -----------------------------------------------------------------
 
 // {user: (error_or_None, [(mechanism, iterations)])}
@@ -7134,7 +7044,7 @@ static PyObject* py_UpdateFeaturesResult_drain(PyObject* self, PyObject* args) {
 // so the *success* branch of every drain below is unreachable from the test
 // suite; their Py_BuildValue arity is checked statically by
 // `test/static/test_format_arity.py` and their field order by review against the
-// matching `_to_*` unpacker in admin.py. What the suite does exercise is the
+// matching converter in `confluent_kafka/admin/_conversions.py`. What the suite does exercise is the
 // error branch of each: the mocks that throw per key still echo the requested
 // key set, so key columns and per-key errors flow end to end.
 //
@@ -7510,12 +7420,6 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"KafkaError_is_api_error", py_KafkaError_is_api_error, METH_VARARGS,
      "Whether the error is an ApiException (tells a bare KafkaException from "
      "UNKNOWN_SERVER_ERROR, which share an id)"},
-    {"KafkaError_is_retriable", py_KafkaError_is_retriable, METH_VARARGS,
-     "Check if KafkaError is retriable"},
-    {"KafkaError_is_fatal", py_KafkaError_is_fatal, METH_VARARGS,
-     "Check if KafkaError is fatal"},
-    {"KafkaError_txn_requires_abort", py_KafkaError_txn_requires_abort, METH_VARARGS,
-     "Check if KafkaError requires the transaction to be aborted"},
     {"KafkaError_destroy", py_KafkaError_destroy, METH_VARARGS,
      "Destroy KafkaError handle"},
     {"KafkaError_new", py_KafkaError_new, METH_VARARGS,
@@ -7604,8 +7508,7 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Consumer_close_with_option", py_Consumer_close_with_option, METH_VARARGS, "Sync close(CloseOptions) (timeout_ms, operation_code); returns error_int"},
     {"Consumer_close_with_option_async", py_Consumer_close_with_option_async, METH_VARARGS, "Async close(CloseOptions); cb(error_int)"},
     // ---- Admin ----
-    {"Admin_MockAdminClient_new", py_Admin_MockAdminClient_new, METH_VARARGS, "Create a MockAdminClient"},
-    {"Admin_AdminClient_new", py_Admin_AdminClient_new, METH_VARARGS, "Create an AdminClient"},
+    {"Admin_AdminClient_new", py_Admin_AdminClient_new, METH_VARARGS, "Create an AdminClient; returns (handle_int, error_int)"},
     {"Admin_destroy", py_Admin_destroy, METH_VARARGS, "Destroy an admin-client handle"},
     {"Admin_close_async", py_Admin_close_async, METH_VARARGS, "Async close; cb(error_int)"},
     {"Admin_create_topics_async", py_Admin_create_topics_async, METH_VARARGS, "Async createTopics; cb(result_int, error_int)"},
@@ -7616,11 +7519,6 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Admin_describe_topics_by_ids_async", py_Admin_describe_topics_by_ids_async, METH_VARARGS, "Async describeTopics by id; cb(result_int, error_int)"},
     {"Admin_create_partitions_async", py_Admin_create_partitions_async, METH_VARARGS, "Async createPartitions; cb(result_int, error_int)"},
     {"Admin_delete_records_async", py_Admin_delete_records_async, METH_VARARGS, "Async deleteRecords; cb(result_int, error_int)"},
-    {"MockAdminClient_timeout_next_request", py_MockAdminClient_timeout_next_request, METH_VARARGS, "Mock: time out the next N requests; returns error_int"},
-    {"MockAdminClient_update_beginning_offsets", py_MockAdminClient_update_beginning_offsets,
-     METH_VARARGS, "Mock: seed beginning offsets; returns error_int"},
-    {"MockAdminClient_update_end_offsets", py_MockAdminClient_update_end_offsets, METH_VARARGS,
-     "Mock: seed end offsets; returns error_int"},
     {"CreateTopicsResult_drain", py_CreateTopicsResult_drain, METH_VARARGS, "Drain+destroy a CreateTopicsResult handle into a dict"},
     {"DeleteTopicsResult_drain", py_DeleteTopicsResult_drain, METH_VARARGS, "Drain+destroy a DeleteTopicsResult handle into a dict"},
     {"ListTopicsResult_drain", py_ListTopicsResult_drain, METH_VARARGS, "Drain+destroy a ListTopicsResult handle into a dict"},
@@ -7671,9 +7569,6 @@ static PyMethodDef ProducerNativeMethods[] = {
      METH_VARARGS, "Drain+destroy a ListPartitionReassignmentsResult handle into a dict"},
     {"ListOffsetsResult_drain", py_ListOffsetsResult_drain, METH_VARARGS,
      "Drain+destroy a ListOffsetsResult handle into a dict"},
-    {"MockAdminClient_update_consumer_group_offsets",
-     py_MockAdminClient_update_consumer_group_offsets, METH_VARARGS,
-     "Mock: seed committed consumer-group offsets; returns error_int"},
     {"Admin_list_groups_async", py_Admin_list_groups_async, METH_VARARGS,
      "Async listGroups; cb(result_int, error_int)"},
     {"Admin_describe_consumer_groups_async", py_Admin_describe_consumer_groups_async,
@@ -7744,8 +7639,6 @@ static PyMethodDef ProducerNativeMethods[] = {
      "Async describeFeatures; cb(result_int, error_int)"},
     {"Admin_update_features_async", py_Admin_update_features_async, METH_VARARGS,
      "Async updateFeatures; cb(result_int, error_int)"},
-    {"MockAdminClient_set_feature_levels", py_MockAdminClient_set_feature_levels, METH_VARARGS,
-     "Mock: seed the feature-level maps; returns error_int"},
     {"DescribeUserScramCredentialsResult_drain", py_DescribeUserScramCredentialsResult_drain,
      METH_VARARGS, "Drain+destroy a DescribeUserScramCredentialsResult handle into a dict"},
     {"AlterUserScramCredentialsResult_drain", py_AlterUserScramCredentialsResult_drain,

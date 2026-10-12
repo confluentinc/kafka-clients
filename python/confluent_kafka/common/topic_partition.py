@@ -16,6 +16,9 @@
 
 from __future__ import annotations
 
+import functools
+from typing import Any
+
 from confluent_kafka._java import java_str
 
 __all__ = ["TopicPartition"]
@@ -53,3 +56,10 @@ class TopicPartition:
 
     def __str__(self) -> str:
         return java_str(self._topic) + "-" + str(self._partition)
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        """Rebuild through the public constructor by keyword (``pickle``,
+        ``copy``): Java's class is ``Serializable``, and its cached ``hash``
+        field is not saved (CLAUDE.md, Python Binding Conventions, Types, JDK
+        interfaces)."""
+        return (functools.partial(type(self), topic=self._topic, partition=self._partition), ())

@@ -458,7 +458,14 @@ class AsyncProducer(Generic[K, V], _ProducerState):
             self._undelivered.hand_over(loop, deliver, payload, free)
 
         submit(cb)
-        return await fut
+        try:
+            return await fut
+        except asyncio.CancelledError:
+            # Delivered, then cancelled before this task resumed: ``cancel()``
+            # could not cancel the done future, so ``deliver`` kept the payload.
+            if fut.done() and not fut.cancelled():
+                free(fut.result())
+            raise
 
     async def _run_async(self, submit: Callable[[Callable[..., None]], None]) -> None:
         """A void ``_async`` FFI operation, awaited; raises its typed error."""
