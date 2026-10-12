@@ -26,6 +26,10 @@
 //! four backends. The producer used to seed records is always the native
 //! in-process Rust one — it is fixture, not system under test, exactly as in
 //! `multilanguage_consumer_test`.
+//!
+//! References below to `admin.py` name the
+//! legacy Python admin binding, which is removed; the Python arm
+//! now runs on `confluent_kafka.admin`.
 
 use std::collections::HashMap;
 use std::time::Duration;

@@ -518,10 +518,16 @@ pub trait AdminBackend {
     ///
     /// Java's `DescribeUserScramCredentialsResult` holds one future over the raw
     /// response data and exposes three views (`all()` / `users()` /
-    /// `description(user)`); this is the per-user shape that subsumes all three,
-    /// identical to what `src/ffi/admin.rs`'s
-    /// `submit_describe_user_scram_credentials` composes and what `admin.py`
-    /// returns, so all four backends answer with the same key set.
+    /// `description(user)`); this is the per-user shape of `all()`, with each
+    /// failing user's own `description(user)` error. A user the broker reports as
+    /// RESOURCE_NOT_FOUND is a success with no credentials, as in `all()`. The
+    /// FFI's rows (`src/ffi/admin.rs`, `compose_scram_description_outcomes`) give
+    /// that user its RESOURCE_NOT_FOUND error instead, which the C and Python gRPC
+    /// servers map back to an empty description. So all four backends answer with
+    /// the same key set when `all()` succeeds. When `all()` fails, they differ on a
+    /// requested RESOURCE_NOT_FOUND user: the C and Python backends answer it with an
+    /// empty description, while the native backend lists only `users()`, which
+    /// leaves it out. No integration test reaches that case.
     ///
     /// The broker never returns the salted password or the salt, so the value
     /// carries only the mechanism and iteration count per credential.
@@ -1582,9 +1588,11 @@ impl AdminBackend for RustNativeAdmin {
         options: DescribeUserScramCredentialsOptions,
     ) -> Result<Outcomes<String, UserScramCredentialsDescription>, Error> {
         let result = self.admin.describe_user_scram_credentials_with_users_options(users, options);
-        // Java's three views composed into the per-user shape, exactly as
-        // `src/ffi/admin.rs`'s `submit_describe_user_scram_credentials` does — so
-        // all four backends answer with the same key set and the same errors.
+        // Java's three views composed into the per-user shape the gRPC servers
+        // answer with (the FFI's rows, `compose_scram_description_outcomes`, give a
+        // RESOURCE_NOT_FOUND user its error, which the C and Python servers map to
+        // an empty description). The key sets agree with the C and Python backends'
+        // except in one case, noted below.
         //
         //   - `all()` succeeds only when every user's error code is NONE or
         //     RESOURCE_NOT_FOUND, so when it does its keys are the complete user
@@ -1592,8 +1600,10 @@ impl AdminBackend for RustNativeAdmin {
         //   - when it fails, `users()` still lists every user whose error is not
         //     RESOURCE_NOT_FOUND — necessarily including the one that failed
         //     `all()` — and `description(user)` yields that user's own error.
-        //     The users omitted at that point are exactly the ones Java's `all()`
-        //     also declines to report.
+        //     A requested RESOURCE_NOT_FOUND user is left out here, while the C and
+        //     Python backends answer it with an empty description (the FFI's row
+        //     carries its RESOURCE_NOT_FOUND error). No integration test reaches
+        //     this case.
         //   - if the response future itself failed, all three fail with the same
         //     error and it becomes the whole-call `Err`; and if the composition
         //     yields no rows at all, the `all()` error is returned rather than

@@ -29,6 +29,10 @@
 //! With only `integration-tests` enabled the `__rust` arm is the whole
 //! expansion, and it drives the same production `Admin` trait against the same
 //! broker as the single-backend tests these scenarios were converted from.
+//!
+//! References below to `admin.py` name the
+//! legacy Python admin binding, which is removed; the Python arm
+//! now runs on `confluent_kafka.admin`.
 
 use std::collections::BTreeMap;
 use std::time::Duration;

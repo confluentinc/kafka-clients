@@ -269,15 +269,16 @@ def _bindings():
 
     Returns a namespace with the types the soak constructs: ``KafkaProducer``,
     ``KafkaConsumer``, ``ProducerRecord``, ``TopicPartition``,
-    ``OffsetAndMetadata``, plus ``KafkaError`` / ``RecordMetadata`` for callers
-    that want the types themselves.
+    ``OffsetAndMetadata``, ``Admin`` / ``NewTopic`` for topic administration,
+    plus ``KafkaError`` / ``RecordMetadata`` for callers that want the types
+    themselves.
 
     The producer and consumer come from the ``confluent_kafka`` package
     (``confluent_kafka.producer`` / ``.consumer`` / ``.common``), whose API is
     keyword-only with accessor *methods* (``record.value()``, ``tp.topic()``).
-    Topic administration still goes through the flat, paused ``admin`` module,
-    whose ``KafkaError`` is the flat admin error type (``code`` / ``message`` /
-    ``is_retriable`` properties).
+    Topic administration goes through ``confluent_kafka.admin`` (``Admin`` /
+    ``NewTopic``), whose results hold futures and whose errors are typed classes
+    like the rest of the package.
 
     Raises ``RuntimeError`` with an actionable message rather than letting a bare
     ``ModuleNotFoundError`` escape — the overwhelmingly likely cause is that
@@ -286,8 +287,8 @@ def _bindings():
     global _BINDINGS
     if _BINDINGS is None:
         try:
-            import admin as _admin
-            from confluent_kafka.common import TopicPartition
+            from confluent_kafka.admin import Admin, NewTopic
+            from confluent_kafka.common import KafkaError, TopicPartition
             from confluent_kafka.common.serialization import memoryview_deserializer
             from confluent_kafka.consumer import KafkaConsumer, OffsetAndMetadata
             from confluent_kafka.producer import (KafkaProducer, ProducerRecord,
@@ -307,9 +308,9 @@ def _bindings():
             TopicPartition=TopicPartition,
             OffsetAndMetadata=OffsetAndMetadata,
             memoryview_deserializer=memoryview_deserializer,
-            KafkaError=_admin.KafkaError,
-            AdminClient=_admin.AdminClient,
-            NewTopic=_admin.NewTopic,
+            KafkaError=KafkaError,
+            Admin=Admin,
+            NewTopic=NewTopic,
         )
     return _BINDINGS
 
@@ -317,7 +318,7 @@ def _bindings():
 def error_message(ex):
     """The message of a client error, without needing its type.
 
-    The admin binding's flat ``KafkaError`` exposes ``message`` as a property;
+    An error that exposes a ``message`` string property is read through it;
     anything else — including every ``confluent_kafka`` error, whose ``str()`` is
     Java's ``getMessage()`` — falls back to ``str(ex)``. Read by duck typing so the
     error-classification helpers stay importable — and unit-testable — without
@@ -334,7 +335,7 @@ def _is_int_code(code):
 def error_code(ex):
     """The protocol error code of a client error, or ``None``.
 
-    The admin binding's flat ``KafkaError.code`` is an ``int`` property. A
+    An error with an ``int`` ``code`` property is read through it. A
     ``confluent_kafka`` error has no ``code()`` (its type is the predicate), so
     the class's FFI id is read instead: it equals Java's wire code for every API
     error (``NotCoordinatorError`` -> 16), which is what the code tables above are
@@ -361,8 +362,8 @@ def _error_class(name):
 def error_is_retriable(ex):
     """Whether a client error advertises itself as retriable.
 
-    The admin binding's flat ``KafkaError`` carries an ``is_retriable`` property;
-    a ``confluent_kafka`` error is retriable when it is a ``RetriableError``
+    An error with an ``is_retriable`` property is read through it; a
+    ``confluent_kafka`` error is retriable when it is a ``RetriableError``
     (Java's ``RetriableException``), the same set ``Error::is_retriable_error()``
     answers for.
     """
@@ -1263,8 +1264,8 @@ class SoakClient(object):
                              "producer only: %s", ", ".join(routed))
         validate_config(cconf, CONSUMER_CONFIG_KEYS, "consumer")
 
-        # Topic creation goes through this repo's Rust-backed AdminClient
-        # (python/admin.py), which takes the same Java-style config
+        # Topic creation goes through this repo's Rust-backed admin client
+        # (confluent_kafka.admin), which takes the same Java-style config
         # namespace as the producer/consumer — no librdkafka translation. The
         # security.protocol fix on this branch makes it work against SASL/SSL
         # clusters (Confluent Cloud). Create-if-absent by default: run.sh
@@ -1376,7 +1377,7 @@ class SoakClient(object):
     def create_topic(self, topic, aconf, partitions, replication_factor, recreate):
         """Create the topic if it doesn't already exist.
 
-        Uses this repo's Rust-backed AdminClient (python/admin.py),
+        Uses this repo's Rust-backed admin client (confluent_kafka.admin),
         which accepts the same Java-style config namespace as the
         producer/consumer (bootstrap.servers, security.protocol, sasl.mechanism,
         sasl.jaas.config, ssl.*). ``recreate`` (``--recreate-topic``)
@@ -1384,7 +1385,6 @@ class SoakClient(object):
         the default — run.sh restarts the soak in a loop.
         """
         bindings = _bindings()
-        KafkaError = bindings.KafkaError
 
         if recreate:
             from soak_metrics import recreate_topic
@@ -1392,11 +1392,11 @@ class SoakClient(object):
             recreate_topic(aconf, topic, partitions=partitions)
             return
 
-        # `Errors` wire codes (src/common/protocol/errors.rs). The admin binding
-        # returns ``create_topics([...])`` -> ``{name: TopicMetadataAndConfig |
-        # KafkaError}`` (each value is already the per-key result or a
-        # ``KafkaError`` whose ``.code`` is the wire code), and the whole call
-        # itself raises a ``KafkaError`` on a call-level failure.
+        # `Errors` wire codes (src/common/protocol/errors.rs). ``create_topics``
+        # returns a result whose ``values()`` holds one future per topic: a
+        # per-topic failure is raised by that future's ``result()`` and the
+        # whole call itself raises on a call-level failure. Either way the error
+        # is a typed class, whose wire code is its FFI id (``error_code``).
         # Authentication / authorization failures will never clear by retrying;
         # everything else here (broker unreachable, metadata timeout) might.
         TOPIC_ALREADY_EXISTS = 36
@@ -1409,13 +1409,13 @@ class SoakClient(object):
             58,   # SASL_AUTHENTICATION_FAILED
         }
 
-        admin = bindings.AdminClient(dict(aconf))
+        admin = bindings.Admin.create(configs=dict(aconf))
         try:
-            new_topic = bindings.NewTopic(topic, num_partitions=partitions,
+            new_topic = bindings.NewTopic(name=topic, num_partitions=partitions,
                                           replication_factor=replication_factor)
 
             def _handle_create_error(_topic, ex):
-                code = ex.code
+                code = error_code(ex)
                 if code == TOPIC_ALREADY_EXISTS:
                     self.logger.info("Topic %s already exists: good", _topic)
                 elif code in auth_codes:
@@ -1423,23 +1423,25 @@ class SoakClient(object):
                         "authentication/authorization failed creating topic {!r}: {}. "
                         "Check sasl.jaas.config (username/password) and the API "
                         "key's ACLs. Restarting will not fix this.".format(
-                            _topic, ex.message)) from ex
+                            _topic, error_message(ex))) from ex
                 else:
                     raise TransientStartupError(
                         "could not create or verify topic {!r}: {}. If the cluster "
                         "is reachable this may clear on retry.".format(
-                            _topic, ex.message)) from ex
+                            _topic, error_message(ex))) from ex
 
             try:
-                results = admin.create_topics([new_topic])
-            except KafkaError as ex:
-                # The old admin interface raises a whole-call KafkaError from
-                # the call itself; classify it the same way as a per-key error.
+                futures = admin.create_topics(new_topics=[new_topic]).values()
+            except Exception as ex:
+                # A call-level failure raises from the call itself; classify it
+                # the same way as a per-topic error.
                 _handle_create_error(topic, ex)
             else:
-                for _topic, result in results.items():
-                    if isinstance(result, KafkaError):
-                        _handle_create_error(_topic, result)
+                for _topic, future in futures.items():
+                    try:
+                        future.result()
+                    except Exception as ex:
+                        _handle_create_error(_topic, ex)
                     else:
                         self.logger.info("Created topic %s (partitions=%d, rf=%d)",
                                          _topic, partitions, replication_factor)

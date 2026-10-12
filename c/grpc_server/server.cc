@@ -3476,9 +3476,9 @@ class AdminServiceImpl final : public AdminService::Service {
     // The named ClientQuotaMatchKind is resolved to Kafka's MATCH_TYPE_* wire
     // constants by *this* table, written here rather than forwarded from the
     // harness, so it is independent of the one grpc_translate.py reaches through
-    // admin.py's factories. MATCH_KIND_UNSPECIFIED is rejected rather than
-    // defaulted: a defaulted EXACT would turn a dropped field into a valid
-    // filter.
+    // confluent_kafka's ClientQuotaFilterComponent factories.
+    // MATCH_KIND_UNSPECIFIED is rejected rather than defaulted: a defaulted
+    // EXACT would turn a dropped field into a valid filter.
     std::vector<std::string> owned_types;
     std::vector<const char*> entity_types;
     std::vector<int32_t> match_types;
@@ -3692,14 +3692,17 @@ class AdminServiceImpl final : public AdminService::Service {
                    kafka_admin_DescribeUserScramCredentialsResult_get_user(result, i));
       const kafka_common_Error_t* key_err =
           kafka_admin_DescribeUserScramCredentialsResult_get_error(result, i);
-      if (key_err != nullptr) {
+      // A user the broker reports as RESOURCE_NOT_FOUND carries that error (Java's
+      // `description(user)`), but Java's `all()` counts it as described, with no
+      // credentials: answer an empty description, as the Python and native
+      // backends do. Any other error is the user's error.
+      if (key_err != nullptr &&
+          kafka_common_Error_code(key_err) != kafka_common_ErrorCode_RESOURCE_NOT_FOUND) {
         copy_proto_error(entry->mutable_error(), key_err);
         continue;
       }
-      // A user with zero credentials is a *successful* description ("the broker
-      // reports none"), not an error — Java's `all()` treats RESOURCE_NOT_FOUND
-      // that way. The salted password and salt are never returned, so there is
-      // nothing else to carry.
+      // The salted password and salt are never returned, so the mechanisms and
+      // iterations are all there is to carry (none for a RESOURCE_NOT_FOUND user).
       UserScramCredentialsDescription* value = entry->mutable_value();
       value->set_name(cstr(kafka_admin_DescribeUserScramCredentialsResult_get_user(result, i)));
       const int32_t infos =
@@ -4554,9 +4557,9 @@ class AdminServiceImpl final : public AdminService::Service {
   // `KafkaAdminClient.getOffsetFromSpec` (`KafkaAdminClient.java:5142-5156`)
   // emits for the six no-argument factories. This table is deliberately written
   // here rather than sent over the wire: `grpc_translate.py` reaches the same
-  // sentinels through `admin.py`'s named factories, so the two tables are
-  // independent and a disagreement between them is a finding rather than a shared
-  // mistake forwarded by both.
+  // sentinels through `confluent_kafka.admin.OffsetSpec`'s named factories, so
+  // the two tables are independent and a disagreement between them is a
+  // finding rather than a shared mistake forwarded by both.
   //
   // `is_timestamp` stays separate from the value because the projection is not
   // injective — `forTimestamp(-2)` and `earliest()` both yield -2.
@@ -4661,7 +4664,8 @@ class AdminServiceImpl final : public AdminService::Service {
     if (err != nullptr) copy_proto_error(dst->mutable_error(), err);
     // Java's totalBytes() / usableBytes() are OptionalLong; the C surface spells
     // an empty one -1 (DescribeLogDirsResponse.UNKNOWN_VOLUME_BYTES), the same
-    // mapping admin.py applies, so a negative stays absent on the wire.
+    // mapping the Python LogDirDescription applies (a negative is None), so a
+    // negative stays absent on the wire.
     const int64_t total = kafka_admin_LogDirDescription_total_bytes(description);
     if (total >= 0) dst->set_total_bytes(total);
     const int64_t usable = kafka_admin_LogDirDescription_usable_bytes(description);
