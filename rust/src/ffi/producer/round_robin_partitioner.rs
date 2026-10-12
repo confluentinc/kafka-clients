@@ -38,7 +38,16 @@ struct RoundRobinPartitionerInner {
     as_partitioner: OnceLock<Interface<SharedPartitioner>>,
 }
 
+/// The state behind a handle.
+///
+/// # Safety
+///
+/// `self_` must be a live handle, kept alive for `'a`.
 unsafe fn inner<'a>(self_: *const kafka_producer_RoundRobinPartitioner_t) -> &'a RoundRobinPartitionerInner {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle kept alive for `'a`, i.e.
+    // the `Box::into_raw` of a `RoundRobinPartitionerInner` in
+    // `kafka_producer_RoundRobinPartitioner_new`, the only constructor. The inner value is changed
+    // only through its `OnceLock`, so the shared reference is sound.
     unsafe { &*(self_ as *const RoundRobinPartitionerInner) }
 }
 
@@ -66,6 +75,9 @@ pub extern "C" fn kafka_producer_RoundRobinPartitioner_new() -> *mut kafka_produ
 pub unsafe extern "C" fn kafka_producer_RoundRobinPartitioner__as_Partitioner(
     self_: *mut kafka_producer_RoundRobinPartitioner_t,
 ) -> *mut kafka_producer_Partitioner_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `inner` requires. The
+    // view returned is the `Interface` cached in the handle's `as_partitioner` cell, which is never
+    // moved or replaced, so it lives as long as the handle, as the rustdoc states.
     let inner = unsafe { inner(self_) };
     let view = inner.as_partitioner.get_or_init(|| partitioner_view(Arc::clone(&inner.imp)));
     view as *const Interface<SharedPartitioner> as *mut kafka_producer_Partitioner_t
@@ -82,6 +94,10 @@ pub unsafe extern "C" fn kafka_producer_RoundRobinPartitioner_destroy(
     self_: *mut kafka_producer_RoundRobinPartitioner_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, a handle
+        // not yet destroyed, i.e. the `Box::into_raw` of
+        // `kafka_producer_RoundRobinPartitioner_new`, so `Box::from_raw` reclaims it exactly once;
+        // its cached view goes with it.
         drop(unsafe { Box::from_raw(self_ as *mut RoundRobinPartitionerInner) });
     }
 }
@@ -114,6 +130,9 @@ mod tests {
         let handle = kafka_producer_RoundRobinPartitioner_new();
         let cluster = box_cluster(cluster());
         let topic = CString::new("topic").unwrap();
+        // SAFETY: Test code: `handle` and `cluster` are owned handles destroyed once at the end,
+        // after the last use of the view `handle` caches; `topic` outlives every call, and the null
+        // byte views and key pointers are what the invoker documents for a Java `null`.
         unsafe {
             let view = kafka_producer_RoundRobinPartitioner__as_Partitioner(handle);
             assert_eq!(view, kafka_producer_RoundRobinPartitioner__as_Partitioner(handle));

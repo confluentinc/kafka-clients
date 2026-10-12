@@ -128,11 +128,27 @@ struct BuilderInner {
     value_serializer: Option<Arc<DynSerializer>>,
 }
 
+/// The class state behind a handle.
+///
+/// # Safety
+///
+/// `self_` must be a live handle, kept alive for `'a`.
 unsafe fn handle<'a>(self_: *const kafka_producer_MockProducer_t) -> &'a Handle {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle kept alive for `'a`, i.e.
+    // the `Box::into_raw` of a `Handle` in `box_mock`, the only constructor. `Handle` is only ever
+    // shared (`kafka_producer_MockProducer_destroy` takes it back by `Box::from_raw`), so the
+    // shared reference is sound.
     unsafe { &*(self_ as *const Handle) }
 }
 
+/// The mock behind a handle.
+///
+/// # Safety
+///
+/// `self_` must be a live handle, kept alive for `'a`.
 unsafe fn mock<'a>(self_: *const kafka_producer_MockProducer_t) -> &'a MockProducer<GenericValue, GenericValue> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle kept alive for `'a`, as
+    // `handle` requires; the producer returned is a field of that handle, so it lives as long.
     unsafe { handle(self_) }.producer()
 }
 
@@ -168,6 +184,8 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_with_cluster_auto_complete(
     auto_complete: i8,
 ) -> *mut kafka_producer_MockProducer_t {
     box_mock(MockProducer::with_cluster_auto_complete(
+        // SAFETY: Per this function's `# Safety`, `cluster` is a live handle, as `cluster_ref`
+        // requires; the cluster is cloned, so the reference is used only within this call.
         unsafe { cluster_ref(cluster) }.clone(),
         auto_complete != 0,
     ))
@@ -185,6 +203,10 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_with_options(
     options: *const kafka_producer_MockProducerOptions_t,
 ) -> *mut kafka_producer_MockProducer_t {
     box_mock(MockProducer::with_options(
+        // SAFETY: Per this function's `# Safety`, `options` is a live handle, i.e. the
+        // `Box::into_raw` of an `OptionsInner` in
+        // `kafka_producer_MockProducerOptionsBuilder_build`, the only constructor; it is never
+        // mutated after that, so the shared reference, used only within this call, is sound.
         unsafe { &*(options as *const OptionsInner) }.build(),
     ))
 }
@@ -200,6 +222,9 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_with_options(
 pub unsafe extern "C" fn kafka_producer_MockProducer__as_Producer(
     self_: *const kafka_producer_MockProducer_t,
 ) -> *const kafka_producer_Producer_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `handle` requires; the
+    // view returned is the address of the handle's `client` field, so it is valid until the class
+    // handle is destroyed, as the rustdoc states.
     unsafe { handle(self_) }.as_producer()
 }
 
@@ -213,6 +238,9 @@ pub unsafe extern "C" fn kafka_producer_MockProducer__as_Producer(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_destroy(self_: *mut kafka_producer_MockProducer_t) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, a handle
+        // not yet destroyed, i.e. the `Box::into_raw` of `box_mock`, so `Box::from_raw` reclaims it
+        // exactly once; its `__as_Producer` views, addresses inside it, go with it.
         unsafe { *Box::from_raw(self_ as *mut Handle) }.destroy();
     }
 }
@@ -229,7 +257,14 @@ fn record_list(records: Vec<crate::producer::ProducerRecord<GenericValue, Generi
     box_list(elements, Some(destroy_record))
 }
 
+/// Frees a record handle held as a `void *` container element.
+///
+/// # Safety
+///
+/// `element` must be an owned record handle not yet destroyed.
 unsafe fn destroy_record(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned record handle not yet
+    // destroyed, which is what `kafka_producer_ProducerRecord_destroy` requires.
     unsafe { kafka_producer_ProducerRecord_destroy(element as *mut _) }
 }
 
@@ -257,15 +292,36 @@ fn offsets_map(offsets: HashMap<TopicPartition, OffsetAndMetadata>) -> *mut kafk
     )
 }
 
+/// Frees a topic-partition handle held as a `void *` container element.
+///
+/// # Safety
+///
+/// `element` must be an owned topic-partition handle not yet destroyed.
 unsafe fn destroy_topic_partition(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned topic-partition handle not yet
+    // destroyed, which is what `kafka_common_TopicPartition_destroy` requires.
     unsafe { kafka_common_TopicPartition_destroy(element as *mut kafka_common_TopicPartition_t) }
 }
 
+/// Frees an offset-and-metadata handle held as a `void *` container element.
+///
+/// # Safety
+///
+/// `element` must be an owned offset-and-metadata handle not yet destroyed.
 unsafe fn destroy_offset_and_metadata(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned offset-and-metadata handle not
+    // yet destroyed, which is what `kafka_consumer_OffsetAndMetadata_destroy` requires.
     unsafe { kafka_consumer_OffsetAndMetadata_destroy(element as *mut kafka_consumer_OffsetAndMetadata_t) }
 }
 
+/// Compares two `kafka_common_TopicPartition_t *` keys for `kafka_Map_get`.
+///
+/// # Safety
+///
+/// Both must be valid topic-partition handles.
 unsafe fn topic_partition_eq(a: *mut c_void, b: *mut c_void) -> bool {
+    // SAFETY: Per this function's `# Safety`, `a` and `b` are valid topic-partition handles, as
+    // `topic_partition_ref` requires; both references are used only within this call.
     unsafe { topic_partition_ref(a as *const _) == topic_partition_ref(b as *const _) }
 }
 
@@ -282,7 +338,14 @@ fn group_offsets_map(groups: HashMap<String, HashMap<TopicPartition, OffsetAndMe
     )
 }
 
+/// Frees a map handle held as a `void *` container element.
+///
+/// # Safety
+///
+/// `element` must be an owned map handle not yet destroyed.
 unsafe fn destroy_map(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned map handle not yet destroyed,
+    // which is what `kafka_Map_destroy` requires.
     unsafe { kafka_Map_destroy(element as *mut kafka_Map_t) }
 }
 
@@ -297,6 +360,8 @@ unsafe fn destroy_map(element: *mut c_void) {
 pub unsafe extern "C" fn kafka_producer_MockProducer_history(
     self_: *const kafka_producer_MockProducer_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `mock` requires; the
+    // reference is used only within this call.
     record_list(unsafe { mock(self_) }.history())
 }
 
@@ -311,6 +376,8 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_history(
 pub unsafe extern "C" fn kafka_producer_MockProducer_uncommitted_records(
     self_: *const kafka_producer_MockProducer_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `mock` requires; the
+    // reference is used only within this call.
     record_list(unsafe { mock(self_) }.uncommitted_records())
 }
 
@@ -326,6 +393,8 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_uncommitted_records(
 pub unsafe extern "C" fn kafka_producer_MockProducer_consumer_group_offsets_history(
     self_: *const kafka_producer_MockProducer_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `mock` requires; the
+    // reference is used only within this call.
     let elements = unsafe { mock(self_) }
         .consumer_group_offsets_history()
         .into_iter()
@@ -348,8 +417,14 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_committed_offset(
     group: *const c_char,
     topic_partition: *const kafka_common_TopicPartition_t,
 ) -> *mut kafka_consumer_OffsetAndMetadata_t {
+    // SAFETY: Per this function's `# Safety`, `group` is a NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied into an owned `String`.
     let group = unsafe { c_str_to_string(group) };
+    // SAFETY: Per this function's `# Safety`, `topic_partition` is a live handle, as
+    // `topic_partition_ref` requires; the reference is used only within this call.
     let topic_partition = unsafe { topic_partition_ref(topic_partition) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `mock` requires; the
+    // reference is used only within this call.
     unsafe { mock(self_) }
         .committed_offset(&group, topic_partition)
         .map_or(std::ptr::null_mut(), box_offset_and_metadata)
@@ -367,6 +442,8 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_committed_offset(
 pub unsafe extern "C" fn kafka_producer_MockProducer_uncommitted_offsets(
     self_: *const kafka_producer_MockProducer_t,
 ) -> *mut kafka_Map_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `mock` requires; the
+    // reference is used only within this call.
     group_offsets_map(unsafe { mock(self_) }.uncommitted_offsets())
 }
 
@@ -382,6 +459,8 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_uncommitted_offsets(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_clear(self_: *const kafka_producer_MockProducer_t) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `mock` requires; the
+    // reference is used only within this call.
     unsafe { mock(self_) }.clear();
 }
 
@@ -394,6 +473,8 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_clear(self_: *const kafka_p
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_complete_next(self_: *const kafka_producer_MockProducer_t) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `mock` requires; the
+    // reference is used only within this call.
     i8::from(unsafe { mock(self_) }.complete_next())
 }
 
@@ -404,7 +485,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_complete_next(self_: *const
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `error` null or an error not yet
+/// `self_` must be a live handle and `error` null or an owned error not yet
 /// destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -412,7 +493,12 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_error_next(
     self_: *const kafka_producer_MockProducer_t,
     error: *mut kafka_common_Error_t,
 ) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `mock` requires; the
+    // reference is used only within this call.
     let mock = unsafe { mock(self_) };
+    // SAFETY: Per this function's `# Safety`, `error` is null or an owned error handle not yet
+    // destroyed, as `take_error` requires; its ownership moves to the mock, as the rustdoc states,
+    // so this is its final use by the caller.
     i8::from(match unsafe { take_error(error) } {
         Some(error) => mock.error_next(error),
         None => mock.complete_next(),
@@ -429,6 +515,8 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_error_next(
 pub unsafe extern "C" fn kafka_producer_MockProducer_fence_producer(
     self_: *const kafka_producer_MockProducer_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `mock` requires; the
+    // reference is used only within this call.
     unsafe { mock(self_) }
         .fence_producer()
         .err()
@@ -445,6 +533,8 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_fence_producer(
 pub unsafe extern "C" fn kafka_producer_MockProducer_transaction_initialized(
     self_: *const kafka_producer_MockProducer_t,
 ) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `mock` requires; the
+    // reference is used only within this call.
     i8::from(unsafe { mock(self_) }.transaction_initialized())
 }
 
@@ -458,6 +548,8 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_transaction_initialized(
 pub unsafe extern "C" fn kafka_producer_MockProducer_transaction_in_flight(
     self_: *const kafka_producer_MockProducer_t,
 ) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `mock` requires; the
+    // reference is used only within this call.
     i8::from(unsafe { mock(self_) }.transaction_in_flight())
 }
 
@@ -471,6 +563,8 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_transaction_in_flight(
 pub unsafe extern "C" fn kafka_producer_MockProducer_transaction_committed(
     self_: *const kafka_producer_MockProducer_t,
 ) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `mock` requires; the
+    // reference is used only within this call.
     i8::from(unsafe { mock(self_) }.transaction_committed())
 }
 
@@ -484,6 +578,8 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_transaction_committed(
 pub unsafe extern "C" fn kafka_producer_MockProducer_transaction_aborted(
     self_: *const kafka_producer_MockProducer_t,
 ) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `mock` requires; the
+    // reference is used only within this call.
     i8::from(unsafe { mock(self_) }.transaction_aborted())
 }
 
@@ -495,6 +591,8 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_transaction_aborted(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_sent_offsets(self_: *const kafka_producer_MockProducer_t) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `mock` requires; the
+    // reference is used only within this call.
     i8::from(unsafe { mock(self_) }.sent_offsets())
 }
 
@@ -506,6 +604,8 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_sent_offsets(self_: *const 
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_closed(self_: *const kafka_producer_MockProducer_t) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `mock` requires; the
+    // reference is used only within this call.
     i8::from(unsafe { mock(self_) }.closed())
 }
 
@@ -517,6 +617,8 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_closed(self_: *const kafka_
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_flushed(self_: *const kafka_producer_MockProducer_t) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `mock` requires; the
+    // reference is used only within this call.
     i8::from(unsafe { mock(self_) }.flushed())
 }
 
@@ -530,6 +632,8 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_flushed(self_: *const kafka
 #[ffi_guard(fallback = -1)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_commit_count(self_: *const kafka_producer_MockProducer_t) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `mock` requires; the
+    // reference is used only within this call.
     unsafe { mock(self_) }.commit_count()
 }
 
@@ -538,7 +642,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_commit_count(self_: *const 
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `error` null or an error not yet
+/// `self_` must be a live handle and `error` null or an owned error not yet
 /// destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -546,6 +650,9 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_send_error(
     self_: *const kafka_producer_MockProducer_t,
     error: *mut kafka_common_Error_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `mock` requires, and
+    // `error` null or an owned error handle not yet destroyed, as `take_error` requires; its
+    // ownership moves to the mock, as the rustdoc states, so this is its final use by the caller.
     unsafe { mock(self_) }.set_send_error(unsafe { take_error(error) });
 }
 
@@ -554,7 +661,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_send_error(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `error` null or an error not yet
+/// `self_` must be a live handle and `error` null or an owned error not yet
 /// destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -562,6 +669,9 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_flush_error(
     self_: *const kafka_producer_MockProducer_t,
     error: *mut kafka_common_Error_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `mock` requires, and
+    // `error` null or an owned error handle not yet destroyed, as `take_error` requires; its
+    // ownership moves to the mock, as the rustdoc states, so this is its final use by the caller.
     unsafe { mock(self_) }.set_flush_error(unsafe { take_error(error) });
 }
 
@@ -570,7 +680,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_flush_error(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `error` null or an error not yet
+/// `self_` must be a live handle and `error` null or an owned error not yet
 /// destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -578,6 +688,9 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_partitions_for_error(
     self_: *const kafka_producer_MockProducer_t,
     error: *mut kafka_common_Error_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `mock` requires, and
+    // `error` null or an owned error handle not yet destroyed, as `take_error` requires; its
+    // ownership moves to the mock, as the rustdoc states, so this is its final use by the caller.
     unsafe { mock(self_) }.set_partitions_for_error(unsafe { take_error(error) });
 }
 
@@ -586,7 +699,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_partitions_for_error(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `error` null or an error not yet
+/// `self_` must be a live handle and `error` null or an owned error not yet
 /// destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -594,6 +707,9 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_close_error(
     self_: *const kafka_producer_MockProducer_t,
     error: *mut kafka_common_Error_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `mock` requires, and
+    // `error` null or an owned error handle not yet destroyed, as `take_error` requires; its
+    // ownership moves to the mock, as the rustdoc states, so this is its final use by the caller.
     unsafe { mock(self_) }.set_close_error(unsafe { take_error(error) });
 }
 
@@ -602,7 +718,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_close_error(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `error` null or an error not yet
+/// `self_` must be a live handle and `error` null or an owned error not yet
 /// destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -610,6 +726,9 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_init_transaction_error(
     self_: *const kafka_producer_MockProducer_t,
     error: *mut kafka_common_Error_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `mock` requires, and
+    // `error` null or an owned error handle not yet destroyed, as `take_error` requires; its
+    // ownership moves to the mock, as the rustdoc states, so this is its final use by the caller.
     unsafe { mock(self_) }.set_init_transaction_error(unsafe { take_error(error) });
 }
 
@@ -618,7 +737,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_init_transaction_error(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `error` null or an error not yet
+/// `self_` must be a live handle and `error` null or an owned error not yet
 /// destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -626,6 +745,9 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_begin_transaction_error
     self_: *const kafka_producer_MockProducer_t,
     error: *mut kafka_common_Error_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `mock` requires, and
+    // `error` null or an owned error handle not yet destroyed, as `take_error` requires; its
+    // ownership moves to the mock, as the rustdoc states, so this is its final use by the caller.
     unsafe { mock(self_) }.set_begin_transaction_error(unsafe { take_error(error) });
 }
 
@@ -634,7 +756,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_begin_transaction_error
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `error` null or an error not yet
+/// `self_` must be a live handle and `error` null or an owned error not yet
 /// destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -642,6 +764,9 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_send_offsets_to_transac
     self_: *const kafka_producer_MockProducer_t,
     error: *mut kafka_common_Error_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `mock` requires, and
+    // `error` null or an owned error handle not yet destroyed, as `take_error` requires; its
+    // ownership moves to the mock, as the rustdoc states, so this is its final use by the caller.
     unsafe { mock(self_) }.set_send_offsets_to_transaction_error(unsafe { take_error(error) });
 }
 
@@ -650,7 +775,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_send_offsets_to_transac
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `error` null or an error not yet
+/// `self_` must be a live handle and `error` null or an owned error not yet
 /// destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -658,6 +783,9 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_commit_transaction_erro
     self_: *const kafka_producer_MockProducer_t,
     error: *mut kafka_common_Error_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `mock` requires, and
+    // `error` null or an owned error handle not yet destroyed, as `take_error` requires; its
+    // ownership moves to the mock, as the rustdoc states, so this is its final use by the caller.
     unsafe { mock(self_) }.set_commit_transaction_error(unsafe { take_error(error) });
 }
 
@@ -666,7 +794,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_commit_transaction_erro
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `error` null or an error not yet
+/// `self_` must be a live handle and `error` null or an owned error not yet
 /// destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -674,6 +802,9 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_abort_transaction_error
     self_: *const kafka_producer_MockProducer_t,
     error: *mut kafka_common_Error_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `mock` requires, and
+    // `error` null or an owned error handle not yet destroyed, as `take_error` requires; its
+    // ownership moves to the mock, as the rustdoc states, so this is its final use by the caller.
     unsafe { mock(self_) }.set_abort_transaction_error(unsafe { take_error(error) });
 }
 
@@ -690,8 +821,14 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_mock_metrics(
     name: *const kafka_common_MetricName_t,
     metric: *const kafka_common_metrics_KafkaMetric_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `name` is a live handle, as `metric_name_ref`
+    // requires; the name is cloned, so the reference is used only within this statement.
     let name = unsafe { metric_name_ref(name) }.clone();
+    // SAFETY: Per this function's `# Safety`, `metric` is a live handle, as `kafka_metric_ref`
+    // requires; the `Arc` is cloned, so the reference is used only within this statement.
     let metric = Arc::clone(unsafe { kafka_metric_ref(metric) });
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `mock` requires; the
+    // reference is used only within this call.
     unsafe { mock(self_) }.set_mock_metrics(name, metric);
 }
 
@@ -699,7 +836,17 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_mock_metrics(
 // MockProducerOptions / MockProducerOptionsBuilder
 // ---------------------------------------------------------------------------
 
+/// The builder state behind a handle.
+///
+/// # Safety
+///
+/// `self_` must be a live handle, kept alive for `'a`, that no other call
+/// uses during `'a`.
 unsafe fn builder<'a>(self_: *mut kafka_producer_MockProducerOptionsBuilder_t) -> &'a mut BuilderInner {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle kept alive for `'a`, i.e.
+    // the `Box::into_raw` of a `BuilderInner` in `kafka_producer_MockProducerOptionsBuilder_new`,
+    // the only constructor, that no other call uses for `'a`, so the exclusive reference aliases
+    // nothing.
     unsafe { &mut *(self_ as *mut BuilderInner) }
 }
 
@@ -715,13 +862,17 @@ pub extern "C" fn kafka_producer_MockProducerOptionsBuilder_new() -> *mut kafka_
 ///
 /// # Safety
 ///
-/// `self_` and `cluster` must be live handles.
+/// `self_` and `cluster` must be live handles, and no other call may use
+/// `self_` at the same time.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_set_cluster(
     self_: *mut kafka_producer_MockProducerOptionsBuilder_t,
     cluster: *const kafka_common_Cluster_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
+    // the same time, as `builder` requires; the exclusive reference is used only within this
+    // statement; `cluster` is a live handle, as `cluster_ref` requires, and is cloned.
     unsafe { builder(self_) }.cluster = Some(unsafe { cluster_ref(cluster) }.clone());
 }
 
@@ -729,13 +880,16 @@ pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_set_cluster(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle that no other call uses at the same time.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_set_auto_complete(
     self_: *mut kafka_producer_MockProducerOptionsBuilder_t,
     auto_complete: i8,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
+    // the same time, as `builder` requires; the exclusive reference is used only within this
+    // statement.
     unsafe { builder(self_) }.auto_complete = Some(auto_complete != 0);
 }
 
@@ -745,13 +899,18 @@ pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_set_auto_comp
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `partitioner` null or a live handle.
+/// `self_` must be a live handle that no other call uses at the same time,
+/// and `partitioner` null or a live handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_set_partitioner(
     self_: *mut kafka_producer_MockProducerOptionsBuilder_t,
     partitioner: *mut kafka_producer_Partitioner_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
+    // the same time, as `builder` requires; the exclusive reference is used only within this
+    // statement; `partitioner`, when non-null (checked in the closure), is a live handle, as
+    // `take_partitioner` requires, and an owned one is consumed, as the rustdoc states.
     unsafe { builder(self_) }.partitioner = (!partitioner.is_null()).then(|| unsafe { take_partitioner(partitioner) });
 }
 
@@ -761,14 +920,21 @@ pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_set_partition
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `key_serializer` null or a live handle.
+/// `self_` must be a live handle that no other call uses at the same time,
+/// and `key_serializer` null or a live handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_set_key_serializer(
     self_: *mut kafka_producer_MockProducerOptionsBuilder_t,
     key_serializer: *mut kafka_common_serialization_Serializer_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
+    // the same time, as `builder` requires; the exclusive reference is used only within this
+    // statement.
     unsafe { builder(self_) }.key_serializer =
+            // SAFETY: `key_serializer` is non-null (checked just before) and, per this function's
+            // `# Safety`, a live handle, as `take_serializer` requires; an owned one is consumed,
+            // as the rustdoc states, so the caller does not use it again.
         (!key_serializer.is_null()).then(|| unsafe { take_serializer(key_serializer) });
 }
 
@@ -777,14 +943,21 @@ pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_set_key_seria
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `value_serializer` null or a live handle.
+/// `self_` must be a live handle that no other call uses at the same time,
+/// and `value_serializer` null or a live handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_set_value_serializer(
     self_: *mut kafka_producer_MockProducerOptionsBuilder_t,
     value_serializer: *mut kafka_common_serialization_Serializer_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
+    // the same time, as `builder` requires; the exclusive reference is used only within this
+    // statement.
     unsafe { builder(self_) }.value_serializer =
+            // SAFETY: `value_serializer` is non-null (checked just before) and, per this function's
+            // `# Safety`, a live handle, as `take_serializer` requires; an owned one is consumed,
+            // as the rustdoc states, so the caller does not use it again.
         (!value_serializer.is_null()).then(|| unsafe { take_serializer(value_serializer) });
 }
 
@@ -795,13 +968,17 @@ pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_set_value_ser
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `out_build` a valid slot.
+/// `self_` must be a live handle that no other call uses at the same time,
+/// and `out_build` a valid slot.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_build(
     self_: *mut kafka_producer_MockProducerOptionsBuilder_t,
     out_build: *mut *mut kafka_producer_MockProducerOptions_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
+    // the same time, as `builder` requires; the exclusive reference is used only within this call,
+    // which only reads through it.
     let builder = unsafe { builder(self_) };
     // The Rust builder owns the validation (and its message); the shareable
     // pieces are not part of it.
@@ -823,6 +1000,9 @@ pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_build(
         key_serializer: builder.key_serializer.clone(),
         value_serializer: builder.value_serializer.clone(),
     };
+    // SAFETY: Per this function's `# Safety`, `out_build` is a valid slot, so the write is sound;
+    // the handle written is a fresh box the caller owns, freed with
+    // `kafka_producer_MockProducerOptions_destroy`.
     unsafe { *out_build = Box::into_raw(Box::new(inner)) as *mut kafka_producer_MockProducerOptions_t };
     std::ptr::null_mut()
 }
@@ -838,6 +1018,10 @@ pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_destroy(
     self_: *mut kafka_producer_MockProducerOptionsBuilder_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, a handle
+        // not yet destroyed, i.e. the `Box::into_raw` of
+        // `kafka_producer_MockProducerOptionsBuilder_new`, so `Box::from_raw` reclaims it exactly
+        // once.
         drop(unsafe { Box::from_raw(self_ as *mut BuilderInner) });
     }
 }
@@ -851,6 +1035,10 @@ pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_destroy(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducerOptions_destroy(self_: *mut kafka_producer_MockProducerOptions_t) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, a handle
+        // not yet destroyed, i.e. the `Box::into_raw` of
+        // `kafka_producer_MockProducerOptionsBuilder_build`, so `Box::from_raw` reclaims it exactly
+        // once; the producers built from it hold their own pieces.
         drop(unsafe { Box::from_raw(self_ as *mut OptionsInner) });
     }
 }
@@ -891,9 +1079,13 @@ mod tests {
         metadata: *const kafka_producer_RecordMetadata_t,
         error: *const kafka_common_Error_t,
     ) {
+        // SAFETY: Test code: `self_` is the `Seen` the test registered with
+        // `kafka_producer_Callback_new`, alive until the callbacks ran.
         let seen = unsafe { &*(self_ as *const Seen) };
         assert!(error.is_null());
         seen.last_offset.store(
+            // SAFETY: Test code: `metadata` is the live record metadata the delivery callback is
+            // handed.
             unsafe { kafka_producer_RecordMetadata_offset(metadata) } as i32,
             Ordering::SeqCst,
         );
@@ -905,9 +1097,13 @@ mod tests {
         error: *mut kafka_common_Error_t,
         opaque: *mut c_void,
     ) {
+        // SAFETY: Test code: `opaque` is the `Seen` the test passed to
+        // `kafka_producer_Producer_send_cb`, alive until the callbacks ran.
         let seen = unsafe { &*(opaque as *const Seen) };
         assert!(error.is_null());
         assert!(!value.is_null());
+        // SAFETY: Test code: the completion owns `value`, a live future handle; it is destroyed
+        // once.
         unsafe { kafka_common_KafkaFuture_destroy(value) };
         seen.sends.fetch_add(1, Ordering::SeqCst);
     }
@@ -921,6 +1117,10 @@ mod tests {
         };
         let topic = CString::new("topic").unwrap();
         let value = 42i32;
+        // SAFETY: Test code: `mock`, `record` and `callback` are live from their constructor to
+        // their single destroy below, `view` is used only before the mock is destroyed, `future`,
+        // `history`, each error and the metadata borrowed from `future` are used only before they
+        // are destroyed, once, and `seen`, `topic` and `value` outlive every use.
         unsafe {
             let mock = kafka_producer_MockProducer_with_auto_complete(0);
             let view = kafka_producer_MockProducer__as_Producer(mock);
@@ -975,6 +1175,9 @@ mod tests {
             last_offset: AtomicI32::new(-1),
         };
         let topic = CString::new("topic").unwrap();
+        // SAFETY: Test code: `mock` and `record` are live from their constructor to their single
+        // destroy below, `view` is used only before the mock is destroyed, each list is destroyed
+        // once after its last use, and `seen` outlives the callback run that reads it.
         unsafe {
             let mock = kafka_producer_MockProducer_with_auto_complete(1);
             let view = kafka_producer_MockProducer__as_Producer(mock);
@@ -1008,6 +1211,9 @@ mod tests {
 
     #[test]
     fn options_builder_validates_and_builds_a_mock() {
+        // SAFETY: Test code: `builder`, `options`, `mock` and each list, map and error are live
+        // from their constructor to their single destroy below, and `builder` is destroyed only
+        // after its last use.
         unsafe {
             let builder = kafka_producer_MockProducerOptionsBuilder_new();
             let mut options = std::ptr::null_mut();

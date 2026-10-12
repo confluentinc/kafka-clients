@@ -246,6 +246,14 @@ impl Client {
     fn deliver(&self, cb: kafka_producer_Producer_init_transactions_cb_t, opaque: SendPtr, result: Result<(), Error>) {
         let error = result.err().map_or(std::ptr::null_mut(), box_error);
         let error = SendPtr(error as *mut c_void);
+        // SAFETY: `cb` and `opaque` are the pair the C caller passed to a `_cb` entry point: each
+        // caller of `deliver` (`with_txn_control_cb`, `with_drain_cb`,
+        // `kafka_producer_Producer_close_with_timeout_cb`) passes them on unchanged and delivers
+        // them on one path only, so calling `cb` with `opaque` is the completion the caller is
+        // waiting for. `error` is null or the fresh `box_error` handle above, owned by no one else,
+        // so handing it to `cb` transfers its ownership, as
+        // `kafka_producer_Producer_init_transactions_cb_t` documents; the job is a `FnOnce`, so
+        // `cb` fires exactly once.
         self.queue.push(Box::new(move || unsafe {
             cb(error.get() as *mut kafka_common_Error_t, opaque.get())
         }));
@@ -321,6 +329,14 @@ fn deliver_send(
     };
     let value = SendPtr(value as *mut c_void);
     let error = SendPtr(error as *mut c_void);
+    // SAFETY: `cb` and `opaque` are the pair the C caller passed to
+    // `kafka_producer_Producer_send_with_callback_cb` (or `send_cb`, which forwards to it): that
+    // function puts them in one `SubmitRequest::Send`, which `submission_loop` delivers here once,
+    // or, when the channel refused the request, delivers them here itself, so calling `cb` with
+    // `opaque` is the completion the caller is waiting for. `value` and `error` are each null or
+    // the fresh `box_future` / `box_error` handle above, owned by no one else, so handing them to
+    // `cb` transfers their ownership, as `kafka_producer_Producer_send_cb_t` documents; the job is
+    // a `FnOnce`, so `cb` fires exactly once.
     client.queue.push(Box::new(move || unsafe {
         cb(
             value.get() as *mut kafka_common_KafkaFuture_t,
@@ -342,7 +358,15 @@ fn metadata_future(
     )
 }
 
+/// Frees a record-metadata handle held as a future's value (see
+/// [`map_future_handle`]).
+///
+/// # Safety
+///
+/// `element` must be an owned record-metadata handle not yet destroyed.
 unsafe fn destroy_record_metadata(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned record-metadata handle not yet
+    // destroyed, which is what `kafka_producer_RecordMetadata_destroy` requires.
     unsafe { kafka_producer_RecordMetadata_destroy(element as *mut _) }
 }
 
@@ -455,8 +479,14 @@ where
 ///
 /// # Safety
 ///
-/// `producer` must be a live view from an `__as_Producer` function.
+/// `producer` must be a live view from an `__as_Producer` function, kept
+/// alive for `'a`.
 unsafe fn client_ref<'a>(producer: *const kafka_producer_Producer_t) -> &'a Arc<Client> {
+    // SAFETY: Per this function's `# Safety`, `producer` is a live view from an `__as_Producer`
+    // function, kept alive for `'a`. Both such functions return `ProducerHandle::as_producer`, the
+    // address of the class handle's `client` field, so the cast reads that `Arc<Client>`, which
+    // lives as long as the class handle. The class handle is only shared while it is live (its
+    // `_destroy` takes the box back by value), so the shared reference is sound.
     unsafe { &*(producer as *const Arc<Client>) }
 }
 
@@ -465,8 +495,10 @@ unsafe fn client_ref<'a>(producer: *const kafka_producer_Producer_t) -> &'a Arc<
 ///
 /// # Safety
 ///
-/// `producer` must be a live handle or view.
+/// `producer` must be a live view from an `__as_Producer` function.
 pub(crate) unsafe fn completion_sink(producer: *const kafka_producer_Producer_t) -> impl FnOnce(CallbackJob) {
+    // SAFETY: Per this function's `# Safety`, `producer` is a live view, as `client_ref` requires;
+    // the reference is used only to clone the `Arc`, within this statement.
     let client = Arc::clone(unsafe { client_ref(producer) });
     move |job| client.queue.push(job)
 }
@@ -573,13 +605,22 @@ fn with_drain_cb<F, Fut>(
 ///
 /// # Safety
 ///
-/// `offsets` must be a live map with those element types.
+/// `offsets` must be a live map whose keys and values are live handles of
+/// those types, and no other call may mutate it during this one.
 unsafe fn offsets_map(offsets: *const kafka_Map_t) -> HashMap<TopicPartition, OffsetAndMetadata> {
+    // SAFETY: Per this function's `# Safety`, `offsets` is a live map that no other call mutates
+    // during this one, as `map_entries` requires; the entries are read only within this expression.
     unsafe { map_entries(offsets) }
         .iter()
         .map(|&(tp, oam)| {
             (
+                // SAFETY: Per this function's `# Safety`, every key of `offsets` is a live
+                // topic-partition handle, as `topic_partition_ref` requires; the reference is only
+                // cloned.
                 unsafe { topic_partition_ref(tp as *const _) }.clone(),
+                // SAFETY: Per this function's `# Safety`, every value of `offsets` is a live
+                // offset-and-metadata handle, as `offset_and_metadata_ref` requires; the reference
+                // is only cloned.
                 unsafe { offset_and_metadata_ref(oam as *const kafka_consumer_OffsetAndMetadata_t) }.clone(),
             )
         })
@@ -654,6 +695,8 @@ pub type kafka_producer_Producer_callbacks_notify_fn_t = unsafe extern "C" fn(op
 pub unsafe extern "C" fn kafka_producer_Producer_init_transactions(
     self_: *const kafka_producer_Producer_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires; the
+    // reference does not outlive the call.
     with_txn_control(unsafe { client_ref(self_) }, |p| async move { p.init_transactions().await })
 }
 
@@ -662,7 +705,14 @@ pub unsafe extern "C" fn kafka_producer_Producer_init_transactions(
 /// # Safety
 ///
 /// `self_` must be a live view.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. The body hands `cb` over
+    // only as the last step of `with_txn_control_cb`: to `Client::deliver` before its early return,
+    // or to the task `Client::spawn` registers, after which nothing can panic. So `cb` has not
+    // fired for this `opaque`, as `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_init_transactions_cb(
     self_: *const kafka_producer_Producer_t,
@@ -671,6 +721,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_init_transactions_cb(
 ) {
     with_txn_control_cb(
         "kafka_producer_Producer_init_transactions_cb",
+        // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
+        // `with_txn_control_cb` uses the reference only before it returns, cloning the `Arc` for
+        // the task it spawns.
         unsafe { client_ref(self_) },
         cb,
         opaque,
@@ -689,6 +742,8 @@ pub unsafe extern "C" fn kafka_producer_Producer_init_transactions_cb(
 pub unsafe extern "C" fn kafka_producer_Producer_begin_transaction(
     self_: *const kafka_producer_Producer_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires; the
+    // reference does not outlive the call.
     with_txn_control(unsafe { client_ref(self_) }, |p| async move { p.begin_transaction() })
 }
 
@@ -699,7 +754,10 @@ pub unsafe extern "C" fn kafka_producer_Producer_begin_transaction(
 ///
 /// # Safety
 ///
-/// `self_`, `offsets` and `group_metadata` must be live handles.
+/// `self_` must be a live view, `offsets` a live map of
+/// `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *`
+/// that no other call mutates during this one, and `group_metadata` a live
+/// handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_send_offsets_to_transaction(
@@ -707,8 +765,15 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_offsets_to_transaction(
     offsets: *const kafka_Map_t,
     group_metadata: *const kafka_consumer_ConsumerGroupMetadata_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `offsets` is a live map of topic-partition to
+    // offset-and-metadata handles that no other call mutates during this one, as `offsets_map`
+    // requires.
     let offsets = unsafe { offsets_map(offsets) };
+    // SAFETY: Per this function's `# Safety`, `group_metadata` is a live handle, as
+    // `group_metadata_ref` requires; the reference is only cloned, within this statement.
     let group_metadata = Arc::clone(unsafe { group_metadata_ref(group_metadata) });
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires; the
+    // reference does not outlive the call.
     with_txn_control(unsafe { client_ref(self_) }, |p| async move {
         p.send_offsets_to_transaction(offsets, &*group_metadata).await
     })
@@ -718,8 +783,19 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_offsets_to_transaction(
 ///
 /// # Safety
 ///
-/// `self_`, `offsets` and `group_metadata` must be live handles.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+/// `self_` must be a live view, `offsets` a live map of
+/// `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *`
+/// that no other call mutates during this one, and `group_metadata` a live
+/// handle.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading `offsets` and
+    // `group_metadata` comes first and hands nothing over; the body hands `cb` over only as the
+    // last step of `with_txn_control_cb`: to `Client::deliver` before its early return, or to the
+    // task `Client::spawn` registers, after which nothing can panic. So `cb` has not fired for this
+    // `opaque`, as `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_send_offsets_to_transaction_cb(
     self_: *const kafka_producer_Producer_t,
@@ -728,10 +804,18 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_offsets_to_transaction_cb(
     cb: kafka_producer_Producer_send_offsets_to_transaction_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `offsets` is a live map of topic-partition to
+    // offset-and-metadata handles that no other call mutates during this one, as `offsets_map`
+    // requires.
     let offsets = unsafe { offsets_map(offsets) };
+    // SAFETY: Per this function's `# Safety`, `group_metadata` is a live handle, as
+    // `group_metadata_ref` requires; the reference is only cloned, within this statement.
     let group_metadata = Arc::clone(unsafe { group_metadata_ref(group_metadata) });
     with_txn_control_cb(
         "kafka_producer_Producer_send_offsets_to_transaction_cb",
+        // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
+        // `with_txn_control_cb` uses the reference only before it returns, cloning the `Arc` for
+        // the task it spawns.
         unsafe { client_ref(self_) },
         cb,
         opaque,
@@ -749,6 +833,8 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_offsets_to_transaction_cb(
 pub unsafe extern "C" fn kafka_producer_Producer_commit_transaction(
     self_: *const kafka_producer_Producer_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires; the
+    // reference does not outlive the call.
     with_txn_control(unsafe { client_ref(self_) }, |p| async move { p.commit_transaction().await })
 }
 
@@ -757,7 +843,14 @@ pub unsafe extern "C" fn kafka_producer_Producer_commit_transaction(
 /// # Safety
 ///
 /// `self_` must be a live view.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. The body hands `cb` over
+    // only as the last step of `with_txn_control_cb`: to `Client::deliver` before its early return,
+    // or to the task `Client::spawn` registers, after which nothing can panic. So `cb` has not
+    // fired for this `opaque`, as `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_commit_transaction_cb(
     self_: *const kafka_producer_Producer_t,
@@ -766,6 +859,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_commit_transaction_cb(
 ) {
     with_txn_control_cb(
         "kafka_producer_Producer_commit_transaction_cb",
+        // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
+        // `with_txn_control_cb` uses the reference only before it returns, cloning the `Arc` for
+        // the task it spawns.
         unsafe { client_ref(self_) },
         cb,
         opaque,
@@ -783,6 +879,8 @@ pub unsafe extern "C" fn kafka_producer_Producer_commit_transaction_cb(
 pub unsafe extern "C" fn kafka_producer_Producer_abort_transaction(
     self_: *const kafka_producer_Producer_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires; the
+    // reference does not outlive the call.
     with_txn_control(unsafe { client_ref(self_) }, |p| async move { p.abort_transaction().await })
 }
 
@@ -791,7 +889,14 @@ pub unsafe extern "C" fn kafka_producer_Producer_abort_transaction(
 /// # Safety
 ///
 /// `self_` must be a live view.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. The body hands `cb` over
+    // only as the last step of `with_txn_control_cb`: to `Client::deliver` before its early return,
+    // or to the task `Client::spawn` registers, after which nothing can panic. So `cb` has not
+    // fired for this `opaque`, as `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_abort_transaction_cb(
     self_: *const kafka_producer_Producer_t,
@@ -800,6 +905,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_abort_transaction_cb(
 ) {
     with_txn_control_cb(
         "kafka_producer_Producer_abort_transaction_cb",
+        // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
+        // `with_txn_control_cb` uses the reference only before it returns, cloning the `Arc` for
+        // the task it spawns.
         unsafe { client_ref(self_) },
         cb,
         opaque,
@@ -827,6 +935,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_send(
     record: *const kafka_producer_ProducerRecord_t,
     out_send: *mut *mut kafka_common_KafkaFuture_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view, `record` a live handle and
+    // `out_send` a valid slot, and a null `callback` is allowed, which is what
+    // `kafka_producer_Producer_send_with_callback`'s `# Safety` asks for.
     unsafe { kafka_producer_Producer_send_with_callback(self_, record, std::ptr::null(), out_send) }
 }
 
@@ -837,7 +948,14 @@ pub unsafe extern "C" fn kafka_producer_Producer_send(
 /// # Safety
 ///
 /// `self_` and `record` must be live handles.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. The body's one step, the
+    // call to `kafka_producer_Producer_send_with_callback_cb`, delivers `cb` itself (a panic inside
+    // it included) before it returns. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic_value` requires.
+    unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_send_cb(
     self_: *const kafka_producer_Producer_t,
@@ -845,6 +963,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_cb(
     cb: kafka_producer_Producer_send_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view and `record` a live handle,
+    // and a null `callback` is allowed, which is what
+    // `kafka_producer_Producer_send_with_callback_cb`'s `# Safety` asks for.
     unsafe { kafka_producer_Producer_send_with_callback_cb(self_, record, std::ptr::null(), cb, opaque) }
 }
 
@@ -867,14 +988,23 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
     callback: *const kafka_producer_Callback_t,
     out_send_with_callback: *mut *mut kafka_common_KafkaFuture_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
+    // `client` is used only during the call.
     let client = unsafe { client_ref(self_) };
+    // SAFETY: Per this function's `# Safety`, `record` is a live handle, as `producer_record_ref`
+    // requires; the reference is only cloned, within this statement.
     let record = unsafe { producer_record_ref(record) }.clone();
+    // SAFETY: Per this function's `# Safety`, `callback` is null or a live handle, as
+    // `delivery_callback` requires.
     let callback = unsafe { delivery_callback(client, callback) };
     let producer = Arc::clone(&client.producer);
     match block_on(Some(&client.runtime), async move {
         producer.send_with_callback(record, callback).await
     }) {
         Ok(future) => {
+            // SAFETY: Per this function's `# Safety`, `out_send_with_callback` is a valid slot, so
+            // the write is sound; the handle written is the fresh `box_future` the caller owns,
+            // freed with `kafka_common_KafkaFuture_destroy`.
             unsafe {
                 *out_send_with_callback = box_future(
                     metadata_future(&future),
@@ -895,7 +1025,14 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
 ///
 /// `self_` and `record` must be live handles, `callback` null or a live
 /// handle.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. The body hands `cb` over
+    // once, as its last step, after which nothing can panic: in the request the submission channel
+    // accepts or, when the channel refuses it (dropping it unfired), to `deliver_send`. So `cb` has
+    // not fired for this `opaque`, as `deliver_panic_value` requires.
+    unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback_cb(
     self_: *const kafka_producer_Producer_t,
@@ -904,8 +1041,14 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback_cb(
     cb: kafka_producer_Producer_send_with_callback_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
+    // `client` is used only during the call.
     let client = unsafe { client_ref(self_) };
+    // SAFETY: Per this function's `# Safety`, `record` is a live handle, as `producer_record_ref`
+    // requires; the reference is only cloned, within this statement.
     let record = unsafe { producer_record_ref(record) }.clone();
+    // SAFETY: Per this function's `# Safety`, `callback` is null or a live handle, as
+    // `delivery_callback` requires.
     let callback = unsafe { delivery_callback(client, callback) };
     let opaque = SendPtr(opaque);
     #[cfg(test)]
@@ -931,7 +1074,14 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback_cb(
 }
 
 /// The Rust delivery callback queuing a C `on_completion`, or `None`.
+///
+/// # Safety
+///
+/// `callback` must be null or a live handle.
 unsafe fn delivery_callback(client: &Arc<Client>, callback: *const kafka_producer_Callback_t) -> Option<Callback> {
+    // SAFETY: Per this function's `# Safety`, `callback` is a live handle when it is not null, and
+    // the closure runs only then, as `callback_registration` requires; the registration is read
+    // only within this expression.
     (!callback.is_null()).then(|| unsafe { callback_registration(callback) }.into_callback(Arc::clone(&client.queue)))
 }
 
@@ -949,6 +1099,8 @@ unsafe fn delivery_callback(client: &Arc<Client>, callback: *const kafka_produce
 pub unsafe extern "C" fn kafka_producer_Producer_flush(
     self_: *const kafka_producer_Producer_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires; the
+    // reference does not outlive the call.
     with_drain(unsafe { client_ref(self_) }, |p| async move { p.flush().await })
 }
 
@@ -957,7 +1109,13 @@ pub unsafe extern "C" fn kafka_producer_Producer_flush(
 /// # Safety
 ///
 /// `self_` must be a live view.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. The body hands `cb` over
+    // only as the last step of `with_drain_cb`, to the task `Client::spawn` registers, after which
+    // nothing can panic. So `cb` has not fired for this `opaque`, as `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_flush_cb(
     self_: *const kafka_producer_Producer_t,
@@ -966,6 +1124,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_flush_cb(
 ) {
     with_drain_cb(
         "kafka_producer_Producer_flush_cb",
+        // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
+        // `with_drain_cb` uses the reference only before it returns, cloning the `Arc` for the task
+        // it spawns.
         unsafe { client_ref(self_) },
         cb,
         opaque,
@@ -987,11 +1148,18 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for(
     topic: *const c_char,
     out_partitions_for: *mut *mut kafka_List_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
+    // `client` is used only during the call.
     let client = unsafe { client_ref(self_) };
+    // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
+    // `c_str_to_string` requires.
     let topic = unsafe { c_str_to_string(topic) };
     let producer = Arc::clone(&client.producer);
     match block_on(Some(&client.runtime), async move { producer.partitions_for(&topic).await }) {
         Ok(infos) => {
+            // SAFETY: Per this function's `# Safety`, `out_partitions_for` is a valid slot, so the
+            // write is sound; the list written is the fresh `box_list` the caller owns, freed with
+            // `kafka_List_destroy`.
             unsafe { *out_partitions_for = partition_info_list(infos) };
             std::ptr::null_mut()
         },
@@ -1004,7 +1172,14 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for(
 /// # Safety
 ///
 /// `self_` must be a live view and `topic` a NUL-terminated string.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading `self_` and `topic`
+    // comes first and hands nothing over; the body hands `cb` over only as its last step, to the
+    // task `Client::spawn` registers, after which nothing can panic. So `cb` has not fired for this
+    // `opaque`, as `deliver_panic_value` requires.
+    unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_partitions_for_cb(
     self_: *const kafka_producer_Producer_t,
@@ -1012,7 +1187,11 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for_cb(
     cb: kafka_producer_Producer_partitions_for_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
+    // `client` is used only during the call, the task getting its own `Arc`.
     let client = unsafe { client_ref(self_) };
+    // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
+    // `c_str_to_string` requires.
     let topic = unsafe { c_str_to_string(topic) };
     let opaque = SendPtr(opaque);
     let task_client = Arc::clone(client);
@@ -1030,6 +1209,12 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for_cb(
         };
         let value = SendPtr(value as *mut c_void);
         let error = SendPtr(error as *mut c_void);
+        // SAFETY: `cb` and `opaque` are the pair the C caller passed to this entry point, moved
+        // into this one task, which pushes this one job, so calling `cb` with `opaque` is the
+        // completion the caller is waiting for. `value` and `error` are each null or the fresh
+        // `box_list` / `box_error` handle above, owned by no one else, so handing them to `cb`
+        // transfers their ownership, as `kafka_producer_Producer_partitions_for_cb_t` documents;
+        // the job is a `FnOnce`, so `cb` fires exactly once.
         task_client.queue.push(Box::new(move || unsafe {
             cb(
                 value.get() as *mut kafka_List_t,
@@ -1045,7 +1230,14 @@ fn partition_info_list(infos: Vec<crate::common::PartitionInfo>) -> *mut kafka_L
     box_list(elements, Some(destroy_partition_info))
 }
 
+/// Frees a partition-info handle held as a `void *` container element.
+///
+/// # Safety
+///
+/// `element` must be an owned partition-info handle not yet destroyed.
 unsafe fn destroy_partition_info(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned partition-info handle not yet
+    // destroyed, which is what `kafka_common_PartitionInfo_destroy` requires.
     unsafe { kafka_common_PartitionInfo_destroy(element as *mut _) }
 }
 
@@ -1059,6 +1251,8 @@ unsafe fn destroy_partition_info(element: *mut c_void) {
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_metrics(self_: *const kafka_producer_Producer_t) -> *mut kafka_Map_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
+    // `client` is used only during the call.
     let client = unsafe { client_ref(self_) };
     let mut metrics: Vec<_> = client.producer.metrics().into_iter().collect();
     // Deterministic order for a map Java leaves unordered.
@@ -1075,11 +1269,25 @@ pub unsafe extern "C" fn kafka_producer_Producer_metrics(self_: *const kafka_pro
     )
 }
 
+/// Frees a metric-name handle held as a `void *` container element.
+///
+/// # Safety
+///
+/// `element` must be an owned metric-name handle not yet destroyed.
 unsafe fn destroy_metric_name(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned metric-name handle not yet
+    // destroyed, which is what `kafka_common_MetricName_destroy` requires.
     unsafe { kafka_common_MetricName_destroy(element as *mut _) }
 }
 
+/// Frees a metric handle held as a `void *` container element.
+///
+/// # Safety
+///
+/// `element` must be an owned metric handle not yet destroyed.
 unsafe fn destroy_kafka_metric(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned metric handle not yet
+    // destroyed, which is what `kafka_common_metrics_KafkaMetric_destroy` requires.
     unsafe { kafka_common_metrics_KafkaMetric_destroy(element as *mut _) }
 }
 
@@ -1095,6 +1303,8 @@ unsafe fn destroy_kafka_metric(element: *mut c_void) {
 pub unsafe extern "C" fn kafka_producer_Producer_close(
     self_: *const kafka_producer_Producer_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires; the
+    // reference does not outlive the call.
     with_drain(unsafe { client_ref(self_) }, |p| async move { p.close().await })
 }
 
@@ -1103,7 +1313,13 @@ pub unsafe extern "C" fn kafka_producer_Producer_close(
 /// # Safety
 ///
 /// `self_` must be a live view.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. The body hands `cb` over
+    // only as the last step of `with_drain_cb`, to the task `Client::spawn` registers, after which
+    // nothing can panic. So `cb` has not fired for this `opaque`, as `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_close_cb(
     self_: *const kafka_producer_Producer_t,
@@ -1112,6 +1328,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_close_cb(
 ) {
     with_drain_cb(
         "kafka_producer_Producer_close_cb",
+        // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
+        // `with_drain_cb` uses the reference only before it returns, cloning the `Arc` for the task
+        // it spawns.
         unsafe { client_ref(self_) },
         cb,
         opaque,
@@ -1135,7 +1354,8 @@ pub unsafe extern "C" fn kafka_producer_Producer_close_with_timeout(
     self_: *const kafka_producer_Producer_t,
     timeout: i64,
 ) -> *mut kafka_common_Error_t {
-    // SAFETY: the caller passes a live view (see `# Safety`).
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
+    // `client` is used only during the call.
     let client = unsafe { client_ref(self_) };
     let timeout = match close_timeout(client, timeout) {
         Ok(timeout) => timeout,
@@ -1151,7 +1371,15 @@ pub unsafe extern "C" fn kafka_producer_Producer_close_with_timeout(
 /// # Safety
 ///
 /// `self_` must be a live view.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Computing the timeout hands
+    // nothing over; the body hands `cb` over only as its last step: as the last step of
+    // `with_drain_cb`, to the task `Client::spawn` registers, after which nothing can panic, or,
+    // for a rejected timeout, to `Client::deliver`. So `cb` has not fired for this `opaque`, as
+    // `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_close_with_timeout_cb(
     self_: *const kafka_producer_Producer_t,
@@ -1159,7 +1387,8 @@ pub unsafe extern "C" fn kafka_producer_Producer_close_with_timeout_cb(
     cb: kafka_producer_Producer_close_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
-    // SAFETY: the caller passes a live view (see `# Safety`).
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
+    // `client` is used only during the call.
     let client = unsafe { client_ref(self_) };
     match close_timeout(client, timeout) {
         Ok(timeout) => {
@@ -1201,6 +1430,8 @@ fn close_timeout(client: &Client, timeout: i64) -> Result<Duration, Error> {
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer__execute_callbacks(self_: *const kafka_producer_Producer_t) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires; the
+    // reference does not outlive the call.
     unsafe { client_ref(self_) }.queue.execute()
 }
 
@@ -1219,6 +1450,9 @@ pub unsafe extern "C" fn kafka_producer_Producer__set_callbacks_notify(
     notify: kafka_producer_Producer_callbacks_notify_fn_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires, and
+    // `opaque` stays valid while the hook is installed, which is what the hook call in
+    // `CallbackQueue::notify_if` relies on: `notify` and `opaque` are stored together.
     unsafe { client_ref(self_) }.queue.set_notify(Some(notify), opaque);
 }
 

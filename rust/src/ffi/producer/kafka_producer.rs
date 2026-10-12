@@ -135,22 +135,43 @@ impl Serializer<GenericValue> for ArcSerializer {
 ///
 /// # Safety
 ///
-/// `serializer` must be null or a live handle.
+/// `serializer` must be null or a live handle; an owned one must not be used
+/// again by the caller.
 pub(crate) unsafe fn serializer_from(
     serializer: *mut kafka_common_serialization_Serializer_t,
 ) -> Box<dyn Serializer<GenericValue> + Send + Sync> {
     if serializer.is_null() {
         Box::new(BytesPassthrough)
     } else {
+        // SAFETY: Per this function's `# Safety`, `serializer` is a live handle (non-null, checked
+        // above), as `take_serializer` requires; an owned one is not used again by the caller, as
+        // the `# Safety` states.
         Box::new(ArcSerializer(unsafe { take_serializer(serializer) }))
     }
 }
 
+/// The class state behind a handle.
+///
+/// # Safety
+///
+/// `self_` must be a live handle, kept alive for `'a`.
 unsafe fn handle<'a>(self_: *const kafka_producer_KafkaProducer_t) -> &'a Handle {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live class handle kept alive for `'a`,
+    // i.e. the `Box::into_raw` of a `Handle` in `kafka_producer_KafkaProducer_new`, the only
+    // constructor. `Handle` is only ever shared (`destroy` takes it back by `Box::from_raw`), so
+    // the shared reference is sound.
     unsafe { &*(self_ as *const Handle) }
 }
 
+/// The handle's `__as_Producer` view.
+///
+/// # Safety
+///
+/// `self_` must be a live handle.
 unsafe fn producer(self_: *const kafka_producer_KafkaProducer_t) -> *const kafka_producer_Producer_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live class handle, as `handle` requires;
+    // the view returned is the address of the handle's `client` field, which lives as long as the
+    // handle.
     unsafe { handle(self_) }.as_producer()
 }
 
@@ -160,8 +181,8 @@ unsafe fn producer(self_: *const kafka_producer_KafkaProducer_t) -> *const kafka
 ///
 /// # Safety
 ///
-/// `config` must be a live handle, each serializer null or a live handle,
-/// `out_new` a valid slot.
+/// `config` must be a live handle, each serializer null or a live handle (an
+/// owned one not used again by the caller), `out_new` a valid slot.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(
@@ -170,14 +191,25 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(
     value_serializer: *mut kafka_common_serialization_Serializer_t,
     out_new: *mut *mut kafka_producer_KafkaProducer_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `config` is a live handle; no
+    // `kafka_producer_ProducerConfig_set_partitioner` call can run on it meanwhile, since that
+    // function's `# Safety` excludes any other call using the handle at the same time, so
+    // `producer_config_ref`'s requirement holds for this statement, the only use of the reference.
     let config = match unsafe { producer_config_ref(config) }.build() {
         Ok(config) => config,
         Err(error) => return box_error(error),
     };
+    // SAFETY: Per this function's `# Safety`, `key_serializer` is null or a live handle, not used
+    // again by the caller when owned, as `serializer_from` requires.
     let key_serializer = unsafe { serializer_from(key_serializer) };
+    // SAFETY: Per this function's `# Safety`, `value_serializer` is null or a live handle, not used
+    // again by the caller when owned, as `serializer_from` requires.
     let value_serializer = unsafe { serializer_from(value_serializer) };
     match ProducerHandle::new(|| KafkaProducer::new(config, key_serializer, value_serializer), true) {
         Ok(handle) => {
+            // SAFETY: Per this function's `# Safety`, `out_new` is a valid slot, so the write is
+            // sound; the handle written is the fresh box the caller owns, freed with
+            // `kafka_producer_KafkaProducer_destroy`.
             unsafe { *out_new = Box::into_raw(handle) as *mut kafka_producer_KafkaProducer_t };
             std::ptr::null_mut()
         },
@@ -197,6 +229,9 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(
 pub unsafe extern "C" fn kafka_producer_KafkaProducer__as_Producer(
     self_: *const kafka_producer_KafkaProducer_t,
 ) -> *const kafka_producer_Producer_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `producer` requires; the
+    // view is valid until the class handle is destroyed, as the rustdoc states, since it is the
+    // address of a field of that handle.
     unsafe { producer(self_) }
 }
 
@@ -211,6 +246,9 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer__as_Producer(
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_init_transactions(
     self_: *const kafka_producer_KafkaProducer_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `producer` requires, so
+    // `producer(self_)` is its live `__as_Producer` view, which is what
+    // `kafka_producer_Producer_init_transactions`'s `# Safety` asks for.
     unsafe { kafka_producer_Producer_init_transactions(producer(self_)) }
 }
 
@@ -219,13 +257,24 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_init_transactions(
 /// # Safety
 ///
 /// `self_` must be a live handle.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(producer(self_)), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, so `producer(self_)` is its
+    // live `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the
+    // body did not return, and the body's one step, the call to
+    // `kafka_producer_Producer_init_transactions_cb`, delivers `cb` itself (a panic inside it
+    // included) before it returns, so `cb` has not fired for this `opaque`, as `deliver_panic`
+    // requires.
+    unsafe { deliver_panic(completion_sink(producer(self_)), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_init_transactions_cb(
     self_: *const kafka_producer_KafkaProducer_t,
     cb: kafka_producer_KafkaProducer_init_transactions_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `producer` requires, so
+    // `producer(self_)` is its live `__as_Producer` view, which is what
+    // `kafka_producer_Producer_init_transactions_cb`'s `# Safety` asks for.
     unsafe { kafka_producer_Producer_init_transactions_cb(producer(self_), cb, opaque) }
 }
 
@@ -240,6 +289,9 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_init_transactions_cb(
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_begin_transaction(
     self_: *const kafka_producer_KafkaProducer_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `producer` requires, so
+    // `producer(self_)` is its live `__as_Producer` view, which is what
+    // `kafka_producer_Producer_begin_transaction`'s `# Safety` asks for.
     unsafe { kafka_producer_Producer_begin_transaction(producer(self_)) }
 }
 
@@ -248,7 +300,10 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_begin_transaction(
 ///
 /// # Safety
 ///
-/// `self_`, `offsets` and `group_metadata` must be live handles.
+/// `self_` must be a live handle, `offsets` a live map of
+/// `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *`
+/// that no other call mutates during this one, and `group_metadata` a live
+/// handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_send_offsets_to_transaction(
@@ -256,6 +311,11 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_send_offsets_to_transactio
     offsets: *const kafka_Map_t,
     group_metadata: *const kafka_consumer_ConsumerGroupMetadata_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `producer` requires, so
+    // `producer(self_)` is its live `__as_Producer` view, `offsets` a live map of topic-partition
+    // to offset-and-metadata handles that no other call mutates meanwhile and `group_metadata` a
+    // live handle, which is what
+    // `kafka_producer_Producer_send_offsets_to_transaction`'s `# Safety` asks for.
     unsafe { kafka_producer_Producer_send_offsets_to_transaction(producer(self_), offsets, group_metadata) }
 }
 
@@ -263,8 +323,19 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_send_offsets_to_transactio
 ///
 /// # Safety
 ///
-/// `self_`, `offsets` and `group_metadata` must be live handles.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(producer(self_)), cb, opaque, err) })]
+/// `self_` must be a live handle, `offsets` a live map of
+/// `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *`
+/// that no other call mutates during this one, and `group_metadata` a live
+/// handle.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, so `producer(self_)` is its
+    // live `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the
+    // body did not return, and the body's one step, the call to
+    // `kafka_producer_Producer_send_offsets_to_transaction_cb`, delivers `cb` itself (a panic
+    // inside it included) before it returns, so `cb` has not fired for this `opaque`, as
+    // `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(producer(self_)), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_send_offsets_to_transaction_cb(
     self_: *const kafka_producer_KafkaProducer_t,
@@ -273,6 +344,11 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_send_offsets_to_transactio
     cb: kafka_producer_KafkaProducer_send_offsets_to_transaction_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `producer` requires, so
+    // `producer(self_)` is its live `__as_Producer` view, `offsets` a live map of topic-partition
+    // to offset-and-metadata handles that no other call mutates meanwhile and `group_metadata` a
+    // live handle, which is what
+    // `kafka_producer_Producer_send_offsets_to_transaction_cb`'s `# Safety` asks for.
     unsafe {
         kafka_producer_Producer_send_offsets_to_transaction_cb(producer(self_), offsets, group_metadata, cb, opaque)
     }
@@ -289,6 +365,9 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_send_offsets_to_transactio
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_commit_transaction(
     self_: *const kafka_producer_KafkaProducer_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `producer` requires, so
+    // `producer(self_)` is its live `__as_Producer` view, which is what
+    // `kafka_producer_Producer_commit_transaction`'s `# Safety` asks for.
     unsafe { kafka_producer_Producer_commit_transaction(producer(self_)) }
 }
 
@@ -297,13 +376,24 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_commit_transaction(
 /// # Safety
 ///
 /// `self_` must be a live handle.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(producer(self_)), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, so `producer(self_)` is its
+    // live `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the
+    // body did not return, and the body's one step, the call to
+    // `kafka_producer_Producer_commit_transaction_cb`, delivers `cb` itself (a panic inside it
+    // included) before it returns, so `cb` has not fired for this `opaque`, as `deliver_panic`
+    // requires.
+    unsafe { deliver_panic(completion_sink(producer(self_)), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_commit_transaction_cb(
     self_: *const kafka_producer_KafkaProducer_t,
     cb: kafka_producer_KafkaProducer_commit_transaction_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `producer` requires, so
+    // `producer(self_)` is its live `__as_Producer` view, which is what
+    // `kafka_producer_Producer_commit_transaction_cb`'s `# Safety` asks for.
     unsafe { kafka_producer_Producer_commit_transaction_cb(producer(self_), cb, opaque) }
 }
 
@@ -318,6 +408,9 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_commit_transaction_cb(
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_abort_transaction(
     self_: *const kafka_producer_KafkaProducer_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `producer` requires, so
+    // `producer(self_)` is its live `__as_Producer` view, which is what
+    // `kafka_producer_Producer_abort_transaction`'s `# Safety` asks for.
     unsafe { kafka_producer_Producer_abort_transaction(producer(self_)) }
 }
 
@@ -326,13 +419,24 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_abort_transaction(
 /// # Safety
 ///
 /// `self_` must be a live handle.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(producer(self_)), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, so `producer(self_)` is its
+    // live `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the
+    // body did not return, and the body's one step, the call to
+    // `kafka_producer_Producer_abort_transaction_cb`, delivers `cb` itself (a panic inside it
+    // included) before it returns, so `cb` has not fired for this `opaque`, as `deliver_panic`
+    // requires.
+    unsafe { deliver_panic(completion_sink(producer(self_)), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_abort_transaction_cb(
     self_: *const kafka_producer_KafkaProducer_t,
     cb: kafka_producer_KafkaProducer_abort_transaction_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `producer` requires, so
+    // `producer(self_)` is its live `__as_Producer` view, which is what
+    // `kafka_producer_Producer_abort_transaction_cb`'s `# Safety` asks for.
     unsafe { kafka_producer_Producer_abort_transaction_cb(producer(self_), cb, opaque) }
 }
 
@@ -351,6 +455,10 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_send(
     callback: *const kafka_producer_Callback_t,
     out_send: *mut *mut kafka_common_KafkaFuture_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `producer` requires, so
+    // `producer(self_)` is its live `__as_Producer` view, `record` a live handle, `callback` null
+    // or a live handle and `out_send` a valid slot, which is what
+    // `kafka_producer_Producer_send_with_callback`'s `# Safety` asks for.
     unsafe { kafka_producer_Producer_send_with_callback(producer(self_), record, callback, out_send) }
 }
 
@@ -361,7 +469,15 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_send(
 ///
 /// `self_` and `record` must be live handles, `callback` null or a live
 /// handle.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic_value(completion_sink(producer(self_)), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, so `producer(self_)` is its
+    // live `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the
+    // body did not return, and the body's one step, the call to
+    // `kafka_producer_Producer_send_with_callback_cb`, delivers `cb` itself (a panic inside it
+    // included) before it returns, so `cb` has not fired for this `opaque`, as
+    // `deliver_panic_value` requires.
+    unsafe { deliver_panic_value(completion_sink(producer(self_)), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_send_cb(
     self_: *const kafka_producer_KafkaProducer_t,
@@ -370,6 +486,10 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_send_cb(
     cb: kafka_producer_KafkaProducer_send_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `producer` requires, so
+    // `producer(self_)` is its live `__as_Producer` view, `record` a live handle and `callback`
+    // null or a live handle, which is what `kafka_producer_Producer_send_with_callback_cb`'s
+    // `# Safety` asks for.
     unsafe { kafka_producer_Producer_send_with_callback_cb(producer(self_), record, callback, cb, opaque) }
 }
 
@@ -384,6 +504,10 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_send_cb(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_destroy(self_: *mut kafka_producer_KafkaProducer_t) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, a handle
+        // not yet destroyed, i.e. the `Box::into_raw` of `kafka_producer_KafkaProducer_new`, so
+        // `Box::from_raw` reclaims it exactly once; its `__as_Producer` views, addresses inside it,
+        // are invalid afterwards, as the rustdoc states.
         unsafe { *Box::from_raw(self_ as *mut Handle) }.destroy();
     }
 }
@@ -434,6 +558,10 @@ mod tests {
         let props = box_string_map([("bootstrap.servers", "localhost:1"), ("max.block.ms", "100")]);
         let topic = CString::new("topic").unwrap();
         let bytes = kafka_Bytes_t::from_slice(b"v");
+        // SAFETY: Test code: `props`, `config`, `record` and the producer are live from their
+        // constructor to their single destroy below, `future` and each error are destroyed once
+        // after their last use, `view` is used only before the producer is destroyed, and
+        // `rejected` outlives the callback run that writes it.
         unsafe {
             let mut config = std::ptr::null_mut();
             assert!(kafka_producer_ProducerConfig_new(props, &raw mut config).is_null());
