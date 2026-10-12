@@ -86,7 +86,17 @@ pub(crate) fn box_consumer_handle(client: &Arc<Client>) -> *mut kafka_consumer_C
     })) as *mut kafka_consumer_ConsumerHandle_t
 }
 
+/// What a handle points at.
+///
+/// # Safety
+///
+/// `self_` must be a live handle, i.e. one from `box_consumer_handle` not yet
+/// destroyed, kept alive for `'a`.
 unsafe fn inner<'a>(self_: *const kafka_consumer_ConsumerHandle_t) -> &'a HandleInner {
+    // SAFETY: Per this function's `# Safety`, `self_` is a `Box<HandleInner>` from
+    // `box_consumer_handle`, the only constructor, kept alive for `'a`; nothing takes a `&mut` to
+    // it but `kafka_consumer_ConsumerHandle_destroy`, which no other call may overlap, so the
+    // shared reference is valid for `'a`.
     unsafe { &*(self_ as *const HandleInner) }
 }
 
@@ -165,6 +175,9 @@ impl HandleInner {
 ///
 /// `self_` must be a live handle.
 unsafe fn completion_sink(self_: *const kafka_consumer_ConsumerHandle_t) -> impl FnOnce(CallbackJob) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this expression,
+    // the only use of the reference, as `inner` requires; the sink keeps the upgraded `Arc`, if
+    // any, not the reference.
     let client = unsafe { inner(self_) }.client.upgrade();
     move |job| match client {
         Some(client) => client.delivery.queue.push(job),
@@ -190,7 +203,12 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_assign(
     self_: *const kafka_consumer_ConsumerHandle_t,
     partitions: *const kafka_List_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     let h = inner.handle.clone();
     error_slot(inner.run_blocking(
@@ -210,7 +228,15 @@ pub type kafka_consumer_ConsumerHandle_assign_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of
+    // `HandleInner::run_cb`: to the task `Client::spawn` registers, after which nothing can panic,
+    // or, once the consumer is destroyed, to the inline fallback, which fires `cb` as its last
+    // action. So `cb` has not fired for this `opaque`, as `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_assign_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -218,7 +244,12 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_assign_cb(
     cb: kafka_consumer_ConsumerHandle_assign_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
@@ -226,6 +257,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_assign_cb(
         "kafka_consumer_ConsumerHandle_assign_cb",
         async move { h.assign(partitions).await },
         move |client, result| deliver_void(client, cb, opaque, result),
+        // SAFETY: `cb` and `opaque` are this call's own arguments, and `cb` is valid per this
+        // function's `# Safety`. `run_cb` calls this fallback only when the consumer is gone and
+        // nothing was spawned, so `deliver` never runs and `cb` fires here exactly once, with an
+        // owned error.
         |error| unsafe { cb(box_error(error), opaque.get()) },
     )
 }
@@ -246,7 +281,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_offset(
     partition: *const kafka_common_TopicPartition_t,
     offset: i64,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, alive
+    // for this expression, as `topic_partition_ref` requires; the value is cloned.
     let partition = unsafe { topic_partition_ref(partition) }.clone();
     let h = inner.handle.clone();
     error_slot(
@@ -267,7 +306,15 @@ pub type kafka_consumer_ConsumerHandle_seek_with_offset_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of
+    // `HandleInner::run_cb`: to the task `Client::spawn` registers, after which nothing can panic,
+    // or, once the consumer is destroyed, to the inline fallback, which fires `cb` as its last
+    // action. So `cb` has not fired for this `opaque`, as `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_offset_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -276,7 +323,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_offset_cb(
     cb: kafka_consumer_ConsumerHandle_seek_with_offset_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, alive
+    // for this expression, as `topic_partition_ref` requires; the value is cloned.
     let partition = unsafe { topic_partition_ref(partition) }.clone();
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
@@ -284,6 +335,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_offset_cb(
         "kafka_consumer_ConsumerHandle_seek_with_offset_cb",
         async move { h.seek_with_offset(partition, offset).await },
         move |client, result| deliver_void(client, cb, opaque, result),
+        // SAFETY: `cb` and `opaque` are this call's own arguments, and `cb` is valid per this
+        // function's `# Safety`. `run_cb` calls this fallback only when the consumer is gone and
+        // nothing was spawned, so `deliver` never runs and `cb` fires here exactly once, with an
+        // owned error.
         |error| unsafe { cb(box_error(error), opaque.get()) },
     )
 }
@@ -304,8 +359,15 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_offset_and_meta
     partition: *const kafka_common_TopicPartition_t,
     offset_and_metadata: *const kafka_consumer_OffsetAndMetadata_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, alive
+    // for this expression, as `topic_partition_ref` requires; the value is cloned.
     let partition = unsafe { topic_partition_ref(partition) }.clone();
+    // SAFETY: Per this function's `# Safety`, `offset_and_metadata` is a valid offset-and-metadata
+    // handle, alive for this expression, as `offset_and_metadata_ref` requires; the value is
+    // cloned.
     let offset_and_metadata = unsafe { offset_and_metadata_ref(offset_and_metadata) }.clone();
     let h = inner.handle.clone();
     error_slot(
@@ -326,7 +388,15 @@ pub type kafka_consumer_ConsumerHandle_seek_with_offset_and_metadata_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of
+    // `HandleInner::run_cb`: to the task `Client::spawn` registers, after which nothing can panic,
+    // or, once the consumer is destroyed, to the inline fallback, which fires `cb` as its last
+    // action. So `cb` has not fired for this `opaque`, as `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_offset_and_metadata_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -335,8 +405,15 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_offset_and_meta
     cb: kafka_consumer_ConsumerHandle_seek_with_offset_and_metadata_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, alive
+    // for this expression, as `topic_partition_ref` requires; the value is cloned.
     let partition = unsafe { topic_partition_ref(partition) }.clone();
+    // SAFETY: Per this function's `# Safety`, `offset_and_metadata` is a valid offset-and-metadata
+    // handle, alive for this expression, as `offset_and_metadata_ref` requires; the value is
+    // cloned.
     let offset_and_metadata = unsafe { offset_and_metadata_ref(offset_and_metadata) }.clone();
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
@@ -344,6 +421,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_offset_and_meta
         "kafka_consumer_ConsumerHandle_seek_with_offset_and_metadata_cb",
         async move { h.seek_with_offset_and_metadata(partition, offset_and_metadata).await },
         move |client, result| deliver_void(client, cb, opaque, result),
+        // SAFETY: `cb` and `opaque` are this call's own arguments, and `cb` is valid per this
+        // function's `# Safety`. `run_cb` calls this fallback only when the consumer is gone and
+        // nothing was spawned, so `deliver` never runs and `cb` fires here exactly once, with an
+        // owned error.
         |error| unsafe { cb(box_error(error), opaque.get()) },
     )
 }
@@ -363,7 +444,12 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_beginning(
     self_: *const kafka_consumer_ConsumerHandle_t,
     partitions: *const kafka_List_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     let h = inner.handle.clone();
     error_slot(
@@ -384,7 +470,15 @@ pub type kafka_consumer_ConsumerHandle_seek_to_beginning_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of
+    // `HandleInner::run_cb`: to the task `Client::spawn` registers, after which nothing can panic,
+    // or, once the consumer is destroyed, to the inline fallback, which fires `cb` as its last
+    // action. So `cb` has not fired for this `opaque`, as `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_beginning_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -392,7 +486,12 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_beginning_cb(
     cb: kafka_consumer_ConsumerHandle_seek_to_beginning_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
@@ -400,6 +499,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_beginning_cb(
         "kafka_consumer_ConsumerHandle_seek_to_beginning_cb",
         async move { h.seek_to_beginning(&partitions).await },
         move |client, result| deliver_void(client, cb, opaque, result),
+        // SAFETY: `cb` and `opaque` are this call's own arguments, and `cb` is valid per this
+        // function's `# Safety`. `run_cb` calls this fallback only when the consumer is gone and
+        // nothing was spawned, so `deliver` never runs and `cb` fires here exactly once, with an
+        // owned error.
         |error| unsafe { cb(box_error(error), opaque.get()) },
     )
 }
@@ -419,7 +522,12 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_end(
     self_: *const kafka_consumer_ConsumerHandle_t,
     partitions: *const kafka_List_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     let h = inner.handle.clone();
     error_slot(inner.run_blocking("kafka_consumer_ConsumerHandle_seek_to_end", async move {
@@ -438,7 +546,15 @@ pub type kafka_consumer_ConsumerHandle_seek_to_end_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of
+    // `HandleInner::run_cb`: to the task `Client::spawn` registers, after which nothing can panic,
+    // or, once the consumer is destroyed, to the inline fallback, which fires `cb` as its last
+    // action. So `cb` has not fired for this `opaque`, as `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_end_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -446,7 +562,12 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_end_cb(
     cb: kafka_consumer_ConsumerHandle_seek_to_end_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
@@ -454,6 +575,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_end_cb(
         "kafka_consumer_ConsumerHandle_seek_to_end_cb",
         async move { h.seek_to_end(&partitions).await },
         move |client, result| deliver_void(client, cb, opaque, result),
+        // SAFETY: `cb` and `opaque` are this call's own arguments, and `cb` is valid per this
+        // function's `# Safety`. `run_cb` calls this fallback only when the consumer is gone and
+        // nothing was spawned, so `deliver` never runs and `cb` fires here exactly once, with an
+        // owned error.
         |error| unsafe { cb(box_error(error), opaque.get()) },
     )
 }
@@ -473,7 +598,12 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_pause(
     self_: *const kafka_consumer_ConsumerHandle_t,
     partitions: *const kafka_List_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     let h = inner.handle.clone();
     error_slot(inner.run_blocking("kafka_consumer_ConsumerHandle_pause", async move { h.pause(&partitions).await }))
@@ -490,7 +620,15 @@ pub type kafka_consumer_ConsumerHandle_pause_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of
+    // `HandleInner::run_cb`: to the task `Client::spawn` registers, after which nothing can panic,
+    // or, once the consumer is destroyed, to the inline fallback, which fires `cb` as its last
+    // action. So `cb` has not fired for this `opaque`, as `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_pause_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -498,7 +636,12 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_pause_cb(
     cb: kafka_consumer_ConsumerHandle_pause_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
@@ -506,6 +649,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_pause_cb(
         "kafka_consumer_ConsumerHandle_pause_cb",
         async move { h.pause(&partitions).await },
         move |client, result| deliver_void(client, cb, opaque, result),
+        // SAFETY: `cb` and `opaque` are this call's own arguments, and `cb` is valid per this
+        // function's `# Safety`. `run_cb` calls this fallback only when the consumer is gone and
+        // nothing was spawned, so `deliver` never runs and `cb` fires here exactly once, with an
+        // owned error.
         |error| unsafe { cb(box_error(error), opaque.get()) },
     )
 }
@@ -525,7 +672,12 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_resume(
     self_: *const kafka_consumer_ConsumerHandle_t,
     partitions: *const kafka_List_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     let h = inner.handle.clone();
     error_slot(inner.run_blocking(
@@ -545,7 +697,15 @@ pub type kafka_consumer_ConsumerHandle_resume_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of
+    // `HandleInner::run_cb`: to the task `Client::spawn` registers, after which nothing can panic,
+    // or, once the consumer is destroyed, to the inline fallback, which fires `cb` as its last
+    // action. So `cb` has not fired for this `opaque`, as `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_resume_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -553,7 +713,12 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_resume_cb(
     cb: kafka_consumer_ConsumerHandle_resume_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
@@ -561,6 +726,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_resume_cb(
         "kafka_consumer_ConsumerHandle_resume_cb",
         async move { h.resume(&partitions).await },
         move |client, result| deliver_void(client, cb, opaque, result),
+        // SAFETY: `cb` and `opaque` are this call's own arguments, and `cb` is valid per this
+        // function's `# Safety`. `run_cb` calls this fallback only when the consumer is gone and
+        // nothing was spawned, so `deliver` never runs and `cb` fires here exactly once, with an
+        // owned error.
         |error| unsafe { cb(box_error(error), opaque.get()) },
     )
 }
@@ -581,13 +750,19 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position(
     partition: *const kafka_common_TopicPartition_t,
     out_position: *mut i64,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, alive
+    // for this expression, as `topic_partition_ref` requires; the value is cloned.
     let partition = unsafe { topic_partition_ref(partition) }.clone();
     let h = inner.handle.clone();
     let result = inner.run_blocking(
         "kafka_consumer_ConsumerHandle_position",
         async move { h.position(&partition).await },
     );
+    // SAFETY: Per this function's `# Safety`, `out_position` is a valid pointer to write the result
+    // to, as `out_slot` requires.
     unsafe { out_slot(result, out_position, |v| v) }
 }
 
@@ -602,7 +777,15 @@ pub type kafka_consumer_ConsumerHandle_position_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic_i64(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of
+    // `HandleInner::run_cb`: to the task `Client::spawn` registers, after which nothing can panic,
+    // or, once the consumer is destroyed, to the inline fallback, which fires `cb` as its last
+    // action. So `cb` has not fired for this `opaque`, as `deliver_panic_i64` requires.
+    unsafe { deliver_panic_i64(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -610,7 +793,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position_cb(
     cb: kafka_consumer_ConsumerHandle_position_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, alive
+    // for this expression, as `topic_partition_ref` requires; the value is cloned.
     let partition = unsafe { topic_partition_ref(partition) }.clone();
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
@@ -618,6 +805,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position_cb(
         "kafka_consumer_ConsumerHandle_position_cb",
         async move { h.position(&partition).await },
         move |client, result| deliver_i64(client, cb, opaque, result),
+        // SAFETY: `cb` and `opaque` are this call's own arguments, and `cb` is valid per this
+        // function's `# Safety`. `run_cb` calls this fallback only when the consumer is gone and
+        // nothing was spawned, so `deliver` never runs and `cb` fires here exactly once, with an
+        // owned error.
         |error| unsafe { cb(-1, box_error(error), opaque.get()) },
     )
 }
@@ -640,12 +831,18 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position_with_timeout(
     timeout: i64,
     out_position_with_timeout: *mut i64,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, alive
+    // for this expression, as `topic_partition_ref` requires; the value is cloned.
     let partition = unsafe { topic_partition_ref(partition) }.clone();
     let h = inner.handle.clone();
     let result = inner.run_blocking("kafka_consumer_ConsumerHandle_position_with_timeout", async move {
         h.position_with_timeout(&partition, ms(timeout)?).await
     });
+    // SAFETY: Per this function's `# Safety`, `out_position_with_timeout` is a valid pointer to
+    // write the result to, as `out_slot` requires.
     unsafe { out_slot(result, out_position_with_timeout, |v| v) }
 }
 
@@ -660,7 +857,15 @@ pub type kafka_consumer_ConsumerHandle_position_with_timeout_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic_i64(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of
+    // `HandleInner::run_cb`: to the task `Client::spawn` registers, after which nothing can panic,
+    // or, once the consumer is destroyed, to the inline fallback, which fires `cb` as its last
+    // action. So `cb` has not fired for this `opaque`, as `deliver_panic_i64` requires.
+    unsafe { deliver_panic_i64(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position_with_timeout_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -669,7 +874,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position_with_timeout_cb(
     cb: kafka_consumer_ConsumerHandle_position_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, alive
+    // for this expression, as `topic_partition_ref` requires; the value is cloned.
     let partition = unsafe { topic_partition_ref(partition) }.clone();
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
@@ -677,6 +886,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position_with_timeout_cb(
         "kafka_consumer_ConsumerHandle_position_with_timeout_cb",
         async move { h.position_with_timeout(&partition, ms(timeout)?).await },
         move |client, result| deliver_i64(client, cb, opaque, result),
+        // SAFETY: `cb` and `opaque` are this call's own arguments, and `cb` is valid per this
+        // function's `# Safety`. `run_cb` calls this fallback only when the consumer is gone and
+        // nothing was spawned, so `deliver` never runs and `cb` fires here exactly once, with an
+        // owned error.
         |error| unsafe { cb(-1, box_error(error), opaque.get()) },
     )
 }
@@ -700,12 +913,19 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed(
     partitions: *const kafka_List_t,
     out_committed: *mut *mut kafka_Map_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     let h = inner.handle.clone();
     let result = inner.run_blocking("kafka_consumer_ConsumerHandle_committed", async move {
         h.committed(&partitions).await
     });
+    // SAFETY: Per this function's `# Safety`, `out_committed` is a valid pointer to write the
+    // result to, as `out_slot` requires.
     unsafe { out_slot(result, out_committed, |offsets| offset_and_metadata_map(&offsets)) }
 }
 
@@ -720,7 +940,15 @@ pub type kafka_consumer_ConsumerHandle_committed_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of
+    // `HandleInner::run_cb`: to the task `Client::spawn` registers, after which nothing can panic,
+    // or, once the consumer is destroyed, to the inline fallback, which fires `cb` as its last
+    // action. So `cb` has not fired for this `opaque`, as `deliver_panic_value` requires.
+    unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -728,7 +956,12 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed_cb(
     cb: kafka_consumer_ConsumerHandle_committed_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
@@ -736,6 +969,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed_cb(
         "kafka_consumer_ConsumerHandle_committed_cb",
         async move { h.committed(&partitions).await },
         move |client, result| deliver_ptr(client, cb, opaque, result, move |offsets| offset_and_metadata_map(&offsets)),
+        // SAFETY: `cb` and `opaque` are this call's own arguments, and `cb` is valid per this
+        // function's `# Safety`. `run_cb` calls this fallback only when the consumer is gone and
+        // nothing was spawned, so `deliver` never runs and `cb` fires here exactly once, with an
+        // owned error.
         |error| unsafe { cb(std::ptr::null_mut(), box_error(error), opaque.get()) },
     )
 }
@@ -758,12 +995,19 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets(
     partitions: *const kafka_List_t,
     out_beginning_offsets: *mut *mut kafka_Map_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     let h = inner.handle.clone();
     let result = inner.run_blocking("kafka_consumer_ConsumerHandle_beginning_offsets", async move {
         h.beginning_offsets(&partitions).await
     });
+    // SAFETY: Per this function's `# Safety`, `out_beginning_offsets` is a valid pointer to write
+    // the result to, as `out_slot` requires.
     unsafe { out_slot(result, out_beginning_offsets, |offsets| topic_partition_i64_map(&offsets)) }
 }
 
@@ -778,7 +1022,15 @@ pub type kafka_consumer_ConsumerHandle_beginning_offsets_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of
+    // `HandleInner::run_cb`: to the task `Client::spawn` registers, after which nothing can panic,
+    // or, once the consumer is destroyed, to the inline fallback, which fires `cb` as its last
+    // action. So `cb` has not fired for this `opaque`, as `deliver_panic_value` requires.
+    unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -786,7 +1038,12 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets_cb(
     cb: kafka_consumer_ConsumerHandle_beginning_offsets_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
@@ -794,6 +1051,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets_cb(
         "kafka_consumer_ConsumerHandle_beginning_offsets_cb",
         async move { h.beginning_offsets(&partitions).await },
         move |client, result| deliver_ptr(client, cb, opaque, result, move |offsets| topic_partition_i64_map(&offsets)),
+        // SAFETY: `cb` and `opaque` are this call's own arguments, and `cb` is valid per this
+        // function's `# Safety`. `run_cb` calls this fallback only when the consumer is gone and
+        // nothing was spawned, so `deliver` never runs and `cb` fires here exactly once, with an
+        // owned error.
         |error| unsafe { cb(std::ptr::null_mut(), box_error(error), opaque.get()) },
     )
 }
@@ -816,12 +1077,19 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets(
     partitions: *const kafka_List_t,
     out_end_offsets: *mut *mut kafka_Map_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     let h = inner.handle.clone();
     let result = inner.run_blocking("kafka_consumer_ConsumerHandle_end_offsets", async move {
         h.end_offsets(&partitions).await
     });
+    // SAFETY: Per this function's `# Safety`, `out_end_offsets` is a valid pointer to write the
+    // result to, as `out_slot` requires.
     unsafe { out_slot(result, out_end_offsets, |offsets| topic_partition_i64_map(&offsets)) }
 }
 
@@ -836,7 +1104,15 @@ pub type kafka_consumer_ConsumerHandle_end_offsets_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of
+    // `HandleInner::run_cb`: to the task `Client::spawn` registers, after which nothing can panic,
+    // or, once the consumer is destroyed, to the inline fallback, which fires `cb` as its last
+    // action. So `cb` has not fired for this `opaque`, as `deliver_panic_value` requires.
+    unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -844,7 +1120,12 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets_cb(
     cb: kafka_consumer_ConsumerHandle_end_offsets_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+    // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
+    // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
@@ -852,6 +1133,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets_cb(
         "kafka_consumer_ConsumerHandle_end_offsets_cb",
         async move { h.end_offsets(&partitions).await },
         move |client, result| deliver_ptr(client, cb, opaque, result, move |offsets| topic_partition_i64_map(&offsets)),
+        // SAFETY: `cb` and `opaque` are this call's own arguments, and `cb` is valid per this
+        // function's `# Safety`. `run_cb` calls this fallback only when the consumer is gone and
+        // nothing was spawned, so `deliver` never runs and `cb` fires here exactly once, with an
+        // owned error.
         |error| unsafe { cb(std::ptr::null_mut(), box_error(error), opaque.get()) },
     )
 }
@@ -876,12 +1161,19 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times(
     timestamps_to_search: *const kafka_Map_t,
     out_offsets_for_times: *mut *mut kafka_Map_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `timestamps_to_search` is null or a valid map of
+    // `kafka_common_TopicPartition_t *` to `int64_t *`, as `map_topic_partition_i64` requires; the
+    // entries are copied, so the borrow lasts for this call only.
     let timestamps_to_search = unsafe { map_topic_partition_i64(timestamps_to_search) };
     let h = inner.handle.clone();
     let result = inner.run_blocking("kafka_consumer_ConsumerHandle_offsets_for_times", async move {
         h.offsets_for_times(timestamps_to_search).await
     });
+    // SAFETY: Per this function's `# Safety`, `out_offsets_for_times` is a valid pointer to write
+    // the result to, as `out_slot` requires.
     unsafe { out_slot(result, out_offsets_for_times, |offsets| offset_and_timestamp_map(&offsets)) }
 }
 
@@ -896,7 +1188,15 @@ pub type kafka_consumer_ConsumerHandle_offsets_for_times_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of
+    // `HandleInner::run_cb`: to the task `Client::spawn` registers, after which nothing can panic,
+    // or, once the consumer is destroyed, to the inline fallback, which fires `cb` as its last
+    // action. So `cb` has not fired for this `opaque`, as `deliver_panic_value` requires.
+    unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -904,7 +1204,12 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times_cb(
     cb: kafka_consumer_ConsumerHandle_offsets_for_times_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `timestamps_to_search` is null or a valid map of
+    // `kafka_common_TopicPartition_t *` to `int64_t *`, as `map_topic_partition_i64` requires; the
+    // entries are copied, so the borrow lasts for this call only.
     let timestamps_to_search = unsafe { map_topic_partition_i64(timestamps_to_search) };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
@@ -914,6 +1219,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times_cb(
         move |client, result| {
             deliver_ptr(client, cb, opaque, result, move |offsets| offset_and_timestamp_map(&offsets))
         },
+        // SAFETY: `cb` and `opaque` are this call's own arguments, and `cb` is valid per this
+        // function's `# Safety`. `run_cb` calls this fallback only when the consumer is gone and
+        // nothing was spawned, so `deliver` never runs and `cb` fires here exactly once, with an
+        // owned error.
         |error| unsafe { cb(std::ptr::null_mut(), box_error(error), opaque.get()) },
     )
 }
@@ -933,6 +1242,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times_cb(
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync(
     self_: *const kafka_consumer_ConsumerHandle_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
     let h = inner.handle.clone();
     error_slot(inner.run_blocking(
@@ -952,13 +1263,23 @@ pub type kafka_consumer_ConsumerHandle_commit_sync_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of
+    // `HandleInner::run_cb`: to the task `Client::spawn` registers, after which nothing can panic,
+    // or, once the consumer is destroyed, to the inline fallback, which fires `cb` as its last
+    // action. So `cb` has not fired for this `opaque`, as `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
     cb: kafka_consumer_ConsumerHandle_commit_sync_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
@@ -966,6 +1287,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_cb(
         "kafka_consumer_ConsumerHandle_commit_sync_cb",
         async move { h.commit_sync().await },
         move |client, result| deliver_void(client, cb, opaque, result),
+        // SAFETY: `cb` and `opaque` are this call's own arguments, and `cb` is valid per this
+        // function's `# Safety`. `run_cb` calls this fallback only when the consumer is gone and
+        // nothing was spawned, so `deliver` never runs and `cb` fires here exactly once, with an
+        // owned error.
         |error| unsafe { cb(box_error(error), opaque.get()) },
     )
 }
@@ -979,15 +1304,21 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_cb(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and the other parameters valid for
-/// their documented types.
+/// `self_` must be a live handle and `offsets` null or a valid map of
+/// `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *`
+/// that no other call mutates during this one.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_offsets(
     self_: *const kafka_consumer_ConsumerHandle_t,
     offsets: *const kafka_Map_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `offsets` is null or a valid map of
+    // `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *` that no other
+    // call mutates during this one, as `map_offset_and_metadata` requires; the entries are copied.
     let offsets = unsafe { map_offset_and_metadata(offsets) };
     let h = inner.handle.clone();
     error_slot(
@@ -1008,7 +1339,15 @@ pub type kafka_consumer_ConsumerHandle_commit_sync_with_offsets_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of
+    // `HandleInner::run_cb`: to the task `Client::spawn` registers, after which nothing can panic,
+    // or, once the consumer is destroyed, to the inline fallback, which fires `cb` as its last
+    // action. So `cb` has not fired for this `opaque`, as `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_offsets_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -1016,7 +1355,12 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_offsets_
     cb: kafka_consumer_ConsumerHandle_commit_sync_with_offsets_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `offsets` is null or a valid map of
+    // `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *` that no other
+    // call mutates during this one, as `map_offset_and_metadata` requires; the entries are copied.
     let offsets = unsafe { map_offset_and_metadata(offsets) };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
@@ -1024,6 +1368,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_offsets_
         "kafka_consumer_ConsumerHandle_commit_sync_with_offsets_cb",
         async move { h.commit_sync_with_offsets(offsets).await },
         move |client, result| deliver_void(client, cb, opaque, result),
+        // SAFETY: `cb` and `opaque` are this call's own arguments, and `cb` is valid per this
+        // function's `# Safety`. `run_cb` calls this fallback only when the consumer is gone and
+        // nothing was spawned, so `deliver` never runs and `cb` fires here exactly once, with an
+        // owned error.
         |error| unsafe { cb(box_error(error), opaque.get()) },
     )
 }
@@ -1042,6 +1390,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_offsets_
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async(
     self_: *const kafka_consumer_ConsumerHandle_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
     let h = inner.handle.clone();
     error_slot(inner.run_blocking(
@@ -1061,13 +1411,23 @@ pub type kafka_consumer_ConsumerHandle_commit_async_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of
+    // `HandleInner::run_cb`: to the task `Client::spawn` registers, after which nothing can panic,
+    // or, once the consumer is destroyed, to the inline fallback, which fires `cb` as its last
+    // action. So `cb` has not fired for this `opaque`, as `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
     cb: kafka_consumer_ConsumerHandle_commit_async_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
@@ -1075,6 +1435,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_cb(
         "kafka_consumer_ConsumerHandle_commit_async_cb",
         async move { h.commit_async().await },
         move |client, result| deliver_void(client, cb, opaque, result),
+        // SAFETY: `cb` and `opaque` are this call's own arguments, and `cb` is valid per this
+        // function's `# Safety`. `run_cb` calls this fallback only when the consumer is gone and
+        // nothing was spawned, so `deliver` never runs and `cb` fires here exactly once, with an
+        // owned error.
         |error| unsafe { cb(box_error(error), opaque.get()) },
     )
 }
@@ -1086,15 +1450,21 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_cb(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and the other parameters valid for
-/// their documented types.
+/// `self_` must be a live handle and `offsets` null or a valid map of
+/// `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *`
+/// that no other call mutates during this one.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_offsets(
     self_: *const kafka_consumer_ConsumerHandle_t,
     offsets: *const kafka_Map_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `offsets` is null or a valid map of
+    // `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *` that no other
+    // call mutates during this one, as `map_offset_and_metadata` requires; the entries are copied.
     let offsets = unsafe { map_offset_and_metadata(offsets) };
     let h = inner.handle.clone();
     error_slot(
@@ -1115,7 +1485,15 @@ pub type kafka_consumer_ConsumerHandle_commit_async_offsets_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments comes
+    // first and hands nothing over; the body hands `cb` over only as the last step of
+    // `HandleInner::run_cb`: to the task `Client::spawn` registers, after which nothing can panic,
+    // or, once the consumer is destroyed, to the inline fallback, which fires `cb` as its last
+    // action. So `cb` has not fired for this `opaque`, as `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_offsets_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -1123,7 +1501,12 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_offsets_cb(
     cb: kafka_consumer_ConsumerHandle_commit_async_offsets_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
     let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `offsets` is null or a valid map of
+    // `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *` that no other
+    // call mutates during this one, as `map_offset_and_metadata` requires; the entries are copied.
     let offsets = unsafe { map_offset_and_metadata(offsets) };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
@@ -1131,6 +1514,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_offsets_cb(
         "kafka_consumer_ConsumerHandle_commit_async_offsets_cb",
         async move { h.commit_async_offsets(offsets).await },
         move |client, result| deliver_void(client, cb, opaque, result),
+        // SAFETY: `cb` and `opaque` are this call's own arguments, and `cb` is valid per this
+        // function's `# Safety`. `run_cb` calls this fallback only when the consumer is gone and
+        // nothing was spawned, so `deliver` never runs and `cb` fires here exactly once, with an
+        // owned error.
         |error| unsafe { cb(box_error(error), opaque.get()) },
     )
 }
@@ -1146,6 +1533,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_offsets_cb(
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_assignment(
     self_: *const kafka_consumer_ConsumerHandle_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this expression,
+    // the only use of the reference, as `inner` requires.
     sorted_topic_partition_list(unsafe { inner(self_) }.handle.assignment().iter())
 }
 
@@ -1159,6 +1548,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_assignment(
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_subscription(
     self_: *const kafka_consumer_ConsumerHandle_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this expression,
+    // the only use of the reference, as `inner` requires.
     sorted_string_list(unsafe { inner(self_) }.handle.subscription().iter())
 }
 
@@ -1173,6 +1564,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_subscription(
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_paused(
     self_: *const kafka_consumer_ConsumerHandle_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this expression,
+    // the only use of the reference, as `inner` requires.
     sorted_topic_partition_list(unsafe { inner(self_) }.handle.paused().iter())
 }
 
@@ -1184,6 +1577,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_paused(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_wakeup(self_: *const kafka_consumer_ConsumerHandle_t) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this expression,
+    // the only use of the reference, as `inner` requires.
     unsafe { inner(self_) }.handle.wakeup();
 }
 
@@ -1191,11 +1586,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_wakeup(self_: *const kafk
 ///
 /// # Safety
 ///
-/// `self_` must be null or a live handle not used afterwards.
+/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// call uses at the same time, not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_destroy(self_: *mut kafka_consumer_ConsumerHandle_t) {
     if !self_.is_null() {
+        // SAFETY: Per this function's `# Safety`, `self_` (non-null, checked above) is an owned
+        // handle not yet destroyed, i.e. a `Box<HandleInner>` from `box_consumer_handle`, that no
+        // other call uses at the same time, so taking it back and dropping it frees it exactly
+        // once. It holds the client weakly, so the consumer is unaffected.
         drop(unsafe { Box::from_raw(self_ as *mut HandleInner) });
     }
 }
