@@ -213,6 +213,12 @@ Phase 0 completion notes (agent 90):
     `assert_message_version!` rows in `message_test.rs`. No `ConcreteRequest`/`ConcreteResponse`
     variant: both fall through to the existing "not currently handled" arm, as `STREAMS_GROUP_HEARTBEAT`
     does. **Phase 12** adds the UnregisterController variants and wrappers.
+  - **Recorded skip (review fix round, COMMENTS.114 C7):** 7997c9ebe0's two new `RequestResponseTest`
+    cases, `testStreamsGroupDescribeRequestV0RejectsIncludeTopologyDescription` and
+    `testStreamsGroupDescribeResponseV0RejectsTopologyDescriptionFields`, are not translated. The Streams
+    group protocol and the Streams admin API are out of scope for this client; the `StreamsGroupDescribe`
+    specs are generated only because the whole message corpus is generated, and no client path builds or
+    parses those messages.
   - `AbortedTxn` is a broker-side data spec; the generated `AbortedTxnData` has no client caller.
   - **Byte-level tests** (DoD #3): ApiVersions request v5 (defaults, both fields set, v4 drops them,
     v5 parse), response v4 == v5; DeleteGroups request v3 == v2, response v3 (message set, null, and
@@ -3082,7 +3088,7 @@ master merges and the one patch-equivalent commit that `--cherry-pick` drops, ma
 | `723847904b` | Wire | P | KAFKA-20444 | Ported | P5: `supports_*` (`d6593d7b`) |
 | `7340eefc48` | Wire | P | MINOR | Ported | P5: `d6593d7b` (+ `f48b1c2c`) |
 | `7562044781` | Wire | P | KAFKA-20444 | Ported | P5: spec sync (`d6593d7b`) |
-| `7997c9ebe0` | Wire | P | KAFKA-20620 | Ported | P0: specs (incl. DeleteGroups v3) and errors 134 / 135 (`954a6ff2`, `d584de7b`); the Streams RPC itself out of scope |
+| `7997c9ebe0` | Wire | P | KAFKA-20620 | Ported | P0: specs (incl. DeleteGroups v3) and errors 134 / 135 (`954a6ff2`, `d584de7b`); the Streams RPC itself out of scope, and its two `StreamsGroupDescribe` v0-rejection `RequestResponseTest` cases are a recorded skip (Streams is out of scope; COMMENTS.114 C7) |
 | `baa064e422` | Wire | P | KAFKA-20444 | Ported | P5: `d6593d7b`, `4540a340` |
 | `f66a67fcef` | Wire | P | MINOR | Ported | P1: generated-reader limits (`8f60523e`); no Rust `ArrayOf` reader |
 
