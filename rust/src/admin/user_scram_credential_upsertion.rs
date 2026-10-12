@@ -97,7 +97,7 @@ impl UserScramCredentialUpsertion {
 /// Java has no `toString()` here, so there is no Java rendering to mirror; a
 /// derived `Debug` would print the password (and the salt, keyed material for
 /// the stored credential) as their byte values, so both are hidden. Each renders
-/// as [`Password::HIDDEN`] with no quotes, as a [`Password`]'s own `Debug` does.
+/// as `Password::HIDDEN` with no quotes, as a `Password`'s own `Debug` does.
 impl fmt::Debug for UserScramCredentialUpsertion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Destructured exhaustively, so a field added to the struct must be
