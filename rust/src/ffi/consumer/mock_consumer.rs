@@ -418,8 +418,9 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance_cb(
                     }
                 })
                 .await;
-                deliver_void(&task_client, cb, opaque, result);
+                // Release the flag before queuing, as `run_cb` does.
                 drop(guard);
+                deliver_void(&task_client, cb, opaque, result);
             });
         },
     }

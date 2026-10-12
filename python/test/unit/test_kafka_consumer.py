@@ -1440,11 +1440,9 @@ def _start_without_draining(monkeypatch: pytest.MonkeyPatch, stopped_loop: Any,
 
 def _await_queued_completion(consumer: AsyncKafkaConsumer[Any, Any]) -> None:
     """Wait until the core has queued the held call's completion (its notify
-    hook fired) and released the call's single-owner guard, which the branch C
-    API does just after queuing it (``run_cb``: deliver, then drop the guard),
-    so the next call is not refused while that guard is still held."""
+    hook fired). The core releases the call's single-owner guard before it
+    queues the completion, so the next call is not refused."""
     assert consumer._pending_event.wait(WAIT)  # noqa: SLF001
-    time.sleep(0.1)
 
 
 def _close_bounded(consumer: AsyncKafkaConsumer[Any, Any], stopped_loop: Any) -> None:

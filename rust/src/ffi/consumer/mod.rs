@@ -33,7 +33,9 @@
 //! keeps that contract with a single-owner flag ([`Client::acquire`]). Every
 //! operation that takes `&mut self` in Rust takes `kafka_consumer_Consumer_t *`
 //! and holds the flag for its duration — the blocking form while it runs on
-//! the calling thread, the `_cb` form until its completion is queued. The
+//! the calling thread, the `_cb` form until its operation ends, released just
+//! before the completion is queued, so a caller that runs the completion and
+//! makes its next call never finds the flag still held. The
 //! sync getters (`assignment`, `metrics`, ...) take the flag for the call
 //! and, when an operation is in flight, return the empty value
 //! (`-1` / `NULL` for scalars and handles), there being no error slot to
@@ -599,8 +601,11 @@ where
             let task_client = Arc::clone(&client);
             client.spawn(async move {
                 let result = catch_task_panic(fn_name, f(guard.consumer_mut())).await;
-                deliver(&task_client, result);
+                // Release the flag before queuing: the queue's notify hook can wake a caller
+                // that runs this completion and calls again before this task would get past
+                // the push, and that call must not be rejected as concurrent.
                 drop(guard);
+                deliver(&task_client, result);
             });
         },
     }
