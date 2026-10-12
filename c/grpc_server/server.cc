@@ -4161,31 +4161,8 @@ class AdminServiceImpl final : public AdminService::Service {
         result(kafka_admin_Admin_describe_user_scram_credentials_with_users_options(
             admin, all_users ? nullptr : users.list, opts.get()));
 
-    std::vector<std::string> names;
-    if (all_users) {
-      // The users the broker reported, then one description each.
-      OwnedFuture f(kafka_admin_DescribeUserScramCredentialsResult_users(result.get()));
-      const kafka_List_t* found = nullptr;
-      kafka_common_Error_t* err = future_get(f.get(), &found);
-      if (err != nullptr) {
-        fill_proto_error(resp->mutable_error(), err);
-        return grpc::Status::OK;
-      }
-      for_each_in_list<char>(found, [&names](const char* user) { names.push_back(cstr(user)); });
-    } else {
-      names.assign(req->users().begin(), req->users().end());
-    }
-    for (const std::string& user : names) {
-      DescribeUserScramCredentialsEntry* entry = resp->add_entries();
-      set_name_key(entry->mutable_key(), user.c_str());
-      OwnedFuture f(kafka_admin_DescribeUserScramCredentialsResult_description(result.get(), user.c_str()));
-      const kafka_admin_UserScramCredentialsDescription_t* d = nullptr;
-      kafka_common_Error_t* err = future_get(f.get(), &d);
-      if (err != nullptr) {
-        fill_proto_error(entry->mutable_error(), err);
-        continue;
-      }
-      UserScramCredentialsDescription* dst = entry->mutable_value();
+    auto fill_description = [](UserScramCredentialsDescription* dst,
+                               const kafka_admin_UserScramCredentialsDescription_t* d) {
       dst->set_name(cstr(kafka_admin_UserScramCredentialsDescription_name(d)));
       OwnedList infos(kafka_admin_UserScramCredentialsDescription_credential_infos(d));
       for_each_in_list<kafka_admin_ScramCredentialInfo_t>(
@@ -4194,7 +4171,62 @@ class AdminServiceImpl final : public AdminService::Service {
             pi->set_mechanism(kafka_admin_ScramMechanism_type(kafka_admin_ScramCredentialInfo_mechanism(info)));
             pi->set_iterations(kafka_admin_ScramCredentialInfo_iterations(info));
           });
+    };
+
+    // Java's three views composed into the per-user shape, as the Rust backend
+    // (rust/tests/common/admin_backend.rs) composes them, so every backend
+    // answers with the same key set and the same errors:
+    //
+    //   - all() succeeds only when every user's error is NONE or
+    //     RESOURCE_NOT_FOUND, and then its keys are the complete user set, a
+    //     user the broker reports as having no credential described with an
+    //     empty list rather than as an error;
+    //   - when it fails, users() still lists every user whose error is not
+    //     RESOURCE_NOT_FOUND -- necessarily including the one that failed all()
+    //     -- and description(user) yields that user's own outcome;
+    //   - if that leaves no row at all, all()'s error is the whole-call error
+    //     rather than an empty, successful-looking response.
+    //
+    // description(user) alone is not enough: for a user with no credential it
+    // fails with RESOURCE_NOT_FOUND, which all() does not treat as an error.
+    OwnedFuture all(kafka_admin_DescribeUserScramCredentialsResult_all(result.get()));
+    const kafka_Map_t* described = nullptr;
+    kafka_common_Error_t* all_err = future_get(all.get(), &described);
+    if (all_err == nullptr) {
+      const int32_t n = kafka_Map_size(described);
+      for (int32_t i = 0; i < n; i++) {
+        DescribeUserScramCredentialsEntry* entry = resp->add_entries();
+        set_name_key(entry->mutable_key(), static_cast<const char*>(kafka_Map_key(described, i)));
+        fill_description(entry->mutable_value(),
+                         static_cast<const kafka_admin_UserScramCredentialsDescription_t*>(
+                             kafka_Map_value(described, i)));
+      }
+      return grpc::Status::OK;
     }
+    OwnedError all_error(all_err);
+
+    OwnedFuture listed(kafka_admin_DescribeUserScramCredentialsResult_users(result.get()));
+    const kafka_List_t* found = nullptr;
+    kafka_common_Error_t* err = future_get(listed.get(), &found);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+    std::vector<std::string> names;
+    for_each_in_list<char>(found, [&names](const char* user) { names.push_back(cstr(user)); });
+    for (const std::string& user : names) {
+      DescribeUserScramCredentialsEntry* entry = resp->add_entries();
+      set_name_key(entry->mutable_key(), user.c_str());
+      OwnedFuture f(kafka_admin_DescribeUserScramCredentialsResult_description(result.get(), user.c_str()));
+      const kafka_admin_UserScramCredentialsDescription_t* d = nullptr;
+      err = future_get(f.get(), &d);
+      if (err != nullptr) {
+        fill_proto_error(entry->mutable_error(), err);
+        continue;
+      }
+      fill_description(entry->mutable_value(), d);
+    }
+    if (resp->entries_size() == 0) fill_proto_error(resp->mutable_error(), all_error.release());
     return grpc::Status::OK;
   }
 
