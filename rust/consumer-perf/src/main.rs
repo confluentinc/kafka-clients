@@ -50,6 +50,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use confluent_kafka::common::Error;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::{Consumer, ConsumerConfig, KafkaConsumer};
+#[cfg(not(target_os = "linux"))]
 use sysinfo::{MINIMUM_CPU_UPDATE_INTERVAL, Pid, ProcessesToUpdate, System};
 
 /// Zero-copy deserializer: returns the byte length instead of the bytes, so the
@@ -210,35 +211,106 @@ impl RecordsPerPoll {
 
 /// Samples this process's CPU usage (percent of a single core; may exceed 100%
 /// on multi-core work) and resident set size, between successive calls.
+///
+/// On Linux (the benchmark hosts) this reads `/proc/self/stat` (cumulative
+/// utime+stime ticks, diffed over the interval) and `/proc/self/status`
+/// (`VmRSS`) directly, like the producer perf test's `ProcSampler` and
+/// `JavaE2E.readBusyTicks()`. sysinfo 0.32 computes per-process
+/// `cpu_usage()` on Linux only when refreshing *every* process
+/// (`ProcessesToUpdate::All`; a `Some(&[pid])` refresh reports 0.0% forever),
+/// which would scan all of `/proc` once per interval on a benchmark host.
+/// Elsewhere (macOS dev runs) sysinfo is used.
+#[cfg(target_os = "linux")]
+struct ResourceSampler {
+    prev_busy_ticks: u64,
+    prev_instant: Instant,
+}
+
+/// Linux `USER_HZ` — clock ticks per second used to convert `/proc/self/stat`
+/// utime/stime into CPU seconds. Effectively always 100 on Linux.
+#[cfg(target_os = "linux")]
+const USER_HZ: f64 = 100.0;
+
+#[cfg(target_os = "linux")]
+impl ResourceSampler {
+    fn new() -> Self {
+        Self { prev_busy_ticks: read_busy_ticks(), prev_instant: Instant::now() }
+    }
+
+    /// Returns `(cpu_percent_of_one_core, rss_mb)` for the interval since the
+    /// last call (or since `new()`).
+    fn sample(&mut self) -> (f32, f64) {
+        let busy = read_busy_ticks();
+        let now = Instant::now();
+        let dt = now.duration_since(self.prev_instant).as_secs_f64();
+        let dticks = busy.saturating_sub(self.prev_busy_ticks);
+        self.prev_busy_ticks = busy;
+        self.prev_instant = now;
+        let cpu = if dt > 0.0 {
+            (dticks as f64 / USER_HZ) / dt * 100.0
+        } else {
+            0.0
+        };
+        (cpu as f32, read_rss_bytes() as f64 / (1024.0 * 1024.0))
+    }
+}
+
+/// utime + stime of this process, in clock ticks (0 if unreadable).
+#[cfg(target_os = "linux")]
+fn read_busy_ticks() -> u64 {
+    let Ok(content) = std::fs::read_to_string("/proc/self/stat") else {
+        return 0;
+    };
+    // The comm field (field 2) is wrapped in parens and may contain spaces, so
+    // start parsing after the final ')'. utime is field 14, stime field 15,
+    // i.e. indices 11 and 12 of the whitespace-split remainder.
+    let Some(rparen) = content.rfind(')') else { return 0 };
+    let fields: Vec<&str> = content[rparen + 1..].split_whitespace().collect();
+    let utime = fields.get(11).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+    let stime = fields.get(12).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+    utime + stime
+}
+
+/// Resident set size of this process in bytes, from `VmRSS` (0 if unreadable).
+#[cfg(target_os = "linux")]
+fn read_rss_bytes() -> u64 {
+    let Ok(content) = std::fs::read_to_string("/proc/self/status") else {
+        return 0;
+    };
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:")
+            && let Some(kb) = rest.split_whitespace().next().and_then(|s| s.parse::<u64>().ok())
+        {
+            return kb * 1024;
+        }
+    }
+    0
+}
+
+#[cfg(not(target_os = "linux"))]
 struct ResourceSampler {
     sys: System,
     pid: Pid,
 }
 
+#[cfg(not(target_os = "linux"))]
 impl ResourceSampler {
     fn new() -> Self {
         let pid = Pid::from_u32(std::process::id());
         let mut sys = System::new();
-        // Refresh with `ProcessesToUpdate::All`, NOT `Some(&[pid])`: sysinfo's
-        // Linux backend only computes per-process `cpu_usage()` inside the
-        // `ProcessesToUpdate::All` branch of `refresh_processes_specifics`
-        // (sysinfo 0.32 `unix/linux/system.rs`), so a `Some(...)` refresh
-        // reports 0.0% CPU forever on Linux (verified on EC2; macOS computes
-        // per-process CPU on a different path and worked either way).
-        //
-        // sysinfo also only produces a valid `cpu_usage()` after the process
-        // has been refreshed twice (the first registers it, the second
-        // establishes the CPU baseline). Warm it with two spaced refreshes so
-        // the caller's first `sample()` already yields a real reading.
-        sys.refresh_processes(ProcessesToUpdate::All, true);
+        // sysinfo only produces a valid `cpu_usage()` after the process has
+        // been refreshed twice (the first registers it, the second establishes
+        // the CPU baseline). Warm it with two spaced refreshes so the caller's
+        // first `sample()` already yields a real reading.
+        sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
         std::thread::sleep(MINIMUM_CPU_UPDATE_INTERVAL);
-        sys.refresh_processes(ProcessesToUpdate::All, true);
+        sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
         Self { sys, pid }
     }
 
     /// Returns `(cpu_percent_of_one_core, rss_mb)`.
     fn sample(&mut self) -> (f32, f64) {
-        self.sys.refresh_processes(ProcessesToUpdate::All, true);
+        self.sys.refresh_processes(ProcessesToUpdate::Some(&[self.pid]), true);
         match self.sys.process(self.pid) {
             Some(p) => (p.cpu_usage(), p.memory() as f64 / (1024.0 * 1024.0)),
             None => (0.0, 0.0),
