@@ -27,8 +27,8 @@ every other method is a plain ``def`` (``assignment()``, ``subscription()``,
 ``_cb`` form, running the queued callbacks on the event loop; the listener runs
 there and may be ``async def``.
 A coroutine listener method that ``commit_nowait()`` delivers is awaited in a
-task that holds the consumer until it ends: meanwhile ``metrics()`` /
-``group_metadata()`` raise ``ConcurrentModificationError`` (see
+task that holds the consumer until it ends: meanwhile ``group_metadata()``
+and ``current_lag()`` raise ``ConcurrentModificationError`` (see
 ``commit_nowait``).
 
 Not generated: :class:`Consumer`'s omissions.
@@ -159,8 +159,9 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         loop, the listener awaited there, and the next awaited call on the
         consumer waits for it (and raises its failure). Until that task ends,
         ``assignment()`` / ``subscription()`` / ``paused()`` read through the
-        core's ``ConsumerHandle``, a further ``commit_nowait()`` follows it, and
-        ``metrics()`` / ``group_metadata()``, which the handle lacks, raise
+        core's ``ConsumerHandle``, a further ``commit_nowait()`` follows it,
+        ``metrics()`` answers (Java's takes no ``acquire()``), and
+        ``group_metadata()`` / ``current_lag()``, which the handle lacks, raise
         ``ConcurrentModificationError``."""
         self._c_commit_nowait(offsets, callback)
 
