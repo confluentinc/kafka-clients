@@ -184,7 +184,6 @@ mod tests {
     /// `#[ffi_guard...]` attribute. A new entry point without one fails here with
     /// its file and line.
     #[test]
-    #[ignore = "the split FFI is not guarded yet; #207 is ported onto it in the next commits"]
     fn test_every_exported_function_is_guarded() {
         let mut offenders = Vec::new();
         let mut total = 0;
@@ -207,9 +206,9 @@ mod tests {
             "exported functions without #[ffi_guard] directly above #[unsafe(no_mangle)]: {offenders:?}"
         );
         // Sanity check that the scan saw the whole surface rather than, say, a
-        // renamed attribute spelling: 2306 exports after the FFI was split into
+        // renamed attribute spelling: 2307 exports after the FFI was split into
         // one file per class.
-        assert!(total >= 2306, "only {total} exported functions found");
+        assert!(total >= 2307, "only {total} exported functions found");
     }
 
     /// The `int8_t` exports carrying a Java `byte` code: each enum's domain
