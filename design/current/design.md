@@ -1236,7 +1236,15 @@ Deviations recorded in the package's module docstrings:
   wait for its record to reach the producer. `init_transactions`,
   `begin_transaction`, `send_offsets_to_transaction`, `commit_transaction`,
   `abort_transaction` and `partitions_for` raise `TimeoutError` after
-  `max.block.ms`; the operation itself may still complete.
+  `max.block.ms`; the operation itself may still complete. For
+  `begin_transaction` that leaves the core in a transaction while the
+  binding's `_in_transaction` stays `False`, the result arriving only once the
+  callback returns: a retry raises Java's `IllegalStateError` (the
+  transaction is already in progress), and sends from outside a callback keep
+  waiting for their handover until `commit_transaction` or
+  `abort_transaction` ends the transaction. No binding-side fix: a timed-out
+  wait cannot tell whether the core began, and not waiting would drop
+  `begin_transaction`'s own errors.
 - Inside a consumer callback, a listener re-enters the consumer through the
   guard-free `ConsumerHandle`, since the outer call holds the single-owner
   guard. Two calls raise `ConcurrentModificationError` at once, because their

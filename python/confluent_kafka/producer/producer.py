@@ -46,6 +46,12 @@ when Java's waits, blocking the I/O thread its completion needs, time out; the
 operation itself may still complete. ``begin_transaction`` does too, although
 Java's does not wait: its queued form first drains the records already sent
 (producer-transactions.md §13), and its completion needs that same thread.
+The core may then have begun the transaction while the producer still counts
+none as started, since the result arrives only once the callback returns: a
+retried ``begin_transaction`` raises Java's ``IllegalStateError`` for a
+transaction already in progress, and sends from outside a callback keep
+waiting for their record's handover, as with no transaction started, until
+``commit_transaction`` or ``abort_transaction`` ends it.
 """
 
 from __future__ import annotations
