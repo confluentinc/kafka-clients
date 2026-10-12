@@ -1364,9 +1364,9 @@ async fn cannot_send_to_internal_topic_inner<F: ProducerBackendFactory>(ctx: &mu
         // (`GroupCoordinatorService.java:2324-2330`) with the default
         // `offsets.topic.segment.bytes`.
         let topic_config = BTreeMap::from([
-            ("cleanup.policy".to_string(), "compact".to_string()),
-            ("compression.type".to_string(), "producer".to_string()),
-            ("segment.bytes".to_string(), (100 * 1024 * 1024).to_string()),
+            ("cleanup.policy".to_string(), Some("compact".to_string())),
+            ("compression.type".to_string(), Some("producer".to_string())),
+            ("segment.bytes".to_string(), Some((100 * 1024 * 1024).to_string())),
         ]);
         let new_topic =
             NewTopic::with_num_partitions_replication_factor(GROUP_METADATA_TOPIC_NAME.to_string(), Some(1), Some(1))

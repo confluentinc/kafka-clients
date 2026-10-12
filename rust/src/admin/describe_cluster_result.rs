@@ -28,7 +28,7 @@ use crate::common::{KafkaFuture, Node};
 pub struct DescribeClusterResult {
     nodes: KafkaFuture<Vec<Node>>,
     controller: KafkaFuture<Option<Node>>,
-    cluster_id: KafkaFuture<String>,
+    cluster_id: KafkaFuture<Option<String>>,
     authorized_operations: KafkaFuture<Option<BTreeSet<AclOperation>>>,
 }
 
@@ -38,7 +38,7 @@ impl DescribeClusterResult {
     pub(crate) fn new(
         nodes: KafkaFuture<Vec<Node>>,
         controller: KafkaFuture<Option<Node>>,
-        cluster_id: KafkaFuture<String>,
+        cluster_id: KafkaFuture<Option<String>>,
         authorized_operations: KafkaFuture<Option<BTreeSet<AclOperation>>>,
     ) -> Self {
         Self { nodes, controller, cluster_id, authorized_operations }
@@ -59,8 +59,12 @@ impl DescribeClusterResult {
     }
 
     /// Returns a future which yields the id of the cluster.
+    ///
+    /// The value is `None` where Java's is null: a broker too old for
+    /// `DescribeCluster` answers through the `Metadata` fallback, whose
+    /// `ClusterId` is nullable.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeClusterResult#clusterId")]
-    pub fn cluster_id(&self) -> KafkaFuture<String> {
+    pub fn cluster_id(&self) -> KafkaFuture<Option<String>> {
         self.cluster_id.clone()
     }
 
