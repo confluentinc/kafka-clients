@@ -60,6 +60,8 @@ mod preview_warning;
 pub mod producer;
 #[cfg(test)]
 mod test_alloc_tracker;
+#[cfg(test)]
+mod test_fake_broker;
 
 #[cfg(feature = "ffi")]
 pub mod ffi;

@@ -7267,6 +7267,70 @@ mod tests {
         }
     }
 
+    /// `metadata.cluster.check.enable` (KIP-1242) reaches the consumer's
+    /// `NetworkClient`, as `ClientUtils.createNetworkClient` passes it
+    /// (`ClientUtils.java:309`). Goes through the REAL constructor (DoD #12)
+    /// against an in-process fake broker and observes the wire: the bootstrap
+    /// connection's ApiVersions carries no cluster id (not known yet), and the
+    /// connection to the partition leader (node 0, opened to reset the assigned
+    /// partition's position) carries `ClusterId`/`NodeId` only when the check
+    /// is enabled — the default. Java's broker-backed analogue is
+    /// `ClientRebootstrapTest.testRebootstrapOnMetadataClusterCheckFail`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn metadata_cluster_check_enable_reaches_the_network_client() {
+        use std::collections::HashMap;
+
+        use crate::common::serialization::Deserializer;
+        use crate::test_fake_broker::{FAKE_BROKER_NODE_ID, FakeBroker, ReceivedApiVersions};
+
+        struct TestStringDeserializer;
+        impl Deserializer<String> for TestStringDeserializer {
+            fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+                String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
+            }
+        }
+
+        const TOPIC: &str = "cluster-check-topic";
+        for (configured, check) in [(None, true), (Some("false"), false), (Some("true"), true)] {
+            let broker = FakeBroker::start("fake-cluster", TOPIC).await;
+            // No group.id: the position comes from a ListOffsets to the leader,
+            // the request that opens the second connection.
+            let mut props = HashMap::from([("bootstrap.servers".to_string(), broker.bootstrap())]);
+            if let Some(value) = configured {
+                props.insert("metadata.cluster.check.enable".to_string(), value.to_string());
+            }
+            let mut consumer = AsyncKafkaConsumer::<String, String>::new(
+                ConsumerConfig::new(&props).expect("config validates"),
+                Box::new(TestStringDeserializer),
+                Box::new(TestStringDeserializer),
+            )
+            .expect("constructs against the fake broker");
+            consumer.assign(vec![TopicPartition::new(TOPIC.to_string(), 0)]).await.expect("assign");
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            while broker.api_versions_requests().len() < 2 && tokio::time::Instant::now() < deadline {
+                let _ = consumer.poll(Duration::from_millis(50)).await;
+            }
+            let seen = broker.api_versions_requests();
+            assert_eq!(2, seen.len(), "metadata.cluster.check.enable = {configured:?}: {seen:?}");
+            let unchecked = ReceivedApiVersions { version: 5, cluster_id: None, node_id: -1 };
+            assert_eq!(unchecked, seen[0], "bootstrap connection, check = {check}");
+            let expected_leader = if check {
+                ReceivedApiVersions {
+                    version: 5,
+                    cluster_id: Some("fake-cluster".to_string()),
+                    node_id: FAKE_BROKER_NODE_ID,
+                }
+            } else {
+                unchecked
+            };
+            assert_eq!(expected_leader, seen[1], "leader connection, check = {check}");
+            consumer
+                .close_with_options(crate::consumer::CloseOptions::new_timeout(Duration::ZERO))
+                .await
+                .expect("close");
+        }
+    }
+
     /// Java validates `group.instance.id` again in the constructor
     /// (`GroupRebalanceConfig.java:68-72`), independently of `client.id`, so an
     /// id that `ConsumerConfig` accepted (explicit `client.id`) still fails
