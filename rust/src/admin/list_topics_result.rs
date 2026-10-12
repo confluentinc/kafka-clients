@@ -47,13 +47,13 @@ impl ListTopicsResult {
     /// Return a future which yields a collection of `TopicListing` objects.
     #[doc(alias = "org.apache.kafka.clients.admin.ListTopicsResult#listings")]
     pub fn listings(&self) -> KafkaFuture<Vec<TopicListing>> {
-        self.future.then_apply(|map| map.into_values().collect())
+        self.future.then_apply(|map| Ok(map.into_values().collect()))
     }
 
     /// Return a future which yields a set of topic names.
     #[doc(alias = "org.apache.kafka.clients.admin.ListTopicsResult#names")]
     pub fn names(&self) -> KafkaFuture<HashSet<String>> {
-        self.future.then_apply(|map| map.into_keys().collect())
+        self.future.then_apply(|map| Ok(map.into_keys().collect()))
     }
 }
 

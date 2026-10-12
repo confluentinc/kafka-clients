@@ -130,7 +130,10 @@ fn register_cleanup_hook() {
 /// leaked network consumes a slice of Docker's address pool for the rest of the
 /// process, and once the pool is exhausted *every* subsequent cluster start
 /// fails.
-fn teardown(cluster: &KafkaCluster) {
+///
+/// Also the teardown path of a dedicated (non-pooled) cluster, run by
+/// [`super::test_context::TestContext`]'s `Drop`.
+pub(super) fn teardown(cluster: &KafkaCluster) {
     for id in cluster.container_ids() {
         let _ = std::process::Command::new("docker").args(["rm", "-f", id]).output();
     }

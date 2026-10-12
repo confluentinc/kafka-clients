@@ -197,7 +197,7 @@ static long current_time_ns() {
     return (ts.tv_sec * 1000000000L) + ts.tv_nsec;
 }
 
-static bool verify_record_metadata(kafka_producer_RecordMetadata_t* metadata) {
+static bool verify_record_metadata(const kafka_producer_RecordMetadata_t* metadata) {
     if (!DO_VERIFY) {
         verified++;
         return true;
@@ -240,20 +240,26 @@ static bool verify_record_metadata(kafka_producer_RecordMetadata_t* metadata) {
 
 // Rust client C bindings backend (v3): KafkaProducer over confluent_kafka.h.
 // The producer owns an internal async runtime, so no polling thread is needed;
-// send returns a KafkaFuture_RecordMetadata whose _get blocks for the result.
+// send returns a KafkaFuture_t whose _get blocks for the RecordMetadata.
+//
+// `test_Producer_t` is the `kafka_producer_KafkaProducer_t` class handle; the
+// sends go through its `Producer` interface view, a borrowed pointer valid
+// until the class handle is destroyed, cached here so the per-message path
+// does not re-derive it.
+static const kafka_producer_Producer_t *v3_producer_view = NULL;
+
 static test_Future_t test_v3_send(test_Producer_t producer, Message *message) {
-    kafka_producer_Producer_t *p = (kafka_producer_Producer_t *)producer;
+    (void)producer;
     kafka_common_Error_t *error = NULL;
-    kafka_common_KafkaFuture_RecordMetadata_t *future = NULL;
-    const uint8_t *key = KEY_SIZE > 0 ? message->key : NULL;
-    int32_t key_len = KEY_SIZE > 0 ? (int32_t)KEY_SIZE : -1;
+    kafka_common_KafkaFuture_t *future = NULL;
+    // NULL serializers: key and value are `kafka_Bytes_t` views, read while
+    // the blocking send runs, so the stack copies below suffice.
+    kafka_Bytes_t key = { message->key, (int32_t)KEY_SIZE };
+    kafka_Bytes_t value = { message->value, (int32_t)VALUE_SIZE };
+    kafka_producer_ProducerRecord_t *record =
+        kafka_producer_ProducerRecord_with_key(TOPIC, KEY_SIZE > 0 ? &key : NULL, &value);
     do {
-        error = NULL;
-        future = kafka_producer_Producer_send(
-            p, TOPIC, -1, -1,
-            key, key_len,
-            message->value, (int32_t)VALUE_SIZE,
-            &error);
+        error = kafka_producer_Producer_send(v3_producer_view, record, &future);
 
         if (error) {
             const char* msg = kafka_common_Error_message(error);
@@ -261,34 +267,33 @@ static test_Future_t test_v3_send(test_Producer_t producer, Message *message) {
             kafka_common_Error_destroy(error);
         }
     } while (error && !interrupted);
+    kafka_producer_ProducerRecord_destroy(record);
     return future;
 }
 
 static bool test_v3_verify_future(test_Future_t future) {
-    kafka_common_KafkaFuture_RecordMetadata_t *f =
-        (kafka_common_KafkaFuture_RecordMetadata_t *)future;
-    kafka_common_Error_t* error = NULL;
-    kafka_producer_RecordMetadata_t* metadata =
-        kafka_common_KafkaFuture_RecordMetadata_get(f, &error);
+    kafka_common_KafkaFuture_t *f = (kafka_common_KafkaFuture_t *)future;
+    void *value = NULL;
+    kafka_common_Error_t* error = kafka_common_KafkaFuture_get(f, &value);
 
     if (error) {
         const char* msg = kafka_common_Error_message(error);
         fprintf(stderr, "Send error: %s\n", msg ? msg : "Unknown error");
         kafka_common_Error_destroy(error);
-        kafka_common_KafkaFuture_RecordMetadata_destroy(f);
+        kafka_common_KafkaFuture_destroy(f);
         return false;
     }
 
-    // Verify the RecordMetadata
+    // The RecordMetadata is borrowed from the future: destroying the future
+    // frees it, and it is never passed to RecordMetadata_destroy.
+    const kafka_producer_RecordMetadata_t* metadata = (const kafka_producer_RecordMetadata_t*)value;
     if (!verify_record_metadata(metadata)) {
         fprintf(stderr, "RecordMetadata verification failed\n");
-        kafka_producer_RecordMetadata_destroy(metadata);
-        kafka_common_KafkaFuture_RecordMetadata_destroy(f);
+        kafka_common_KafkaFuture_destroy(f);
         return false;
     }
 
-    kafka_producer_RecordMetadata_destroy(metadata);
-    kafka_common_KafkaFuture_RecordMetadata_destroy(f);
+    kafka_common_KafkaFuture_destroy(f);
     return true;
 }
 
@@ -1135,43 +1140,58 @@ static void run_test() {
     Queue produce_calls;
 
     if (CLIENT_VERSION == 3) {
-        kafka_producer_ProducerProperties_t* properties =
-            kafka_producer_ProducerProperties_new();
-        kafka_producer_ProducerProperties_put(properties, "bootstrap.servers", BOOTSTRAP_SERVERS);
+        // `ProducerConfig` is built from a map of C strings; a map built in C
+        // borrows its keys and values, so every formatted value needs its own
+        // storage that outlives `ProducerConfig_new`.
+        kafka_Map_t* properties = kafka_Map_new();
+        kafka_Map_put(properties, (void*)"bootstrap.servers", (void*)BOOTSTRAP_SERVERS);
+        char jaas_config[512];
         if (sasl_enabled) {
-            char buffer[512];
-            snprintf(buffer, sizeof(buffer),
+            snprintf(jaas_config, sizeof(jaas_config),
                 "org.apache.kafka.common.security.plain.PlainLoginModule required \n\tusername=\"%s\" \n\tpassword=\"%s\";",
                 SASL_USERNAME, SASL_PASSWORD);
-            kafka_producer_ProducerProperties_put(properties, "security.protocol", SECURITY_PROTOCOL);
-            kafka_producer_ProducerProperties_put(properties, "sasl.mechanism", SASL_MECHANISM);
-            kafka_producer_ProducerProperties_put(properties, "sasl.jaas.config", buffer);
+            kafka_Map_put(properties, (void*)"security.protocol", (void*)SECURITY_PROTOCOL);
+            kafka_Map_put(properties, (void*)"sasl.mechanism", (void*)SASL_MECHANISM);
+            kafka_Map_put(properties, (void*)"sasl.jaas.config", jaas_config);
         }
         if (SSL_CA_LOCATION) {
-            kafka_producer_ProducerProperties_put(properties, "ssl.truststore.location", SSL_CA_LOCATION);
-            kafka_producer_ProducerProperties_put(properties, "ssl.truststore.type", "PEM");
+            kafka_Map_put(properties, (void*)"ssl.truststore.location", (void*)SSL_CA_LOCATION);
+            kafka_Map_put(properties, (void*)"ssl.truststore.type", (void*)"PEM");
         }
 
-        char buffer[512];
+        char buffer_memory_str[32];
+        char batch_size_str[32];
+        char max_request_size_str[32];
         if (!USE_DEFAULTS) {
             if (buffer_memory_bytes > 0) {
-                snprintf(buffer, sizeof(buffer), "%" PRId64, buffer_memory_bytes);
-                kafka_producer_ProducerProperties_put(properties, "buffer.memory", buffer);
+                snprintf(buffer_memory_str, sizeof(buffer_memory_str), "%" PRId64, buffer_memory_bytes);
+                kafka_Map_put(properties, (void*)"buffer.memory", buffer_memory_str);
             }
-            snprintf(buffer, sizeof(buffer), "%" PRId64, batch_size_bytes);
-            kafka_producer_ProducerProperties_put(properties, "batch.size", buffer);
-            snprintf(buffer, sizeof(buffer), "%" PRId64, max_request_size_bytes);
-            kafka_producer_ProducerProperties_put(properties, "max.request.size", buffer);
-            kafka_producer_ProducerProperties_put(properties, "compression.type", COMPRESSION_TYPE);
-            kafka_producer_ProducerProperties_put(properties, "linger.ms", LINGER_MS);
-            kafka_producer_ProducerProperties_put(properties, "acks", "all");
-            kafka_producer_ProducerProperties_put(properties, "enable.idempotence", ENABLE_IDEMPOTENCE);
-            kafka_producer_ProducerProperties_put(properties, "max.in.flight.requests.per.connection", MAX_IN_FLIGHT);
+            snprintf(batch_size_str, sizeof(batch_size_str), "%" PRId64, batch_size_bytes);
+            kafka_Map_put(properties, (void*)"batch.size", batch_size_str);
+            snprintf(max_request_size_str, sizeof(max_request_size_str), "%" PRId64, max_request_size_bytes);
+            kafka_Map_put(properties, (void*)"max.request.size", max_request_size_str);
+            kafka_Map_put(properties, (void*)"compression.type", (void*)COMPRESSION_TYPE);
+            kafka_Map_put(properties, (void*)"linger.ms", (void*)LINGER_MS);
+            kafka_Map_put(properties, (void*)"acks", (void*)"all");
+            kafka_Map_put(properties, (void*)"enable.idempotence", (void*)ENABLE_IDEMPOTENCE);
+            kafka_Map_put(properties, (void*)"max.in.flight.requests.per.connection", (void*)MAX_IN_FLIGHT);
         }
 
-        kafka_common_Error_t* error = NULL;
-        producer = kafka_producer_KafkaProducer_new(properties, &error);
-        kafka_producer_ProducerProperties_destroy(properties);
+        producer = NULL;
+        kafka_producer_ProducerConfig_t* config = NULL;
+        kafka_common_Error_t* error = kafka_producer_ProducerConfig_new(properties, &config);
+        kafka_Map_destroy(properties);
+        if (!error) {
+            // NULL serializers: the record's key and value are `kafka_Bytes_t`.
+            kafka_producer_KafkaProducer_t* kafka_producer = NULL;
+            error = kafka_producer_KafkaProducer_new(config, NULL, NULL, &kafka_producer);
+            kafka_producer_ProducerConfig_destroy(config);
+            if (!error) {
+                producer = kafka_producer;
+                v3_producer_view = kafka_producer_KafkaProducer__as_Producer(kafka_producer);
+            }
+        }
 
         if (error) {
             const char* msg = kafka_common_Error_message(error);
@@ -1391,12 +1411,15 @@ static void run_test() {
     queue_destroy(&produce_calls);
 end:
     if (CLIENT_VERSION == 3) {
-        kafka_common_Error_t *error = NULL;
-        kafka_producer_Producer_close(producer, &error);
-        if (error) {
-            kafka_common_Error_destroy(error);
+        if (producer != NULL) {
+            // close() through the interface view, then the class destroy.
+            kafka_common_Error_t *error = kafka_producer_Producer_close(v3_producer_view);
+            if (error) {
+                kafka_common_Error_destroy(error);
+            }
+            kafka_producer_KafkaProducer_destroy((kafka_producer_KafkaProducer_t *)producer);
+            v3_producer_view = NULL;
         }
-        kafka_producer_Producer_destroy(producer);
     } else {
         if (poll_running) {
             poll_running = false;

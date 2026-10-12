@@ -112,6 +112,7 @@ use super::ConsumerMembershipManager;
 use super::NetworkClientDelegate;
 use super::RequestManagers;
 use super::WakeupTrigger;
+use super::consumer_interceptors::panic_payload_message;
 use super::events::ApplicationEventEnvelope;
 use super::events::ApplicationEventProcessor;
 use super::events::CompletableEventReaper;
@@ -168,9 +169,12 @@ pub(crate) struct ConsumerNetworkThread<K: KafkaClient + Send + 'static> {
     /// [`Self::maximum_time_to_wait`]. Updated by `run_once` after each
     /// pass through the request managers.
     cached_max_time_to_wait_ms: Arc<AtomicI64>,
-    /// Close timeout (millis). Set by [`Self::set_close_timeout_ms`]
-    /// before `close()`.
-    close_timeout_ms: AtomicI64,
+    /// Close timeout (millis) — Java's `volatile Duration closeTimeout`
+    /// (`ConsumerNetworkThread.java:84`). Written by the app side's close
+    /// path through the shared [`Self::close_timeout_handle`] (Java's
+    /// `closeInternal(timeout)` assigns `closeTimeout = timeout`, line 380)
+    /// and read by [`Self::cleanup`].
+    close_timeout_ms: Arc<AtomicI64>,
     /// Wall-clock timestamp of the last `run_once` call. Feeds Java's
     /// `recordTimeBetweenNetworkThreadPoll(currentTimeMs - lastPollTimeMs)`
     /// metric (wired in `run_once` when `async_consumer_metrics` is set).
@@ -254,7 +258,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             wakeup,
             running: Arc::new(AtomicBool::new(true)),
             cached_max_time_to_wait_ms,
-            close_timeout_ms: AtomicI64::new(Self::DEFAULT_CLOSE_TIMEOUT_MS),
+            close_timeout_ms: Arc::new(AtomicI64::new(Self::DEFAULT_CLOSE_TIMEOUT_MS)),
             last_poll_time_ms: 0,
             time,
             membership,
@@ -329,6 +333,13 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
     pub(crate) fn signal_close(&self) {
         self.running.store(false, Ordering::Release);
         self.wakeup.wakeup();
+    }
+
+    /// Shared handle to the close timeout read by [`Self::cleanup`], captured
+    /// by the production close closure before `self` moves onto the bg task
+    /// (same pattern as [`Self::running_handle`]).
+    pub(crate) fn close_timeout_handle(&self) -> Arc<AtomicI64> {
+        Arc::clone(&self.close_timeout_ms)
     }
 
     /// Sets the close timeout used by [`Self::cleanup`].
@@ -772,60 +783,17 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             if let Some(metrics) = &metrics {
                 metrics.record_application_event_queue_time(self.time.milliseconds() - env.enqueued_ms);
             }
-            // 1. Register with the reaper if completable. The Java
-            // `CompletableEvent` interface check is replaced by the
-            // `erased_handle()` accessor on [`ApplicationEvent`].
-            if let Some(erased) = env.event.erased_handle() {
-                let mut reaper = match self.application_event_reaper.lock() {
-                    Ok(g) => g,
-                    Err(p) => p.into_inner(),
-                };
-                reaper.add(erased);
+            // Java CNT:257-270 wraps each event in `try { ... } catch
+            // (Throwable t) { log.warn("Error processing event {}", ...) }`,
+            // so one failing event neither skips the rest of the batch nor
+            // stops the network thread. A completable event that panics stays
+            // registered with the reaper and expires at its deadline, as in
+            // Java where the catch does not complete it either.
+            if let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.process_application_event(env)))
+            {
+                log::warn!("Error processing event {}", panic_payload_message(&*payload));
             }
-
-            // 1b. Track notifiable+completable events in the parallel
-            // list so the post-poll `maybeFailOnMetadataError` arm can
-            // observe them. Java derives this list from
-            // `applicationEventReaper.uncompletedEvents()` filtered for
-            // `MetadataErrorNotifiableEvent`; in Rust the reaper holds
-            // erased handles only so we keep a side list. See module
-            // docstring for the rationale.
-            if let Some(notifiable) = env.event.metadata_error_notifiable_handle() {
-                self.notifiable_handles.push(notifiable);
-            }
-
-            // 2. Metadata-error short-circuit. Java's
-            // `maybeFailOnMetadataError` queries the delegate's
-            // `getAndClearMetadataError()`; we mirror that here so the
-            // error is consumed regardless of whether THIS event was
-            // notifiable. Java keeps the same "don't get-and-clear if
-            // no notifiable events" optimisation.
-            //
-            // We hold the delegate guard briefly with `try_lock` because
-            // the bg task is the sole holder. No `.await` while held.
-            let event_was_notified = if env.event.is_metadata_error_notifiable() {
-                let mut delegate_guard = self
-                    .network_client_delegate
-                    .try_lock()
-                    .expect("delegate not contended on bg task");
-                if let Some(err) = delegate_guard.get_and_clear_metadata_error() {
-                    env.event.on_metadata_error(err)
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-            if event_was_notified {
-                continue;
-            }
-
-            // 3. Normal dispatch. Java wraps in a `try { ... } catch
-            // (Throwable t) { log.warn(...) }`; Rust's processor is
-            // already infallible by signature (`fn process(&mut self,
-            // event)`) — any panic would unwind the bg task. The
-            // surrounding tokio::spawn entry point owns the catch.
-            self.application_event_processor.process(env.event);
         }
         // Java CNT:273 — record the total processing time for the batch.
         if let Some(metrics) = &metrics {
@@ -833,6 +801,63 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         }
         // Restore the (drained) scratch buffer; capacity retained.
         self.app_event_drain_scratch = envelopes;
+    }
+
+    /// The body of Java's per-event `try` block in `processApplicationEvents`:
+    /// register with the reaper, short-circuit on a pending metadata error,
+    /// then dispatch. [`Self::process_application_events`] runs it under the
+    /// per-event panic boundary.
+    fn process_application_event(&mut self, env: ApplicationEventEnvelope) {
+        // 1. Register with the reaper if completable. The Java
+        // `CompletableEvent` interface check is replaced by the
+        // `erased_handle()` accessor on [`ApplicationEvent`].
+        if let Some(erased) = env.event.erased_handle() {
+            let mut reaper = match self.application_event_reaper.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            reaper.add(erased);
+        }
+
+        // 1b. Track notifiable+completable events in the parallel
+        // list so the post-poll `maybeFailOnMetadataError` arm can
+        // observe them. Java derives this list from
+        // `applicationEventReaper.uncompletedEvents()` filtered for
+        // `MetadataErrorNotifiableEvent`; in Rust the reaper holds
+        // erased handles only so we keep a side list. See module
+        // docstring for the rationale.
+        if let Some(notifiable) = env.event.metadata_error_notifiable_handle() {
+            self.notifiable_handles.push(notifiable);
+        }
+
+        // 2. Metadata-error short-circuit. Java's
+        // `maybeFailOnMetadataError` queries the delegate's
+        // `getAndClearMetadataError()`; we mirror that here so the
+        // error is consumed regardless of whether THIS event was
+        // notifiable. Java keeps the same "don't get-and-clear if
+        // no notifiable events" optimisation.
+        //
+        // We hold the delegate guard briefly with `try_lock` because
+        // the bg task is the sole holder. No `.await` while held.
+        let event_was_notified = if env.event.is_metadata_error_notifiable() {
+            let mut delegate_guard = self
+                .network_client_delegate
+                .try_lock()
+                .expect("delegate not contended on bg task");
+            if let Some(err) = delegate_guard.get_and_clear_metadata_error() {
+                env.event.on_metadata_error(err)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if event_was_notified {
+            return;
+        }
+
+        // 3. Normal dispatch.
+        self.application_event_processor.process(env.event);
     }
 
     /// Test-only helper that pushes an erased handle directly onto
@@ -900,23 +925,36 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         }
 
         // ──── 2. Drain unsent requests until timer expires ────
-        loop {
-            let now = self.time.milliseconds();
-            let remaining = close_deadline_ms.saturating_sub(now);
-            let has_pending = {
-                let delegate_guard = self
-                    .network_client_delegate
-                    .try_lock()
-                    .expect("delegate not contended on bg task");
-                delegate_guard.has_any_pending_requests()
-            };
-            if !has_pending || remaining <= 0 {
-                break;
+        //
+        // Java's `sendUnsentRequests` (`ConsumerNetworkThread.java:393-407`)
+        // returns early only when nothing is pending; otherwise it is a
+        // do-while that ALWAYS polls once — a non-blocking `poll(0)` when the
+        // close timer is already spent — before checking
+        // `timer.notExpired() && hasAnyPendingRequests()`. That first pass is
+        // what sends the leave-group heartbeat `pollOnClose` builds for a
+        // close with zero timeout (`AbstractHeartbeatRequestManager.java:217-237`),
+        // so the timer check must not precede it.
+        let has_pending = |thread: &Self| {
+            thread
+                .network_client_delegate
+                .try_lock()
+                .expect("delegate not contended on bg task")
+                .has_any_pending_requests()
+        };
+        if has_pending(self) {
+            loop {
+                let now = self.time.milliseconds();
+                let remaining = close_deadline_ms.saturating_sub(now).max(0);
+                {
+                    let mut delegate_guard = self.network_client_delegate.lock().await;
+                    delegate_guard.poll_on_close(remaining, now).await;
+                }
+                // `while (timer.notExpired() && hasAnyPendingRequests())` —
+                // short-circuits, so pending is not read once expired.
+                if close_deadline_ms.saturating_sub(self.time.milliseconds()) <= 0 || !has_pending(self) {
+                    break;
+                }
             }
-            let mut delegate_guard = self.network_client_delegate.lock().await;
-            delegate_guard.poll_on_close(remaining, now).await;
-            // re-loop; `notExpired() && hasAnyPendingRequests` is the
-            // Java guard.
         }
         {
             let delegate_guard = self
@@ -985,11 +1023,31 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
     /// 11 consumer constructor.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#run")]
     pub(crate) async fn run(mut self) {
+        use futures_util::FutureExt;
+
         log::debug!("Consumer network thread started");
         while self.is_running() {
             // Re-check the shutdown signal first so `signal_close()`
             // followed by `wakeup.wakeup()` exits immediately.
-            self.run_once().await;
+            //
+            // Java CNT:161-166: `try { runOnce(); } catch (final Throwable e)
+            // { log.error(...) }` — swallow and continue, so a failing
+            // iteration neither ends the task nor skips `cleanup()`. Without
+            // this boundary a panic would unwind out of the spawned task, which
+            // Tokio turns into task termination, not Java's swallow-and-continue.
+            if let Err(payload) = std::panic::AssertUnwindSafe(self.run_once()).catch_unwind().await {
+                log::error!(
+                    "Unexpected error caught in consumer network task: {}",
+                    panic_payload_message(&*payload)
+                );
+                // A Java thread that keeps failing spins on its own thread. A
+                // Tokio task that panics before its first real `.await` never
+                // returns control to the scheduler, which would starve the
+                // worker (and hang a current-thread runtime, including the
+                // `close()` waiting on this task). Yield so a repeated failure
+                // stays cooperative.
+                tokio::task::yield_now().await;
+            }
         }
         self.cleanup().await;
     }
@@ -1847,6 +1905,36 @@ mod tests {
         );
     }
 
+    /// Java's `sendUnsentRequests` is a do-while
+    /// (`ConsumerNetworkThread.java:393-407`): with a request pending it polls
+    /// once even when the close timeout is zero, which is how the leave-group
+    /// heartbeat `pollOnClose` builds for a zero-timeout close gets sent
+    /// (`AbstractHeartbeatRequestManager.java:217-237`). A zero close timeout
+    /// must therefore still perform exactly one non-blocking `poll(0)`.
+    #[tokio::test]
+    async fn test_send_unsent_requests_polls_once_with_zero_close_timeout() {
+        let (mut fixture, poll_call_count, poll_timeouts, has_in_flight_script) =
+            make_thread_with_dyn_managers(Vec::new());
+        // Initial `hasAnyPendingRequests()` = true -> one poll; the expired
+        // timer short-circuits the loop guard; the trailing `false` serves
+        // the post-drain warning check.
+        has_in_flight_script.lock().unwrap().extend([true, false]);
+
+        fixture.thread.set_close_timeout_ms(0);
+        fixture.thread.cleanup().await;
+
+        assert_eq!(
+            poll_call_count.load(Ordering::SeqCst),
+            1,
+            "a zero close timeout must still poll once to send pending requests"
+        );
+        assert_eq!(
+            poll_timeouts.lock().unwrap().as_slice(),
+            &[0],
+            "the single close poll must be non-blocking (timer.remainingMs() == 0)"
+        );
+    }
+
     // ─── Java tests deliberately NOT translated in this commit ───
     //
     // - `testStartupAndTearDown`: exercises `Thread.start()`/
@@ -1920,6 +2008,107 @@ mod tests {
             .expect("send ok");
         thread.process_application_events();
         assert_eq!(reaper.lock().unwrap().size(), 0, "non-completable events must not be tracked");
+    }
+
+    /// Java's `processApplicationEvents` catches `Throwable` per event
+    /// (CNT:257-270), so one failing event does not skip the rest of the
+    /// batch. The failure is induced through the production path: with the
+    /// delegate lock held elsewhere, the metadata-error arm's
+    /// `try_lock().expect(..)` panics on the notifiable event.
+    #[tokio::test]
+    async fn process_events_continues_after_an_event_panics() {
+        let (fixture, _, _, _) = make_thread_with_dyn_managers(Vec::new());
+        let CountingFixture { mut thread, delegate, reaper, tx, .. } = fixture;
+
+        let (failing, mut failing_rx, failing_erased) = CompletableEvent::make_completable_event::<
+            std::collections::HashMap<String, Vec<crate::common::PartitionInfo>>,
+        >(60_000);
+        tx.send(ApplicationEventEnvelope {
+            event: ApplicationEvent::AllTopicsMetadata { handle: failing },
+            enqueued_ms: 1_000,
+        })
+        .expect("send ok");
+        let (next, mut next_rx, _) = CompletableEvent::make_completable_event::<()>(60_000);
+        let event =
+            ApplicationEvent::AssignmentChange { handle: next, current_time_ms: 1_000, partitions: HashSet::new() };
+        tx.send(ApplicationEventEnvelope { event, enqueued_ms: 1_000 })
+            .expect("send ok");
+
+        {
+            let _held = delegate.lock().await;
+            thread.process_application_events();
+        }
+
+        assert!(
+            matches!(next_rx.try_recv(), Ok(Ok(()))),
+            "the event after the failing one must still be dispatched"
+        );
+        // Like Java's catch, the boundary does not complete the failing event:
+        // it stays with the reaper, which fails it at its deadline.
+        assert!(
+            failing_rx.try_recv().is_err(),
+            "the failing event must not be completed by the boundary"
+        );
+        assert!(
+            reaper.lock().unwrap().contains(&failing_erased),
+            "the failing event must stay registered with the reaper"
+        );
+    }
+
+    /// Request manager whose first `poll` panics; the second clears the
+    /// thread's running flag so `run` leaves its loop.
+    struct PanickingRequestManager {
+        poll_calls: Arc<AtomicUsize>,
+        poll_on_close_calls: Arc<AtomicUsize>,
+        running: Arc<std::sync::OnceLock<Arc<AtomicBool>>>,
+    }
+
+    impl RequestManager for PanickingRequestManager {
+        fn poll(&mut self, _current_time_ms: i64) -> PollResult {
+            if self.poll_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                panic!("request manager failure");
+            }
+            self.running
+                .get()
+                .expect("running flag installed")
+                .store(false, Ordering::Release);
+            PollResult::empty()
+        }
+
+        fn poll_on_close(&mut self, _current_time_ms: i64) -> PollResult {
+            self.poll_on_close_calls.fetch_add(1, Ordering::SeqCst);
+            PollResult::empty()
+        }
+    }
+
+    /// Java's `run()` wraps each `runOnce()` in `catch (final Throwable e)`
+    /// and keeps looping (CNT:161-166), and `cleanup()` still runs in its
+    /// `finally`. A panicking iteration must therefore neither end the task
+    /// nor skip `cleanup()`.
+    #[tokio::test]
+    async fn run_continues_after_run_once_panics_and_still_cleans_up() {
+        let poll_calls = Arc::new(AtomicUsize::new(0));
+        let poll_on_close_calls = Arc::new(AtomicUsize::new(0));
+        let running = Arc::new(std::sync::OnceLock::new());
+        let manager = PanickingRequestManager {
+            poll_calls: poll_calls.clone(),
+            poll_on_close_calls: poll_on_close_calls.clone(),
+            running: running.clone(),
+        };
+        let (fixture, _, _, _) = make_thread_with_dyn_managers(vec![Box::new(manager)]);
+        let thread = fixture.thread;
+        running.set(thread.running_handle()).expect("set once");
+
+        tokio::time::timeout(Duration::from_secs(10), thread.run())
+            .await
+            .expect("run must return once the running flag is cleared");
+
+        assert_eq!(
+            poll_calls.load(Ordering::SeqCst),
+            2,
+            "the loop must run again after the panicking iteration"
+        );
+        assert_eq!(poll_on_close_calls.load(Ordering::SeqCst), 1, "cleanup must still run");
     }
 
     /// `wakeup` mid-poll: the bg-task `run_once` should not hang when

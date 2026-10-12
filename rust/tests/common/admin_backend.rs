@@ -1852,7 +1852,7 @@ where
 /// `CreateTopicsResult::futures()` `pub(crate)` (correctly — Java's field is
 /// private too), so the only public route is the four `topicId` /
 /// `numPartitions` / `replicationFactor` / `config` views. Every one of them is
-/// `then_apply_try` over the *same* source object, so they all fail with the same
+/// `then_apply` over the *same* source object, so they all fail with the same
 /// error when the broker reported no usable metadata, which is exactly the
 /// `TopicMetadataAndConfig(KafkaException)` state.
 async fn metadata_of(result: &CreateTopicsResult, topic: &str) -> TopicMetadataAndConfig {
