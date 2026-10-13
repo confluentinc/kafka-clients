@@ -2706,7 +2706,7 @@ No rule file holds a master-merge or Java-bump recipe, so this step lives here, 
   classes plus 165 generated errors). Drop the FFI-backed ones (the client bases and `Kafka*` classes)
   and the ones cited only in prose (`CommonClientConfigs`, `NetworkClient` in an error docstring), then
   diff the rest file by file with `git -C kafka show <tag>:<path>`.
-- **Result at this bump (`4.3.1` → `4.4.0-rc4`, agent 117).** 45 of the 53 classes and 160 of the 165
+- **Result at this bump (`4.3.1` → `4.4.0-rc4`, agent 117).** 44 of the 53 classes and 160 of the 165
   errors are unchanged. The rest:
 
   | Java class | Delta (code only) | Python |
