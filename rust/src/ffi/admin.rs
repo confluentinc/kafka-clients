@@ -36,13 +36,20 @@
 //! `KafkaFuture<T>` per key. C has no `KafkaFuture`, so (decisions D1/D2 in
 //! `PLAN-bindings.md` §7) every RPC gets:
 //!
-//! - a **bare (synchronous)** entry point that submits the RPC and blocks until
-//!   every per-key future has resolved, writing one flattened result handle; and
+//! - a **bare (synchronous)** entry point that, like Java's method, submits the
+//!   RPC and returns at once, writing a result handle that holds the RPC's
+//!   **unresolved** futures. The handle's accessors are Java's `get()`: each
+//!   waits for the future it reads (one key's, for a per-key accessor) and never
+//!   for any other, keys known at submission are readable without waiting, and
+//!   `_all` / `_is_done` mirror Java's `all().get()` / `isDone()`. Every failure
+//!   of the request — per key or request-wide — is read from the handle; the
+//!   entry point's own error reports only what Java would throw from the call
+//!   (a NULL handle, input that cannot be marshalled). See `admin_sync_submit`
+//!   and `LazyOutcome`; and
 //! - an **`_async`** entry point that submits the RPC and returns immediately.
 //!
 //! In both cases the RPC method itself is invoked on the **calling** thread, so
-//! the request is enqueued as promptly as in Java; only the awaiting of the
-//! per-key futures moves to the tokio runtime.
+//! the request is enqueued as promptly as in Java.
 //!
 //! For most RPCs, the `_async` entry point delivers one flattened result handle
 //! through a single C callback once every key has resolved (see *Callback
@@ -93,11 +100,12 @@
 //! entry point below restates the rule in full rather than pointing here; a
 //! cross-reference to this section would dangle for a C reader.
 //!
-//! A flattened `kafka_admin_*Result_t` exposes `_count` / `_get_key(i)` /
+//! A `kafka_admin_*Result_t` exposes `_count` / `_get_key(i)` /
 //! `_get_value(i)` / `_get_error(i)` / `_destroy`, so per-key data *and* per-key
-//! errors survive the boundary; only independent per-key *timing* is lost (which
-//! C cannot express without a `KafkaFuture` type). This still describes every
-//! **synchronous** entry point, and the `_async` entry points for every RPC
+//! errors survive the boundary. On a handle from a **synchronous** entry point
+//! per-key *timing* survives too, because each accessor waits for its own key
+//! only. A handle delivered by an `_async` callback is built once every key has
+//! resolved, so its accessors never wait; that is the shape for every RPC
 //! outside the topic family above. For the topic family's `_async` entry
 //! points, per-key timing is *not* lost — that is the point of the per-key
 //! callback shape — so there is no flattened result handle on that path at
@@ -150,8 +158,8 @@
 use crate::common::requests::DescribeClientQuotasRequest;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::{CStr, CString, c_char, c_void};
-use std::sync::{Arc, Mutex};
 use std::sync::OnceLock;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::FutureExt;
@@ -1015,57 +1023,6 @@ unsafe fn admin_async_value_op<T, S, C>(
             complete,
         )
     };
-}
-
-/// Synchronous dispatch for a value-returning admin RPC: runs `submit` on the
-/// calling thread, then blocks until the returned future resolves.
-///
-/// This is the C equivalent of Java's `result.all().get()` in that it waits for
-/// every per-key future; unlike `all()` it does not discard the per-key
-/// outcomes, because the flattened result handle is the only channel C has for
-/// them (`PLAN-bindings.md` D2).
-///
-/// # Safety
-///
-/// `admin` must be a valid handle from an admin-client constructor.
-unsafe fn admin_sync_future_op<T, S, Fut>(admin: *const kafka_admin_AdminClient_t, submit: S) -> Result<T, Error>
-where
-    S: FnOnce(&dyn Admin) -> Result<Fut, Error>,
-    Fut: std::future::Future<Output = Result<T, Error>>,
-{
-    if admin.is_null() {
-        return Err(Error::local_illegal_argument("admin handle must not be null"));
-    }
-    // SAFETY: `handle_ref` requires a non-null handle from an admin-client constructor;
-    // `admin` is non-null (checked above) and, per this function's `# Safety`, such a
-    // handle. `h` is used only for the duration of this synchronous call (`enter`,
-    // `submit(h.admin())`, `block_on`), during which the C caller keeps the handle alive;
-    // the future `submit` returns is consumed by `block_on` before this call returns.
-    let h = unsafe { handle_ref(admin) };
-    // Scoped so the runtime `EnterGuard` is dropped before `block_on`.
-    let future = {
-        let _guard = h.runtime.enter();
-        submit(h.admin())?
-    };
-    h.runtime.block_on(future)
-}
-
-/// Synchronous dispatch for a value-returning admin RPC that resolves through
-/// one [`KafkaFuture`]. Thin wrapper over [`admin_sync_future_op`].
-///
-/// # Safety
-///
-/// `admin` must be a valid handle from an admin-client constructor.
-unsafe fn admin_sync_value_op<T, S>(admin: *const kafka_admin_AdminClient_t, submit: S) -> Result<T, Error>
-where
-    T: Clone + Send + Sync + 'static,
-    S: FnOnce(&dyn Admin) -> Result<KafkaFuture<T>, Error>,
-{
-    // SAFETY: `admin_sync_future_op` has the same `# Safety` requirement as this function
-    // (`admin` must be a valid handle from an admin-client constructor), which the caller
-    // upholds; `admin` is forwarded unchanged, and `submit` is only wrapped so the returned
-    // `KafkaFuture` is awaited through `get()`.
-    unsafe { admin_sync_future_op(admin, move |a| submit(a).map(|future| async move { future.get().await })) }
 }
 
 // ---------------------------------------------------------------------------
@@ -3982,7 +3939,10 @@ fn delete_topics_result_inner<K: Ord>(
     let mut futures = futures;
     futures.sort_by(|a, b| a.0.cmp(&b.0));
     let keys = futures.iter().map(|(key, _)| to_cstring(&key_text(key))).collect();
-    let entries = futures.into_iter().map(|(_, future)| lazy_keyed(waiter, future, |()| ())).collect();
+    let entries = futures
+        .into_iter()
+        .map(|(_, future)| lazy_keyed(waiter, future, |()| ()))
+        .collect();
     DeleteTopicsResultInner { keys, entries }
 }
 
@@ -4537,7 +4497,10 @@ fn create_partitions_result_inner(
     let mut futures = futures;
     futures.sort_by(|a, b| a.0.cmp(&b.0));
     let keys = futures.iter().map(|(name, _)| to_cstring(name)).collect();
-    let entries = futures.into_iter().map(|(_, future)| lazy_keyed(waiter, future, |()| ())).collect();
+    let entries = futures
+        .into_iter()
+        .map(|(_, future)| lazy_keyed(waiter, future, |()| ()))
+        .collect();
     CreatePartitionsResultInner { keys, entries }
 }
 
@@ -4637,7 +4600,10 @@ pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_get_error(
 /// `result` must be a valid `create_partitions` result handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_is_done(result: *const kafka_admin_CreatePartitionsResult_t, index: i32) -> bool {
+pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_is_done(
+    result: *const kafka_admin_CreatePartitionsResult_t,
+    index: i32,
+) -> bool {
     // SAFETY: `create_partitions_result_ref` requires a non-null `create_partitions` result handle, which
     // this function's `# Safety` requires of `result` (no in-body null check, so the C
     // caller's contract is the sole source); the reference is used only for this check
@@ -4655,7 +4621,9 @@ pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_is_done(result: *con
 /// `result` must be a valid `create_partitions` result handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_all(result: *const kafka_admin_CreatePartitionsResult_t) -> *mut kafka_common_Error_t {
+pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_all(
+    result: *const kafka_admin_CreatePartitionsResult_t,
+) -> *mut kafka_common_Error_t {
     // SAFETY: `create_partitions_result_ref` requires a non-null `create_partitions` result handle, which
     // this function's `# Safety` requires of `result` (no in-body null check, so the C
     // caller's contract is the sole source); the reference is used only for the duration
@@ -4790,8 +4758,10 @@ fn delete_records_result_inner(
     futures.sort_by(|a, b| a.0.topic().cmp(b.0.topic()).then(a.0.partition().cmp(&b.0.partition())));
     let topics = futures.iter().map(|(tp, _)| to_cstring(tp.topic())).collect();
     let partitions = futures.iter().map(|(tp, _)| tp.partition()).collect();
-    let entries =
-        futures.into_iter().map(|(_, future)| lazy_keyed(waiter, future, |deleted| deleted.low_watermark())).collect();
+    let entries = futures
+        .into_iter()
+        .map(|(_, future)| lazy_keyed(waiter, future, |deleted| deleted.low_watermark()))
+        .collect();
     DeleteRecordsResultInner { topics, partitions, entries }
 }
 
@@ -4997,7 +4967,6 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_destroy(result: *mut ka
 // for one RPC. The `Admin` method itself is called here, on the caller's thread,
 // exactly as in Java.
 // ---------------------------------------------------------------------------
-
 
 /// Submits `deleteTopics(TopicCollection.ofTopicNames(...))`.
 fn submit_delete_topics_by_names(
@@ -5254,7 +5223,10 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_topics(
     // only there; the handle it builds holds only owned futures and the waiter.
     let outcome = unsafe {
         admin_sync_submit(admin, move |a, w| {
-            Ok(create_topics_result_inner(w, submit_create_topics_entries(a, &new_topics, options)))
+            Ok(create_topics_result_inner(
+                w,
+                submit_create_topics_entries(a, &new_topics, options),
+            ))
         })
     };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
@@ -5486,12 +5458,11 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics(
     let topic_names = unsafe { read_strings(names, count) };
     let options = delete_topics_options(timeout_ms, retry_on_quota_violation);
     let outcome =
-        // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+        // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
         // admin-client constructor, as this function's `# Safety` requires of the C caller
         // (the helper additionally turns a NULL `admin` into an illegal-argument error).
         // The `submit` closure runs on the calling thread inside the helper, consuming the
-        // owned `topic_names`, and the helper uses the handle only until `block_on` returns
-        // within this call.
+        // owned `topic_names`, and the handle it builds holds only owned futures and the waiter.
         unsafe { admin_sync_submit(admin, move |a, w| Ok(delete_topics_result_inner(w, submit_delete_topics_by_names(a, topic_names, options)?, String::clone))) };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
     // which is exactly what this function's `# Safety` promises (`out_result` must be null
@@ -5670,14 +5641,18 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics_by_ids(
         Err(e) => return box_error(e),
     };
     let options = delete_topics_options(timeout_ms, retry_on_quota_violation);
-    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
     // admin-client constructor, as this function's `# Safety` requires of the C caller (the
     // helper additionally turns a NULL `admin` into an illegal-argument error). The
     // `submit` closure runs on the calling thread inside the helper, consuming the owned
-    // `ids`, and the helper uses the handle only until `block_on` returns within this call.
+    // `ids`, and the handle it builds holds only owned futures and the waiter.
     let outcome = unsafe {
         admin_sync_submit(admin, move |a, w| {
-            Ok(delete_topics_result_inner(w, submit_delete_topics_by_ids(a, ids, options)?, Uuid::to_string))
+            Ok(delete_topics_result_inner(
+                w,
+                submit_delete_topics_by_ids(a, ids, options)?,
+                Uuid::to_string,
+            ))
         })
     };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
@@ -6026,12 +6001,11 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics(
     let topic_names = unsafe { read_strings(names, count) };
     let options = describe_topics_options(timeout_ms, include_authorized_operations, partition_size_limit_per_response);
     let outcome =
-        // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+        // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
         // admin-client constructor, as this function's `# Safety` requires of the C caller
         // (the helper additionally turns a NULL `admin` into an illegal-argument error).
         // The `submit` closure runs on the calling thread inside the helper, consuming the
-        // owned `topic_names`, and the helper uses the handle only until `block_on` returns
-        // within this call.
+        // owned `topic_names`, and the handle it builds holds only owned futures and the waiter.
         unsafe {
             admin_sync_submit(admin, move |a, w| {
                 Ok(describe_topics_result_inner(w, submit_describe_topics_by_names(a, topic_names, options)?, String::clone))
@@ -6226,14 +6200,18 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics_by_ids(
         Err(e) => return box_error(e),
     };
     let options = describe_topics_options(timeout_ms, include_authorized_operations, partition_size_limit_per_response);
-    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
     // admin-client constructor, as this function's `# Safety` requires of the C caller (the
     // helper additionally turns a NULL `admin` into an illegal-argument error). The
     // `submit` closure runs on the calling thread inside the helper, consuming the owned
-    // `ids`, and the helper uses the handle only until `block_on` returns within this call.
+    // `ids`, and the handle it builds holds only owned futures and the waiter.
     let outcome = unsafe {
         admin_sync_submit(admin, move |a, w| {
-            Ok(describe_topics_result_inner(w, submit_describe_topics_by_ids(a, ids, options)?, Uuid::to_string))
+            Ok(describe_topics_result_inner(
+                w,
+                submit_describe_topics_by_ids(a, ids, options)?,
+                Uuid::to_string,
+            ))
         })
     };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
@@ -6420,8 +6398,9 @@ fn create_partitions_options(
 pub type kafka_admin_AdminClient_create_partitions_callback_t =
     unsafe extern "C" fn(*const c_char, *mut kafka_common_Error_t, *mut c_void);
 
-/// Increases the partition count of the given topics, blocking until every
-/// per-topic future has resolved (synchronous).
+/// Increases the partition count of the given topics — Java's
+/// `createPartitions`. Like Java, this **does not wait**: it submits the request
+/// and returns at once.
 ///
 /// This is `createPartitions(Map<String, NewPartitions>, CreatePartitionsOptions)`.
 /// Java's map becomes two parallel arrays: entry `i` pairs `topics[i]` with
@@ -6430,10 +6409,12 @@ pub type kafka_admin_AdminClient_create_partitions_callback_t =
 ///
 /// On success writes a [`kafka_admin_CreatePartitionsResult_t`] to `*out_result`
 /// (free it with [`kafka_admin_CreatePartitionsResult_destroy`]) and returns
-/// null. **A per-topic failure is not a call failure**: it is reported by
-/// [`kafka_admin_CreatePartitionsResult_get_error`] for that key, so a partially
-/// failed batch still returns null here with a non-null result handle. A non-null
-/// return means the request could not be submitted at all.
+/// null. The handle holds one future per topic; its topic names are readable at
+/// once, [`kafka_admin_CreatePartitionsResult_get_error`] waits for that topic's
+/// future only, and [`kafka_admin_CreatePartitionsResult_all`] waits for every
+/// topic (Java's `get()`). **Every failure of the request — per topic, or of the
+/// request as a whole, such as a timeout — is read from the handle**, as in
+/// Java. A non-null return means the request could not be submitted at all.
 ///
 /// # Parameters
 ///
@@ -6469,14 +6450,17 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_partitions(
     // this call; the C caller retains ownership of the handles.
     let specs = unsafe { read_new_partitions(topics, new_partitions, count) };
     let options = create_partitions_options(timeout_ms, validate_only, retry_on_quota_violation);
-    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
     // admin-client constructor, as this function's `# Safety` requires of the C caller (the
     // helper additionally turns a NULL `admin` into an illegal-argument error). The
     // `submit` closure runs on the calling thread inside the helper, borrowing `specs` only
-    // there, and the helper uses the handle only until `block_on` returns within this call.
+    // there, and the handle it builds holds only owned futures and the waiter.
     let outcome = unsafe {
         admin_sync_submit(admin, move |a, w| {
-            Ok(create_partitions_result_inner(w, submit_create_partitions_entries(a, &specs, options)))
+            Ok(create_partitions_result_inner(
+                w,
+                submit_create_partitions_entries(a, &specs, options),
+            ))
         })
     };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
@@ -6641,8 +6625,9 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_partitions_async(
 pub type kafka_admin_AdminClient_delete_records_callback_t =
     unsafe extern "C" fn(*const c_char, i32, *mut kafka_admin_DeletedRecords_t, *mut kafka_common_Error_t, *mut c_void);
 
-/// Deletes the records before the given offset of each partition, blocking until
-/// every per-partition future has resolved (synchronous).
+/// Deletes the records before the given offset of each partition — Java's
+/// `deleteRecords`. Like Java, this **does not wait**: it submits the request and
+/// returns at once.
 ///
 /// This is `deleteRecords(Map<TopicPartition, RecordsToDelete>,
 /// DeleteRecordsOptions)`. Java's map becomes three parallel arrays: entry `i` is
@@ -6654,8 +6639,13 @@ pub type kafka_admin_AdminClient_delete_records_callback_t =
 ///
 /// On success writes a [`kafka_admin_DeleteRecordsResult_t`] to `*out_result`
 /// (free it with [`kafka_admin_DeleteRecordsResult_destroy`]) and returns null.
-/// Per-partition failures are reported by
-/// [`kafka_admin_DeleteRecordsResult_get_error`], not by the return value.
+/// The handle holds one future per partition; its partitions are readable at
+/// once, [`kafka_admin_DeleteRecordsResult_get_low_watermark`] /
+/// [`kafka_admin_DeleteRecordsResult_get_error`] wait for that partition's future
+/// only, and [`kafka_admin_DeleteRecordsResult_all`] waits for every partition
+/// (Java's `get()`). **Every failure of the request — per partition, or of the
+/// request as a whole, such as a timeout — is read from the handle**, as in
+/// Java. A non-null return means the request could not be submitted at all.
 ///
 /// # Parameters
 ///
@@ -6687,15 +6677,17 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_records(
     // this call.
     let records = unsafe { read_records_to_delete(topics, partitions, before_offsets, count) };
     let options = DeleteRecordsOptions::new().set_timeout_ms(option_timeout(timeout_ms));
-    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
     // admin-client constructor, as this function's `# Safety` requires of the C caller (the
     // helper additionally turns a NULL `admin` into an illegal-argument error). The
     // `submit` closure runs on the calling thread inside the helper, borrowing `records`
-    // only there, and the helper uses the handle only until `block_on` returns within this
-    // call.
+    // only there, and the handle it builds holds only owned futures and the waiter.
     let outcome = unsafe {
         admin_sync_submit(admin, move |a, w| {
-            Ok(delete_records_result_inner(w, submit_delete_records_entries(a, &records, options)))
+            Ok(delete_records_result_inner(
+                w,
+                submit_delete_records_entries(a, &records, options),
+            ))
         })
     };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
@@ -15716,19 +15708,6 @@ fn optional_error_at(errors: &[Option<ErrorInner>], index: i32) -> *const kafka_
         Some(slot) => error_ptr(slot.as_ref()),
         None => std::ptr::null(),
     }
-}
-
-/// Splits string-keyed void outcomes into the parallel key / error vectors a
-/// per-key-error-only result handle stores.
-fn flatten_keyed_void_outcomes(outcomes: GroupVoidOutcomes) -> (Vec<CString>, Vec<Option<ErrorInner>>) {
-    let entries = sorted_entries(outcomes);
-    let mut keys = Vec::with_capacity(entries.len());
-    let mut errors = Vec::with_capacity(entries.len());
-    for (key, outcome) in entries {
-        keys.push(to_cstring(&key));
-        errors.push(outcome.err().map(error_inner));
-    }
-    (keys, errors)
 }
 
 /// Parses `count` `GroupState` names into a set.
@@ -40221,7 +40200,8 @@ mod tests {
         // are read while it lives, and its `_destroy` is the single destroy.
         unsafe {
             assert!(!kafka_admin_DescribeDelegationTokenResult_is_done(result));
-            let completer = complete_future_later(described, Ok(vec![lazy_test_token("first"), lazy_test_token("second")]));
+            let completer =
+                complete_future_later(described, Ok(vec![lazy_test_token("first"), lazy_test_token("second")]));
             assert_eq!(kafka_admin_DescribeDelegationTokenResult_count(result), 2);
             completer.join().expect("completer thread");
             assert!(kafka_admin_DescribeDelegationTokenResult_is_done(result));
@@ -46675,7 +46655,10 @@ mod tests {
         let (_runtime, waiter) = lazy_test_waiter();
         let fast = crate::common::internals::KafkaFutureImpl::<i64>::new();
         let slow = crate::common::internals::KafkaFutureImpl::<i64>::new();
-        let entries = vec![lazy_keyed(&waiter, fast.future(), |v| v), lazy_keyed(&waiter, slow.future(), |v| v)];
+        let entries = vec![
+            lazy_keyed(&waiter, fast.future(), |v| v),
+            lazy_keyed(&waiter, slow.future(), |v| v),
+        ];
 
         assert!(!keyed_is_done_at(&entries, 0));
         assert!(!keyed_is_done_at(&entries, 1));
@@ -46761,10 +46744,16 @@ mod tests {
         assert_eq!(borrowed_message(error), "The AdminClient thread has exited.");
         // SAFETY: Test code: `error` is non-null (checked by `borrowed_message`) and borrowed
         // from `entries`, which is still alive.
-        assert_eq!(unsafe { common::kafka_common_Error_code(error) } as i32, Errors::RequestTimedOut as i32);
+        assert_eq!(
+            unsafe { common::kafka_common_Error_code(error) } as i32,
+            Errors::RequestTimedOut as i32
+        );
         destroyer.join().expect("destroyer thread");
 
-        assert_eq!(borrowed_message(keyed_error_at(&entries, 2)), "The AdminClient thread has exited.");
+        assert_eq!(
+            borrowed_message(keyed_error_at(&entries, 2)),
+            "The AdminClient thread has exited."
+        );
         assert_eq!(keyed_value_at(&entries, 0), Some(&3));
         // The cached outcome sticks even if the future completes afterwards.
         waiting.complete(9);
@@ -46829,15 +46818,25 @@ mod tests {
         let started = std::time::Instant::now();
         // SAFETY: Test code: `admin` is live; `topics` holds one live `NewTopic`; `result` is a
         // writable slot.
-        let error = unsafe { kafka_admin_AdminClient_create_topics(admin, topics.as_ptr(), 1, 1_000, false, false, &mut result) };
+        let error = unsafe {
+            kafka_admin_AdminClient_create_topics(admin, topics.as_ptr(), 1, 1_000, false, false, &mut result)
+        };
         assert!(error.is_null(), "submission must not fail");
-        assert!(started.elapsed() < Duration::from_millis(500), "create_topics waited for the request");
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "create_topics waited for the request"
+        );
 
         // SAFETY: Test code: `result` is the live handle written above; borrowed pointers are
         // read before it is destroyed.
         unsafe {
             assert_eq!(kafka_admin_CreateTopicsResult_count(result), 1);
-            assert_eq!(CStr::from_ptr(kafka_admin_CreateTopicsResult_get_key(result, 0)).to_str().unwrap(), "lazy-topic");
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_CreateTopicsResult_get_key(result, 0))
+                    .to_str()
+                    .unwrap(),
+                "lazy-topic"
+            );
             assert!(!kafka_admin_CreateTopicsResult_is_done(result, 0));
 
             let all = kafka_admin_CreateTopicsResult_all(result);
@@ -46846,7 +46845,10 @@ mod tests {
             common::kafka_common_Error_destroy(all);
             assert!(kafka_admin_CreateTopicsResult_is_done(result, 0));
             let per_topic = kafka_admin_CreateTopicsResult_get_error(result, 0);
-            assert_eq!(common::kafka_common_Error_code(per_topic) as i32, Errors::RequestTimedOut as i32);
+            assert_eq!(
+                common::kafka_common_Error_code(per_topic) as i32,
+                Errors::RequestTimedOut as i32
+            );
             assert!(kafka_admin_CreateTopicsResult_get_value(result, 0).is_null());
 
             kafka_admin_NewTopic_destroy(topic);
