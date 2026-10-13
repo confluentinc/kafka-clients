@@ -681,6 +681,8 @@ int main(int argc, char **argv) {
     hist_t rpp;
     hist_init(&rpp);
     cpu_sampler_t sampler;
+    /* Re-initialised when warmup completes, so the CPU average covers only
+     * the measurement window. */
     cpu_sampler_init(&sampler);
     /* Run-level current-RSS aggregation (avg/min/max over interval samples). */
     double rss_sum = 0.0, rss_min = 1e18, rss_max = 0.0;
@@ -800,6 +802,11 @@ int main(int argc, char **argv) {
                     warmup_complete = 1;
                     measure_start = monotonic_s();
                     interval_start = measure_start;
+                    /* Re-baseline the CPU sampler at the start of the
+                     * measurement window: the first interval sample must
+                     * cover only measured time, not the join / settle /
+                     * warmup CPU accumulated since the init above. */
+                    cpu_sampler_init(&sampler);
                     printf("    warmup complete (%d msgs); measuring now\n",
                            a.warmup);
                     fflush(stdout);

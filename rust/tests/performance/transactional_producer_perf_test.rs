@@ -42,8 +42,12 @@
 //! `TOPIC_NAME` -> `send_offsets_to_transaction` (last-consumed-offset + 1 per
 //! partition, with the consumer group metadata) -> `commit_transaction` (or
 //! `abort_transaction` per the deterministic abort rule). An empty poll is
-//! skipped (no empty transaction) so a run with no source data terminates on
-//! the duration / message bound rather than deadlocking. Aborted transactions
+//! skipped (no empty transaction). With a message target (`NUM_MESSAGES`, also
+//! set by `LIMIT_RPS`) the bound is GLOBAL — the total source records processed
+//! across all producers, checked at each transaction boundary — and if no
+//! producer polls a record for 30 s while that total is below the target, the
+//! workers stop and the run fails (the source cannot satisfy it). Without a target the run is
+//! bounded by `TEST_DURATION_SECONDS`. Aborted transactions
 //! are NOT retried and their consumed offsets are NOT committed — those records
 //! count toward neither throughput nor latency (the produce-mode precedent),
 //! and this harness does not seek the consumer back on abort (a benchmark
@@ -75,7 +79,7 @@
 //! file. Seed-then-run: the harness waits for the seeder to finish, so the source
 //! is fully populated before the clock starts.
 //!
-//! Two documented exceptions to the KAFKA_BIN path:
+//! Two documented deviations from the KAFKA_BIN path:
 //!  * In-suite (the ephemeral Docker cluster): seeded in-process by
 //!    `seed_source_topic` (a high-throughput non-transactional producer run before
 //!    the measured clock), because this path must run WITHOUT a Kafka bin dir or
@@ -84,7 +88,18 @@
 //!    pre-populated `SOURCE_TOPIC` by equivalent means.
 //!
 //! In every case the consumer never hangs on an under-fed source (bounded poll +
-//! a one-time "source starved" warning).
+//! a one-time "source starved" warning, plus the 30 s idle failure in count
+//! mode).
+//!
+//! Rate limiting (`LIMIT_RPS`): each producer paces to its exact share
+//! `LIMIT_RPS / NUM_TRANSACTIONAL_PRODUCERS` (a float, so the shares sum to
+//! `LIMIT_RPS`) — see `pace`.
+//!
+//! Run failures (the test fails, after `results.json` is written): a worker
+//! failure (`begin_transaction` / EOS poll error, task panic), a send rejected
+//! inside a transaction (that transaction is aborted, never committed), or the
+//! EOS idle safety net. A failed `commit_transaction` is aborted and counted as
+//! an aborted transaction, and the worker continues; it is not a run failure.
 //!
 //! KIP-848: ALL consumers in this project's transactional perf
 //! harnesses run on the KIP-848 consumer group protocol. Here the EOS consumer
@@ -158,6 +173,12 @@ const MAX_LATENCY_MS: usize = 10_000;
 /// Seconds to keep sampling metrics after the last commit, so the JSONL
 /// captures post-measurement (cooldown) windows. Mirrors the sibling tests.
 const POST_TEST_AWAIT_SECONDS: u64 = 10;
+
+/// EOS count mode (`NUM_MESSAGES > 0`): when no producer has polled a record for
+/// this long while the shared processed counter is still below `NUM_MESSAGES`,
+/// the workers stop and the run fails — the source cannot satisfy the target, and waiting longer
+/// would hang the run.
+const EOS_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Linux `USER_HZ` — clock ticks per second used to convert `/proc/self/stat`
 /// utime/stime into CPU seconds. Effectively always 100 on Linux.
@@ -924,9 +945,47 @@ struct SharedState {
     committed_transactions: Arc<AtomicU64>,
     aborted_transactions: Arc<AtomicU64>,
     aborted_records: Arc<AtomicU64>,
-    // Set by a producer task that stops early because `begin_transaction`
-    // failed; fails the run.
+    // Set by a producer task that stops early because `begin_transaction` (or,
+    // in EOS mode, the consumer poll) failed; fails the run.
     worker_failed: Arc<AtomicBool>,
+    // Set when a `send()` inside a transaction was rejected synchronously; that
+    // transaction is aborted (never committed) and the run fails.
+    send_rejected: Arc<AtomicBool>,
+    // EOS count mode: set when a worker gave up because NO producer had polled a
+    // record for `EOS_IDLE_TIMEOUT` with the shared counter still below
+    // `NUM_MESSAGES`; fails the run.
+    source_exhausted: Arc<AtomicBool>,
+    // EOS: when any producer last polled a non-empty batch, in ms since the
+    // measured-interval start. The idle safety net watches this shared value
+    // (not a worker's own polls), so a producer that owns no source partitions
+    // cannot fail a run the others are still making progress on.
+    eos_last_records_ms: Arc<AtomicU64>,
+    // EOS count mode: total source records processed across ALL producers (the
+    // global `NUM_MESSAGES` bound). Bumped by each polled batch's size once its
+    // transaction is finished (committed, aborted or failed).
+    eos_processed: Arc<AtomicU64>,
+}
+
+/// Exact-rate pacing shared by both loops: with `rate` records/s (0 = unlimited)
+/// and `checkpoint = max(floor(rate / 10), 1)`, every `checkpoint` records sleep
+/// until `start + records_sent / rate`. The deadline is derived from the
+/// cumulative count (not advanced by a fixed 100 ms per checkpoint), so rates
+/// that are not a multiple of 10 — including fractional per-producer shares —
+/// are honoured exactly.
+async fn pace(rate: f64, checkpoint: u64, records_sent: u64, start: Instant) {
+    if rate > 0.0 && records_sent.is_multiple_of(checkpoint) {
+        let deadline = Duration::from_secs_f64(records_sent as f64 / rate);
+        let elapsed = start.elapsed();
+        if elapsed < deadline {
+            tokio::time::sleep(deadline - elapsed).await;
+        }
+    }
+}
+
+/// The pacing checkpoint for `rate`: `max(floor(rate / 10), 1)` records (~100 ms
+/// worth of records at that rate).
+fn rate_checkpoint(rate: f64) -> u64 {
+    ((rate / 10.0).floor() as u64).max(1)
 }
 
 /// One producer task's produce-mode loop (`TXN_MODE=produce`).
@@ -947,16 +1006,14 @@ async fn run_producer(
     num_messages: u64,
     test_start: Instant,
     test_duration: Duration,
-    limit_rps: u64,
+    rate: f64,
     shared: Arc<SharedState>,
 ) {
     let msg_count = messages.len();
     let mut txn_index: u64 = 0;
     let mut records_sent: u64 = 0;
-    // Rate limiting: pace in 100 ms windows (limit_rps/10 records per checkpoint),
-    // matching producer_perf_test.rs's rate_checkpoint.
-    let rate_checkpoint = (limit_rps / 10).max(1);
-    let mut next_check_time = Duration::from_millis(100);
+    // Rate limiting: this producer's exact share `rate` of LIMIT_RPS (see `pace`).
+    let checkpoint = rate_checkpoint(rate);
 
     loop {
         // A counted run is bounded by `num_messages` (records attempted by this
@@ -983,6 +1040,9 @@ async fn run_producer(
         let n = records_per_transaction as usize;
         let mut produce_ts: Vec<Instant> = Vec::with_capacity(n);
         let mut produce_calls = Vec::with_capacity(n);
+        // Set when any send in this transaction is rejected synchronously; the
+        // transaction is then aborted instead of committed (see below).
+        let mut txn_rejected = false;
         for _ in 0..records_per_transaction {
             let (key, value) = &messages[records_sent as usize % msg_count];
             let record: ProducerRecord<&[u8], &[u8]> =
@@ -994,23 +1054,29 @@ async fn run_producer(
                     produce_calls.push(produce_call);
                 },
                 Err(e) => {
-                    eprintln!("Send error: {e:?}");
+                    eprintln!("Send error (the transaction will be aborted): {e:?}");
+                    txn_rejected = true;
                 },
             }
             records_sent += 1;
 
             // Rate limit per record, relative to the common measured-interval start.
-            if limit_rps > 0 && records_sent.is_multiple_of(rate_checkpoint) {
-                let elapsed = test_start.elapsed();
-                if elapsed < next_check_time {
-                    tokio::time::sleep(next_check_time - elapsed).await;
-                }
-                next_check_time += Duration::from_millis(100);
-            }
+            pace(rate, checkpoint, records_sent, test_start).await;
         }
 
         // --- commit or abort ---
-        if should_abort(txn_index, abort_rate) {
+        if txn_rejected {
+            // A send was rejected synchronously: never commit a transaction that
+            // is missing records. Abort it; its N attempted records count as
+            // aborted and record no latency or completion (no abort latency
+            // either — that series is deterministic-abort only). Fails the run.
+            shared.send_rejected.store(true, Ordering::Relaxed);
+            if let Err(e) = producer.abort_transaction().await {
+                eprintln!("abort_transaction error: {e:?}");
+            }
+            shared.aborted_transactions.fetch_add(1, Ordering::Relaxed);
+            shared.aborted_records.fetch_add(records_per_transaction, Ordering::Relaxed);
+        } else if should_abort(txn_index, abort_rate) {
             // Aborted transactions STILL produced their N records above; on abort
             // those records count toward neither throughput nor latency.
             if let Err(e) = producer.abort_transaction().await {
@@ -1024,8 +1090,7 @@ async fn run_producer(
             let ams = (abort_latency_us / 1000) as usize;
             shared.abort_latency_hist[ams.min(MAX_LATENCY_MS + 1)].fetch_add(1, Ordering::Relaxed);
             shared.aborted_transactions.fetch_add(1, Ordering::Relaxed);
-            // The transaction attempted N records regardless of how many sends
-            // returned Ok, matching PLAN §4.2 and the C/Java harnesses
+            // The transaction attempted N records, matching the C/Java harnesses
             // (`aborted_records += n` / `abortedRecords.addAndGet(n)`).
             shared.aborted_records.fetch_add(records_per_transaction, Ordering::Relaxed);
         } else {
@@ -1057,17 +1122,22 @@ async fn run_producer(
                                 }
                             },
                             Err(e) => {
-                                eprintln!("Produce call resulted in exception: {e:?}");
+                                eprintln!("Produce call resulted in an error: {e:?}");
                             },
                         }
                         shared.committed_records.fetch_add(1, Ordering::Relaxed);
                     }
                 },
                 Err(e) => {
+                    // A failed commit does not stop the worker: abort the
+                    // transaction (so the next `begin_transaction` can proceed),
+                    // count it as aborted with its N attempted records, matching
+                    // the C/Java harnesses, and continue.
                     eprintln!("commit_transaction error: {e:?}");
+                    if let Err(ae) = producer.abort_transaction().await {
+                        eprintln!("abort_transaction error: {ae:?}");
+                    }
                     shared.aborted_transactions.fetch_add(1, Ordering::Relaxed);
-                    // The transaction attempted N records regardless of how many
-                    // sends returned Ok, matching PLAN §4.3 and the C/Java harnesses.
                     shared.aborted_records.fetch_add(records_per_transaction, Ordering::Relaxed);
                 },
             }
@@ -1117,15 +1187,14 @@ async fn run_eos_producer(
     num_messages: u64,
     test_start: Instant,
     test_duration: Duration,
-    limit_rps: u64,
+    rate: f64,
     poll_timeout: Duration,
     shared: Arc<SharedState>,
 ) {
     let mut txn_index: u64 = 0;
     let mut records_sent: u64 = 0;
-    // Rate limiting: pace in 100 ms windows, matching produce mode.
-    let rate_checkpoint = (limit_rps / 10).max(1);
-    let mut next_check_time = Duration::from_millis(100);
+    // Rate limiting: this producer's exact share `rate` of LIMIT_RPS (see `pace`).
+    let checkpoint = rate_checkpoint(rate);
     // Consecutive empty polls, to warn (once) that the source is starving the
     // pipeline: the EOS ceiling is min(source-rate, txn-rate),
     // so an under-fed source shows up here rather than as a deadlock.
@@ -1133,9 +1202,13 @@ async fn run_eos_producer(
     let mut starvation_warned = false;
 
     loop {
-        // Bound at a transaction boundary so a transaction is never split.
+        // Bound at a transaction boundary so a transaction is never split. In
+        // count mode the bound is GLOBAL: the total source records processed by
+        // all producers (`eos_processed`), not a per-producer share — one worker
+        // may consume a whole poll batch past its share, which would leave
+        // another unable to ever reach its own.
         if num_messages > 0 {
-            if records_sent >= num_messages {
+            if shared.eos_processed.load(Ordering::Relaxed) >= num_messages {
                 break;
             }
         } else if test_start.elapsed() >= test_duration {
@@ -1148,6 +1221,7 @@ async fn run_eos_producer(
             Ok(r) => r,
             Err(e) => {
                 eprintln!("consumer poll error: {e:?}");
+                shared.worker_failed.store(true, Ordering::Relaxed);
                 break;
             },
         };
@@ -1166,9 +1240,30 @@ async fn run_eos_producer(
                 );
                 starvation_warned = true;
             }
+            // Count-mode safety net: the target can only be reached by polling
+            // more records, so a source that stays empty for EOS_IDLE_TIMEOUT
+            // would otherwise hang the run. (Duration mode is bounded by
+            // TEST_DURATION_SECONDS and needs none.)
+            let since_any_records_ms = (test_start.elapsed().as_millis() as u64)
+                .saturating_sub(shared.eos_last_records_ms.load(Ordering::Relaxed));
+            if num_messages > 0 && since_any_records_ms >= EOS_IDLE_TIMEOUT.as_millis() as u64 {
+                let processed = shared.eos_processed.load(Ordering::Relaxed);
+                if processed < num_messages {
+                    eprintln!(
+                        "[ERROR] EOS source exhausted before NUM_MESSAGES was reached: no producer \
+                         polled a record for {} s with {processed}/{num_messages} processed; stopping this worker",
+                        EOS_IDLE_TIMEOUT.as_secs()
+                    );
+                    shared.source_exhausted.store(true, Ordering::Relaxed);
+                    break;
+                }
+            }
             continue;
         }
         consecutive_empty_polls = 0;
+        shared
+            .eos_last_records_ms
+            .fetch_max(test_start.elapsed().as_millis() as u64, Ordering::Relaxed);
 
         // --- begin ---
         let begin_time = Instant::now();
@@ -1188,6 +1283,9 @@ async fn run_eos_producer(
         // The transaction ATTEMPTED this many records (used for aborted_records,
         // mirroring produce mode's `aborted_records += n`).
         let mut batch_records: u64 = 0;
+        // Set when any send in this transaction is rejected synchronously; the
+        // transaction is then aborted (no offsets sent, no commit).
+        let mut txn_rejected = false;
         for record in &records {
             let key = record.key().map(|k| k.as_slice());
             let value = record.value().map(|v| v.as_slice());
@@ -1199,7 +1297,8 @@ async fn run_eos_producer(
                     produce_calls.push(produce_call);
                 },
                 Err(e) => {
-                    eprintln!("Send error: {e:?}");
+                    eprintln!("Send error (the transaction will be aborted): {e:?}");
+                    txn_rejected = true;
                 },
             }
 
@@ -1211,17 +1310,11 @@ async fn run_eos_producer(
             batch_records += 1;
 
             // Rate limit per record, relative to the common measured-interval start.
-            if limit_rps > 0 && records_sent.is_multiple_of(rate_checkpoint) {
-                let elapsed = test_start.elapsed();
-                if elapsed < next_check_time {
-                    tokio::time::sleep(next_check_time - elapsed).await;
-                }
-                next_check_time += Duration::from_millis(100);
-            }
+            pace(rate, checkpoint, records_sent, test_start).await;
         }
 
         // --- send the consumed offsets to the transaction (offset + 1 per
-        // partition, with the consumer group metadata) ---
+        // partition, with the consumer group metadata), then commit or abort ---
         let group_metadata = consumer.group_metadata();
         let mut offset_map: HashMap<TopicPartition, OffsetAndMetadata> = HashMap::with_capacity(offsets.len());
         for (tp, off) in offsets {
@@ -1232,19 +1325,31 @@ async fn run_eos_producer(
                 Err(e) => eprintln!("offset error for {tp:?}: {e:?}"),
             }
         }
-        if let Err(e) = producer.send_offsets_to_transaction(offset_map, group_metadata.as_ref()).await {
+        // Every outcome of the transaction (rejected send, failed
+        // send_offsets_to_transaction, deterministic abort, commit success or
+        // failure) falls through to the shared footer below, so no path skips
+        // the global count bookkeeping or the bound check at the top of the loop.
+        if txn_rejected {
+            // A send was rejected synchronously: do NOT send the offsets and do
+            // NOT commit, so the source offsets never advance without their
+            // output. Abort; the attempted records count as aborted with no
+            // latency or completion (no abort latency either — that series is
+            // deterministic-abort only). Fails the run.
+            shared.send_rejected.store(true, Ordering::Relaxed);
+            if let Err(e) = producer.abort_transaction().await {
+                eprintln!("abort_transaction error: {e:?}");
+            }
+            shared.aborted_transactions.fetch_add(1, Ordering::Relaxed);
+            shared.aborted_records.fetch_add(batch_records, Ordering::Relaxed);
+        } else if let Err(e) = producer.send_offsets_to_transaction(offset_map, group_metadata.as_ref()).await {
             eprintln!("send_offsets_to_transaction error: {e:?}");
             if let Err(ae) = producer.abort_transaction().await {
                 eprintln!("abort_transaction error: {ae:?}");
             }
             shared.aborted_transactions.fetch_add(1, Ordering::Relaxed);
             shared.aborted_records.fetch_add(batch_records, Ordering::Relaxed);
-            txn_index += 1;
-            continue;
-        }
-
-        // --- commit or abort ---
-        if should_abort(txn_index, abort_rate) {
+        } else if should_abort(txn_index, abort_rate) {
+            // --- deterministic abort ---
             // Aborted transactions produced+consumed their records; on abort they
             // count toward neither throughput nor latency, the consumed offsets
             // are NOT committed, and (per the module doc) the consumer is NOT
@@ -1289,20 +1394,28 @@ async fn run_eos_producer(
                                 }
                             },
                             Err(e) => {
-                                eprintln!("Produce call resulted in exception: {e:?}");
+                                eprintln!("Produce call resulted in an error: {e:?}");
                             },
                         }
                         shared.committed_records.fetch_add(1, Ordering::Relaxed);
                     }
                 },
                 Err(e) => {
+                    // A failed commit does not stop the worker: abort, count it
+                    // as aborted with its attempted records, and continue.
                     eprintln!("commit_transaction error: {e:?}");
+                    if let Err(ae) = producer.abort_transaction().await {
+                        eprintln!("abort_transaction error: {ae:?}");
+                    }
                     shared.aborted_transactions.fetch_add(1, Ordering::Relaxed);
                     shared.aborted_records.fetch_add(batch_records, Ordering::Relaxed);
                 },
             }
         }
 
+        // --- footer: the batch's transaction is finished (committed, aborted or
+        // failed); count its records toward the global bound ---
+        shared.eos_processed.fetch_add(batch_records, Ordering::Relaxed);
         txn_index += 1;
     }
 
@@ -1819,17 +1932,19 @@ async fn transactional_producer_perf_test() {
     meas_start.store(now_ms() as u64, Ordering::Relaxed);
     let test_duration = Duration::from_secs(config.test_duration_seconds);
 
-    // Split the total rate / message target evenly across producers so the
-    // aggregate matches LIMIT_RPS / NUM_MESSAGES.
-    let per_producer_rps = if config.limit_rps > 0 {
-        (config.limit_rps / num_producers).max(1)
+    // Split the total rate evenly across producers as an exact float, so the
+    // per-producer rates sum to LIMIT_RPS (no integer floor).
+    let per_producer_rate = if config.limit_rps > 0 {
+        config.limit_rps as f64 / num_producers as f64
     } else {
-        0
+        0.0
     };
-    // With a message target, the first `num_messages % num_producers` producers
-    // get one extra record so the shares sum to the target. A producer whose
-    // share is 0 (fewer messages than producers) is not started: 0 means "run
-    // for the duration" to the producer loop.
+    // Produce mode only: with a message target, the first
+    // `num_messages % num_producers` producers get one extra record so the
+    // shares sum to the target. A producer whose share is 0 (fewer messages
+    // than producers) is not started: 0 means "run for the duration" to the
+    // producer loop. EOS mode ignores the shares: its bound is the global
+    // processed counter, and all producers are started.
     let shares: Vec<u64> = (0..num_producers)
         .map(|k| {
             if config.num_messages > 0 {
@@ -1851,6 +1966,10 @@ async fn transactional_producer_perf_test() {
         aborted_transactions: Arc::new(AtomicU64::new(0)),
         aborted_records: Arc::new(AtomicU64::new(0)),
         worker_failed: Arc::new(AtomicBool::new(false)),
+        send_rejected: Arc::new(AtomicBool::new(false)),
+        source_exhausted: Arc::new(AtomicBool::new(false)),
+        eos_processed: Arc::new(AtomicU64::new(0)),
+        eos_last_records_ms: Arc::new(AtomicU64::new(0)),
     });
 
     // Bound each EOS consumer poll so a run with no source data cannot block
@@ -1858,9 +1977,7 @@ async fn transactional_producer_perf_test() {
     let poll_timeout = Duration::from_millis(500);
     let mut handles = Vec::with_capacity(num_producers as usize);
     for (producer, &per_producer_num_messages) in producers.into_iter().zip(&shares) {
-        if config.num_messages > 0 && per_producer_num_messages == 0 {
-            // Keep the one-consumer-per-producer pairing for the started ones.
-            consumers.pop_front();
+        if !eos_mode && config.num_messages > 0 && per_producer_num_messages == 0 {
             continue;
         }
         let topic = topic.clone();
@@ -1877,10 +1994,11 @@ async fn transactional_producer_perf_test() {
                     message_size,
                     abort_rate,
                     do_verify,
-                    per_producer_num_messages,
+                    // The global target (0 = duration mode), shared by all workers.
+                    config.num_messages,
                     test_start,
                     test_duration,
-                    per_producer_rps,
+                    per_producer_rate,
                     poll_timeout,
                     shared,
                 )
@@ -1901,20 +2019,22 @@ async fn transactional_producer_perf_test() {
                     per_producer_num_messages,
                     test_start,
                     test_duration,
-                    per_producer_rps,
+                    per_producer_rate,
                     shared,
                 )
                 .await;
             }));
         }
     }
+    // A panicked task fails the run, but only after the summary is written
+    // (see the run-failure assertions at the end).
+    let mut task_panicked = false;
     for h in handles {
-        h.await.expect("transactional producer task panicked");
+        if let Err(e) = h.await {
+            eprintln!("transactional producer task panicked: {e:?}");
+            task_panicked = true;
+        }
     }
-    assert!(
-        !shared.worker_failed.load(Ordering::Relaxed),
-        "one or more transactional producer tasks failed (see above)"
-    );
     // The last commit has completed; mark the end of the measured interval.
     meas_end.store(now_ms() as u64, Ordering::Relaxed);
     let measured_secs = test_start.elapsed().as_secs_f64();
@@ -2103,8 +2223,26 @@ async fn transactional_producer_perf_test() {
         .unwrap_or_else(|e| panic!("Failed to write {}: {e}", config.results_file));
     println!("Results summary written to: {}", config.results_file);
 
+    // === RUN-FAILURE ASSERTIONS ===
+    // Checked only now, after results.json is written, so a failed run still
+    // leaves its summary behind.
+    assert!(!task_panicked, "one or more transactional producer tasks panicked (see above)");
+    assert!(
+        !shared.worker_failed.load(Ordering::Relaxed),
+        "one or more transactional producer tasks failed (see above)"
+    );
+    assert!(
+        !shared.send_rejected.load(Ordering::Relaxed),
+        "one or more sends were rejected inside a transaction; those transactions were aborted (see above)"
+    );
+    assert!(
+        !shared.source_exhausted.load(Ordering::Relaxed),
+        "EOS source exhausted before NUM_MESSAGES ({}) was reached (see above)",
+        config.num_messages
+    );
+
     // === PERFORMANCE TARGET ASSERTIONS ===
-    // Assertions apply to committed records only (per the plan).
+    // Assertions apply to committed records only.
     // `verified == committed` always holds (both are 0 when everything aborts).
     assert_eq!(
         verified, committed_records,
@@ -2125,17 +2263,23 @@ async fn transactional_producer_perf_test() {
             assert!(committed_transactions > 0, "Should have committed at least one transaction");
             assert!(committed_records > 0, "Should have committed at least one record");
         }
-        // Exact-count assertion: only with no aborts. Each producer produces whole
-        // transactions, so it commits `ceil(per_producer_num_messages /
-        // records_per_transaction) * records_per_transaction` records — the target
-        // is that, summed across producers, NOT the raw message count (which need
-        // not be a multiple of records_per_transaction).
-        if config.num_messages > 0 && config.abort_rate == 0.0 {
+        // Exact-count assertion. Each producer produces whole transactions, so it
+        // attempts `ceil(per_producer_num_messages / records_per_transaction) *
+        // records_per_transaction` records — the target is that, summed across
+        // producers, NOT the raw message count (which need not be a multiple of
+        // records_per_transaction). Every attempted transaction ends either
+        // committed (all N records counted in `committed_records`) or aborted (N
+        // counted in `aborted_records`: deterministic abort, a rejected send, or a
+        // failed commit), so the two together must account for the target
+        // exactly. With ABORT_RATE == 0 and no failures this is `committed ==
+        // target`.
+        if config.num_messages > 0 {
             let n = config.records_per_transaction;
             let target: u64 = shares.iter().map(|share| share.div_ceil(n) * n).sum();
             assert_eq!(
-                committed_records, target,
-                "committed ({committed_records}) must match produced target ({target})"
+                committed_records + aborted_records,
+                target,
+                "committed ({committed_records}) + aborted ({aborted_records}) records must match produced target ({target})"
             );
         }
     }

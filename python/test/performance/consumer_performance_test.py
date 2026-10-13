@@ -495,7 +495,21 @@ class _Measurement:
         self.measure_start = None
         self.no_data_deadline = None
 
+    def _reset_cpu_baseline(self):
+        # psutil's cpu_percent() (what the shared CPUBucket samples each window)
+        # reports CPU over the span since its previous call, and its very first
+        # call returns a meaningless 0.0. Calling it here restarts that span at
+        # "now", so the first measured sample covers only measured time: no
+        # warmup CPU (warmup completing mid-window) and no spurious 0.0 (warmup
+        # disabled, measurement starting with the sampler).
+        try:
+            self.metrics.cpu.process.cpu_percent()
+        except Exception:  # noqa: BLE001
+            pass
+
     def begin(self):
+        # Prime the CPU baseline before the sampler starts (no race with it).
+        self._reset_cpu_baseline()
         self.metrics.start_collecting(interval_s=self.cfg.interval_seconds)
         if self.warmup_complete:
             self.measure_start = time.monotonic()
@@ -511,6 +525,8 @@ class _Measurement:
             if now - self.consume_start >= self.cfg.warmup_seconds:
                 self.warmup_complete = True
                 self.measure_start = now
+                # Exclude warmup CPU from the first measured CPU sample.
+                self._reset_cpu_baseline()
                 self.metrics.measurement_start_ms = _now_ms()
                 print(f">>> warmup complete ({self.cfg.warmup_seconds}s); measuring", flush=True)
             return

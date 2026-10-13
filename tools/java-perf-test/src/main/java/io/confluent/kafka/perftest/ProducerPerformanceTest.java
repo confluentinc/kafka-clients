@@ -63,7 +63,8 @@ import java.util.concurrent.atomic.AtomicLong;
  *   BOOTSTRAP_SERVERS       Kafka bootstrap servers (default localhost:9092)
  *   TOPIC_NAME              topic to produce to (default test-topic)
  *   NUM_MESSAGES            total messages to produce (0 = time-based)
- *   LIMIT_RPS               rate limit in msg/s (0 = unlimited)
+ *   LIMIT_RPS               rate limit in msg/s (0 = unlimited); when set, the run
+ *                           is bounded by LIMIT_RPS * TEST_DURATION_SECONDS messages
  *   KEY_SIZE                key size in bytes (0 = no key, default 0)
  *   VALUE_SIZE              value size in bytes (default 2048)
  *   BATCH_SIZE              batch.size in KB (default 977 ≈ 1MB; matches Python default)
@@ -107,7 +108,11 @@ public class ProducerPerformanceTest {
     private static final long LIMIT_RPS = envLong("LIMIT_RPS", 0);
     private static final int WARMUP_SECONDS = envInt("WARMUP_SECONDS", 120);
     private static final int TEST_DURATION_SECONDS = envInt("TEST_DURATION_SECONDS", 600);
-    private static final long NUM_MESSAGES = envLong("NUM_MESSAGES", 0);
+    // When rate-limited, the run is bounded by rps x duration (matches the C,
+    // Rust and Python producer perf tests).
+    private static final long NUM_MESSAGES = LIMIT_RPS > 0
+        ? LIMIT_RPS * TEST_DURATION_SECONDS
+        : envLong("NUM_MESSAGES", 0);
     private static final boolean DO_VERIFY = envBool("DO_VERIFY", true);
     private static final boolean VERIFY_CONSUMED = envBool("VERIFY_CONSUMED", false);
     // When true (default), delete + re-create the topic before the run. -1
@@ -129,6 +134,9 @@ public class ProducerPerformanceTest {
     private static boolean latencyBudgetExceeded = false;
     // Set when results.json could not be written; fails the run.
     private static boolean resultsWriteFailed = false;
+    // Set when the verified / completed / expected counts disagree on a run
+    // that was not interrupted; fails the run (results.json is still written).
+    private static boolean countMismatch = false;
 
     public static void main(String[] args) throws Exception {
         installSignalHandler();
@@ -189,7 +197,8 @@ public class ProducerPerformanceTest {
                         verifyRecordMetadata(f.get());
                     } catch (Exception e) {
                         System.out.println("Warmup failed due to message verification error: " + e.getMessage());
-                        return;
+                        // An early exit before the summary is a failed run.
+                        System.exit(1);
                     }
                     warmupSent++;
                     Thread.sleep(100);
@@ -211,13 +220,16 @@ public class ProducerPerformanceTest {
 
             long beforeMs = System.currentTimeMillis();
             long firstMessageNs = System.nanoTime();
-            // Pace in 100 ms windows (LIMIT_RPS/10 messages per checkpoint),
-            // matching the C harness's checkpoint_interval = LIMIT_RPS / 10 and
-            // the Rust harness. Whole-second pacing would burst a full second's
-            // quota into the accumulator and measure burst queueing rather than
-            // steady-state latency.
-            long rateCheckpoint = Math.max(LIMIT_RPS / 10, 1);
-            long nextCheckNs = firstMessageNs + 100_000_000L;
+            // Pace in ~100 ms windows: every max(floor(LIMIT_RPS / 10), 1)
+            // messages, sleep until the deadline derived from the cumulative
+            // count (start + messagesSent / LIMIT_RPS), matching the C, Rust and
+            // Python harnesses. Deriving the deadline from the count (rather
+            // than adding a fixed 100 ms per checkpoint) keeps the rate exact
+            // for rates that are not a multiple of 10. Whole-second pacing would
+            // burst a full second's quota into the accumulator and measure burst
+            // queueing rather than steady-state latency.
+            double rateRps = (double) LIMIT_RPS;
+            long rateCheckpoint = Math.max((long) Math.floor(rateRps / 10.0), 1L);
             metrics.measurementStartMs = beforeMs;
 
             System.out.println("Starting measured interval at " + beforeMs + " ms: " + Instant.now());
@@ -240,12 +252,12 @@ public class ProducerPerformanceTest {
                 messagesSent++;
 
                 if (LIMIT_RPS > 0 && messagesSent % rateCheckpoint == 0) {
+                    long deadlineNs = firstMessageNs + (long) (messagesSent / rateRps * 1e9);
                     long now = System.nanoTime();
-                    if (now < nextCheckNs) {
-                        long sleepNs = nextCheckNs - now;
+                    if (now < deadlineNs) {
+                        long sleepNs = deadlineNs - now;
                         Thread.sleep(sleepNs / 1_000_000L, (int) (sleepNs % 1_000_000L));
                     }
-                    nextCheckNs += 100_000_000L;
                 }
 
                 if (messagesSent % 10_000 == 0) {
@@ -272,9 +284,18 @@ public class ProducerPerformanceTest {
             long afterMs = System.currentTimeMillis();
             metrics.measurementEndMs = afterMs;
 
-            if (verified != completedMessages && !terminating) {
-                System.out.println("Verified messages " + verified
-                    + " does not match completed messages " + completedMessages);
+            // A count mismatch fails the run (unless it was interrupted), but
+            // the summary below is still written.
+            if (!terminating) {
+                if (verified != completedMessages) {
+                    System.err.println("Verified messages " + verified
+                        + " does not match completed messages " + completedMessages);
+                    countMismatch = true;
+                } else if (NUM_MESSAGES > 0 && completedMessages != NUM_MESSAGES) {
+                    System.err.println("Completed messages " + completedMessages
+                        + " does not match produced messages " + NUM_MESSAGES);
+                    countMismatch = true;
+                }
             }
 
             double durationS = (afterMs - beforeMs) / 1000.0;
@@ -383,7 +404,7 @@ public class ProducerPerformanceTest {
         metrics.stopCollecting();
         System.out.println("Done");
 
-        int exitCode = (latencyBudgetExceeded || resultsWriteFailed) ? 1 : 0;
+        int exitCode = (latencyBudgetExceeded || resultsWriteFailed || countMismatch) ? 1 : 0;
         if (VERIFY_CONSUMED && !terminating && baselineEndOffsets != null) {
             long expected = warmupSent + measuredSent;
             System.out.println("Verifying consumed messages from topic '" + TOPIC_NAME

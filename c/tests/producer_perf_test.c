@@ -108,6 +108,11 @@ static const char *RESULTS_FILE = "results.json";
 static bool latency_budget_exceeded = false;
 // Set when results.json could not be written; fails the run.
 static bool results_write_failed = false;
+// Set when the run cannot produce a trustworthy result: an early exit before
+// the summary (producer creation or warmup failure) or an inconsistent summary
+// (verified != completed, or completed != NUM_MESSAGES unless the duration cap
+// interrupted the run). Fails the run.
+static bool run_failed = false;
 // Latency histogram (ms resolution) for the p99 computation, mirroring the Rust
 // test. Written only by the single record-completed task and read after that
 // task is joined, so no locking is needed.
@@ -1343,6 +1348,7 @@ static void run_test() {
 
     if (!producer) {
         fprintf(stderr, "Failed to create producer\n");
+        run_failed = true;
         free_message_data(messages);
         return;
     }
@@ -1375,7 +1381,8 @@ static void run_test() {
             usleep(100000);
         }
         if (!warmup_succeeded) {
-            printf("Warmup failed due to message verification error\n");
+            fprintf(stderr, "Warmup failed due to message verification error\n");
+            run_failed = true;
             goto end;
         } else {
             printf("Warmup complete.\n");
@@ -1445,128 +1452,134 @@ static void run_test() {
     after_ns = current_time_ns();
     long after_ms = current_time_ms();
 
-    // Verify all messages were verified
+    // An inconsistent summary fails the run, but the summary below is ALWAYS
+    // written so the run's numbers are not lost. Every queued future is
+    // drained above, so a verified/completed mismatch is a real verification
+    // or delivery failure and always fails. A short count is excused only when
+    // the duration cap in the send loop interrupted the run (that cap is also
+    // how a time-based run ends).
     if (verified != completed_messages) {
         fprintf(stderr, "Verified messages %ld does not match completed messages %ld\n",
             verified, completed_messages);
+        run_failed = true;
     } else if (NUM_MESSAGES > 0 && completed_messages != NUM_MESSAGES) {
         fprintf(stderr, "Completed messages %ld does not match produced messages %ld\n",
             completed_messages, NUM_MESSAGES);
-    } else {
-        metrics_set_measurement_end_ms(&metrics, after_ns);
-        long total_time_ns = after_ns - first_message_time;
-        double total_time_s = total_time_ns / 1e9;
-        double average_cpu, average_rss;
-        double message_rate = completed_messages / total_time_s;
-        metrics_external_metrics_aggregations(&metrics, &average_cpu, &average_rss);
-
-        printf("End time: %ld ms\n", after_ms);
-        printf("Duration: %.2f ms\n", (double)total_time_ns / 1e6);
-        printf("Average CPU: %.2f %%\n",
-            average_cpu);
-        printf("Average RSS: %.2f KiB\n",
-            average_rss / 1024.0);
-        printf("CPU efficiency: %.2f msg/(s * 1%% CPU)\n",
-            (double)message_rate / (average_cpu > 0.0 ? average_cpu : 1.0));
-        printf("Memory efficiency: %.2f msg/(s * KB RSS)\n",
-            (double)message_rate / (average_rss > 0.0 ? average_rss / 1024.0 : 1.0));
-        double average_queue_size;
-        size_t max_queue_size;
-        metrics_queue_aggregations(&metrics, &average_queue_size, &max_queue_size);
-        printf("Average future queue size: %.2f\n", average_queue_size);
-        printf("Max future queue size: %zu\n", max_queue_size);
-        printf("Average time: %.2f ms\n",
-            (double)total_time_ns / completed_messages / 1e6);
-        printf("Average rate msg/s: %.2f msg/s\n",
-            message_rate);
-        printf("Average rate MiB/s: %.2f MiB/s\n",
-            (completed_messages * MESSAGE_SIZE / (1024.0 * 1024.0)) / total_time_s);
-        printf("Average latency: %.2f ms\n",
-            (double)total_latency / completed_messages / 1e6);
-        printf("Max latency: %.2f ms\n", (double)max_latency / 1e6);
-
-        long p99_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.99);
-        printf("p99 latency: %ld ms\n", p99_ms);
-        // Latency budget — only asserted when set (P99_LIMIT_MS=0 disables it
-        // for max-rate benchmark runs, where queueing makes per-message latency
-        // moot). Mirrors the Rust producer_perf_test.
-        if (P99_LIMIT_MS > 0 && p99_ms > P99_LIMIT_MS) {
-            fprintf(stderr, "p99 latency %ld ms exceeds %ld ms budget\n",
-                p99_ms, P99_LIMIT_MS);
-            latency_budget_exceeded = true;
-        }
-
-        // Machine-readable summary, kept in sync with the other producer
-        // performance tests (same file name, keys and latency_ms shape as the
-        // consumer performance test's results.json; `client` identifies which
-        // implementation wrote it).
-        long p50_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.50);
-        long p90_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.90);
-        long p95_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.95);
-        long p999_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.999);
-        long min_latency_ms = 0;
-        for (size_t i = 0; i < MAX_LATENCY_MS + 2; i++) {
-            if (latency_hist[i] > 0) {
-                min_latency_ms = (long)i;
-                break;
-            }
-        }
-        // Guard the ratios: a run that completed no messages (or measured no
-        // time) must still write valid JSON, and nan / inf are not JSON numbers.
-        double results_rate = total_time_s > 0 ? message_rate : 0.0;
-        double results_mib_s = total_time_s > 0
-            ? (completed_messages * MESSAGE_SIZE / (1024.0 * 1024.0)) / total_time_s
-            : 0.0;
-        double results_avg_latency_ms = completed_messages > 0
-            ? (double)total_latency / completed_messages / 1e6
-            : 0.0;
-        FILE *results_fp = fopen(RESULTS_FILE, "w");
-        if (results_fp != NULL) {
-            fprintf(results_fp,
-                "{\n"
-                "  \"test\": \"producer\",\n"
-                "  \"client\": \"%s\",\n"
-                "  \"topic\": \"%s\",\n"
-                "  \"messages_measured\": %ld,\n"
-                "  \"duration_s\": %.2f,\n"
-                "  \"throughput_msg_s\": %.2f,\n"
-                "  \"throughput_mib_s\": %.2f,\n"
-                "  \"latency_ms\": {\"min\": %ld, \"avg\": %.2f, \"p50\": %ld, "
-                "\"p90\": %ld, \"p95\": %ld, \"p99\": %ld, \"p999\": %ld, "
-                "\"max\": %.2f},\n"
-                "  \"cpu_avg_pct\": %.2f,\n"
-                "  \"rss_avg_kib\": %.2f\n"
-                "}\n",
-                CLIENT_VERSION == 3 ? "rust-c-ffi" : "librdkafka",
-                TOPIC,
-                completed_messages,
-                total_time_s,
-                results_rate,
-                results_mib_s,
-                min_latency_ms,
-                results_avg_latency_ms,
-                p50_ms, p90_ms, p95_ms, p99_ms, p999_ms,
-                (double)max_latency / 1e6,
-                average_cpu,
-                average_rss / 1024.0);
-            if (fclose(results_fp) != 0) {
-                fprintf(stderr, "Failed to write %s\n", RESULTS_FILE);
-                results_write_failed = true;
-            } else {
-                printf("Results summary written to: %s\n", RESULTS_FILE);
-            }
-        } else {
-            // The machine-readable summary is the run's primary artifact:
-            // fail the run rather than exit 0 without it.
-            fprintf(stderr, "Failed to write %s\n", RESULTS_FILE);
-            results_write_failed = true;
-        }
+        if (!interrupted) run_failed = true;
     }
 
-    // Stop sampling the queue before destroying it: the metrics thread runs
-    // until later, and the verification-failure branches above never set
-    // measurement_end_ms, so the measured-only guard alone would not prevent a
-    // sample after free. Clear under the metrics lock to avoid a data race.
+    metrics_set_measurement_end_ms(&metrics, after_ms);
+    long total_time_ns = after_ns - first_message_time;
+    double total_time_s = total_time_ns / 1e9;
+    double average_cpu, average_rss;
+    double message_rate = total_time_s > 0 ? completed_messages / total_time_s : 0.0;
+    metrics_external_metrics_aggregations(&metrics, &average_cpu, &average_rss);
+
+    printf("End time: %ld ms\n", after_ms);
+    printf("Duration: %.2f ms\n", (double)total_time_ns / 1e6);
+    printf("Average CPU: %.2f %%\n",
+        average_cpu);
+    printf("Average RSS: %.2f KiB\n",
+        average_rss / 1024.0);
+    printf("CPU efficiency: %.2f msg/(s * 1%% CPU)\n",
+        (double)message_rate / (average_cpu > 0.0 ? average_cpu : 1.0));
+    printf("Memory efficiency: %.2f msg/(s * KB RSS)\n",
+        (double)message_rate / (average_rss > 0.0 ? average_rss / 1024.0 : 1.0));
+    double average_queue_size;
+    size_t max_queue_size;
+    metrics_queue_aggregations(&metrics, &average_queue_size, &max_queue_size);
+    printf("Average future queue size: %.2f\n", average_queue_size);
+    printf("Max future queue size: %zu\n", max_queue_size);
+    printf("Average time: %.2f ms\n",
+        completed_messages > 0 ? (double)total_time_ns / completed_messages / 1e6 : 0.0);
+    printf("Average rate msg/s: %.2f msg/s\n",
+        message_rate);
+    printf("Average rate MiB/s: %.2f MiB/s\n",
+        total_time_s > 0 ? (completed_messages * MESSAGE_SIZE / (1024.0 * 1024.0)) / total_time_s : 0.0);
+    printf("Average latency: %.2f ms\n",
+        completed_messages > 0 ? (double)total_latency / completed_messages / 1e6 : 0.0);
+    printf("Max latency: %.2f ms\n", (double)max_latency / 1e6);
+
+    long p99_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.99);
+    printf("p99 latency: %ld ms\n", p99_ms);
+    // Latency budget — only asserted when set (P99_LIMIT_MS=0 disables it
+    // for max-rate benchmark runs, where queueing makes per-message latency
+    // moot). Mirrors the Rust producer_perf_test.
+    if (P99_LIMIT_MS > 0 && p99_ms > P99_LIMIT_MS) {
+        fprintf(stderr, "p99 latency %ld ms exceeds %ld ms budget\n",
+            p99_ms, P99_LIMIT_MS);
+        latency_budget_exceeded = true;
+    }
+
+    // Machine-readable summary, kept in sync with the other producer
+    // performance tests (same file name, keys and latency_ms shape as the
+    // consumer performance test's results.json; `client` identifies which
+    // implementation wrote it).
+    long p50_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.50);
+    long p90_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.90);
+    long p95_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.95);
+    long p999_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.999);
+    long min_latency_ms = 0;
+    for (size_t i = 0; i < MAX_LATENCY_MS + 2; i++) {
+        if (latency_hist[i] > 0) {
+            min_latency_ms = (long)i;
+            break;
+        }
+    }
+    // Guard the ratios: a run that completed no messages (or measured no
+    // time) must still write valid JSON, and nan / inf are not JSON numbers.
+    double results_rate = total_time_s > 0 ? message_rate : 0.0;
+    double results_mib_s = total_time_s > 0
+        ? (completed_messages * MESSAGE_SIZE / (1024.0 * 1024.0)) / total_time_s
+        : 0.0;
+    double results_avg_latency_ms = completed_messages > 0
+        ? (double)total_latency / completed_messages / 1e6
+        : 0.0;
+    FILE *results_fp = fopen(RESULTS_FILE, "w");
+    if (results_fp != NULL) {
+        fprintf(results_fp,
+            "{\n"
+            "  \"test\": \"producer\",\n"
+            "  \"client\": \"%s\",\n"
+            "  \"topic\": \"%s\",\n"
+            "  \"messages_measured\": %ld,\n"
+            "  \"duration_s\": %.2f,\n"
+            "  \"throughput_msg_s\": %.2f,\n"
+            "  \"throughput_mib_s\": %.2f,\n"
+            "  \"latency_ms\": {\"min\": %ld, \"avg\": %.2f, \"p50\": %ld, "
+            "\"p90\": %ld, \"p95\": %ld, \"p99\": %ld, \"p999\": %ld, "
+            "\"max\": %.2f},\n"
+            "  \"cpu_avg_pct\": %.2f,\n"
+            "  \"rss_avg_kib\": %.2f\n"
+            "}\n",
+            CLIENT_VERSION == 3 ? "rust-c-ffi" : "librdkafka",
+            TOPIC,
+            completed_messages,
+            total_time_s,
+            results_rate,
+            results_mib_s,
+            min_latency_ms,
+            results_avg_latency_ms,
+            p50_ms, p90_ms, p95_ms, p99_ms, p999_ms,
+            (double)max_latency / 1e6,
+            average_cpu,
+            average_rss / 1024.0);
+        if (fclose(results_fp) != 0) {
+            fprintf(stderr, "Failed to write %s\n", RESULTS_FILE);
+            results_write_failed = true;
+        } else {
+            printf("Results summary written to: %s\n", RESULTS_FILE);
+        }
+    } else {
+        // The machine-readable summary is the run's primary artifact:
+        // fail the run rather than exit 0 without it.
+        fprintf(stderr, "Failed to write %s\n", RESULTS_FILE);
+        results_write_failed = true;
+    }
+
+    // Stop sampling the queue before destroying it: the metrics thread keeps
+    // running until main stops it, so clear the pointer under the metrics lock
+    // to avoid a sample after free (and a data race).
     pthread_mutex_lock(&metrics.mutex);
     g_future_queue = NULL;
     pthread_mutex_unlock(&metrics.mutex);
@@ -1912,5 +1925,8 @@ int main(int argc, char** argv) {
     metrics_stop_collecting(&metrics);
     printf("Done\n");
 
-    return (latency_budget_exceeded || results_write_failed) ? 1 : 0;
+    if (run_failed) {
+        fprintf(stderr, "Run failed (see above)\n");
+    }
+    return (latency_budget_exceeded || results_write_failed || run_failed) ? 1 : 0;
 }

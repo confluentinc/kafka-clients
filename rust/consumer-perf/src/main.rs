@@ -237,8 +237,16 @@ impl ResourceSampler {
         Self { prev_busy_ticks: read_busy_ticks(), prev_instant: Instant::now() }
     }
 
+    /// Restart the CPU interval baseline at "now", so the next `sample()`
+    /// covers only the time from this call on (used when warmup completes, so
+    /// warmup CPU is excluded from the first measured sample).
+    fn reset(&mut self) {
+        self.prev_busy_ticks = read_busy_ticks();
+        self.prev_instant = Instant::now();
+    }
+
     /// Returns `(cpu_percent_of_one_core, rss_mb)` for the interval since the
-    /// last call (or since `new()`).
+    /// last call (or since `new()` / `reset()`).
     fn sample(&mut self) -> (f32, f64) {
         let busy = read_busy_ticks();
         let now = Instant::now();
@@ -308,7 +316,17 @@ impl ResourceSampler {
         Self { sys, pid }
     }
 
-    /// Returns `(cpu_percent_of_one_core, rss_mb)`.
+    /// Restart the CPU interval baseline at "now": sysinfo's `cpu_usage()` is
+    /// computed over the span since the previous refresh, so refreshing here
+    /// makes the next `sample()` cover only the time from this call on (used
+    /// when warmup completes, so warmup CPU is excluded from the first measured
+    /// sample).
+    fn reset(&mut self) {
+        self.sys.refresh_processes(ProcessesToUpdate::Some(&[self.pid]), true);
+    }
+
+    /// Returns `(cpu_percent_of_one_core, rss_mb)` for the interval since the
+    /// last call (or since `new()` / `reset()`).
     fn sample(&mut self) -> (f32, f64) {
         self.sys.refresh_processes(ProcessesToUpdate::Some(&[self.pid]), true);
         match self.sys.process(self.pid) {
@@ -847,6 +865,10 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     warmup_complete = true;
                     measure_start = Instant::now();
                     interval_start = measure_start;
+                    // The sampler's baseline dates from before warmup; restart it
+                    // so the first measured CPU sample (and therefore the
+                    // summary's CPU average) excludes warmup CPU time.
+                    sampler.reset();
                     println!("    warmup complete ({} msgs); measuring now", args.warmup_messages);
                 }
                 continue;

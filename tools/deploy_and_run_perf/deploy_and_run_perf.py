@@ -431,13 +431,40 @@ case "$TEST" in
     if [ -n "${INTERVAL_SECONDS:-}" ]; then JARGS+=(--interval "$INTERVAL_SECONDS"); fi
     if [ -n "${GROUP_ID:-}" ]; then JARGS+=(--group-id "$GROUP_ID"); fi
     if [ -n "${CLIENT_CONFIG:-}" ]; then JARGS+=(--client-config "$CLIENT_CONFIG"); fi
-    # Capture JavaE2E's status instead of letting errexit abort here, so the
-    # background load generator is always stopped first.
-    JAVA_RC=0
+    # Run JavaE2E in the background (its output streamed from the log) and
+    # watch the load generator: JavaE2E's warmup is count-based, so if the
+    # generator dies early (e.g. bad security properties) JavaE2E would wait
+    # forever. A generator that exits non-zero first stops JavaE2E and fails
+    # the arm. JavaE2E's status is captured rather than left to errexit, so
+    # the generator is always stopped.
     java -cp "$REPO/tools/java-perf-test/build/libs/java-perf-test-all.jar:$REPO/rust/consumer-perf/compare/build" \
-      JavaE2E "${JARGS[@]}" ${EXTRA_CONSUMER_ARGS:-} | tee "$OUT/java-e2e.log" || JAVA_RC=$?
-    kill "$PRODUCER_PID" 2>/dev/null || true
-    wait "$PRODUCER_PID" 2>/dev/null || true
+      JavaE2E "${JARGS[@]}" ${EXTRA_CONSUMER_ARGS:-} > "$OUT/java-e2e.log" 2>&1 &
+    JAVA_PID=$!
+    tail -n +1 -f --pid="$JAVA_PID" "$OUT/java-e2e.log" &
+    TAIL_PID=$!
+    PRODUCER_DONE=0
+    while kill -0 "$JAVA_PID" 2>/dev/null; do
+      if [ "$PRODUCER_DONE" = 0 ] && ! kill -0 "$PRODUCER_PID" 2>/dev/null; then
+        PRODUCER_DONE=1
+        PRODUCER_RC=0
+        wait "$PRODUCER_PID" || PRODUCER_RC=$?
+        if [ "$PRODUCER_RC" -ne 0 ]; then
+          echo "ERROR: load generator exited with status $PRODUCER_RC before JavaE2E finished (see $OUT/producer.log)" >&2
+          kill "$JAVA_PID" 2>/dev/null || true
+          wait "$JAVA_PID" 2>/dev/null || true
+          wait "$TAIL_PID" 2>/dev/null || true
+          exit 1
+        fi
+      fi
+      sleep 2
+    done
+    JAVA_RC=0
+    wait "$JAVA_PID" || JAVA_RC=$?
+    wait "$TAIL_PID" 2>/dev/null || true
+    if [ "$PRODUCER_DONE" = 0 ]; then
+      kill "$PRODUCER_PID" 2>/dev/null || true
+      wait "$PRODUCER_PID" 2>/dev/null || true
+    fi
     if [ "$JAVA_RC" -ne 0 ]; then
       echo "ERROR: JavaE2E exited with status $JAVA_RC (see $OUT/java-e2e.log)" >&2
       exit "$JAVA_RC"

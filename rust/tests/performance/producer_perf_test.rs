@@ -791,14 +791,16 @@ async fn producer_perf_test() {
     let test_duration = Duration::from_secs(config.test_duration_seconds);
 
     // -- send loop --
-    // Rate limiting: every `limit_rps` messages, sleep until the
-    // next 1 s boundary (relative to the measured-interval start).
-    // Pace in 100ms windows (LIMIT_RPS/10 messages per checkpoint), matching the
-    // C harness's checkpoint_interval = LIMIT_RPS / 10. Whole-second pacing would
-    // burst a full second's quota into the accumulator (overrunning buffer.memory
-    // at high rates) and measure burst queueing rather than steady-state latency.
-    let rate_checkpoint = (config.limit_rps / 10).max(1);
-    let mut next_check_time = Duration::from_millis(100);
+    // Rate limiting: pace against the exact rate `r = LIMIT_RPS`. Every
+    // `max(floor(r / 10), 1)` messages (~100 ms worth, matching the C harness's
+    // checkpoint_interval = LIMIT_RPS / 10), sleep until `start + sent / r`.
+    // The deadline is derived from the cumulative count rather than advanced by
+    // a fixed 100 ms per checkpoint, so rates that are not a multiple of 10 are
+    // honoured exactly. Whole-second pacing would burst a full second's quota
+    // into the accumulator (overrunning buffer.memory at high rates) and measure
+    // burst queueing rather than steady-state latency.
+    let rate = config.limit_rps as f64;
+    let rate_checkpoint = ((rate / 10.0).floor() as u64).max(1);
 
     // Single completion task consuming futures over a channel (avoids per-message
     // tokio::spawn cost): resolves each future, verifies metadata, and tracks
@@ -898,12 +900,13 @@ async fn producer_perf_test() {
             },
         }
 
-        if config.limit_rps > 0 && messages_sent.load(Ordering::Relaxed).is_multiple_of(rate_checkpoint) {
+        let sent = messages_sent.load(Ordering::Relaxed);
+        if rate > 0.0 && sent.is_multiple_of(rate_checkpoint) {
+            let deadline = Duration::from_secs_f64(sent as f64 / rate);
             let elapsed = test_start.elapsed();
-            if elapsed < next_check_time {
-                tokio::time::sleep(next_check_time - elapsed).await;
+            if elapsed < deadline {
+                tokio::time::sleep(deadline - elapsed).await;
             }
-            next_check_time += Duration::from_millis(100);
         }
     }
 

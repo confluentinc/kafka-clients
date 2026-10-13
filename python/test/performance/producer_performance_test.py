@@ -119,8 +119,10 @@ POST_TEST_AWAIT_SECONDS = 10
 latency_hist = [0] * (MAX_LATENCY_MS + 2)
 # Set True when P99_LIMIT_MS > 0 and the measured p99 exceeds it.
 latency_budget_exceeded = False
-# Set True when results.json could not be written; fails the run.
-results_write_failed = False
+# Set True when the run must exit non-zero: results.json could not be written,
+# the warmup failed, or (unless terminated by a signal) the verified / completed
+# counts do not match the completed / requested counts.
+run_failed = False
 
 
 def _is_queue_full(exc):
@@ -510,16 +512,18 @@ def print_measurement_summary(completed_messages, total_latency_ms,
 
     print(
         "Average time: "
-        f"{total_time_ms / completed_messages:.2f} ms")
+        f"{total_time_ms / completed_messages if completed_messages > 0 else 0.0:.2f} ms")
     print(
         "Average rate msg/s: "
         f"{message_rate:.2f} msg/s")
+    mib_rate = (completed_messages * message_size) / (1024.0 * 1024.0) / total_time_s \
+        if total_time_s > 0 else 0.0
     print(
         "Average rate MiB/s: "
-        f"{(completed_messages * message_size) / (1024.0 * 1024.0) / total_time_s:.2f} MiB/s")  # noqa: E501
+        f"{mib_rate:.2f} MiB/s")
     print(
         "Average latency: "
-        f"{total_latency_ms / completed_messages:.2f} ms")
+        f"{total_latency_ms / completed_messages if completed_messages > 0 else 0.0:.2f} ms")
     print("Max latency: "
           f"{max_latency_ms:.2f} ms")
     # Percentiles from the cumulative measured-interval histogram, matching the
@@ -545,9 +549,7 @@ def print_measurement_summary(completed_messages, total_latency_ms,
         "messages_measured": completed_messages,
         "duration_s": round(total_time_s, 2),
         "throughput_msg_s": round(message_rate, 2),
-        "throughput_mib_s": round(
-            (completed_messages * message_size) / (1024.0 * 1024.0) / total_time_s
-            if total_time_s > 0 else 0.0, 2),
+        "throughput_mib_s": round(mib_rate, 2),
         "latency_ms": {
             "min": min_latency_ms,
             "avg": round(total_latency_ms / completed_messages, 2)
@@ -567,14 +569,54 @@ def print_measurement_summary(completed_messages, total_latency_ms,
     except OSError as e:
         # The machine-readable summary is the run's primary artifact: fail the
         # run rather than exit 0 without it.
-        global results_write_failed
+        global run_failed
         print(f"Failed to write {results_file}: {e}")
-        results_write_failed = True
+        run_failed = True
 
     if p99_limit_ms > 0 and p99 > p99_limit_ms:
         global latency_budget_exceeded
         latency_budget_exceeded = True
         print(f"p99 latency {p99} ms exceeds budget {p99_limit_ms} ms")
+
+def pacing_wait_s(messages_sent, first_message_time):
+    """Seconds to sleep after ``messages_sent`` measured messages (<= 0 = none).
+
+    Every ``max(floor(limit_rps / 10), 1)`` messages (~100 ms of traffic) the
+    sender sleeps until ``first_message_time + messages_sent / limit_rps``. The
+    deadline is derived from the cumulative count rather than stepped by a fixed
+    100 ms per checkpoint, so rates that are not a multiple of 10 are honoured
+    exactly. Unlimited (``limit_rps`` unset) never waits."""
+    if not limit_rps:
+        return 0.0
+    checkpoint = max(limit_rps // 10, 1)
+    if messages_sent % checkpoint != 0:
+        return 0.0
+    deadline_ns = first_message_time + messages_sent * 1e9 / limit_rps
+    return (deadline_ns - time.time_ns()) / 1e9
+
+
+def fail_run():
+    """Fail the run (non-zero exit status)."""
+    global run_failed
+    run_failed = True
+
+
+def check_completion(completed_messages):
+    """Fail the run, unless it was terminated by a signal, when not every
+    completed record verified or (with a message target) not every requested
+    record completed. The summary and results.json are written regardless."""
+    if terminating:
+        return
+    if verified != completed_messages:
+        print(f"Verified messages {verified} "
+              "does not match completed messages "
+              f"{completed_messages}")
+        fail_run()
+    if num_messages > 0 and completed_messages != num_messages:
+        print(f"Completed messages {completed_messages} "
+              f"does not match produced messages {num_messages}")
+        fail_run()
+
 
 def main(v2=False):
     global producer, verified, warmup_sent, measured_sent, baseline_end_offsets
@@ -670,6 +712,7 @@ def main(v2=False):
                         warmup_sent += 1
                     except Exception:
                         print("Warmup failed due to message verification error")
+                        fail_run()
                         producer = None
                         return
                     time.sleep(0.1)
@@ -679,12 +722,12 @@ def main(v2=False):
 
             before_ms = int(time.time() * 1000)
             first_message_time = time.time_ns()
-            # Pace in 100 ms windows (limit_rps/10 messages per checkpoint),
-            # matching the C, Rust and Java harnesses. Whole-second pacing would
-            # burst a full second's quota into the client and measure burst
-            # queueing rather than steady-state latency.
-            rate_checkpoint = max(limit_rps // 10, 1) if limit_rps else 0
-            next_check_time = first_message_time + 100_000_000
+            # Pace in ~100 ms windows: every max(floor(limit_rps / 10), 1)
+            # messages, sleep until first_message_time + messages_sent /
+            # limit_rps (see pacing_wait_s), matching the C, Rust and Java
+            # harnesses. Whole-second pacing would burst a full second's quota
+            # into the client and measure burst queueing rather than
+            # steady-state latency.
             metrics.measurement_start_ms = before_ms
             print(f"Starting measured interval at {before_ms} ms: {datetime.datetime.now(tz=datetime.timezone.utc)}")  # noqa: E501
             messages_sent = 0
@@ -708,13 +751,9 @@ def main(v2=False):
                         callback=(lambda md, exc, st=start_time:
                                   record_delivery(md, exc, st)))
                     messages_sent += 1
-                    limit_rps_reached = limit_rps and messages_sent % rate_checkpoint == 0
-                    if limit_rps_reached:
-                        now = time.time_ns()
-                        if now < next_check_time:
-                            time_to_wait_s = (next_check_time - now) / 1e9
-                            time.sleep(time_to_wait_s)
-                        next_check_time = next_check_time + 100_000_000
+                    time_to_wait_s = pacing_wait_s(messages_sent, first_message_time)
+                    if time_to_wait_s > 0:
+                        time.sleep(time_to_wait_s)
                     if messages_sent % 10000 == 0:
                         duration = time.time_ns() - first_message_time
                         exceeded_seconds = num_messages > 0 and 10 or 1
@@ -740,19 +779,10 @@ def main(v2=False):
             after_ms = int(time.time() * 1000)
             after_ns = time.time_ns()
 
-            if verified != completed_messages:
-                if not terminating:
-                    print(f"Verified messages {verified} "
-                          "does not match completed messages "
-                          f"{completed_messages}")
-            elif num_messages > 0 and completed_messages != num_messages:
-                if not terminating:
-                    print(f"Completed messages {completed_messages} "
-                          f"does not match produced messages {num_messages}")
-            else:
-                print_measurement_summary(
-                    completed_messages, total_latency_ms, max_latency_ms,
-                    before_ms, after_ms, after_ns, first_message_time)
+            check_completion(completed_messages)
+            print_measurement_summary(
+                completed_messages, total_latency_ms, max_latency_ms,
+                before_ms, after_ms, after_ns, first_message_time)
     except CancelledError:
         print("Main cancelled")
 
@@ -872,6 +902,7 @@ async def async_main():
                         warmup_sent += 1
                     except Exception:
                         print("Warmup failed due to message verification error")
+                        fail_run()
                         producer = None
                         return
                     await asyncio.sleep(0.1)
@@ -881,12 +912,12 @@ async def async_main():
 
             before_ms = int(time.time() * 1000)
             first_message_time = time.time_ns()
-            # Pace in 100 ms windows (limit_rps/10 messages per checkpoint),
-            # matching the C, Rust and Java harnesses. Whole-second pacing would
-            # burst a full second's quota into the client and measure burst
-            # queueing rather than steady-state latency.
-            rate_checkpoint = max(limit_rps // 10, 1) if limit_rps else 0
-            next_check_time = first_message_time + 100_000_000
+            # Pace in ~100 ms windows: every max(floor(limit_rps / 10), 1)
+            # messages, sleep until first_message_time + messages_sent /
+            # limit_rps (see pacing_wait_s), matching the C, Rust and Java
+            # harnesses. Whole-second pacing would burst a full second's quota
+            # into the client and measure burst queueing rather than
+            # steady-state latency.
             metrics.measurement_start_ms = before_ms
             print(f"Starting measured interval at {before_ms} ms: {datetime.datetime.now(tz=datetime.timezone.utc)}")  # noqa: E501
             messages_sent = 0
@@ -909,12 +940,9 @@ async def async_main():
                     fut.add_done_callback(
                         lambda f, st=start_time: record_delivery_async(f, st))
                     messages_sent += 1
-                    limit_rps_reached = limit_rps and messages_sent % rate_checkpoint == 0
-                    if limit_rps_reached:
-                        now = time.time_ns()
-                        if now < next_check_time:
-                            await asyncio.sleep((next_check_time - now) / 1e9)
-                        next_check_time = next_check_time + 100_000_000
+                    time_to_wait_s = pacing_wait_s(messages_sent, first_message_time)
+                    if time_to_wait_s > 0:
+                        await asyncio.sleep(time_to_wait_s)
                     if messages_sent % 10000 == 0:
                         # Yield to the in-flight completions and their delivery
                         # done-callbacks (which record latency/metrics).
@@ -948,19 +976,10 @@ async def async_main():
             after_ms = int(time.time() * 1000)
             after_ns = time.time_ns()
 
-            if verified != completed_messages:
-                if not terminating:
-                    print(f"Verified messages {verified} "
-                          "does not match completed messages "
-                          f"{completed_messages}")
-            elif num_messages > 0 and completed_messages != num_messages:
-                if not terminating:
-                    print(f"Completed messages {completed_messages} "
-                          f"does not match produced messages {num_messages}")
-            else:
-                print_measurement_summary(
-                    completed_messages, total_latency_ms, max_latency_ms,
-                    before_ms, after_ms, after_ns, first_message_time)
+            check_completion(completed_messages)
+            print_measurement_summary(
+                completed_messages, total_latency_ms, max_latency_ms,
+                before_ms, after_ms, after_ns, first_message_time)
     except CancelledError:
         print("Main cancelled")
 
@@ -1092,7 +1111,7 @@ if __name__ == "__main__":
         print("Consumer verification skipped (baseline capture failed)")
 
     # Fail the run if the p99 latency budget was exceeded (matches C/Rust/Java).
-    if latency_budget_exceeded or results_write_failed:
+    if latency_budget_exceeded or run_failed:
         exit_code = 1
 
     sys.exit(exit_code)

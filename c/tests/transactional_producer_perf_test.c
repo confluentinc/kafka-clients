@@ -58,7 +58,15 @@
 // When KAFKA_BIN is unset the source is assumed externally pre-populated (the
 // C harness has no in-suite broker). The consumer never hangs on an under-fed
 // source: the poll is bounded (EOS_POLL_TIMEOUT_MS) and an empty poll is skipped
-// rather than opening an empty transaction.
+// rather than opening an empty transaction. With a message target (NUM_MESSAGES,
+// also set by LIMIT_RPS) the EOS bound is the TOTAL number of source records
+// processed across all producers (one shared counter), and the run fails if NO
+// producer polls a record for EOS_IDLE_LIMIT_S seconds before that total is
+// reached.
+//
+// A produce rejected inside a transaction (producev error other than a retried
+// QUEUE_FULL) aborts that transaction — in EOS mode its offsets are not sent —
+// and fails the run. A failed commit is aborted and counted as aborted.
 //
 // KIP-848: all consumers across the transactional perf harnesses
 // (Rust / librdkafka-C / Java / Python) run on the KIP-848 consumer group
@@ -174,6 +182,16 @@ static const char *GROUP_ID = NULL;
 // Per-poll timeout (ms): bounds rd_kafka_consumer_poll so a run with no source
 // data cannot block forever.
 #define EOS_POLL_TIMEOUT_MS 500
+// EOS count mode (NUM_MESSAGES > 0) safety net: when no producer has polled a
+// source record for this many seconds while the shared processed-record counter
+// is still below NUM_MESSAGES, the workers give up and the run fails, instead of
+// polling an exhausted source forever.
+#define EOS_IDLE_LIMIT_S 30
+// EOS count mode: total source records processed across ALL workers (each
+// polled batch is added once its transaction is finished: committed, aborted
+// or failed). Every worker stops at a transaction boundary once this reaches
+// NUM_MESSAGES, so the bound is global rather than a per-worker share.
+static atomic_long eos_records_processed = 0;
 
 // Per-message p99 latency budget (ms). 0 disables the assertion.
 static long P99_LIMIT_MS = 0;
@@ -185,6 +203,22 @@ static bool results_write_failed = false;
 // Set by a producer thread that exits early (client creation,
 // init_transactions or begin_transaction failed); fails the run.
 static atomic_bool worker_failed = false;
+// Set when a producev() inside a transaction was rejected synchronously (an
+// error other than a retried QUEUE_FULL); that transaction is aborted. Fails
+// the run.
+static atomic_bool produce_rejected = false;
+// Set by an EOS worker (count mode) when no producer has polled a source record
+// for EOS_IDLE_LIMIT_S seconds before the shared target was reached. Fails the
+// run.
+static atomic_bool source_exhausted = false;
+// When any EOS producer last polled a source record (CLOCK_MONOTONIC ns). The
+// idle safety net watches this shared value rather than a worker's own polls, so
+// a producer that owns no source partitions cannot fail a run the others are
+// still making progress on.
+static atomic_long eos_last_record_ns = 0;
+// Set when the summary is inconsistent (verified != committed records); the
+// summary is still written. Fails the run unless it was interrupted.
+static bool summary_mismatch = false;
 static bool interrupted = false;
 
 // --- shared statistics, written by all producer threads (guarded by
@@ -954,23 +988,39 @@ typedef struct {
     int index;
     Message* messages;
     long first_message_time_ns; // shared measured-interval start (rate pacing)
-    long num_messages;          // per-producer message target (0 = time-based)
+    // Message target (0 = time-based). TXN_MODE=produce: this producer's share
+    // of NUM_MESSAGES. TXN_MODE=eos: the global NUM_MESSAGES, compared against
+    // the shared eos_records_processed counter.
+    long num_messages;
 } ProducerArgs;
 
-// Rate limiter (per producer): sleep so this producer's rate stays under its
-// share (LIMIT_RPS / NUM_TRANSACTIONAL_PRODUCERS). Mirrors producer_perf_test.c.
+// Per-producer pacing rate r_k = LIMIT_RPS / NUM_TRANSACTIONAL_PRODUCERS as an
+// exact floating-point value (no integer floor), so the per-producer rates sum
+// to LIMIT_RPS. 0 = unlimited.
+static double per_producer_rate(void) {
+    return LIMIT_RPS > 0 ? (double)LIMIT_RPS / (double)NUM_TRANSACTIONAL_PRODUCERS : 0.0;
+}
+
+// Records between two pacing checkpoints: max(floor(r / 10), 1).
+static long rate_checkpoint_interval(double rate) {
+    if (rate <= 0.0) return 0;
+    long c = (long)floor(rate / 10.0);
+    return c > 0 ? c : 1;
+}
+
+// Rate limiter (per producer): sleep until first_message_time + records_sent / rate,
+// a deadline derived from the cumulative count (not "previous deadline + 100 ms"),
+// so this producer's rate converges on its exact share. Mirrors producer_perf_test.c.
 static void sleep_until_rate_limit_met(long records_sent, long first_message_time_ns,
-                                       long per_producer_rps) {
-    if (per_producer_rps <= 0) {
+                                       double rate) {
+    if (rate <= 0.0) {
         return;
     }
-    double limit_rpns = (double)per_producer_rps / 1e9;
-    long elapsed = current_time_ns() - first_message_time_ns;
-    double expected = elapsed * limit_rpns;
-    if (records_sent > expected) {
-        double sleep_time = (records_sent - expected) / (double)per_producer_rps;
-        long usleep_time = (long)(sleep_time * 1000000);
-        if (usleep_time > 0) usleep(usleep_time);
+    long deadline_ns = first_message_time_ns + (long)((double)records_sent / rate * 1e9);
+    long sleep_ns = deadline_ns - current_time_ns();
+    if (sleep_ns > 0) {
+        struct timespec ts = { .tv_sec = sleep_ns / 1000000000L, .tv_nsec = sleep_ns % 1000000000L };
+        nanosleep(&ts, NULL);
     }
 }
 
@@ -991,9 +1041,8 @@ static void* producer_thread_func(void* arg) {
         return NULL;
     }
 
-    long per_producer_rps = LIMIT_RPS > 0 ? (LIMIT_RPS / NUM_TRANSACTIONAL_PRODUCERS) : 0;
-    if (LIMIT_RPS > 0 && per_producer_rps < 1) per_producer_rps = 1;
-    long checkpoint_interval = per_producer_rps > 0 ? (per_producer_rps / 10 > 0 ? per_producer_rps / 10 : 1) : 0;
+    double per_producer_rps = per_producer_rate();
+    long checkpoint_interval = rate_checkpoint_interval(per_producer_rps);
     long next_checkpoint = checkpoint_interval;
 
     long txn_index = 0;
@@ -1011,6 +1060,7 @@ static void* producer_thread_func(void* arg) {
         }
 
         // --- produce N records ---
+        bool txn_rejected = false;
         for (long r = 0; r < n; r++) {
             Message* message = &pa->messages[records_sent % GENERATED_MESSAGE_COUNT];
             TxnFuture* f = calloc(1, sizeof(TxnFuture));
@@ -1036,10 +1086,12 @@ static void* producer_thread_func(void* arg) {
             if (err != RD_KAFKA_RESP_ERR_NO_ERROR) {
                 // Never enqueued, so no delivery report will fire for it:
                 // complete the future here as failed instead of leaving the
-                // drain below waiting on it forever.
+                // drain below waiting on it forever. A rejected produce aborts
+                // the whole transaction below and fails the run.
                 fprintf(stderr, "producev failed: %s\n", rd_kafka_err2str(err));
                 f->err = err;
                 atomic_store_explicit(&f->done, true, memory_order_release);
+                txn_rejected = true;
             }
 
             records_sent++;
@@ -1050,7 +1102,24 @@ static void* producer_thread_func(void* arg) {
         }
 
         // --- commit or abort ---
-        if (should_abort(txn_index, ABORT_RATE)) {
+        if (txn_rejected) {
+            // A produce was rejected synchronously: never commit a transaction
+            // that is missing records. Abort it; its N attempted records count
+            // as aborted and record no latency or completion (no abort latency
+            // either — that series is deterministic-abort only).
+            atomic_store(&produce_rejected, true);
+            check_txn_error(rd_kafka_abort_transaction(rk, 60000), "abort_transaction");
+            for (long r = 0; r < n; r++) {
+                while (!atomic_load_explicit(&futures[r]->done, memory_order_acquire)) {
+                    rd_kafka_poll(rk, 100);
+                }
+                free(futures[r]);
+            }
+            pthread_mutex_lock(&stats_mutex);
+            aborted_transactions++;
+            aborted_records += n;
+            pthread_mutex_unlock(&stats_mutex);
+        } else if (should_abort(txn_index, ABORT_RATE)) {
             // Aborted transactions STILL produced their N records above; on abort
             // they count toward neither throughput nor latency.
             check_txn_error(rd_kafka_abort_transaction(rk, 60000), "abort_transaction");
@@ -1082,6 +1151,11 @@ static void* producer_thread_func(void* arg) {
                 check_txn_error(rd_kafka_commit_transaction(rk, 60000), "commit_transaction");
             long commit_ns = current_time_ns();
             if (commit_failed) {
+                // A failed commit does not end the worker: abort so the producer
+                // can begin the next transaction, count it as aborted and go on.
+                // (After a fatal error the abort fails too and the next
+                // begin_transaction fails the worker.)
+                check_txn_error(rd_kafka_abort_transaction(rk, 60000), "abort_transaction");
                 for (long r = 0; r < n; r++) {
                     while (!atomic_load_explicit(&futures[r]->done, memory_order_acquire)) {
                         rd_kafka_poll(rk, 100);
@@ -1177,6 +1251,22 @@ static void eos_accumulate_offset(rd_kafka_topic_partition_list_t* offsets,
     }
 }
 
+// The EOS loop bound, evaluated as the loop condition so every round — an empty
+// poll, a rejected/aborted/failed transaction or a committed one — passes
+// through it. Count mode (num_messages > 0): stop once the shared
+// eos_records_processed counter reaches NUM_MESSAGES. Duration mode: stop once
+// TEST_DURATION_S has elapsed since the measured-interval start.
+static bool eos_should_continue(const ProducerArgs* pa) {
+    if (interrupted) {
+        return false;
+    }
+    if (pa->num_messages > 0) {
+        return atomic_load(&eos_records_processed) < pa->num_messages;
+    }
+    long duration = current_time_ns() - pa->first_message_time_ns;
+    return duration <= (long)TEST_DURATION_S * 1000000000L;
+}
+
 static void* eos_producer_thread_func(void* arg) {
     ProducerArgs* pa = (ProducerArgs*)arg;
     char txn_id[256];
@@ -1199,9 +1289,8 @@ static void* eos_producer_thread_func(void* arg) {
         return NULL;
     }
 
-    long per_producer_rps = LIMIT_RPS > 0 ? (LIMIT_RPS / NUM_TRANSACTIONAL_PRODUCERS) : 0;
-    if (LIMIT_RPS > 0 && per_producer_rps < 1) per_producer_rps = 1;
-    long checkpoint_interval = per_producer_rps > 0 ? (per_producer_rps / 10 > 0 ? per_producer_rps / 10 : 1) : 0;
+    double per_producer_rps = per_producer_rate();
+    long checkpoint_interval = rate_checkpoint_interval(per_producer_rps);
     long next_checkpoint = checkpoint_interval;
 
     long txn_index = 0;
@@ -1215,14 +1304,14 @@ static void* eos_producer_thread_func(void* arg) {
     long consecutive_empty_rounds = 0;
     bool starvation_warned = false;
 
-    bool continue_sending = pa->num_messages > 0 ? records_sent < pa->num_messages : !interrupted;
-    while (continue_sending) {
+    while (eos_should_continue(pa)) {
         // --- consume up to N records (one rd_kafka_consumer_poll per message;
         // stop on a timeout, i.e. no more data right now). `attempts` bounds the
         // loop so a stream of error events cannot spin forever. ---
         long batch = 0;
         long attempts = 0;
         long begin_ns = 0;
+        bool txn_rejected = false;
         rd_kafka_topic_partition_list_t* offsets = rd_kafka_topic_partition_list_new(1);
         while (batch < n && attempts < n && !interrupted) {
             attempts++;
@@ -1268,10 +1357,13 @@ static void* eos_producer_thread_func(void* arg) {
             } while (perr == RD_KAFKA_RESP_ERR__QUEUE_FULL && !interrupted);
             if (perr != RD_KAFKA_RESP_ERR_NO_ERROR) {
                 // Never enqueued: complete the future as failed (no delivery
-                // report will fire for it) so the drain cannot hang on it.
+                // report will fire for it) so the drain cannot hang on it. A
+                // rejected produce aborts the whole transaction below (its
+                // offsets are not sent) and fails the run.
                 fprintf(stderr, "producev failed: %s\n", rd_kafka_err2str(perr));
                 f->err = perr;
                 atomic_store_explicit(&f->done, true, memory_order_release);
+                txn_rejected = true;
             }
             futures[batch] = f;
 
@@ -1292,7 +1384,7 @@ static void* eos_producer_thread_func(void* arg) {
         if (batch == 0) {
             // No source data this round; do not open a transaction. Warn once if
             // the source appears to be starving the pipeline,
-            // then loop (bounded by the duration / message target below).
+            // then loop (bounded by the loop condition's duration / message target).
             rd_kafka_topic_partition_list_destroy(offsets);
             consecutive_empty_rounds++;
             if (consecutive_empty_rounds >= 10 && !starvation_warned) {
@@ -1304,16 +1396,49 @@ static void* eos_producer_thread_func(void* arg) {
                     "high-throughput producer\n", consecutive_empty_rounds);
                 starvation_warned = true;
             }
-            if (pa->num_messages <= 0) {
-                long duration = current_time_ns() - pa->first_message_time_ns;
-                if (duration > (long)TEST_DURATION_S * 1000000000L) {
+            // Count-mode safety net: an exhausted source would otherwise keep
+            // this worker polling forever below the shared target.
+            if (pa->num_messages > 0 &&
+                current_time_ns() - atomic_load(&eos_last_record_ns) >= (long)EOS_IDLE_LIMIT_S * 1000000000L) {
+                long processed = atomic_load(&eos_records_processed);
+                if (processed < pa->num_messages) {
+                    fprintf(stderr,
+                        "[ERROR] EOS producer %d: no producer polled a source record for %d s with "
+                        "%ld/%ld processed — source exhausted before NUM_MESSAGES was "
+                        "reached; stopping this worker\n",
+                        pa->index, EOS_IDLE_LIMIT_S, processed, pa->num_messages);
+                    atomic_store(&source_exhausted, true);
                     break;
                 }
             }
-            continue_sending = pa->num_messages > 0 ? records_sent < pa->num_messages : !interrupted;
-            continue;
+            continue; // back to the loop condition (the bound check)
         }
         consecutive_empty_rounds = 0;
+        atomic_store(&eos_last_record_ns, current_time_ns());
+
+        if (txn_rejected) {
+            // A produce was rejected synchronously: do NOT send the consumed
+            // offsets (they must not advance without their output) and do NOT
+            // commit. Abort; the attempted records count as aborted and record
+            // no latency or completion (no abort latency either — that series is
+            // deterministic-abort only).
+            rd_kafka_topic_partition_list_destroy(offsets);
+            atomic_store(&produce_rejected, true);
+            check_txn_error(rd_kafka_abort_transaction(producer, 60000), "abort_transaction");
+            for (long r = 0; r < batch; r++) {
+                while (!atomic_load_explicit(&futures[r]->done, memory_order_acquire)) {
+                    rd_kafka_poll(producer, 100);
+                }
+                free(futures[r]);
+            }
+            pthread_mutex_lock(&stats_mutex);
+            aborted_transactions++;
+            aborted_records += batch;
+            pthread_mutex_unlock(&stats_mutex);
+            txn_index++;
+            atomic_fetch_add(&eos_records_processed, batch);
+            continue; // back to the loop condition (the bound check)
+        }
 
         // --- send the consumed offsets to the transaction (offset + 1 per
         // partition, with the consumer group metadata) ---
@@ -1365,6 +1490,11 @@ static void* eos_producer_thread_func(void* arg) {
                 check_txn_error(rd_kafka_commit_transaction(producer, 60000), "commit_transaction");
             long commit_ns = current_time_ns();
             if (commit_failed) {
+                // A failed commit does not end the worker: abort so the producer
+                // can begin the next transaction, count it as aborted and go on.
+                // (After a fatal error the abort fails too and the next
+                // begin_transaction fails the worker.)
+                check_txn_error(rd_kafka_abort_transaction(producer, 60000), "abort_transaction");
                 for (long r = 0; r < batch; r++) {
                     while (!atomic_load_explicit(&futures[r]->done, memory_order_acquire)) {
                         rd_kafka_poll(producer, 100);
@@ -1424,14 +1554,9 @@ static void* eos_producer_thread_func(void* arg) {
         }
 
         txn_index++;
-
-        if (pa->num_messages <= 0) {
-            long duration = current_time_ns() - pa->first_message_time_ns;
-            if (duration > (long)TEST_DURATION_S * 1000000000L) {
-                break;
-            }
-        }
-        continue_sending = pa->num_messages > 0 ? records_sent < pa->num_messages : !interrupted;
+        // The batch's transaction is finished (committed, aborted or failed):
+        // add it to the global count bound checked by the loop condition.
+        atomic_fetch_add(&eos_records_processed, batch);
     }
 
 cleanup:
@@ -1742,14 +1867,17 @@ static void run_test() {
     }
 
     long first_message_time_ns = current_time_ns();
+    atomic_store(&eos_last_record_ns, first_message_time_ns);
     long before_ms = current_time_ms();
     metrics_set_measurement_start_ms(&metrics, before_ms);
     printf("Starting measured interval at %ld ms\n", before_ms);
 
-    // Split the total message target across producers; the first
-    // NUM_MESSAGES % NUM_TRANSACTIONAL_PRODUCERS get one extra record so the
-    // shares sum to NUM_MESSAGES. A producer whose share is 0 (fewer messages
-    // than producers) is not started: 0 means "run for the duration" to it.
+    // TXN_MODE=produce: split the total message target across producers; the
+    // first NUM_MESSAGES % NUM_TRANSACTIONAL_PRODUCERS get one extra record so
+    // the shares sum to NUM_MESSAGES. A producer whose share is 0 (fewer
+    // messages than producers) is not started: 0 means "run for the duration"
+    // to it. TXN_MODE=eos: every producer is started with the global target,
+    // bounded by the shared eos_records_processed counter.
     long share_base = NUM_MESSAGES > 0 ? NUM_MESSAGES / NUM_TRANSACTIONAL_PRODUCERS : 0;
     long share_extra = NUM_MESSAGES > 0 ? NUM_MESSAGES % NUM_TRANSACTIONAL_PRODUCERS : 0;
 
@@ -1758,7 +1886,7 @@ static void run_test() {
     void* (*worker)(void*) = EOS_MODE ? eos_producer_thread_func : producer_thread_func;
     bool* started = calloc((size_t)NUM_TRANSACTIONAL_PRODUCERS, sizeof(bool));
     for (long k = 0; k < NUM_TRANSACTIONAL_PRODUCERS; k++) {
-        long share = share_base + (k < share_extra ? 1 : 0);
+        long share = EOS_MODE ? NUM_MESSAGES : share_base + (k < share_extra ? 1 : 0);
         if (NUM_MESSAGES > 0 && share == 0) continue;
         args[k].index = (int)k;
         args[k].messages = messages;
@@ -1778,9 +1906,12 @@ static void run_test() {
     long after_ms = current_time_ms();
     metrics_set_measurement_end_ms(&metrics, after_ms);
 
+    // An inconsistent summary fails the run (unless it was interrupted), but the
+    // summary below is still written so the run's numbers are not lost.
     if (verified != completed_messages) {
         fprintf(stderr, "Verified messages %ld does not match completed messages %ld\n",
             verified, completed_messages);
+        if (!interrupted) summary_mismatch = true;
     }
 
     long total_time_ns = after_ns - first_message_time_ns;
@@ -2163,5 +2294,17 @@ int main(int argc, char** argv) {
     if (atomic_load(&worker_failed)) {
         fprintf(stderr, "One or more transactional producer threads failed (see above)\n");
     }
-    return (latency_budget_exceeded || results_write_failed || atomic_load(&worker_failed)) ? 1 : 0;
+    if (atomic_load(&produce_rejected)) {
+        fprintf(stderr, "One or more produces were rejected; their transactions were aborted (see above)\n");
+    }
+    if (atomic_load(&source_exhausted)) {
+        fprintf(stderr, "EOS source exhausted before NUM_MESSAGES was reached (see above)\n");
+    }
+    if (summary_mismatch) {
+        fprintf(stderr, "Run summary is inconsistent (see above)\n");
+    }
+    bool failed = latency_budget_exceeded || results_write_failed || summary_mismatch ||
+                  atomic_load(&worker_failed) || atomic_load(&produce_rejected) ||
+                  atomic_load(&source_exhausted);
+    return failed ? 1 : 0;
 }
