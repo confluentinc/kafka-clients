@@ -240,7 +240,9 @@ where
                     // polls (we discard); otherwise it leaves the entry
                     // behind. We mirror that by taking ownership and
                     // pushing back on the "leave" path.
-                    let completed_fetch = fetch_buffer.poll().expect("non-empty checked above");
+                    // `poll_checked_out` keeps the partition buffered while it
+                    // is initialized, as Java's peek-initialize-poll order does.
+                    let completed_fetch = fetch_buffer.poll_checked_out().expect("non-empty checked above");
                     // Snapshot records size BEFORE moving cf into initialize.
                     let records_size_bytes = FetchResponse::records_size(&completed_fetch.partition_data);
 
@@ -270,6 +272,9 @@ where
                                 ConsumerRecords::fetch_is_empty(&records_by_partition, position_advanced);
                             if !(fetch_is_empty && records_size_bytes == 0) {
                                 fetch_buffer.push_front(cf);
+                            } else {
+                                // Java's `fetchBuffer.poll()`: the fetch is gone.
+                                fetch_buffer.clear_checked_out_next_in_line();
                             }
                             // Defer the throw so the paused-fetches
                             // restore step still runs (matches Java's
@@ -283,7 +288,7 @@ where
                     // no additional action.
                 } else {
                     // Initialized — set as next-in-line and drop from queue.
-                    let cf = fetch_buffer.poll().expect("non-empty checked above");
+                    let cf = fetch_buffer.poll_checked_out().expect("non-empty checked above");
                     fetch_buffer.set_next_in_line_fetch(Some(cf));
                 }
                 // Loop back: read the new next-in-line.
@@ -565,6 +570,14 @@ where
                     position_advanced = true;
                 }
 
+                // Drain after position update to ensure the background task sees
+                // the updated position before it sees is_consumed=true. This
+                // prevents duplicate fetch requests for the old offset
+                // (KAFKA-15529).
+                if cf.is_exhausted() {
+                    cf.drain();
+                }
+
                 // Record per-partition lag / lead, mirroring Java's
                 // `FetchCollector` (`subscriptions.partitionLag` /
                 // `partitionLead` → `metricsManager.recordPartitionLag/Lead`).
@@ -720,7 +733,7 @@ where
 
         // Java: `if (!batches.hasNext() && FetchResponse.recordsSize(partition) > 0)
         // throw new KafkaException("Failed to make progress reading messages at ...")`
-        // (`FetchCollector.java:265-270`). Brokers before KIP-74 could return a
+        // (`FetchCollector.java:270-275`). Brokers before KIP-74 could return a
         // non-empty payload containing no *complete* batch; without this check the
         // consumer re-fetches the same offset forever and reports nothing, because
         // no records are decoded so the position never advances.
@@ -1101,6 +1114,81 @@ mod tests {
         )
     }
 
+    /// Translated from `FetchCollectorTest.testPositionUpdatedBeforeDrainOnExhaustedFetch`
+    /// (KAFKA-15529). With `max.poll.records` one above the record count the
+    /// fetch is exhausted within one `collect_fetch`, and when it is drained the
+    /// subscription position has already advanced past every record, so the
+    /// background task never sees a consumed fetch next to the old position.
+    ///
+    /// Java spies on `drain()`; here the `on_drain_for_test` seam records the
+    /// position at the moment of the drain.
+    #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchCollectorTest#testPositionUpdatedBeforeDrainOnExhaustedFetch"
+    )]
+    fn test_position_updated_before_drain_on_exhausted_fetch() {
+        // DEFAULT_RECORD_COUNT + 1 makes the fetchRecords loop call
+        // nextFetchedRecord one extra time, triggering exhaustion and drain
+        // within the same collectFetch.
+        let h = build_harness(DEFAULT_RECORD_COUNT + 1, IsolationLevel::ReadUncommitted);
+        let partition = tp("topic-a", 0);
+        assign_and_seek(&h, &partition);
+
+        let mut cf = build_completed_fetch(&h, partition.clone(), 0, DEFAULT_RECORD_COUNT, None);
+        // Record the subscription position at every drain() call. Java's spy
+        // keeps only the last one; keeping all of them also catches a second
+        // drain (for example the pre-fix drain inside the cursor followed by
+        // the collector's).
+        let positions_at_drain_time = Arc::new(Mutex::new(Vec::<i64>::new()));
+        let (subs, recorded, tp_in_hook) = (h.subs.clone(), positions_at_drain_time.clone(), partition.clone());
+        cf.on_drain_for_test = Some(Box::new(move || {
+            let offset = subs.lock().unwrap().position(&tp_in_hook).unwrap().map_or(-1, |p| p.offset);
+            recorded.lock().unwrap().push(offset);
+        }));
+        h.fetch_buffer.add(cf);
+
+        let fetch = h.collector.collect_fetch(&h.fetch_buffer).unwrap();
+        assert_eq!(DEFAULT_RECORD_COUNT as usize, fetch.count());
+        // Java: `assertTrue(completedFetch.isConsumed())`. The consumed fetch is
+        // discarded by the collector's next pass, so its drain is observed
+        // through the hook instead.
+        assert!(!h.fetch_buffer.has_next_in_line_fetch(), "the consumed fetch was discarded");
+
+        // drain() was invoked exactly once, after the position had been advanced.
+        assert_eq!(vec![DEFAULT_RECORD_COUNT as i64], *positions_at_drain_time.lock().unwrap());
+    }
+
+    /// Critic 100 L1 (KAFKA-15529, the Rust ownership model): Java initializes
+    /// the head fetch in place (`peek`, `initialize`, `setNextInLineFetch`,
+    /// `poll`, `FetchCollector.java:101-122`), so its partition stays buffered
+    /// throughout. The Rust collector takes the fetch out to initialize it;
+    /// `buffered_partitions()`, which the background task reads to decide what
+    /// to fetch, must still report the partition from inside `initialize`.
+    #[test]
+    fn test_head_fetch_stays_buffered_while_initialized() {
+        let mut h = build_harness(DEFAULT_RECORD_COUNT, IsolationLevel::ReadUncommitted);
+        let partition = tp("topic-a", 0);
+        assign_and_seek(&h, &partition);
+        h.fetch_buffer
+            .add(build_completed_fetch(&h, partition.clone(), 0, DEFAULT_RECORD_COUNT, None));
+        assert_eq!(HashSet::from([partition.clone()]), h.fetch_buffer.buffered_partitions());
+
+        let seen_inside_initialize = Arc::new(Mutex::new(None::<HashSet<TopicPartition>>));
+        let (buffer, seen) = (h.fetch_buffer.clone(), seen_inside_initialize.clone());
+        h.collector.set_force_initialize_error(move || {
+            *seen.lock().unwrap() = Some(buffer.buffered_partitions());
+            None
+        });
+
+        let fetch = h.collector.collect_fetch(&h.fetch_buffer).unwrap();
+        assert_eq!(DEFAULT_RECORD_COUNT as usize, fetch.count());
+        assert_eq!(
+            Some(HashSet::from([partition])),
+            *seen_inside_initialize.lock().unwrap(),
+            "the partition must stay buffered while its fetch is initialized"
+        );
+    }
+
     /// Translated from `FetchCollectorTest.testFetchNormal`.
     ///
     /// The Java test sets `recordCount = DEFAULT_MAX_POLL_RECORDS` (500) so
@@ -1386,8 +1474,10 @@ mod tests {
     /// removed. We mirror that exactly: iterate every `Errors` variant and
     /// skip the ones with dedicated handling (the `Errors::None` happy path
     /// plus the metadata-refresh / OOR / auth / leader-epoch / server /
-    /// corrupt arms). This is the full set, not a 3-error sample, so adding
-    /// a new "other" error to the enum is automatically covered.
+    /// corrupt arms). This is the full set, not a 3-error sample: the walk is
+    /// bounded by `Errors::MAX_CODE`, the same bound the `errors.rs` walks use
+    /// and pin against the enum, so a new "other" error is covered as soon as
+    /// it is added there.
     #[test]
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchCollectorTest#testFetchWithOtherErrors")]
     fn test_fetch_with_other_errors() {
@@ -1414,15 +1504,13 @@ mod tests {
         // Rust's `Errors` has no `values()` array (adding one would be a
         // production change, out of scope for a test-parity phase), so we
         // enumerate the full set by walking every assigned error code via
-        // `Errors::for_code` and de-duplicating. Codes 0..=133 cover the
-        // current enum; unassigned codes fold into `UnknownServerError`
-        // (which is in `handled`, so they are skipped). This mirrors
-        // Java's `Errors.values()` minus the removed set.
-        let all_errors: std::collections::BTreeSet<i16> = (0i16..=133).collect();
+        // `Errors::for_code`. `Errors::all_for_test()` walks
+        // `-1..=Errors::MAX_CODE`, the bound `errors.rs` pins against the enum
+        // (every code up to it declared, the next one not), so it is exactly
+        // Java's `Errors.values()`; the removed set is skipped below.
         let mut seen: HashSet<Errors> = HashSet::new();
         let mut checked = 0usize;
-        for code in all_errors {
-            let error = Errors::for_code(code);
+        for error in Errors::all_for_test() {
             if !seen.insert(error) {
                 continue;
             }
@@ -1521,6 +1609,9 @@ mod tests {
             h.fetch_buffer.is_empty(),
             "queue-empty state must match (record_count == 0) for record_count={record_count}"
         );
+        // The discarded empty fetch no longer counts as buffered (the
+        // checked-out marker is cleared, Critic 100 L4); a requeued one does.
+        assert_eq!(record_count != 0, !h.fetch_buffer.buffered_partitions().is_empty());
     }
 
     /// `testErrorInInitialize(10, RuntimeException)` — record-bearing fetch,
@@ -2373,7 +2464,7 @@ mod tests {
     // `Fetch.isEmpty()` is `numRecords == 0 && !positionAdvanced`
     // (`Fetch.java:116-118`), and BOTH of `collectFetch`'s guards use it: the
     // one that decides whether to drop the offending entry from the buffer
-    // (`FetchCollector.java:116`) and the one that decides whether to rethrow
+    // (`FetchCollector.java:115`) and the one that decides whether to rethrow
     // (`:138-139`). A records-only spelling makes an all-aborted READ_COMMITTED
     // batch — zero records, position advanced — look empty, which loses BOTH
     // the position progress and the queued entry Java keeps on purpose.

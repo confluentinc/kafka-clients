@@ -1224,19 +1224,19 @@ fn generate_add_size_body(
             writeln!(file, "{}for field in &self.unknown_tagged_fields {{", indent)?;
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(field.tag()));",
+                "{}    size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(field.tag()));",
                 indent
             )?;
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(field.size() as u32));",
+                "{}    size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(field.size() as u32));",
                 indent
             )?;
             writeln!(file, "{}    size.add_bytes(field.size() as i32);", indent)?;
             writeln!(file, "{}}}", indent)?;
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(num_tagged_fields));",
+                "{}size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(num_tagged_fields));",
                 indent
             )?;
             writeln!(file, "        }}")?;
@@ -1246,19 +1246,19 @@ fn generate_add_size_body(
             writeln!(file, "{}for field in &self.unknown_tagged_fields {{", indent)?;
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(field.tag()));",
+                "{}    size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(field.tag()));",
                 indent
             )?;
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(field.size() as u32));",
+                "{}    size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(field.size() as u32));",
                 indent
             )?;
             writeln!(file, "{}    size.add_bytes(field.size() as i32);", indent)?;
             writeln!(file, "{}}}", indent)?;
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(num_tagged_fields));",
+                "{}size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(num_tagged_fields));",
                 indent
             )?;
         }
@@ -1480,7 +1480,7 @@ fn generate_string_add_size(
         if flexible_versions.lowest() == 0 {
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
+                "{}    size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
                 indent
             )?;
         } else {
@@ -1497,7 +1497,7 @@ fn generate_string_add_size(
             }
             writeln!(
                 file,
-                "{}        size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
+                "{}        size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
                 indent
             )?;
             writeln!(file, "{}    }} else {{", indent)?;
@@ -1531,7 +1531,7 @@ fn generate_bytes_add_size(
         if flexible_versions.lowest() == 0 {
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
+                "{}    size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
                 indent
             )?;
         } else {
@@ -1548,7 +1548,7 @@ fn generate_bytes_add_size(
             }
             writeln!(
                 file,
-                "{}        size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
+                "{}        size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
                 indent
             )?;
             writeln!(file, "{}    }} else {{", indent)?;
@@ -1576,7 +1576,7 @@ fn generate_array_add_size(
         if flexible_versions.lowest() == 0 {
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint({}.len() as u32 + 1));",
+                "{}size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint({}.len() as u32 + 1));",
                 indent, accessor
             )?;
         } else {
@@ -1593,7 +1593,7 @@ fn generate_array_add_size(
             }
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint({}.len() as u32 + 1));",
+                "{}    size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint({}.len() as u32 + 1));",
                 indent, accessor
             )?;
             writeln!(file, "{}}} else {{", indent)?;
@@ -1643,7 +1643,7 @@ fn generate_array_element_add_size(
                 if flexible_versions.lowest() == 0 {
                     writeln!(
                         file,
-                        "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
+                        "{}    size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
                         indent
                     )?;
                 } else {
@@ -1660,7 +1660,7 @@ fn generate_array_element_add_size(
                     }
                     writeln!(
                         file,
-                        "{}        size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
+                        "{}        size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
                         indent
                     )?;
                     writeln!(file, "{}    }} else {{", indent)?;
@@ -1678,7 +1678,7 @@ fn generate_array_element_add_size(
                 if flexible_versions.lowest() == 0 {
                     writeln!(
                         file,
-                        "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
+                        "{}    size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
                         indent
                     )?;
                 } else {
@@ -1695,7 +1695,7 @@ fn generate_array_element_add_size(
                     }
                     writeln!(
                         file,
-                        "{}        size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
+                        "{}        size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
                         indent
                     )?;
                     writeln!(file, "{}    }} else {{", indent)?;
@@ -1762,7 +1762,7 @@ fn generate_tagged_field_add_size(
     writeln!(file, "{}num_tagged_fields += 1;", inner)?;
     writeln!(
         file,
-        "{}size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint({}));",
+        "{}size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint({}));",
         inner, tag
     )?;
     generate_tagged_field_content_size(file, field, &field_name, flexible_versions, &inner)?;
@@ -1987,7 +1987,7 @@ fn generate_tagged_field_content_size(
         FieldType::Bool | FieldType::Int8 => {
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(1)); // size prefix",
+                "{}size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(1)); // size prefix",
                 indent
             )?;
             writeln!(file, "{}size.add_bytes(1);", indent)?;
@@ -1995,7 +1995,7 @@ fn generate_tagged_field_content_size(
         FieldType::Int16 | FieldType::Uint16 => {
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(2)); // size prefix",
+                "{}size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(2)); // size prefix",
                 indent
             )?;
             writeln!(file, "{}size.add_bytes(2);", indent)?;
@@ -2003,7 +2003,7 @@ fn generate_tagged_field_content_size(
         FieldType::Int32 | FieldType::Uint32 => {
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(4)); // size prefix",
+                "{}size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(4)); // size prefix",
                 indent
             )?;
             writeln!(file, "{}size.add_bytes(4);", indent)?;
@@ -2011,7 +2011,7 @@ fn generate_tagged_field_content_size(
         FieldType::Int64 => {
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(8)); // size prefix",
+                "{}size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(8)); // size prefix",
                 indent
             )?;
             writeln!(file, "{}size.add_bytes(8);", indent)?;
@@ -2019,7 +2019,7 @@ fn generate_tagged_field_content_size(
         FieldType::Float64 => {
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(8)); // size prefix",
+                "{}size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(8)); // size prefix",
                 indent
             )?;
             writeln!(file, "{}size.add_bytes(8);", indent)?;
@@ -2027,7 +2027,7 @@ fn generate_tagged_field_content_size(
         FieldType::Uuid => {
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(16)); // size prefix",
+                "{}size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(16)); // size prefix",
                 indent
             )?;
             writeln!(file, "{}size.add_bytes(16);", indent)?;
@@ -2041,7 +2041,7 @@ fn generate_tagged_field_content_size(
                 writeln!(file, "{}        let bytes_len = val.len() as u32;", indent)?;
                 writeln!(
                     file,
-                    "{}        let string_prefix_size = crate::common::utils::ByteUtils::size_of_unsigned_varint(bytes_len + 1);",
+                    "{}        let string_prefix_size = crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(bytes_len + 1);",
                     indent
                 )?;
                 writeln!(
@@ -2051,7 +2051,7 @@ fn generate_tagged_field_content_size(
                 )?;
                 writeln!(
                     file,
-                    "{}        size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(inner_size as u32));",
+                    "{}        size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(inner_size as u32));",
                     indent
                 )?;
                 writeln!(file, "{}        size.add_bytes(inner_size);", indent)?;
@@ -2059,7 +2059,7 @@ fn generate_tagged_field_content_size(
                 // null encoding: varint(0) = 1 byte, so inner_size = 1
                 writeln!(
                     file,
-                    "{}        size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(1)); // size prefix for null",
+                    "{}        size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(1)); // size prefix for null",
                     indent
                 )?;
                 writeln!(file, "{}        size.add_bytes(1); // varint(0) for null", indent)?;
@@ -2068,13 +2068,13 @@ fn generate_tagged_field_content_size(
                 writeln!(file, "{}    let bytes_len = {}.len() as u32;", indent, accessor)?;
                 writeln!(
                     file,
-                    "{}    let string_prefix_size = crate::common::utils::ByteUtils::size_of_unsigned_varint(bytes_len + 1);",
+                    "{}    let string_prefix_size = crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(bytes_len + 1);",
                     indent
                 )?;
                 writeln!(file, "{}    let inner_size = string_prefix_size + bytes_len as i32;", indent)?;
                 writeln!(
                     file,
-                    "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(inner_size as u32)); // size prefix",
+                    "{}    size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(inner_size as u32)); // size prefix",
                     indent
                 )?;
                 writeln!(file, "{}    size.add_bytes(inner_size);", indent)?;
@@ -2088,13 +2088,13 @@ fn generate_tagged_field_content_size(
                 writeln!(file, "{}        let bytes_len = val.len() as u32;", indent)?;
                 writeln!(
                     file,
-                    "{}        let bytes_prefix_size = crate::common::utils::ByteUtils::size_of_unsigned_varint(bytes_len + 1);",
+                    "{}        let bytes_prefix_size = crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(bytes_len + 1);",
                     indent
                 )?;
                 writeln!(file, "{}        let inner_size = bytes_prefix_size + bytes_len as i32;", indent)?;
                 writeln!(
                     file,
-                    "{}        size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(inner_size as u32));",
+                    "{}        size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(inner_size as u32));",
                     indent
                 )?;
                 writeln!(file, "{}        size.add_bytes(inner_size);", indent)?;
@@ -2102,7 +2102,7 @@ fn generate_tagged_field_content_size(
                 // null encoding: varint(0) = 1 byte, so inner_size = 1
                 writeln!(
                     file,
-                    "{}        size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(1)); // size prefix for null",
+                    "{}        size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(1)); // size prefix for null",
                     indent
                 )?;
                 writeln!(file, "{}        size.add_bytes(1); // varint(0) for null", indent)?;
@@ -2111,13 +2111,13 @@ fn generate_tagged_field_content_size(
                 writeln!(file, "{}    let bytes_len = {}.len() as u32;", indent, accessor)?;
                 writeln!(
                     file,
-                    "{}    let bytes_prefix_size = crate::common::utils::ByteUtils::size_of_unsigned_varint(bytes_len + 1);",
+                    "{}    let bytes_prefix_size = crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(bytes_len + 1);",
                     indent
                 )?;
                 writeln!(file, "{}    let inner_size = bytes_prefix_size + bytes_len as i32;", indent)?;
                 writeln!(
                     file,
-                    "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(inner_size as u32)); // size prefix",
+                    "{}    size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(inner_size as u32)); // size prefix",
                     indent
                 )?;
                 writeln!(file, "{}    size.add_bytes(inner_size);", indent)?;
@@ -2131,7 +2131,7 @@ fn generate_tagged_field_content_size(
             // Array length prefix (varint(len+1))
             writeln!(
                 file,
-                "{}    array_size += crate::common::utils::ByteUtils::size_of_unsigned_varint({}.len() as u32 + 1);",
+                "{}    array_size += crate::common::utils::internals::ByteUtils::size_of_unsigned_varint({}.len() as u32 + 1);",
                 indent, accessor
             )?;
             // Element sizes
@@ -2145,7 +2145,7 @@ fn generate_tagged_field_content_size(
                         writeln!(file, "{}        let elem_len = element.len() as u32;", indent)?;
                         writeln!(
                             file,
-                            "{}        array_size += crate::common::utils::ByteUtils::size_of_unsigned_varint(elem_len + 1);",
+                            "{}        array_size += crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(elem_len + 1);",
                             indent
                         )?;
                         writeln!(file, "{}        array_size += elem_len as i32;", indent)?;
@@ -2161,7 +2161,7 @@ fn generate_tagged_field_content_size(
             }
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(array_size as u32)); // size prefix",
+                "{}    size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(array_size as u32)); // size prefix",
                 indent
             )?;
             writeln!(file, "{}    size.add_bytes(array_size);", indent)?;
@@ -2187,7 +2187,7 @@ fn generate_tagged_field_content_size(
                     )?;
                     writeln!(
                         file,
-                        "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(content_size as u32)); // size prefix",
+                        "{}    size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(content_size as u32)); // size prefix",
                         indent
                     )?;
                     writeln!(file, "{}    size.add_bytes(content_size);", indent)?;
@@ -2205,7 +2205,7 @@ fn generate_tagged_field_content_size(
                     )?;
                     writeln!(
                         file,
-                        "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(content_size as u32)); // size prefix",
+                        "{}    size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(content_size as u32)); // size prefix",
                         indent
                     )?;
                     writeln!(file, "{}    size.add_bytes(content_size);", indent)?;
@@ -2217,7 +2217,7 @@ fn generate_tagged_field_content_size(
                     )?;
                     writeln!(
                         file,
-                        "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(1)); // size prefix for 1 byte",
+                        "{}    size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(1)); // size prefix for 1 byte",
                         indent
                     )?;
                     writeln!(file, "{}    size.add_bytes(1); // varint(0) null indicator", indent)?;
@@ -2230,7 +2230,7 @@ fn generate_tagged_field_content_size(
                 writeln!(file, "{}    let struct_size = struct_acc.total_size();", indent)?;
                 writeln!(
                     file,
-                    "{}    size.add_bytes(crate::common::utils::ByteUtils::size_of_unsigned_varint(struct_size as u32)); // size prefix",
+                    "{}    size.add_bytes(crate::common::utils::internals::ByteUtils::size_of_unsigned_varint(struct_size as u32)); // size prefix",
                     indent
                 )?;
                 writeln!(file, "{}    size.add_bytes(struct_size);", indent)?;
@@ -2253,6 +2253,91 @@ fn generate_display_impl(file: &mut fs::File, struct_name: &str) -> Result<(), B
     Ok(())
 }
 
+/// Initial capacity of a generated reader's array: the declared `length`,
+/// capped at `MessageUtil::MAX_PREALLOCATED_ARRAY_CAPACITY` (Java
+/// `Math.min(arrayLength, MessageUtil.MAX_PREALLOCATED_ARRAY_CAPACITY)`,
+/// KAFKA 4.4 1a770734fe). A larger declared count still parses; the `Vec`
+/// grows on demand as elements are read.
+const PREALLOCATED_CAPACITY_EXPR: &str =
+    "std::cmp::min(length, crate::common::protocol::MessageUtil::MAX_PREALLOCATED_ARRAY_CAPACITY as u32) as usize";
+
+/// Emits the hard cap on a declared array length, which mirrors Java's
+/// `if (arrayLength > MessageUtil.MAX_ARRAY_LENGTH)` guard. It follows the
+/// remaining-bytes check, as in Java, so the error a reader returns for a
+/// length that fails both is the remaining-bytes one.
+fn write_array_length_cap_check(file: &mut fs::File, ind: &str) -> Result<(), Box<dyn std::error::Error>> {
+    writeln!(
+        file,
+        "{}if length > crate::common::protocol::MessageUtil::MAX_ARRAY_LENGTH as u32 {{",
+        ind
+    )?;
+    writeln!(
+        file,
+        "{}    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,",
+        ind
+    )?;
+    writeln!(
+        file,
+        "{}        format!(\"Tried to read a collection of size {{}}, which exceeds the maximum allowed size of {{}}.\", length, crate::common::protocol::MessageUtil::MAX_ARRAY_LENGTH)));",
+        ind
+    )?;
+    writeln!(file, "{}}}", ind)?;
+    Ok(())
+}
+
+/// Emits the read of a tagged-field section's count with Java's three guards
+/// (`MessageDataGenerator.generateClassReader`, KAFKA 4.4 1a770734fe): a
+/// negative count, a count larger than the remaining bytes, and a count above
+/// `MessageUtil::MAX_TAGGED_FIELD_COUNT` are rejected before the loop.
+///
+/// Java reads the count with `readUnsignedVarint()` into an `int`, so a varint
+/// of 2^31 or more is negative there; the `as i32` reproduces that so the
+/// negative-count guard and its message match.
+fn write_tagged_field_count_read(file: &mut fs::File, ind: &str) -> Result<(), Box<dyn std::error::Error>> {
+    writeln!(file, "{}let num_tagged_fields = readable.read_unsigned_varint()? as i32;", ind)?;
+    writeln!(file, "{}if num_tagged_fields < 0 {{", ind)?;
+    writeln!(
+        file,
+        "{}    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,",
+        ind
+    )?;
+    writeln!(
+        file,
+        "{}        format!(\"Invalid negative number of tagged fields {{}}\", num_tagged_fields)));",
+        ind
+    )?;
+    writeln!(file, "{}}}", ind)?;
+    writeln!(file, "{}if num_tagged_fields as usize > readable.remaining() {{", ind)?;
+    writeln!(
+        file,
+        "{}    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,",
+        ind
+    )?;
+    writeln!(
+        file,
+        "{}        format!(\"Tried to read {{}} tagged fields, but there are only {{}} bytes remaining.\", num_tagged_fields, readable.remaining())));",
+        ind
+    )?;
+    writeln!(file, "{}}}", ind)?;
+    writeln!(
+        file,
+        "{}if num_tagged_fields > crate::common::protocol::MessageUtil::MAX_TAGGED_FIELD_COUNT {{",
+        ind
+    )?;
+    writeln!(
+        file,
+        "{}    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,",
+        ind
+    )?;
+    writeln!(
+        file,
+        "{}        format!(\"Tried to read {{}} tagged fields, which exceeds the maximum allowed count of {{}}.\", num_tagged_fields, crate::common::protocol::MessageUtil::MAX_TAGGED_FIELD_COUNT)));",
+        ind
+    )?;
+    writeln!(file, "{}}}", ind)?;
+    Ok(())
+}
+
 fn generate_tagged_field_read(
     file: &mut fs::File,
     tagged_fields: &[&FieldSpec],
@@ -2261,11 +2346,7 @@ fn generate_tagged_field_read(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let indent = if indented { "    " } else { "" };
 
-    writeln!(
-        file,
-        "{}        let num_tagged_fields = readable.read_unsigned_varint()?;",
-        indent
-    )?;
+    write_tagged_field_count_read(file, &format!("{}        ", indent))?;
     writeln!(file, "{}        for _ in 0..num_tagged_fields {{", indent)?;
     writeln!(file, "{}            let tag = readable.read_unsigned_varint()?;", indent)?;
     writeln!(file, "{}            let size = readable.read_unsigned_varint()?;", indent)?;
@@ -2292,12 +2373,17 @@ fn generate_tagged_field_read(
                         writeln!(file, "{}                    if length == 0 {{", indent)?;
                         writeln!(file, "{}                        result.{} = None;", indent, field_name)?;
                         writeln!(file, "{}                    }} else {{", indent)?;
+                        write_string_length_guard(
+                            file,
+                            &format!("{}                        ", indent),
+                            "(length - 1)",
+                            &field.camel_case_name(),
+                        )?;
                         writeln!(
                             file,
-                            "{}                        let mut bytes = vec![0u8; (length - 1) as usize];",
+                            "{}                        let bytes = readable.read_array((length - 1) as usize)?;",
                             indent
                         )?;
-                        writeln!(file, "{}                        readable.read_bytes(&mut bytes)?;", indent)?;
                         writeln!(
                             file,
                             "{}                        result.{} = Some(String::from_utf8(bytes)",
@@ -2313,12 +2399,17 @@ fn generate_tagged_field_read(
                         writeln!(file, "{}                    if length == 0 {{", indent)?;
                         writeln!(file, "{}                        result.{} = String::new();", indent, field_name)?;
                         writeln!(file, "{}                    }} else {{", indent)?;
+                        write_string_length_guard(
+                            file,
+                            &format!("{}                        ", indent),
+                            "(length - 1)",
+                            &field.camel_case_name(),
+                        )?;
                         writeln!(
                             file,
-                            "{}                        let mut bytes = vec![0u8; (length - 1) as usize];",
+                            "{}                        let bytes = readable.read_array((length - 1) as usize)?;",
                             indent
                         )?;
-                        writeln!(file, "{}                        readable.read_bytes(&mut bytes)?;", indent)?;
                         writeln!(
                             file,
                             "{}                        result.{} = String::from_utf8(bytes)",
@@ -2413,10 +2504,11 @@ fn generate_tagged_field_read(
                             indent
                         )?;
                         writeln!(file, "{}                        }}", indent)?;
+                        write_array_length_cap_check(file, &format!("{}                        ", indent))?;
                         writeln!(
                             file,
-                            "{}                        let mut _arr = Vec::with_capacity(length as usize);",
-                            indent
+                            "{}                        let mut _arr = Vec::with_capacity({});",
+                            indent, PREALLOCATED_CAPACITY_EXPR
                         )?;
                         writeln!(file, "{}                        for _ in 0..length {{", indent)?;
                     } else {
@@ -2440,10 +2532,11 @@ fn generate_tagged_field_read(
                             indent
                         )?;
                         writeln!(file, "{}                        }}", indent)?;
+                        write_array_length_cap_check(file, &format!("{}                        ", indent))?;
                         writeln!(
                             file,
-                            "{}                        result.{} = Vec::with_capacity(length as usize);",
-                            indent, field_name
+                            "{}                        result.{} = Vec::with_capacity({});",
+                            indent, field_name, PREALLOCATED_CAPACITY_EXPR
                         )?;
                         writeln!(file, "{}                        for _ in 0..length {{", indent)?;
                     }
@@ -2469,14 +2562,15 @@ fn generate_tagged_field_read(
                                 indent, push_target
                             )?;
                             writeln!(file, "{}                            }} else {{", indent)?;
-                            writeln!(
+                            write_string_length_guard(
                                 file,
-                                "{}                                let mut bytes = vec![0u8; (len - 1) as usize];",
-                                indent
+                                &format!("{}                                ", indent),
+                                "(len - 1)",
+                                &format!("{} element", field.camel_case_name()),
                             )?;
                             writeln!(
                                 file,
-                                "{}                                readable.read_bytes(&mut bytes)?;",
+                                "{}                                let bytes = readable.read_array((len - 1) as usize)?;",
                                 indent
                             )?;
                             writeln!(
@@ -2584,10 +2678,9 @@ fn generate_tagged_field_read(
                         // For non-nullable structs, read the bytes and parse the struct
                         writeln!(
                             file,
-                            "{}                    let mut struct_bytes = vec![0u8; size as usize];",
+                            "{}                    let struct_bytes = readable.read_array(size as usize)?;",
                             indent
                         )?;
-                        writeln!(file, "{}                    readable.read_bytes(&mut struct_bytes)?;", indent)?;
                         writeln!(
                             file,
                             "{}                    let mut struct_accessor = crate::common::protocol::ByteBufferAccessor::new(struct_bytes);",
@@ -2621,20 +2714,18 @@ fn generate_tagged_field_read(
                         writeln!(file, "{}                    }} else {{", indent)?;
                         writeln!(
                             file,
-                            "{}                        let mut bytes = vec![0u8; (len - 1) as usize];",
+                            "{}                        let bytes = readable.read_array((len - 1) as usize)?;",
                             indent
                         )?;
-                        writeln!(file, "{}                        readable.read_bytes(&mut bytes)?;", indent)?;
                         writeln!(file, "{}                        result.{} = Some(bytes);", indent, field_name)?;
                         writeln!(file, "{}                    }}", indent)?;
                     } else {
                         writeln!(file, "{}                    if len > 0 {{", indent)?;
                         writeln!(
                             file,
-                            "{}                        let mut bytes = vec![0u8; (len - 1) as usize];",
+                            "{}                        let bytes = readable.read_array((len - 1) as usize)?;",
                             indent
                         )?;
-                        writeln!(file, "{}                        readable.read_bytes(&mut bytes)?;", indent)?;
                         writeln!(file, "{}                        result.{} = bytes;", indent, field_name)?;
                         writeln!(file, "{}                    }} else {{", indent)?;
                         writeln!(file, "{}                        result.{} = Vec::new();", indent, field_name)?;
@@ -2645,10 +2736,9 @@ fn generate_tagged_field_read(
                     // Skip unknown/unhandled types
                     writeln!(
                         file,
-                        "{}                    let mut skip_bytes = vec![0u8; size as usize];",
+                        "{}                    let skip_bytes = readable.read_array(size as usize)?;",
                         indent
                     )?;
-                    writeln!(file, "{}                    readable.read_bytes(&mut skip_bytes)?;", indent)?;
                 },
             }
 
@@ -2786,7 +2876,7 @@ fn generate_tagged_field_write(
                             writeln!(file, "{}                    let bytes = val.as_bytes();", indent)?;
                             writeln!(
                                 file,
-                                "{}                    let string_prefix_size = crate::common::utils::ByteUtils::size_of_unsigned_varint((bytes.len() as u32) + 1);",
+                                "{}                    let string_prefix_size = crate::common::utils::internals::ByteUtils::size_of_unsigned_varint((bytes.len() as u32) + 1);",
                                 indent
                             )?;
                             writeln!(
@@ -2818,7 +2908,7 @@ fn generate_tagged_field_write(
                             writeln!(file, "{}                let bytes = {}.as_bytes();", indent, tagged_accessor)?;
                             writeln!(
                                 file,
-                                "{}                let string_prefix_size = crate::common::utils::ByteUtils::size_of_unsigned_varint((bytes.len() as u32) + 1);",
+                                "{}                let string_prefix_size = crate::common::utils::internals::ByteUtils::size_of_unsigned_varint((bytes.len() as u32) + 1);",
                                 indent
                             )?;
                             writeln!(
@@ -3265,7 +3355,7 @@ fn generate_read_method(
         writeln!(file)?;
         if flexible_versions.lowest() == 0 {
             writeln!(file, "        // Read tagged fields (flexible version)")?;
-            writeln!(file, "        let num_tagged_fields = readable.read_unsigned_varint()?;")?;
+            write_tagged_field_count_read(file, "        ")?;
             writeln!(file, "        for _ in 0..num_tagged_fields {{")?;
             writeln!(file, "            let tag = readable.read_unsigned_varint()?;")?;
             writeln!(file, "            let size = readable.read_unsigned_varint()?;")?;
@@ -3287,7 +3377,7 @@ fn generate_read_method(
                 )?;
             }
             writeln!(file, "            // Read tagged fields (flexible version)")?;
-            writeln!(file, "            let num_tagged_fields = readable.read_unsigned_varint()?;")?;
+            write_tagged_field_count_read(file, "            ")?;
             writeln!(file, "            for _ in 0..num_tagged_fields {{")?;
             writeln!(file, "                let tag = readable.read_unsigned_varint()?;")?;
             writeln!(file, "                let size = readable.read_unsigned_varint()?;")?;
@@ -3519,7 +3609,7 @@ fn generate_field_read(
             writeln!(file, "{}result.{} = readable.read_double()?;", indent, field_name)?;
         },
         FieldType::String => {
-            generate_string_read(file, &field_name, flexible_versions, indent, nullable)?;
+            generate_string_read(file, &field_name, &field.camel_case_name(), flexible_versions, indent, nullable)?;
         },
         FieldType::Bytes => {
             generate_bytes_read(file, &field_name, flexible_versions, indent, nullable)?;
@@ -3528,7 +3618,15 @@ fn generate_field_read(
             generate_records_read(file, &field_name, flexible_versions, indent, nullable)?;
         },
         FieldType::Array(element_type) => {
-            generate_array_read(file, &field_name, element_type, flexible_versions, indent, nullable)?;
+            generate_array_read(
+                file,
+                &field_name,
+                &field.camel_case_name(),
+                element_type,
+                flexible_versions,
+                indent,
+                nullable,
+            )?;
         },
         FieldType::Struct(struct_name) => {
             if nullable {
@@ -3585,10 +3683,31 @@ fn generate_field_read(
     Ok(())
 }
 
+/// Emits Java's string-length guard (`MessageDataGenerator.generateVariableLengthReader`,
+/// `MessageDataGenerator.java:653-657`): a declared string length above `0x7fff` is
+/// rejected with "string field <name> had invalid length <length>". Only the compact
+/// (varint) encodings need it; a non-compact length is an `int16` and cannot exceed it.
+fn write_string_length_guard(
+    file: &mut fs::File,
+    ind: &str,
+    length_expr: &str,
+    java_name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    writeln!(file, "{ind}if {length_expr} > 0x7fff {{")?;
+    writeln!(file, "{ind}    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,")?;
+    writeln!(
+        file,
+        "{ind}        format!(\"string field {java_name} had invalid length {{}}\", {length_expr})));"
+    )?;
+    writeln!(file, "{ind}}}")?;
+    Ok(())
+}
+
 /// Generate string field read code, handling nullable fields.
 fn generate_string_read(
     file: &mut fs::File,
     field_name: &str,
+    java_name: &str,
     flexible_versions: Versions,
     indent: &str,
     nullable: bool,
@@ -3614,8 +3733,8 @@ fn generate_string_read(
             writeln!(file, "{}    {}", indent, null_action)?;
             writeln!(file, "{}}} else {{", indent)?;
             writeln!(file, "{}    let length = len - 1;", indent)?;
-            writeln!(file, "{}    let mut bytes = vec![0u8; length as usize];", indent)?;
-            writeln!(file, "{}    readable.read_bytes(&mut bytes)?;", indent)?;
+            write_string_length_guard(file, &format!("{}    ", indent), "length", java_name)?;
+            writeln!(file, "{}    let bytes = readable.read_array(length as usize)?;", indent)?;
             writeln!(
                 file,
                 "{}    result.{} = {}String::from_utf8(bytes)",
@@ -3645,8 +3764,8 @@ fn generate_string_read(
             writeln!(file, "{}        {}", indent, null_action)?;
             writeln!(file, "{}    }} else {{", indent)?;
             writeln!(file, "{}        let length = len - 1;", indent)?;
-            writeln!(file, "{}        let mut bytes = vec![0u8; length as usize];", indent)?;
-            writeln!(file, "{}        readable.read_bytes(&mut bytes)?;", indent)?;
+            write_string_length_guard(file, &format!("{}        ", indent), "length", java_name)?;
+            writeln!(file, "{}        let bytes = readable.read_array(length as usize)?;", indent)?;
             writeln!(
                 file,
                 "{}        result.{} = {}String::from_utf8(bytes)",
@@ -3663,8 +3782,7 @@ fn generate_string_read(
             writeln!(file, "{}    if len < 0 {{", indent)?;
             writeln!(file, "{}        {}", indent, neg_action)?;
             writeln!(file, "{}    }} else {{", indent)?;
-            writeln!(file, "{}        let mut bytes = vec![0u8; len as usize];", indent)?;
-            writeln!(file, "{}        readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(file, "{}        let bytes = readable.read_array(len as usize)?;", indent)?;
             writeln!(
                 file,
                 "{}        result.{} = {}String::from_utf8(bytes)",
@@ -3684,8 +3802,7 @@ fn generate_string_read(
         writeln!(file, "{}if len < 0 {{", indent)?;
         writeln!(file, "{}    {}", indent, neg_action)?;
         writeln!(file, "{}}} else {{", indent)?;
-        writeln!(file, "{}    let mut bytes = vec![0u8; len as usize];", indent)?;
-        writeln!(file, "{}    readable.read_bytes(&mut bytes)?;", indent)?;
+        writeln!(file, "{}    let bytes = readable.read_array(len as usize)?;", indent)?;
         writeln!(
             file,
             "{}    result.{} = {}String::from_utf8(bytes)",
@@ -3854,6 +3971,7 @@ fn generate_records_read(
 fn generate_array_read(
     file: &mut fs::File,
     field_name: &str,
+    java_name: &str,
     element_type: &FieldType,
     flexible_versions: Versions,
     indent: &str,
@@ -3886,17 +4004,26 @@ fn generate_array_read(
             ind
         )?;
         writeln!(file, "{}}}", ind)?;
+        write_array_length_cap_check(file, ind)?;
         if nullable {
-            writeln!(file, "{}let mut _arr = Vec::with_capacity(length as usize);", ind)?;
+            writeln!(
+                file,
+                "{}let mut _arr = Vec::with_capacity({});",
+                ind, PREALLOCATED_CAPACITY_EXPR
+            )?;
             // We need a temporary field_name for element reads
             writeln!(file, "{}for _ in 0..length {{", ind)?;
-            generate_array_element_read_to_vec(file, element_type, "_arr", flexible_versions)?;
+            generate_array_element_read_to_vec(file, element_type, "_arr", java_name, flexible_versions)?;
             writeln!(file, "{}}}", ind)?;
             writeln!(file, "{}result.{} = Some(_arr);", ind, fn_name)?;
         } else {
-            writeln!(file, "{}result.{} = Vec::with_capacity(length as usize);", ind, fn_name)?;
+            writeln!(
+                file,
+                "{}result.{} = Vec::with_capacity({});",
+                ind, fn_name, PREALLOCATED_CAPACITY_EXPR
+            )?;
             writeln!(file, "{}for _ in 0..length {{", ind)?;
-            generate_array_element_read(file, element_type, fn_name, flexible_versions)?;
+            generate_array_element_read(file, element_type, fn_name, java_name, flexible_versions)?;
             writeln!(file, "{}}}", ind)?;
         }
         Ok(())
@@ -3960,20 +4087,25 @@ fn generate_array_element_read_to_vec(
     file: &mut fs::File,
     element_type: &FieldType,
     vec_name: &str,
+    java_name: &str,
     flexible_versions: Versions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Reuse the same logic but with a different prefix (no "result." prefix)
-    generate_array_element_read_with_prefix(file, element_type, vec_name, "", flexible_versions)
+    generate_array_element_read_with_prefix(file, element_type, vec_name, "", java_name, flexible_versions)
 }
 
+/// `java_name` is the array field's Java `camelCaseName()`; an element string's
+/// length-guard message names it `"<name> element"`, as Java's does.
 fn generate_array_element_read_with_prefix(
     file: &mut fs::File,
     element_type: &FieldType,
     array_name: &str,
     prefix: &str,
+    java_name: &str,
     flexible_versions: Versions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let target = format!("{}{}", prefix, array_name);
+    let element_name = format!("{java_name} element");
     match element_type {
         FieldType::Bool => {
             writeln!(file, "                {}.push(readable.read_byte()? != 0);", target)?;
@@ -4010,8 +4142,11 @@ fn generate_array_element_read_with_prefix(
                     writeln!(file, "                if str_len == 0 {{")?;
                     writeln!(file, "                    {}.push(String::new());", target)?;
                     writeln!(file, "                }} else {{")?;
-                    writeln!(file, "                    let mut bytes = vec![0u8; (str_len - 1) as usize];")?;
-                    writeln!(file, "                    readable.read_bytes(&mut bytes)?;")?;
+                    write_string_length_guard(file, "                    ", "(str_len - 1)", &element_name)?;
+                    writeln!(
+                        file,
+                        "                    let bytes = readable.read_array((str_len - 1) as usize)?;"
+                    )?;
                     writeln!(
                         file,
                         "                    {}.push(String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);",
@@ -4034,11 +4169,11 @@ fn generate_array_element_read_with_prefix(
                     writeln!(file, "                    if str_len == 0 {{")?;
                     writeln!(file, "                        {}.push(String::new());", target)?;
                     writeln!(file, "                    }} else {{")?;
+                    write_string_length_guard(file, "                        ", "(str_len - 1)", &element_name)?;
                     writeln!(
                         file,
-                        "                        let mut bytes = vec![0u8; (str_len - 1) as usize];"
+                        "                        let bytes = readable.read_array((str_len - 1) as usize)?;"
                     )?;
-                    writeln!(file, "                        readable.read_bytes(&mut bytes)?;")?;
                     writeln!(
                         file,
                         "                        {}.push(String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);",
@@ -4047,8 +4182,7 @@ fn generate_array_element_read_with_prefix(
                     writeln!(file, "                    }}")?;
                     writeln!(file, "                }} else {{")?;
                     writeln!(file, "                    let str_len = readable.read_short()? as usize;")?;
-                    writeln!(file, "                    let mut bytes = vec![0u8; str_len];")?;
-                    writeln!(file, "                    readable.read_bytes(&mut bytes)?;")?;
+                    writeln!(file, "                    let bytes = readable.read_array(str_len)?;")?;
                     writeln!(
                         file,
                         "                    {}.push(String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);",
@@ -4059,8 +4193,7 @@ fn generate_array_element_read_with_prefix(
             } else {
                 // No flexible versions: always use standard encoding
                 writeln!(file, "                let str_len = readable.read_short()? as usize;")?;
-                writeln!(file, "                let mut bytes = vec![0u8; str_len];")?;
-                writeln!(file, "                readable.read_bytes(&mut bytes)?;")?;
+                writeln!(file, "                let bytes = readable.read_array(str_len)?;")?;
                 writeln!(
                     file,
                     "                {}.push(String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);",
@@ -4086,9 +4219,10 @@ fn generate_array_element_read(
     file: &mut fs::File,
     element_type: &FieldType,
     array_name: &str,
+    java_name: &str,
     flexible_versions: Versions,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    generate_array_element_read_with_prefix(file, element_type, array_name, "result.", flexible_versions)
+    generate_array_element_read_with_prefix(file, element_type, array_name, "result.", java_name, flexible_versions)
 }
 
 fn generate_field_write(
@@ -5384,5 +5518,132 @@ mod tests {
                  "nullableVersions": "0+", "default": "null" }"#,
         );
         assert_eq!(get_default_value_for_field(&explicit), "None");
+    }
+
+    /// Generates the full source of one message spec, as `process_spec_file` does,
+    /// into a scratch file and returns it (Java `MessageDataGeneratorTest.generateMessageSource`).
+    fn emit_message(spec_json: &str, tag: &str) -> String {
+        let spec: MessageSpec = serde_json::from_str(spec_json).expect("valid message spec");
+        let path = std::env::temp_dir().join(format!("ckr-gen-msg-{}-{}.rs", std::process::id(), tag));
+        {
+            let mut file = fs::File::create(&path).expect("create scratch file");
+            generate_message_struct(&mut file, &spec).expect("generate");
+        }
+        let emitted = fs::read_to_string(&path).expect("read scratch file");
+        let _ = fs::remove_file(&path);
+        emitted
+    }
+
+    /// The Java `CapTest` spec: a primitive array plus a keyed struct array that holds
+    /// a nested keyed struct array, so all three array readers are emitted.
+    const CAP_TEST_SPEC: &str = r#"{
+      "type": "request", "name": "CapTest", "validVersions": "0-2", "flexibleVersions": "none",
+      "fields": [
+        { "name": "Foo", "type": "[]int32", "versions": "0+" },
+        { "name": "Bar", "type": "[]Baz", "versions": "1+", "fields": [
+          { "name": "Key", "type": "int32", "versions": "1+", "mapKey": true },
+          { "name": "Value", "type": "[]Bam", "versions": "2+", "fields": [
+            {"name": "NestedKey", "type": "string", "versions": "2+", "mapKey": true },
+            { "name": "NestedValue", "type": "string", "versions": "2+" }
+          ]}
+        ]}
+      ]
+    }"#;
+
+    /// The Rust generator emits keyed collections as a `Vec`, like plain arrays, so
+    /// Java's separate `ArrayList` / `BazCollection` / `BamCollection` assertions all
+    /// land on the one capped `Vec::with_capacity` form, once per array field.
+    #[test]
+    #[doc(alias = "org.apache.kafka.message.MessageDataGeneratorTest#testArrayPreallocationIsCapped")]
+    fn test_array_preallocation_is_capped() {
+        let source = emit_message(CAP_TEST_SPEC, "prealloc");
+        let capped = format!("Vec::with_capacity({PREALLOCATED_CAPACITY_EXPR})");
+        assert_eq!(
+            3,
+            source.matches(&capped).count(),
+            "expected the capped pre-allocation for Foo, Bar and Value:\n{source}"
+        );
+        assert!(
+            !source.contains("Vec::with_capacity(length as usize)"),
+            "an uncapped pre-allocation is left:\n{source}"
+        );
+    }
+
+    #[test]
+    #[doc(alias = "org.apache.kafka.message.MessageDataGeneratorTest#testArrayLengthIsCapped")]
+    fn test_array_length_is_capped() {
+        let source = emit_message(CAP_TEST_SPEC, "length");
+        let occurrences = source
+            .matches("if length > crate::common::protocol::MessageUtil::MAX_ARRAY_LENGTH as u32 {")
+            .count();
+        assert_eq!(
+            3, occurrences,
+            "Expected the cap check for all 3 array fields (Foo, Bar, Value), but found {occurrences}"
+        );
+    }
+
+    #[test]
+    #[doc(alias = "org.apache.kafka.message.MessageDataGeneratorTest#testTaggedFieldCountIsBounded")]
+    fn test_tagged_field_count_is_bounded() {
+        let source = emit_message(
+            r#"{
+              "type": "request", "name": "TagBoundTest", "validVersions": "0-1", "flexibleVersions": "1+",
+              "fields": [
+                { "name": "Foo", "type": "int32", "versions": "1+", "taggedVersions": "1+", "tag": 0, "default": "0" }
+              ]
+            }"#,
+            "tagged",
+        );
+        for expected in [
+            "if num_tagged_fields < 0 {",
+            "if num_tagged_fields as usize > readable.remaining() {",
+            "\"Tried to read {} tagged fields, but there are only {} bytes remaining.\", num_tagged_fields, readable.remaining()",
+            "if num_tagged_fields > crate::common::protocol::MessageUtil::MAX_TAGGED_FIELD_COUNT {",
+            "\"Tried to read {} tagged fields, which exceeds the maximum allowed count of {}.\", num_tagged_fields, crate::common::protocol::MessageUtil::MAX_TAGGED_FIELD_COUNT",
+        ] {
+            assert!(
+                source.contains(expected),
+                "Expected string to contain '{expected}', but it was {source}"
+            );
+        }
+    }
+
+    /// The string readers carry Java's `0x7fff` guard with Java's message (the field's
+    /// `camelCaseName()`, plus " element" inside an array), and no reader allocates a
+    /// declared length before the remaining-bytes check: every variable-length read goes
+    /// through `read_array`.
+    #[test]
+    fn test_string_and_tagged_reads_are_bounded() {
+        let source = emit_message(
+            r#"{
+              "type": "request", "name": "StringBoundTest", "validVersions": "0-1", "flexibleVersions": "0+",
+              "fields": [
+                { "name": "Foo", "type": "string", "versions": "0+" },
+                { "name": "Bars", "type": "[]string", "versions": "0+" },
+                { "name": "Tagged", "type": "string", "versions": "1+", "taggedVersions": "1+", "tag": 0 },
+                { "name": "TaggedStruct", "type": "Baz", "versions": "1+", "taggedVersions": "1+", "tag": 1,
+                  "fields": [ { "name": "Qux", "type": "int32", "versions": "1+" } ] }
+              ]
+            }"#,
+            "strings",
+        );
+        for expected in [
+            "string field foo had invalid length {}",
+            "string field bars element had invalid length {}",
+            "string field tagged had invalid length {}",
+        ] {
+            assert!(
+                source.contains(expected),
+                "Expected string to contain '{expected}', but it was {source}"
+            );
+        }
+        assert!(
+            !source.contains("vec![0u8"),
+            "a reader allocates a declared length up front:\n{source}"
+        );
+        assert!(
+            source.contains("let struct_bytes = readable.read_array(size as usize)?;"),
+            "{source}"
+        );
     }
 }

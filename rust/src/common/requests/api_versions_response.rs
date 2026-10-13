@@ -758,4 +758,43 @@ mod tests {
             assert_eq!(Some(&expected), found);
         }
     }
+
+    /// ApiVersions v5 (KIP-1242) changes only the request; the response body is
+    /// the v3/v4 flexible shape. Byte-level vector, identical at v4 and v5:
+    ///   error_code 0: 0x00 0x00
+    ///   api_keys: compact array len 1 -> 0x02
+    ///     api_key 18 (ApiVersions): 0x00 0x12
+    ///     min_version 0: 0x00 0x00, max_version 5: 0x00 0x05
+    ///     entry tagged fields: 0x00
+    ///   throttle_time_ms 0: 0x00 0x00 0x00 0x00
+    ///   top-level tagged fields (all at their defaults, so none): 0x00
+    #[test]
+    fn test_serialize_known_byte_vector_v5_same_body_as_v4() {
+        let mut api_version = ApiVersion::new();
+        api_version
+            .set_api_key(ApiKeys::API_VERSIONS.id())
+            .set_min_version(0)
+            .set_max_version(5);
+        let mut data = ApiVersionsResponseData::new();
+        data.set_api_keys(vec![api_version]);
+        let expected: &[u8] = &[
+            0x00, 0x00, // error_code 0
+            0x02, // api_keys compact array len 1
+            0x00, 0x12, // api_key 18
+            0x00, 0x00, // min_version 0
+            0x00, 0x05, // max_version 5
+            0x00, // entry tagged fields
+            0x00, 0x00, 0x00, 0x00, // throttle_time_ms 0
+            0x00, // top-level tagged fields
+        ];
+        for version in [4, 5] {
+            let mut response =
+                crate::common::requests::ConcreteResponse::ApiVersions(ApiVersionsResponse::new(data.clone()));
+            assert_eq!(
+                response.serialize(version).unwrap().into_buffer().as_slice(),
+                expected,
+                "ApiVersions response v{version}"
+            );
+        }
+    }
 }

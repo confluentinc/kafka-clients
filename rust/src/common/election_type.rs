@@ -63,6 +63,17 @@ impl ElectionType {
         }
     }
 
+    /// Java's `ElectionType.name()`: the enum constant's own name.
+    ///
+    /// `name()` is inherited from `java.lang.Enum`, so there is no Java body to
+    /// translate; `Debug` would print `Unclean` where Java prints `UNCLEAN`.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Preferred => "PREFERRED",
+            Self::Unclean => "UNCLEAN",
+        }
+    }
+
     /// All election types, in declaration order.
     ///
     /// Mirrors `ElectionType.values()`.

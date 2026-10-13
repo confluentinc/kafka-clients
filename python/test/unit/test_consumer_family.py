@@ -63,7 +63,7 @@ ASYNC_METHODS[ASYNC_METHODS.index("__exit__")] = "__aexit__"
 # setClientInstanceId / injectTimeoutException / disableTelemetry /
 # addedMetrics).
 MOCK_METHODS = [
-    "rebalance", "add_record", "set_max_poll_records", "set_poll_exception",
+    "rebalance", "lose_partitions", "add_record", "set_max_poll_records", "set_poll_exception",
     "set_offsets_exception", "update_beginning_offsets", "update_end_offsets",
     "update_duration_offsets", "update_partitions", "closed", "schedule_poll_task",
     "schedule_nop_poll_task", "last_poll_timeout",
@@ -99,9 +99,9 @@ def test_members_keep_javas_declaration_order() -> None:
     assert public_methods(AsyncConsumer) == ASYNC_METHODS
     assert public_methods(KafkaConsumer) == []
     assert public_methods(AsyncKafkaConsumer) == []
-    assert ["rebalance"] + public_methods(MockConsumerCore) == MOCK_METHODS
-    assert public_methods(MockConsumer) == ["rebalance"]
-    assert public_methods(AsyncMockConsumer) == ["rebalance"]
+    assert ["rebalance", "lose_partitions"] + public_methods(MockConsumerCore) == MOCK_METHODS
+    assert public_methods(MockConsumer) == ["rebalance", "lose_partitions"]
+    assert public_methods(AsyncMockConsumer) == ["rebalance", "lose_partitions"]
 
 
 def test_async_def_iff_java_waits() -> None:
@@ -109,9 +109,12 @@ def test_async_def_iff_java_waits() -> None:
         assert inspect.iscoroutinefunction(getattr(AsyncConsumer, name)) is (name in WAITING), name
     for name in CONSUMER_METHODS:
         assert not inspect.iscoroutinefunction(getattr(Consumer, name)), name
-    assert inspect.iscoroutinefunction(AsyncMockConsumer.rebalance)
-    assert not inspect.iscoroutinefunction(MockConsumer.rebalance)
-    for name in MOCK_METHODS[1:]:
+    # rebalance and losePartitions run the listener, which may be async def
+    # on the async mock.
+    for name in ("rebalance", "lose_partitions"):
+        assert inspect.iscoroutinefunction(getattr(AsyncMockConsumer, name)), name
+        assert not inspect.iscoroutinefunction(getattr(MockConsumer, name)), name
+    for name in MOCK_METHODS[2:]:
         assert not inspect.iscoroutinefunction(getattr(AsyncMockConsumer, name)), name
 
 
@@ -178,7 +181,7 @@ POSITIONAL_CALLS = [
     ("end_offsets", ([TP],)), ("current_lag", (TP,)), ("close", (1,)),
 ]
 MOCK_POSITIONAL_CALLS = [
-    ("rebalance", ([TP],)), ("add_record", (None,)), ("set_max_poll_records", (1,)),
+    ("rebalance", ([TP],)), ("lose_partitions", ([TP],)), ("add_record", (None,)), ("set_max_poll_records", (1,)),
     ("set_poll_exception", (None,)), ("set_offsets_exception", (None,)),
     ("update_beginning_offsets", ({},)), ("update_end_offsets", ({},)),
     ("update_duration_offsets", ({},)), ("update_partitions", ("t", [])),

@@ -31,7 +31,7 @@ use crate::common::TopicPartition;
 /// The default generation id used when a subscription carries no generation.
 ///
 /// Corresponds to `AbstractStickyAssignor.DEFAULT_GENERATION`, which
-/// `ConsumerPartitionAssignor.java:34` static-imports.
+/// `ConsumerPartitionAssignor.java:35` static-imports.
 ///
 /// Stays a module-level constant rather than becoming an associated const:
 /// the Java class that *declares* it, `AbstractStickyAssignor`, is a
@@ -42,7 +42,7 @@ pub const DEFAULT_GENERATION: i32 = -1;
 
 /// The parameters of Java's widest `Subscription` constructor
 /// (`Subscription(List, ByteBuffer, List, int, Optional<String>)`,
-/// `ConsumerPartitionAssignor.java:113`).
+/// `ConsumerPartitionAssignor.java:127`).
 ///
 /// That constructor carries four parameters beyond the overload group's
 /// `{topics}` intersection, so CLAUDE.md §2 caps its derived name and makes
@@ -51,7 +51,7 @@ pub const DEFAULT_GENERATION: i32 = -1;
 /// solely to satisfy that naming rule (DoD #7).
 ///
 /// It deliberately has **no** `Default`. `topics` is what even Java's
-/// narrowest `Subscription` constructor (`:130`) takes from its caller, so it
+/// narrowest `Subscription` constructor (`:162`) takes from its caller, so it
 /// has no Java-derived default, and a synthesised empty topic list would
 /// silently produce a subscription to nothing. Construct it with
 /// [`SubscriptionOptionsBuilder::new`] and set it: [`SubscriptionOptionsBuilder::build`] returns an error if `topics` was not set.
@@ -60,14 +60,14 @@ pub const DEFAULT_GENERATION: i32 = -1;
 pub struct SubscriptionOptions {
     /// Java's `topics`.
     pub(crate) topics: Vec<String>,
-    /// Java's `userData`. Starts as `None`, as in `:130`.
+    /// Java's `userData`. Starts as `None`, as in `:162`.
     pub(crate) user_data: Option<Vec<u8>>,
-    /// Java's `ownedPartitions`. Starts empty, as in `:130`
+    /// Java's `ownedPartitions`. Starts empty, as in `:162`
     /// (`Collections.emptyList()`).
     pub(crate) owned_partitions: Vec<TopicPartition>,
-    /// Java's `generationId`. Starts as [`DEFAULT_GENERATION`], as in `:130`.
+    /// Java's `generationId`. Starts as [`DEFAULT_GENERATION`], as in `:162`.
     pub(crate) generation_id: i32,
-    /// Java's `rackId`. Starts as `None`, as in `:130`'s `Optional.empty()`.
+    /// Java's `rackId`. Starts as `None`, as in `:162`'s `Optional.empty()`.
     pub(crate) rack_id: Option<String>,
 }
 
@@ -105,7 +105,7 @@ impl SubscriptionOptionsBuilder {
     }
 
     /// Sets `SubscriptionOptions::topics`, a mandatory parameter: [`Self::build`]
-    /// panics if it was not set.
+    /// returns an error if it was not set.
     pub fn set_topics(mut self, topics: Vec<String>) -> Self {
         self.topics = Some(topics);
         self
@@ -163,7 +163,8 @@ impl SubscriptionOptionsBuilder {
     }
 }
 
-/// A consumer member's subscription.
+/// Represents a consumer's subscription information including topics, user
+/// data, and owned partitions.
 ///
 /// Corresponds to `ConsumerPartitionAssignor.Subscription`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -179,16 +180,16 @@ pub struct Subscription {
 
 impl Subscription {
     // Java's four `Subscription` constructors
-    // (`ConsumerPartitionAssignor.java:113,122,126,130`) intersect on
-    // `{topics}`, and `Subscription(List topics)` (`:130`) is exactly that — so
+    // (`ConsumerPartitionAssignor.java:127,143,153,162`) intersect on
+    // `{topics}`, and `Subscription(List topics)` (`:162`) is exactly that — so
     // it keeps the plain name `new` and the others carry their Rust parameters
-    // beyond it (CLAUDE.md §2). Only `:113` would need more than three
+    // beyond it (CLAUDE.md §2). Only `:127` would need more than three
     // parameters in its name, so it alone takes the `Options` shape, where the
     // struct is the method's only parameter.
 
     /// Creates a subscription from topics only.
     ///
-    /// Mirrors `Subscription(List)` (`:130`).
+    /// Mirrors `Subscription(List)` (`:162`).
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerPartitionAssignor$Subscription#Subscription")]
     pub fn new(topics: Vec<String>) -> Self {
         Self::with_options(
@@ -201,7 +202,7 @@ impl Subscription {
 
     /// Creates a subscription from topics and optional user data.
     ///
-    /// Mirrors `Subscription(List, ByteBuffer)` (`:126`).
+    /// Mirrors `Subscription(List, ByteBuffer)` (`:153`).
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerPartitionAssignor$Subscription#Subscription")]
     pub fn with_user_data(topics: Vec<String>, user_data: Option<Vec<u8>>) -> Self {
         Self::with_options(
@@ -216,7 +217,7 @@ impl Subscription {
     /// Creates a subscription from topics, optional user data and owned
     /// partitions (default generation, no rack).
     ///
-    /// Mirrors `Subscription(List, ByteBuffer, List)` (`:122`).
+    /// Mirrors `Subscription(List, ByteBuffer, List)` (`:143`).
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerPartitionAssignor$Subscription#Subscription")]
     pub fn with_user_data_owned_partitions(
         topics: Vec<String>,
@@ -236,7 +237,7 @@ impl Subscription {
     /// Creates a subscription with all fields.
     ///
     /// Mirrors `Subscription(List, ByteBuffer, List, int, Optional<String>)`
-    /// (`:113`); all five of its parameters are carried by
+    /// (`:127`); all five of its parameters are carried by
     /// [`SubscriptionOptions`] — see the note above this overload group.
     ///
     /// A `generation_id` less than zero is mapped to `None`, matching Java's
@@ -297,7 +298,7 @@ impl Subscription {
     }
 }
 
-/// A consumer member's assignment.
+/// Represents the partition assignment for a consumer.
 ///
 /// Corresponds to `ConsumerPartitionAssignor.Assignment`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -309,13 +310,13 @@ pub struct Assignment {
 
 impl Assignment {
     // Java's two `Assignment` constructors
-    // (`ConsumerPartitionAssignor.java:179,184`) intersect on `{partitions}`,
-    // and `Assignment(List partitions)` (`:184`) is exactly that — so it keeps
+    // (`ConsumerPartitionAssignor.java:255,265`) intersect on `{partitions}`,
+    // and `Assignment(List partitions)` (`:265`) is exactly that — so it keeps
     // the plain name `new` (CLAUDE.md §2).
 
     /// Creates an assignment from partitions only.
     ///
-    /// Mirrors `Assignment(List)` (`:184`).
+    /// Mirrors `Assignment(List)` (`:265`).
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerPartitionAssignor$Assignment#Assignment")]
     pub fn new(partitions: Vec<TopicPartition>) -> Self {
         Self::with_user_data(partitions, None)
@@ -323,7 +324,7 @@ impl Assignment {
 
     /// Creates an assignment with partitions and optional user data.
     ///
-    /// Mirrors `Assignment(List, ByteBuffer)` (`:179`).
+    /// Mirrors `Assignment(List, ByteBuffer)` (`:255`).
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerPartitionAssignor$Assignment#Assignment")]
     pub fn with_user_data(partitions: Vec<TopicPartition>, user_data: Option<Vec<u8>>) -> Self {
         Self { partitions, user_data }

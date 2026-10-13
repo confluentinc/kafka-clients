@@ -25,7 +25,7 @@ use std::collections::{HashMap, HashSet};
 use crate::OffsetDeleteRequestData;
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, CoordinatorType, RequestBuilder, offset_delete_request};
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::LogContext;
 use crate::common::{Error, Node, TopicPartition};
 use crate::kafka_warn;
 use crate::offset_delete_request_data::{OffsetDeleteRequestPartition, OffsetDeleteRequestTopic};

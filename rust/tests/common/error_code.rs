@@ -168,6 +168,9 @@ pub const STREAMS_INVALID_TOPOLOGY: i32 = 130;
 pub const STREAMS_INVALID_TOPOLOGY_EPOCH: i32 = 131;
 pub const STREAMS_TOPOLOGY_FENCED: i32 = 132;
 pub const SHARE_SESSION_LIMIT_REACHED: i32 = 133;
+pub const GROUP_DELETION_FAILED: i32 = 134;
+pub const STREAMS_TOPOLOGY_DESCRIPTION_UPDATE_FAILED: i32 = 135;
+pub const CONTROLLER_ID_NOT_REGISTERED: i32 = 136;
 pub const LOCAL_CONCURRENT_MODIFICATION: i32 = -2;
 pub const LOCAL_ILLEGAL_ARGUMENT: i32 = -3;
 pub const LOCAL_ILLEGAL_STATE: i32 = -4;
@@ -195,6 +198,7 @@ pub const INVALID_RECEIVE: i32 = -25;
 pub const QUOTA_VIOLATION: i32 = -26;
 pub const RECORD_DESERIALIZATION: i32 = -27;
 pub const PRODUCER_BUFFER_EXHAUSTED: i32 = -28;
+pub const BOOTSTRAP_RESOLUTION: i32 = -29;
 
 /// Rebuild the error class that owns the protocol error `code`, carrying
 /// `message` -- the table of `Errors::error_with_message` (Java's
@@ -209,6 +213,9 @@ pub fn error_with_message(code: i32, message: String) -> Option<Error> {
         BROKER_NOT_AVAILABLE => Some(Error::BrokerNotAvailable(BrokerNotAvailableError::new(message))),
         CLUSTER_AUTHORIZATION_FAILED => Some(Error::ClusterAuthorization(ClusterAuthorizationError::new(message))),
         CONCURRENT_TRANSACTIONS => Some(Error::ConcurrentTransactions(ConcurrentTransactionsError::new(message))),
+        CONTROLLER_ID_NOT_REGISTERED => {
+            Some(Error::ControllerIdNotRegistered(ControllerIdNotRegisteredError::new(message)))
+        },
         COORDINATOR_LOAD_IN_PROGRESS => {
             Some(Error::CoordinatorLoadInProgress(CoordinatorLoadInProgressError::new(message)))
         },
@@ -248,6 +255,7 @@ pub fn error_with_message(code: i32, message: String) -> Option<Error> {
         GROUP_AUTHORIZATION_FAILED => {
             Some(Error::GroupAuthorization(GroupAuthorizationError::new(String::new(), message)))
         },
+        GROUP_DELETION_FAILED => Some(Error::GroupDeletionFailed(GroupDeletionFailedError::new(message))),
         GROUP_ID_NOT_FOUND => Some(Error::GroupIdNotFound(GroupIdNotFoundError::new(message))),
         GROUP_MAX_SIZE_REACHED => Some(Error::GroupMaxSizeReached(GroupMaxSizeReachedError::new(message))),
         GROUP_SUBSCRIBED_TO_TOPIC => Some(Error::GroupSubscribedToTopic(GroupSubscribedToTopicError::new(message))),
@@ -350,6 +358,9 @@ pub fn error_with_message(code: i32, message: String) -> Option<Error> {
         STREAMS_INVALID_TOPOLOGY => Some(Error::StreamsInvalidTopology(StreamsInvalidTopologyError::new(message))),
         STREAMS_INVALID_TOPOLOGY_EPOCH => Some(Error::StreamsInvalidTopologyEpoch(
             StreamsInvalidTopologyEpochError::new(message),
+        )),
+        STREAMS_TOPOLOGY_DESCRIPTION_UPDATE_FAILED => Some(Error::StreamsTopologyDescriptionUpdateFailed(
+            StreamsTopologyDescriptionUpdateFailedError::new(message),
         )),
         STREAMS_TOPOLOGY_FENCED => Some(Error::StreamsTopologyFenced(StreamsTopologyFencedError::new(message))),
         TELEMETRY_TOO_LARGE => Some(Error::TelemetryTooLarge(TelemetryTooLargeError::new(message))),

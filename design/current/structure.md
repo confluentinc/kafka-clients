@@ -173,7 +173,7 @@ things to read.*
 ```
 rust/src/common/
 ├── protocol/       # Readable, Writable, ByteBufferAccessor, Message,
-│                   # ApiMessage, varint, api_keys.rs, errors.rs (135 codes),
+│                   # ApiMessage, varint, api_keys.rs, errors.rs (138 codes),
 │                   # message_size_accumulator.rs, object_serialization_cache.rs,
 │                   # message_util.rs
 ├── requests/       # 117 files: RequestBuilder trait, AbstractRequest /
@@ -207,7 +207,7 @@ rust/src/common/
 ├── internals/      # KafkaFutureImpl, Topic, PartitionStates,
 │                   # ClusterResourceListeners
 ├── feature/, header/, memory/, utils/
-├── error.rs        # Error enum (162 variants) + ErrorHierarchy predicates
+├── error.rs        # Error enum (166 variants) + ErrorHierarchy predicates
 ├── kafka_error.rs  # KafkaError struct (Java's KafkaException)
 ├── local_{illegal_argument,illegal_state,concurrent_modification,
 │   timeout}_error.rs, invalid_record_error.rs
@@ -266,7 +266,7 @@ Sender-confined fields live on `sender.rs`, not in the manager.*
 ## consumer/ — org.apache.kafka.clients.consumer
 
 ```
-rust/src/consumer/               # 22 files + 51 internals + 9 events
+rust/src/consumer/               # 22 files + 45 internals + 10 metrics + 9 events (each incl. mod.rs)
 ├── mod.rs                  # Consumer<K, V> trait
 ├── kafka_consumer.rs       # KafkaConsumer::new -> Box<dyn Consumer<K, V>>
 ├── async_kafka_consumer.rs # AsyncKafkaConsumer<K, V> (pub(crate))
@@ -304,12 +304,15 @@ rust/src/consumer/               # 22 files + 51 internals + 9 events
     │                                # bytes for the admin group-describe path
     ├── deserializers.rs, consumer_interceptors.rs, consumer_utils.rs
     ├── wakeup_trigger.rs, request_state.rs, timed_request_state.rs
-    ├── async_consumer_metrics.rs, kafka_consumer_metrics.rs,
-    │   fetch_metrics_manager.rs, fetch_metrics_aggregator.rs,
-    │   fetch_metrics_registry.rs, heartbeat_metrics_manager.rs,
-    │   offset_commit_metrics_manager.rs,
-    │   consumer_rebalance_metrics_manager.rs,
-    │   rebalance_callback_metrics_manager.rs, sensor_builder.rs
+    ├── fetch_metrics_manager.rs, fetch_metrics_aggregator.rs,
+    │   fetch_metrics_registry.rs
+    ├── metrics/                     # consumer.internals.metrics (KAFKA-19542)
+    │   ├── metrics_ledger.rs, abstract_consumer_metrics_manager.rs
+    │   ├── async_consumer_metrics.rs, kafka_consumer_metrics.rs
+    │   ├── heartbeat_metrics_manager.rs, offset_commit_metrics_manager.rs
+    │   ├── consumer_rebalance_metrics_manager.rs,
+    │   │   rebalance_callback_metrics_manager.rs
+    │   └── sensor_builder.rs
     └── events/
         ├── application_event.rs, application_event_handler.rs,
         │   application_event_processor.rs
