@@ -239,11 +239,16 @@ enum AdminKind {
 /// runtime driving the background I/O task, and the callback dispatcher thread.
 struct AdminHandle {
     kind: AdminKind,
-    /// Drives the sync entry points via `block_on` and hosts the admin client's
-    /// own background task. Multi-thread for the same reason the producer and
-    /// consumer handles are: a current-thread runtime only makes progress inside
-    /// `block_on`, so the admin background task would stall between calls (and
-    /// the `_async` awaiter tasks would never run at all).
+    /// Hosts the admin client's own background task and the `_async` awaiter
+    /// tasks; `kafka_admin_AdminClient_close` blocks on it (Java's `close`
+    /// blocks). The synchronous entry points only enter it to submit, never
+    /// block on it; a result handle's blocking accessors wait through its
+    /// `Handle` (see [`FutureWaiter`]).
+    ///
+    /// Multi-thread for the same reason the producer and consumer handles are:
+    /// a current-thread runtime only makes progress inside `block_on`, so the
+    /// admin background task would stall between calls (and the `_async`
+    /// awaiter tasks would never run at all).
     runtime: tokio::runtime::Runtime,
     /// Handle for spawning the `_async` awaiter tasks.
     runtime_handle: tokio::runtime::Handle,
@@ -1033,8 +1038,9 @@ unsafe fn admin_async_future_op<T, S, Fut, C>(
 }
 
 /// Async dispatch for a value-returning admin RPC that resolves through one
-/// [`KafkaFuture`] — normally `KafkaFuture::join_map_results(...)` over the
-/// `*Result`'s per-key futures. Thin wrapper over [`admin_async_future_op`].
+/// [`KafkaFuture`] — the single future of a Java result that has one (e.g.
+/// `listTopics().namesToListings()`). Thin wrapper over
+/// [`admin_async_future_op`].
 ///
 /// # Safety
 ///
@@ -1100,9 +1106,10 @@ impl FutureWaiter {
     /// An already-resolved future is read without touching the runtime (always
     /// the case for a handle the `_async` path delivered, and for the mock). For
     /// an unresolved one this blocks in `Handle::block_on`, which panics on a
-    /// thread already driving a tokio runtime — the same constraint the blocking
-    /// entry points always had — and `#[ffi_guard]` turns that panic into a
-    /// `LOCAL_ILLEGAL_STATE` error. If the admin client is destroyed first, or
+    /// thread already driving a tokio runtime — the constraint the synchronous
+    /// entry points had while they still blocked — and `#[ffi_guard]` turns that
+    /// panic into a `LOCAL_ILLEGAL_STATE` error (documented for C callers on
+    /// `kafka_admin_AdminClient_t`). If the admin client is destroyed first, or
     /// while waiting, this returns [`admin_thread_exited`] instead of hanging.
     fn get<T: Send + 'static>(&self, future: &KafkaFuture<T>) -> Result<T, Error> {
         if let Some(outcome) = future.get().now_or_never() {
@@ -1334,10 +1341,9 @@ where
 }
 
 /// Async dispatch for a multi-key admin RPC that delivers **one callback per
-/// key, independently, as that key's own future resolves** — the reverse of
-/// [`admin_async_value_op`], which joins every key into one flattened result
-/// via `KafkaFuture::join_map_results` before firing a single callback for the
-/// whole batch. This is the Java-faithful shape: `Admin` RPCs hand back one
+/// key, independently, as that key's own future resolves** — unlike
+/// [`admin_async_value_op`], which awaits one future and fires a single
+/// callback for it. This is the Java-faithful shape: `Admin` RPCs hand back one
 /// `KafkaFuture<T>` per key (`admin-client.md` §5), and a caller may observe a
 /// fast or already-resolved key without waiting on a slow or failed one.
 ///
@@ -4027,7 +4033,8 @@ unsafe fn delete_topics_result_ref(
     unsafe { &*(result as *const DeleteTopicsResultInner) }
 }
 
-/// Returns the number of requested topics.
+/// Returns the number of requested topics. Never blocks: the topics are known
+/// when the request is submitted.
 ///
 /// # Safety
 ///
@@ -4045,6 +4052,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_count(result: *const kaf
 /// Returns the key at `index` (borrowed): the topic name for
 /// [`kafka_admin_AdminClient_delete_topics`], or the base64 topic id for
 /// [`kafka_admin_AdminClient_delete_topics_by_ids`]. Null if out of range.
+/// Never blocks.
 ///
 /// # Safety
 ///
@@ -4211,8 +4219,9 @@ fn box_list_topics_result(listings: HashMap<String, TopicListing>) -> *mut kafka
 /// `result` must be a non-null handle from a `list_topics` call.
 unsafe fn list_topics_result_ref(result: *const kafka_admin_ListTopicsResult_t) -> &'static ListTopicsResultInner {
     // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
-    // `list_topics` call, i.e. the `Box<ListTopicsResultInner>` leaked by `Box::into_raw`
-    // in `box_list_topics_result` and freed only by `kafka_admin_ListTopicsResult_destroy`,
+    // `list_topics` call, i.e. the `Box<ListTopicsResultInner>` leaked by `into_handle`
+    // (called by `kafka_admin_AdminClient_list_topics`, and by `box_list_topics_result` on
+    // the `_async` path) and freed only by `kafka_admin_ListTopicsResult_destroy`,
     // so it is aligned and live; callers use the reference only within their own
     // synchronous getter call, during which the C caller keeps the handle alive.
     unsafe { &*(result as *const ListTopicsResultInner) }
@@ -4398,7 +4407,8 @@ unsafe fn describe_topics_result_ref(
     unsafe { &*(result as *const DescribeTopicsResultInner) }
 }
 
-/// Returns the number of requested topics.
+/// Returns the number of requested topics. Never blocks: the topics are known
+/// when the request is submitted.
 ///
 /// # Safety
 ///
@@ -4418,6 +4428,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_count(
 /// Returns the key at `index` (borrowed): the topic name for
 /// [`kafka_admin_AdminClient_describe_topics`], or the base64 topic id for
 /// [`kafka_admin_AdminClient_describe_topics_by_ids`]. Null if out of range.
+/// Never blocks.
 ///
 /// # Safety
 ///
@@ -4615,7 +4626,8 @@ unsafe fn create_partitions_result_ref(
     unsafe { &*(result as *const CreatePartitionsResultInner) }
 }
 
-/// Returns the number of requested topics.
+/// Returns the number of requested topics. Never blocks: the topics are known
+/// when the request is submitted.
 ///
 /// # Safety
 ///
@@ -4633,7 +4645,7 @@ pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_count(
 }
 
 /// Returns the topic name at `index` (borrowed), or null if out of range.
-/// Entries are sorted by topic name.
+/// Entries are sorted by topic name. Never blocks.
 ///
 /// # Safety
 ///
@@ -4886,7 +4898,8 @@ unsafe fn delete_records_result_ref(
     unsafe { &*(result as *const DeleteRecordsResultInner) }
 }
 
-/// Returns the number of requested partitions.
+/// Returns the number of requested partitions. Never blocks: the partitions
+/// are known when the request is submitted.
 ///
 /// # Safety
 ///
@@ -4904,7 +4917,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_count(
 }
 
 /// Returns the topic name of the entry at `index` (borrowed), or null if out of
-/// range. Entries are sorted by topic name then partition id.
+/// range. Entries are sorted by topic name then partition id. Never blocks.
 ///
 /// # Safety
 ///
@@ -4924,6 +4937,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_get_topic(
 }
 
 /// Returns the partition id of the entry at `index`, or -1 if out of range.
+/// Never blocks.
 ///
 /// # Safety
 ///
@@ -5071,25 +5085,20 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_destroy(result: *mut ka
 // ---------------------------------------------------------------------------
 // RPC submission helpers
 //
-// Each returns the `KafkaFuture` whose resolution yields the per-key outcomes
-// for one RPC. The `Admin` method itself is called here, on the caller's thread,
-// exactly as in Java.
+// Each calls one `Admin` method on the caller's thread, exactly as in Java, and
+// returns the `*Result`'s per-key futures unjoined, as `Vec<(key,
+// KafkaFuture<T>)>`. The synchronous entry points wrap them in their result
+// handle; `admin_async_per_key_op` delivers one callback per key as each
+// resolves.
+//
+// The two by-ids topic RPCs have two helpers each, differing only in key type.
+// The synchronous result handle keeps the `Uuid` keys so it can sort entries in
+// `Uuid` order before stringifying them; the per-key callbacks take the base64
+// `String` key the caller passed in.
 // ---------------------------------------------------------------------------
 
-/// Submits `deleteTopics(TopicCollection.ofTopicNames(...))`.
-fn submit_delete_topics_by_names(
-    admin: &dyn Admin,
-    names: Vec<String>,
-    options: DeleteTopicsOptions,
-) -> Result<Vec<(String, KafkaFuture<()>)>, Error> {
-    let result = admin.delete_topics_with_options(TopicCollection::of_topic_names(names), options);
-    let values = result
-        .topic_name_values()
-        .ok_or_else(|| Error::local_illegal_state("deleteTopics(ofTopicNames) did not return name-keyed futures"))?;
-    Ok(values.iter().map(|(name, f)| (name.clone(), f.clone())).collect())
-}
-
-/// Submits `deleteTopics(TopicCollection.ofTopicIds(...))`.
+/// Submits `deleteTopics(TopicCollection.ofTopicIds(...))`, keyed by `Uuid`
+/// (the synchronous result handle).
 fn submit_delete_topics_by_ids(
     admin: &dyn Admin,
     ids: Vec<Uuid>,
@@ -5102,20 +5111,8 @@ fn submit_delete_topics_by_ids(
     Ok(values.iter().map(|(id, f)| (*id, f.clone())).collect())
 }
 
-/// Submits `describeTopics(TopicCollection.ofTopicNames(...))`.
-fn submit_describe_topics_by_names(
-    admin: &dyn Admin,
-    names: Vec<String>,
-    options: DescribeTopicsOptions,
-) -> Result<Vec<(String, KafkaFuture<TopicDescription>)>, Error> {
-    let result = admin.describe_topics_with_topics_options(TopicCollection::of_topic_names(names), options);
-    let values = result
-        .topic_name_values()
-        .ok_or_else(|| Error::local_illegal_state("describeTopics(ofTopicNames) did not return name-keyed futures"))?;
-    Ok(values.iter().map(|(name, f)| (name.clone(), f.clone())).collect())
-}
-
-/// Submits `describeTopics(TopicCollection.ofTopicIds(...))`.
+/// Submits `describeTopics(TopicCollection.ofTopicIds(...))`, keyed by `Uuid`
+/// (the synchronous result handle).
 fn submit_describe_topics_by_ids(
     admin: &dyn Admin,
     ids: Vec<Uuid>,
@@ -5128,17 +5125,7 @@ fn submit_describe_topics_by_ids(
     Ok(values.iter().map(|(id, f)| (*id, f.clone())).collect())
 }
 
-// ---------------------------------------------------------------------------
-// RPC submission helpers — per-key (unjoined) variants
-//
-// Same `Admin` calls as above, but returning the per-key futures unjoined
-// (`Vec<(key, KafkaFuture<T>)>` instead of one `join_map_results`-aggregated
-// `KafkaFuture`), for `admin_async_per_key_op`'s independent-per-key delivery.
-// The synchronous/flattened path keeps using the `join_map_results` variants
-// above unchanged.
-// ---------------------------------------------------------------------------
-
-/// Submits `createTopics`, unjoined.
+/// Submits `createTopics`.
 fn submit_create_topics_entries(
     admin: &dyn Admin,
     new_topics: &[NewTopic],
@@ -5148,7 +5135,7 @@ fn submit_create_topics_entries(
     result.futures().iter().map(|(name, f)| (name.clone(), f.clone())).collect()
 }
 
-/// Submits `deleteTopics(TopicCollection.ofTopicNames(...))`, unjoined.
+/// Submits `deleteTopics(TopicCollection.ofTopicNames(...))`.
 fn submit_delete_topics_by_names_entries(
     admin: &dyn Admin,
     names: Vec<String>,
@@ -5161,10 +5148,10 @@ fn submit_delete_topics_by_names_entries(
     Ok(values.iter().map(|(name, f)| (name.clone(), f.clone())).collect())
 }
 
-/// Submits `deleteTopics(TopicCollection.ofTopicIds(...))`, unjoined. Keys are
-/// re-stringified (Java's `Uuid.toString()`) so the callback's key parameter
-/// is the same base64 string representation the caller passed in, matching
-/// the by-name variant's `String` key.
+/// Submits `deleteTopics(TopicCollection.ofTopicIds(...))`, for the per-key
+/// callbacks. Keys are re-stringified (Java's `Uuid.toString()`) so the
+/// callback's key parameter is the same base64 string representation the
+/// caller passed in, matching the by-name variant's `String` key.
 fn submit_delete_topics_by_ids_entries(
     admin: &dyn Admin,
     ids: Vec<Uuid>,
@@ -5177,7 +5164,7 @@ fn submit_delete_topics_by_ids_entries(
     Ok(values.iter().map(|(id, f)| (id.to_string(), f.clone())).collect())
 }
 
-/// Submits `describeTopics(TopicCollection.ofTopicNames(...))`, unjoined.
+/// Submits `describeTopics(TopicCollection.ofTopicNames(...))`.
 fn submit_describe_topics_by_names_entries(
     admin: &dyn Admin,
     names: Vec<String>,
@@ -5190,8 +5177,9 @@ fn submit_describe_topics_by_names_entries(
     Ok(values.iter().map(|(name, f)| (name.clone(), f.clone())).collect())
 }
 
-/// Submits `describeTopics(TopicCollection.ofTopicIds(...))`, unjoined. Keys
-/// are re-stringified, as for `submit_delete_topics_by_ids_entries`.
+/// Submits `describeTopics(TopicCollection.ofTopicIds(...))`, for the per-key
+/// callbacks. Keys are re-stringified, as for
+/// `submit_delete_topics_by_ids_entries`.
 fn submit_describe_topics_by_ids_entries(
     admin: &dyn Admin,
     ids: Vec<Uuid>,
@@ -5204,7 +5192,7 @@ fn submit_describe_topics_by_ids_entries(
     Ok(values.iter().map(|(id, f)| (id.to_string(), f.clone())).collect())
 }
 
-/// Submits `createPartitions`, unjoined.
+/// Submits `createPartitions`.
 fn submit_create_partitions_entries(
     admin: &dyn Admin,
     new_partitions: &HashMap<String, NewPartitions>,
@@ -5214,7 +5202,7 @@ fn submit_create_partitions_entries(
     result.values().iter().map(|(name, f)| (name.clone(), f.clone())).collect()
 }
 
-/// Submits `deleteRecords`, unjoined.
+/// Submits `deleteRecords`.
 fn submit_delete_records_entries(
     admin: &dyn Admin,
     records_to_delete: &HashMap<TopicPartition, RecordsToDelete>,
@@ -5571,7 +5559,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics(
         // (the helper additionally turns a NULL `admin` into an illegal-argument error).
         // The `submit` closure runs on the calling thread inside the helper, consuming the
         // owned `topic_names`, and the handle it builds holds only owned futures and the waiter.
-        unsafe { admin_sync_submit(admin, move |a, w| Ok(delete_topics_result_inner(w, submit_delete_topics_by_names(a, topic_names, options)?, String::clone))) };
+        unsafe { admin_sync_submit(admin, move |a, w| Ok(delete_topics_result_inner(w, submit_delete_topics_by_names_entries(a, topic_names, options)?, String::clone))) };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
     // which is exactly what this function's `# Safety` promises (`out_result` must be null
     // or writable); it null-checks before writing exactly one freshly boxed
@@ -6116,7 +6104,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics(
         // owned `topic_names`, and the handle it builds holds only owned futures and the waiter.
         unsafe {
             admin_sync_submit(admin, move |a, w| {
-                Ok(describe_topics_result_inner(w, submit_describe_topics_by_names(a, topic_names, options)?, String::clone))
+                Ok(describe_topics_result_inner(w, submit_describe_topics_by_names_entries(a, topic_names, options)?, String::clone))
             })
         };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
