@@ -12236,7 +12236,8 @@ mod tests {
     }
 
     fn members_to_remove(instance_ids: &[&str]) -> RemoveMembersFromConsumerGroupOptions {
-        RemoveMembersFromConsumerGroupOptions::new(instance_ids.iter().map(|id| MemberToRemove::new(*id))).unwrap()
+        RemoveMembersFromConsumerGroupOptions::with_members(instance_ids.iter().map(|id| MemberToRemove::new(*id)))
+            .unwrap()
     }
 
     /// Translated from `testDeleteConsumerGroupsNumRetries`: with `retries=0`, a

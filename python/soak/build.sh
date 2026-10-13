@@ -199,26 +199,27 @@ CONFLUENT_KAFKA_LIB_DIR="$LIB_DIR" \
     "$PYTHON" -m pip install -e "$ROOT/python"
 
 # Fail loudly here rather than three days into a soak. Run from $ROOT (which
-# contains no producer.py / consumer.py) and assert the modules resolved inside
-# the tree we just built: `python -` puts the cwd first on sys.path, so running
-# this from another checkout's python/ would import that one instead and
-# the check would pass while the install was broken.
+# contains no confluent_kafka/ or admin.py) and assert the modules resolved
+# inside the tree we just built: `python -` puts the cwd first on sys.path, so
+# running this from another checkout's python/ would import that one
+# instead and the check would pass while the install was broken.
 ( cd "$ROOT" && CONFLUENT_KAFKA_LIB_DIR="$LIB_DIR" ROOT="$ROOT" \
     SOAK_DIR="$SOAK_DIR" "$PYTHON" - <<'PYEOF'
 import os
 import sys
 
-import consumer
-import producer
+import admin
+import confluent_kafka.consumer
+import confluent_kafka.producer
 
 root = os.path.realpath(os.environ["ROOT"])
-for module in (producer, consumer):
+for module in (confluent_kafka.producer, confluent_kafka.consumer, admin):
     path = os.path.realpath(module.__file__)
     if not path.startswith(root + os.sep):
         sys.exit(">>> ERROR: {} resolved to {}, outside the tree just built "
                  "({})".format(module.__name__, path, root))
-print(">>> bindings import OK: producer=%s consumer=%s"
-      % (producer.__file__, consumer.__file__))
+print(">>> bindings import OK: confluent_kafka=%s admin=%s"
+      % (os.path.dirname(confluent_kafka.producer.__file__), admin.__file__))
 
 # Import the soak client too: it additionally needs psutil and the
 # soak_metrics import, and a missing dependency or a syntax

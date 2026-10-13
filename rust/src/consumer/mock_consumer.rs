@@ -27,8 +27,8 @@
 //! any task because it takes `&self` and uses an atomic flag.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -109,9 +109,14 @@ pub struct MockConsumer<K, V> {
     records: HashMap<TopicPartition, Vec<ConsumerRecord<K, V>>>,
     poll_error: Option<Error>,
     offsets_error: Option<Error>,
-    last_poll_timeout: Option<Duration>,
-    closed: bool,
-    should_rebalance: bool,
+    /// The three fields Java reads outside the mock's monitor
+    /// (`lastPollTimeout()`, `shouldRebalance()`) or under it while waiting
+    /// (`closed()`), shared so [`Consumer::handle`] can answer them while an
+    /// operation borrows the mock: the C binding reads them through the
+    /// handle rather than its single-owner flag.
+    last_poll_timeout: Arc<Mutex<Option<Duration>>>,
+    closed: Arc<AtomicBool>,
+    should_rebalance: Arc<AtomicBool>,
     /// `i64::MAX` is the "no cap" sentinel mirroring Java's `Long.MAX_VALUE`.
     max_poll_records: i64,
 }
@@ -147,9 +152,9 @@ impl<K, V> MockConsumer<K, V> {
             records: HashMap::new(),
             poll_error: None,
             offsets_error: None,
-            last_poll_timeout: None,
-            closed: false,
-            should_rebalance: false,
+            last_poll_timeout: Arc::new(Mutex::new(None)),
+            closed: Arc::new(AtomicBool::new(false)),
+            should_rebalance: Arc::new(AtomicBool::new(false)),
             max_poll_records: i64::MAX,
         }
     }
@@ -218,23 +223,26 @@ impl<K, V> MockConsumer<K, V> {
 
     /// Inject an exception to be returned by the next
     /// [`Consumer::poll`] call. The
-    /// exception is taken (cleared) on use.
+    /// exception is taken (cleared) on use; `None` clears a pending one.
     ///
-    /// Translates Java's `setPollException(KafkaException)`.
+    /// Translates Java's `setPollException(KafkaException)`, whose `null`
+    /// argument clears the field.
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#setPollException")]
-    pub fn set_poll_error(&mut self, error: Error) {
-        self.poll_error = Some(error);
+    pub fn set_poll_error(&mut self, error: Option<Error>) {
+        self.poll_error = error;
     }
 
     /// Inject an exception to be returned by the next
     /// [`Consumer::beginning_offsets`] /
     /// [`Consumer::end_offsets`]
-    /// call. The exception is taken (cleared) on use.
+    /// call. The exception is taken (cleared) on use; `None` clears a pending
+    /// one.
     ///
-    /// Translates Java's `setOffsetsException(KafkaException)`.
+    /// Translates Java's `setOffsetsException(KafkaException)`, whose `null`
+    /// argument clears the field.
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#setOffsetsException")]
-    pub fn set_offsets_error(&mut self, error: Error) {
-        self.offsets_error = Some(error);
+    pub fn set_offsets_error(&mut self, error: Option<Error>) {
+        self.offsets_error = error;
     }
 
     /// Set the maximum number of records returned in a single
@@ -315,12 +323,23 @@ impl<K, V> MockConsumer<K, V> {
         self.poll_tasks.push_back(task);
     }
 
+    /// Schedule a task that does nothing to run on the next
+    /// [`Consumer::poll`] call: it takes that call's slot in the FIFO, so a
+    /// task scheduled after it runs one `poll` later.
+    ///
+    /// Translates Java's `scheduleNopPollTask()`, which schedules
+    /// `() -> { }` through `schedulePollTask`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#scheduleNopPollTask")]
+    pub fn schedule_nop_poll_task(&mut self) {
+        self.schedule_poll_task(Box::new(|_| {}));
+    }
+
     /// Return whether the consumer has been closed.
     ///
     /// Translates Java's `closed()`.
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#closed")]
     pub fn closed(&self) -> bool {
-        self.closed
+        self.closed.load(Ordering::SeqCst)
     }
 
     /// Return whether an `enforceRebalance` request is pending.
@@ -328,7 +347,7 @@ impl<K, V> MockConsumer<K, V> {
     /// Translates Java's `shouldRebalance()`.
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#shouldRebalance")]
     pub fn should_rebalance(&self) -> bool {
-        self.should_rebalance
+        self.should_rebalance.load(Ordering::SeqCst)
     }
 
     /// Reset the rebalance-pending flag after handling it.
@@ -336,7 +355,7 @@ impl<K, V> MockConsumer<K, V> {
     /// Translates Java's `resetShouldRebalance()`.
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#resetShouldRebalance")]
     pub fn reset_should_rebalance(&mut self) {
-        self.should_rebalance = false;
+        self.should_rebalance.store(false, Ordering::SeqCst);
     }
 
     /// The timeout passed to the most recent
@@ -346,7 +365,7 @@ impl<K, V> MockConsumer<K, V> {
     /// Translates Java's `lastPollTimeout()`.
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#lastPollTimeout")]
     pub fn last_poll_timeout(&self) -> Option<Duration> {
-        self.last_poll_timeout
+        *self.last_poll_timeout.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     // ── Internal helpers (used by both inherent + Consumer impls) ───────
@@ -355,7 +374,7 @@ impl<K, V> MockConsumer<K, V> {
     /// `IllegalStateException("This consumer has already been closed.")`.
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#ensureNotClosed")]
     fn ensure_not_closed(&self) -> Result<(), Error> {
-        if self.closed {
+        if self.closed() {
             Err(Error::local_illegal_state("This consumer has already been closed."))
         } else {
             Ok(())
@@ -603,7 +622,7 @@ where
         self.ensure_not_closed()?;
 
         // Step 2: record the timeout (Java line 252).
-        self.last_poll_timeout = Some(timeout);
+        *self.last_poll_timeout.lock().unwrap_or_else(PoisonError::into_inner) = Some(timeout);
 
         // Step 3: drain one queued poll task (Java line 256-260). Pop with
         // pop_front then invoke with &mut self — the task may schedule more
@@ -1046,13 +1065,13 @@ where
         // Java line 697-699: `enforceRebalance()` forwards to
         // `enforceRebalance(null)`; Rust's suffixed form takes a non-null
         // `&str`, so the flag is set directly here instead.
-        self.should_rebalance = true;
+        self.should_rebalance.store(true, Ordering::SeqCst);
         Ok(())
     }
 
     async fn enforce_rebalance_with_reason(&mut self, _reason: &str) -> Result<(), Error> {
         // Java line 702-704: sets the flag; the reason is ignored.
-        self.should_rebalance = true;
+        self.should_rebalance.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -1067,7 +1086,7 @@ where
 
     async fn close_with_options(&mut self, _options: CloseOptions) -> Result<(), Error> {
         // Java line 594-596: ignores the options.
-        self.closed = true;
+        self.closed.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -1077,7 +1096,12 @@ where
     }
 
     fn handle(&self) -> ConsumerHandle {
-        ConsumerHandle::for_mock(Arc::clone(&self.wakeup))
+        ConsumerHandle::for_mock(
+            Arc::clone(&self.wakeup),
+            Arc::clone(&self.closed),
+            Arc::clone(&self.should_rebalance),
+            Arc::clone(&self.last_poll_timeout),
+        )
     }
 }
 
@@ -1152,7 +1176,7 @@ mod tests {
     fn test_reset_should_rebalance() {
         let mut c: MockConsumer<String, String> =
             MockConsumer::with_auto_offset_reset_strategy(AutoOffsetResetStrategy::EARLIEST);
-        c.should_rebalance = true;
+        c.should_rebalance.store(true, Ordering::SeqCst);
         assert!(c.should_rebalance());
         c.reset_should_rebalance();
         assert!(!c.should_rebalance());
@@ -1162,9 +1186,72 @@ mod tests {
     fn test_update_partitions_after_close_errors() {
         let mut c: MockConsumer<String, String> =
             MockConsumer::with_auto_offset_reset_strategy(AutoOffsetResetStrategy::EARLIEST);
-        c.closed = true;
+        c.closed.store(true, Ordering::SeqCst);
         let err = c.update_partitions("t", Vec::new()).unwrap_err();
         assert!(matches!(err, Error::LocalIllegalState(_)));
+    }
+
+    /// Java's `scheduleNopPollTask()` queues `() -> { }` like any other poll
+    /// task (`MockConsumer.java:609-611`): it consumes one `poll`, so the
+    /// task scheduled after it runs on the next one.
+    #[tokio::test]
+    async fn schedule_nop_poll_task_takes_one_poll() {
+        let mut c: MockConsumer<String, String> =
+            MockConsumer::with_auto_offset_reset_strategy(AutoOffsetResetStrategy::EARLIEST);
+        c.schedule_nop_poll_task();
+        c.schedule_poll_task(Box::new(|c| c.reset_should_rebalance()));
+        c.should_rebalance.store(true, Ordering::SeqCst);
+
+        c.poll(Duration::from_millis(0)).await.expect("poll");
+        assert!(c.should_rebalance(), "the first poll ran the no-op task");
+        c.poll(Duration::from_millis(0)).await.expect("poll");
+        assert!(!c.should_rebalance(), "the second poll ran the task scheduled after it");
+        assert!(c.poll_tasks.is_empty());
+    }
+
+    /// Java's `setPollException(null)` clears a pending poll exception
+    /// (`MockConsumer.java:344-346`): the next `poll` then succeeds.
+    #[tokio::test]
+    async fn set_poll_error_none_clears_the_pending_error() {
+        let mut c: MockConsumer<String, String> =
+            MockConsumer::with_auto_offset_reset_strategy(AutoOffsetResetStrategy::EARLIEST);
+        let tp = TopicPartition::new("t", 0);
+        c.assign(vec![tp.clone()]).await.expect("assign");
+        c.update_beginning_offsets(HashMap::from([(tp, 0)]));
+
+        c.set_poll_error(Some(Error::local_illegal_state("boom")));
+        c.set_poll_error(None);
+        assert!(
+            c.poll(Duration::from_millis(0)).await.is_ok(),
+            "the cleared error must not fire"
+        );
+
+        c.set_poll_error(Some(Error::local_illegal_state("boom")));
+        let err = c.poll(Duration::from_millis(0)).await.unwrap_err();
+        assert_eq!(err.message(), "boom");
+        assert!(c.poll(Duration::from_millis(0)).await.is_ok(), "the error fires once");
+    }
+
+    /// Java's `setOffsetsException(null)` clears a pending offsets exception
+    /// (`MockConsumer.java:348-350`).
+    #[tokio::test]
+    async fn set_offsets_error_none_clears_the_pending_error() {
+        let mut c: MockConsumer<String, String> =
+            MockConsumer::with_auto_offset_reset_strategy(AutoOffsetResetStrategy::EARLIEST);
+        let tp = TopicPartition::new("t", 0);
+        c.update_end_offsets(HashMap::from([(tp.clone(), 5)]));
+
+        c.set_offsets_error(Some(Error::local_illegal_state("boom")));
+        c.set_offsets_error(None);
+        let offsets = c
+            .end_offsets(std::slice::from_ref(&tp))
+            .await
+            .expect("the cleared error must not fire");
+        assert_eq!(offsets.get(&tp), Some(&5));
+
+        c.set_offsets_error(Some(Error::local_illegal_state("boom")));
+        let err = c.end_offsets(std::slice::from_ref(&tp)).await.unwrap_err();
+        assert_eq!(err.message(), "boom");
     }
 
     /// A [`ConsumerHandle`] obtained from the mock fires the SAME wakeup

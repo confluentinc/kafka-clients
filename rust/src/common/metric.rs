@@ -44,6 +44,30 @@ impl MetricValue {
             _ => None,
         }
     }
+
+    /// Returns the value as a `&str` if it is a [`MetricValue::String`].
+    pub fn as_string(&self) -> Option<&str> {
+        match self {
+            MetricValue::String(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Returns the value as an `i64` if it is a [`MetricValue::Long`].
+    pub fn as_long(&self) -> Option<i64> {
+        match self {
+            MetricValue::Long(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Returns the value as an `i32` if it is a [`MetricValue::Int`].
+    pub fn as_int(&self) -> Option<i32> {
+        match self {
+            MetricValue::Int(v) => Some(*v),
+            _ => None,
+        }
+    }
 }
 
 /// A metric tracked for monitoring purposes.

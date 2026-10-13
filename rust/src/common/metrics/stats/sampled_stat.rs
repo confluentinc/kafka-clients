@@ -169,8 +169,10 @@ impl SampledStat {
 
     fn advance_locked(inner: &mut SampledStatInner, initial_value: f64, config: &MetricConfig, time_ms: i64) -> usize {
         // keep one extra placeholder for "overlapping sample" (see
-        // purge_obsolete_samples() logic)
-        let max_samples = (config.samples() + 1) as usize;
+        // purge_obsolete_samples() logic). Java's `int` arithmetic wraps, so the
+        // time and count arithmetic here and below wraps too rather than
+        // panicking under overflow checks on extreme caller-given values.
+        let max_samples = config.samples().wrapping_add(1) as usize;
         inner.current = (inner.current + 1) % max_samples;
         if inner.current >= inner.samples.len() {
             let s = Self::new_sample(initial_value, inner.time_window_ms, time_ms);
@@ -193,11 +195,11 @@ impl SampledStat {
         } else {
             config.time_window_ms()
         };
-        let expire_age = config.samples() as i64 * window_ms;
+        let expire_age = (config.samples() as i64).wrapping_mul(window_ms);
         for sample in inner.samples.iter_mut() {
             // samples overlapping the monitored window are kept, even if they
             // started before it
-            if now - sample.last_event_ms >= expire_age {
+            if now.wrapping_sub(sample.last_event_ms) >= expire_age {
                 sample.reset_to(initial_value, now);
             }
         }
@@ -310,7 +312,7 @@ impl Sample {
         } else {
             config.time_window_ms()
         };
-        time_ms - self.start_time_ms >= window_ms || self.event_count >= config.event_window()
+        time_ms.wrapping_sub(self.start_time_ms) >= window_ms || self.event_count >= config.event_window()
     }
 
     /// The initial (reset) value of this sample.
@@ -416,6 +418,27 @@ mod tests {
         time.sleep(config.time_window_ms() - 1);
         stat.record(config, 1.0, time.milliseconds());
         time.sleep(1);
+    }
+
+    /// Extreme caller-given times and sample counts wrap as Java's `long` and
+    /// `int` arithmetic does instead of panicking (they reach here from C
+    /// through the void `kafka_common_metrics_Sensor_record_with_value_time_ms`
+    /// and `kafka_common_metrics_MetricConfig_set_samples`). No Java
+    /// counterpart.
+    #[test]
+    fn extreme_times_and_sample_counts_wrap_instead_of_panicking() {
+        let config = MetricConfig::new().set_samples(i32::MAX);
+        let stat = sample_count();
+        for time_ms in [1, i64::MIN, i64::MAX, i64::MIN, 0] {
+            stat.record(&config, 1.0, time_ms);
+        }
+        let _ = stat.measure(&config, i64::MIN);
+        let _ = stat.measure(&config, i64::MAX);
+
+        let config = MetricConfig::new().set_time_window(i64::MAX, TimeUnit::Days).set_samples(3);
+        let stat = sample_count();
+        stat.record(&config, 1.0, i64::MAX);
+        let _ = stat.measure(&config, i64::MIN);
     }
 
     // SampledStatTest.testSampleIsPurgedIfDoesntOverlap

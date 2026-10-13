@@ -1153,8 +1153,8 @@ async fn remove_one_member_from_consumer_group<F: AdminBackendFactory>(ctx: &mut
     member_one.close().await.expect("close m1");
 
     // Remove instance-1 by its group.instance.id.
-    let options =
-        RemoveMembersFromConsumerGroupOptions::new([MemberToRemove::new("instance-1")]).expect("non-empty members");
+    let options = RemoveMembersFromConsumerGroupOptions::with_members([MemberToRemove::new("instance-1")])
+        .expect("non-empty members");
     assert!(
         !options.remove_all(),
         "{backend} backend: options built from a non-empty member set are not removeAll"
@@ -1313,7 +1313,7 @@ async fn remove_members_rejects_an_explicitly_empty_selection<F: AdminBackendFac
     // selection is unrepresentable as an options object in the first place. That
     // is the assertion: every backend's binding must refuse it the same way,
     // rather than one of them defaulting to the destructive removeAll form.
-    let rejected = RemoveMembersFromConsumerGroupOptions::new(Vec::<MemberToRemove>::new());
+    let rejected = RemoveMembersFromConsumerGroupOptions::with_members(Vec::<MemberToRemove>::new());
     let err = rejected.expect_err(&format!(
         "{backend} backend: an empty member collection must be rejected, not silently treated as removeAll"
     ));

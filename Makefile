@@ -14,7 +14,7 @@ VENV = . venv/bin/activate
 
 .PHONY: build build-all check-generated \
 	build-rust build-rust-integration-tests build-rust-all-features \
-	submodules build-c init-venv build-python \
+	submodules build-c init-venv init-venv-librdkafka build-python \
 	devel-build devel-build-rust devel-build-rust-integration-tests devel-build-rust-all-features \
 	devel-build-c devel-build-python \
 	build-grpc-images build-grpc-images-python build-grpc-images-c init init-hooks \
@@ -51,8 +51,29 @@ submodules:
 build-c: submodules build-rust-all-features
 	$(MAKE) -C c $(ROOTS) build
 
+# The second line is a one-time migration: master's `[dev]` extras once
+# installed the PyPI confluent-kafka (librdkafka) into venv/, and it shares the
+# top-level package `confluent_kafka` with this client. Leaving `[dev]` stops new
+# installs but does not remove it from an existing venv, where it shadows the
+# package (`cannot import name 'IllegalArgumentError' from 'confluent_kafka'`).
+# The librdkafka baseline lives in its own venv (init-venv-librdkafka).
 init-venv:
 	[ -d venv ] || python3 -m venv venv
+	@if venv/bin/python -m pip show -q confluent-kafka >/dev/null 2>&1; then \
+	  echo "Removing PyPI confluent-kafka from venv/ (it shadows confluent_kafka)"; \
+	  venv/bin/python -m pip uninstall -y -q confluent-kafka; fi
+
+# The librdkafka venv of the Python perf benchmarks: the PyPI confluent-kafka
+# client for the CLIENT_VERSION=2 baseline and for the librdkafka-backed helpers
+# (topic recreation, end-of-run verification; see
+# python/test/performance/librdkafka_helpers.py). It is separate from
+# `venv` because both packages install the top-level package `confluent_kafka`.
+LIBRDKAFKA_VENV ?= venv-librdkafka
+LIBRDKAFKA_PYTHON := $(abspath $(LIBRDKAFKA_VENV))/bin/python
+
+init-venv-librdkafka:
+	[ -d $(LIBRDKAFKA_VENV) ] || python3 -m venv $(LIBRDKAFKA_VENV)
+	$(LIBRDKAFKA_PYTHON) -m pip install -q -r python/test/performance/requirements-librdkafka.txt
 
 build-python: init-venv build-rust-all-features
 	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release build)
@@ -208,11 +229,14 @@ producer-perf-test:
 producer-perf-test-c: build-c
 	$(MAKE) -C c $(ROOTS) producer-perf-test
 
-consumer-perf-test-python: build-python
-	@($(VENV) && $(MAKE) -C python $(ROOTS) consumer-perf-test)
+# The Python benchmarks also need the librdkafka venv: CLIENT_VERSION=2 runs the
+# librdkafka baseline in it, and the Rust run uses it for its librdkafka-backed
+# helpers (see python/Makefile).
+consumer-perf-test-python: build-python init-venv-librdkafka
+	@($(VENV) && $(MAKE) -C python $(ROOTS) LIBRDKAFKA_PYTHON=$(LIBRDKAFKA_PYTHON) consumer-perf-test)
 
-producer-perf-test-python: build-python
-	@($(VENV) && $(MAKE) -C python $(ROOTS) producer-perf-test)
+producer-perf-test-python: build-python init-venv-librdkafka
+	@($(VENV) && $(MAKE) -C python $(ROOTS) LIBRDKAFKA_PYTHON=$(LIBRDKAFKA_PYTHON) producer-perf-test)
 
 # c/'s `test` runs ctest and then the C-backend multilanguage arm.
 test-c: build-c
