@@ -46,6 +46,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -56,6 +57,7 @@ use confluent_kafka::admin::AdminClientConfig;
 use confluent_kafka::admin::NewPartitionReassignment;
 use confluent_kafka::admin::NewTopic;
 use confluent_kafka::admin::TopicDescription;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicCollection;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::Uuid;
@@ -165,7 +167,8 @@ async fn create_topic_with_assignment(admin: &dyn Admin, topic: &str, assignment
 }
 
 /// `cluster.createTopic(topic, partitions, replicas)`, which waits until every
-/// broker knows the topic; the leader wait is the client-observable half.
+/// broker knows the topic; the leader wait is the client-observable half, and
+/// [`known_topic_metadata`] covers the other broker for the describes that follow.
 async fn cluster_create_topic(admin: &dyn Admin, topic: &str, num_partitions: i32, replication_factor: i16) {
     test_utils::create_topic(admin, topic, num_partitions, replication_factor).await;
     test_utils::wait_for_partition_leaders(admin, topic, 0..num_partitions).await;
@@ -212,6 +215,44 @@ async fn topic_metadata(admin: &dyn Admin, topic: &str) -> Result<TopicDescripti
         .map_err(|e| format!("describe {topic}: {e:?}"))?;
     all.remove(topic)
         .ok_or_else(|| format!("describe {topic}: topic missing from the result"))
+}
+
+/// [`topic_metadata`] for a topic the test has just created or recreated:
+/// retries while the answering broker reports `UNKNOWN_TOPIC_OR_PARTITION`.
+///
+/// Java's `topicMetadata()` needs no retry, because `cluster.createTopic` waits
+/// in `waitTopicCreation` (`ClusterInstance.java:353-365`) until every broker's
+/// metadata cache has the topic. A client cannot read each broker's cache:
+/// [`cluster_create_topic`]'s waits show only that one broker has the topic,
+/// while the by-name describe goes to the least-loaded broker, which on this
+/// two-broker cluster may not have applied the creation yet. Retrying the
+/// describe on that one error closes the window; any other error fails at once.
+async fn known_topic_metadata(admin: &dyn Admin, topic: &str) -> TopicDescription {
+    let description = Mutex::new(None);
+    test_utils::retry_on_error_with_timeout(DEFAULT_MAX_WAIT, || async {
+        let result = admin
+            .describe_topics_with_topic_names(&[topic.to_string()])
+            .all_topic_names()
+            .expect("described by name")
+            .get()
+            .await;
+        match result {
+            Ok(mut all) => {
+                let found = all
+                    .remove(topic)
+                    .unwrap_or_else(|| panic!("describe {topic}: topic missing from the result"));
+                *description.lock().expect("description lock") = Some(found);
+                Ok(())
+            },
+            Err(e @ Error::UnknownTopicOrPartition(_)) => Err(format!("describe {topic}: {e:?}")),
+            Err(e) => panic!("describe {topic}: {e:?}"),
+        }
+    })
+    .await;
+    description
+        .into_inner()
+        .expect("description lock")
+        .expect("set when the describe succeeded")
 }
 
 /// `ProducerSendWhileDeletionTest.verifyTopicDeletion` (`:267-306`) for the
@@ -335,7 +376,7 @@ async fn test_send_with_recreated_topic() {
     let producer = create_producer(ctx.bootstrap_servers());
 
     cluster_create_topic(admin.as_ref(), &topic, 1, 1).await;
-    let topic_id = topic_metadata(admin.as_ref(), &topic).await.expect("topic metadata").topic_id();
+    let topic_id = known_topic_metadata(admin.as_ref(), &topic).await.topic_id();
 
     for i in 1..=NUM_RECORDS {
         let resp = send_and_get(&producer, &topic, &format!("value{i}")).await;
@@ -348,10 +389,7 @@ async fn test_send_with_recreated_topic() {
     // Verify that the topic is deleted when no metadata request comes in
     verify_topic_deletion(admin.as_ref(), &topic).await;
     cluster_create_topic(admin.as_ref(), &topic, 1, 1).await;
-    assert_ne!(
-        topic_id,
-        topic_metadata(admin.as_ref(), &topic).await.expect("topic metadata").topic_id()
-    );
+    assert_ne!(topic_id, known_topic_metadata(admin.as_ref(), &topic).await.topic_id());
 
     // Producer should be able to send messages even after topic gets recreated
     let record_metadata = send_and_get(&producer, &topic, "value").await;
@@ -474,7 +512,7 @@ async fn test_send_with_topic_reassignment_is_mid_way() {
     create_topic_with_assignment(admin.as_ref(), &topic, BTreeMap::from([(0, vec![1])])).await;
     assert_leader(admin.as_ref(), &topic, 0, 1).await;
 
-    let topic_details = topic_metadata(admin.as_ref(), &topic).await.expect("topic metadata");
+    let topic_details = known_topic_metadata(admin.as_ref(), &topic).await;
     for i in 1..=NUM_RECORDS {
         let resp = send_and_get(&producer, &topic, &format!("value{i}")).await;
         assert_eq!(topic, resp.topic());
@@ -487,7 +525,7 @@ async fn test_send_with_topic_reassignment_is_mid_way() {
     assert_leader(admin.as_ref(), &topic, 0, 2).await;
     assert_eq!(
         topic_details.topic_id(),
-        topic_metadata(admin.as_ref(), &topic).await.expect("topic metadata").topic_id()
+        known_topic_metadata(admin.as_ref(), &topic).await.topic_id()
     );
 
     // Producer should be able to send messages even after topic gets reassigned
