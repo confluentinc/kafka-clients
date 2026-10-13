@@ -88,10 +88,7 @@
 //! borrow the producer, never across the send itself, so it is not serialized
 //! behind a blocking [`kafka_producer_Producer_send`] waiting on metadata. (Sends
 //! racing on other threads are not ordered against each other; the same boundary
-//! every send function here has.) For a caller that wants to bound its own memory,
-//! [`kafka_producer_Producer_on_space_available`] still offers a one-shot bell that
-//! rings — on the dispatcher thread — once the number of records queued, in flight
-//! or waiting drops back below `MAX_QUEUED_SENDS` (1000).
+//! every send function here has.)
 //!
 //! Java's *transaction-control* methods are the exception: `initTransactions`,
 //! `beginTransaction`, `sendOffsetsToTransaction`, `commitTransaction` and
@@ -658,10 +655,6 @@ pub type kafka_producer_Producer_send_callback_t =
 /// Per-record completion callback for [`kafka_producer_Producer_send_batch_async`].
 pub type kafka_producer_Producer_send_batch_callback_t =
     unsafe extern "C" fn(*mut kafka_producer_RecordMetadata_t, *mut kafka_common_Error_t, *mut std::ffi::c_void);
-/// One-shot "space available" bell registered through
-/// [`kafka_producer_Producer_on_space_available`]. Receives only the caller's
-/// `user_data`; there is no result to deliver.
-pub type kafka_producer_Producer_on_space_available_callback_t = unsafe extern "C" fn(*mut std::ffi::c_void);
 /// Completion callback for [`kafka_common_KafkaFuture_RecordMetadata_get_async`].
 pub type kafka_common_KafkaFuture_RecordMetadata_get_callback_t =
     unsafe extern "C" fn(*mut kafka_producer_RecordMetadata_t, *mut kafka_common_Error_t, *mut std::ffi::c_void);
@@ -796,26 +789,6 @@ struct RecordBatchCallbackTarget {
 }
 // SAFETY: see `RecordCallbackTarget`.
 unsafe impl Send for RecordBatchCallbackTarget {}
-
-/// Upper bound on records queued by `send_async` / `send_batch_async` but not yet
-/// accepted or refused by the producer — still in the submission queue, or waiting
-/// out `max.block.ms` in a `send_waiter` — above which
-/// [`kafka_producer_Producer_send_async`] reports the queue as full. The queue
-/// itself stays unbounded — the bound is advisory backpressure for the caller (see
-/// the module-level "Concurrency model" docs), matching the depth at which the
-/// previous C-side accumulation reported `full`.
-const MAX_QUEUED_SENDS: usize = 1000;
-
-/// A registered "space available" bell (function pointer + opaque `user_data`),
-/// stored until the queue depth drops below [`MAX_QUEUED_SENDS`] and then fired
-/// once on the dispatcher thread. See [`RecordCallbackTarget`] for the wrapping.
-#[derive(Clone, Copy)]
-struct SpaceWaiter {
-    callback: kafka_producer_Producer_on_space_available_callback_t,
-    user_data: *mut std::ffi::c_void,
-}
-// SAFETY: see `RecordCallbackTarget`.
-unsafe impl Send for SpaceWaiter {}
 
 /// Callback fired once a record [`kafka_producer_Producer_send_async`] returned a
 /// handle for has been settled by the producer — Java's `send()` return point.
@@ -1257,49 +1230,11 @@ unsafe fn producer_kind_ref(handle: &ProducerHandle) -> &ProducerKind {
 /// the submission task, or on the per-record [`send_waiter`] it was moved into —
 /// whether it was produced, refused, discarded, or panicked on. Keeping it in a
 /// `Drop` means the counter cannot drift, and a drifted counter would make every
-/// later drain push a barrier for a request that no longer exists and could leave
-/// the space bell below silent.
-///
-/// It also rings the "space available" bell: when the decrement brings the depth
-/// back below [`MAX_QUEUED_SENDS`], every waiter registered through
-/// [`kafka_producer_Producer_on_space_available`] is taken and fired once on the
-/// dispatcher thread. Registration and this check both hold `space_waiters` while
-/// reading the counter, so a waiter can never be registered against a depth that
-/// has already dropped without someone firing it (no lost wakeup): either the
-/// registrant sees the low depth and is told to proceed, or it stores the waiter
-/// before this guard re-reads the depth under the same lock and takes it.
+/// later drain push a barrier for a request that no longer exists.
 struct QueueDepthGuard<'a>(&'a ProducerHandle);
 impl Drop for QueueDepthGuard<'_> {
     fn drop(&mut self) {
-        let handle = self.0;
-        let depth_after = handle.queued_sends.fetch_sub(1, std::sync::atomic::Ordering::AcqRel) - 1;
-        if depth_after >= MAX_QUEUED_SENDS {
-            return;
-        }
-        let waiters = {
-            let mut waiters = handle.space_waiters.lock().unwrap();
-            // Re-read under the lock: a burst of `send_async` calls may have refilled
-            // the queue since the decrement above, in which case the waiters stay
-            // registered and the drop that next crosses the bound fires them.
-            if waiters.is_empty() || handle.queued_sends.load(std::sync::atomic::Ordering::Acquire) >= MAX_QUEUED_SENDS
-            {
-                return;
-            }
-            std::mem::take(&mut *waiters)
-        };
-        for waiter in waiters {
-            let job: CompletionJob = Box::new(move || {
-                let waiter = waiter;
-                // SAFETY: `waiter.callback`/`waiter.user_data` are the pair the C caller registered
-                // through `kafka_producer_Producer_on_space_available`, whose contract is that the
-                // bell rings exactly once, on the dispatcher thread (or inline once it has exited, per
-                // `enqueue_or_run_inline`). `waiter` was taken out of `space_waiters` under its lock and
-                // moved into this `FnOnce` job, so this is its single invocation; the C user is
-                // responsible for the thread-safety of `user_data`.
-                unsafe { (waiter.callback)(waiter.user_data) }
-            });
-            enqueue_or_run_inline(&handle.completion_tx, job);
-        }
+        self.0.queued_sends.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
 
@@ -1368,7 +1303,7 @@ impl Drop for WaiterRegistration<'_> {
 /// behind one that does, and N callers waiting at the same time wait
 /// *concurrently* — as N Java threads blocked in `send()` do — not one after
 /// another. The record's queue-depth count and its [`SendWaiters`] registration
-/// travel with it: the count keeps the space bell honest, the registration lets
+/// travel with it: the count keeps the queue depth honest, the registration lets
 /// `destroy` join it. The `flush`/`close`/transaction-control drains do not wait
 /// for it — it is a `send()` in progress, which Java's `flush()` and
 /// `commitTransaction()` do not wait for either — and `close` ends its wait through
@@ -1399,8 +1334,7 @@ async fn send_waiter(
     // the shape it was passed in (`Option`), so it goes straight through.
     let result = kp.send(record, callback).await.map(|_| ());
     settlement.settle(result, &handle.completion_tx);
-    // Count the record out (which may ring the space bell through `handle`)
-    // before leaving the registry; see "Lifetime" above.
+    // Count the record out before leaving the registry; see "Lifetime" above.
     drop(depth);
     drop(registration);
 }
@@ -1445,7 +1379,7 @@ async fn submission_loop(ptr: usize, mut rx: tokio::sync::mpsc::UnboundedReceive
         };
         // Decremented only once the send has fully settled — here, or on the
         // waiter it is moved into — so the counter means "queued, in flight or
-        // waiting", the depth the space bell (`QueueDepthGuard`) is about.
+        // waiting" (`QueueDepthGuard`).
         let depth = QueueDepthGuard(handle);
         // The record's callback and the bookkeeping that tells, after an `Err`,
         // whether a batch still owns it (see `CallbackState`).
@@ -1551,12 +1485,6 @@ struct ProducerHandle {
     /// The per-record waiters alive right now, for `destroy` to join. See
     /// [`SendWaiters`].
     send_waiters: SendWaiters,
-    /// "Space available" bells registered while `queued_sends` was at or above
-    /// [`MAX_QUEUED_SENDS`]; fired once and cleared by [`QueueDepthGuard`] when the
-    /// depth drops back below the bound (or by `destroy`, so no waiter is leaked).
-    /// The lock is also what makes registration race-free against the decrement —
-    /// see [`QueueDepthGuard`].
-    space_waiters: std::sync::Mutex<Vec<SpaceWaiter>>,
     /// Test-only stall flag for the submission task
     /// ([`kafka_producer_Producer_test_set_paused`]). While `true` the task stops
     /// taking items off the channel, so queued sends accumulate and the depth
@@ -1607,7 +1535,6 @@ fn build_producer_handle(kind: ProducerKind) -> *mut kafka_producer_Producer_t {
         txn_control_busy: std::sync::atomic::AtomicBool::new(false),
         queued_sends: std::sync::atomic::AtomicUsize::new(0),
         send_waiters: SendWaiters::default(),
-        space_waiters: std::sync::Mutex::new(Vec::new()),
         test_paused: std::sync::atomic::AtomicBool::new(false),
         pause_notify: tokio::sync::Notify::new(),
     });
@@ -1975,10 +1902,8 @@ pub unsafe extern "C" fn kafka_producer_Producer_destroy(producer: *mut kafka_pr
         txn_control_busy: _,
         queued_sends: _,
         // Left in place (not moved) — the submission task and the per-record
-        // waiters may still touch them while steps 2 and 2b wait; leftover space
-        // bells are fired in step 3 once every task is gone.
+        // waiters may still touch it while steps 2 and 2b wait.
         send_waiters: _,
-        space_waiters: _,
         test_paused: _,
         pause_notify: _,
     } = *handle;
@@ -2017,30 +1942,12 @@ pub unsafe extern "C" fn kafka_producer_Producer_destroy(producer: *mut kafka_pr
     //     send in progress"), so this is normally instant; otherwise each waits
     //     out its `max.block.ms`.
     kind.runtime().block_on(handle.send_waiters.wait_until_empty());
-    // 3. Ring any "space available" bell still registered. With every task joined
-    //    nothing else touches `space_waiters`, and a waiter that never fires would
-    //    leave a caller parked forever (and leak its `user_data`). Goes on the
-    //    dispatcher, behind the record completions already queued.
-    let leftover_waiters = std::mem::take(&mut *handle.space_waiters.lock().unwrap());
-    for waiter in leftover_waiters {
-        let job: CompletionJob = Box::new(move || {
-            let waiter = waiter;
-            // SAFETY: `waiter.callback`/`waiter.user_data` are the pair the C caller registered
-            // through `kafka_producer_Producer_on_space_available`, whose contract is that the
-            // bell rings exactly once, on the dispatcher thread (or inline once it has exited, per
-            // `enqueue_or_run_inline`). `waiter` was taken out of `space_waiters` under its lock and
-            // moved into this `FnOnce` job, so this is its single invocation; the C user is
-            // responsible for the thread-safety of `user_data`.
-            unsafe { (waiter.callback)(waiter.user_data) }
-        });
-        enqueue_or_run_inline(&completion_tx, job);
-    }
-    // 4. Drop the producer and its runtime. The producer's `Drop` force-closes;
+    // 3. Drop the producer and its runtime. The producer's `Drop` force-closes;
     //    dropping the runtime waits for any other remaining tasks. Any
     //    in-flight record callbacks fire here and enqueue jobs onto the
     //    still-open completion channel (the clones live inside those callbacks).
     drop(kind);
-    // 5. Close the completion channel; the dispatcher drains remaining jobs
+    // 4. Close the completion channel; the dispatcher drains remaining jobs
     //    (firing their callbacks) and then exits. Join it.
     //
     // NOTE: every live future handle (`FfiFuture`) and in-flight callback holds
@@ -2732,11 +2639,6 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch(
 /// other threads are not ordered against this call — the same boundary every send
 /// function here has.)
 ///
-/// The submission queue is unbounded. A caller that wants to bound its own memory
-/// registers a bell with [`kafka_producer_Producer_on_space_available`], which
-/// rings once the number of records queued, in flight or waiting drops back below
-/// `MAX_QUEUED_SENDS` (1000).
-///
 /// `callback` is invoked on the producer's dedicated dispatcher thread for every
 /// **accepted** record. For a *refused* one it is not invoked — the refusal is on
 /// the acceptance handle and `user_data` stays the caller's — unless the handle
@@ -3220,57 +3122,6 @@ pub unsafe extern "C" fn kafka_producer_SendAccepted_destroy(accepted: *mut kafk
     }
 }
 
-/// Registers a one-shot bell to ring once the number of records queued by
-/// [`kafka_producer_Producer_send_async`] / `send_batch_async` and not yet accepted
-/// or refused — in the submission queue, or waiting in a `send_waiter` — drops
-/// below [`MAX_QUEUED_SENDS`]. The queue itself never turns a record away; this
-/// bell is how a caller that queues without waiting on each acceptance handle
-/// bounds its own memory.
-///
-/// Returns `true` — **without** storing `callback` — when space is already
-/// available (the depth is below `MAX_QUEUED_SENDS`), so the caller may queue
-/// again immediately and `callback` will **never** be invoked. Returns `false`
-/// when the caller must wait: `callback(user_data)` then fires **exactly once**,
-/// on the producer's dispatcher thread, as soon as a queued send settles (accepted
-/// or refused, including one that waited in a `send_waiter`) and the depth falls
-/// below the bound — or from
-/// [`kafka_producer_Producer_destroy`] if the producer is torn down first, so a
-/// registered bell is never leaked.
-///
-/// The check and the registration happen under one lock shared with the
-/// submission task's decrement, so there is no window in which the depth drops
-/// after the check but before the registration (no lost wakeup).
-///
-/// A caught panic reports `true` without storing `callback`: the bell could not be
-/// registered, so the caller must not wait for it.
-///
-/// # Safety
-///
-/// `producer` must be a valid handle, or null (null reports space available, since
-/// there is nothing to wait for).
-#[ffi_guard(fallback = true)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_producer_Producer_on_space_available(
-    producer: *mut kafka_producer_Producer_t,
-    callback: kafka_producer_Producer_on_space_available_callback_t,
-    user_data: *mut std::ffi::c_void,
-) -> bool {
-    if producer.is_null() {
-        return true;
-    }
-    // SAFETY: `producer` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle, i.e. one created by `build_producer_handle`, which is what
-    // `producer_handle` requires; the reference is used only within this call
-    // (`space_waiters`, `queued_sends`), during which the C caller keeps the handle alive.
-    let handle = unsafe { producer_handle(producer) };
-    let mut waiters = handle.space_waiters.lock().unwrap();
-    if handle.queued_sends.load(std::sync::atomic::Ordering::Acquire) < MAX_QUEUED_SENDS {
-        return true;
-    }
-    waiters.push(SpaceWaiter { callback, user_data });
-    false
-}
-
 /// **Test-only hook.** Pauses (`paused == true`) or resumes the producer's
 /// submission task, the task that hands records queued by
 /// [`kafka_producer_Producer_send_async`] / [`kafka_producer_Producer_send_batch_async`]
@@ -3278,10 +3129,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_on_space_available(
 ///
 /// While paused the task stops handing items to the producer (it holds at most
 /// the one item it has already taken off the submission channel), so queued sends
-/// accumulate — counted in the depth that drives
-/// [`kafka_producer_Producer_on_space_available`] — which lets a test park a
-/// record deterministically against a mock that would otherwise accept every
-/// record instantly. Only [`kafka_producer_Producer_send_batch_async`] queues
+/// accumulate, which lets a test park a record deterministically against a mock
+/// that would otherwise accept every record instantly. Only
+/// [`kafka_producer_Producer_send_batch_async`] queues
 /// unconditionally; `send_async` queues a record only where the producer would
 /// have to wait for it, which a mock never does. Resuming drains the accumulated
 /// sends in order.
@@ -8767,7 +8617,6 @@ mod tests {
             txn_control_busy: std::sync::atomic::AtomicBool::new(false),
             queued_sends: std::sync::atomic::AtomicUsize::new(1),
             send_waiters: SendWaiters::default(),
-            space_waiters: std::sync::Mutex::new(Vec::new()),
             test_paused: std::sync::atomic::AtomicBool::new(false),
             pause_notify: tokio::sync::Notify::new(),
         });
@@ -9856,7 +9705,6 @@ mod tests {
             txn_control_busy: std::sync::atomic::AtomicBool::new(false),
             queued_sends: std::sync::atomic::AtomicUsize::new(0),
             send_waiters: SendWaiters::default(),
-            space_waiters: std::sync::Mutex::new(Vec::new()),
             test_paused: std::sync::atomic::AtomicBool::new(false),
             pause_notify: tokio::sync::Notify::new(),
         });

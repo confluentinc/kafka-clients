@@ -851,8 +851,7 @@ static PyObject* py_KafkaProducer_new(PyObject* self, PyObject* args) {
 // comes back on an already-settled handle. The queue never turns a record away:
 // each Python caller is parked on its own record's acceptance instead, so the
 // number of records queued or waiting is bounded by the number of concurrent
-// callers, and the Producer_on_space_available bell is not used by the Python
-// send.
+// callers.
 //
 // The Rust call runs with the GIL released, like the other producer entry
 // points. An application thread flooding send() would otherwise never yield the
@@ -998,55 +997,6 @@ static void accepted_trampoline(kafka_common_Error_t* error, bool callback_pendi
     Py_XDECREF(err_obj);
     Py_DECREF(pin);
     PyGILState_Release(g);
-}
-
-// One-shot callback Rust fires (on its dispatcher thread, or from the Rust
-// destroy if the producer is torn down first) when the submission queue has
-// room again (Producer_on_space_available). Calls the Python callable `cb` with
-// no arguments, then drops the reference the registering function took.
-static void space_trampoline(void* ud) {
-    PyObject* cb = (PyObject*)ud;
-    PyGILState_STATE g = PyGILState_Ensure();
-    PyObject* r = PyObject_CallFunctionObjArgs(cb, NULL);
-    if (r) {
-        Py_DECREF(r);
-    } else {
-        PyErr_WriteUnraisable(cb);
-    }
-    Py_DECREF(cb);
-    PyGILState_Release(g);
-}
-
-// Producer_on_space_available(producer, cb) -> bool: the FFI's bell
-// (kafka_producer_Producer_on_space_available). True when the submission queue
-// already has room (the caller need not wait; `cb` is not kept), False when `cb`
-// was registered and fires exactly once, later, from the dispatcher thread — or
-// from the Rust destroy, if the producer is torn down first — once the number of
-// records queued or waiting drops below the FFI's bound. Check-and-register
-// happens under the Rust-side lock shared with the queue's drain, so there is
-// no lost-wakeup window. The Python send does not use it (each caller waits on
-// its own record's acceptance); it is here for the tests of the bell.
-static PyObject* py_Producer_on_space_available(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
-    PyObject* space_cb;
-
-    if (!PyArg_ParseTuple(args, "KO", &producer_ptr, &space_cb)) {
-        return NULL;
-    }
-
-    Producer* producer = (Producer*)producer_ptr;
-
-    Py_INCREF(space_cb);
-    bool available;
-    Py_BEGIN_ALLOW_THREADS
-    available = kafka_producer_Producer_on_space_available(
-        producer->producer, space_trampoline, space_cb);
-    Py_END_ALLOW_THREADS
-    if (available) {
-        Py_DECREF(space_cb);  // not stored
-        Py_RETURN_TRUE;
-    }
-    Py_RETURN_FALSE;
 }
 
 // Test-only: pause/resume the Rust submission task, the task that hands the
@@ -7241,9 +7191,6 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Producer_send", py_Producer_send, METH_VARARGS,
      "Hand a record to the producer on this thread; returns True (taken), None (queued: "
      "cb(None, error_int) answers), False (closing) or an owned error_int (refused)"},
-    {"Producer_on_space_available", py_Producer_on_space_available, METH_VARARGS,
-     "Register a one-shot callback for when the submission queue has room again; "
-     "returns True if it already has"},
     {"Producer_test_set_paused", py_Producer_test_set_paused, METH_VARARGS,
      "Test-only: pause/resume the Rust submission task so queued sends accumulate"},
     {"Producer_shutdown", py_Producer_shutdown, METH_VARARGS,

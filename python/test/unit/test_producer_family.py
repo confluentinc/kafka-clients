@@ -1657,67 +1657,6 @@ async def test_a_closed_async_producer_reports_the_closed_state(
     assert str(err.value) == CLOSED
 
 
-# ===========================================================================
-# The submission queue's bell (kafka_producer_Producer_on_space_available)
-# ===========================================================================
-
-# MAX_QUEUED_SENDS in rust/src/ffi/producer.rs: the bell reports room while
-# fewer records than this are queued or waiting inside the producer. The Python
-# send does not use it (each caller waits on its own record's answer); the
-# extension keeps the entry point for the FFI's contract, tested here.
-QUEUE_BOUND = 1000
-
-
-def _ring(p: KafkaProducer[Any, Any] | AsyncKafkaProducer[Any, Any], rung: list[int],
-          mark: int) -> bool:
-    """Register the bell, which appends ``mark`` to ``rung`` when it rings;
-    whether the queue already has room (then the bell is not kept)."""
-    c_producer = p._c_producer  # noqa: SLF001
-    available: bool = _lib.Producer_on_space_available(c_producer, lambda: rung.append(mark))
-    return available
-
-
-def test_the_bell_reports_room_at_once_on_an_idle_producer() -> None:
-    p = KafkaProducer(configs=UNREACHABLE)
-    try:
-        rung: list[int] = []
-        assert _ring(p, rung, 1) is True
-        time.sleep(0.05)
-        assert rung == []  # not registered
-    finally:
-        p.close(timeout=0)
-
-
-async def test_the_bell_rings_once_when_a_full_queue_has_room_again(
-        monkeypatch: pytest.MonkeyPatch) -> None:
-    # With the hand-over held, QUEUE_BOUND sends fill the queue: the bell
-    # reports no room and is registered; it rings exactly once when the queue
-    # has room again, once the producer has answered for the first record.
-    answers = spy_on(monkeypatch, "Producer_send")
-    p = AsyncKafkaProducer(configs=UNREACHABLE)
-    try:
-        _lib.Producer_test_set_paused(p._c_producer, True)  # noqa: SLF001
-        sends = [asyncio.ensure_future(p.send(record=RECORD)) for _ in range(QUEUE_BOUND)]
-        await await_until(lambda: len(answers) == QUEUE_BOUND)
-        assert answers == [None] * QUEUE_BOUND
-        assert not any(send.done() for send in sends)
-        rung: list[int] = []
-        assert _ring(p, rung, 1) is False
-        await asyncio.sleep(0.1)
-        assert rung == []
-        _lib.Producer_test_set_paused(p._c_producer, False)  # noqa: SLF001
-        futures = await asyncio.wait_for(asyncio.gather(*sends), 60)
-        await asyncio.wait(futures, timeout=30)
-        assert all(isinstance(f.exception(), KafkaTimeoutError) for f in futures)
-        await await_until(lambda: bool(rung))
-        await asyncio.sleep(0.1)
-        assert rung == [1], "the bell did not ring exactly once"
-        assert _ring(p, rung, 2) is True
-    finally:
-        _lib.Producer_test_set_paused(p._c_producer, False)  # noqa: SLF001
-        await p.close(timeout=0)
-
-
 async def test_cancelling_close_waits_for_its_teardown_before_closing_the_serializers() -> None:
     # Cancelling the task awaiting close() lets the teardown (forcing an
     # unfinished close, waiting for the calls in flight, joining the threads)
@@ -1801,9 +1740,8 @@ def test_producer_record_rejects_a_2_gib_header_value(two_gib_bytes: bytes) -> N
 # allocation failure the extension does not handle crashes the process.
 _NO_MEMORY_PRELUDE = """
 import sys
-QUEUE_BOUND = int(sys.argv[1])
-FUTURE_TIMEOUT = float(sys.argv[2])
-sys.path[:0] = sys.argv[3:]
+FUTURE_TIMEOUT = float(sys.argv[1])
+sys.path[:0] = sys.argv[2:]
 import _testcapi
 import _confluentkafka as _lib
 from confluent_kafka.producer import KafkaProducer, ProducerRecord
@@ -1850,7 +1788,7 @@ def _run_without_memory(body: str) -> None:
         for path in (_lib.__file__, os.path.dirname(os.path.abspath(confluent_kafka.__file__))))
     proc = subprocess.run(
         [sys.executable, "-c", _NO_MEMORY_PRELUDE + body,
-         str(QUEUE_BOUND), str(_NO_MEMORY_FUTURE_TIMEOUT), *module_dirs],
+         str(_NO_MEMORY_FUTURE_TIMEOUT), *module_dirs],
         capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, (proc.returncode, proc.stderr)
     assert proc.stdout.splitlines()[-1:] == ["ok"], proc.stdout
@@ -1884,8 +1822,7 @@ print("ok")
 
 
 # Master's `test_waiting_for_space_without_memory_does_not_wait` has no subject
-# here: the bell (Producer_on_space_available) is registered in Rust, with no
-# CPython allocation, and the Python send does not wait for space.
+# here: the Python send does not wait for space.
 
 
 # ===========================================================================
