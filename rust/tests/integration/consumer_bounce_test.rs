@@ -242,8 +242,20 @@ fn is_partition_assignment_valid(
     partitions.iter().all(|tp| all_assigned_partitions.contains(tp))
 }
 
-/// Java's two-argument `validateGroupAssignment` (line 579): wait up to 10 s
-/// for a valid assignment across `consumer_pollers`.
+/// How long [`validate_group_assignment`] waits for a valid assignment.
+///
+/// **Deviation:** Java waits 10 s, which holds only because its "async" test
+/// never sets `group.protocol` and so runs classic (see the module docs). Under
+/// KIP-848 a 4.2 broker recomputes the target on a member's heartbeat, so an
+/// owner learns it must revoke only on its next heartbeat and the newcomer
+/// receives the freed partition only on its own: up to two
+/// `group.consumer.heartbeat.interval.ms` rounds (5 s each) plus reconciliation,
+/// which sits right at 10 s and failed on CI. 20 s covers two rounds with slack.
+const ASSIGNMENT_TIMEOUT_MS: u64 = 20_000;
+
+/// Java's two-argument `validateGroupAssignment` (line 579): wait up to
+/// [`ASSIGNMENT_TIMEOUT_MS`] (Java: 10 s) for a valid assignment across
+/// `consumer_pollers`.
 async fn validate_group_assignment(
     consumer_pollers: &[ConsumerAssignmentPoller],
     subscriptions: &HashSet<TopicPartition>,
@@ -263,7 +275,7 @@ async fn validate_group_assignment(
             async move { valid }
         },
         &format!("Did not get valid assignment for partitions {subscriptions:?}"),
-        10_000,
+        ASSIGNMENT_TIMEOUT_MS,
         100,
     )
     .await;
