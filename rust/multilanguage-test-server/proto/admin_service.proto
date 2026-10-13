@@ -222,10 +222,11 @@ service AdminService {
   //     by [ResultKey.name]. Its Java result holds one future over the raw
   //     response data and exposes three views (`all()` / `users()` /
   //     `description(user)`); the per-user shape that subsumes all three is what
-  //     the C FFI already composes (`src/ffi/admin.rs`'s
-  //     `submit_describe_user_scram_credentials`, whose doc comment states the
-  //     composition and why nothing Java can reach is lost) and what admin.py
-  //     returns (`{user: UserScramCredentialsDescription | KafkaError}`). It is
+  //     every backend composes the same way: `all()` first, then `users()` +
+  //     `description(user)` when `all()` fails (`rust/tests/common/
+  //     admin_backend.rs`, `c/grpc_server/server.cc`, and the Python
+  //     extension's `assemble_scram` behind admin.py, which returns
+  //     `{user: UserScramCredentialsDescription | KafkaError}`). It is
   //     **not** the `listGroups` `valid()`/`errors()` split: every error here has
   //     a user to hang on, so [Listings] does not apply.
   //

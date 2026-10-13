@@ -17,6 +17,8 @@
 
 use std::cmp::Ordering;
 
+use crate::common::Error;
+
 /// This class defines an immutable universally unique identifier (UUID).
 /// It represents a 128-bit value.
 ///
@@ -115,24 +117,29 @@ impl Uuid {
 
     /// Creates a UUID based on a base64 URL encoded string (without padding).
     /// This matches the Java implementation's fromString() method.
+    ///
+    /// Java throws `IllegalArgumentException` for a string that is not a
+    /// base64 UUID; this returns the corresponding `LocalIllegalArgument`
+    /// error.
     #[doc(alias = "org.apache.kafka.common.Uuid#fromString")]
-    pub fn from_string(s: &str) -> Result<Self, String> {
+    pub fn from_string(s: &str) -> Result<Self, Error> {
         if s.len() > 24 {
-            return Err(format!(
+            return Err(Error::local_illegal_argument(format!(
                 "Input string with prefix `{}` is too long to be decoded as a base64 UUID",
                 &s[..24.min(s.len())]
-            ));
+            )));
         }
 
         // Decode base64 URL without padding
-        let decoded = base64_url_decode(s).map_err(|e| format!("Failed to decode base64 string: {}", e))?;
+        let decoded = base64_url_decode(s)
+            .map_err(|e| Error::local_illegal_argument(format!("Failed to decode base64 string: {}", e)))?;
 
         if decoded.len() != 16 {
-            return Err(format!(
+            return Err(Error::local_illegal_argument(format!(
                 "Input string `{}` decoded as {} bytes, which is not equal to the expected 16 bytes of a base64-encoded UUID",
                 s,
                 decoded.len()
-            ));
+            )));
         }
 
         let mut bytes = [0u8; 16];
@@ -459,13 +466,17 @@ mod tests {
     fn test_from_string_too_long() {
         let result = Uuid::from_string("AAAAAAAAAAAAAAAAAAAAAA_THIS_IS_TOO_LONG");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("too long"));
+        let error = result.unwrap_err();
+        assert!(error.is_local_illegal_argument_error());
+        assert!(error.to_string().contains("too long"));
     }
 
     #[test]
     fn test_from_string_invalid_length() {
         let result = Uuid::from_string("AAAA");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not equal to the expected 16 bytes"));
+        let error = result.unwrap_err();
+        assert!(error.is_local_illegal_argument_error());
+        assert!(error.to_string().contains("not equal to the expected 16 bytes"));
     }
 }

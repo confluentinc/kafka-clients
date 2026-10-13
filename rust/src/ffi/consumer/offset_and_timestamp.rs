@@ -1,0 +1,270 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! `kafka_consumer_OffsetAndTimestamp_t`:
+//! `org.apache.kafka.clients.consumer.OffsetAndTimestamp`, the value of
+//! `offsetsForTimes`.
+
+use std::collections::HashMap;
+use std::ffi::{c_char, c_void};
+
+use crate::common::{Error, TopicPartition};
+use crate::consumer::OffsetAndTimestamp;
+use crate::ffi::common::topic_partition::{TopicPartitionInner, box_topic_partition, topic_partition_key_eq};
+use crate::ffi::common::{box_error, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
+use crate::ffi::util::{box_map, destroy_boxed, into_c_string, kafka_Map_t};
+
+/// Opaque handle to an [`OffsetAndTimestamp`].
+#[repr(C)]
+pub struct kafka_consumer_OffsetAndTimestamp_t {
+    _private: [u8; 0],
+}
+
+/// Hands `oat` to C as an owned handle, freed with
+/// [`kafka_consumer_OffsetAndTimestamp_destroy`] or by the map owning it.
+pub(crate) fn box_offset_and_timestamp(oat: OffsetAndTimestamp) -> *mut kafka_consumer_OffsetAndTimestamp_t {
+    Box::into_raw(Box::new(oat)) as *mut kafka_consumer_OffsetAndTimestamp_t
+}
+
+/// The value behind a handle.
+///
+/// # Safety
+///
+/// `oat` must be a valid offset-and-timestamp handle, kept alive for `'a`.
+pub(crate) unsafe fn offset_and_timestamp_ref<'a>(
+    oat: *const kafka_consumer_OffsetAndTimestamp_t,
+) -> &'a OffsetAndTimestamp {
+    // SAFETY: Per this function's `# Safety`, `oat` is a valid offset-and-timestamp handle kept
+    // alive for `'a`: a `Box<OffsetAndTimestamp>` from `box_offset_and_timestamp`, the only place
+    // handles are made, owned by the caller or by a map, and never mutated, so the shared reference
+    // is to a live value.
+    unsafe { &*(oat as *const OffsetAndTimestamp) }
+}
+
+/// Hands a Java `Map<TopicPartition, OffsetAndTimestamp>` to C as an owned
+/// map: keys are owned `kafka_common_TopicPartition_t *`, values owned
+/// `kafka_consumer_OffsetAndTimestamp_t *`, entries ordered by topic then
+/// partition, and `kafka_Map_get` compares keys by value. An unresolved
+/// partition is absent (see the Rust `offsets_for_times` contract note).
+pub(crate) fn offset_and_timestamp_map(map: &HashMap<TopicPartition, OffsetAndTimestamp>) -> *mut kafka_Map_t {
+    let mut entries: Vec<(&TopicPartition, &OffsetAndTimestamp)> = map.iter().collect();
+    entries.sort_by(|(a, _), (b, _)| a.topic().cmp(b.topic()).then(a.partition().cmp(&b.partition())));
+    let entries = entries
+        .into_iter()
+        .map(|(tp, oat)| {
+            (
+                box_topic_partition(tp.clone()) as *mut c_void,
+                box_offset_and_timestamp(oat.clone()) as *mut c_void,
+            )
+        })
+        .collect();
+    box_map(
+        entries,
+        Some(destroy_boxed::<TopicPartitionInner>),
+        Some(destroy_boxed::<OffsetAndTimestamp>),
+        Some(topic_partition_key_eq),
+    )
+}
+
+/// Delivers a constructor's value through `out`, or returns its error.
+///
+/// # Safety
+///
+/// `out` must be a valid pointer.
+unsafe fn deliver(
+    oat: Result<OffsetAndTimestamp, Error>,
+    out: *mut *mut kafka_consumer_OffsetAndTimestamp_t,
+) -> *mut kafka_common_Error_t {
+    match oat {
+        Ok(oat) => {
+            // SAFETY: Per this function's `# Safety`, `out` is a valid pointer, so the write is
+            // sound; the handle written is the fresh box the caller owns, freed with
+            // `kafka_consumer_OffsetAndTimestamp_destroy`.
+            unsafe { *out = box_offset_and_timestamp(oat) };
+            std::ptr::null_mut()
+        },
+        Err(error) => box_error(error),
+    }
+}
+
+/// `new OffsetAndTimestamp(long offset, long timestamp)`: an owned handle
+/// delivered through `out_new`. A negative offset fails with the Java
+/// `IllegalArgumentException`.
+///
+/// # Safety
+///
+/// `out_new` must be a valid pointer.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_new(
+    offset: i64,
+    timestamp: i64,
+    out_new: *mut *mut kafka_consumer_OffsetAndTimestamp_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `out_new` is a valid pointer, as `deliver` requires.
+    unsafe { deliver(OffsetAndTimestamp::new(offset, timestamp), out_new) }
+}
+
+/// `new OffsetAndTimestamp(long offset, long timestamp, Optional<Integer> leaderEpoch)`;
+/// a negative `leader_epoch` is `Optional.empty()`.
+///
+/// # Safety
+///
+/// `out_with_leader_epoch` must be a valid pointer.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_with_leader_epoch(
+    offset: i64,
+    timestamp: i64,
+    leader_epoch: i32,
+    out_with_leader_epoch: *mut *mut kafka_consumer_OffsetAndTimestamp_t,
+) -> *mut kafka_common_Error_t {
+    let leader_epoch = (leader_epoch >= 0).then_some(leader_epoch);
+    // SAFETY: Per this function's `# Safety`, `out_with_leader_epoch` is a valid pointer, as
+    // `deliver` requires.
+    unsafe {
+        deliver(
+            OffsetAndTimestamp::with_leader_epoch(offset, timestamp, leader_epoch),
+            out_with_leader_epoch,
+        )
+    }
+}
+
+/// Java `toString()`: an owned string freed with `kafka_string_destroy`.
+///
+/// # Safety
+///
+/// `self_` must be a valid handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_to_string(
+    self_: *const kafka_consumer_OffsetAndTimestamp_t,
+) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
+    // the only use of the reference, as `offset_and_timestamp_ref` requires.
+    into_c_string(&unsafe { offset_and_timestamp_ref(self_) }.to_string())
+}
+
+/// `offset()`.
+///
+/// # Safety
+///
+/// `self_` must be a valid handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_offset(
+    self_: *const kafka_consumer_OffsetAndTimestamp_t,
+) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
+    // the only use of the reference, as `offset_and_timestamp_ref` requires.
+    unsafe { offset_and_timestamp_ref(self_) }.offset()
+}
+
+/// `timestamp()`: milliseconds since the epoch.
+///
+/// # Safety
+///
+/// `self_` must be a valid handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_timestamp(
+    self_: *const kafka_consumer_OffsetAndTimestamp_t,
+) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
+    // the only use of the reference, as `offset_and_timestamp_ref` requires.
+    unsafe { offset_and_timestamp_ref(self_) }.timestamp()
+}
+
+/// `leaderEpoch()`: the epoch, or `-1` for `Optional.empty()`.
+///
+/// A caught Rust panic returns -2, which is no leader epoch.
+///
+/// # Safety
+///
+/// `self_` must be a valid handle.
+#[ffi_guard(fallback = -2)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_leader_epoch(
+    self_: *const kafka_consumer_OffsetAndTimestamp_t,
+) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
+    // the only use of the reference, as `offset_and_timestamp_ref` requires.
+    unsafe { offset_and_timestamp_ref(self_) }.leader_epoch().unwrap_or(-1)
+}
+
+/// Frees an owned handle; a null pointer is a no-op. A handle borrowed from
+/// a map Rust returned is freed by that map's `kafka_Map_destroy`, never
+/// here.
+///
+/// # Safety
+///
+/// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_destroy(self_: *mut kafka_consumer_OffsetAndTimestamp_t) {
+    if !self_.is_null() {
+        // SAFETY: Per this function's `# Safety`, `self_` (non-null, checked above) is an owned
+        // handle not yet destroyed, i.e. a `Box<OffsetAndTimestamp>` from
+        // `box_offset_and_timestamp` that no map owns, so taking it back and dropping it frees it
+        // exactly once.
+        unsafe { drop(Box::from_raw(self_ as *mut OffsetAndTimestamp)) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::CStr;
+
+    use super::*;
+    use crate::ffi::common::{error_ref, kafka_common_Error_destroy};
+    use crate::ffi::util::kafka_string_destroy;
+
+    #[test]
+    fn constructors_and_getters() {
+        let mut oat = std::ptr::null_mut();
+        // SAFETY: Test code: `oat` is a valid out pointer.
+        assert!(unsafe { kafka_consumer_OffsetAndTimestamp_with_leader_epoch(5, 100, 2, &mut oat) }.is_null());
+        // SAFETY: Test code: `oat` is the owned handle just delivered, destroyed once at the end;
+        // the string from `to_string` is destroyed once, after it is read.
+        unsafe {
+            assert_eq!(kafka_consumer_OffsetAndTimestamp_offset(oat), 5);
+            assert_eq!(kafka_consumer_OffsetAndTimestamp_timestamp(oat), 100);
+            assert_eq!(kafka_consumer_OffsetAndTimestamp_leader_epoch(oat), 2);
+            let s = kafka_consumer_OffsetAndTimestamp_to_string(oat);
+            assert_eq!(CStr::from_ptr(s).to_str().unwrap(), "(timestamp=100, leaderEpoch=2, offset=5)");
+            kafka_string_destroy(s);
+            kafka_consumer_OffsetAndTimestamp_destroy(oat);
+        }
+        let mut plain = std::ptr::null_mut();
+        // SAFETY: Test code: `plain` is a valid out pointer.
+        assert!(unsafe { kafka_consumer_OffsetAndTimestamp_new(5, 100, &mut plain) }.is_null());
+        // SAFETY: Test code: `plain` is the owned handle just delivered.
+        assert_eq!(unsafe { kafka_consumer_OffsetAndTimestamp_leader_epoch(plain) }, -1);
+        // SAFETY: Test code: `plain` is the owned handle delivered above, destroyed once.
+        unsafe { kafka_consumer_OffsetAndTimestamp_destroy(plain) };
+    }
+
+    #[test]
+    fn negative_offset_is_the_java_illegal_argument() {
+        let mut oat = std::ptr::null_mut();
+        // SAFETY: Test code: `oat` is a valid out pointer.
+        let error = unsafe { kafka_consumer_OffsetAndTimestamp_new(-1, 0, &mut oat) };
+        assert!(!error.is_null());
+        // SAFETY: Test code: `error` is the owned error just returned (non-null, asserted above).
+        assert!(unsafe { error_ref(error) }.error.is_local_illegal_argument_error());
+        // SAFETY: Test code: `error` is the owned error returned above, destroyed once.
+        unsafe { kafka_common_Error_destroy(error) };
+    }
+}

@@ -69,7 +69,7 @@ pub use channel_state::ChannelState;
 pub use cipher_information::CipherInformation;
 pub use client_information::ClientInformation;
 pub use connection_mode::ConnectionMode;
-pub use invalid_receive_error::InvalidReceiveError;
+pub use invalid_receive_error::{InvalidReceiveError, is_invalid_receive_error};
 pub use kafka_channel::KafkaChannel;
 pub use listener_name::ListenerName;
 pub use mock_selector::{DelayedReceive, MockSelector};

@@ -1472,7 +1472,8 @@ impl Admin for MockAdminClient {
             let future: KafkaFutureImpl<ListOffsetsResultInfo> = KafkaFutureImpl::new();
             match spec {
                 OffsetSpec::Timestamp(_) => {
-                    future.complete_with_error(Error::unsupported_version("Not implemented yet"));
+                    // Java's message is "Not implement yet" (sic), `MockAdminClient.java:1231`.
+                    future.complete_with_error(Error::unsupported_version("Not implement yet"));
                 },
                 OffsetSpec::Earliest => {
                     let offset = state.beginning_offsets.get(tp).copied().unwrap_or(-1);

@@ -20,14 +20,16 @@
 //! covered by the per-test harness in this module (`TestContext`,
 //! `ClusterConfig`, ...).
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::future::Future;
 use std::time::{Duration, Instant};
 
 use confluent_kafka::admin::{
-    Admin, AdminClient, AdminClientConfig, CreateTopicsOptions, DescribeTopicsOptions, NewTopic,
+    Admin, AdminClient, AdminClientConfig, CreateTopicsOptions, DescribeTopicsOptions, NewTopic, OffsetSpec,
 };
 use confluent_kafka::common::TopicCollection;
+use confluent_kafka::common::TopicPartition;
 
 use super::test_context::TestContext;
 
@@ -230,19 +232,60 @@ pub async fn wait_for_all_partitions_metadata_with_context(
 /// `UnknownTopicOrPartition` by a broker that has not caught up. Tests that
 /// create a topic and then immediately assert on it MUST go through here.
 pub async fn create_topic(admin: &dyn Admin, topic: &str, num_partitions: i32, replication_factor: i16) {
+    create_topic_with_configs(admin, topic, num_partitions, replication_factor, BTreeMap::new()).await;
+}
+
+/// [`create_topic`] with topic-level configs — the `topicConfig` parameter of
+/// Java's `TestUtils.createTopicWithAdmin` (`TestUtils.scala:832-853`). An
+/// empty map sends no configs, exactly like [`create_topic`].
+pub async fn create_topic_with_configs(
+    admin: &dyn Admin,
+    topic: &str,
+    num_partitions: i32,
+    replication_factor: i16,
+    configs: BTreeMap<String, String>,
+) {
+    let mut new_topic = NewTopic::with_num_partitions_replication_factor(
+        topic.to_string(),
+        Some(num_partitions),
+        Some(replication_factor),
+    );
+    if !configs.is_empty() {
+        new_topic = new_topic.set_configs(configs);
+    }
     admin
-        .create_topics_with_options(
-            &[NewTopic::with_num_partitions_replication_factor(
-                topic.to_string(),
-                Some(num_partitions),
-                Some(replication_factor),
-            )],
-            CreateTopicsOptions::new(),
-        )
+        .create_topics_with_options(&[new_topic], CreateTopicsOptions::new())
         .all()
         .get()
         .await
         .expect("create topic");
 
     wait_for_all_partitions_metadata(admin, topic, num_partitions as usize).await;
+}
+
+/// Waits until the leader of each of `partitions` answers a leader-only
+/// request — the client-observable half of Java's
+/// `TestUtils.waitForPartitionMetadata` / `waitForAllPartitionsMetadata`
+/// that matters to a producer.
+///
+/// `ListOffsets` is routed to the partition leader, which rejects it with
+/// `NOT_LEADER_OR_FOLLOWER` until it has applied its leadership — the same
+/// check a `Produce` request hits — and it writes nothing, so the offsets the
+/// tests assert on are unaffected.
+pub async fn wait_for_partition_leaders(admin: &dyn Admin, topic: &str, partitions: std::ops::Range<i32>) {
+    let specs: HashMap<TopicPartition, OffsetSpec> = partitions
+        .map(|p| (TopicPartition::new(topic.to_string(), p), OffsetSpec::latest()))
+        .collect();
+    retry_on_error_with_timeout(Duration::from_millis(TOPIC_METADATA_PROPAGATION_WAIT_MS), || {
+        let result = admin.list_offsets(&specs);
+        async move {
+            result
+                .all()
+                .get()
+                .await
+                .map(|_| ())
+                .map_err(|e| format!("partition leaders of {topic} not ready: {e:?}"))
+        }
+    })
+    .await;
 }

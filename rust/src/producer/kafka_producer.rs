@@ -34,7 +34,6 @@ use tokio::task::JoinHandle;
 
 use crate::ClientUtils;
 use crate::KafkaClient;
-use crate::MetadataRecoveryStrategy;
 use crate::NetworkClient;
 use crate::common::Cluster;
 use crate::common::Error;
@@ -698,8 +697,13 @@ impl<K, V> KafkaProducer<K, V> {
     ///   [`KafkaProducerOptionsBuilder`]. [`KafkaProducerOptions`] is this
     ///   method's only parameter because the derived name would list ten
     ///   parameters, past CLAUDE.md §2's cap of three.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::LocalIllegalArgument`] when `metrics.num.samples` is below 1, as
+    /// Java's `MetricConfig.samples` throws in the same constructor.
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#KafkaProducer")]
-    pub(crate) fn with_options(options: KafkaProducerOptions<'_, K, V>) -> Self {
+    pub(crate) fn with_options(options: KafkaProducerOptions<'_, K, V>) -> Result<Self, Error> {
         let KafkaProducerOptions {
             config,
             key_serializer,
@@ -716,8 +720,8 @@ impl<K, V> KafkaProducer<K, V> {
             partitioner,
         } = options;
         let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
-        let (metrics, producer_metrics) = Self::create_metrics(config);
-        Self {
+        let (metrics, producer_metrics) = Self::create_metrics(config)?;
+        Ok(Self {
             client_id: config.client_id.clone(),
             key_serializer,
             value_serializer,
@@ -740,7 +744,7 @@ impl<K, V> KafkaProducer<K, V> {
             metrics,
             producer_metrics,
             log_context,
-        }
+        })
     }
 
     /// Creates a `KafkaProducer` from configuration, serializers, and an optional
@@ -957,8 +961,10 @@ impl<K, V> KafkaProducer<K, V> {
             true, // discover_broker_versions
             Arc::clone(&api_versions),
             DefaultHostResolver::new(),
-            config.metadata_max_age_ms, // rebootstrap_trigger_ms
-            MetadataRecoveryStrategy::None,
+            // `ClientUtils.createNetworkClient` (`ClientUtils.java:223-224`) reads
+            // both from the config; the default strategy is `rebootstrap`.
+            config.metadata_recovery_rebootstrap_trigger_ms,
+            config.metadata_recovery_strategy,
             log_context.clone(),
         );
 
@@ -966,7 +972,7 @@ impl<K, V> KafkaProducer<K, V> {
         //    the constructor (`KafkaProducer.java:357`), before the
         //    `RecordAccumulator`/`BufferPool` (`:426-438`), because both are
         //    handed the same `Metrics` instance.
-        let (metrics, producer_metrics) = Self::create_metrics(&config);
+        let (metrics, producer_metrics) = Self::create_metrics(&config)?;
 
         // 9. Create the TransactionManager, before the accumulator and the Sender
         //    because both of them need it (PLAN §6.3). Java's field assignment sits
@@ -1237,7 +1243,7 @@ impl<K, V> KafkaProducer<K, V> {
     /// `metrics.recording.level` and a single `client-id` tag. Reporters and the
     /// JMX metrics context are N/A in Rust (consumer Phase M7 precedent); the
     /// registry is reporter-less but fully functional.
-    fn create_metrics(config: &ProducerConfig) -> (Arc<Metrics>, KafkaProducerMetrics) {
+    fn create_metrics(config: &ProducerConfig) -> Result<(Arc<Metrics>, KafkaProducerMetrics), Error> {
         const CLIENT_ID_METRIC_TAG: &str = "client-id";
 
         let mut tags = std::collections::BTreeMap::new();
@@ -1245,14 +1251,14 @@ impl<K, V> KafkaProducer<K, V> {
 
         let recording_level = RecordingLevel::for_name(&config.metrics_recording_level).unwrap_or(RecordingLevel::Info);
         let metric_config = MetricConfig::new()
-            .set_samples(config.metrics_num_samples)
+            .set_samples(config.metrics_num_samples)?
             .set_time_window_ms(config.metrics_sample_window_ms)
             .set_record_level(recording_level)
             .set_tags(tags);
 
         let metrics = Arc::new(Metrics::with_default_config(Arc::new(metric_config)));
         let producer_metrics = KafkaProducerMetrics::new(Arc::clone(&metrics));
-        (metrics, producer_metrics)
+        Ok((metrics, producer_metrics))
     }
 
     /// Validate and optionally adjust `delivery.timeout.ms` against
@@ -1687,7 +1693,10 @@ impl<K, V> KafkaProducer<K, V> {
                 // outer catches dispatch on the resulting class.
                 let e = self.relabel_if_closed_while_sending(e);
                 if e.is_api_error() {
-                    return self.handle_api_error(e, record.topic(), RecordMetadata::UNKNOWN_PARTITION, callback);
+                    // Java's `AppendCallbacks.topicPartition()` (`KafkaProducer.java:1613-1621`):
+                    // no partition is computed yet, so the record's own, if it names one.
+                    let partition = record.partition().unwrap_or(RecordMetadata::UNKNOWN_PARTITION);
+                    return self.handle_api_error(e, record.topic(), partition, callback);
                 }
                 return Err(e);
             },
@@ -1728,7 +1737,9 @@ impl<K, V> KafkaProducer<K, V> {
                 {
                     Ok(bytes) => bytes,
                     Err(e) if e.is_api_error() => {
-                        return self.handle_api_error(e, &record_topic, RecordMetadata::UNKNOWN_PARTITION, callback);
+                        // `AppendCallbacks.topicPartition()`, as for the metadata wait.
+                        let partition = partition_opt.unwrap_or(RecordMetadata::UNKNOWN_PARTITION);
+                        return self.handle_api_error(e, &record_topic, partition, callback);
                     },
                     Err(e) => return Err(e),
                 };
@@ -1740,7 +1751,9 @@ impl<K, V> KafkaProducer<K, V> {
                 {
                     Ok(bytes) => bytes,
                     Err(e) if e.is_api_error() => {
-                        return self.handle_api_error(e, &record_topic, RecordMetadata::UNKNOWN_PARTITION, callback);
+                        // `AppendCallbacks.topicPartition()`, as for the metadata wait.
+                        let partition = partition_opt.unwrap_or(RecordMetadata::UNKNOWN_PARTITION);
+                        return self.handle_api_error(e, &record_topic, partition, callback);
                     },
                     Err(e) => return Err(e),
                 };
@@ -1782,7 +1795,9 @@ impl<K, V> KafkaProducer<K, V> {
                 {
                     Ok(bytes) => bytes,
                     Err(e) if e.is_api_error() => {
-                        return self.handle_api_error(e, &record_topic, RecordMetadata::UNKNOWN_PARTITION, callback);
+                        // `AppendCallbacks.topicPartition()`, as for the metadata wait.
+                        let partition = partition_opt.unwrap_or(RecordMetadata::UNKNOWN_PARTITION);
+                        return self.handle_api_error(e, &record_topic, partition, callback);
                     },
                     Err(e) => return Err(e),
                 };
@@ -1794,7 +1809,9 @@ impl<K, V> KafkaProducer<K, V> {
                 {
                     Ok(bytes) => bytes,
                     Err(e) if e.is_api_error() => {
-                        return self.handle_api_error(e, &record_topic, RecordMetadata::UNKNOWN_PARTITION, callback);
+                        // `AppendCallbacks.topicPartition()`, as for the metadata wait.
+                        let partition = partition_opt.unwrap_or(RecordMetadata::UNKNOWN_PARTITION);
+                        return self.handle_api_error(e, &record_topic, partition, callback);
                     },
                     Err(e) => return Err(e),
                 };
@@ -2418,7 +2435,10 @@ impl KafkaProducer<Vec<u8>, Vec<u8>> {
                 // Java 993-998, as in `do_send`.
                 let e = self.relabel_if_closed_while_sending(e);
                 if e.is_api_error() {
-                    return self.handle_api_error(e, record.topic(), RecordMetadata::UNKNOWN_PARTITION, callback);
+                    // Java's `AppendCallbacks.topicPartition()` (`KafkaProducer.java:1613-1621`):
+                    // no partition is computed yet, so the record's own, if it names one.
+                    let partition = record.partition().unwrap_or(RecordMetadata::UNKNOWN_PARTITION);
+                    return self.handle_api_error(e, record.topic(), partition, callback);
                 }
                 return Err(e);
             },
@@ -2427,15 +2447,18 @@ impl KafkaProducer<Vec<u8>, Vec<u8>> {
         let remaining_wait_ms = 0i64.max(self.max_block_ms - cluster_and_wait_time.waited_on_metadata_ms);
         let cluster = cluster_and_wait_time.cluster;
 
-        let (record_topic, partition, timestamp, _headers, key, value) = record.into_parts();
+        let (record_topic, partition, timestamp, record_headers, key, value) = record.into_parts();
 
+        // Java's `doSend` appends `record.headers().toArray()`
+        // (`KafkaProducer.java:1020`, `:1029-1030`); the header bytes are
+        // written straight into the batch buffer, as on the typed path.
         self.do_send_bytes(
             &record_topic,
             partition,
             timestamp,
             key,
             value,
-            RecordBatch::EMPTY_HEADERS,
+            record_headers.to_array(),
             callback,
             now_ms,
             remaining_wait_ms,
@@ -2748,6 +2771,7 @@ mod tests {
                 .build()
                 .expect("KafkaProducerOptionsBuilder::build: every mandatory parameter is set above"),
         )
+        .unwrap()
     }
 
     /// A serializer that always fails with a caller-chosen error, so `do_send`'s
@@ -2777,6 +2801,7 @@ mod tests {
                 .build()
                 .expect("KafkaProducerOptionsBuilder::build: every mandatory parameter is set above"),
         )
+        .unwrap()
     }
 
     /// Java's only catch around the serializer call is
@@ -2822,6 +2847,111 @@ mod tests {
 
         let invoked = callback_error.lock().unwrap().take().expect("the callback must be invoked");
         assert!(invoked.is_timeout_error(), "got {invoked:?}");
+    }
+
+    /// The callback partition of a pre-append API error: Java's `catch (ApiException e)`
+    /// (`KafkaProducer.java:1049-1057`) builds its null metadata from
+    /// `AppendCallbacks.topicPartition()` (`:1613-1621`), which, before a partition is
+    /// computed, names the record's own partition when the record names one, and
+    /// `UNKNOWN_PARTITION` only otherwise. Covers a serializer failure on both
+    /// serialization paths (built-in and custom partitioner) and the metadata wait on both
+    /// `send` paths (typed and borrowed bytes), each with and without a record partition.
+    #[tokio::test]
+    async fn a_pre_append_api_error_reports_the_record_partition() {
+        use crate::common::serialization::ByteArraySerializer;
+
+        fn recording_callback(slot: &Arc<Mutex<Option<(String, i32)>>>) -> Callback {
+            let slot = Arc::clone(slot);
+            Box::new(move |metadata, error| {
+                assert!(error.is_some(), "the callback is handed the error");
+                let metadata = metadata.expect("Java passes a non-null RecordMetadata here");
+                *slot.lock().unwrap() = Some((metadata.topic().to_string(), metadata.partition()));
+            })
+        }
+
+        // A serializer API error, on the built-in partitioner's zero-copy path.
+        for (partition, expected) in [(Some(2), 2), (None, RecordMetadata::UNKNOWN_PARTITION)] {
+            let producer = create_producer_with_key_serializer(
+                create_metadata_with_topic(TOPIC, 3),
+                create_accumulator(),
+                Box::new(FailingSerializer(Error::timeout("schema registry lookup timed out"))),
+            );
+            let seen = Arc::new(Mutex::new(None));
+            let record =
+                ProducerRecord::with_partition_key(TOPIC.to_string(), partition, Some("k".to_string()), None).unwrap();
+            let future = producer
+                .send_with_callback(record, Some(recording_callback(&seen)))
+                .await
+                .expect("an API error comes back as a failed future");
+            assert!(future.get().await.unwrap_err().is_timeout_error());
+            assert_eq!(seen.lock().unwrap().take(), Some((TOPIC.to_string(), expected)));
+        }
+
+        // The same on the custom partitioner's borrowing path.
+        for (partition, expected) in [(Some(2), 2), (None, RecordMetadata::UNKNOWN_PARTITION)] {
+            let producer: KafkaProducer<String, String> = KafkaProducer::with_options(
+                KafkaProducerOptionsBuilder::new()
+                    .set_config(&ProducerConfig::default())
+                    .set_key_serializer(Box::new(FailingSerializer(Error::timeout("schema registry lookup timed out"))))
+                    .set_value_serializer(Box::new(StringSerializer))
+                    .set_metadata(create_metadata_with_topic(TOPIC, 3))
+                    .set_accumulator(create_accumulator())
+                    .set_time(default_time())
+                    .set_pending_requests(Arc::new(Mutex::new(PendingRequests::new())))
+                    .set_partitioner(Some(Box::new(RoundRobinPartitioner::new())))
+                    .build()
+                    .expect("KafkaProducerOptionsBuilder::build: every mandatory parameter is set above"),
+            )
+            .unwrap();
+            let seen = Arc::new(Mutex::new(None));
+            let record =
+                ProducerRecord::with_partition_key(TOPIC.to_string(), partition, Some("k".to_string()), None).unwrap();
+            let future = producer
+                .send_with_callback(record, Some(recording_callback(&seen)))
+                .await
+                .expect("an API error comes back as a failed future");
+            assert!(future.get().await.unwrap_err().is_timeout_error());
+            assert_eq!(seen.lock().unwrap().take(), Some((TOPIC.to_string(), expected)));
+        }
+
+        // A metadata-wait timeout: the record names a partition the topic does not have,
+        // and `max.block.ms = 0` fails the wait at once.
+        let config = || ProducerConfig { max_block_ms: 0, ..Default::default() };
+        let producer =
+            create_producer_with_config(config(), create_metadata_with_topic(TOPIC, 1), create_accumulator());
+        let seen = Arc::new(Mutex::new(None));
+        let record =
+            ProducerRecord::with_partition_key(TOPIC.to_string(), Some(5), None, Some("v".to_string())).unwrap();
+        let future = producer
+            .send_with_callback(record, Some(recording_callback(&seen)))
+            .await
+            .expect("a metadata timeout comes back as a failed future");
+        assert!(future.get().await.unwrap_err().is_timeout_error());
+        assert_eq!(seen.lock().unwrap().take(), Some((TOPIC.to_string(), 5)));
+
+        // The same on the borrowed byte-slice `send`.
+        let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::with_options(
+            KafkaProducerOptionsBuilder::new()
+                .set_config(&config())
+                .set_key_serializer(Box::new(ByteArraySerializer))
+                .set_value_serializer(Box::new(ByteArraySerializer))
+                .set_metadata(create_metadata_with_topic(TOPIC, 1))
+                .set_accumulator(create_accumulator())
+                .set_time(default_time())
+                .set_pending_requests(Arc::new(Mutex::new(PendingRequests::new())))
+                .build()
+                .expect("KafkaProducerOptionsBuilder::build: every mandatory parameter is set above"),
+        )
+        .unwrap();
+        let seen = Arc::new(Mutex::new(None));
+        let record =
+            ProducerRecord::with_partition_key(TOPIC.to_string(), Some(5), None, Some(b"v".as_slice())).unwrap();
+        let future = producer
+            .send(record, Some(recording_callback(&seen)))
+            .await
+            .expect("a metadata timeout comes back as a failed future");
+        assert!(future.get().await.unwrap_err().is_timeout_error());
+        assert_eq!(seen.lock().unwrap().take(), Some((TOPIC.to_string(), 5)));
     }
 
     /// The other half of the same dispatch: a `SerializationException` — which
@@ -3666,6 +3796,7 @@ mod tests {
                 .build()
                 .expect("KafkaProducerOptionsBuilder::build: every mandatory parameter is set above"),
         )
+        .unwrap()
     }
 
     /// Translated from `KafkaProducerTest.testPartitionerClose` (`:667-686`).
@@ -4468,6 +4599,64 @@ mod tests {
         let result = producer.send(record).await;
         assert!(result.is_ok(), "Send with headers should succeed");
         assert!(accumulator.has_undrained(), "Accumulator should have batches");
+        assert_eq!(
+            accumulator.record_headers_for_test(&TopicPartition::new(TOPIC.to_string(), 0)),
+            vec![vec![("test".to_string(), Some(b"header-value".to_vec()))]]
+        );
+    }
+
+    /// The borrowed byte-slice `send`, the path of the C FFI's `send_batch` and
+    /// single-record sends (so of the C and Python `KafkaProducer`), appends the
+    /// record's headers as Java's `doSend` does (`KafkaProducer.java:1020`,
+    /// `:1029-1030`), in order, with an empty and a null value kept apart. It
+    /// used to append none.
+    #[tokio::test]
+    async fn test_borrowed_send_appends_the_record_headers() {
+        use crate::common::header::Headers;
+        use crate::common::header::RecordHeaders;
+        use crate::common::serialization::ByteArraySerializer;
+
+        let metadata = create_metadata_with_topic(TOPIC, 1);
+        let accumulator = create_accumulator();
+        let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::with_options(
+            KafkaProducerOptionsBuilder::new()
+                .set_config(&ProducerConfig::default())
+                .set_key_serializer(Box::new(ByteArraySerializer))
+                .set_value_serializer(Box::new(ByteArraySerializer))
+                .set_metadata(metadata)
+                .set_accumulator(Arc::clone(&accumulator))
+                .set_time(default_time())
+                .set_pending_requests(Arc::new(Mutex::new(PendingRequests::new())))
+                .build()
+                .expect("KafkaProducerOptionsBuilder::build: every mandatory parameter is set above"),
+        )
+        .unwrap();
+
+        let mut headers = RecordHeaders::new();
+        headers.add_with_key_value("trace", Some(b"abc")).unwrap();
+        headers.add_with_key_value("empty", Some(b"")).unwrap();
+        headers.add_with_key_value("null", None).unwrap();
+        let record = ProducerRecord::with_partition_key_headers(
+            TOPIC.to_string(),
+            Some(0),
+            Some(b"key".as_slice()),
+            Some(b"value".as_slice()),
+            headers,
+        )
+        .unwrap();
+
+        producer
+            .send(record, None)
+            .await
+            .expect("the borrowed send should append the record");
+        assert_eq!(
+            accumulator.record_headers_for_test(&TopicPartition::new(TOPIC.to_string(), 0)),
+            vec![vec![
+                ("trace".to_string(), Some(b"abc".to_vec())),
+                ("empty".to_string(), Some(Vec::new())),
+                ("null".to_string(), None),
+            ]]
+        );
     }
 
     /// Translated from `KafkaProducerTest.testFlushCompleteSendOfInflightBatches`.
@@ -4775,7 +4964,8 @@ mod tests {
                     .set_pending_requests(Arc::new(Mutex::new(PendingRequests::new())))
                     .build()
                     .expect("KafkaProducerOptionsBuilder::build: every mandatory parameter is set above"),
-            );
+            )
+            .unwrap();
             let cluster = metadata.fetch();
 
             // Warm up: create the topic info, the deque and the batch.
@@ -4857,7 +5047,8 @@ mod tests {
                     .set_partitioner(partitioner)
                     .build()
                     .expect("KafkaProducerOptionsBuilder::build: every mandatory parameter is set above"),
-            );
+            )
+            .unwrap();
             let cluster = metadata.fetch();
 
             // Warm up: create the topic info, the deque and the batch, and (for the
@@ -5092,7 +5283,8 @@ mod tests {
                     .set_pending_requests(pending_requests)
                     .build()
                     .expect("KafkaProducerOptionsBuilder::build: every mandatory parameter is set above"),
-            );
+            )
+            .unwrap();
 
             Self { producer, sender, accumulator, metadata, transaction_manager, time }
         }
@@ -6722,6 +6914,7 @@ mod tests {
                 .build()
                 .expect("KafkaProducerOptionsBuilder::build: every mandatory parameter is set above"),
         )
+        .unwrap()
     }
 
     /// The body all three `testCloseIsForcedOn*` methods share: start

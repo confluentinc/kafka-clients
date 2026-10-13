@@ -356,7 +356,7 @@ impl ClientUtils {
     /// ([`DefaultHostResolver::EMPTY_HOST_ADDRESS`]), as `InetAddress` does,
     /// and the bootstrap entry is keyed by its name
     /// ([`DefaultHostResolver::EMPTY_HOST_NAME`]).
-    fn parse_host_port(address: &str) -> Option<(&str, &str)> {
+    pub(crate) fn parse_host_port(address: &str) -> Option<(&str, &str)> {
         let is_scheme_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '%' | '.' | '_');
         let is_host_char = |c: char| is_scheme_char(c) || c == ':';
 
