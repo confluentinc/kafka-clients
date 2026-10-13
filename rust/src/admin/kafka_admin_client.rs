@@ -136,6 +136,7 @@ use super::internals::ListOffsetsHandler;
 use super::internals::ListTransactionsHandler;
 use super::internals::PartitionLeaderCache;
 use super::internals::RemoveMembersFromConsumerGroupHandler;
+use super::internals::admin_client_runnable::enqueue_within_max_retries;
 use super::internals::{AdminApiDriver, RequestSpec};
 use super::internals::{AdminClientRunnable, ShutdownSignal};
 use super::internals::{Call, HandleResult, MaybeRetryOutcome, NodeProvider};
@@ -238,6 +239,9 @@ struct Shared {
     /// passed to the driver in `invokeDriver`).
     retry_backoff_ms: i64,
     retry_backoff_max_ms: i64,
+    /// The `retries` config (Java's `KafkaAdminClient.maxRetries`), checked by
+    /// [`runnable_call`] as `AdminClientRunnable.enqueue` checks it.
+    max_retries: i32,
     /// Cache of partition-to-leader mappings shared across driver-backed calls
     /// (`deleteRecords`), mirroring `KafkaAdminClient.partitionLeaderCache`.
     partition_leader_cache: Arc<PartitionLeaderCache>,
@@ -447,6 +451,7 @@ impl KafkaAdminClient {
             bg_handle: Mutex::new(None),
             retry_backoff_ms: config.retry_backoff_ms(),
             retry_backoff_max_ms: config.retry_backoff_max_ms(),
+            max_retries: config.retries(),
             partition_leader_cache: Arc::new(PartitionLeaderCache::new()),
             log_context,
         };
@@ -472,6 +477,8 @@ impl KafkaAdminClient {
             self.shared.metadata_manager.using_bootstrap_controllers(),
             &self.retry_backoff(),
             self.now(),
+            self.shared.max_retries,
+            &self.shared.log_context,
             call,
         );
     }
@@ -714,6 +721,7 @@ impl KafkaAdminClient {
             shutdown: Arc::clone(&self.shared.shutdown),
             using_bootstrap_controllers: self.shared.metadata_manager.using_bootstrap_controllers(),
             retry_backoff: self.retry_backoff(),
+            max_retries: self.shared.max_retries,
             time: Arc::clone(&self.shared.time),
             log_context: LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id)),
         }
@@ -988,6 +996,9 @@ struct DriverContext {
     /// The client's retry backoff, which Java's `call.fail` advances when the
     /// gate rejects a call (it shows in the timeout message).
     retry_backoff: ExponentialBackoff,
+    /// The `retries` config: a driver follow-up carries its spec's `tries`, so
+    /// [`runnable_call`] fails it once they exceed this, as Java's `enqueue` does.
+    max_retries: i32,
     time: Arc<dyn Time>,
     log_context: LogContext,
 }
@@ -1003,6 +1014,8 @@ impl DriverContext {
             self.using_bootstrap_controllers,
             &self.retry_backoff,
             self.time.milliseconds(),
+            self.max_retries,
+            &self.log_context,
             call,
         );
     }
@@ -1031,11 +1044,16 @@ impl DriverContext {
 ///    serve (`:1602-1605`).
 ///    Like Java's `call.fail(now, ..)`, a call whose deadline has already
 ///    passed gets a `TimeoutException` caused by the rejection.
-/// 3. Otherwise hand it to the I/O task and wake the task's poll
+/// 3. Fail a call whose `tries` exceed `retries` with
+///    `TimeoutException("Exceeded maxRetries after <tries> tries.")`
+///    (`enqueue`, `:1563-1568`; [`enqueue_within_max_retries`]). Only driver
+///    follow-ups reach this with `tries > 0`: each carries its spec's `tries`.
+/// 4. Otherwise hand it to the I/O task and wake the task's poll
 ///    (`client.wakeup()`, `:1582`). If the task has stopped accepting calls —
 ///    its receiver is closed (the `finally`'s `closing = true`) or gone — fail it
 ///    with
 ///    `TimeoutException("The AdminClient thread has exited.")` (`:1585-1586`).
+#[expect(clippy::too_many_arguments)]
 fn runnable_call(
     tx: &mpsc::UnboundedSender<Call>,
     wakeup: &Notify,
@@ -1043,10 +1061,15 @@ fn runnable_call(
     using_bootstrap_controllers: bool,
     retry_backoff: &ExponentialBackoff,
     now: i64,
+    max_retries: i32,
+    log_context: &LogContext,
     call: Call,
 ) {
-    // Steps 1 and 2, shared with the runnable's own follow-ups.
-    let Some(call) = shutdown.admit_new_call(using_bootstrap_controllers, retry_backoff, now, call) else {
+    // Steps 1 to 3, shared with the runnable's own follow-ups.
+    let Some(call) = shutdown
+        .admit_new_call(using_bootstrap_controllers, retry_backoff, now, call)
+        .and_then(|call| enqueue_within_max_retries(max_retries, log_context, call))
+    else {
         return;
     };
     match tx.send(call) {
@@ -5532,7 +5555,7 @@ mod tests {
     use crate::admin::mock_admin_client;
     use crate::common::utils::MockTime;
     use std::collections::{HashMap, HashSet};
-    use std::sync::atomic::{AtomicI64, Ordering};
+    use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
     use crate::CreatePartitionsResponseData;
     use crate::CreateTopicsResponseData;
@@ -8986,6 +9009,53 @@ mod tests {
         assert_eq!(future.get().await.unwrap(), expected);
     }
 
+    /// A driver call (here the `FindCoordinator` lookup of `describeTransactions`)
+    /// honours `retries`: `AdminClientRunnable.enqueue` fails a call whose
+    /// `tries` exceed `maxRetries` with `TimeoutException("Exceeded maxRetries
+    /// after " + tries + " tries.")` (`KafkaAdminClient.java:1563-1568`). With
+    /// `retries=2` and a coordinator that is never available, Java 4.3.1 sends
+    /// exactly three `FindCoordinator` requests (tries 0, 1, 2) and fails the key
+    /// when the driver offers the fourth.
+    ///
+    /// Rust-side test, no Java counterpart: it was added with this port to check
+    /// the retry bound on a coordinator lookup directly. The translated Java tests
+    /// (`testListOffsetsHandlesFulfillmentTimeouts` and the `*NumRetries` tests)
+    /// cover the same bound through other APIs.
+    #[tokio::test]
+    async fn test_driver_lookup_retries_are_bounded_by_max_retries() {
+        let (admin, mut runnable, time, _nodes) = env_with_props(&[("retries", "2"), ("retry.backoff.ms", "10")]);
+        let find_coordinator_requests = Arc::new(AtomicUsize::new(0));
+        // More error responses than Java consumes, so a fourth request would be
+        // answered (and counted) rather than left waiting.
+        for _ in 0..5 {
+            let counter = Arc::clone(&find_coordinator_requests);
+            runnable.client_mut().prepare_response_matcher(
+                Box::new(move |body: &AbstractRequest| {
+                    let is_find_coordinator = matches!(body, AbstractRequest::FindCoordinator(_));
+                    if is_find_coordinator {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                    }
+                    is_find_coordinator
+                }),
+                find_coordinator_error_resp("foo", Errors::CoordinatorNotAvailable),
+            );
+        }
+
+        let result = admin.describe_transactions_with_options(&["foo".to_string()], DescribeTransactionsOptions::new());
+        let future = result.description("foo").unwrap();
+        drive_until(&mut runnable, &time, 200, || future.is_done()).await;
+
+        assert!(
+            future.is_done(),
+            "the lookup must fail once out of retries; {} FindCoordinator requests were sent",
+            find_coordinator_requests.load(Ordering::SeqCst)
+        );
+        let err = future.get().await.expect_err("the lookup runs out of retries");
+        assert!(matches!(err, Error::Timeout(_)), "got {err:?}");
+        assert_eq!(err.message(), "Exceeded maxRetries after 3 tries.");
+        assert_eq!(find_coordinator_requests.load(Ordering::SeqCst), 3);
+    }
+
     /// Mirrors `KafkaAdminClientTest.testFenceProducers`.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testFenceProducers")]
@@ -9684,6 +9754,7 @@ mod tests {
             shutdown: Arc::new(ShutdownSignal::new()),
             using_bootstrap_controllers: false,
             retry_backoff: test_retry_backoff(),
+            max_retries: i32::MAX,
             time: mock_time(now),
             log_context: LogContext::new("[test] "),
         };
@@ -9726,6 +9797,7 @@ mod tests {
             shutdown: Arc::new(ShutdownSignal::new()),
             using_bootstrap_controllers: false,
             retry_backoff: test_retry_backoff(),
+            max_retries: i32::MAX,
             time: mock_time(now),
             log_context: LogContext::new("[test] "),
         };
@@ -11448,6 +11520,89 @@ mod tests {
         assert!(result.all().get().await.is_err());
     }
 
+    /// Translated from `testListOffsetsHandlesFulfillmentTimeouts`: a partition
+    /// whose `ListOffsets` keeps answering `REQUEST_TIMED_OUT` is retried until
+    /// its fulfillment `tries` exceed `retries`, when `AdminClientRunnable.enqueue`
+    /// fails it with `TimeoutException("Exceeded maxRetries after " + tries +
+    /// " tries.")` (`KafkaAdminClient.java:1563-1568`), while the partition that
+    /// succeeded keeps its result. One timeout fewer lets both partitions succeed.
+    ///
+    /// Java asserts only the exception class; the message is asserted here as
+    /// well, so the failure cannot be the API timeout's.
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListOffsetsHandlesFulfillmentTimeouts")]
+    async fn test_list_offsets_handles_fulfillment_timeouts() {
+        let num_retries: i32 = 2;
+        let (admin, mut runnable, time, nodes) = env_nodes_with_props(1, &[("retries", &num_retries.to_string())]);
+        let node = nodes[0].clone();
+        let tp0 = TopicPartition::new("foo", 0);
+        let tp1 = TopicPartition::new("foo", 1);
+        let metadata = || metadata_resp(&nodes, vec![topic_meta_leaders("foo", &[(0, 0), (1, 0)])]);
+        let is_list_offsets: fn() -> crate::RequestMatcher =
+            || Box::new(|body: &AbstractRequest| matches!(body, AbstractRequest::ListOffsets(_)));
+        let response_with_error = || {
+            list_offsets_resp_from(&[
+                (tp0.clone(), Errors::RequestTimedOut, -1, -1, -1),
+                (tp1.clone(), Errors::None, -1, 345, 543),
+            ])
+        };
+        let response = || {
+            list_offsets_resp_from(&[
+                (tp0.clone(), Errors::None, -1, 789, 987),
+                (tp1.clone(), Errors::None, -1, 345, 543),
+            ])
+        };
+        let partitions = HashMap::from([(tp0.clone(), OffsetSpec::latest()), (tp1.clone(), OffsetSpec::latest())]);
+
+        // Test that one-too-many timeouts for partition 0 result in partial success overall -
+        // timeout for partition 0 and success for partition 1.
+
+        // It might be desirable to have the AdminApiDriver mechanism also handle all retriable
+        // exceptions like TimeoutException during the lookup stage (it currently doesn't).
+        runnable.client_mut().prepare_response(metadata());
+        for _ in 0..num_retries + 1 {
+            runnable
+                .client_mut()
+                .prepare_response_from_matcher(is_list_offsets(), response_with_error(), &node);
+        }
+        let result = admin.list_offsets(&partitions);
+        let tp0_future = result.partition_result(&tp0).unwrap();
+        let tp1_future = result.partition_result(&tp1).unwrap();
+        drive_until(&mut runnable, &time, 100, || tp0_future.is_done() && tp1_future.is_done()).await;
+        assert!(tp0_future.is_done(), "partition 0 must fail once out of retries");
+        let err = tp0_future.get().await.expect_err("partition 0 runs out of retries");
+        assert!(matches!(err, Error::Timeout(_)), "got {err:?}");
+        assert_eq!(err.message(), "Exceeded maxRetries after 3 tries.");
+        let tp1_result = tp1_future.get().await.unwrap();
+        assert_eq!(tp1_result.offset(), 345);
+        assert_eq!(tp1_result.leader_epoch(), Some(543));
+        assert_eq!(tp1_result.timestamp(), -1);
+
+        // Now test that only numRetries timeouts for partition 0 result in success for both
+        // partition 0 and partition 1.
+        runnable.client_mut().prepare_response(metadata());
+        for _ in 0..num_retries {
+            runnable
+                .client_mut()
+                .prepare_response_from_matcher(is_list_offsets(), response_with_error(), &node);
+        }
+        runnable
+            .client_mut()
+            .prepare_response_from_matcher(is_list_offsets(), response(), &node);
+        let result = admin.list_offsets(&partitions);
+        let tp0_future = result.partition_result(&tp0).unwrap();
+        let tp1_future = result.partition_result(&tp1).unwrap();
+        drive_until(&mut runnable, &time, 100, || tp0_future.is_done() && tp1_future.is_done()).await;
+        let tp0_result = tp0_future.get().await.unwrap();
+        assert_eq!(tp0_result.offset(), 789);
+        assert_eq!(tp0_result.leader_epoch(), Some(987));
+        assert_eq!(tp0_result.timestamp(), -1);
+        let tp1_result = tp1_future.get().await.unwrap();
+        assert_eq!(tp1_result.offset(), 345);
+        assert_eq!(tp1_result.leader_epoch(), Some(543));
+        assert_eq!(tp1_result.timestamp(), -1);
+    }
+
     /// KAFKA-20673. Reproduces the scenario where the partition-leader cache
     /// holds an entry pointing at a broker that has since left the cluster (for
     /// example after a broker is recycled with a new id). The cached leader
@@ -12183,6 +12338,31 @@ mod tests {
         assert_eq!(coordinator, &nodes[0]);
     }
 
+    /// Translated from `testDescribeConsumerGroupNumRetries`: with `retries=0`,
+    /// the re-lookup a `NOT_COORDINATOR` describe triggers exceeds the retry
+    /// budget. As in Java the describe response is a classic `DescribeGroups`
+    /// one, prepared without a node or matcher, so it answers whichever describe
+    /// request goes out first.
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeConsumerGroupNumRetries")]
+    async fn test_describe_consumer_group_num_retries() {
+        let (admin, mut runnable, time, nodes) = env_nodes_with_props(3, &[("retries", "0")]);
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+        runnable
+            .client_mut()
+            .prepare_response(describe_groups_error_resp(GROUP_ID, Errors::NotCoordinator, None));
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+
+        let result = admin.describe_consumer_groups(&[GROUP_ID.to_string()]);
+        let all = result.all();
+        drive_until(&mut runnable, &time, 100, || all.is_done()).await;
+        assert_exceeded_max_retries_after_one_try(&all).await;
+    }
+
     /// A `describe_consumer_groups` on a nonexistent group id surfaces
     /// `GROUP_ID_NOT_FOUND` after the classic fallback also reports it, keeping
     /// the more-informative `ConsumerGroupDescribe` message.
@@ -12681,6 +12861,29 @@ mod tests {
         assert_eq!(offsets.get(&tp3).unwrap(), &None);
     }
 
+    /// Translated from `testListConsumerGroupOffsetsNumRetries`: with
+    /// `retries=0`, the re-lookup a `NOT_COORDINATOR` fetch triggers exceeds the
+    /// retry budget.
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListConsumerGroupOffsetsNumRetries")]
+    async fn test_list_consumer_group_offsets_num_retries() {
+        let (admin, mut runnable, time, nodes) = env_nodes_with_props(3, &[("retries", "0")]);
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+        runnable
+            .client_mut()
+            .prepare_response(offset_fetch_group_error(GROUP_ID, Errors::NotCoordinator));
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+
+        let result = admin.list_consumer_group_offsets_with_group_id(GROUP_ID);
+        let future = result.partitions_to_offset_and_metadata().unwrap();
+        drive_until(&mut runnable, &time, 100, || future.is_done()).await;
+        assert_exceeded_max_retries_after_one_try(&future).await;
+    }
+
     /// Translated from `testListConsumerGroupOffsetsNonRetriableErrors`.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListConsumerGroupOffsetsNonRetriableErrors")]
@@ -12944,6 +13147,45 @@ mod tests {
         ));
     }
 
+    /// The failure Java's `AdminClientRunnable.enqueue` gives a coordinator
+    /// re-lookup once `retries=0` is used up (`KafkaAdminClient.java:1563-1568`):
+    /// the second `FindCoordinator` carries `tries == 1`. The `*NumRetries` tests
+    /// assert only `TimeoutException.class`; the message is asserted as well, so
+    /// the failure cannot be the API timeout's. The future must already be done:
+    /// awaiting a pending one would hang the test rather than fail it.
+    async fn assert_exceeded_max_retries_after_one_try<T: Send + 'static>(future: &KafkaFuture<T>) {
+        assert!(future.is_done(), "the coordinator re-lookup must fail once out of retries");
+        let Err(err) = future.get().await else {
+            panic!("the coordinator re-lookup must fail once out of retries");
+        };
+        assert!(matches!(err, Error::Timeout(_)), "got {err:?}");
+        assert_eq!(err.message(), "Exceeded maxRetries after 1 tries.");
+    }
+
+    /// Translated from `testOffsetCommitNumRetries`: with `retries=0`, the
+    /// re-lookup a `NOT_COORDINATOR` commit triggers exceeds the retry budget.
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testOffsetCommitNumRetries")]
+    async fn test_offset_commit_num_retries() {
+        let (admin, mut runnable, time, nodes) = env_nodes_with_props(3, &[("retries", "0")]);
+        let tp1 = TopicPartition::new("foo", 0);
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+        runnable
+            .client_mut()
+            .prepare_response(offset_commit_resp(&[(tp1.clone(), Errors::NotCoordinator)]));
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+
+        let offsets = HashMap::from([(tp1.clone(), OffsetAndMetadata::new(123).unwrap())]);
+        let result = admin.alter_consumer_group_offsets(GROUP_ID, &offsets);
+        let all = result.all();
+        drive_until(&mut runnable, &time, 100, || all.is_done()).await;
+        assert_exceeded_max_retries_after_one_try(&all).await;
+    }
+
     /// Translated from `testOffsetCommitWithMultipleErrors`.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testOffsetCommitWithMultipleErrors")]
@@ -13145,6 +13387,30 @@ mod tests {
             result.partition_result(&tp1).unwrap().get().await.unwrap_err().error(),
             Errors::GroupAuthorizationFailed
         );
+    }
+
+    /// Translated from `testDeleteConsumerGroupOffsetsNumRetries`: with
+    /// `retries=0`, the re-lookup a `NOT_COORDINATOR` deletion triggers exceeds
+    /// the retry budget.
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDeleteConsumerGroupOffsetsNumRetries")]
+    async fn test_delete_consumer_group_offsets_num_retries() {
+        let (admin, mut runnable, time, nodes) = env_nodes_with_props(3, &[("retries", "0")]);
+        let tp1 = TopicPartition::new("foo", 0);
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+        runnable
+            .client_mut()
+            .prepare_response(offset_delete_top_level(Errors::NotCoordinator));
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+
+        let result = admin.delete_consumer_group_offsets(GROUP_ID, &HashSet::from([tp1.clone()]));
+        let all = result.all();
+        drive_until(&mut runnable, &time, 100, || all.is_done()).await;
+        assert_exceeded_max_retries_after_one_try(&all).await;
     }
 
     /// Translated from `testDeleteConsumerGroupOffsetsRetriableErrors`: retriable

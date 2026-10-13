@@ -23,7 +23,7 @@ pub(crate) mod admin_api_driver;
 pub(crate) mod admin_api_future;
 pub(crate) mod admin_api_handler;
 pub(crate) mod admin_api_lookup_strategy;
-mod admin_client_runnable;
+pub(crate) mod admin_client_runnable;
 mod admin_metadata_manager;
 mod admin_utils;
 pub(crate) mod all_brokers_strategy;
