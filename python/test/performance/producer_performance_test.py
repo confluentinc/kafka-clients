@@ -1,11 +1,11 @@
 import asyncio
 import datetime
+import json
 import os
 import sys
 import time
 import random
 import signal
-import queue
 import gc
 from threading import Thread
 
@@ -54,7 +54,6 @@ verified = 0
 warmup_sent = 0
 measured_sent = 0
 baseline_end_offsets = None  # {partition: offset}; set by main() pre-produce, None = not captured
-message_size = key_size + value_size
 topic_name = os.getenv("TOPIC_NAME", "test-topic")
 limit_rps = os.getenv("LIMIT_RPS", None)
 verify_consumed = os.getenv("VERIFY_CONSUMED", "False") == "True"
@@ -62,8 +61,18 @@ if 'KEY_SIZE' in os.environ:
     key_size = int(os.environ['KEY_SIZE'])
 if 'VALUE_SIZE' in os.environ:
     value_size = int(os.environ['VALUE_SIZE'])
+# Computed AFTER the KEY_SIZE/VALUE_SIZE env overrides: message_size feeds the
+# bytes-per-message metrics and the MiB/s summary, so computing it from the
+# defaults inflated (e.g.) a VALUE_SIZE=1024 run's byte rate by 2x.
+message_size = key_size + value_size
 if limit_rps is not None:
     limit_rps = int(limit_rps)
+    # LIMIT_RPS <= 0 means unbounded (max rate), matching the Rust/C/Java perf
+    # tests which treat 0 as "no rate limit". Normalize to None so the
+    # unbounded/time-based path is taken (message_generator requires a positive
+    # limit, and num_messages must not be forced to 0).
+    if limit_rps <= 0:
+        limit_rps = None
 v2 = os.getenv("CLIENT_VERSION", "3") == "2"
 # The two backends are different packages sharing the top-level import name
 # ``confluent_kafka``, so each runs in its own venv (see librdkafka_helpers):
@@ -98,6 +107,8 @@ else:
 
 # p99 latency budget (ms); 0 disables the assertion. Matches C/Rust/Java.
 p99_limit_ms = int(os.getenv("P99_LIMIT_MS", "0"))
+# Machine-readable summary file, matching the other producer perf tests.
+results_file = os.getenv("RESULTS_FILE", "results.json")
 # Seconds to keep collecting metrics after the measured interval, so the
 # cooldown is captured in metrics.jsonl (but excluded from the averages).
 POST_TEST_AWAIT_SECONDS = 10
@@ -108,6 +119,10 @@ POST_TEST_AWAIT_SECONDS = 10
 latency_hist = [0] * (MAX_LATENCY_MS + 2)
 # Set True when P99_LIMIT_MS > 0 and the measured p99 exceeds it.
 latency_budget_exceeded = False
+# Set True when the run must exit non-zero: results.json could not be written,
+# the warmup failed, or (unless terminated by a signal) the verified / completed
+# counts do not match the completed / requested counts.
+run_failed = False
 
 
 def _is_queue_full(exc):
@@ -153,10 +168,27 @@ class CompatibleProducer:
     def __init__(self, configuration):
         self._producer = CKProducer(configuration)
         self._closed = False
+        # PERF_DEBUG_TIMING=1: sampled produce() timing + per-second poll-thread
+        # accounting (poll() returns the number of served callbacks, so the
+        # aggregate is the delivery-report drain rate).
+        self._debug_timing = os.getenv("PERF_DEBUG_TIMING") == "1"
+        self._send_seq = 0
 
         def poll_producer():
+            served = 0
+            polls = 0
+            window_start = time.monotonic()
             while not self._closed:
-                self._producer.poll(1.0)
+                served += self._producer.poll(1.0)
+                polls += 1
+                if self._debug_timing:
+                    now = time.monotonic()
+                    if now - window_start >= 1.0:
+                        print(f"[TIMING][PY] tag=v2.poll_window served={served} polls={polls} "
+                              f"window_s={now - window_start:.3f}", file=sys.stderr)
+                        served = 0
+                        polls = 0
+                        window_start = now
         self._thread = Thread(target=poll_producer)
         self._thread.start()
 
@@ -166,14 +198,28 @@ class CompatibleProducer:
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
 
-    def send(self, *, record):
+    def send(self, *, record, callback=None):
         fut = Future()
 
         def delivery_report(err, msg):
+            # Fires on the single poll thread at the broker ack. Stamp latency
+            # here via callback — mirroring the Rust binding's
+            # callback(metadata, exception) — so both backends record at the
+            # delivery callback, not in a recorder that reads the clock later.
             if err is not None:
-                fut.set_exception(Exception(err))
+                exc = Exception(err)
+                fut.set_exception(exc)
+                if callback is not None:
+                    callback(None, exc)
             else:
                 fut.set_result(msg)
+                if callback is not None:
+                    callback(msg, None)
+
+        self._send_seq += 1
+        sample = self._debug_timing and self._send_seq % 512 == 0
+        t0 = time.perf_counter_ns() if sample else 0
+        retries = 0
         while not terminating:
             try:
                 self._producer.produce(
@@ -184,8 +230,22 @@ class CompatibleProducer:
                 )
                 break
             except BufferError:
+                retries += 1
                 time.sleep(0.001)
+        if sample:
+            print(f"[TIMING][PY] tag=v2.produce seq={self._send_seq} "
+                  f"dur_ns={time.perf_counter_ns() - t0} buffer_full_retries={retries}",
+                  file=sys.stderr)
         return fut
+
+    def flush(self):
+        # Stop the poll thread first so delivery callbacks fire only on the
+        # caller's thread during the flush — preserving the single-writer
+        # invariant the recorder relies on — then drive all pending deliveries.
+        if not self._closed:
+            self._closed = True
+            self._thread.join()
+        self._producer.flush()
 
     def close(self):
         self._closed = True
@@ -226,12 +286,20 @@ class AsyncCompatibleProducer:
 
     async def send(self, *, record):
         # AIOProducer.produce is a coroutine that returns the delivery future;
-        # the recorder task awaits that future for the Message.
+        # async_main adds a done-callback to it that records latency at the ack.
         return await self._producer.produce(
             topic=record.topic,
             key=record.key,
             value=record.value,
         )
+
+    async def flush(self):
+        # AIOProducer exposes an async flush(); if a given version doesn't, the
+        # caller's drain-wait still catches stragglers via the poll task.
+        try:
+            await self._producer.flush()
+        except AttributeError:
+            pass
 
     async def close(self):
         self._closed = True
@@ -371,6 +439,15 @@ def v3_producer(common_default_configuration):
     conf = {k: str(v) for k, v in conf.items()}
     return KafkaProducer(configs=conf)
 
+def _maybe_enable_lrk_stats(conf, label):
+    # PERF_LRK_STATS=1: librdkafka statistics JSON every 10s (per-broker rtt /
+    # int_latency / outbuf_latency, per-partition msgq) for stage debugging.
+    if os.getenv("PERF_LRK_STATS") == "1":
+        conf['statistics.interval.ms'] = 10000
+        conf['stats_cb'] = lambda js: print(f"[STATS-PY-{label}] {js}", file=sys.stderr)
+    return conf
+
+
 def v2_producer(common_default_configuration):
     conf = configuration_from_env(common_default_configuration, v2=True)
     # Match the v3 Rust client's default partitioner so end-of-run partition
@@ -380,9 +457,11 @@ def v2_producer(common_default_configuration):
     # consistent_random is already librdkafka's own default, this is explicit
     # but redundant (and it is skipped under USE_DEFAULTS, where librdkafka's
     # default already applies).
-    if not use_defaults:
+    # SKIP_PARTITIONER_OVERRIDE=1 drops the override (A/B knob).
+    if not use_defaults and os.getenv("SKIP_PARTITIONER_OVERRIDE", "0") != "1":
         conf['partitioner'] = 'consistent_random'
     print_configuration(conf)
+    _maybe_enable_lrk_stats(conf, "sync")
     return CompatibleProducer(conf)
 
 
@@ -396,6 +475,7 @@ def v3_async_producer(common_default_configuration):
 def v2_async_producer(common_default_configuration):
     conf = configuration_from_env(common_default_configuration, v2=True)
     print_configuration(conf)
+    _maybe_enable_lrk_stats(conf, "async")
     return AsyncCompatibleProducer(conf)
 
 
@@ -432,32 +512,111 @@ def print_measurement_summary(completed_messages, total_latency_ms,
 
     print(
         "Average time: "
-        f"{total_time_ms / completed_messages:.2f} ms")
+        f"{total_time_ms / completed_messages if completed_messages > 0 else 0.0:.2f} ms")
     print(
         "Average rate msg/s: "
         f"{message_rate:.2f} msg/s")
+    mib_rate = (completed_messages * message_size) / (1024.0 * 1024.0) / total_time_s \
+        if total_time_s > 0 else 0.0
     print(
         "Average rate MiB/s: "
-        f"{(completed_messages * message_size) / (1024.0 * 1024.0) / total_time_s:.2f} MiB/s")  # noqa: E501
+        f"{mib_rate:.2f} MiB/s")
     print(
         "Average latency: "
-        f"{total_latency_ms / completed_messages:.2f} ms")
+        f"{total_latency_ms / completed_messages if completed_messages > 0 else 0.0:.2f} ms")
     print("Max latency: "
           f"{max_latency_ms:.2f} ms")
     # Percentiles from the cumulative measured-interval histogram, matching the
     # C/Rust/Java perf tests.
     p50 = percentile_from_hist(latency_hist, 0.50)
     p90 = percentile_from_hist(latency_hist, 0.90)
+    p95 = percentile_from_hist(latency_hist, 0.95)
     p99 = percentile_from_hist(latency_hist, 0.99)
     p999 = percentile_from_hist(latency_hist, 0.999)
     print(f"p50 latency: {p50} ms")
     print(f"p90 latency: {p90} ms")
     print(f"p99 latency: {p99} ms")
     print(f"p999 latency: {p999} ms")
+
+    # Machine-readable summary, kept in sync with the other producer perf
+    # tests (same file name, keys and latency_ms shape as the consumer perf
+    # test's results.json; `client` identifies which implementation wrote it).
+    min_latency_ms = next((ms for ms, c in enumerate(latency_hist) if c), 0)
+    client = ("python-librdkafka" if v2 else "python-rust") + \
+        ("-async" if run_async else "")
+    results = {
+        "test": "producer", "client": client, "topic": topic_name,
+        "messages_measured": completed_messages,
+        "duration_s": round(total_time_s, 2),
+        "throughput_msg_s": round(message_rate, 2),
+        "throughput_mib_s": round(mib_rate, 2),
+        "latency_ms": {
+            "min": min_latency_ms,
+            "avg": round(total_latency_ms / completed_messages, 2)
+            if completed_messages > 0 else 0.0,
+            "p50": p50, "p90": p90, "p95": p95, "p99": p99, "p999": p999,
+            "max": round(max_latency_ms, 2),
+        },
+        "cpu_avg_pct": round(external_metrics_aggregations.get('average_cpu', 0.0), 2)
+        if external_metrics_aggregations["total_external_metrics"] > 0 else 0.0,
+        "rss_avg_kib": round(external_metrics_aggregations.get('average_rss', 0.0) / 1024, 2)
+        if external_metrics_aggregations["total_external_metrics"] > 0 else 0.0,
+    }
+    try:
+        with open(results_file, "w") as fh:
+            json.dump(results, fh, indent=2)
+        print(f"Results summary written to: {results_file}")
+    except OSError as e:
+        # The machine-readable summary is the run's primary artifact: fail the
+        # run rather than exit 0 without it.
+        global run_failed
+        print(f"Failed to write {results_file}: {e}")
+        run_failed = True
+
     if p99_limit_ms > 0 and p99 > p99_limit_ms:
         global latency_budget_exceeded
         latency_budget_exceeded = True
         print(f"p99 latency {p99} ms exceeds budget {p99_limit_ms} ms")
+
+def pacing_wait_s(messages_sent, first_message_time):
+    """Seconds to sleep after ``messages_sent`` measured messages (<= 0 = none).
+
+    Every ``max(floor(limit_rps / 10), 1)`` messages (~100 ms of traffic) the
+    sender sleeps until ``first_message_time + messages_sent / limit_rps``. The
+    deadline is derived from the cumulative count rather than stepped by a fixed
+    100 ms per checkpoint, so rates that are not a multiple of 10 are honoured
+    exactly. Unlimited (``limit_rps`` unset) never waits."""
+    if not limit_rps:
+        return 0.0
+    checkpoint = max(limit_rps // 10, 1)
+    if messages_sent % checkpoint != 0:
+        return 0.0
+    deadline_ns = first_message_time + messages_sent * 1e9 / limit_rps
+    return (deadline_ns - time.time_ns()) / 1e9
+
+
+def fail_run():
+    """Fail the run (non-zero exit status)."""
+    global run_failed
+    run_failed = True
+
+
+def check_completion(completed_messages):
+    """Fail the run, unless it was terminated by a signal, when not every
+    completed record verified or (with a message target) not every requested
+    record completed. The summary and results.json are written regardless."""
+    if terminating:
+        return
+    if verified != completed_messages:
+        print(f"Verified messages {verified} "
+              "does not match completed messages "
+              f"{completed_messages}")
+        fail_run()
+    if num_messages > 0 and completed_messages != num_messages:
+        print(f"Completed messages {completed_messages} "
+              f"does not match produced messages {num_messages}")
+        fail_run()
+
 
 def main(v2=False):
     global producer, verified, warmup_sent, measured_sent, baseline_end_offsets
@@ -466,7 +625,6 @@ def main(v2=False):
     completed_messages = 0
     before_ms = None
     first_message_time = None
-    record_completed_calls_loop = None
 
     common_default_configuration = {
         "bootstrap.servers": "localhost:9092",
@@ -499,46 +657,40 @@ def main(v2=False):
     else:
         producer = v2_producer(common_default_configuration)
 
-    def record_completed_calls(produce_call, start_time):
+    def record_delivery(metadata, exception, start_time):
+        # Both backends record here, in their native delivery callback (v3
+        # callback / v2 delivery_report). It runs on the producer's single
+        # completion/poll thread — the single writer of the latency state — and
+        # stamps the latency at the broker ack, so a slow reader can never
+        # inflate it (matches the native rust/C perf apps).
         nonlocal max_latency_ms, total_latency_ms, completed_messages
+        # completed_messages is bumped in `finally` so every delivery counts
+        # exactly once even if the accounting below raises: an exception
+        # escaping this callback would otherwise kill the v2 poll thread (or be
+        # swallowed by the v3 bridge) and leave the drain waiting out its 30s
+        # deadline.
         try:
-            r = produce_call.result()
-            verification_function(r)
-        except Exception as e:
-            print(f"Produce call resulted in exception: {e}")
-        except CancelledError:
-            pass
-        completed_messages += 1
-        current_latency = int(time.time() * 1000) - start_time
-        metrics.latency.add_measurement(current_latency)
-        record_latency(current_latency)
-        metrics.messages.add_measurement(1)
-        metrics.bytes.add_measurement(message_size)
-        max_latency_ms = max(max_latency_ms, current_latency)
-        total_latency_ms += current_latency
-
-    def start_recording_completed_calls(produce_calls_queue):
-        nonlocal record_completed_calls_loop
-
-        def record_completed_calls_worker():
-            while record_completed_calls_loop and (num_messages == 0 or completed_messages < num_messages):
+            if exception is not None:
+                # A failed record counts as completed (in `finally`) but adds no
+                # latency or throughput, like the other producer harnesses.
+                print(f"Produce call resulted in exception: {exception}")
+                return
+            else:
                 try:
-                    produce_call, start_time = produce_calls_queue.get(
-                        timeout=1)
-                except queue.Empty:
-                    continue
-                record_completed_calls(produce_call, start_time)
-
-            while True:
-                try:
-                    produce_call, start_time = produce_calls_queue.get_nowait()
-                    record_completed_calls(produce_call, start_time)
-                except queue.Empty:
-                    break
-
-        record_completed_calls_loop = Thread(
-            target=record_completed_calls_worker)
-        record_completed_calls_loop.start()
+                    verification_function(metadata)
+                except Exception as e:
+                    print(f"Produce call resulted in exception: {e}")
+            current_latency = int(time.time() * 1000) - start_time
+            metrics.latency.add_measurement(current_latency)
+            record_latency(current_latency)
+            metrics.messages.add_measurement(1)
+            metrics.bytes.add_measurement(message_size)
+            max_latency_ms = max(max_latency_ms, current_latency)
+            total_latency_ms += current_latency
+        except Exception as e:  # noqa: BLE001
+            print(f"Delivery accounting failed: {e!r}")
+        finally:
+            completed_messages += 1
 
     try:
         with producer:
@@ -560,6 +712,7 @@ def main(v2=False):
                         warmup_sent += 1
                     except Exception:
                         print("Warmup failed due to message verification error")
+                        fail_run()
                         producer = None
                         return
                     time.sleep(0.1)
@@ -567,12 +720,14 @@ def main(v2=False):
 
             verified = 0
 
-            #max 2BG of messages in the queue
-            produce_calls = queue.Queue(maxsize=(1024**3 * 2 // message_size))
-            start_recording_completed_calls(produce_calls)
             before_ms = int(time.time() * 1000)
             first_message_time = time.time_ns()
-            next_check_time = first_message_time + 1_000_000_000
+            # Pace in ~100 ms windows: every max(floor(limit_rps / 10), 1)
+            # messages, sleep until first_message_time + messages_sent /
+            # limit_rps (see pacing_wait_s), matching the C, Rust and Java
+            # harnesses. Whole-second pacing would burst a full second's quota
+            # into the client and measure burst queueing rather than
+            # steady-state latency.
             metrics.measurement_start_ms = before_ms
             print(f"Starting measured interval at {before_ms} ms: {datetime.datetime.now(tz=datetime.timezone.utc)}")  # noqa: E501
             messages_sent = 0
@@ -589,16 +744,16 @@ def main(v2=False):
                         key=key,
                         value=value)
                     start_time = int(time.time() * 1000)
-                    produce_call = producer.send(record=next_message)
-                    produce_calls.put((produce_call, start_time))
+                    # Both backends record latency in their native delivery
+                    # callback (stamped at the broker ack), not in a recorder.
+                    producer.send(
+                        record=next_message,
+                        callback=(lambda md, exc, st=start_time:
+                                  record_delivery(md, exc, st)))
                     messages_sent += 1
-                    limit_rps_reached = limit_rps and messages_sent % limit_rps == 0
-                    if limit_rps_reached:
-                        now = time.time_ns()
-                        if now < next_check_time:
-                            time_to_wait_s = (next_check_time - now) / 1e9
-                            time.sleep(time_to_wait_s)
-                        next_check_time = next_check_time + 1_000_000_000
+                    time_to_wait_s = pacing_wait_s(messages_sent, first_message_time)
+                    if time_to_wait_s > 0:
+                        time.sleep(time_to_wait_s)
                     if messages_sent % 10000 == 0:
                         duration = time.time_ns() - first_message_time
                         exceeded_seconds = num_messages > 0 and 10 or 1
@@ -612,28 +767,23 @@ def main(v2=False):
                 if num_messages > 0:
                     continue_sending = continue_sending and messages_sent < num_messages
 
-            t, record_completed_calls_loop = record_completed_calls_loop, None
-            t.join()
+            if not terminating:
+                # Flush so the producer drives every pending delivery to
+                # completion, then wait for the delivery callbacks (which record
+                # latency/metrics) to drain. Same barrier for both backends.
+                producer.flush()
+                drain_deadline = time.time() + 30
+                while completed_messages < messages_sent and time.time() < drain_deadline:
+                    time.sleep(0.01)
             measured_sent = messages_sent
             after_ms = int(time.time() * 1000)
             after_ns = time.time_ns()
 
-            if verified != completed_messages:
-                if not terminating:
-                    print(f"Verified messages {verified} "
-                          "does not match completed messages "
-                          f"{completed_messages}")
-            elif num_messages > 0 and completed_messages != num_messages:
-                if not terminating:
-                    print(f"Completed messages {completed_messages} "
-                          f"does not match produced messages {num_messages}")
-            else:
-                print_measurement_summary(
-                    completed_messages, total_latency_ms, max_latency_ms,
-                    before_ms, after_ms, after_ns, first_message_time)
+            check_completion(completed_messages)
+            print_measurement_summary(
+                completed_messages, total_latency_ms, max_latency_ms,
+                before_ms, after_ms, after_ns, first_message_time)
     except CancelledError:
-        t, record_completed_calls_loop = record_completed_calls_loop, None
-        t.join()
         print("Main cancelled")
 
     producer = None
@@ -688,45 +838,50 @@ async def async_main():
     producer = v2_async_producer(common_default_configuration) if v2 \
         else v3_async_producer(common_default_configuration)
 
-    def record_completed_call(r, start_time):
-        nonlocal max_latency_ms, total_latency_ms, completed_messages
+    def record_delivery_async(fut, start_time):
+        # Runs on the event loop when the delivery future resolves
+        # (add_done_callback -> call_soon), stamping latency at completion so a
+        # backed-up reader can't inflate it. Single-threaded (the loop), so no
+        # lock is needed. Matches the sync path and the native rust/C apps.
+        nonlocal max_latency_ms, total_latency_ms, completed_messages, queue_full
+        # A cancelled future carries no result/exception (calling .exception()
+        # on it would raise), so treat it like any other completion below.
+        exc = None if fut.cancelled() else fut.exception()
+        # QUEUE_FULL is the one outcome kept OUT of the throughput count: those
+        # records were never sent, so they are subtracted from measured_sent
+        # instead. Don't log it — it can occur tens of thousands of times.
+        if exc is not None and _is_queue_full(exc):
+            queue_full += 1
+            return
+        # Success, a non-QUEUE_FULL error, or a cancelled future all count toward
+        # completed_messages (errors included), mirroring the sync path's
+        # record_delivery. This also makes the drain converge — every message
+        # bumps exactly one of completed_messages / queue_full — so a stray
+        # error no longer leaves the drain waiting out its full 30s deadline.
+        # Same `finally` guard as the sync record_delivery: count the delivery
+        # even if the accounting raises.
         try:
-            verification_function(r)
-        except Exception as e:
-            print(f"Produce call resulted in exception: {e}")
-        completed_messages += 1
-        current_latency = int(time.time() * 1000) - start_time
-        metrics.latency.add_measurement(current_latency)
-        record_latency(current_latency)
-        metrics.messages.add_measurement(1)
-        metrics.bytes.add_measurement(message_size)
-        max_latency_ms = max(max_latency_ms, current_latency)
-        total_latency_ms += current_latency
-
-    async def record_completed_calls_worker(produce_calls_queue):
-        # Stops on the `None` sentinel enqueued after the send loop completes.
-        nonlocal queue_full
-        while True:
-            item = await produce_calls_queue.get()
-            if item is None:
-                break
-            produce_call, start_time = item
-            try:
-                r = await produce_call
-            except CancelledError:
-                continue
-            except Exception as e:
-                # QUEUE_FULL means the message was never sent — count it (it is
-                # subtracted from measured_sent below) and don't log it (it can
-                # occur tens of thousands of times and would flood the output).
-                if _is_queue_full(e):
-                    queue_full += 1
-                else:
+            if exc is not None:
+                # Counted as completed (in `finally`), no latency or throughput.
+                print(f"Produce call resulted in exception: {exc}")
+                return
+            elif not fut.cancelled():
+                try:
+                    verification_function(fut.result())
+                except Exception as e:
                     print(f"Produce call resulted in exception: {e}")
-                continue
-            record_completed_call(r, start_time)
+            current_latency = int(time.time() * 1000) - start_time
+            metrics.latency.add_measurement(current_latency)
+            record_latency(current_latency)
+            metrics.messages.add_measurement(1)
+            metrics.bytes.add_measurement(message_size)
+            max_latency_ms = max(max_latency_ms, current_latency)
+            total_latency_ms += current_latency
+        except Exception as e:  # noqa: BLE001
+            print(f"Delivery accounting failed: {e!r}")
+        finally:
+            completed_messages += 1
 
-    record_task = None
     try:
         async with producer:
             generated_messages_len = len(generated_messages)
@@ -747,6 +902,7 @@ async def async_main():
                         warmup_sent += 1
                     except Exception:
                         print("Warmup failed due to message verification error")
+                        fail_run()
                         producer = None
                         return
                     await asyncio.sleep(0.1)
@@ -754,13 +910,14 @@ async def async_main():
 
             verified = 0
 
-            # max 2GB of messages in the queue
-            produce_calls = asyncio.Queue(maxsize=(1024**3 * 2 // message_size))
-            record_task = asyncio.create_task(
-                record_completed_calls_worker(produce_calls))
             before_ms = int(time.time() * 1000)
             first_message_time = time.time_ns()
-            next_check_time = first_message_time + 1_000_000_000
+            # Pace in ~100 ms windows: every max(floor(limit_rps / 10), 1)
+            # messages, sleep until first_message_time + messages_sent /
+            # limit_rps (see pacing_wait_s), matching the C, Rust and Java
+            # harnesses. Whole-second pacing would burst a full second's quota
+            # into the client and measure burst queueing rather than
+            # steady-state latency.
             metrics.measurement_start_ms = before_ms
             print(f"Starting measured interval at {before_ms} ms: {datetime.datetime.now(tz=datetime.timezone.utc)}")  # noqa: E501
             messages_sent = 0
@@ -777,18 +934,18 @@ async def async_main():
                         key=key,
                         value=value)
                     start_time = int(time.time() * 1000)
-                    produce_call = await producer.send(record=next_message)
-                    await produce_calls.put((produce_call, start_time))
+                    # Record latency in the delivery callback (stamped at the
+                    # ack on the event loop), not in a recorder task.
+                    fut = await producer.send(record=next_message)
+                    fut.add_done_callback(
+                        lambda f, st=start_time: record_delivery_async(f, st))
                     messages_sent += 1
-                    limit_rps_reached = limit_rps and messages_sent % limit_rps == 0
-                    if limit_rps_reached:
-                        now = time.time_ns()
-                        if now < next_check_time:
-                            await asyncio.sleep((next_check_time - now) / 1e9)
-                        next_check_time = next_check_time + 1_000_000_000
+                    time_to_wait_s = pacing_wait_s(messages_sent, first_message_time)
+                    if time_to_wait_s > 0:
+                        await asyncio.sleep(time_to_wait_s)
                     if messages_sent % 10000 == 0:
-                        # Yield to the recorder task and to the in-flight
-                        # call_soon_threadsafe completions.
+                        # Yield to the in-flight completions and their delivery
+                        # done-callbacks (which record latency/metrics).
                         await asyncio.sleep(0)
                         duration = time.time_ns() - first_message_time
                         exceeded_seconds = num_messages > 0 and 10 or 1
@@ -802,11 +959,16 @@ async def async_main():
                 if num_messages > 0:
                     continue_sending = continue_sending and messages_sent < num_messages
 
-            await produce_calls.put(None)  # stop the recorder once drained
-            await record_task
-            record_task = None
+            # Flush so the producer drives every pending delivery to completion,
+            # then yield until the delivery callbacks (which record
+            # latency/metrics) have all fired.
+            await producer.flush()
+            drain_deadline = time.time() + 30
+            while (completed_messages + queue_full) < messages_sent \
+                    and time.time() < drain_deadline:
+                await asyncio.sleep(0.01)
             # QUEUE_FULL deliveries were never sent — subtract them from the
-            # measured sent count (recorder finished draining at await above).
+            # measured sent count.
             measured_sent = messages_sent - queue_full
             if queue_full > 0:
                 print(f"QUEUE_FULL errors: {queue_full} (subtracted from sent; "
@@ -814,22 +976,11 @@ async def async_main():
             after_ms = int(time.time() * 1000)
             after_ns = time.time_ns()
 
-            if verified != completed_messages:
-                if not terminating:
-                    print(f"Verified messages {verified} "
-                          "does not match completed messages "
-                          f"{completed_messages}")
-            elif num_messages > 0 and completed_messages != num_messages:
-                if not terminating:
-                    print(f"Completed messages {completed_messages} "
-                          f"does not match produced messages {num_messages}")
-            else:
-                print_measurement_summary(
-                    completed_messages, total_latency_ms, max_latency_ms,
-                    before_ms, after_ms, after_ns, first_message_time)
+            check_completion(completed_messages)
+            print_measurement_summary(
+                completed_messages, total_latency_ms, max_latency_ms,
+                before_ms, after_ms, after_ns, first_message_time)
     except CancelledError:
-        if record_task is not None:
-            record_task.cancel()
         print("Main cancelled")
 
     producer = None
@@ -960,7 +1111,7 @@ if __name__ == "__main__":
         print("Consumer verification skipped (baseline capture failed)")
 
     # Fail the run if the p99 latency budget was exceeded (matches C/Rust/Java).
-    if latency_budget_exceeded:
+    if latency_budget_exceeded or run_failed:
         exit_code = 1
 
     sys.exit(exit_code)
