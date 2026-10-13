@@ -4022,10 +4022,12 @@ fn generate_array_element_read_with_prefix(
         },
         FieldType::String => {
             // Elements are non-nullable (`Versions.NONE`, `MessageDataGenerator.java:673`),
-            // so Java throws on a negative standard-encoding length (`:613-617`). Check it
-            // before the `usize` cast: a negative `i16` sign-extends to a size `vec!`
-            // cannot allocate, and it panics.
-            let neg_action = format!(
+            // so Java throws on a length that encodes null (`:613-617`): a negative
+            // standard-encoding length, or a compact length of 0, which Java reads as
+            // `readUnsignedVarint() - 1` = -1 (`:602`). An empty compact string is 1, not 0.
+            // Check the standard length before the `usize` cast: a negative `i16`
+            // sign-extends to a size `vec!` cannot allocate, and it panics.
+            let null_action = format!(
                 "return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, \"non-nullable field {} was serialized as null\"));",
                 element_name
             );
@@ -4034,16 +4036,15 @@ fn generate_array_element_read_with_prefix(
                     // All versions flexible: use compact encoding
                     writeln!(file, "                let str_len = readable.read_unsigned_varint()?;")?;
                     writeln!(file, "                if str_len == 0 {{")?;
-                    writeln!(file, "                    {}.push(String::new());", target)?;
-                    writeln!(file, "                }} else {{")?;
-                    writeln!(file, "                    let mut bytes = vec![0u8; (str_len - 1) as usize];")?;
-                    writeln!(file, "                    readable.read_bytes(&mut bytes)?;")?;
+                    writeln!(file, "                    {}", null_action)?;
+                    writeln!(file, "                }}")?;
+                    writeln!(file, "                let mut bytes = vec![0u8; (str_len - 1) as usize];")?;
+                    writeln!(file, "                readable.read_bytes(&mut bytes)?;")?;
                     writeln!(
                         file,
-                        "                    {}.push(String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);",
+                        "                {}.push(String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);",
                         target
                     )?;
-                    writeln!(file, "                }}")?;
                 } else {
                     // Mixed versions: check at runtime
                     if flexible_versions.highest() == i16::MAX {
@@ -4058,23 +4059,19 @@ fn generate_array_element_read_with_prefix(
                     }
                     writeln!(file, "                    let str_len = readable.read_unsigned_varint()?;")?;
                     writeln!(file, "                    if str_len == 0 {{")?;
-                    writeln!(file, "                        {}.push(String::new());", target)?;
-                    writeln!(file, "                    }} else {{")?;
+                    writeln!(file, "                        {}", null_action)?;
+                    writeln!(file, "                    }}")?;
+                    writeln!(file, "                    let mut bytes = vec![0u8; (str_len - 1) as usize];")?;
+                    writeln!(file, "                    readable.read_bytes(&mut bytes)?;")?;
                     writeln!(
                         file,
-                        "                        let mut bytes = vec![0u8; (str_len - 1) as usize];"
-                    )?;
-                    writeln!(file, "                        readable.read_bytes(&mut bytes)?;")?;
-                    writeln!(
-                        file,
-                        "                        {}.push(String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);",
+                        "                    {}.push(String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);",
                         target
                     )?;
-                    writeln!(file, "                    }}")?;
                     writeln!(file, "                }} else {{")?;
                     writeln!(file, "                    let str_len = readable.read_short()?;")?;
                     writeln!(file, "                    if str_len < 0 {{")?;
-                    writeln!(file, "                        {}", neg_action)?;
+                    writeln!(file, "                        {}", null_action)?;
                     writeln!(file, "                    }}")?;
                     writeln!(file, "                    let mut bytes = vec![0u8; str_len as usize];")?;
                     writeln!(file, "                    readable.read_bytes(&mut bytes)?;")?;
@@ -4089,7 +4086,7 @@ fn generate_array_element_read_with_prefix(
                 // No flexible versions: always use standard encoding
                 writeln!(file, "                let str_len = readable.read_short()?;")?;
                 writeln!(file, "                if str_len < 0 {{")?;
-                writeln!(file, "                    {}", neg_action)?;
+                writeln!(file, "                    {}", null_action)?;
                 writeln!(file, "                }}")?;
                 writeln!(file, "                let mut bytes = vec![0u8; str_len as usize];")?;
                 writeln!(file, "                readable.read_bytes(&mut bytes)?;")?;
