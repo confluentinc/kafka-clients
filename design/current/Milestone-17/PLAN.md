@@ -2691,6 +2691,36 @@ its 1, `ConsumerMembershipManager.onHeartbeatSuccess`, in 0d2e8766; Phase 11 cle
 disappeared with the merge of `milestone-16-producer` by agent 103; see §6.) The table header has been
 removed with the last row.
 
+### 5.2 Bump checklist: merging master's pure-Python layer onto a newer Java base
+
+No rule file holds a master-merge or Java-bump recipe, so this step lives here, for the next bump to copy
+(Critic 115 S4, user-approved).
+
+- **After merging master's pure-Python layer onto a newer Java base**, diff every Java class that
+  `python/confluent_kafka/` translates directly (CLAUDE.md, Python Binding Conventions, Implementation
+  over the FFI: value types, records, enums, errors, `CloseOptions`, the serdes, the `Mock*` classes and
+  the private helpers they use) between the two Java tags, ignoring comments, annotations, imports and
+  blank lines, and port every behavioural delta. Master's Python is written against the older tag, so a
+  merge carries no conflict there and the delta lands silently.
+- **The set** is every `org.apache.kafka.*` class a `confluent_kafka` module cites (218 at this bump: 53
+  classes plus 165 generated errors). Drop the FFI-backed ones (the client bases and `Kafka*` classes)
+  and the ones cited only in prose (`CommonClientConfigs`, `NetworkClient` in an error docstring), then
+  diff the rest file by file with `git -C kafka show <tag>:<path>`.
+- **Result at this bump (`4.3.1` → `4.4.0-rc4`, agent 117).** 45 of the 53 classes and 160 of the 165
+  errors are unchanged. The rest:
+
+  | Java class | Delta (code only) | Python |
+  |---|---|---|
+  | `common.Uuid` | `randomUuid` rejects any `-` (KAFKA-20072); `toArray` / `toList` refactors | ported in `801ee69e` (R2); the refactors are not behavioural |
+  | `common.metrics.KafkaMetric` | new `toString()` | ported in `5826e097` (R6), with the three new `KafkaMetricTest` cases |
+  | `clients.consumer.MockConsumer` | new `losePartitions` (KAFKA-20575) | ported at the master merge `f5c7b08d` (`consumer/_mock_core.py`) |
+  | `clients.consumer.internals.SubscriptionState` | `hasFetchablePartitions(Predicate)` added, `hasPartitionsNeedingValidation` removed | neither is among the methods the mock uses (`consumer/_subscription_state.py`); nothing to port |
+  | `common.Node` | a protected constructor taking `idString` | protected, so not generated; public behaviour unchanged |
+  | `common.Cluster` | `Collections.empty*` → `Set.of` / `List.of` | a placeholder in Python (`common/cluster.py`) |
+  | `common.errors.TopicAuthorizationException` | `Collections.emptySet()` → `Set.of()` | equivalent; generated |
+  | 4 new errors (`BootstrapResolution`, `ControllerIdNotRegistered`, `GroupDeletionFailed`, `StreamsTopologyDescriptionUpdateFailed`) | new classes | generated at the merge (`cargo xtask generate-error-codes`) |
+  | `clients.producer.KafkaProducer`, `CommonClientConfigs`, `NetworkClient` | KIP-1332 / KIP-909 config and I/O changes | FFI-backed or cited only in prose; the core carries them |
+
 ## 6. Commit classification (input to the Phase 13 audit)
 
 The full table (191 rows after Phase 13's correction; SHA, component, classification, subject, line counts) is in
