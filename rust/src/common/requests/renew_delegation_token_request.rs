@@ -28,7 +28,7 @@ use super::{AbstractRequest, ConcreteResponse, RenewDelegationTokenResponse, Req
 ///
 /// Corresponds to
 /// `org.apache.kafka.common.requests.RenewDelegationTokenRequest`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.RenewDelegationTokenRequest")]
 pub struct RenewDelegationTokenRequest {
     data: RenewDelegationTokenRequestData,
@@ -81,21 +81,46 @@ impl RenewDelegationTokenRequest {
         let data = RenewDelegationTokenRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
     }
+
+    /// Returns a copy of `data` with the hmac emptied, for rendering.
+    ///
+    /// Mirrors Java's private `maskData` (`RenewDelegationTokenRequest.java:71-74`),
+    /// shared, as in Java, by the request's `toString()` (`:79-80`) and
+    /// `Builder.toString()` (`:66-67`). Java returns the copy's `toString()`,
+    /// and the callers here render the copy.
+    fn mask_data(data: &RenewDelegationTokenRequestData) -> RenewDelegationTokenRequestData {
+        let mut temp_data = data.clone();
+        temp_data.hmac = Vec::new();
+        temp_data
+    }
 }
 
 impl std::fmt::Display for RenewDelegationTokenRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Mirrors Java's `toString`, which masks the hmac.
-        let mut redacted = self.data.clone();
-        redacted.hmac = Vec::new();
-        write!(f, "RenewDelegationTokenRequest(version={}, data={:?})", self.version, redacted)
+        write!(
+            f,
+            "RenewDelegationTokenRequest(version={}, data={:?})",
+            self.version,
+            Self::mask_data(&self.data)
+        )
+    }
+}
+
+/// Renders exactly what the redacting [`Display`](std::fmt::Display) renders.
+///
+/// Java has a single `toString()`; a derived `Debug` would be a second,
+/// unredacted rendering that prints the hmac.
+impl std::fmt::Debug for RenewDelegationTokenRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
     }
 }
 
 /// Builder for [`RenewDelegationTokenRequest`].
 ///
 /// Corresponds to `RenewDelegationTokenRequest.Builder` in Java.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.RenewDelegationTokenRequest$Builder")]
 pub struct Builder {
     data: RenewDelegationTokenRequestData,
@@ -136,6 +161,24 @@ impl RequestBuilder for Builder {
     }
 }
 
+/// Mirrors Java's `Builder.toString()` (`RenewDelegationTokenRequest.java:66-67`),
+/// which returns `maskData(data)`: the data with the hmac emptied.
+impl std::fmt::Display for Builder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", RenewDelegationTokenRequest::mask_data(&self.data))
+    }
+}
+
+/// Renders exactly what the redacting [`Display`](std::fmt::Display) renders.
+///
+/// Java has a single `toString()`; a derived `Debug` would be a second,
+/// unredacted rendering that prints the hmac.
+impl std::fmt::Debug for Builder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,6 +209,50 @@ mod tests {
             RenewDelegationTokenRequest::new(request_data(), ApiKeys::RENEW_DELEGATION_TOKEN.latest_version());
         let rendered = request.to_string();
         assert!(!rendered.contains("the-hmac"), "{rendered}");
+    }
+
+    /// `Debug` renders exactly what `Display` does (Java has a single
+    /// `toString()`): an empty hmac, never the bytes a derived `Debug` would
+    /// print as their byte values.
+    #[test]
+    fn debug_masks_hmac() {
+        let request =
+            RenewDelegationTokenRequest::new(request_data(), ApiKeys::RENEW_DELEGATION_TOKEN.latest_version());
+        assert_eq!(request.data().hmac, b"the-hmac");
+        for rendered in [format!("{request:?}"), format!("{request:#?}")] {
+            assert_eq!(rendered, request.to_string());
+            assert!(rendered.contains("hmac: []"), "{rendered}");
+            assert!(!rendered.contains(&format!("{:?}", &b"the-hmac"[..])), "{rendered}");
+        }
+    }
+
+    /// New test, no Java original: the builder renders as Java's
+    /// `Builder.toString()` does, the data with the hmac emptied (`maskData`),
+    /// so the renew period still shows.
+    #[test]
+    fn builder_display_masks_hmac() {
+        let builder = Builder::new(request_data());
+        let rendered = builder.to_string();
+        let mut masked = request_data();
+        masked.hmac = Vec::new();
+        assert_eq!(rendered, masked.to_string());
+        assert!(rendered.contains("hmac: []"), "{rendered}");
+        assert!(rendered.contains("renew_period_ms: 3600000"), "{rendered}");
+        assert!(!rendered.contains(&format!("{:?}", &b"the-hmac"[..])), "{rendered}");
+    }
+
+    /// New test, no Java original: the builder's `Debug` renders exactly what
+    /// its `Display` does, an empty hmac, never the bytes a derived `Debug`
+    /// would print as their byte values.
+    #[test]
+    fn builder_debug_masks_hmac() {
+        let builder = Builder::new(request_data());
+        assert_eq!(builder.data.hmac, b"the-hmac");
+        for rendered in [format!("{builder:?}"), format!("{builder:#?}")] {
+            assert_eq!(rendered, builder.to_string());
+            assert!(rendered.contains("hmac: []"), "{rendered}");
+            assert!(!rendered.contains(&format!("{:?}", &b"the-hmac"[..])), "{rendered}");
+        }
     }
 
     #[test]

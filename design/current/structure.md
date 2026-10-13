@@ -143,10 +143,10 @@ In practice:
   `ApiVersions`, `KafkaClient`, ...) and `CommonClientConfigs` are
   `pub(crate)`.
 - `common::{compress, feature, memory, network, protocol, requests, utils}`,
-  `common::security::{authenticator, ssl}` and the generated wire modules are
-  `pub(crate)`. Tests that need them live inside the crate: the message and
-  protocol tests sit under `rust/src/common/`, and the raw-socket integration
-  suites under `rust/src/integration_tests/`.
+  `common::config::types`, `common::security::{authenticator, ssl}` and the
+  generated wire modules are `pub(crate)`. Tests that need them live inside the
+  crate: the message and protocol tests sit under `rust/src/common/`, and the
+  raw-socket integration suites under `rust/src/integration_tests/`.
 - `consumer::AsyncKafkaConsumer` is `pub(crate)`; `KafkaConsumer::new`
   constructs it and returns it as `Box<dyn Consumer<K, V>>`.
 - `Errors` (the wire enum) is `pub(crate)`, so `Error` has no public
@@ -190,7 +190,9 @@ rust/src/common/
 │                   # ssl/ (SslFactory), authenticator/, token/delegation/,
 │                   # scram/
 ├── config/         # ssl_configs, sasl_configs, ssl_client_auth,
-│                   # config_resource, config_error
+│                   # config_resource, config_error, types/password.rs
+│                   # (Password: Type.PASSWORD values, Display/Debug =
+│                   # "[hidden]")
 ├── record/         # timestamp_type.rs + internal/ (record batches,
 │                   # MemoryRecords, compression framing)
 ├── errors/         # 146 files: one payload struct per Java exception
