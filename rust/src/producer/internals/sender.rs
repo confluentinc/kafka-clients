@@ -1349,7 +1349,7 @@ impl<C: KafkaClient> Sender<C> {
                         match self.accumulator.split_and_reenqueue(batch) {
                             Ok(_num_split_batches) => {
                                 // Java records the split in `completeBatch` right after
-                                // `splitAndReenqueue` (`Sender.java:689`).
+                                // `splitAndReenqueue` (`Sender.java:690`).
                                 self.sensors.record_batch_split();
                             },
                             Err(error) => {

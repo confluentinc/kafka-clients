@@ -1459,7 +1459,7 @@ fn format_partitions_for_display(partitions: &[TopicPartition]) -> String {
 }
 
 /// Java: `private ConsumerGroupMetadata initializeConsumerGroupMetadata(final String groupId, final Optional<String> groupInstanceId)`
-/// (`AsyncKafkaConsumer.java:845-853`).
+/// (`AsyncKafkaConsumer.java:853-861`).
 ///
 /// Builds the initial [`ConsumerGroupMetadata`] for a consumer that has a
 /// `group.id`: `UNKNOWN_GENERATION_ID` (-1) / `UNKNOWN_MEMBER_ID` ("") — the
@@ -1481,13 +1481,13 @@ fn initialize_consumer_group_metadata(group_id: &str, group_instance_id: Option<
 }
 
 /// Java: `private Optional<ConsumerGroupMetadata> initializeGroupMetadata(final String groupId, final Optional<String> groupInstanceId)`
-/// (`AsyncKafkaConsumer.java:831-842`).
+/// (`AsyncKafkaConsumer.java:839-850`).
 ///
 /// Seeds the group-metadata slot at construction: a `None` group id yields
 /// `None` (an assignment-only consumer is never "in a group"); otherwise
 /// `Some(initialize_consumer_group_metadata(group_id, group_instance_id))`.
 /// Java also rejects a present-but-empty `group.id` with
-/// `InvalidGroupIdException` here (`:833-836`); the Rust constructor performs
+/// `InvalidGroupIdException` here (`:841-844`); the Rust constructor performs
 /// that rejection earlier, when it computes `group_id: Option<String>` (the
 /// `Some("") => Err(Error::invalid_group_id(...))` arm), so by the time this
 /// helper runs the group id is already `None` or non-empty and no re-check is
@@ -1504,7 +1504,7 @@ fn initialize_group_metadata(
 /// caches: `group_metadata` and `group_assignment_snapshot`.
 ///
 /// Mirrors Java's anonymous-inner-class `memberStateListener` at
-/// `AsyncKafkaConsumer.java:422-433`. The callbacks are invoked
+/// `AsyncKafkaConsumer.java:424-435`. The callbacks are invoked
 /// synchronously from the bg task (membership-manager reconciliation
 /// step); they only touch their two `Arc<Mutex<…>>` fields and never
 /// call back into the consumer or take other locks, so the brief
@@ -1514,7 +1514,7 @@ fn initialize_group_metadata(
 /// live in the [`ConsumerGroupMetadata`] already stored in `group_metadata`
 /// (seeded at construction — see `initialize_group_metadata`). Java reads
 /// them back off the old value inside `updateAndGet`
-/// (`AsyncKafkaConsumer.java:860`, `:863`) rather than off a field, and so
+/// (`AsyncKafkaConsumer.java:868`, `:871`) rather than off a field, and so
 /// do we.
 pub(crate) struct ConsumerStateNotifier {
     /// Shared with [`AsyncKafkaConsumer::group_metadata`].
@@ -1548,12 +1548,12 @@ impl ConsumerStateNotifier {
     /// Updates the cached [`ConsumerGroupMetadata`] to carry the new
     /// epoch / member-id. Java is an `updateAndGet` over an
     /// `AtomicReference<Optional<ConsumerGroupMetadata>>` whose lambda
-    /// `map`s the *old* value (`:858-865`): it keeps the existing
-    /// `group.id` (`:860`) and `group.instance.id` (`:863`) and overwrites
+    /// `map`s the *old* value (`:866-873`): it keeps the existing
+    /// `group.id` (`:868`) and `group.instance.id` (`:871`) and overwrites
     /// only the generation and member id. A `None` slot stays `None`
     /// (Java's `Optional.map` short-circuits) — the slot is seeded once at
     /// construction, when `group.id` is present (`initialize_group_metadata`,
-    /// Java `:531`), and an assignment-only consumer never populates it.
+    /// Java `:533`), and an assignment-only consumer never populates it.
     fn update_group_metadata(&self, member_epoch: Option<i32>, member_id: &str) {
         let Some(epoch) = member_epoch else {
             // Java's `memberEpoch.ifPresent(...)` short-circuits when
@@ -1563,7 +1563,7 @@ impl ConsumerStateNotifier {
         let mut guard = self.group_metadata.lock().unwrap();
         if let Some(old) = guard.as_ref() {
             // Map over the old value: keep its group_id / group_instance_id,
-            // overwrite generation + member id. Java `:859-864`.
+            // overwrite generation + member id. Java `:867-872`.
             let next = ConsumerGroupMetadataImpl::with_generation_id_member_id_group_instance_id(
                 old.group_id().to_string(),
                 epoch,
@@ -1585,7 +1585,7 @@ impl ConsumerStateNotifier {
     }
 
     /// Java: `private void resetGroupMetadata()`
-    /// (`AsyncKafkaConsumer.java:1949-1957`).
+    /// (`AsyncKafkaConsumer.java:1964-1972`).
     ///
     /// Resets the cached [`ConsumerGroupMetadata`] to the
     /// `UNKNOWN_GENERATION_ID` / `UNKNOWN_MEMBER_ID` defaults,
@@ -1593,9 +1593,9 @@ impl ConsumerStateNotifier {
     /// by [`AsyncKafkaConsumer::unsubscribe`] after the unsubscribe
     /// event completes, matching Java's
     /// `processBackgroundEvents(...)` → `resetGroupMetadata()` sequence
-    /// (Java `:1940`).
+    /// (Java `:1955`).
     ///
-    /// Mirrors Java's `updateAndGet` over the Optional (`:1950-1956`): the
+    /// Mirrors Java's `updateAndGet` over the Optional (`:1965-1971`): the
     /// lambda `map`s the old value through `initializeConsumerGroupMetadata`,
     /// so a `Some` slot is rebuilt with UNKNOWN epoch / member but the same
     /// group id + instance id, and a `None` slot (assignment-only consumer
@@ -1603,7 +1603,7 @@ impl ConsumerStateNotifier {
     pub(crate) fn reset_group_metadata(&self) {
         let mut guard = self.group_metadata.lock().unwrap();
         if let Some(old) = guard.as_ref() {
-            // Java `:1952-1955`: `initializeConsumerGroupMetadata(old.groupId(),
+            // Java `:1967-1970`: `initializeConsumerGroupMetadata(old.groupId(),
             // old.groupInstanceId())` — fresh metadata with UNKNOWN epoch +
             // member, preserving the old group_id + group_instance_id.
             *guard = Some(Arc::new(initialize_consumer_group_metadata(
@@ -2468,7 +2468,7 @@ where
         // read. Single-notifier wiring now closes that gap.
         // Seed the group-metadata slot exactly as Java does at construction:
         // `groupMetadata.set(initializeGroupMetadata(config, groupRebalanceConfig))`
-        // (Java `:531`, resolving through `:818` / `:831` to the `(groupId,
+        // (Java `:533`, resolving through `:826` / `:839` to the `(groupId,
         // groupInstanceId)` overload). A consumer WITH a `group.id` therefore
         // starts with `UNKNOWN_GENERATION_ID` / `UNKNOWN_MEMBER_ID` AND the
         // configured `group.instance.id` already in place — so a static
@@ -2476,7 +2476,7 @@ where
         // before any heartbeat response arrives (issues.md Issue C1). A
         // groupless consumer gets `None`. An empty `group.id` was already
         // rejected upstream (the ctor's `invalid_group_id` arm), matching Java
-        // `:834-836`.
+        // `:842-844`.
         let group_metadata: Arc<Mutex<Option<Arc<ConsumerGroupMetadataImpl>>>> = Arc::new(Mutex::new(
             initialize_group_metadata(group_id.as_deref(), config.group_instance_id()),
         ));
@@ -2964,7 +2964,7 @@ where
     }
 
     /// Java: `ConsumerGroupMetadata groupMetadata()`
-    /// (`AsyncKafkaConsumer.java:1516-1524`).
+    /// (`AsyncKafkaConsumer.java:1529-1537`).
     ///
     /// # Java divergence
     ///
@@ -3010,7 +3010,7 @@ where
             None => {
                 // Groupless (assignment-only) consumer: the slot was never
                 // seeded — `initialize_group_metadata` returns `None` when
-                // `group.id` is absent (Java `:841`). Java would throw
+                // `group.id` is absent (Java `:849`). Java would throw
                 // `InvalidGroupIdException` here; per the divergence above we
                 // return a groupless stub instead.
                 let group = self.group_id.clone().unwrap_or_default();
@@ -6773,7 +6773,7 @@ mod tests {
     #[tokio::test]
     async fn group_metadata_returns_seeded_placeholders_for_freshly_constructed_consumer() {
         // The production ctor seeds the group-metadata slot at construction
-        // (Issue C1; Java `AsyncKafkaConsumer.java:531` → `:831-853`), so a
+        // (Issue C1; Java `AsyncKafkaConsumer.java:533` → `:839-861`), so a
         // freshly constructed consumer with a `group.id` — before any
         // heartbeat — already returns the configured group id with the
         // UNKNOWN generation / member-id placeholders, NOT a groupless stub.
@@ -8259,7 +8259,7 @@ mod tests {
     }
 
     /// Java: `testGroupMetadataAfterCreationWithGroupIdIsNull`
-    /// (`AsyncKafkaConsumerTest.java:1406-1419`). Asserts the EXACT Java
+    /// (`AsyncKafkaConsumerTest.java:1640-1653`). Asserts the EXACT Java
     /// message on a groupless consumer's group-management surface.
     ///
     /// Rust divergence: Java throws `InvalidGroupIdException` from
@@ -8288,7 +8288,7 @@ mod tests {
     }
 
     /// Java: `testGroupMetadataAfterCreationWithGroupIdIsNotNull`
-    /// (`AsyncKafkaConsumerTest.java:1422-1432`). On a consumer with
+    /// (`AsyncKafkaConsumerTest.java:1656-1666`). On a consumer with
     /// `group.id` set, the initial `group_metadata()` returns:
     ///   - `group_id` = configured value
     ///   - `generation_id` = `UNKNOWN_GENERATION_ID` (-1)
@@ -8305,18 +8305,18 @@ mod tests {
     }
 
     /// Java: `testGroupMetadataAfterCreationWithGroupIdIsNotNullAndGroupInstanceIdSet`
-    /// (`AsyncKafkaConsumerTest.java:1435-1448`). This is the Issue-C1
+    /// (`AsyncKafkaConsumerTest.java:1669-1682`). This is the Issue-C1
     /// regression: a freshly constructed consumer with `group.instance.id`
     /// set surfaces it from `group_metadata()` immediately — the production
     /// ctor seeds the slot at construction with the configured instance id
-    /// (Java `AsyncKafkaConsumer.java:531` → `:844-853`), alongside the
+    /// (Java `AsyncKafkaConsumer.java:533` → `:852-861`), alongside the
     /// UNKNOWN generation / member-id placeholders. No heartbeat / notifier
     /// call is needed.
     ///
     /// Pre-C1 the slot was `None` at construction and the getter returned a
     /// groupless stub with `group_instance_id = None`, so a static member's
     /// `TxnOffsetCommitRequest` omitted `GroupInstanceId` until the first
-    /// heartbeat (`transaction_manager.rs:1735`).
+    /// heartbeat (`transaction_manager.rs:1832`).
     #[tokio::test]
     async fn group_metadata_with_instance_id() {
         let (consumer, _handles) = make_test_consumer_with_group(Some("test-group"), Some("groupInstanceId1"));
@@ -8327,12 +8327,12 @@ mod tests {
         assert_eq!(meta.member_id(), ""); // JoinGroupRequest.UNKNOWN_MEMBER_ID
     }
 
-    /// Java: `testGroupMetadataUpdate` (`AsyncKafkaConsumerTest.java:1475-1493`).
+    /// Java: `testGroupMetadataUpdate` (`AsyncKafkaConsumerTest.java:1709-1727`).
     /// The captured
     /// `MemberStateListener.onMemberEpochUpdated(Optional.of(42), "memberId")`
     /// updates the cached `group_metadata` to reflect the new epoch +
     /// member id, while carrying the group id / instance id over from the
-    /// old value (Java `AsyncKafkaConsumer.java:856-868` maps over the old).
+    /// old value (Java `AsyncKafkaConsumer.java:864-876` maps over the old).
     #[tokio::test]
     async fn group_metadata_update_via_member_state_listener() {
         let consumer = make_test_consumer();
@@ -8348,15 +8348,15 @@ mod tests {
     }
 
     /// Java: `testGroupMetadataIsResetAfterUnsubscribe`
-    /// (`AsyncKafkaConsumerTest.java:1497-1521`). After `unsubscribe()`
+    /// (`AsyncKafkaConsumerTest.java:1731-1755`). After `unsubscribe()`
     /// returns, the cached `group_metadata()` carries the original
     /// `group_id` + `group_instance_id` but the `generation_id` /
     /// `member_id` slots are reset to
     /// `JoinGroupRequest.UNKNOWN_GENERATION_ID` (-1) /
     /// `JoinGroupRequest.UNKNOWN_MEMBER_ID` ("").
     ///
-    /// Mirrors `resetGroupMetadata()` (`AsyncKafkaConsumer.java:1949-1957`)
-    /// called from `unsubscribe()` at `:1940`; Issue 21 fixup.
+    /// Mirrors `resetGroupMetadata()` (`AsyncKafkaConsumer.java:1964-1972`)
+    /// called from `unsubscribe()` at `:1955`; Issue 21 fixup.
     #[tokio::test]
     async fn group_metadata_is_reset_after_unsubscribe() {
         let (mut consumer, handles) = make_test_consumer_with_channels();
@@ -8385,11 +8385,11 @@ mod tests {
     }
 
     /// Issue C1 (strengthens `testGroupMetadataUpdate`,
-    /// `AsyncKafkaConsumerTest.java:1475-1493`): an epoch update PRESERVES the
+    /// `AsyncKafkaConsumerTest.java:1709-1727`): an epoch update PRESERVES the
     /// configured `group.instance.id`. Java's `updateGroupMetadata` maps over
     /// the old value and reuses `oldGroupMetadata.groupInstanceId()`
-    /// (`AsyncKafkaConsumer.java:856-868`, specifically the
-    /// `oldGroupMetadata.groupInstanceId()` argument at `:863`). Java's own
+    /// (`AsyncKafkaConsumer.java:864-876`, specifically the
+    /// `oldGroupMetadata.groupInstanceId()` argument at `:871`). Java's own
     /// test can only assert `old == new` on an EMPTY instance id; seeding a
     /// non-empty instance id proves the instance id survives an epoch update —
     /// the exact value a static member's `TxnOffsetCommitRequest` carries.
@@ -8413,10 +8413,10 @@ mod tests {
     }
 
     /// Issue C1 (strengthens `testGroupMetadataIsResetAfterUnsubscribe`,
-    /// `AsyncKafkaConsumerTest.java:1497-1521`): the unsubscribe reset PRESERVES
+    /// `AsyncKafkaConsumerTest.java:1731-1755`): the unsubscribe reset PRESERVES
     /// the configured `group.instance.id`. `resetGroupMetadata()` maps old →
     /// `initializeConsumerGroupMetadata(old.groupId(), old.groupInstanceId())`
-    /// (`AsyncKafkaConsumer.java:1949-1957`), so the instance id survives the
+    /// (`AsyncKafkaConsumer.java:1964-1972`), so the instance id survives the
     /// reset. Java's own test uses an empty instance id, so it cannot tell
     /// "reset drops it" from "reset keeps it"; a non-empty instance id proves
     /// it is kept.
@@ -8450,7 +8450,7 @@ mod tests {
 
     /// Issue C1 behaviour change: on a consumer WITHOUT `group.id`, an
     /// epoch update leaves the slot empty. Java's `updateGroupMetadata`
-    /// (`AsyncKafkaConsumer.java:856-868`) is an `Optional.map` over the old
+    /// (`AsyncKafkaConsumer.java:864-876`) is an `Optional.map` over the old
     /// value, so an empty slot stays empty and `group_metadata()` keeps
     /// returning the groupless stub. This differs from the pre-C1 lazy-init
     /// notifier, which would have written a fresh entry on the first update —

@@ -1313,7 +1313,7 @@ mod round_trip {
 
     /// A transactional (non-control) v2 data batch, mirroring Java's
     /// `appendTransactionalRecords(buffer, pid, baseOffset, records...)`
-    /// (`FetchRequestManagerTest.java:2868-2882`): magic v2, CREATE_TIME,
+    /// (`FetchRequestManagerTest.java:3114-3128`): magic v2, CREATE_TIME,
     /// `producer_epoch = 0`, `base_sequence = (int) base_offset`,
     /// `is_transactional = true`, `NO_PARTITION_LEADER_EPOCH`. Each `(key, value)`
     /// pair is appended at consecutive offsets from `base_offset`; a `None` value
@@ -1345,14 +1345,14 @@ mod round_trip {
 
     /// A `COMMIT` end-transaction-marker control batch at `base_offset` for
     /// `producer_id`, mirroring Java's `commitTransaction(buffer, producerId,
-    /// baseOffset)` (`FetchRequestManagerTest.java:2884-2889`).
+    /// baseOffset)` (`FetchRequestManagerTest.java:3130-3135`).
     fn commit_transaction(base_offset: i64, producer_id: i64) -> Vec<u8> {
         end_txn_marker_batch(base_offset, producer_id, ControlRecordType::Commit)
     }
 
     /// An `ABORT` end-transaction-marker control batch, mirroring Java's
     /// `abortTransaction(buffer, producerId, baseOffset)`
-    /// (`FetchRequestManagerTest.java:2891-2897`). The marker consumes one offset
+    /// (`FetchRequestManagerTest.java:3137-3143`). The marker consumes one offset
     /// (Java returns 1), so callers tracking a running offset advance it by one.
     fn abort_transaction(base_offset: i64, producer_id: i64) -> Vec<u8> {
         end_txn_marker_batch(base_offset, producer_id, ControlRecordType::Abort)
@@ -3496,7 +3496,7 @@ mod round_trip {
 
     /// Translated from
     /// `FetchRequestManagerTest.testConsumerPositionUpdatedWhenSkippingAbortedTransactions`
-    /// (`FetchRequestManagerTest.java:2705-2739`): under READ_COMMITTED an
+    /// (`FetchRequestManagerTest.java:2951-2985`): under READ_COMMITTED an
     /// all-aborted transactional data batch plus its ABORT marker returns NO
     /// records, but the consumer position still advances past both.
     #[test]
@@ -3537,7 +3537,7 @@ mod round_trip {
 
     /// Translated from
     /// `FetchRequestManagerTest.testReadCommittedWithCommittedAndAbortedTransactions`
-    /// (`FetchRequestManagerTest.java:2367-2440`): two interleaved producers whose
+    /// (`FetchRequestManagerTest.java:2613-2686`): two interleaved producers whose
     /// transactions commit and abort in turn under READ_COMMITTED; only the three
     /// committed records survive the filtering.
     #[test]
@@ -3599,7 +3599,7 @@ mod round_trip {
     }
 
     /// Translated from `FetchRequestManagerTest.testMultipleAbortMarkers`
-    /// (`FetchRequestManagerTest.java:2442-2489`): an aborted transaction followed
+    /// (`FetchRequestManagerTest.java:2688-2735`): an aborted transaction followed
     /// by a DUPLICATE abort marker (which must be ignored) and then a committed
     /// transaction; only the two committed records are returned.
     #[test]
@@ -3655,7 +3655,7 @@ mod round_trip {
     }
 
     /// Translated from `FetchRequestManagerTest.testReadCommittedAbortMarkerWithNoData`
-    /// (`FetchRequestManagerTest.java:2491-2529`): an ABORT marker whose
+    /// (`FetchRequestManagerTest.java:2737-2775`): an ABORT marker whose
     /// transactional data is no longer in the log, followed by a committed batch of
     /// null-valued records; the committed records are returned and the marker with
     /// no data is skipped.

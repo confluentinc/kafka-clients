@@ -390,7 +390,7 @@ type PartitionDequeRef<'a> = dashmap::mapref::one::Ref<'a, i32, Mutex<VecDeque<P
 ///
 /// The put-back is a `Drop`, not a plain statement after the closure, because the
 /// Sender survives panics: `Sender::run_once_logging_errors`
-/// (`sender.rs:1010-1022`) wraps `run_once` in `catch_unwind` to mirror Java's
+/// (`sender.rs:1041-1053`) wraps `run_once` in `catch_unwind` to mirror Java's
 /// "Uncaught error in kafka producer I/O thread" loop. If the pool closure
 /// unwinds, a plain re-insert after it would be skipped and the removed batches
 /// dropped while the Sender keeps running — their `send().await` futures would
@@ -2733,8 +2733,8 @@ impl RecordAccumulator {
         // A direct `remove` per requested partition matches Java, which never scans:
         // `TxnPartitionMap.java:43` `get(tp)` and `:114` `adjustSequencesDueToFailedBatch`
         // both look the partition up directly in the `HashMap` at `:36`, and
-        // `TransactionManager.java:612/673/1066` call `startSequencesAtBeginning(tp, ..)`
-        // once per partition while `:836` calls `adjustSequencesDueToFailedBatch(batch)`.
+        // `TransactionManager.java:620/681/1074` call `startSequencesAtBeginning(tp, ..)`
+        // once per partition while `:844` calls `adjustSequencesDueToFailedBatch(batch)`.
         // Cost is O(|partitions|), not O(|sender map| × |partitions|).
         let mut restore = SenderInFlightRestore { sender_batches, entries: Vec::new() };
         for tp in partitions {
@@ -5734,7 +5734,7 @@ mod tests {
         accum.register_incomplete_for_test(&big_batch);
 
         // Inject the fault: drop the partition's `TxnPartitionMap` entry. `Sender`
-        // normally removes only the big batch here (`Sender.java:685-686`); dropping the
+        // normally removes only the big batch here (`Sender.java:686-687`); dropping the
         // whole entry makes `add_in_flight_batch(&sub_batch)` fail at `get_mut` for every
         // sub-batch, driving the `?` site that used to drop them. The sub-batches still
         // carry sequences (`split` copies the producer state over), so the failure is the
@@ -6457,7 +6457,7 @@ mod tests {
 
     /// (e) Panic safety: if the closure unwinds, the RAII guard still returns
     /// every removed batch to the Sender map — matching the Sender surviving a
-    /// panic under `catch_unwind` (`sender.rs:1010-1022`). The accumulator's
+    /// panic under `catch_unwind` (`sender.rs:1041-1053`). The accumulator's
     /// deque mutexes are poisoned by the unwinding guards, so it is not touched
     /// after the panic; the assertions are on the map alone.
     #[tokio::test]

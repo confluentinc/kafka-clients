@@ -1536,8 +1536,8 @@ impl<K, V> KafkaProducer<K, V> {
     pub async fn init_transactions(&self) -> Result<(), Error> {
         let transaction_manager = self.transaction_manager_or_error()?;
         self.ensure_not_closed()?;
-        // Java: `long now = time.nanoseconds()` (`KafkaProducer.java:663`), fed to
-        // `producerMetrics.recordInit(time.nanoseconds() - now)` (`:667`) after a
+        // Java: `long now = time.nanoseconds()` (`KafkaProducer.java:711`), fed to
+        // `producerMetrics.recordInit(time.nanoseconds() - now)` (`:715`) after a
         // successful await. Timed with the injected `time`, as Java times with its
         // injected `Time` — the same clock `flush` and `waitOnMetadata` read.
         let start = self.time.nanoseconds();
@@ -1553,7 +1553,7 @@ impl<K, V> KafkaProducer<K, V> {
         result
             .await_result_timeout(self.max_block_timeout(), Self::INIT_TXN_TIMEOUT_MSG)
             .await?;
-        // Java records only after a successful await (`:667`), so the `?` above must
+        // Java records only after a successful await (`:715`), so the `?` above must
         // stay ahead of both this and `maybeUpdateTransactionV2Enabled`.
         self.producer_metrics.record_init(self.time.nanoseconds() - start);
         transaction_manager.lock().unwrap().maybe_update_transaction_v2_enabled(true);
@@ -1583,8 +1583,8 @@ impl<K, V> KafkaProducer<K, V> {
     pub fn begin_transaction(&self) -> Result<(), Error> {
         let transaction_manager = self.transaction_manager_or_error()?;
         self.ensure_not_closed()?;
-        // Java: `long now = time.nanoseconds()` (`KafkaProducer.java:689`) around the
-        // synchronous state transition, recorded on success (`:691`). Java times this
+        // Java: `long now = time.nanoseconds()` (`KafkaProducer.java:737`) around the
+        // synchronous state transition, recorded on success (`:739`). Java times this
         // even though there is no wait; kept faithful.
         let start = self.time.nanoseconds();
         transaction_manager.lock().unwrap().begin_transaction()?;
@@ -1768,8 +1768,8 @@ impl<K, V> KafkaProducer<K, V> {
     pub async fn commit_transaction(&self) -> Result<(), Error> {
         let transaction_manager = self.transaction_manager_or_error()?;
         self.ensure_not_closed()?;
-        // Java: `long commitStart = time.nanoseconds()` (`KafkaProducer.java:793`),
-        // recorded after a successful await (`:797`).
+        // Java: `long commitStart = time.nanoseconds()` (`KafkaProducer.java:873`),
+        // recorded after a successful await (`:877`).
         let start = self.time.nanoseconds();
         let result = {
             // `pending_requests` before the manager, per the field docs.
@@ -1816,8 +1816,8 @@ impl<K, V> KafkaProducer<K, V> {
         let transaction_manager = self.transaction_manager_or_error()?;
         self.ensure_not_closed()?;
         kafka_info!(self.log_context, "Aborting incomplete transaction");
-        // Java: `long abortStart = time.nanoseconds()` (`KafkaProducer.java:828`),
-        // taken after the log line, recorded after a successful await (`:832`).
+        // Java: `long abortStart = time.nanoseconds()` (`KafkaProducer.java:908`),
+        // taken after the log line, recorded after a successful await (`:912`).
         let start = self.time.nanoseconds();
         let result = {
             // `pending_requests` before the manager, per the field docs.
@@ -6018,8 +6018,8 @@ mod tests {
     /// `send()` on a transactional producer that never called `initTransactions`.
     ///
     /// The state `TransactionManagerTest.testFailIfNotReadyForSendNoProducerId`
-    /// (Java 262-265) asserts on, surfaced through `doSend`. `maybeAddPartition` raises
-    /// `IllegalStateException` (`TransactionManager.java:443`), which is not a
+    /// (Java 267-270) asserts on, surfaced through `doSend`. `maybeAddPartition` raises
+    /// `IllegalStateException` (`TransactionManager.java:469-470`), which is not a
     /// `KafkaException` at all, so it misses `catch (ApiException e)` *and*
     /// `catch (KafkaException e)`, reaches `catch (Exception e)`
     /// (`KafkaProducer.java:1151-1155`) and is rethrown out of `send()`.
@@ -6049,9 +6049,9 @@ mod tests {
     /// `send()` on an initialized transactional producer with no open transaction.
     ///
     /// The state `TransactionManagerTest.testFailIfNotReadyForSendNoOngoingTransaction`
-    /// (Java 282-286) asserts on, surfaced through `doSend`. Same
+    /// (Java 287-291) asserts on, surfaced through `doSend`. Same
     /// `IllegalStateException` treatment as above, from
-    /// `TransactionManager.java:446`, whose message carries the state and Java's
+    /// `TransactionManager.java:472-473`, whose message carries the state and Java's
     /// double space before it.
     #[test]
     fn test_send_outside_transaction_returns_illegal_state() {
@@ -7010,7 +7010,7 @@ mod tests {
     }
 
     /// Reads a producer-level metric's current value. Translated from
-    /// `KafkaProducerTest.getMetricValue` (Java 1208-1212):
+    /// `KafkaProducerTest.getMetricValue` (Java 1199-1203):
     /// `metrics.metric(metrics.metricName(name, "producer-metrics")).metricValue()`.
     fn get_metric_value(producer: &KafkaProducer<String, String>, name: &str) -> f64 {
         // `metric_value()` is a `Metric`-trait method (Java's `Metric.metricValue()`).
@@ -7026,7 +7026,7 @@ mod tests {
     }
 
     /// Translated from `KafkaProducerTest.getAndAssertDurationAtLeast` (Java
-    /// 1841-1845): reads the duration metric, asserts it is at least `floor`, and
+    /// 1989-1993): reads the duration metric, asserts it is at least `floor`, and
     /// returns it.
     ///
     /// The producer times transaction control with its injected `time`, as Java
@@ -7039,14 +7039,14 @@ mod tests {
         value
     }
 
-    /// Translated from `KafkaProducerTest.assertDurationAtLeast` (Java 1837-1839):
+    /// Translated from `KafkaProducerTest.assertDurationAtLeast` (Java 1985-1987):
     /// asserts the duration is at least `floor`, discarding the value.
     fn assert_duration_at_least(producer: &KafkaProducer<String, String>, name: &str, floor: f64) {
         get_and_assert_duration_at_least(producer, name, floor);
     }
 
     /// Translated from `KafkaProducerTest.testMeasureAbortTransactionDuration`
-    /// (Java 1509-1536).
+    /// (Java 1500-1527).
     ///
     /// Runs two complete `beginTransaction` / `abortTransaction` cycles over one
     /// `initTransactions` — which proves `abortTransaction` leaves the manager in a
@@ -7086,7 +7086,7 @@ mod tests {
     }
 
     /// Translated from `KafkaProducerTest.testMeasureTransactionDurations`
-    /// (Java 1848-1897).
+    /// (Java 1996-2050).
     ///
     /// Asserts every transaction-control latency sensor Java asserts —
     /// `txn-init-time-ns-total`, `txn-begin-time-ns-total`,
@@ -7101,6 +7101,12 @@ mod tests {
     /// asserts it grew by at least one more ([`get_and_assert_duration_at_least`] /
     /// [`assert_duration_at_least`]) — Java's `tick.toNanos()` floors, reachable
     /// because the producer times with the injected one-second-tick `MockTime`.
+    ///
+    /// Kafka 4.4 pre-tracks the topic (`metadata.add("topic", ..)`, Java 2006-2009) so
+    /// that `sendOffsetsToTransaction`'s KIP-1319 `awaitTopicMetadata` finds it
+    /// already tracked and does not wait for a refresh, which under the one-second
+    /// auto-tick would exhaust `max.block.ms`. [`TxnProducerContext::new`] tracks
+    /// [`TOPIC`] the same way.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducerTest#testMeasureTransactionDurations")]
     async fn test_measure_transaction_durations() {

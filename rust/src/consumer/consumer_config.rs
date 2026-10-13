@@ -996,7 +996,7 @@ fn parse_i64(key: &str, value: &str) -> Result<i64, Error> {
 
 /// Parses a string value as `bool`.
 ///
-/// Java's `ConfigDef.parseType(BOOLEAN)` (`ConfigDef.java:701-735`) trims the
+/// Java's `ConfigDef.parseType(BOOLEAN)` (`ConfigDef.java:703-737`) trims the
 /// value, then accepts `equalsIgnoreCase("true")` / `("false")`; anything else
 /// throws `ConfigException(name, value, "Expected value to be either true or
 /// false")`, where `value` is the **original, untrimmed** string.
@@ -1067,7 +1067,7 @@ mod tests {
     /// Boolean config values are parsed case-insensitively after trimming, and an
     /// unparseable value is rejected with Java's message and the original,
     /// untrimmed value. Mirrors `ConfigDef.parseType(BOOLEAN)`
-    /// (`ConfigDef.java:701-735`): `equalsIgnoreCase("true")` / `("false")`, else
+    /// (`ConfigDef.java:703-737`): `equalsIgnoreCase("true")` / `("false")`, else
     /// `ConfigException(name, value, "Expected value to be either true or false")`.
     #[test]
     fn test_parse_bool_matches_java_boolean() {

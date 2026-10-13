@@ -610,8 +610,8 @@ impl ProducerConfig {
                     config.max_block_ms = Self::at_least(key, Self::parse_i64(key, value)?, 0)?;
                 },
                 Self::ACKS_CONFIG => {
-                    // `in("all", "-1", "0", "1")` (`ProducerConfig.java:391-394`):
-                    // `ConfigDef.ValidString.ensureValid` (`ConfigDef.java:1114`)
+                    // `in("all", "-1", "0", "1")` (`ProducerConfig.java:430-435`):
+                    // `ConfigDef.ValidString.ensureValid` (`ConfigDef.java:1116`)
                     // matches the trimmed value exactly (case-sensitive) before
                     // `parseAcks` runs, so ` all ` is accepted, `ALL`/`2` are not,
                     // and the error prints the trimmed value.
@@ -757,8 +757,8 @@ impl ProducerConfig {
                     config.partitioner_type = Some(value.to_string());
                 },
                 Self::TRANSACTIONAL_ID_CONFIG => {
-                    // `new ConfigDef.NonEmptyString()` (`ProducerConfig.java:537-540`
-                    // → `ConfigDef.java:1223-1231`) on the trimmed value
+                    // `new ConfigDef.NonEmptyString()` (`ProducerConfig.java:584-587`
+                    // → `ConfigDef.java:1225-1233`) on the trimmed value
                     // (`ConfigDef.parseType` trims a `STRING`): an empty or blank id
                     // is rejected, not read as "no transactional id", and the error
                     // prints the trimmed (empty) value; ` my-txn ` is stored as
@@ -1092,7 +1092,7 @@ impl ProducerConfig {
 
     /// Parses a string value as `bool`.
     ///
-    /// Java's `ConfigDef.parseType(BOOLEAN)` (`ConfigDef.java:701-735`) trims the
+    /// Java's `ConfigDef.parseType(BOOLEAN)` (`ConfigDef.java:703-737`) trims the
     /// value, then accepts `equalsIgnoreCase("true")` / `("false")`; anything else
     /// throws `ConfigException(name, value, "Expected value to be either true or
     /// false")`, where `value` is the **original, untrimmed** string.
@@ -1604,8 +1604,8 @@ mod tests {
         let config = ProducerConfig::new(&props_with(&[("transactional.id", " my-txn ")])).unwrap();
         assert_eq!(config.transactional_id, Some("my-txn".to_string()));
 
-        // Java's `ConfigDef.NonEmptyString` validator (`ProducerConfig.java:537-540`
-        // → `ConfigDef.java:1223-1231`) rejects an empty string; a whitespace-only
+        // Java's `ConfigDef.NonEmptyString` validator (`ProducerConfig.java:584-587`
+        // → `ConfigDef.java:1225-1233`) rejects an empty string; a whitespace-only
         // id trims to empty and is rejected the same way. The error prints the
         // trimmed (empty) value, so "Invalid value " is followed by two spaces.
         for raw in ["", "   "] {
@@ -1677,7 +1677,7 @@ mod tests {
 
     /// `acks` accepts exactly `all`, `-1`, `0`, `1` (after trimming) and rejects
     /// anything else, mirroring Java's `ConfigDef.ValidString.in("all", "-1",
-    /// "0", "1")` (`ProducerConfig.java:391-394`, `ConfigDef.java:1114`), which
+    /// "0", "1")` (`ProducerConfig.java:430-435`, `ConfigDef.java:1116`), which
     /// runs before `parseAcks`. The error names the trimmed value because the
     /// validator runs on the parsed (trimmed) value; the check is exact-match, so
     /// `ALL` and `2` are rejected while a padded ` all ` is accepted.
@@ -1721,7 +1721,7 @@ mod tests {
     /// Boolean config values are parsed case-insensitively after trimming, and an
     /// unparseable value is rejected with Java's message and the original,
     /// untrimmed value. Mirrors `ConfigDef.parseType(BOOLEAN)`
-    /// (`ConfigDef.java:701-735`): `equalsIgnoreCase("true")` / `("false")`, else
+    /// (`ConfigDef.java:703-737`): `equalsIgnoreCase("true")` / `("false")`, else
     /// `ConfigException(name, value, "Expected value to be either true or false")`.
     #[test]
     fn test_parse_bool_matches_java_boolean() {

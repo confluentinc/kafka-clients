@@ -2166,7 +2166,7 @@ impl TransactionManager {
     /// [`Sender::handle_produce_response`](super::sender) must surface without
     /// dropping the batches the same request carried. It reuses the production
     /// [`Self::reset_sequence_for_partition`] path (`resetSequenceForPartition`,
-    /// Java 627), which is otherwise private.
+    /// Java 653), which is otherwise private.
     #[cfg(test)]
     pub(crate) fn remove_partition_entry_for_test(&mut self, topic_partition: &TopicPartition) {
         self.reset_sequence_for_partition(topic_partition);
