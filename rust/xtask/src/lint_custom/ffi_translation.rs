@@ -126,7 +126,9 @@
 //! queued twins of sync methods whose C form drains the submission queue
 //! ([`C_ONLY_DRAINING_CB_TWINS`]) have no async Rust method behind them; the
 //! consumer state reads the C handle's single-owner guard can refuse
-//! ([`C_GUARDED_READS`]) are fallible in C only; a trait
+//! ([`C_GUARDED_READS`]) are fallible in C only; the factories of an error
+//! carrying a binding's opaque pointer ([`C_RELEASE_HOOKS`]) take a trailing
+//! nullable release hook in C only; a trait
 //! method with `where Self: Sized`
 //! cannot be called through the interface handle and expects nothing;
 //! associated consts expect nothing (cbindgen exports no constants); a
@@ -213,6 +215,20 @@ const C_GUARDED_READS: &[&str] = &[
     "kafka_consumer_Consumer_paused",
     "kafka_consumer_Consumer_subscription",
 ];
+
+/// Factories taking a binding's opaque pointer whose C form adds a trailing
+/// `release` parameter, with the nullable typedef `(opaque) -> void` it is
+/// declared as. A binding's pointer may stand for an object the binding owns
+/// (a Python exception), which the error must keep alive and give back once,
+/// when its last copy drops; a Rust caller owns its values through Rust
+/// ownership and never hands one over as a raw pointer. So the Rust method
+/// (`Error::local_callback(message, opaque)`) keeps the unowned form, and only
+/// the C form takes the hook, `NULL` meaning unowned; the typedef has no Rust
+/// item behind it.
+const C_RELEASE_HOOKS: &[(&str, &str)] = &[(
+    "kafka_common_Error_local_callback",
+    "kafka_common_LocalCallbackError_release_fn_t",
+)];
 
 /// The handle over `common::Error`.
 const ERROR_HANDLE: &str = "kafka_common_Error_t";
@@ -2031,6 +2047,11 @@ fn expect_method(
         },
         (Output::Value(_), Some(v)) => blocking.ret = Some(v.render()),
         _ => {},
+    }
+    if let Some((_, hook)) = C_RELEASE_HOOKS.iter().find(|(f, _)| *f == name) {
+        blocking.params.push(Param::new("release", (*hook).to_string()));
+        let sig = Sig { params: vec![Param::new("opaque", "*mut c_void".to_string())], ret: None };
+        out.add((*hook).to_string(), Shape::FnPtr { sig, nullable: true }, file);
     }
     out.add(name.clone(), Shape::Fn(blocking), file);
 
@@ -4089,6 +4110,76 @@ mod tests {
             "expected `fn(self: *const kafka_consumer_Consumer_t, partition: i32) -> i64`, \
              found `fn(self_: *const kafka_consumer_Consumer_t, partition: i32, out_client_lag: *mut i64) \
              -> *mut kafka_common_Error_t`"
+        );
+    }
+
+    /// A factory listed in `C_RELEASE_HOOKS` is expected with a trailing
+    /// `release` parameter its Rust method lacks, and the hook's nullable
+    /// typedef with it; a factory not listed keeps the Rust parameters.
+    #[test]
+    fn test_release_hook_is_a_c_only_trailing_parameter() {
+        let rust = r#"
+            pub mod common {
+                pub mod error {
+                    use std::ffi::c_void;
+                    pub enum Error { LocalCallback(LocalCallbackError), Timeout(TimeoutError) }
+                    pub struct TimeoutError;
+                    #[doc(alias = "rust-only")]
+                    pub struct LocalCallbackError;
+                    impl Error {
+                        pub fn local_callback(message: &str, opaque: *mut c_void) -> Self { todo!() }
+                        pub fn timeout(message: &str) -> Self { todo!() }
+                    }
+                }
+                pub use error::{Error, LocalCallbackError};
+            }
+        "#;
+        let ffi = r#"
+            #[repr(C)] pub struct kafka_common_Error_t { _p: [u8; 0] }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Error_destroy(this: *mut kafka_common_Error_t) {}
+            pub type kafka_common_LocalCallbackError_release_fn_t = unsafe extern "C" fn(opaque: *mut c_void);
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Error_local_callback(message: *const c_char, opaque: *mut c_void) -> *mut kafka_common_Error_t { std::ptr::null_mut() }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Error_timeout(message: *const c_char, release: kafka_common_LocalCallbackError_release_fn_t) -> *mut kafka_common_Error_t { std::ptr::null_mut() }
+        "#;
+        let findings = run("release-hook", rust, ffi);
+        assert_eq!(
+            detail(&findings, "shape kafka_common_Error_local_callback"),
+            "expected `fn(message: *const c_char, opaque: *mut c_void, release: \
+             kafka_common_LocalCallbackError_release_fn_t) -> *mut kafka_common_Error_t`, found `fn(message: \
+             *const c_char, opaque: *mut c_void) -> *mut kafka_common_Error_t`"
+        );
+        assert_eq!(
+            detail(&findings, "shape kafka_common_Error_timeout"),
+            "expected `fn(message: *const c_char) -> *mut kafka_common_Error_t`, found `fn(message: *const \
+             c_char, release: kafka_common_LocalCallbackError_release_fn_t) -> *mut kafka_common_Error_t`"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|(k, _)| k == "shape kafka_common_LocalCallbackError_release_fn_t"),
+            "the typedef must be nullable: {findings:#?}"
+        );
+
+        // Declared as the expectations say, nothing is left.
+        let ffi = ffi
+            .replace(
+                "release_fn_t = unsafe extern \"C\" fn(opaque: *mut c_void);",
+                "release_fn_t = Option<unsafe extern \"C\" fn(opaque: *mut c_void)>;",
+            )
+            .replace(
+                "opaque: *mut c_void) -> *mut kafka_common_Error_t",
+                "opaque: *mut c_void, release: kafka_common_LocalCallbackError_release_fn_t) -> *mut kafka_common_Error_t",
+            )
+            .replace(
+                "message: *const c_char, release: kafka_common_LocalCallbackError_release_fn_t)",
+                "message: *const c_char)",
+            );
+        let findings = run("release-hook-ok", rust, &ffi);
+        assert!(
+            !findings
+                .iter()
+                .any(|(k, _)| k.contains("local_callback") || k.contains("timeout") || k.contains("release")),
+            "{findings:#?}"
         );
     }
 

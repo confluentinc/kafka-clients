@@ -1046,14 +1046,15 @@ static void test_listener_error_propagates(void) {
 
 // A binding's foreign callback error comes back with its opaque pointer
 // unchanged: the mock, like Java's `MockConsumer.rebalance`, does not wrap the
-// listener's error, so it is the rebalance's result itself.
+// listener's error, so it is the rebalance's result itself. A NULL release
+// function leaves the pointer unowned.
 static void test_listener_local_callback_error_keeps_its_opaque(void) {
     fixture_t f;
     fixture_init(&f);
     listener_probe_t probe;
     probe_init(&probe, f.consumer, 1);
     int marker = 7;
-    probe.assigned_error = kafka_common_Error_local_callback("ValueError: bad", &marker);
+    probe.assigned_error = kafka_common_Error_local_callback("ValueError: bad", &marker, NULL);
     subscribe_probe(&f, "t", &probe);
 
     kafka_common_Error_t *err = rebalance_to(&f, "t", 1);
@@ -1069,6 +1070,64 @@ static void test_listener_local_callback_error_keeps_its_opaque(void) {
     kafka_common_Error_destroy(err);
     TEST_ASSERT_EQUAL_INT(7, marker);
     fixture_destroy(&f);
+}
+
+// What `count_release` counts: how many times it ran, and on which thread.
+typedef struct {
+    atomic_int calls;
+    pthread_t thread;
+} release_probe_t;
+
+static void count_release(void *opaque) {
+    release_probe_t *p = (release_probe_t *)opaque;
+    p->thread = pthread_self();
+    atomic_fetch_add(&p->calls, 1);
+}
+
+// Given a release function, the error owns its opaque pointer: Rust releases
+// it exactly once, when the last copy of the error is destroyed; with NULL it
+// never does.
+static void test_local_callback_error_releases_its_opaque_once(void) {
+    release_probe_t owned;
+    atomic_init(&owned.calls, 0);
+    kafka_common_Error_t *err = kafka_common_Error_local_callback("ValueError: bad", &owned, count_release);
+    const kafka_common_LocalCallbackError_t *view = kafka_common_Error_local_callback_error(err);
+    TEST_ASSERT_EQUAL_PTR(&owned, kafka_common_LocalCallbackError_opaque(view));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&owned.calls));
+    kafka_common_Error_destroy(err);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&owned.calls));
+    TEST_ASSERT_TRUE(pthread_equal(pthread_self(), owned.thread));
+
+    release_probe_t unowned;
+    atomic_init(&unowned.calls, 0);
+    kafka_common_Error_destroy(kafka_common_Error_local_callback("boom", &unowned, NULL));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&unowned.calls));
+}
+
+// A listener's owned foreign callback error travels through the client and
+// comes back as the rebalance's result, still holding the pointer; the
+// release runs once, after the last copy is gone (the result destroyed and
+// the consumer with it), never while the result is alive.
+static void test_listener_local_callback_error_releases_its_opaque_once(void) {
+    fixture_t f;
+    fixture_init(&f);
+    listener_probe_t probe;
+    probe_init(&probe, f.consumer, 1);
+    release_probe_t released;
+    atomic_init(&released.calls, 0);
+    probe.assigned_error = kafka_common_Error_local_callback("ValueError: bad", &released, count_release);
+    subscribe_probe(&f, "t", &probe);
+
+    kafka_common_Error_t *err = rebalance_to(&f, "t", 1);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_callback_error(err));
+    const kafka_common_LocalCallbackError_t *view = kafka_common_Error_local_callback_error(err);
+    TEST_ASSERT_NOT_NULL(view);
+    TEST_ASSERT_EQUAL_PTR(&released, kafka_common_LocalCallbackError_opaque(view));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&released.calls));
+    kafka_common_Error_destroy(err);
+    fixture_destroy(&f);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&released.calls));
 }
 
 // `subscribe_with_topics_listener_cb` completes through the pump and the
@@ -1153,6 +1212,8 @@ int main(void) {
     RUN_TEST(test_listener_calls_consumer_handle_no_deadlock);
     RUN_TEST(test_listener_error_propagates);
     RUN_TEST(test_listener_local_callback_error_keeps_its_opaque);
+    RUN_TEST(test_local_callback_error_releases_its_opaque_once);
+    RUN_TEST(test_listener_local_callback_error_releases_its_opaque_once);
     RUN_TEST(test_subscribe_with_topics_listener_cb);
     RUN_TEST(test_destroy_runs_pending_rebalance_cb_listener_and_completion_once);
     return UNITY_END();

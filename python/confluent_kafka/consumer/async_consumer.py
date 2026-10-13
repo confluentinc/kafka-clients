@@ -438,7 +438,6 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
                 await awaitable
             except BaseException as exc:  # noqa: BLE001 - reported to the core
                 error = exc
-                self._keep_callback_error(exc)
             # Under the lifecycle lock: close() clears the handle under it
             # before it frees the handle, so a live handle is not freed meanwhile.
             with self._lifecycle:
@@ -517,7 +516,6 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         payload = box[0]
         if interrupted is not None:
             free(payload)
-            self._take_callback_errors()
             raise interrupted
         resolve(payload)
 
@@ -538,7 +536,6 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
             payload = box[0]
             if cancelled is not None:
                 free(payload)
-                self._take_callback_errors()
                 raise cancelled
             try:
                 resolve(payload)

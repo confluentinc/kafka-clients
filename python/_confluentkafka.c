@@ -610,24 +610,27 @@ static inline Producer* producer_from_handle(unsigned long long ptr) {
 
 // ---- error / metadata -> Python tuples -------------------------------------
 
-// The opaque pointer of the first foreign callback error in `e`'s cause chain,
-// `e` included, or NULL. A Python callback that raised reports its exception
-// object as that pointer (see `callback_error_from_py_exception`); the client
-// wraps the error as Java wraps a listener's foreign Throwable, so it usually
-// comes back as the cause.
-static void* callback_opaque_of(const kafka_common_Error_t* e) {
+// The exception object of the first foreign callback error in `e`'s cause
+// chain, `e` included, as a BORROWED reference, or NULL. A Python callback that
+// raised reports its exception object as that error's opaque pointer, the
+// error owning one reference to it (see `callback_error_from_py`), so the
+// object lives as long as the handle `e` it is read from; the client wraps the
+// error as Java wraps a listener's foreign Throwable, so it usually comes back
+// as the cause. Every foreign callback error in this process is built by
+// `callback_error_from_py`, so a non-NULL opaque is always such an object.
+static PyObject* callback_exception_of(const kafka_common_Error_t* e) {
     for (const kafka_common_Error_t* cur = e; cur != NULL; cur = kafka_common_Error_source(cur)) {
         const kafka_common_LocalCallbackError_t* cb = kafka_common_Error_local_callback_error(cur);
-        if (cb != NULL) return kafka_common_LocalCallbackError_opaque(cb);
+        if (cb != NULL) return (PyObject*)kafka_common_LocalCallbackError_opaque(cb);
     }
     return NULL;
 }
 
 // Mirrors KafkaError._from_c field for field, from a BORROWED error:
 // (code, message | None, is_retriable, is_fatal, txn_requires_abort,
-//  callback_opaque | None). `callback_opaque` is the address of the Python
-// exception a callback raised (`callback_opaque_of`), which the consumer swaps
-// back in; it is only compared, never turned back into an object.
+//  callback_exception | None). `callback_exception` is the exception object a
+// Python callback raised (`callback_exception_of`), a new reference, which the
+// consumer swaps back in.
 // `error_is_fatal` (defined with the KafkaError accessors below) composes
 // RequestUtils.isFatalException from the exported predicates. Used by the
 // consumer and admin sections.
@@ -637,16 +640,16 @@ static PyObject* error_to_py(const kafka_common_Error_t* e) {
     const char* msg = kafka_common_Error_message(e);
     PyObject* py_msg = msg ? PyUnicode_FromString(msg) : (Py_INCREF(Py_None), Py_None);
     if (py_msg == NULL) return NULL;
-    void* opaque = callback_opaque_of(e);
-    PyObject* py_opaque = opaque ? PyLong_FromVoidPtr(opaque) : (Py_INCREF(Py_None), Py_None);
-    if (py_opaque == NULL) { Py_DECREF(py_msg); return NULL; }
+    PyObject* exc = callback_exception_of(e);
+    PyObject* py_exc = exc ? exc : Py_None;
+    Py_INCREF(py_exc);
     return Py_BuildValue("(iNOOON)",
                          (int)kafka_common_Error__enum(e),
                          py_msg,
                          kafka_common_Error_is_retriable_error(e) ? Py_True : Py_False,
                          error_is_fatal(e) ? Py_True : Py_False,
                          kafka_common_Error_is_transaction_abortable_error(e) ? Py_True : Py_False,
-                         py_opaque);
+                         py_exc);
 }
 
 // Same, consuming an OWNED error.
@@ -1966,18 +1969,20 @@ static PyObject* py_KafkaError_source(PyObject* self, PyObject* args) {
     return error_handle_to_py(kafka_common_Error_source(e));
 }
 
-// KafkaError_callback_opaque(handle) -> int | None: the opaque pointer of the
-// first foreign callback error in the handle's cause chain, the handle
-// included (`callback_opaque_of`), or None. A Python callback that raised
-// reports its exception object as that pointer
-// (`callback_error_from_py_exception`), so the consumer can swap the original
-// back in; the int is only compared, never turned back into an object.
-static PyObject* py_KafkaError_callback_opaque(PyObject* self, PyObject* args) {
+// KafkaError_callback_exception(handle) -> BaseException | None: the exception
+// object of the first foreign callback error in the handle's cause chain, the
+// handle included (`callback_exception_of`), as a new reference, or None. A
+// Python callback that raised reports its exception object through that error
+// (`callback_error_from_py`), so the consumer can swap the original back in.
+// The handle, still Python's, holds the error's own reference, so the object
+// is alive here.
+static PyObject* py_KafkaError_callback_exception(PyObject* self, PyObject* args) {
     unsigned long long ptr;
     if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    void* opaque = callback_opaque_of((const kafka_common_Error_t*)(uintptr_t)ptr);
-    if (opaque == NULL) Py_RETURN_NONE;
-    return PyLong_FromVoidPtr(opaque);
+    PyObject* exc = callback_exception_of((const kafka_common_Error_t*)(uintptr_t)ptr);
+    if (exc == NULL) Py_RETURN_NONE;
+    Py_INCREF(exc);
+    return exc;
 }
 
 // KafkaError_is_api_error(handle) -> bool: Java's `instanceof ApiException`,
@@ -2130,15 +2135,36 @@ static kafka_common_Error_t* error_from_py_exception(const char* fallback) {
     return err;
 }
 
+// The release function of a foreign callback error built by
+// `callback_error_from_py`: drops the reference the error owns to its exception
+// object. Rust calls it once, when the last copy of the error drops, on any
+// thread (a Rust task included), so it takes the GIL. Once the interpreter is
+// finalizing it does nothing, leaking the one object instead of touching a
+// dying interpreter.
+static void release_py_object(void* opaque) {
+#if PY_VERSION_HEX >= 0x030D0000
+    if (Py_IsFinalizing()) return;
+#else
+    if (_Py_IsFinalizing()) return;
+#endif
+    PyGILState_STATE g = PyGILState_Ensure();
+    Py_DECREF((PyObject*)opaque);
+    PyGILState_Release(g);
+}
+
 // A foreign callback error for an exception object: its str() as the message,
-// for the client's logs, and the object itself as the opaque pointer. Rust never
-// dereferences the pointer; the consumer keeps the object alive (its stash of
-// callback errors) for as long as the address may be compared.
+// for the client's logs, and the object itself as the opaque pointer. The error
+// owns one reference to the object, released by `release_py_object` when its
+// last copy drops, so the object lives while any handle to the error (or to an
+// error whose cause it is) does, and `KafkaError_callback_exception` reads it
+// back. The GIL must be held.
 static kafka_common_Error_t* callback_error_from_py(PyObject* exc) {
     PyObject* text = PyObject_Str(exc);
     const char* msg = text ? PyUnicode_AsUTF8(text) : NULL;
     if (msg == NULL) PyErr_Clear();
-    kafka_common_Error_t* err = kafka_common_Error_local_callback(msg ? msg : "callback raised an exception", (void*)exc);
+    Py_INCREF(exc);
+    kafka_common_Error_t* err = kafka_common_Error_local_callback(msg ? msg : "callback raised an exception",
+                                                                  (void*)exc, release_py_object);
     Py_XDECREF(text);
     return err;
 }
@@ -3090,10 +3116,11 @@ static void consumer_orphan_commit(Consumer* c, CommitCbCtx* ctx) {
 //   * None  -> the listener returned: report success now;
 //   * True  -> the adapter deferred (coroutine scheduled on the loop) and will
 //              report through Consumer__set_callback_result itself;
-//   * raise -> report the exception as a foreign callback error carrying the
-//              exception object (stashed by the adapter); the client wraps it
-//              like a Java listener's Throwable and the consumer swaps the
-//              original back in when the operation fails with it.
+//   * raise -> report the exception as a foreign callback error that owns a
+//              reference to the exception object (released when the last copy
+//              of the error is dropped); the client wraps it like a Java
+//              listener's Throwable and the consumer swaps the original back in
+//              when the operation fails with it.
 static void listener_fire(const char* method, void* self_, const kafka_List_t* partitions, int64_t callback_id) {
     ListenerCtx* ctx = (ListenerCtx*)self_;
     PyGILState_STATE g = PyGILState_Ensure();
@@ -3216,8 +3243,8 @@ static PyObject* py_Consumer__execute_callbacks(PyObject* self, PyObject* args) 
 
 // Consumer__set_callback_result(handle, callback_id, error): the deferred
 // report of a listener invocation. None = success; an exception object = the
-// exception the listener raised, reported as a foreign callback error carrying
-// it (the caller has stashed it); a str = a message, reported as a
+// exception the listener raised, reported as a foreign callback error owning a
+// reference to it; a str = a message, reported as a
 // KafkaException. The listener methods are void, so the C `result` is NULL.
 static PyObject* py_Consumer__set_callback_result(PyObject* self, PyObject* args) {
     unsigned long long h; long long callback_id; PyObject* error;
@@ -8789,8 +8816,8 @@ static PyMethodDef ProducerNativeMethods[] = {
      "Java getCause(): the BORROWED source handle, 0 when none (never destroy it)"},
     {"KafkaError_is_api_error", py_KafkaError_is_api_error, METH_VARARGS,
      "Java instanceof ApiException"},
-    {"KafkaError_callback_opaque", py_KafkaError_callback_opaque, METH_VARARGS,
-     "The opaque of the first foreign callback error in the cause chain, or None"},
+    {"KafkaError_callback_exception", py_KafkaError_callback_exception, METH_VARARGS,
+     "The exception object of the first foreign callback error in the cause chain, or None"},
     {"KafkaError_new", py_KafkaError_new, METH_VARARGS,
      "KafkaError_new(code, message | None) -> owned error handle (-1 = bare KafkaException)"},
     {"KafkaError_payload", py_KafkaError_payload, METH_VARARGS,

@@ -36,10 +36,11 @@ at once: the core's guard would refuse it too, but its answer would be queued
 behind the running callback, where a nested drain (which runs nothing) cannot
 reach it.
 
-A listener's exception reaches the core as a foreign callback error carrying the
-exception object (``kafka_common_Error_local_callback``); the consumer keeps the
-object until the call it fails has raised, and swaps it back in, as Java
-surfaces the listener's own ``Throwable`` (``_raise_error``).
+A listener's exception reaches the core as a foreign callback error owning a
+reference to the exception object (``kafka_common_Error_local_callback``), which
+it releases when its last copy drops; the call it fails reads the object back
+from its error and raises it, as Java surfaces the listener's own ``Throwable``
+(``_raise_error``).
 
 ``KafkaConsumer`` is not thread-safe: a call while another thread is inside the
 consumer raises ``ConcurrentModificationError``, ``wakeup()`` excepted — refused by
@@ -365,10 +366,6 @@ class _ConsumerState:
         self._async_waiters: dict[tuple[asyncio.AbstractEventLoop, asyncio.Event], _Use] = {}
         # The awaiting calls' results on their way to their loop (AsyncConsumer).
         self._undelivered = Undelivered()
-        # The exceptions the listener raised, by id(): kept alive while the
-        # foreign callback error carrying the address may come back, so the call
-        # it fails raises the object itself (_raise_error).
-        self._callback_errors: dict[int, BaseException] = {}
         # AsyncConsumer: the tasks awaiting a coroutine listener method, which
         # the delivering call waits for before it returns.
         self._listener_tasks: set[asyncio.Task[None]] = set()
@@ -488,7 +485,6 @@ class _ConsumerState:
             _lib.Consumer_destroy(handle)
         self._listener = None
         self._pending_notify_ref = None
-        self._callback_errors.clear()
         close_if_defined(self._key_deserializer)
         close_if_defined(self._value_deserializer)
 
@@ -559,30 +555,27 @@ class _ConsumerState:
         """Call the listener's method for a queued invocation, inside the
         callback window, so a consumer operation it issues goes through the
         ConsumerHandle; ``True`` when its awaitable was deferred (see
-        ``_ListenerAdapter``). An exception is kept for the swap-back
-        (``_raise_error``) and raised to the trampoline, which reports it.
+        ``_ListenerAdapter``). An exception is raised to the trampoline, which
+        reports it as a foreign callback error owning the object, read back by
+        the swap-back (``_raise_error``).
 
         On the synchronous consumer an ``async def`` method cannot be awaited:
         its coroutine is closed and the rebalance fails with ``TypeError``."""
         token = self._enter_callback()
         try:
-            try:
-                if method == _REVOKED:
-                    result: object = listener.on_partitions_revoked(partitions)  # type: ignore[func-returns-value]
-                elif method == _ASSIGNED:
-                    result = listener.on_partitions_assigned(partitions)  # type: ignore[func-returns-value]
-                else:
-                    result = listener.on_partitions_lost(partitions)  # type: ignore[func-returns-value]
-                if inspect.isawaitable(result):
-                    if self._defer_listener(cast("Awaitable[object]", result), callback_id):
-                        return True
-                    close = getattr(result, "close", None)
-                    if callable(close):
-                        close()
-                    raise TypeError("a coroutine rebalance listener requires an AsyncConsumer")
-            except BaseException as exc:
-                self._keep_callback_error(exc)
-                raise
+            if method == _REVOKED:
+                result: object = listener.on_partitions_revoked(partitions)  # type: ignore[func-returns-value]
+            elif method == _ASSIGNED:
+                result = listener.on_partitions_assigned(partitions)  # type: ignore[func-returns-value]
+            else:
+                result = listener.on_partitions_lost(partitions)  # type: ignore[func-returns-value]
+            if inspect.isawaitable(result):
+                if self._defer_listener(cast("Awaitable[object]", result), callback_id):
+                    return True
+                close = getattr(result, "close", None)
+                if callable(close):
+                    close()
+                raise TypeError("a coroutine rebalance listener requires an AsyncConsumer")
         finally:
             self._exit_callback(token)
         return None
@@ -591,13 +584,6 @@ class _ConsumerState:
         """Await a coroutine listener method's result later; whether it was
         deferred. The synchronous consumer cannot (``AsyncConsumer`` can)."""
         return False
-
-    def _keep_callback_error(self, exc: BaseException) -> None:
-        self._callback_errors[id(exc)] = exc
-
-    def _take_callback_errors(self) -> dict[int, BaseException]:
-        errors, self._callback_errors = self._callback_errors, {}
-        return errors
 
     def _raise_error(self, error: int) -> NoReturn:
         """Raise the typed error of an OWNED error handle, a waiting call's
@@ -611,10 +597,9 @@ class _ConsumerState:
         leaves unwrapped (``KafkaException``, ``InterruptException``); otherwise
         as the wrapping ``KafkaError`` ("User rebalance callback throws an
         error"), with the original as its ``__cause__``."""
-        opaque = _lib.KafkaError_callback_opaque(error)
+        original: BaseException | None = _lib.KafkaError_callback_exception(error)
         code = _lib.KafkaError_code(error)
         typed = from_ffi_error(error)
-        original = self._take_callback_errors().get(opaque) if opaque is not None else None
         if original is None:
             raise typed
         if code == _LOCAL_CALLBACK or isinstance(original, (KafkaError, KeyboardInterrupt)):
@@ -712,7 +697,6 @@ class _ConsumerState:
         payload = box[0]
         if interrupted is not None:
             free(payload)
-            self._take_callback_errors()
             raise interrupted
         return resolve(payload)
 
@@ -762,7 +746,6 @@ class _ConsumerState:
         payload = fut.result()
         if cancelled is not None:
             free(payload)
-            self._take_callback_errors()
             raise cancelled
         return resolve(payload)
 

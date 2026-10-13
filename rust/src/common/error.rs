@@ -2975,9 +2975,31 @@ impl Error {
     /// Create the error a callback written in another language reports when
     /// it raised one of that language's errors: `message` is its text, for the
     /// client's logs, and `opaque` the binding's pointer to it, never
-    /// dereferenced by Rust. See [`LocalCallbackError`].
+    /// dereferenced by Rust and not owned by the error. See
+    /// [`LocalCallbackError`].
     pub fn local_callback(message: impl Into<String>, opaque: *mut c_void) -> Self {
         Self::LocalCallback(LocalCallbackError::new(message, opaque))
+    }
+
+    /// As [`local_callback`](Self::local_callback), but the error owns
+    /// `opaque`: `release(opaque)` runs exactly once, when the last copy of the
+    /// error drops, on whatever task or thread drops it. The FFI's
+    /// `kafka_common_Error_local_callback` builds it when given a release
+    /// function.
+    ///
+    /// # Safety
+    ///
+    /// `release` must be sound to call once with `opaque`, from any thread, at
+    /// any time until the process exits.
+    #[cfg_attr(not(any(feature = "ffi", test)), expect(dead_code))]
+    pub(crate) unsafe fn local_callback_with_release(
+        message: impl Into<String>,
+        opaque: *mut c_void,
+        release: crate::common::local_callback_error::ReleaseFn,
+    ) -> Self {
+        // SAFETY: forwarded: per this function's `# Safety`, `release` is sound to call once
+        // with `opaque`, from any thread, at any time, as `with_release` requires.
+        Self::LocalCallback(unsafe { LocalCallbackError::with_release(message, opaque, release) })
     }
 
     /// Create a transaction aborted error with Java's default message.

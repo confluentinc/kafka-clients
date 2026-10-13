@@ -84,6 +84,7 @@ use futures_util::FutureExt;
 use crate::common::Error;
 use crate::common::protocol::Errors;
 use crate::ffi::callback_queue::{CallbackJob, SendPtr};
+use crate::ffi::common::errors::local_callback_error::kafka_common_LocalCallbackError_release_fn_t;
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, kafka_List_t, list_strings};
 // The 163 enumerators are spelled out in full (see
@@ -1136,12 +1137,22 @@ pub unsafe extern "C" fn kafka_common_Error_local_timeout(message: *const c_char
 /// logs, and `opaque` the binding's pointer to it. No Java class. The client
 /// treats it as Java treats a listener's foreign `Throwable` (it wraps it, so
 /// it comes back as the cause of the operation's error), and
-/// `kafka_common_Error_local_callback_error` reads the pointer back. Rust never
-/// dereferences, frees or retains `opaque`.
+/// `kafka_common_Error_local_callback_error` reads the pointer back.
+///
+/// Rust never dereferences `opaque`. When `release` is `NULL` the error does
+/// not own it: the caller keeps what it points at alive for as long as it may
+/// read the pointer back. Otherwise the error owns `opaque`: Rust calls
+/// `release(opaque)` exactly once, when the last copy of the error is dropped
+/// — this handle and every error the client made from it, such as an error
+/// whose cause it is, and the errors handed to other callbacks — and that can
+/// happen on any thread, a Rust task included, and after this function and
+/// the call that reported the error have returned.
 ///
 /// # Safety
 ///
-/// `message` must be null or a valid NUL-terminated C string.
+/// `message` must be null or a valid NUL-terminated C string. `release`, when
+/// not `NULL`, must be safe to call once with `opaque` from any thread, at any
+/// time until the process exits.
 // a binding's foreign callback error, no Java class (DoD #7)
 #[doc(alias = "rust-only")]
 #[ffi_guard]
@@ -1149,11 +1160,19 @@ pub unsafe extern "C" fn kafka_common_Error_local_timeout(message: *const c_char
 pub unsafe extern "C" fn kafka_common_Error_local_callback(
     message: *const c_char,
     opaque: *mut std::ffi::c_void,
+    release: kafka_common_LocalCallbackError_release_fn_t,
 ) -> *mut kafka_common_Error_t {
     // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
     // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
     // nothing borrows it after this call.
-    box_error(Error::local_callback(unsafe { c_str_to_string(message) }, opaque))
+    let message = unsafe { c_str_to_string(message) };
+    box_error(match release {
+        // SAFETY: Per this function's `# Safety`, a non-null `release` is safe to call once with
+        // `opaque` from any thread, at any time, as `local_callback_with_release` requires; the
+        // error makes that one call when its last copy drops.
+        Some(release) => unsafe { Error::local_callback_with_release(message, opaque, release) },
+        None => Error::local_callback(message, opaque),
+    })
 }
 
 /// `new TransactionAbortedException()`.

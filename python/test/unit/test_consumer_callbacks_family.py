@@ -23,16 +23,18 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import sys
 import threading
 import weakref
-from typing import Any
+from typing import Any, cast
 
+import _confluentkafka as _lib  # type: ignore[import-not-found]
 import pytest
 
 from confluent_kafka.common import TopicPartition
 from confluent_kafka.consumer import (
-    AsyncMockConsumer, CloseOptions, Consumer, ConsumerRebalanceListener, ConsumerRecord,
-    KafkaConsumer, MockConsumer, OffsetAndMetadata,
+    AsyncConsumer, AsyncKafkaConsumer, AsyncMockConsumer, CloseOptions, Consumer,
+    ConsumerRebalanceListener, ConsumerRecord, KafkaConsumer, MockConsumer, OffsetAndMetadata,
 )
 
 TP = TopicPartition(topic="t", partition=0)
@@ -191,3 +193,161 @@ def test_listener_released_by_a_listenerless_or_replacing_subscribe(make: Any) -
     gc.collect()
     assert ref() is None
     close(consumer)
+
+
+# ---------------------------------------------------------------------------
+# A listener's exception is owned by the foreign callback error reporting it
+# (kafka_common_Error_local_callback with a release function): it survives with
+# no Python-side reference until the operation's error is raised, and is
+# released once that error is dropped
+# ---------------------------------------------------------------------------
+def ffi_mock_backed(consumer: Any) -> Any:
+    """``consumer`` (a bare ``KafkaConsumer`` or ``AsyncKafkaConsumer``) over the
+    FFI's ``kafka_consumer_MockConsumer_t``, so a rebalance runs the listener
+    through the C trampolines without a broker."""
+    consumer._h = _lib.Consumer_MockConsumer_new("earliest")
+    consumer._group_id_defined = True
+    consumer._pending_notify_ref = consumer._on_pending_notify
+    _lib.Consumer__set_callbacks_notify(consumer._h, consumer._pending_notify_ref)
+    return consumer
+
+
+def sync_ffi_mock() -> KafkaConsumer[bytes, bytes]:
+    consumer: KafkaConsumer[bytes, bytes] = KafkaConsumer.__new__(KafkaConsumer)
+    Consumer.__init__(consumer)
+    return cast("KafkaConsumer[bytes, bytes]", ffi_mock_backed(consumer))
+
+
+def async_ffi_mock() -> AsyncKafkaConsumer[bytes, bytes]:
+    consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer.__new__(AsyncKafkaConsumer)
+    AsyncConsumer.__init__(consumer)
+    return cast("AsyncKafkaConsumer[bytes, bytes]", ffi_mock_backed(consumer))
+
+
+def rebalance_spec(consumer: Any) -> tuple[Any, Any, Any]:
+    """Drive ``MockConsumer.rebalance([TP])`` as a waiting call, collecting the
+    garbage before the error is read back, so only the error keeps the
+    listener's exception alive."""
+    submit, resolve, free = consumer._void_spec(_lib.MockConsumer_rebalance_cb,
+                                                [(TP.topic(), TP.partition())])
+
+    def collected_then_resolved(payload: tuple[Any, ...]) -> None:
+        gc.collect()
+        resolve(payload)
+
+    return submit, collected_then_resolved, free
+
+
+class ListenerError(ValueError):
+    """A listener's own exception (a subclass, so it takes a weak reference).
+    Java's ``MockConsumer.rebalance`` lets it propagate unwrapped."""
+
+
+class FreshErrorListener(ConsumerRebalanceListener):
+    """Raises a new exception, remembered only through a weak reference."""
+
+    def __init__(self) -> None:
+        self.raised: list[weakref.ref[ListenerError]] = []
+
+    def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
+        error = ListenerError("bad")
+        self.raised.append(weakref.ref(error))
+        raise error
+
+
+class AsyncFreshErrorListener(ConsumerRebalanceListener):
+    def __init__(self) -> None:
+        self.raised: list[weakref.ref[ListenerError]] = []
+
+    async def on_partitions_assigned(  # type: ignore[override]
+            self, partitions: set[TopicPartition]) -> None:
+        error = ListenerError("bad")
+        self.raised.append(weakref.ref(error))
+        raise error
+
+
+class HeldErrorListener(ConsumerRebalanceListener):
+    """Raises the exception the test holds, to count its references."""
+
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+
+    def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
+        raise self.error
+
+
+class AsyncHeldErrorListener(ConsumerRebalanceListener):
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+
+    async def on_partitions_assigned(  # type: ignore[override]
+            self, partitions: set[TopicPartition]) -> None:
+        raise self.error
+
+
+def test_the_listener_exception_lives_in_its_error_until_it_is_dropped() -> None:
+    consumer = sync_ffi_mock()
+    listener = FreshErrorListener()
+    consumer.subscribe(topics=["t"], callback=listener)
+    with pytest.raises(ListenerError) as e:
+        consumer._run_sync(*rebalance_spec(consumer))
+    [ref] = listener.raised
+    assert e.value is ref()
+    assert ref() is not None
+    del e
+    gc.collect()
+    assert ref() is None
+    close(consumer)
+
+
+def test_the_listener_exception_reference_is_released_once() -> None:
+    consumer = sync_ffi_mock()
+    error = ListenerError("bad")
+    consumer.subscribe(topics=["t"], callback=HeldErrorListener(error))
+    gc.collect()
+    baseline = sys.getrefcount(error)
+    with pytest.raises(ListenerError) as e:
+        consumer._run_sync(*rebalance_spec(consumer))
+    assert e.value is error
+    del e
+    error.__traceback__ = None
+    gc.collect()
+    assert sys.getrefcount(error) == baseline
+    close(consumer)
+
+
+def test_async_the_listener_exception_lives_in_its_error_until_it_is_dropped() -> None:
+    async def main() -> None:
+        consumer = async_ffi_mock()
+        listener = AsyncFreshErrorListener()
+        await consumer.subscribe(topics=["t"], callback=listener)
+        with pytest.raises(ListenerError) as e:
+            await consumer._run_async(*rebalance_spec(consumer))
+        [ref] = listener.raised
+        assert e.value is ref()
+        assert ref() is not None
+        del e
+        gc.collect()
+        assert ref() is None
+        await consumer.close(option=CloseOptions.timeout(0))
+
+    asyncio.run(main())
+
+
+def test_async_the_listener_exception_reference_is_released_once() -> None:
+    async def main() -> None:
+        consumer = async_ffi_mock()
+        error = ListenerError("bad")
+        await consumer.subscribe(topics=["t"], callback=AsyncHeldErrorListener(error))
+        gc.collect()
+        baseline = sys.getrefcount(error)
+        with pytest.raises(ListenerError) as e:
+            await consumer._run_async(*rebalance_spec(consumer))
+        assert e.value is error
+        del e
+        error.__traceback__ = None
+        gc.collect()
+        assert sys.getrefcount(error) == baseline
+        await consumer.close(option=CloseOptions.timeout(0))
+
+    asyncio.run(main())

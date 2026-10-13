@@ -23,8 +23,9 @@
 //! cause (`kafka_common_Error_source`) of the error the operation fails with;
 //! `kafka_common_Error_local_callback_error` then yields this view and
 //! `kafka_common_LocalCallbackError_opaque` the pointer, exactly as given.
-//! Rust never dereferences, frees or retains the pointer: the binding keeps
-//! what it points at alive for as long as it may compare it.
+//! Rust never dereferences the pointer; it releases it once, through the
+//! [`kafka_common_LocalCallbackError_release_fn_t`] the binding gave, if it
+//! gave one, when the last copy of the error drops.
 
 use std::ffi::{c_char, c_void};
 use std::ptr;
@@ -34,6 +35,15 @@ use crate::ffi::common::errors::{Payload, PayloadClass};
 use crate::ffi::common::{error_ref, kafka_common_Error_t};
 use crate::ffi::ffi_guard;
 use crate::ffi::util::c_str_to_string;
+
+/// Releases the opaque pointer a foreign callback error owns:
+/// `kafka_common_Error_local_callback` takes one, and Rust calls it exactly
+/// once, with the pointer, when the last copy of the error is dropped, on
+/// whatever thread drops it (a Rust task included). `NULL` where a parameter
+/// of this type is accepted means the pointer is not owned.
+// a binding's foreign callback error, no Java class (DoD #7)
+#[doc(alias = "rust-only")]
+pub type kafka_common_LocalCallbackError_release_fn_t = Option<unsafe extern "C" fn(opaque: *mut c_void)>;
 
 /// Opaque handle to a [`LocalCallbackError`].
 // a binding's foreign callback error, no Java class (DoD #7)
@@ -78,7 +88,8 @@ pub unsafe extern "C" fn kafka_common_Error_local_callback_error(
 }
 
 /// Builds the payload from the foreign error's text and the binding's opaque
-/// pointer to it. Owned, freed with [`kafka_common_LocalCallbackError_destroy`].
+/// pointer to it, which the payload does not own. Owned, freed with
+/// [`kafka_common_LocalCallbackError_destroy`].
 ///
 /// # Safety
 ///
@@ -96,7 +107,11 @@ pub unsafe extern "C" fn kafka_common_LocalCallbackError_new(
     Payload::boxed(LocalCallbackError::new(unsafe { c_str_to_string(message) }, opaque))
 }
 
-/// The binding's opaque pointer, exactly as it was given.
+/// The binding's opaque pointer, exactly as it was given. A pointer the error
+/// owns (given to `kafka_common_Error_local_callback` with a release function)
+/// is valid while the error handle this view was read from lives: the view
+/// borrows from that handle, and the error releases the pointer only once its
+/// last copy drops.
 ///
 /// # Safety
 ///
@@ -168,6 +183,7 @@ pub unsafe extern "C" fn kafka_common_LocalCallbackError_destroy(self_: *mut kaf
 #[cfg(test)]
 mod tests {
     use std::ffi::{CStr, CString};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
     use crate::ffi::common::{
@@ -186,7 +202,7 @@ mod tests {
         // alive (the string is destroyed once), `message` outlives the calls that read it, and
         // `opaque` is only compared, never dereferenced.
         unsafe {
-            let error = kafka_common_Error_local_callback(message.as_ptr(), opaque);
+            let error = kafka_common_Error_local_callback(message.as_ptr(), opaque, None);
             assert_eq!(kafka_common_Error_is_local_callback_error(error), 1);
             assert_eq!(kafka_common_Error_is_kafka_error(error), 0);
             assert_eq!(
@@ -232,6 +248,71 @@ mod tests {
             assert_eq!(kafka_common_LocalCallbackError_opaque(view), opaque);
             kafka_common_Error_destroy(error);
         }
+    }
+
+    /// Counts the calls in the `AtomicUsize` `opaque` points at.
+    ///
+    /// # Safety
+    ///
+    /// `opaque` must point at a live `AtomicUsize`.
+    unsafe extern "C" fn count_release(opaque: *mut c_void) {
+        // SAFETY: Per this function's `# Safety`, `opaque` points at a live `AtomicUsize`, only
+        // read through a shared reference.
+        unsafe { &*opaque.cast::<AtomicUsize>() }.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Given a release function, the error owns the pointer: it stays
+    /// readable through the error, and through the cause of the error the
+    /// client wraps it in, and is released once, when the last of them is
+    /// destroyed.
+    #[test]
+    fn owned_opaque_is_released_once_when_the_last_error_is_destroyed() {
+        let releases = AtomicUsize::new(0);
+        let opaque = (&releases as *const AtomicUsize).cast_mut().cast::<c_void>();
+        let message = CString::new("ValueError: bad").unwrap();
+        // SAFETY: Test code: the error comes from `kafka_common_Error_local_callback` and is taken
+        // back by `take_error` exactly once; `box_error` makes the two wrapping handles, each
+        // destroyed once after its last use; the borrowed cause and the views are used only while
+        // their owner is alive; `message` outlives the call that reads it, and `releases` outlives
+        // every copy of the error, so `count_release` always finds it.
+        unsafe {
+            let error = kafka_common_Error_local_callback(message.as_ptr(), opaque, Some(count_release));
+            let view = kafka_common_Error_local_callback_error(error);
+            assert_eq!(kafka_common_LocalCallbackError_opaque(view), opaque);
+
+            let owned = crate::ffi::common::take_error(error).expect("non-null");
+            let wrapped = crate::consumer::internals::ConsumerUtils::maybe_wrap_as_kafka_error_with_msg(
+                owned,
+                "User rebalance callback throws an error",
+            );
+            let first = box_error(wrapped.clone());
+            let second = box_error(wrapped);
+            assert_eq!(releases.load(Ordering::SeqCst), 0);
+
+            kafka_common_Error_destroy(first);
+            assert_eq!(releases.load(Ordering::SeqCst), 0);
+            let view = kafka_common_Error_local_callback_error(kafka_common_Error_source(second));
+            assert_eq!(kafka_common_LocalCallbackError_opaque(view), opaque);
+            kafka_common_Error_destroy(second);
+        }
+        assert_eq!(releases.load(Ordering::SeqCst), 1);
+    }
+
+    /// A `NULL` release function leaves the pointer unowned: destroying the
+    /// error calls nothing.
+    #[test]
+    fn null_release_owns_nothing() {
+        let releases = AtomicUsize::new(0);
+        let opaque = (&releases as *const AtomicUsize).cast_mut().cast::<c_void>();
+        let message = CString::new("boom").unwrap();
+        // SAFETY: Test code: the error comes from `kafka_common_Error_local_callback` and is
+        // destroyed once; `message` outlives the call that reads it, and `opaque` is never
+        // dereferenced without a release function.
+        unsafe {
+            let error = kafka_common_Error_local_callback(message.as_ptr(), opaque, None);
+            kafka_common_Error_destroy(error);
+        }
+        assert_eq!(releases.load(Ordering::SeqCst), 0);
     }
 
     #[test]
