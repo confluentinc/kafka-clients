@@ -332,6 +332,31 @@ unsafe fn handle_ref(admin: *const kafka_admin_AdminClient_t) -> &'static AdminH
 /// `MockAdminClient`). Instance methods are named
 /// `kafka_admin_AdminClient_<method>`; the mock's own driver methods are named
 /// `kafka_admin_MockAdminClient_<method>` and take the same handle.
+///
+/// # Result handles of the synchronous entry points
+///
+/// A synchronous entry point (`kafka_admin_AdminClient_<rpc>`, without
+/// `_async`) returns its `*Result_t` handle at once, as Java's `Admin` methods
+/// return their `*Result`; the request completes later. Each accessor states
+/// whether it blocks. One that blocks waits for the future it reads, as Java's
+/// `KafkaFuture.get()` does, and no longer than the call's own `timeout_ms`.
+///
+/// - **Never from a thread driving a tokio runtime.** A blocking accessor whose
+///   future is still pending cannot wait on such a thread: for example inside
+///   an `_async` callback that runs on a tokio worker thread because the
+///   dispatcher thread is gone, or in C code called from Rust async code. There
+///   it fails instead of waiting: the error getters and `_all` return a
+///   `LOCAL_ILLEGAL_STATE` error whose message begins "Rust panic caught at the
+///   FFI boundary", and every other accessor returns its failure value (0 from
+///   `_count`, -1, NULL or false), which looks the same as an empty or failed
+///   result. Nothing is cached by that failure, so the same accessor called
+///   later from an ordinary thread waits normally. Accessors that never block,
+///   and blocking ones whose future has already resolved (always the case for a
+///   handle an `_async` callback delivers), are safe on any thread.
+/// - **Lifetime.** A result handle may outlive the admin client: it stays safe
+///   to read, and must still be released with its own `_destroy`. See
+///   [`kafka_admin_AdminClient_destroy`] for what a future still pending at
+///   that point reports.
 #[repr(C)]
 pub struct kafka_admin_AdminClient_t {
     _private: [u8; 0],
@@ -674,6 +699,19 @@ pub extern "C" fn kafka_admin_MockAdminClient_new(num_brokers: i32) -> *mut kafk
 /// Safe to call with a null pointer (no-op). Destroying concurrently with an
 /// in-flight `_async` operation is a C lifetime precondition the caller must
 /// uphold (CLAUDE.md FFI §4).
+///
+/// Result handles returned by the synchronous entry points are not freed here
+/// and may outlive the client: each stays safe to read and must still be
+/// released with its own `_destroy`. An outcome that had already resolved stays
+/// readable. A future still pending at this point can never complete, because
+/// the background task is torn down without first failing its pending calls
+/// (as [`kafka_admin_AdminClient_close`] would). So its `_is_done` reports true,
+/// and every read of it fails at once — it does not wait — with a
+/// `REQUEST_TIMED_OUT` error (Java's `TimeoutException`) "The AdminClient thread
+/// has exited.", the error Java's admin thread completes every pending call
+/// with when it exits. Java has no `destroy`; this behaviour is specific to the
+/// C API. Call `kafka_admin_AdminClient_close` first to resolve pending futures
+/// as Java's `close` does.
 ///
 /// # Safety
 ///
@@ -3724,6 +3762,12 @@ pub unsafe extern "C" fn kafka_admin_TopicListing_is_internal(listing: *const ka
 
 /// Opaque handle to a `CreateTopicsResult`, keyed by topic name: one future
 /// per requested topic (Java's `values()`), read by the accessors below.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_CreateTopicsResult_t {
     _private: [u8; 0],
@@ -3927,6 +3971,12 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_destroy(result: *mut kaf
 }
 
 /// Opaque handle to a flattened `DeleteTopicsResult`.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_DeleteTopicsResult_t {
     _private: [u8; 0],
@@ -4108,6 +4158,12 @@ pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_destroy(result: *mut kaf
 }
 
 /// Opaque handle to a `ListTopicsResult`, keyed by topic name.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_ListTopicsResult_t {
     _private: [u8; 0],
@@ -4290,6 +4346,12 @@ pub unsafe extern "C" fn kafka_admin_ListTopicsResult_destroy(result: *mut kafka
 }
 
 /// Opaque handle to a flattened `DescribeTopicsResult`.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_DescribeTopicsResult_t {
     _private: [u8; 0],
@@ -4500,6 +4562,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_destroy(result: *mut k
 }
 
 /// Opaque handle to a flattened `CreatePartitionsResult`, keyed by topic name.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_CreatePartitionsResult_t {
     _private: [u8; 0],
@@ -4681,6 +4749,12 @@ pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_destroy(result: *mut
 }
 
 /// Opaque handle to a flattened `DeleteRecordsResult`, keyed by topic partition.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_DeleteRecordsResult_t {
     _private: [u8; 0],
@@ -7792,6 +7866,12 @@ struct DescribeClusterOutcome {
 }
 
 /// Opaque handle to a `DescribeClusterResult`.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_DescribeClusterResult_t {
     _private: [u8; 0],
@@ -8434,6 +8514,12 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_cluster_async(
 /// Opaque handle to a flattened `DescribeConfigsResult`, keyed by config
 /// resource: one future per requested resource (Java's `values()`), read by the
 /// accessors below.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_DescribeConfigsResult_t {
     _private: [u8; 0],
@@ -8948,6 +9034,12 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_configs_async(
 /// Opaque handle to a flattened `AlterConfigsResult`, keyed by config resource:
 /// one future per altered resource (Java's `values()`), read by the accessors
 /// below.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_AlterConfigsResult_t {
     _private: [u8; 0],
@@ -9436,6 +9528,12 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_incremental_alter_configs_async
 // ---------------------------------------------------------------------------
 
 /// Opaque handle to a `ListConfigResourcesResult`.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_ListConfigResourcesResult_t {
     _private: [u8; 0],
@@ -9793,6 +9891,12 @@ unsafe fn read_config_resource_types(type_codes: *const i32, count: i32) -> Hash
 // ---------------------------------------------------------------------------
 
 /// Opaque handle to a flattened `DescribeLogDirsResult`, keyed by broker id.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_DescribeLogDirsResult_t {
     _private: [u8; 0],
@@ -10241,6 +10345,12 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_log_dirs_async(
 // ---------------------------------------------------------------------------
 
 /// Opaque handle to a flattened `AlterReplicaLogDirsResult`, keyed by replica.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_AlterReplicaLogDirsResult_t {
     _private: [u8; 0],
@@ -10782,6 +10892,12 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_replica_log_dirs_async(
 
 /// Opaque handle to a flattened `DescribeReplicaLogDirsResult`, keyed by
 /// replica.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_DescribeReplicaLogDirsResult_t {
     _private: [u8; 0],
@@ -12027,6 +12143,12 @@ fn sorted_partition_entries<V>(map: HashMap<TopicPartition, V>) -> Vec<(TopicPar
 }
 
 /// Opaque handle to a flattened `ElectLeadersResult`, keyed by topic partition.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_ElectLeadersResult_t {
     _private: [u8; 0],
@@ -12287,6 +12409,12 @@ pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_destroy(result: *mut kaf
 
 /// Opaque handle to a flattened `AlterPartitionReassignmentsResult`, keyed by
 /// topic partition.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_AlterPartitionReassignmentsResult_t {
     _private: [u8; 0],
@@ -12512,6 +12640,12 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_destroy(
 
 /// Opaque handle to a flattened `ListPartitionReassignmentsResult`, keyed by
 /// topic partition.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_ListPartitionReassignmentsResult_t {
     _private: [u8; 0],
@@ -12771,6 +12905,12 @@ pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_destroy(
 }
 
 /// Opaque handle to a flattened `ListOffsetsResult`, keyed by topic partition.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_ListOffsetsResult_t {
     _private: [u8; 0],
@@ -16396,6 +16536,12 @@ fn submit_remove_members_from_consumer_group(
 
 /// Opaque handle to a `ListGroupsResult`: Java's `all()`, `valid()` and
 /// `errors()` futures, read by the accessors below.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_ListGroupsResult_t {
     _private: [u8; 0],
@@ -16638,6 +16784,12 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_destroy(result: *mut kafka
 /// Opaque handle to a `DescribeConsumerGroupsResult`, keyed by group id: one
 /// future per requested group (Java's `describedGroups()`), read by the
 /// accessors below.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_DescribeConsumerGroupsResult_t {
     _private: [u8; 0],
@@ -16862,6 +17014,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_destroy(
 /// Opaque handle to a `DescribeClassicGroupsResult`, keyed by group id: one
 /// future per requested group (Java's `describedGroups()`), read by the
 /// accessors below.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_DescribeClassicGroupsResult_t {
     _private: [u8; 0],
@@ -17083,6 +17241,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_destroy(
 /// Opaque handle to a `ListConsumerGroupOffsetsResult`, keyed by group id: one
 /// future per requested group (Java's `partitionsToOffsetAndMetadata(groupId)`),
 /// read by the accessors below.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_ListConsumerGroupOffsetsResult_t {
     _private: [u8; 0],
@@ -17403,6 +17567,12 @@ fn consumer_group_partition_keys(requested: &[TopicPartition]) -> (Vec<CString>,
 /// (unresolved) and [`kafka_admin_AdminClient_alter_consumer_group_offsets_async`]
 /// (already resolved, so nothing waits); every function below works on a handle
 /// from either.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_AlterConsumerGroupOffsetsResult_t {
     _private: [u8; 0],
@@ -17735,6 +17905,12 @@ pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_destroy(
 /// (unresolved) and [`kafka_admin_AdminClient_delete_consumer_group_offsets_async`]
 /// (already resolved, so nothing waits); every function below works on a handle
 /// from either.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_DeleteConsumerGroupOffsetsResult_t {
     _private: [u8; 0],
@@ -18037,6 +18213,12 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(
 /// Opaque handle to a `DeleteConsumerGroupsResult`, keyed by group id: one
 /// future per requested group (Java's `deletedGroups()`), read by the
 /// accessors below.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_DeleteConsumerGroupsResult_t {
     _private: [u8; 0],
@@ -18243,6 +18425,12 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_destroy(
 /// [`kafka_admin_AdminClient_remove_members_from_consumer_group_async`] (already
 /// resolved, so nothing waits); every function below works on a handle from
 /// either.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_RemoveMembersFromConsumerGroupResult_t {
     _private: [u8; 0],
@@ -22054,6 +22242,12 @@ fn submit_alter_client_quotas_entries(
 
 /// Opaque handle to a `CreateAclsResult`, keyed by ACL binding: one future per
 /// requested binding (Java's `values()`), read by the accessors below.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_CreateAclsResult_t {
     _private: [u8; 0],
@@ -22238,6 +22432,12 @@ pub unsafe extern "C" fn kafka_admin_CreateAclsResult_destroy(result: *mut kafka
 }
 
 /// Opaque handle to a `DescribeAclsResult`.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_DescribeAclsResult_t {
     _private: [u8; 0],
@@ -22391,6 +22591,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_destroy(result: *mut kaf
 
 /// Opaque handle to a `DeleteAclsResult`, keyed by filter: one future per
 /// requested filter (Java's `values()`), read by the accessors below.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_DeleteAclsResult_t {
     _private: [u8; 0],
@@ -22912,6 +23118,12 @@ pub unsafe extern "C" fn kafka_admin_FilterResults_destroy(results: *mut kafka_a
 }
 
 /// Opaque handle to a `DescribeClientQuotasResult`.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_DescribeClientQuotasResult_t {
     _private: [u8; 0],
@@ -23216,6 +23428,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_destroy(
 
 /// Opaque handle to an `AlterClientQuotasResult`, keyed by quota entity: one
 /// future per altered entity (Java's `values()`), read by the accessors below.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_AlterClientQuotasResult_t {
     _private: [u8; 0],
@@ -28222,6 +28440,12 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_destroy(
 
 /// Opaque handle to a `DescribeUserScramCredentialsResult`, backing Java's three
 /// views over one response.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_DescribeUserScramCredentialsResult_t {
     _private: [u8; 0],
@@ -28648,6 +28872,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_destroy(
 
 /// Opaque handle to an `AlterUserScramCredentialsResult`, keyed by user: one
 /// future per altered user (Java's `values()`), read by the accessors below.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_AlterUserScramCredentialsResult_t {
     _private: [u8; 0],
@@ -28837,6 +29067,12 @@ pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_destroy(
 }
 
 /// Opaque handle to a flattened `CreateDelegationTokenResult`.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_CreateDelegationTokenResult_t {
     _private: [u8; 0],
@@ -28976,6 +29212,12 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenResult_destroy(
 }
 
 /// Opaque handle to a flattened `RenewDelegationTokenResult`.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_RenewDelegationTokenResult_t {
     _private: [u8; 0],
@@ -29102,6 +29344,12 @@ pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenResult_destroy(
 }
 
 /// Opaque handle to a flattened `ExpireDelegationTokenResult`.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_ExpireDelegationTokenResult_t {
     _private: [u8; 0],
@@ -29229,6 +29477,12 @@ pub unsafe extern "C" fn kafka_admin_ExpireDelegationTokenResult_destroy(
 }
 
 /// Opaque handle to a flattened `DescribeDelegationTokenResult`.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_DescribeDelegationTokenResult_t {
     _private: [u8; 0],
@@ -29405,6 +29659,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_destroy(
 }
 
 /// Opaque handle to a flattened `DescribeFeaturesResult`.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_DescribeFeaturesResult_t {
     _private: [u8; 0],
@@ -29788,6 +30048,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_destroy(result: *mut
 }
 
 /// Opaque handle to a flattened `UpdateFeaturesResult`.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_UpdateFeaturesResult_t {
     _private: [u8; 0],
@@ -30330,6 +30596,12 @@ fn submit_fence_producers_entries(
 /// Opaque handle to a `DescribeProducersResult`, keyed by topic partition: one
 /// future per requested partition (Java's `partitionResult(tp)`), read by the
 /// accessors below.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_DescribeProducersResult_t {
     _private: [u8; 0],
@@ -30808,6 +31080,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_destroy(
 /// Opaque handle to a `DescribeTransactionsResult`, keyed by transactional id:
 /// one future per requested id (Java's `description(id)`), read by the
 /// accessors below.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_DescribeTransactionsResult_t {
     _private: [u8; 0],
@@ -31319,6 +31597,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_destroy(
 
 /// Opaque handle to an `AbortTransactionResult`: Java's single `all()` future,
 /// read by the accessors below.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_AbortTransactionResult_t {
     _private: [u8; 0],
@@ -31411,6 +31695,12 @@ pub unsafe extern "C" fn kafka_admin_AbortTransactionResult_destroy(result: *mut
 
 /// Opaque handle to a `TerminateTransactionResult`: Java's single `result()`
 /// future, read by the accessors below.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_TerminateTransactionResult_t {
     _private: [u8; 0],
@@ -31505,6 +31795,12 @@ pub unsafe extern "C" fn kafka_admin_TerminateTransactionResult_destroy(
 
 /// Opaque handle to a `FenceProducersResult`, keyed by transactional id: one
 /// future per requested id, read by the accessors below.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_FenceProducersResult_t {
     _private: [u8; 0],
@@ -31759,6 +32055,12 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_destroy(result: *mut k
 /// Opaque handle to a `ListTransactionsResult`, keyed by broker id: Java's
 /// `byBrokerId()`, `all()` and `allByBrokerId()` futures, read by the accessors
 /// below.
+///
+/// A blocking accessor must not be called from a thread driving a tokio
+/// runtime while its future is pending (it then fails instead of waiting),
+/// and the handle may outlive the admin client: see
+/// [`kafka_admin_AdminClient_t`], *Result handles of the synchronous entry
+/// points*.
 #[repr(C)]
 pub struct kafka_admin_ListTransactionsResult_t {
     _private: [u8; 0],
@@ -47093,6 +47395,67 @@ mod tests {
             // The resolved outcome is cached in the handle, so it outlives the client.
             assert!(!kafka_admin_CreateTopicsResult_get_error(result, 0).is_null());
             kafka_admin_CreateTopicsResult_destroy(result);
+        }
+    }
+
+    /// A blocking accessor called on a thread driving a tokio runtime cannot
+    /// wait for a pending future there: the error getters and `all()` report a
+    /// `LOCAL_ILLEGAL_STATE` error, the value getter returns NULL, and nothing is
+    /// cached, so the same reads from an ordinary thread afterwards wait for the
+    /// real outcome (here the request's own timeout).
+    #[test]
+    fn a_blocking_accessor_on_a_tokio_runtime_thread_fails_and_caches_nothing() {
+        let admin = unreachable_admin_client();
+        let name = CString::new("runtime-thread-topic").unwrap();
+        // SAFETY: Test code: `name` is a valid C string.
+        let topic = unsafe { kafka_admin_NewTopic_new(name.as_ptr(), 1, 1) };
+        assert!(!topic.is_null());
+        let topics = [topic as *const kafka_admin_NewTopic_t];
+        let mut result: *mut kafka_admin_CreateTopicsResult_t = std::ptr::null_mut();
+        // SAFETY: Test code: `admin` is live; `topics` holds one live `NewTopic`; `result` is a
+        // writable slot.
+        let error = unsafe {
+            kafka_admin_AdminClient_create_topics(admin, topics.as_ptr(), 1, 1_000, false, false, &mut result)
+        };
+        assert!(error.is_null(), "submission must not fail");
+
+        let on_runtime = tokio::runtime::Builder::new_current_thread().build().expect("runtime builds");
+        let (all_message, error_message, value_is_null, done) = on_runtime.block_on(async {
+            // SAFETY: Test code: `result` is the live handle written above. The error `all`
+            // returns is owned and consumed here; the `_get_error` pointer is the guard's
+            // deliberately leaked panic error, read and never freed.
+            unsafe {
+                let all = consume_message(kafka_admin_CreateTopicsResult_all(result));
+                let error = borrowed_message(kafka_admin_CreateTopicsResult_get_error(result, 0));
+                let value_is_null = kafka_admin_CreateTopicsResult_get_value(result, 0).is_null();
+                (all, error, value_is_null, kafka_admin_CreateTopicsResult_is_done(result, 0))
+            }
+        });
+        for message in [&all_message, &error_message] {
+            assert!(
+                message.starts_with("Rust panic caught at the FFI boundary"),
+                "unexpected message: {message}"
+            );
+        }
+        assert!(value_is_null);
+        assert!(!done, "the request is still pending");
+
+        // SAFETY: Test code: `result` is the live handle written above and `admin` the live
+        // client; borrowed pointers are read before the result handle is destroyed, and each
+        // handle is destroyed exactly once.
+        unsafe {
+            let all = kafka_admin_CreateTopicsResult_all(result);
+            assert_eq!(common::kafka_common_Error_code(all) as i32, Errors::RequestTimedOut as i32);
+            common::kafka_common_Error_destroy(all);
+            assert!(kafka_admin_CreateTopicsResult_is_done(result, 0));
+            let per_topic = kafka_admin_CreateTopicsResult_get_error(result, 0);
+            assert_eq!(
+                common::kafka_common_Error_code(per_topic) as i32,
+                Errors::RequestTimedOut as i32
+            );
+            kafka_admin_NewTopic_destroy(topic);
+            kafka_admin_CreateTopicsResult_destroy(result);
+            kafka_admin_AdminClient_destroy(admin);
         }
     }
 
