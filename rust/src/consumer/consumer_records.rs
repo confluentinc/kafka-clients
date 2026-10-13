@@ -68,11 +68,15 @@ pub struct ConsumerRecords<K, V> {
 }
 
 impl<K, V> ConsumerRecords<K, V> {
-    /// Create a new `ConsumerRecords` from per-partition record lists and a
-    /// next-offsets map.
+    /// Create a new `ConsumerRecords` with the given records and next offsets.
+    ///
+    /// * `records` - The records for each partition
+    /// * `next_offsets` - The next offset and metadata for each partition whose
+    ///   position was advanced during the poll call. These represent the
+    ///   offsets that the consumer will start reading from on the next poll.
     ///
     /// Corresponds to Java's `ConsumerRecords(Map, Map)`
-    /// (`ConsumerRecords.java:62`). Java's deprecated `ConsumerRecords(Map)`,
+    /// (`ConsumerRecords.java:72`). Java's deprecated `ConsumerRecords(Map)`,
     /// which supplies no next offsets, is not translated (CLAUDE.md §3).
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecords#ConsumerRecords(Map,Map)")]
     pub fn with_next_offsets(

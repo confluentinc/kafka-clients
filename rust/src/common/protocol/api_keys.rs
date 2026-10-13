@@ -148,6 +148,9 @@ impl ApiKeys {
     pub const DESCRIBE_SHARE_GROUP_OFFSETS: Self = Self::new(ApiMessageType::DESCRIBE_SHARE_GROUP_OFFSETS);
     pub const ALTER_SHARE_GROUP_OFFSETS: Self = Self::new(ApiMessageType::ALTER_SHARE_GROUP_OFFSETS);
     pub const DELETE_SHARE_GROUP_OFFSETS: Self = Self::new(ApiMessageType::DELETE_SHARE_GROUP_OFFSETS);
+    pub const STREAMS_GROUP_TOPOLOGY_DESCRIPTION_UPDATE: Self =
+        Self::new(ApiMessageType::STREAMS_GROUP_TOPOLOGY_DESCRIPTION_UPDATE);
+    pub const UNREGISTER_CONTROLLER: Self = Self::forwardable(ApiMessageType::UNREGISTER_CONTROLLER);
 
     /// All known API keys.
     pub const ALL: &[ApiKeys] = &[
@@ -244,6 +247,8 @@ impl ApiKeys {
         Self::DESCRIBE_SHARE_GROUP_OFFSETS,
         Self::ALTER_SHARE_GROUP_OFFSETS,
         Self::DELETE_SHARE_GROUP_OFFSETS,
+        Self::STREAMS_GROUP_TOPOLOGY_DESCRIPTION_UPDATE,
+        Self::UNREGISTER_CONTROLLER,
     ];
 
     /// The permanent and immutable id of this API.

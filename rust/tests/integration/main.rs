@@ -24,6 +24,7 @@ mod common;
 
 mod admin_acls_test;
 mod admin_cluster_configs_test;
+mod admin_controllers_test;
 mod admin_delegation_tokens_test;
 mod admin_elections_reassignments_offsets_test;
 mod admin_features_test;
@@ -36,6 +37,7 @@ mod admin_scram_test;
 mod admin_topics_test;
 mod admin_transactions_test;
 mod base_consumer_test;
+mod bootstrap_resolution_test;
 mod client_rebootstrap_test;
 mod cluster_lifecycle_test;
 mod consumer_bounce_test;
