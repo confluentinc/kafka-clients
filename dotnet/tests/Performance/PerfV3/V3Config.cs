@@ -99,7 +99,9 @@ internal static class V3Config
             conf["fetch.min.bytes"] = Str(cfg.FetchMinBytes);
             conf["max.partition.fetch.bytes"] = Str(cfg.MaxPartitionFetchBytes);
             conf["max.poll.records"] = Str(cfg.BatchSize + 500);
-            conf["check.crcs"] = "false";
+
+            // No check.crcs override: the Rust client keeps its default true, matching the Java client and
+            // the Python harness, which sets check.crcs=false for the v2 (librdkafka) consumer only.
         }
 
         foreach (KeyValuePair<string, string> kv in SaslConfig.FromEnv(SaslForm.Java))

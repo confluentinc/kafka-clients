@@ -115,6 +115,13 @@ public sealed class Metrics : IDisposable
     /// <summary>Records <paramref name="count"/> messages into the current window's messages bucket.</summary>
     public void AddMessages(double count) => Volatile.Read(ref _messages).AddMeasurement(count);
 
+    /// <summary>
+    /// Restarts the CPU sampler's span at "now", so the next CPU sample covers only time from here (Python's
+    /// consumer <c>_reset_cpu_baseline</c>). Call it where the measured interval begins, so the first
+    /// measured sample neither includes warmup CPU nor reads <c>0.0</c> for lack of a baseline.
+    /// </summary>
+    public void ResetCpuBaseline() => _cpuSampler.ResetBaseline();
+
     /// <summary>Marks the start of the measured interval (epoch ms); windows from here feed the averages.</summary>
     public void SetMeasurementStart(long epochMs) => Volatile.Write(ref _measurementStartMs, epochMs);
 

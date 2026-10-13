@@ -24,7 +24,7 @@ namespace Confluent.Kafka.Performance.V3;
 /// generate the cycled messages, (optionally) capture the VERIFY_CONSUMED baseline, start the metrics
 /// sampler, run the sync (Python <c>main</c>) or async (Python <c>async_main</c>) engine over the v3 backend,
 /// cool down (GC + await), then run the optional consume-all verification and return the exit code
-/// (non-zero if the p99 budget was exceeded).
+/// (non-zero if the p99 budget was exceeded or the run failed).
 /// </summary>
 internal static class ProducerMain
 {
@@ -122,7 +122,9 @@ internal static class ProducerMain
             Console.WriteLine("Consumer verification skipped (baseline capture failed)");
         }
 
-        if (result.LatencyBudgetExceeded)
+        // A failed run (warmup, the count checks, the results file) fails the exit code, as the p99 budget
+        // does (Python's run_failed).
+        if (result.LatencyBudgetExceeded || result.RunFailed)
         {
             exitCode = 1;
         }
@@ -146,6 +148,8 @@ internal static class ProducerMain
             }
             finally
             {
+                // Before the close, which tears the metrics down with the producer (Rust harness).
+                backend.PrintCompressionRateAvg();
                 await CloseQuietlyAsync(backend).ConfigureAwait(false);
                 await backend.DisposeAsync().ConfigureAwait(false);
             }
@@ -159,6 +163,7 @@ internal static class ProducerMain
         }
         finally
         {
+            syncBackend.PrintCompressionRateAvg();
             CloseQuietly(syncBackend);
             syncBackend.Dispose();
         }

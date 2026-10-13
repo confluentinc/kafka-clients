@@ -25,7 +25,7 @@ namespace Confluent.Kafka.Performance.V2;
 /// <c>producer_performance_test.py</c>'s <c>__main__</c> with <c>CLIENT_VERSION=2</c>: generate the cycled
 /// messages, build the librdkafka-form producer config, start the metrics sampler, run the sync
 /// (Python <c>main</c>) or async (Python <c>async_main</c>) engine over the ckd backend, cool down
-/// (GC + await), then return the exit code (non-zero if the p99 budget was exceeded).
+/// (GC + await), then return the exit code (non-zero if the p99 budget was exceeded or the run failed).
 /// </summary>
 /// <remarks>
 /// The v2 baseline is manual-comparison only (not the p99 gate — D10). <c>VERIFY_CONSUMED</c> is a v3
@@ -84,7 +84,9 @@ internal static class ProducerMain
         metrics.StopCollecting();
         Console.WriteLine("Done");
 
-        return result.LatencyBudgetExceeded ? 1 : 0;
+        // A failed run (warmup, the count checks, the results file) fails the exit code, as the p99 budget
+        // does (Python's run_failed).
+        return result.LatencyBudgetExceeded || result.RunFailed ? 1 : 0;
     }
 
     private static async Task<ProducerBenchmarkResult> RunBenchmark(

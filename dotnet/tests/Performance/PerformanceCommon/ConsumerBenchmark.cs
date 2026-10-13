@@ -162,7 +162,7 @@ public static class ConsumerBenchmark
             measurement.SetFinalDuration(measuredDuration);
         }
 
-        return Summarize(config, measurement);
+        return Summarize(config, measurement, metrics);
     }
 
     /// <summary>Runs the <b>async</b> consumer benchmark (Python <c>run_async</c>) and returns its stats.</summary>
@@ -236,7 +236,7 @@ public static class ConsumerBenchmark
             measurement.SetFinalDuration(measuredDuration);
         }
 
-        return Summarize(config, measurement);
+        return Summarize(config, measurement, metrics);
     }
 
     /// <summary>
@@ -333,7 +333,7 @@ public static class ConsumerBenchmark
         Console.WriteLine(new string('=', 72));
     }
 
-    private static ConsumerBenchmarkResult Summarize(ConsumerBenchmarkConfig config, Measurement m)
+    private static ConsumerBenchmarkResult Summarize(ConsumerBenchmarkConfig config, Measurement m, Metrics metrics)
     {
         long[] hist = m.LatencyHist;
         long p50 = LatencyHistogram.PercentileFromHist(hist, 0.50);
@@ -371,6 +371,14 @@ public static class ConsumerBenchmark
         double thrMsg = duration > 0 ? m.MeasuredMessages / duration : 0.0;
         double thrMib = duration > 0 ? (m.MeasuredMessages * (double)config.MessageSize) / (1024.0 * 1024.0) / duration : 0.0;
 
+        // CPU / RSS averages over the measured interval, from the shared sampler: the same keys and units
+        // (rss_avg_mb, MB) as the other consumer harnesses' summaries; the producer harnesses' results.json
+        // use rss_avg_kib instead (Python _summarize).
+        ExternalMetricsAggregations agg = metrics.ExternalMetricsAggregations();
+        (double Cpu, double RssMb)? external = agg.TotalExternalMetrics > 0
+            ? (agg.AverageCpu, agg.AverageRss / (1024.0 * 1024.0))
+            : null;
+
         Console.WriteLine();
         Console.WriteLine(new string('=', 72));
         Console.WriteLine($"SUMMARY - CLIENT_VERSION={config.ClientVersion} (warmup excluded)");
@@ -379,9 +387,15 @@ public static class ConsumerBenchmark
         Console.WriteLine($"Duration:          {duration:F2} s");
         Console.WriteLine($"Throughput:        {thrMsg:F0} msg/s  ({thrMib:F2} MiB/s)");
         Console.WriteLine($"E2E latency (ms):  min={min} avg={avg:F2} p50={p50} p90={p90} p95={p95} p99={p99} p99.9={p999} max={max}");
+        if (external is (double cpu, double rssMb))
+        {
+            Console.WriteLine($"CPU (% one core):  avg={cpu:F1}");
+            Console.WriteLine($"RSS (MB):          avg={rssMb:F1}");
+        }
+
         Console.WriteLine(new string('=', 72));
 
-        WriteResultsJson(config, m.MeasuredMessages, duration, thrMsg, thrMib, min, avg, p50, p90, p95, p99, p999, max);
+        WriteResultsJson(config, m.MeasuredMessages, duration, thrMsg, thrMib, min, avg, p50, p90, p95, p99, p999, max, external);
         return new ConsumerBenchmarkResult(assignmentFailed: false, setupNotReady: false, m.MeasuredMessages, p99);
     }
 
@@ -398,49 +412,48 @@ public static class ConsumerBenchmark
         long p95,
         long p99,
         long p999,
-        long max)
+        long max,
+        (double Cpu, double RssMb)? external)
     {
         var sb = new StringBuilder(512);
         sb.Append("{\n");
         sb.Append("  \"client_version\": \"").Append(config.ClientVersion).Append("\",\n");
         sb.Append("  \"topic\": \"").Append(config.Topic).Append("\",\n");
         sb.Append("  \"messages_measured\": ").Append(measuredMessages.ToString(CultureInfo.InvariantCulture)).Append(",\n");
-        sb.Append("  \"duration_s\": ").Append(JsonFloat(duration)).Append(",\n");
-        sb.Append("  \"throughput_msg_s\": ").Append(JsonFloat(thrMsg)).Append(",\n");
-        sb.Append("  \"throughput_mib_s\": ").Append(JsonFloat(thrMib)).Append(",\n");
+        sb.Append("  \"duration_s\": ").Append(PerfFormat.JsonFloat(duration)).Append(",\n");
+        sb.Append("  \"throughput_msg_s\": ").Append(PerfFormat.JsonFloat(thrMsg)).Append(",\n");
+        sb.Append("  \"throughput_mib_s\": ").Append(PerfFormat.JsonFloat(thrMib)).Append(",\n");
         sb.Append("  \"latency_ms\": {\n");
         sb.Append("    \"min\": ").Append(min.ToString(CultureInfo.InvariantCulture)).Append(",\n");
-        sb.Append("    \"avg\": ").Append(JsonFloat(avg)).Append(",\n");
+        sb.Append("    \"avg\": ").Append(PerfFormat.JsonFloat(avg)).Append(",\n");
         sb.Append("    \"p50\": ").Append(p50.ToString(CultureInfo.InvariantCulture)).Append(",\n");
         sb.Append("    \"p90\": ").Append(p90.ToString(CultureInfo.InvariantCulture)).Append(",\n");
         sb.Append("    \"p95\": ").Append(p95.ToString(CultureInfo.InvariantCulture)).Append(",\n");
         sb.Append("    \"p99\": ").Append(p99.ToString(CultureInfo.InvariantCulture)).Append(",\n");
         sb.Append("    \"p999\": ").Append(p999.ToString(CultureInfo.InvariantCulture)).Append(",\n");
         sb.Append("    \"max\": ").Append(max.ToString(CultureInfo.InvariantCulture)).Append('\n');
-        sb.Append("  }\n");
+        if (external is (double cpu, double rssMb))
+        {
+            sb.Append("  },\n");
+            sb.Append("  \"cpu_avg_pct\": ").Append(PerfFormat.JsonFloat(cpu)).Append(",\n");
+            sb.Append("  \"rss_avg_mb\": ").Append(PerfFormat.JsonFloat(rssMb)).Append('\n');
+        }
+        else
+        {
+            sb.Append("  }\n");
+        }
+
         sb.Append("}");
 
         try
         {
             File.WriteAllText("results.json", sb.ToString());
         }
-        catch (IOException)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            // Non-fatal: the summary is already on stdout (Python swallows the same OSError).
+            // Non-fatal: the summary is already on stdout (Python swallows the same OSError, which also
+            // covers the permission error .NET reports as UnauthorizedAccessException).
         }
-    }
-
-    // Rounds to 2 decimals (banker's rounding, matching Python round()) and renders like Python's json:
-    // an integral value keeps a trailing ".0" (round(10.0, 2) -> 10.0 -> "10.0").
-    private static string JsonFloat(double value)
-    {
-        double rounded = Math.Round(value, 2, MidpointRounding.ToEven);
-        if (rounded == Math.Floor(rounded) && Math.Abs(rounded) < 1e15)
-        {
-            return ((long)rounded).ToString(CultureInfo.InvariantCulture) + ".0";
-        }
-
-        return rounded.ToString("0.##", CultureInfo.InvariantCulture);
     }
 
     private static double Monotonic() => Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
@@ -480,6 +493,9 @@ public static class ConsumerBenchmark
 
         internal void Begin()
         {
+            // Primed before the sampler starts, so there is no race with it: the first sample then covers
+            // time since here and is not psutil's meaningless first-call 0.0 (Python begin).
+            _metrics.ResetCpuBaseline();
             _metrics.StartCollecting(_cfg.IntervalSeconds);
             if (_warmupComplete)
             {
@@ -501,6 +517,9 @@ public static class ConsumerBenchmark
                 {
                     _warmupComplete = true;
                     _measureStart = now;
+
+                    // Excludes warmup CPU from the first measured CPU sample (Python process_record).
+                    _metrics.ResetCpuBaseline();
                     _metrics.SetMeasurementStart(Metrics.NowMs());
                     Console.WriteLine($">>> warmup complete ({_cfg.WarmupSeconds}s); measuring");
                 }

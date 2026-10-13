@@ -74,27 +74,26 @@ public sealed class ProducerBenchmarkConfig
     /// <summary>Warmup duration in seconds (<c>WARMUP_SECONDS</c>, default 120); warmup sends are never recorded.</summary>
     public int WarmupSeconds { get; private set; }
 
-    /// <summary>Optional target rate (<c>LIMIT_RPS</c>); when set, <see cref="NumMessages"/> = rate × duration.</summary>
+    /// <summary>
+    /// Optional target rate (<c>LIMIT_RPS</c>); when set, <see cref="NumMessages"/> = rate × duration. Unset,
+    /// empty, <c>0</c> or negative all mean max rate (<see langword="null"/>), as in Python.
+    /// </summary>
     public int? LimitRps { get; private set; }
 
     /// <summary>
-    /// Pacing slice of the rate limiter in ms (<c>LIMIT_RPS_SLICE_MS</c>, default 1000; only read when
-    /// <c>LIMIT_RPS</c> is set). The limiter checks the clock once per slice: it sends
-    /// <see cref="LimitRpsSliceMessages"/> records at full speed, then sleeps until the slice's scheduled
-    /// end. The default reproduces Python's per-second quota exactly (<c>producer_performance_test.py</c>
-    /// checks every <c>limit_rps</c> messages). That quota is not a smooth offered load: the sender runs at
-    /// full speed until the second's quota is sent and then idles, so the closer <c>LIMIT_RPS</c> is to the
-    /// client's full-speed rate, the more of each second is an unthrottled burst. A slice of 5–10 ms spreads
-    /// the same rate evenly, so the client can be measured below saturation.
+    /// Records between two clock checks of the rate limiter: <c>max(floor(LIMIT_RPS / 10), 1)</c>, about
+    /// 100 ms of traffic; 0 when there is no rate limit. At each checkpoint the sender sleeps until
+    /// <c>first send + records sent / LIMIT_RPS</c> (Python <c>pacing_wait_s</c>, and the C, Rust and Java
+    /// harnesses). The deadline comes from the cumulative count, so a rate that is not a multiple of 10 is
+    /// honoured exactly and an oversleep is made up over the following checkpoints.
     /// </summary>
-    public int LimitRpsSliceMs { get; private set; } = 1000;
+    public long PacingCheckpoint => LimitRps is int rps ? Math.Max(rps / 10, 1) : 0;
 
     /// <summary>
-    /// Records per pacing slice: <c>LIMIT_RPS × LIMIT_RPS_SLICE_MS / 1000</c>, at least 1; 0 when no rate
-    /// limit is set. At the default slice this is exactly <c>LIMIT_RPS</c>.
+    /// Where the machine-readable run summary is written (<c>RESULTS_FILE</c>, default <c>results.json</c>,
+    /// relative to the working directory). The same keys as every other producer harness's summary.
     /// </summary>
-    public long LimitRpsSliceMessages =>
-        LimitRps is int rps && rps > 0 ? Math.Max(1L, (long)rps * LimitRpsSliceMs / 1000) : 0;
+    public string ResultsFile { get; private set; } = "results.json";
 
     /// <summary>p99 latency budget in ms (<c>P99_LIMIT_MS</c>, default 0 = disabled); exceeding it fails the run.</summary>
     public int P99LimitMs { get; private set; }
@@ -108,9 +107,9 @@ public sealed class ProducerBenchmarkConfig
     /// <summary>
     /// Whether the async send loop waits for each record to be <b>accepted</b> by the client before it sends
     /// the next one (<c>AWAIT_ACCEPTED</c>, default <b>true</b>; used only on the async path). A send has two
-    /// stages: accepted (Java's <c>send()</c> returning) and delivered. With <c>False</c> the loop hands both
-    /// stages to the recorder and sends the next record at once; a send whose acceptance fails is counted by
-    /// the recorder like one whose call throws. This binding's async <c>Send</c> has a first stage that can
+    /// stages: accepted (Java's <c>send()</c> returning) and delivered. With <c>False</c> the loop sends the
+    /// next record at once; a send whose acceptance later fails is counted as a failed delivery, since it was
+    /// already counted as sent. This binding's async <c>Send</c> has a first stage that can
     /// stay pending once its bound on records not yet handed to the send-batch thread is reached, so with
     /// <c>True</c> that bound throttles this loop. With <c>False</c> it no longer does: records accumulate
     /// inside the client, and its memory grows if they are offered faster than the cluster drains them. For
@@ -149,6 +148,7 @@ public sealed class ProducerBenchmarkConfig
             CreateTopic = PerfEnv.GetBool("CREATE_TOPIC", true),
             Partitions = PerfEnv.GetInt("PARTITIONS", -1),
             ClientVersion = PerfEnv.GetString("CLIENT_VERSION", "3"),
+            ResultsFile = PerfEnv.GetString("RESULTS_FILE", "results.json"),
         };
 
         string? awaitAccepted = PerfEnv.GetStringOrNull("AWAIT_ACCEPTED");
@@ -160,28 +160,16 @@ public sealed class ProducerBenchmarkConfig
         };
 
         string? limitRps = PerfEnv.GetStringOrNull("LIMIT_RPS");
-        if (!string.IsNullOrEmpty(limitRps))
+        if (!string.IsNullOrEmpty(limitRps) && PerfEnv.GetInt("LIMIT_RPS", 0) is int rps && rps > 0)
         {
-            config.LimitRps = PerfEnv.GetInt("LIMIT_RPS", 0);
-            if (config.LimitRps.Value <= 0)
-            {
-                // Python's message_generator hard-fails on limit_rps <= 0 ("limit_rps must be positive")
-                // rather than treating 0/negative as "unbounded" — that meaning belongs to LIMIT_RPS being
-                // unset entirely. Match that instead of silently falling through to max-rate, which would
-                // run a materially different benchmark than what was asked for.
-                throw new ArgumentException("LIMIT_RPS must be positive");
-            }
-
-            config.LimitRpsSliceMs = PerfEnv.GetInt("LIMIT_RPS_SLICE_MS", 1000);
-            if (config.LimitRpsSliceMs <= 0)
-            {
-                throw new ArgumentException("LIMIT_RPS_SLICE_MS must be positive");
-            }
+            // A value <= 0 means max rate, the same as leaving LIMIT_RPS unset (Python sets limit_rps to None
+            // for it, so the run neither paces nor derives a message count).
+            config.LimitRps = rps;
 
             // Run for the specified duration at the target rate (Python: num_messages = limit_rps * duration).
             // (long) on the FIRST operand, so the multiplication itself is 64-bit — casting the result
             // would truncate before the widening (Python: num_messages = int(limit_rps * test_duration_s)).
-            config.NumMessages = (long)config.LimitRps.Value * config.TestDurationSeconds;
+            config.NumMessages = (long)rps * config.TestDurationSeconds;
         }
 
         return config;

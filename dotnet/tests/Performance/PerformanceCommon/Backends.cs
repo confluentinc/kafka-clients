@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace Confluent.Kafka.Performance;
@@ -101,40 +102,85 @@ public readonly struct PerfSendHandle
             : _get(_state!);
 }
 
-// The producer backend is split into a sync and an async interface, one per Python loop. The sync one
-// (Python main) returns a PerfSendHandle once the client has accepted the record, and the engine's recorder
-// thread waits it later. The async one (Python async_main) is two-stage: a ValueTask that completes when the
-// record is accepted (where Java's send() returns), holding the delivery task. Each per-client exe
-// implements the one it drives for a given ASYNC mode; a single unified interface would force every backend
-// to implement the unused shape.
+/// <summary>
+/// The engine's delivery notification — Java's producer <c>Callback.onCompletion(metadata, exception)</c>, the
+/// callback Python passes to <c>producer.send(record, callback)</c>. The engine stamps a record's latency here,
+/// when the client reports its acknowledgement, not when some other thread later gets round to its future, so
+/// a backlog on the engine's side is never reported as client latency.
+/// </summary>
+/// <remarks>
+/// A backend calls <see cref="OnCompletion"/> exactly once for every record whose callback-taking send
+/// returned normally, on whichever thread its client reports the delivery, and calls it for none whose send
+/// threw. One instance serves every send of a run, so a backend hands back the <c>sendStartMs</c> it was given
+/// instead of the engine allocating a callback object per send. Implementations must not throw.
+/// </remarks>
+public interface IPerfDeliveryCallback
+{
+    /// <summary>Reports one record's delivery: <paramref name="exception"/> is <see langword="null"/> on success.</summary>
+    /// <param name="sendStartMs">The value the engine passed to the send, handed back unchanged.</param>
+    /// <param name="metadata">The record's acknowledgement metadata; unspecified when <paramref name="exception"/> is set.</param>
+    /// <param name="exception">The delivery failure, or <see langword="null"/> when the record was acknowledged.</param>
+    void OnCompletion(long sendStartMs, PerfRecordMetadata metadata, Exception? exception);
+}
+
+// The producer backend is split into a sync and an async interface, one per Python loop. Each has two sends.
+// The callback-taking one carries the measured interval: it returns once the client has accepted the record
+// and reports the delivery to an IPerfDeliveryCallback (Python's send(record, callback) in main, and the
+// add_done_callback on the send's future in async_main). The plain one is the warmup's: it hands back the
+// delivery to wait inline. Each per-client exe implements the interface it drives for a given ASYNC mode; a
+// single unified interface would force every backend to implement the unused shape.
 
 /// <summary>
-/// The synchronous producer backend — <see cref="Send"/> returns once the client has accepted the record, with
-/// a <see cref="PerfSendHandle"/> to its delivery.
+/// The synchronous producer backend — each <c>Send</c> returns once the client has accepted the record.
 /// </summary>
 public interface IProducerBackend : IDisposable
 {
     /// <summary>
     /// Serializes and sends the record, returning once the client has accepted it (Java <c>send(record)</c>,
     /// Python <c>producer.send(record)</c>), with the handle whose <see cref="PerfSendHandle.Get"/> waits for
-    /// its delivery (Java <c>future.get()</c>). A send that fails before it is accepted throws.
+    /// its delivery (Java <c>future.get()</c>). A send that fails before it is accepted throws. The engine
+    /// uses this only for warmup.
     /// </summary>
     PerfSendHandle Send(string topic, byte[]? key, byte[]? value);
+
+    /// <summary>
+    /// Serializes and sends the record, returning once the client has accepted it, and reports its delivery to
+    /// <paramref name="callback"/> (Java <c>send(record, callback)</c>). A send that fails before it is
+    /// accepted throws, and then <paramref name="callback"/> is not called for it.
+    /// </summary>
+    void Send(string topic, byte[]? key, byte[]? value, IPerfDeliveryCallback callback, long sendStartMs);
+
+    /// <summary>
+    /// Drives every record sent so far to completion (Java <c>flush()</c>). Delivery callbacks may still be
+    /// running when it returns. A backend whose client takes no token ignores <paramref name="cancellationToken"/>.
+    /// </summary>
+    void Flush(CancellationToken cancellationToken);
 
     /// <summary>Flushes and closes the producer, surfacing a close failure.</summary>
     void Close();
 }
 
-/// <summary>The asynchronous (pipelined) producer backend — <see cref="Send"/> is two-stage (accepted, then delivered).</summary>
+/// <summary>The asynchronous (pipelined) producer backend — each <c>Send</c> is two-stage (accepted, then delivered).</summary>
 public interface IAsyncProducerBackend : IDisposable, IAsyncDisposable
 {
     /// <summary>
     /// Serializes and sends the record. The returned <see cref="ValueTask{TResult}"/> completes once the
     /// client has accepted the record (Java's <c>send()</c> returning), and holds the task that completes
     /// with its metadata on delivery. A send that fails before it is accepted throws, from the call or from
-    /// awaiting the returned value.
+    /// awaiting the returned value. The engine uses this only for warmup.
     /// </summary>
     ValueTask<Task<PerfRecordMetadata>> Send(string topic, byte[]? key, byte[]? value);
+
+    /// <summary>
+    /// Serializes and sends the record, and reports its delivery to <paramref name="callback"/>. The returned
+    /// <see cref="ValueTask"/> completes once the client has accepted the record. A send that fails before it
+    /// is accepted throws, from the call or from awaiting the returned value, and then
+    /// <paramref name="callback"/> is not called for it.
+    /// </summary>
+    ValueTask Send(string topic, byte[]? key, byte[]? value, IPerfDeliveryCallback callback, long sendStartMs);
+
+    /// <summary>Drives every record sent so far to completion (Java <c>flush()</c>). Delivery callbacks may still be running when it completes.</summary>
+    Task Flush(CancellationToken cancellationToken);
 
     /// <summary>Flushes and closes the producer, surfacing a close failure.</summary>
     Task Close();

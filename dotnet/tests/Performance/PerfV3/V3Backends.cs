@@ -14,16 +14,81 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace Confluent.Kafka.Performance.V3;
 
 /// <summary>
-/// Adapts our binding's <see cref="KafkaProducer{TKey, TValue}"/> to the sync <see cref="IProducerBackend"/>:
-/// <see cref="Send"/> serializes and sends, returning once the producer has accepted the record (Java
-/// <c>send(record)</c>) with the <see cref="KafkaFuture{T}"/> wrapped in a <see cref="PerfSendHandle"/>, whose
-/// <c>Get()</c> the engine's recorder calls (Java <c>future.get()</c>). Bytes go over
-/// <c>&lt;byte[], byte[]&gt;</c> + <see cref="Serdes.ByteArray"/> (generic-only surface, M11/P5).
+/// Hands one record's delivery from the binding's <see cref="IDeliveryCallback"/> to the engine's
+/// <see cref="IPerfDeliveryCallback"/>, with the send's start time. One per measured send: the binding's
+/// callback carries no per-send state of its own.
+/// </summary>
+internal sealed class V3Delivery : IDeliveryCallback
+{
+    private readonly IPerfDeliveryCallback _callback;
+    private readonly long _sendStartMs;
+
+    internal V3Delivery(IPerfDeliveryCallback callback, long sendStartMs)
+    {
+        _callback = callback;
+        _sendStartMs = sendStartMs;
+    }
+
+    public void OnCompletion(RecordMetadata metadata, KafkaException? exception) =>
+        _callback.OnCompletion(
+            _sendStartMs,
+            new PerfRecordMetadata(metadata.Topic, metadata.Partition, metadata.Offset, metadata.Timestamp),
+            exception);
+}
+
+/// <summary>Producer-metric prints shared by the two v3 producer backends.</summary>
+internal static class V3ProducerMetrics
+{
+    /// <summary>
+    /// Prints the producer's own <c>compression-rate-avg</c>, as the Rust harness does before closing its
+    /// producer, so a compression run's wire-bytes estimate (achieved MiB/s / compression rate) can be
+    /// cross-checked against a network-counter measurement. Must run before the producer is closed.
+    /// </summary>
+    internal static void PrintCompressionRateAvg(Func<IReadOnlyDictionary<MetricName, IMetric>> metrics)
+    {
+        try
+        {
+            foreach (KeyValuePair<MetricName, IMetric> kv in metrics())
+            {
+                if (kv.Key.Name == "compression-rate-avg")
+                {
+                    Console.WriteLine($"[METRIC] compression-rate-avg = {FormatMetricValue(kv.Value.Value)}");
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            // Diagnostic only: it must not stop the producer from being closed after it.
+            Console.WriteLine($"Producer metrics read failed: {e.Message}");
+        }
+    }
+
+    // As Java's harness prints it (Double.toString): an integral value keeps its ".0".
+    private static string FormatMetricValue(object value)
+    {
+        if (value is double d)
+        {
+            string s = d.ToString("R", CultureInfo.InvariantCulture);
+            return double.IsNaN(d) || double.IsInfinity(d) || s.IndexOfAny(new[] { '.', 'E' }) >= 0 ? s : s + ".0";
+        }
+
+        return Convert.ToString(value, CultureInfo.InvariantCulture) ?? string.Empty;
+    }
+}
+
+/// <summary>
+/// Adapts our binding's <see cref="KafkaProducer{TKey, TValue}"/> to the sync <see cref="IProducerBackend"/>.
+/// The measured send is Java's <c>send(record, callback)</c>, so the engine records each delivery in the
+/// binding's callback; the warmup send hands back the <see cref="KafkaFuture{T}"/> in a
+/// <see cref="PerfSendHandle"/> (Java <c>future.get()</c>). Bytes go over <c>&lt;byte[], byte[]&gt;</c> +
+/// <see cref="Serdes.ByteArray"/> (generic-only surface, M11/P5).
 /// </summary>
 internal sealed class V3SyncProducerBackend : IProducerBackend
 {
@@ -44,6 +109,15 @@ internal sealed class V3SyncProducerBackend : IProducerBackend
     public PerfSendHandle Send(string topic, byte[]? key, byte[]? value) =>
         new PerfSendHandle(s_get, _producer.Send(new ProducerRecord<byte[], byte[]>(topic, value, key)));
 
+    // The future is not needed: the callback reports the delivery.
+    public void Send(string topic, byte[]? key, byte[]? value, IPerfDeliveryCallback callback, long sendStartMs) =>
+        _producer.Send(new ProducerRecord<byte[], byte[]>(topic, value, key), new V3Delivery(callback, sendStartMs));
+
+    // The sync producer's Flush takes no token.
+    public void Flush(CancellationToken cancellationToken) => _producer.Flush();
+
+    internal void PrintCompressionRateAvg() => V3ProducerMetrics.PrintCompressionRateAvg(_producer.Metrics);
+
     public void Close() => _producer.Close();
 
     public void Dispose() => _producer.Dispose();
@@ -51,8 +125,9 @@ internal sealed class V3SyncProducerBackend : IProducerBackend
 
 /// <summary>
 /// Adapts our binding's <see cref="AsyncKafkaProducer{TKey, TValue}"/> to the async (pipelined)
-/// <see cref="IAsyncProducerBackend"/>: <see cref="Send"/> completes when the producer has accepted the
-/// record and hands back the delivery <see cref="Task"/> the engine's recorder awaits.
+/// <see cref="IAsyncProducerBackend"/>. Each send completes when the producer has accepted the record. The
+/// measured send reports the delivery to the binding's callback; the warmup send hands back the delivery
+/// <see cref="Task"/>.
 /// </summary>
 internal sealed class V3AsyncProducerBackend : IAsyncProducerBackend
 {
@@ -81,6 +156,28 @@ internal sealed class V3AsyncProducerBackend : IAsyncProducerBackend
         RecordMetadata meta = await delivery.ConfigureAwait(false);
         return new PerfRecordMetadata(meta.Topic, meta.Partition, meta.Offset, meta.Timestamp);
     }
+
+    public ValueTask Send(string topic, byte[]? key, byte[]? value, IPerfDeliveryCallback callback, long sendStartMs)
+    {
+        // As the warmup send: usually accepted on return, so the common path builds no state machine. The
+        // future is consumed (a ValueTask must be) and dropped: the callback reports the delivery.
+        ValueTask<AsyncKafkaFuture<RecordMetadata>> send =
+            _producer.Send(new ProducerRecord<byte[], byte[]>(topic, value, key), new V3Delivery(callback, sendStartMs));
+        if (send.IsCompletedSuccessfully)
+        {
+            _ = send.Result;
+            return default;
+        }
+
+        return AwaitAcceptance(send);
+    }
+
+    private static async ValueTask AwaitAcceptance(ValueTask<AsyncKafkaFuture<RecordMetadata>> send) =>
+        await send.ConfigureAwait(false);
+
+    public Task Flush(CancellationToken cancellationToken) => _producer.Flush(cancellationToken);
+
+    internal void PrintCompressionRateAvg() => V3ProducerMetrics.PrintCompressionRateAvg(_producer.Metrics);
 
     public Task Close() => _producer.Close();
 

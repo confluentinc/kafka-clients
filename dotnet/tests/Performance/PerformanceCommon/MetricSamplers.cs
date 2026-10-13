@@ -43,6 +43,9 @@ internal sealed class MemorySampler
 internal sealed class CpuSampler
 {
     private readonly Process _process = Process.GetCurrentProcess();
+
+    // Sample runs on the collector thread; ResetBaseline runs on the measuring thread.
+    private readonly object _lock = new object();
     private bool _hasBaseline;
     private double _lastCpuSeconds;
     private long _lastWallTimestamp;
@@ -50,23 +53,43 @@ internal sealed class CpuSampler
     /// <summary>Returns CPU utilization (%) since the previous call; the first call returns <c>0.0</c>.</summary>
     internal double Sample()
     {
-        _process.Refresh();
-        double cpuSeconds = _process.TotalProcessorTime.TotalSeconds;
-        long wallTimestamp = Stopwatch.GetTimestamp();
-
-        if (!_hasBaseline)
+        lock (_lock)
         {
-            _hasBaseline = true;
+            _process.Refresh();
+            double cpuSeconds = _process.TotalProcessorTime.TotalSeconds;
+            long wallTimestamp = Stopwatch.GetTimestamp();
+
+            if (!_hasBaseline)
+            {
+                _hasBaseline = true;
+                _lastCpuSeconds = cpuSeconds;
+                _lastWallTimestamp = wallTimestamp;
+                return 0.0;
+            }
+
+            double wallSeconds = (wallTimestamp - _lastWallTimestamp) / (double)Stopwatch.Frequency;
+            double cpuDeltaSeconds = cpuSeconds - _lastCpuSeconds;
             _lastCpuSeconds = cpuSeconds;
             _lastWallTimestamp = wallTimestamp;
-            return 0.0;
+
+            return wallSeconds > 0 ? cpuDeltaSeconds / wallSeconds * 100.0 : 0.0;
         }
+    }
 
-        double wallSeconds = (wallTimestamp - _lastWallTimestamp) / (double)Stopwatch.Frequency;
-        double cpuDeltaSeconds = cpuSeconds - _lastCpuSeconds;
-        _lastCpuSeconds = cpuSeconds;
-        _lastWallTimestamp = wallTimestamp;
-
-        return wallSeconds > 0 ? cpuDeltaSeconds / wallSeconds * 100.0 : 0.0;
+    /// <summary>
+    /// Restarts the span the next <see cref="Sample"/> covers at "now", and gives it a baseline, so that
+    /// sample reports CPU since this call rather than since the previous sample, or <c>0.0</c> for having
+    /// none. Python calls <c>cpu_percent()</c> for the same effect, so that a run's first measured sample
+    /// covers only measured time.
+    /// </summary>
+    internal void ResetBaseline()
+    {
+        lock (_lock)
+        {
+            _process.Refresh();
+            _lastCpuSeconds = _process.TotalProcessorTime.TotalSeconds;
+            _lastWallTimestamp = Stopwatch.GetTimestamp();
+            _hasBaseline = true;
+        }
     }
 }

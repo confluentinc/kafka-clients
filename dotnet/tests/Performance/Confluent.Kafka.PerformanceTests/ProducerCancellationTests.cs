@@ -23,8 +23,9 @@ namespace Confluent.Kafka.Performance.Tests;
 
 /// <summary>
 /// Regression guards for <c>ProducerBenchmark.RunAsync</c>'s interrupt handling (M13/P3 item D). Before
-/// the fix, a cancellation raised at any of the method's three token-wired awaits escaped RunAsync and
-/// then Main, skipping the channel drain, the recorder task, and the caller's whole reporting tail.
+/// the fix, a cancellation raised at one of the method's token-wired awaits escaped RunAsync and then Main,
+/// skipping the drain and the caller's whole reporting tail. Two awaits are token-wired now: the warmup
+/// delay and the rate limiter's pacing delay.
 /// These drive the CancellationToken directly, which is what makes them a usable guard at all: exercising
 /// a real OS signal would need a subprocess-plus-kill test, and PerfSignals' handlers
 /// (<c>Console.CancelKeyPress</c> plus a <c>PosixSignalRegistration</c> pair for SIGINT/SIGTERM) are
@@ -45,8 +46,12 @@ public sealed class ProducerCancellationTests
         CancelledDuringWarmupReturnsAsync();
 
     [Fact]
-    public Task RunAsync_CancelledMidRun_CompletesRecorderTask() =>
-        CancelledMidRunCompletesRecorderAsync();
+    public Task RunAsync_CancelledMidRun_CountsTheAcceptedSends() =>
+        CancelledMidRunCountsAcceptedSendsAsync();
+
+    [Fact]
+    public Task RunAsync_CancelledDuringAPacingWait_ReturnsWithoutThrowing() =>
+        CancelledDuringPacingReturnsAsync();
 
     // ---- cases -------------------------------------------------------------------------------------
 
@@ -71,8 +76,7 @@ public sealed class ProducerCancellationTests
     private static async Task CancelledDuringWarmupReturnsAsync()
     {
         // Cancelled inside warmup, so the interrupt lands on `await Task.Delay(100, cancellationToken)`.
-        // That is the FIRST guarded region: the channel and the recorder task do not exist yet, so it
-        // needs a guard of its own. Before the fix this threw straight out of RunAsync.
+        // That is the FIRST guarded region; before the fix this threw straight out of RunAsync.
         Apply(warmupSeconds: 30);
         using var cts = new CancellationTokenSource();
         var backend = new ScriptedProducerBackend(cts, cancelOnSend: 1);
@@ -85,31 +89,47 @@ public sealed class ProducerCancellationTests
         Assert.Equal(1, backend.SendCount);
     }
 
-    private static async Task CancelledMidRunCompletesRecorderAsync()
+    private static async Task CancelledMidRunCountsAcceptedSendsAsync()
     {
-        // Cancelled during the measured loop, so the interrupt lands on the channel write. That is the
-        // SECOND guarded region, and the important one: falling through must complete the channel writer
-        // and await the recorder task, which is what lets the run still report what it measured.
-        // RunAsync returning at all is the proof the recorder is not left pending — it awaits it — and
-        // s_returnBudget turns a regression into a failure instead of a hung suite.
+        // Cancelled during the measured loop, with no rate limit: the loop sees the token before its next
+        // send. The 5th send was accepted before that, so it is counted, as Python's async_main counts it.
         Apply(warmupSeconds: 0);
         using var cts = new CancellationTokenSource();
         var backend = new ScriptedProducerBackend(cts, cancelOnSend: 5);
 
         ProducerBenchmarkResult result = await RunAsync(backend, cts.Token).ConfigureAwait(false);
 
-        // The 5th Send cancels, so its channel write throws and that record is never counted; the four
-        // already queued are drained by the recorder.
         Assert.Equal(5, backend.SendCount);
-        Assert.Equal(4, result.MeasuredSent);
+        Assert.Equal(5, result.MeasuredSent);
         Assert.False(result.WarmupFailed);
+
+        // Interrupted, so the count checks are skipped: the run does not fail.
+        Assert.False(result.RunFailed);
+    }
+
+    private static async Task CancelledDuringPacingReturnsAsync()
+    {
+        // LIMIT_RPS=1 makes every send a checkpoint and asks for a 1 s wait after the first, so the interrupt
+        // lands on `await Task.Delay(wait, cancellationToken)`. That is the SECOND guarded region, and the
+        // important one: falling through must still flush, wait for the callbacks and report what was
+        // measured. s_returnBudget turns a regression into a failure instead of a hung suite.
+        Apply(warmupSeconds: 0, limitRps: "1");
+        using var cts = new CancellationTokenSource();
+        var backend = new ScriptedProducerBackend(cts, cancelOnSend: 1);
+
+        ProducerBenchmarkResult result = await RunAsync(backend, cts.Token).ConfigureAwait(false);
+
+        Assert.Equal(1, backend.SendCount);
+        Assert.Equal(1, result.MeasuredSent);
+        Assert.Equal(1, backend.FlushCount);
+        Assert.False(result.RunFailed);
     }
 
     // ---- harness -----------------------------------------------------------------------------------
 
-    private static void Apply(int warmupSeconds)
+    private static void Apply(int warmupSeconds, string? limitRps = null)
     {
-        PerfEngineFixture.Apply(new Dictionary<string, string>(StringComparer.Ordinal)
+        var values = new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["TOPIC_NAME"] = SmokeTopic,
             ["ASYNC"] = "True",
@@ -119,7 +139,13 @@ public sealed class ProducerCancellationTests
             ["TEST_DURATION_SECONDS"] = "600",
             ["NUM_MESSAGES"] = "0",
             ["DO_VERIFY"] = "False",
-        });
+        };
+        if (limitRps is not null)
+        {
+            values["LIMIT_RPS"] = limitRps;
+        }
+
+        PerfEngineFixture.Apply(values);
     }
 
     private static async Task<ProducerBenchmarkResult> RunAsync(IAsyncProducerBackend backend, CancellationToken token)
@@ -138,7 +164,7 @@ public sealed class ProducerCancellationTests
     }
 
     /// <summary>
-    /// A producer backend whose sends complete immediately, and which fires the supplied
+    /// A producer backend whose sends are accepted and delivered immediately, and which fires the supplied
     /// <see cref="CancellationTokenSource"/> on its Nth send — so the cancellation lands at a chosen,
     /// deterministic point in RunAsync rather than racing the loop.
     /// </summary>
@@ -159,9 +185,28 @@ public sealed class ProducerCancellationTests
             _cancelOnSend = cancelOnSend;
         }
 
+        private int _flushCount;
+
         internal int SendCount => Volatile.Read(ref _sendCount);
 
-        public ValueTask<Task<PerfRecordMetadata>> Send(string topic, byte[]? key, byte[]? value)
+        internal int FlushCount => Volatile.Read(ref _flushCount);
+
+        public ValueTask<Task<PerfRecordMetadata>> Send(string topic, byte[]? key, byte[]? value) =>
+            new ValueTask<Task<PerfRecordMetadata>>(Task.FromResult(Next(topic)));
+
+        public ValueTask Send(string topic, byte[]? key, byte[]? value, IPerfDeliveryCallback callback, long sendStartMs)
+        {
+            callback.OnCompletion(sendStartMs, Next(topic), null);
+            return default;
+        }
+
+        public Task Flush(CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref _flushCount);
+            return Task.CompletedTask;
+        }
+
+        private PerfRecordMetadata Next(string topic)
         {
             int n = Interlocked.Increment(ref _sendCount);
             if (_cts is not null && _cancelOnSend > 0 && n == _cancelOnSend)
@@ -169,7 +214,7 @@ public sealed class ProducerCancellationTests
                 _cts.Cancel();
             }
 
-            return new ValueTask<Task<PerfRecordMetadata>>(Task.FromResult(new PerfRecordMetadata(topic, 0, n, 1)));
+            return new PerfRecordMetadata(topic, 0, n, 1);
         }
 
         public Task Close() => Task.CompletedTask;

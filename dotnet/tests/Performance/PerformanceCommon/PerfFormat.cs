@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
 using System.Globalization;
+using System.Text;
 
 namespace Confluent.Kafka.Performance;
 
@@ -63,4 +65,65 @@ internal static class PerfFormat
 
     /// <summary>Formats a long as invariant-culture decimal text (the window / count fields).</summary>
     internal static string Num(long value) => value.ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// Formats a <c>results.json</c> float: rounded to 2 decimals with banker's rounding (Python
+    /// <c>round(x, 2)</c>) and rendered as Python's <c>json</c> renders a float, so an integral value keeps a
+    /// trailing <c>.0</c> (<c>round(10.0, 2)</c> → <c>10.0</c>).
+    /// </summary>
+    internal static string JsonFloat(double value)
+    {
+        double rounded = Math.Round(value, 2, MidpointRounding.ToEven);
+        if (rounded == Math.Floor(rounded) && Math.Abs(rounded) < 1e15)
+        {
+            return ((long)rounded).ToString(CultureInfo.InvariantCulture) + ".0";
+        }
+
+        return rounded.ToString("0.##", CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// Formats a <c>results.json</c> string as a quoted JSON literal, escaping as Python's <c>json</c> does
+    /// by default (<c>ensure_ascii</c>): quotes, backslashes, control and non-ASCII characters.
+    /// </summary>
+    internal static string JsonString(string value)
+    {
+        var sb = new StringBuilder(value.Length + 2);
+        sb.Append('"');
+        foreach (char c in value)
+        {
+            switch (c)
+            {
+                case '"':
+                    sb.Append("\\\"");
+                    break;
+                case '\\':
+                    sb.Append("\\\\");
+                    break;
+                case '\n':
+                    sb.Append("\\n");
+                    break;
+                case '\r':
+                    sb.Append("\\r");
+                    break;
+                case '\t':
+                    sb.Append("\\t");
+                    break;
+                default:
+                    if (c < 0x20 || c > 0x7e)
+                    {
+                        sb.Append("\\u").Append(((int)c).ToString("x4", CultureInfo.InvariantCulture));
+                    }
+                    else
+                    {
+                        sb.Append(c);
+                    }
+
+                    break;
+            }
+        }
+
+        sb.Append('"');
+        return sb.ToString();
+    }
 }

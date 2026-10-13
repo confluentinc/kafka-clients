@@ -74,7 +74,7 @@ internal readonly struct BucketRollover
 /// A per-window accumulator (total / count / max) — the C# analog of Python's <c>Bucket</c>. When
 /// constructed with a histogram it additionally tracks the 1 ms latency histogram (the
 /// <c>LatencyBucket</c> role) and yields p50/p90/p95/p99/p999 at rollover. Thread-safe: measurements
-/// arrive on the producer send / recorder thread while the sampler thread rolls the bucket over, so
+/// arrive on the client's delivery-callback thread while the sampler thread rolls the bucket over, so
 /// every mutation and the rollover take a lock (Python leans on the GIL; .NET must lock so a
 /// non-atomic <c>double</c> update is never torn).
 /// </summary>

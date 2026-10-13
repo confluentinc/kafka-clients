@@ -47,16 +47,18 @@ public sealed class PerfEngineCollection : ICollectionFixture<PerfEngineFixture>
 /// </summary>
 public sealed class PerfEngineFixture : IDisposable
 {
-    // Every variable ConsumerBenchmarkConfig.FromEnv or ProducerBenchmarkConfig.FromEnv reads. Apply()
+    // Every variable ConsumerBenchmarkConfig.FromEnv or ProducerBenchmarkConfig.FromEnv reads, plus the
+    // per-client knobs a smoke's child process reads (PERF_LRK_STATS, SKIP_PARTITIONER_OVERRIDE). Apply()
     // clears the whole set before applying a test's values, so one test can never inherit another's.
     private static readonly string[] s_managedVariables =
     {
         "ASYNC", "AWAIT_ACCEPTED", "BOOTSTRAP_SERVERS", "CLIENT_VERSION", "CONSUMER_BATCH_SIZE", "CREATE_TOPIC",
         "DO_VERIFY", "FETCH_MIN_BYTES", "GROUP_ID", "INTERVAL_SECONDS", "JOIN_TIMEOUT_SECONDS",
-        "KAFKA_BIN", "KEY_SIZE", "LIMIT_RPS", "LIMIT_RPS_SLICE_MS", "MAX_PARTITION_FETCH_BYTES",
-        "NUM_MESSAGES", "P99_LIMIT_MS", "PARTITIONS", "POLL_SINGLE", "POLL_TIMEOUT_MS", "READINESS_MIN_RECORDS",
-        "READINESS_TIMEOUT_SECONDS", "SETTLE_TIMEOUT_SECONDS", "TEST_DURATION_SECONDS", "THROUGHPUT",
-        "TOPIC_NAME", "USE_DEFAULTS", "VALUE_SIZE", "WARMUP_SECONDS",
+        "KAFKA_BIN", "KEY_SIZE", "LIMIT_RPS", "MAX_PARTITION_FETCH_BYTES",
+        "NUM_MESSAGES", "P99_LIMIT_MS", "PARTITIONS", "PERF_LRK_STATS", "POLL_SINGLE", "POLL_TIMEOUT_MS",
+        "READINESS_MIN_RECORDS", "READINESS_TIMEOUT_SECONDS", "RESULTS_FILE", "SETTLE_TIMEOUT_SECONDS",
+        "SKIP_PARTITIONER_OVERRIDE", "TEST_DURATION_SECONDS", "THROUGHPUT", "TOPIC_NAME", "USE_DEFAULTS",
+        "VALUE_SIZE", "WARMUP_SECONDS",
     };
 
     private readonly Dictionary<string, string?> _saved = new(StringComparer.Ordinal);

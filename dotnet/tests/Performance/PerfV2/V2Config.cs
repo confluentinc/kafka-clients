@@ -28,7 +28,7 @@ namespace Confluent.Kafka.Performance.V2;
 ///   <item>SASL in librdkafka form (<c>sasl.username</c> / <c>sasl.password</c>), never the Java <c>sasl.jaas.config</c>.</item>
 ///   <item><c>partitioner=consistent_random</c> set explicitly so partition verification matches the v3
 ///     Rust client's actual default (CRC-32, <c>design/current/partitioner.md</c>), not Java's murmur2
-///     (Python <c>v2_producer</c>, <c>producer_performance_test.py:512-520</c>).</item>
+///     (Python <c>v2_producer</c>); <c>SKIP_PARTITIONER_OVERRIDE=1</c> drops it, as there.</item>
 ///   <item>consumer <c>max.partition.fetch.bytes</c> → <c>fetch.message.max.bytes</c>; no <c>max.poll.records</c>
 ///     (librdkafka batches via <c>Consume</c>).</item>
 /// </list>
@@ -96,11 +96,14 @@ internal static class V2Config
             // apples-to-apples. The Rust client defaults to CRC-32 (KeyHasher::Crc32), matching
             // librdkafka's own consistent_random default rather than the Java client's murmur2 — see
             // design/current/partitioner.md. Since consistent_random is already librdkafka's own
-            // default, this is explicit but redundant (Python v2_producer,
-            // producer_performance_test.py:512-520). Python sets this only for the sync v2_producer; we
-            // set it in the shared v2 producer config so the async path is comparable too (harmless — it
-            // only selects the target partition).
-            conf["partitioner"] = "consistent_random";
+            // default, this is explicit but redundant (Python v2_producer). Python sets this only for the
+            // sync v2_producer; we set it in the shared v2 producer config so the async path is comparable
+            // too (harmless — it only selects the target partition). SKIP_PARTITIONER_OVERRIDE=1 drops the
+            // override (Python's A/B knob).
+            if (PerfEnv.GetString("SKIP_PARTITIONER_OVERRIDE", "0") != "1")
+            {
+                conf["partitioner"] = "consistent_random";
+            }
         }
 
         return conf;

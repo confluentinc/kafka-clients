@@ -32,7 +32,7 @@ public sealed class ProducerAcceptanceModeTests
 {
     private const string Topic = "acceptance-topic";
 
-    // A queue-full failure message. The recorder recognizes QUEUE_FULL by the message text alone
+    // A queue-full failure message. The engine recognizes QUEUE_FULL by the message text alone
     // (ProducerBenchmark.IsQueueFull), so the exception type does not matter here.
     private const string QueueFullMessage = "Local: Queue full";
 
@@ -47,7 +47,7 @@ public sealed class ProducerAcceptanceModeTests
         NotAwaitingKeepsSendingAsync();
 
     [Fact]
-    public Task RunAsync_NotAwaitingAcceptance_CountsBothQueueFullShapesAsQueueFull() =>
+    public Task RunAsync_NotAwaitingAcceptance_SubtractsALaterQueueFull_AndDoesNotCountASendThatThrows() =>
         NotAwaitingCountsQueueFullAsync();
 
     [Theory]
@@ -103,8 +103,9 @@ public sealed class ProducerAcceptanceModeTests
         Assert.True(previousAcceptedAtEverySend, "a send started before the previous send was accepted");
         Assert.Equal(5, backend.SendCount);
 
-        // The 5th send cancels the run, so its channel write throws and only the first four are counted.
-        Assert.Equal(4, result.MeasuredSent);
+        // The 5th send cancels the run, but the client had accepted it, so it is counted, as Python's
+        // async_main counts the send that saw the termination flag.
+        Assert.Equal(5, result.MeasuredSent);
     }
 
     private static async Task NotAwaitingKeepsSendingAsync()
@@ -128,7 +129,7 @@ public sealed class ProducerAcceptanceModeTests
                     }
                 }
 
-                // Stop the run, then let every record be accepted and delivered so the recorder drains.
+                // Stop the run, then let every record be accepted and delivered so the drain completes.
                 cts.Cancel();
                 for (int i = 0; i < acceptances.Count; i++)
                 {
@@ -143,13 +144,14 @@ public sealed class ProducerAcceptanceModeTests
 
         Assert.Equal(4, pendingAtFifthSend);
         Assert.Equal(5, backend.SendCount);
-        Assert.Equal(4, result.MeasuredSent);
+        Assert.Equal(5, result.MeasuredSent);
     }
 
     private static async Task NotAwaitingCountsQueueFullAsync()
     {
-        // A queue-full failure reaches the loop in one of two shapes: the call itself throws, or a send
-        // whose acceptance is still pending fails later. Both must be counted as QUEUE_FULL and subtracted.
+        // A failure reaches the loop in one of two shapes. A send whose acceptance is still pending can fail
+        // later: it was counted as sent, so a QUEUE_FULL there is subtracted from the sent count. Or the call
+        // itself throws: the client never accepted the record, so it is not counted as sent at all.
         Apply(awaitAccepted: "False");
         using var cts = new CancellationTokenSource();
         TaskCompletionSource<Task<PerfRecordMetadata>>? second = null;
@@ -176,9 +178,10 @@ public sealed class ProducerAcceptanceModeTests
 
         ProducerBenchmarkResult result = await RunAsync(backend, cts.Token).ConfigureAwait(false);
 
-        // Sends 1-5 reach the channel (the 6th cancels the run); sends 2 and 4 are QUEUE_FULL.
+        // Sends 1, 2, 3, 5 and 6 are counted as sent (the 6th cancels the run, after it was accepted); the 2nd
+        // is subtracted as QUEUE_FULL, and the 4th, which threw, was never counted.
         Assert.Equal(6, backend.SendCount);
-        Assert.Equal(3, result.MeasuredSent);
+        Assert.Equal(4, result.MeasuredSent);
     }
 
     // ---- harness -----------------------------------------------------------------------------------
@@ -228,6 +231,45 @@ public sealed class ProducerAcceptanceModeTests
         return delivery;
     }
 
+    /// <summary>
+    /// Turns a scripted two-stage send into the callback-taking send the engine measures with: the returned
+    /// <see cref="ValueTask"/> is the acceptance (a failure there surfaces from it, and no callback follows),
+    /// and the delivery task's outcome is reported to the callback.
+    /// </summary>
+    private static class StagedDeliveryBridge
+    {
+        internal static ValueTask Send(ValueTask<Task<PerfRecordMetadata>> staged, IPerfDeliveryCallback callback, long sendStartMs) =>
+            staged.IsCompletedSuccessfully
+                ? Report(staged.Result, callback, sendStartMs)
+                : AwaitAcceptance(staged, callback, sendStartMs);
+
+        private static async ValueTask AwaitAcceptance(ValueTask<Task<PerfRecordMetadata>> staged, IPerfDeliveryCallback callback, long sendStartMs)
+        {
+            Task<PerfRecordMetadata> delivery = await staged.ConfigureAwait(false);
+            await Report(delivery, callback, sendStartMs).ConfigureAwait(false);
+        }
+
+        private static ValueTask Report(Task<PerfRecordMetadata> delivery, IPerfDeliveryCallback callback, long sendStartMs)
+        {
+            _ = delivery.ContinueWith(
+                t =>
+                {
+                    if (t.Status == TaskStatus.RanToCompletion)
+                    {
+                        callback.OnCompletion(sendStartMs, t.Result, null);
+                    }
+                    else
+                    {
+                        callback.OnCompletion(sendStartMs, default, t.Exception?.InnerException ?? new OperationCanceledException());
+                    }
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+            return default;
+        }
+    }
+
     /// <summary>A producer backend whose two send stages are scripted per send by the test.</summary>
     private sealed class StagedProducerBackend : IAsyncProducerBackend
     {
@@ -243,6 +285,11 @@ public sealed class ProducerAcceptanceModeTests
 
         public ValueTask<Task<PerfRecordMetadata>> Send(string topic, byte[]? key, byte[]? value) =>
             _send(Interlocked.Increment(ref _sendCount));
+
+        public ValueTask Send(string topic, byte[]? key, byte[]? value, IPerfDeliveryCallback callback, long sendStartMs) =>
+            StagedDeliveryBridge.Send(_send(Interlocked.Increment(ref _sendCount)), callback, sendStartMs);
+
+        public Task Flush(CancellationToken cancellationToken) => Task.CompletedTask;
 
         public Task Close() => Task.CompletedTask;
 
