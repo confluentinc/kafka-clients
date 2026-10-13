@@ -1,9 +1,26 @@
-# Current Status: Milestones 1–13 complete — client tracks Apache Kafka 4.3.1
+# Current Status: Milestones 1–17 complete — client tracks Apache Kafka 4.3.1
 
 > **Paths (2026-09-27):** the repository was split into `rust/`, `python/` and
 > `c/` (see [structure.md](structure.md#top-level)). Crate paths below — `src/…`,
 > `tests/…`, `generator/…`, `xtask/…` — are relative to `rust/`; the bindings
 > formerly under `bindings/python/` and `bindings/c/` are now `python/` and `c/`.
+
+> **Current state (2026-10-12):** Milestone 17 landed secret redaction aligned
+> with Java's `Password` type (`[hidden]`): the `ConfigDef.Type.PASSWORD` fields
+> of `SslConfigs` / `SaslConfigs` and the Rust-only `SaslConfigs` `password` field
+> are typed `Password`; `ProducerConfig` renders its raw `originals` map as keys
+> only; `DelegationToken` and the six SASL / delegation-token wrappers delegate
+> `Debug` to their redacting `Display`; and `UserScramCredentialUpsertion`, which
+> has no `Display` (Java has no `toString()` there), hides its salt and password
+> in a hand-written `Debug`. Its Phase 2 and review rounds fixed the
+> `NetworkClient` disconnect log (`{:?}` → `Display`), the remaining request,
+> builder and admin-config types whose Java `toString()` masks, and three
+> Rust-only options types. Milestone 14 added the
+> `verifiable-clients` crate (`VerifiableProducer` / `VerifiableConsumer`) for
+> ducktape system tests. Milestones 15 (integration-test parity with the Java
+> 4.3.1 suites) and 16 (the Python client interface) came from `master`. See
+> `design/history/MILESTONES.md` for every milestone, and
+> `design/history/Milestone-17-password-redaction/PLAN.md` for Milestone 17.
 
 > **Current state (2026-09-27, re-verified against the tree):** several
 > statements further down this file were true when written and are now

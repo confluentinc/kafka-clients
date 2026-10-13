@@ -38,7 +38,7 @@ use super::SaslAuthenticateResponse;
 /// A SASL authenticate request.
 ///
 /// Corresponds to `org.apache.kafka.common.requests.SaslAuthenticateRequest`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.SaslAuthenticateRequest")]
 pub struct SaslAuthenticateRequest {
     data: SaslAuthenticateRequestData,
@@ -108,10 +108,20 @@ impl std::fmt::Display for SaslAuthenticateRequest {
     }
 }
 
+/// Renders exactly what the redacting [`Display`](std::fmt::Display) renders.
+///
+/// Java has a single `toString()`; a derived `Debug` would be a second,
+/// unredacted rendering that prints the auth bytes.
+impl std::fmt::Debug for SaslAuthenticateRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
 /// Builder for [`SaslAuthenticateRequest`].
 ///
 /// Corresponds to `SaslAuthenticateRequest.Builder` in Java.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.SaslAuthenticateRequest$Builder")]
 pub struct Builder {
     data: SaslAuthenticateRequestData,
@@ -155,6 +165,19 @@ impl RequestBuilder for Builder {
 impl std::fmt::Display for Builder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "(type=SaslAuthenticateRequest)")
+    }
+}
+
+/// Renders exactly what the [`Display`](std::fmt::Display) renders, which
+/// mirrors Java's `Builder.toString()` (`SaslAuthenticateRequest.java:49-50`):
+/// the request type only.
+///
+/// Java has a single `toString()`; a derived `Debug` would be a second rendering
+/// that prints the auth bytes, which carry the SASL credentials (a PLAIN
+/// password, a SCRAM proof, an OAuth bearer token).
+impl std::fmt::Debug for Builder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
     }
 }
 
@@ -220,11 +243,58 @@ mod tests {
         );
     }
 
+    /// `Debug` renders exactly what `Display` does (Java has a single
+    /// `toString()`): `auth_bytes` present but empty, never the token bytes a
+    /// derived `Debug` would print as their byte values.
+    #[test]
+    fn test_debug_redacted() {
+        let auth_bytes = b"sensitive-auth-token-123";
+        let mut data = SaslAuthenticateRequestData::new();
+        data.set_auth_bytes(auth_bytes.to_vec());
+        let request = SaslAuthenticateRequest::new(data, 2);
+        for debug in [format!("{:?}", request), format!("{:#?}", request)] {
+            assert_eq!(debug, format!("{}", request));
+            assert!(
+                debug.contains("auth_bytes: []"),
+                "auth_bytes field should be empty in Debug output, got: {}",
+                debug
+            );
+            assert!(
+                !debug.contains(&format!("{:?}", &auth_bytes[..])),
+                "auth bytes leaked: {}",
+                debug
+            );
+        }
+    }
+
     #[test]
     fn test_builder_display() {
         let data = SaslAuthenticateRequestData::new();
         let builder = Builder::new(data);
         assert_eq!(format!("{}", builder), "(type=SaslAuthenticateRequest)");
+    }
+
+    /// New test, no Java original: the builder's `Debug` renders exactly what
+    /// its `Display` does (Java has a single `Builder.toString()`), the request
+    /// type only — never the auth bytes a derived `Debug` would print as their
+    /// byte values.
+    #[test]
+    fn test_builder_debug_redacted() {
+        let auth_bytes = b"\0alice\0alice-S3cr3t-pw";
+        let mut data = SaslAuthenticateRequestData::new();
+        data.set_auth_bytes(auth_bytes.to_vec());
+        let builder = Builder::new(data);
+        assert_eq!(builder.data.auth_bytes, auth_bytes);
+        for debug in [format!("{:?}", builder), format!("{:#?}", builder)] {
+            assert_eq!(debug, "(type=SaslAuthenticateRequest)");
+            assert_eq!(debug, format!("{}", builder));
+            assert!(
+                !debug.contains(&format!("{:?}", &auth_bytes[..])),
+                "auth bytes leaked: {}",
+                debug
+            );
+            assert!(!debug.contains("S3cr3t"), "auth bytes leaked: {}", debug);
+        }
     }
 
     #[test]
