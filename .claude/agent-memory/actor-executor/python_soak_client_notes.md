@@ -27,7 +27,8 @@ user's pip.conf.
 format-check` / `lint` both fail with "no such command"). Pre-existing; it means
 Python-only changes cannot be gated on those. The pre-commit hook
 (`core.hooksPath=.githooks`) runs `make verify-sandbox`, which needs the same
-missing tooling plus Docker, so Python-only commits use `--no-verify`.
+missing tooling plus Docker. A Python-only commit still runs it; only the user can allow
+`--no-verify` ([[commit-hook-timeout]]).
 
 **Binding API facts the soak depends on** (all verified against a real broker):
 
