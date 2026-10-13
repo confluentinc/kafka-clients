@@ -14,12 +14,16 @@
 
 """Send-completion helpers shared by the producers (private).
 
-The C extension's batching engine hands each accepted record to the Rust
-producer (``kafka_producer_Producer_send_batch``) and, when the record
-completes, calls its Python callback ``cb(metadata, error)`` with the raw C
-handles as ints. :func:`completion_to_python` turns them into the public
-objects once per completion; :func:`invoke_callback` runs the user's
-``Callback`` (CLAUDE.md, Python Binding Conventions, Threads and callbacks).
+The C extension hands each record to the Rust producer
+(``kafka_producer_Producer_send_async``) and, when the record completes, calls
+its Python callback ``cb(metadata, error)`` with the raw C handles as ints,
+from the producer's callback thread. A record the producer could not take at
+once is queued, and the same callback is first called as ``cb(None, error)``
+once the producer has taken it (``error`` 0) or refused it (an owned error
+handle): the answer ``send()`` waits for, as Java's ``send()`` blocks.
+:func:`completion_to_python` turns the handles of a completion into the public
+objects once; :func:`invoke_callback` runs the user's ``Callback`` (CLAUDE.md,
+Python Binding Conventions, Threads and callbacks).
 """
 
 from __future__ import annotations

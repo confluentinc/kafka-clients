@@ -181,19 +181,34 @@ def test_serializer_close() -> None:
     assert MockSerializer.CLOSE_COUNT == old_close_count + 2
 
 
-def test_should_close_properly_and_throw_if_interrupted() -> None:
+def test_should_close_properly_and_throw_if_interrupted(pending_call: Any) -> None:
     # Java interrupts the thread blocked in close() and expects an
     # InterruptException after the close force-closed the sender
     # (KafkaProducer.close(Duration, boolean), :1419-1437). The Python analog of
     # the interrupt is Ctrl+C: SIGINT, which only the main thread receives, so
-    # close() runs here and a timer sends the signal. Java's MockClient holds
-    # the send in flight; here an unreachable broker keeps the record waiting
-    # for metadata (max.block.ms 60 s), so close() cannot end on its own sooner.
+    # close() runs here and another thread sends the signal. Java's MockClient
+    # holds the send in flight; here the record waits for its topic's metadata
+    # inside the producer (an unreachable broker, max.block.ms 60 s), on another
+    # thread, since send() waits for the producer's answer as Java's does. The
+    # Rust close does not wait for such a record (it fails it), so the native
+    # close is kept pending instead, until the interrupt forces it.
     configs = {"bootstrap.servers": "localhost:9999", "batch.size": "1",
                "max.block.ms": 60000}
     producer = KafkaProducer(configs=configs, key_serializer=string_serializer(),
                              value_serializer=string_serializer())
-    future = producer.send(record=ProducerRecord(topic="topic", key="key", value="value"))
+    outcome: dict[str, BaseException] = {}
+
+    def sending() -> None:
+        try:
+            producer.send(record=ProducerRecord(topic="topic", key="key", value="value"))
+        except BaseException as e:  # noqa: BLE001 - recorded for the assertions
+            outcome["raised"] = e
+
+    sender = threading.Thread(target=sending)
+    sender.start()
+    time.sleep(0.2)
+    assert sender.is_alive()  # the send waits inside the producer
+    pending = pending_call("Producer_close_async")
 
     armed = True
 
@@ -201,28 +216,35 @@ def test_should_close_properly_and_throw_if_interrupted() -> None:
         if armed:
             raise KeyboardInterrupt
 
+    def interrupt() -> None:
+        pending.submitted.wait(10)
+        time.sleep(0.1)
+        os.kill(os.getpid(), signal.SIGINT)
+
     previous = signal.signal(signal.SIGINT, on_sigint)
-    timer = threading.Timer(0.1, os.kill, (os.getpid(), signal.SIGINT))
+    interrupter = threading.Thread(target=interrupt)
     start = time.monotonic()
     try:
-        timer.start()
+        interrupter.start()
         with pytest.raises(KeyboardInterrupt):
             producer.close()
             pytest.fail("Close should block and throw.")
         elapsed = time.monotonic() - start
     finally:
-        timer.cancel()
-        timer.join()
+        interrupter.join()
         armed = False
         time.sleep(0.05)  # a signal still pending runs the disarmed handler
         signal.signal(signal.SIGINT, previous)
 
-    # Close did not complete without waiting for the send, and the interrupt
-    # surfaced once the close was forced, not after max.block.ms.
-    assert 0.1 <= elapsed < 10, elapsed
+    # Close did not complete without waiting, and the interrupt surfaced once
+    # the close was forced, not after max.block.ms.
+    assert 0.1 <= elapsed < 5, elapsed
     # Closed properly: the pending record failed, and the producer is closed.
-    assert future.done()
-    assert isinstance(future.exception(), KafkaError)
+    sender.join(10)
+    assert not sender.is_alive()
+    raised = outcome["raised"]
+    assert isinstance(raised, KafkaError)
+    assert str(raised) == "Producer closed while send in progress"
     with pytest.raises(IllegalStateError) as err:
         producer.send(record=ProducerRecord(topic="topic", key="key", value="value"))
     assert str(err.value) == "Cannot perform operation after producer has been closed"

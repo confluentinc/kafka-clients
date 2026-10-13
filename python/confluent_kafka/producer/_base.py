@@ -15,13 +15,14 @@
 """State and helpers shared by the FFI-backed producers (private).
 
 ``Producer`` / ``KafkaProducer`` and ``AsyncProducer`` / ``AsyncKafkaProducer``
-call the C FFI through the C extension (``_confluentkafka``), whose batching
-engine owns two background threads: the send thread hands accepted records to
-the Rust producer (``kafka_producer_Producer_send_batch``) and the poll thread
-waits on their futures and runs each record's completion. Both families reuse
-the same entry points and differ only in the future type a completion resolves
-and where the user's callback runs (CLAUDE.md, Python Binding Conventions,
-Implementation over the FFI).
+call the C FFI through the C extension (``_confluentkafka``). A send hands its
+record to the Rust producer on the calling thread
+(``kafka_producer_Producer_send_async``) and waits for the producer's answer
+only where Java's ``send()`` would block; the extension's callback thread then
+runs each record's completion. Both families reuse the same entry points and
+differ only in the future type a completion resolves and where the user's
+callback runs (CLAUDE.md, Python Binding Conventions, Implementation over the
+FFI).
 """
 
 from __future__ import annotations
@@ -77,8 +78,6 @@ LONG_MAX_VALUE = (1 << 63) - 1
 
 # Java's RecordAccumulator.append() message for a send that races close.
 CLOSED_WHILE_SENDING_MESSAGE = "Producer closed while send in progress"
-
-_TRANSACTIONAL_ID = "transactional.id"
 
 
 class _SnapshotMetric:
@@ -228,9 +227,9 @@ def force_close(c_producer: int) -> None:
     for a ``close()`` an interrupt stopped (``KafkaProducer.close(Duration,
     boolean)``, KafkaProducer.java:1419-1437: the interrupt is kept and the
     close proceeds to force-close and join). A close with a zero timeout fails
-    the records still pending, which also ends the send thread's metadata
-    waits; a second Ctrl+C meanwhile is dropped, as Java keeps only the first
-    interrupt."""
+    the records still pending, which also ends the metadata waits of the
+    sends still in progress inside the producer; a second Ctrl+C meanwhile is
+    dropped, as Java keeps only the first interrupt."""
     done = threading.Event()
 
     def cb(error: int) -> None:
@@ -288,9 +287,9 @@ class _ProducerState:
     ``_lifecycle`` and refuses to start once ``_closed`` is set. ``close()`` sets
     ``_closed`` under the same lock (so exactly one ``close()`` tears the
     producer down) and waits for the calls in flight to end before it frees the
-    handle. A use covers only the native call itself, never a wait for a
-    completion, so a ``close()`` from a delivery callback waits for nothing that
-    the callback's thread must first run.
+    handle. A use covers only the native call itself, never a wait for the
+    producer's answer or for a completion, so a ``close()`` from a delivery
+    callback waits for nothing that the callback's thread must first run.
     """
 
     def __init__(self) -> None:
@@ -298,15 +297,6 @@ class _ProducerState:
         self._closed = False
         self._lifecycle = threading.Condition()
         self._uses = 0
-        # Whether transactional.id is set, and whether a transaction this
-        # producer began is open (begin_transaction() returned; commit / abort
-        # not called since). While a transactional producer has none open,
-        # send() waits for its record to reach the Rust producer and raises
-        # what Java's doSend rethrows (every such send fails there: the
-        # transaction manager is not IN_TRANSACTION). Inside one, records go
-        # through the batching engine without that wait.
-        self._transactional = False
-        self._in_transaction = False
         # Futures of the records sent and not yet completed: flush() waits for
         # the ones sent before it (their callbacks have run by then, as in Java).
         self._futures: set[Any] = set()
@@ -373,7 +363,6 @@ class _ProducerState:
         self._key_serializer = key
         self._value_serializer = value
         self._c_producer = handle
-        self._transactional = bool(configs.get(_TRANSACTIONAL_ID))
 
     def _check_not_closed(self) -> None:
         """Java's ``throwIfProducerClosed()``."""
@@ -399,34 +388,6 @@ class _ProducerState:
     def _track(self, future: Any) -> None:
         self._futures.add(future)
         future.add_done_callback(self._futures.discard)
-
-    def _drain_sync(self, timeout_s: float | None = None, *, closing: bool = False) -> bool:
-        """Wait until every record sent so far is with the Rust producer, so a
-        send that returned belongs to the flush, transaction-control operation
-        or close that follows (producer-transactions.md §13); at most
-        ``timeout_s`` seconds when given. Returns whether they are.
-
-        Only the registration is a use of the handle: the wait is not, so a
-        ``close()`` meanwhile proceeds (its last send round fires the waiter).
-        ``closing`` is passed by ``close()`` alone (see ``_drain_registered``)."""
-        done = threading.Event()
-        if self._drain_registered(done.set, closing=closing):
-            return True
-        return done.wait(timeout_s)
-
-    def _drain_registered(self, ready: Callable[[], None], *, closing: bool = False) -> bool:
-        """``Producer_drain``: True if drained, else ``ready`` is registered.
-
-        Only ``close()`` passes ``closing``: it owns the handle, which it frees
-        only after this returns, so it uses the handle directly although
-        ``_closed`` is set. Every other caller registers as a counted use,
-        which raises Java's closed ``IllegalStateError`` once a ``close()`` has
-        begun, even when the caller passed its own closed check before that
-        (``_closed`` alone cannot tell such a caller from ``close()``)."""
-        if closing:
-            return bool(_lib.Producer_drain(self._c_producer, ready))
-        with self._use() as c_producer:
-            return bool(_lib.Producer_drain(c_producer, ready))
 
     def _close_serializers(self) -> None:
         """Java closes both serializers at producer close; a failing
