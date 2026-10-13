@@ -62,9 +62,7 @@
 //!     positionally (a struct by value as `*const`, copied out of the
 //!     caller's handle; `Error` by value as `*mut`, consumed), a `Result<T, Error>`
 //!     returned as `*mut kafka_common_Error_t` with `T` through a trailing
-//!     `out_*` slot, a fluent `self -> Self` setter returning nothing, and a
-//!     fallible one (`self -> Result<Self, Error>`) returning only the error,
-//!     since in C both mutate the handle in place;
+//!     `out_*` slot, a fluent `self -> Self` setter returning nothing;
 //!   - `<prefix>_to_string(const <prefix>_t *)` returning an owned string
 //!     when the type implements `Display` (Java's `toString()`);
 //!   - an `async fn` (or one returning `impl Future`, `Pin<Box<dyn Future>>`,
@@ -969,10 +967,7 @@ fn classify_output(ty: Option<&syn::Type>, recv: Receiver, mapper: &Mapper<'_>) 
         return Ok(Output::Unit);
     }
     if let Some(ok) = mapper.result_ok(ty)? {
-        // A fallible fluent setter mutates the handle in place like an
-        // infallible one, so only its error reaches C.
-        let fluent = recv == Receiver::Mut && ok.as_ref().is_some_and(|t| sig_receiver_is_owned(t, mapper.owner_name));
-        return Ok(Output::Fallible(if fluent { None } else { ok }));
+        return Ok(Output::Fallible(ok));
     }
     if recv == Receiver::Mut && sig_receiver_is_owned(ty, mapper.owner_name) {
         return Ok(Output::Fluent);
@@ -3802,7 +3797,6 @@ mod tests {
                 impl Cluster {
                     pub fn with_id(id: &str) -> Result<Self, LocalIllegalArgumentError> { Ok(Cluster) }
                     pub fn set_id(self, id: &str) -> Cluster { self }
-                    pub fn set_size(self, size: i32) -> Result<Self, Error> { Ok(self) }
                     pub fn check(&self) -> Result<(), LocalIllegalStateError> { Ok(()) }
                     pub fn offsets(&self) -> Offsets { Offsets::new() }
                 }
@@ -3817,11 +3811,6 @@ mod tests {
         assert_eq!(
             detail(&findings, "missing kafka_common_Cluster_set_id"),
             "expected `fn(self: *mut kafka_common_Cluster_t, id: *const c_char)`"
-        );
-        // A fallible one too, returning only its error.
-        assert_eq!(
-            detail(&findings, "missing kafka_common_Cluster_set_size"),
-            "expected `fn(self: *mut kafka_common_Cluster_t, size: i32) -> *mut kafka_common_Error_t`"
         );
         assert_eq!(
             detail(&findings, "missing kafka_common_Cluster_check"),

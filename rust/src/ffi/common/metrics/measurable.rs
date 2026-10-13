@@ -198,7 +198,7 @@ mod tests {
     fn c_implementation_is_driven_through_the_trait_and_the_invoker() {
         let mut offset = 0.5_f64;
         let handle = kafka_common_metrics_Measurable_new(&mut offset as *mut f64 as *mut c_void, c_measure);
-        let config = MetricConfig::new().set_samples(3).unwrap();
+        let config = MetricConfig::new().set_samples(3);
         // SAFETY: Test code: `handle` comes from `kafka_common_metrics_Measurable_new` over the
         // `offset` local, which outlives it, and `take_measurable` consumes it, after which it is
         // not used; `config_handle` comes from `kafka_common_metrics_MetricConfig_new` and is

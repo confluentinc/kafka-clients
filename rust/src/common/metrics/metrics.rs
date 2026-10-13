@@ -1434,7 +1434,7 @@ mod tests {
 
         let time = Arc::new(MockTime::new());
         // Use the default time window. Set 3 samples.
-        let cfg = Arc::new(MetricConfig::new().set_samples(3).unwrap());
+        let cfg = Arc::new(MetricConfig::new().set_samples(3));
         let metrics = Metrics::with_default_config_reporters_time(
             Arc::clone(&cfg),
             Vec::new(),
@@ -1566,7 +1566,7 @@ mod tests {
     // Metrics(MetricConfig defaultConfig, Time time) -> Metrics.java:101
     #[test]
     fn test_new_default_config_time_forwards() {
-        let config = Arc::new(MetricConfig::new().set_samples(7).unwrap());
+        let config = Arc::new(MetricConfig::new().set_samples(7));
         let time = Arc::new(MockTime::new());
         let metrics = Metrics::with_default_config_time(Arc::clone(&config), Arc::clone(&time) as Arc<dyn Time>);
 
@@ -1630,7 +1630,7 @@ mod tests {
     #[test]
     fn test_sensor_forwarding_overloads() {
         let (metrics, time) = metrics_with_mock();
-        let config = Arc::new(MetricConfig::new().set_samples(9).unwrap());
+        let config = Arc::new(MetricConfig::new().set_samples(9));
         let parent = metrics.sensor("parent").unwrap();
 
         // :360 — recording level and parents, default config, no expiry.

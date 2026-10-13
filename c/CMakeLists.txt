@@ -99,10 +99,6 @@ add_executable(test_kafka_future tests/test_kafka_future.c)
 target_include_directories(test_kafka_future PRIVATE ${RUST_INCLUDE_DIR})
 target_link_libraries(test_kafka_future unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS})
 
-add_executable(test_metric_config tests/test_metric_config.c)
-target_include_directories(test_metric_config PRIVATE ${RUST_INCLUDE_DIR})
-target_link_libraries(test_metric_config unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS})
-
 # Register tests with CTest
 add_test(NAME mock_producer COMMAND test_mock_producer)
 add_test(NAME kafka_producer COMMAND test_kafka_producer)
@@ -113,7 +109,6 @@ add_test(NAME mock_admin COMMAND test_mock_admin)
 add_test(NAME kafka_admin COMMAND test_kafka_admin)
 add_test(NAME serialization COMMAND test_serialization)
 add_test(NAME kafka_future COMMAND test_kafka_future)
-add_test(NAME metric_config COMMAND test_metric_config)
 
 # ---------------------------------------------------------------------------
 # Producer performance test (opt-in; intentionally NOT registered with CTest).

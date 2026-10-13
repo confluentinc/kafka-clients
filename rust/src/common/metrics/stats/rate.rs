@@ -165,7 +165,6 @@ mod tests {
         for (num_sample, sample_window_size_sec) in [(1, 1), (1, 11), (11, 1), (11, 11)] {
             let config = MetricConfig::new()
                 .set_samples(num_sample)
-                .unwrap()
                 .set_time_window(sample_window_size_sec, TimeUnit::Seconds);
             let rate = Rate::new();
             let time = MockTime::new();
@@ -195,10 +194,7 @@ mod tests {
     #[test]
     #[doc(alias = "org.apache.kafka.common.metrics.stats.RateTest#testRateIsConsistentAfterTheFirstWindow")]
     fn test_rate_is_consistent_after_the_first_window() {
-        let config = MetricConfig::new()
-            .set_time_window(1, TimeUnit::Seconds)
-            .set_samples(2)
-            .unwrap();
+        let config = MetricConfig::new().set_time_window(1, TimeUnit::Seconds).set_samples(2);
         let rate = Rate::new();
         let time = MockTime::new();
         let steps = [0, 99, 100, 100, 100, 100, 100, 100, 100, 100, 100];

@@ -113,10 +113,7 @@ mod tests {
     #[test]
     fn test_time_windowing() {
         let count = WindowedCount::new();
-        let config = MetricConfig::new()
-            .set_time_window(1, TimeUnit::Milliseconds)
-            .set_samples(2)
-            .unwrap();
+        let config = MetricConfig::new().set_time_window(1, TimeUnit::Milliseconds).set_samples(2);
         let time = MockTime::new();
         count.record(&config, 1.0, time.milliseconds());
         time.sleep(1);

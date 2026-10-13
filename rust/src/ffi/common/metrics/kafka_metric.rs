@@ -319,7 +319,7 @@ mod tests {
 
             // Setting through the config handle does not change the metric;
             // `set_config` does.
-            assert!(kafka_common_metrics_MetricConfig_set_samples(config, 7).is_null());
+            kafka_common_metrics_MetricConfig_set_samples(config, 7);
             assert_eq!(kafka_metric_ref(handle).config().samples(), MetricConfig::DEFAULT_NUM_SAMPLES);
             kafka_common_metrics_KafkaMetric_set_config(handle, config);
             assert_eq!(kafka_metric_ref(handle).config().samples(), 7);

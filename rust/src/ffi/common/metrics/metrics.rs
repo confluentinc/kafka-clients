@@ -1501,7 +1501,7 @@ mod tests {
         // error is destroyed once and each out pointer is a valid local.
         unsafe {
             let config = kafka_common_metrics_MetricConfig_new();
-            assert!(kafka_common_metrics_MetricConfig_set_samples(config, 7).is_null());
+            kafka_common_metrics_MetricConfig_set_samples(config, 7);
             let registry = kafka_common_metrics_Metrics_with_default_config(config);
             let shared = kafka_common_metrics_Metrics_config(registry);
             assert_eq!(kafka_common_metrics_MetricConfig_samples(shared), 7);

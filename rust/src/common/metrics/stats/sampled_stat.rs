@@ -427,7 +427,7 @@ mod tests {
     /// counterpart.
     #[test]
     fn extreme_times_and_sample_counts_wrap_instead_of_panicking() {
-        let config = MetricConfig::new().set_samples(i32::MAX).unwrap();
+        let config = MetricConfig::new().set_samples(i32::MAX);
         let stat = sample_count();
         for time_ms in [1, i64::MIN, i64::MAX, i64::MIN, 0] {
             stat.record(&config, 1.0, time_ms);
@@ -435,10 +435,7 @@ mod tests {
         let _ = stat.measure(&config, i64::MIN);
         let _ = stat.measure(&config, i64::MAX);
 
-        let config = MetricConfig::new()
-            .set_time_window(i64::MAX, TimeUnit::Days)
-            .set_samples(3)
-            .unwrap();
+        let config = MetricConfig::new().set_time_window(i64::MAX, TimeUnit::Days).set_samples(3);
         let stat = sample_count();
         stat.record(&config, 1.0, i64::MAX);
         let _ = stat.measure(&config, i64::MIN);
@@ -448,10 +445,7 @@ mod tests {
     #[test]
     #[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStatTest#testSampleIsPurgedIfDoesntOverlap")]
     fn test_sample_is_purged_if_doesnt_overlap() {
-        let config = MetricConfig::new()
-            .set_time_window(1, TimeUnit::Seconds)
-            .set_samples(2)
-            .unwrap();
+        let config = MetricConfig::new().set_time_window(1, TimeUnit::Seconds).set_samples(2);
         let stat = sample_count();
         let time = MockTime::new();
 
@@ -466,10 +460,7 @@ mod tests {
     #[test]
     #[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStatTest#testSampleIsKeptIfOverlaps")]
     fn test_sample_is_kept_if_overlaps() {
-        let config = MetricConfig::new()
-            .set_time_window(1, TimeUnit::Seconds)
-            .set_samples(2)
-            .unwrap();
+        let config = MetricConfig::new().set_time_window(1, TimeUnit::Seconds).set_samples(2);
         let stat = sample_count();
         let time = MockTime::new();
 
@@ -484,10 +475,7 @@ mod tests {
     #[test]
     #[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStatTest#testSampleIsKeptIfOverlapsAndExtra")]
     fn test_sample_is_kept_if_overlaps_and_extra() {
-        let config = MetricConfig::new()
-            .set_time_window(1, TimeUnit::Seconds)
-            .set_samples(2)
-            .unwrap();
+        let config = MetricConfig::new().set_time_window(1, TimeUnit::Seconds).set_samples(2);
         let stat = sample_count();
         let time = MockTime::new();
 
@@ -511,8 +499,7 @@ mod tests {
         let samples = 2;
         let config = MetricConfig::new()
             .set_time_window(window_ms, TimeUnit::Milliseconds)
-            .set_samples(samples)
-            .unwrap();
+            .set_samples(samples);
         let time = MockTime::new();
 
         max.record(&config, 50.0, time.milliseconds());
@@ -535,8 +522,7 @@ mod tests {
         let samples = 2;
         let config = MetricConfig::new()
             .set_time_window(window_ms, TimeUnit::Milliseconds)
-            .set_samples(samples)
-            .unwrap();
+            .set_samples(samples);
         let time = MockTime::new();
 
         count.record(&config, 50.0, time.milliseconds());
