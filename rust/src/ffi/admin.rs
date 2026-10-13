@@ -1277,6 +1277,14 @@ fn keyed_all<V>(entries: &[LazyKeyed<V>]) -> *mut kafka_common_Error_t {
     }
 }
 
+/// Java's `all().isDone()` over per-key futures (`KafkaFuture.allOf`, which
+/// completes once every input has, failed or not): true once every key's
+/// future has resolved, so [`keyed_all`] would not wait. True for no keys.
+/// Never blocks.
+fn keyed_all_is_done<V>(entries: &[LazyKeyed<V>]) -> bool {
+    entries.iter().all(LazyOutcome::is_done)
+}
+
 /// A Java result whose whole value is **one** future (`listTopics`,
 /// `describeAcls`, ...), flattened lazily into `D`.
 type LazySingle<D> = LazyOutcome<Result<D, ErrorInner>>;
@@ -3957,6 +3965,29 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_all(
     keyed_all(&unsafe { create_topics_result_ref(result) }.entries)
 }
 
+/// Java's `all().isDone()`: returns whether every topic's future has resolved,
+/// i.e. whether [`kafka_admin_CreateTopicsResult_all`] (`all()`) would return
+/// without waiting. True when nothing was requested. Never blocks.
+///
+/// Also true once the admin client has been destroyed while a future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
+/// # Safety
+///
+/// `result` must be a valid `create_topics` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_all_is_done(
+    result: *const kafka_admin_CreateTopicsResult_t,
+) -> bool {
+    // SAFETY: `create_topics_result_ref` requires a non-null `create_topics` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the C
+    // caller's contract is the sole source); the reference is used only for this check within
+    // the call, during which the C caller keeps the handle alive.
+    keyed_all_is_done(&unsafe { create_topics_result_ref(result) }.entries)
+}
+
 /// Destroys a `create_topics` result handle, invalidating every borrowed
 /// sub-handle obtained from it. Safe with null (no-op).
 ///
@@ -4145,6 +4176,29 @@ pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_all(
     // C caller's contract is the sole source); the reference is used only for the duration
     // of this call, and the returned error is a fresh copy owned by the caller.
     keyed_all(&unsafe { delete_topics_result_ref(result) }.entries)
+}
+
+/// Java's `all().isDone()`: returns whether every topic's future has resolved,
+/// i.e. whether [`kafka_admin_DeleteTopicsResult_all`] (`all()`) would return
+/// without waiting. True when nothing was requested. Never blocks.
+///
+/// Also true once the admin client has been destroyed while a future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_topics` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_all_is_done(
+    result: *const kafka_admin_DeleteTopicsResult_t,
+) -> bool {
+    // SAFETY: `delete_topics_result_ref` requires a non-null `delete_topics` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the C
+    // caller's contract is the sole source); the reference is used only for this check within
+    // the call, during which the C caller keeps the handle alive.
+    keyed_all_is_done(&unsafe { delete_topics_result_ref(result) }.entries)
 }
 
 /// Destroys a `delete_topics` result handle. Safe with null (no-op).
@@ -4553,6 +4607,31 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_all(
     keyed_all(&unsafe { describe_topics_result_ref(result) }.entries)
 }
 
+/// Java's `allTopicNames().isDone()` / `allTopicIds().isDone()`: returns
+/// whether every topic's future has resolved, i.e. whether
+/// [`kafka_admin_DescribeTopicsResult_all`] (`allTopicNames()` /
+/// `allTopicIds()`) would return without waiting. True when nothing was
+/// requested. Never blocks.
+///
+/// Also true once the admin client has been destroyed while a future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_topics_with_topics` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_all_is_done(
+    result: *const kafka_admin_DescribeTopicsResult_t,
+) -> bool {
+    // SAFETY: `describe_topics_result_ref` requires a non-null `describe_topics_with_topics`
+    // result handle, which this function's `# Safety` requires of `result` (no in-body null
+    // check, so the C caller's contract is the sole source); the reference is used only for
+    // this check within the call, during which the C caller keeps the handle alive.
+    keyed_all_is_done(&unsafe { describe_topics_result_ref(result) }.entries)
+}
+
 /// Destroys a `describe_topics_with_topics` result handle. Safe with null (no-op).
 ///
 /// # Safety
@@ -4739,6 +4818,29 @@ pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_all(
     // caller's contract is the sole source); the reference is used only for the duration
     // of this call, and the returned error is a fresh copy owned by the caller.
     keyed_all(&unsafe { create_partitions_result_ref(result) }.entries)
+}
+
+/// Java's `all().isDone()`: returns whether every topic's future has resolved,
+/// i.e. whether [`kafka_admin_CreatePartitionsResult_all`] (`all()`) would
+/// return without waiting. True when nothing was requested. Never blocks.
+///
+/// Also true once the admin client has been destroyed while a future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
+/// # Safety
+///
+/// `result` must be a valid `create_partitions` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_all_is_done(
+    result: *const kafka_admin_CreatePartitionsResult_t,
+) -> bool {
+    // SAFETY: `create_partitions_result_ref` requires a non-null `create_partitions` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check, so
+    // the C caller's contract is the sole source); the reference is used only for this check
+    // within the call, during which the C caller keeps the handle alive.
+    keyed_all_is_done(&unsafe { create_partitions_result_ref(result) }.entries)
 }
 
 /// Destroys a `create_partitions` result handle. Safe with null (no-op).
@@ -5062,6 +5164,29 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_all(
     // so the C caller's contract is the sole source); the reference is used only for the
     // duration of this call, and the returned error is a fresh copy owned by the caller.
     keyed_all(&unsafe { delete_records_result_ref(result) }.entries)
+}
+
+/// Java's `all().isDone()`: returns whether every partition's future has
+/// resolved, i.e. whether [`kafka_admin_DeleteRecordsResult_all`] (`all()`)
+/// would return without waiting. True when nothing was requested. Never blocks.
+///
+/// Also true once the admin client has been destroyed while a future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_records` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_all_is_done(
+    result: *const kafka_admin_DeleteRecordsResult_t,
+) -> bool {
+    // SAFETY: `delete_records_result_ref` requires a non-null `delete_records` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the C
+    // caller's contract is the sole source); the reference is used only for this check within
+    // the call, during which the C caller keeps the handle alive.
+    keyed_all_is_done(&unsafe { delete_records_result_ref(result) }.entries)
 }
 
 /// Destroys a `delete_records` result handle. Safe with null (no-op).
@@ -8727,6 +8852,29 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_all(
     keyed_all(&unsafe { describe_configs_result_ref(result) }.entries)
 }
 
+/// Java's `all().isDone()`: returns whether every resource's future has
+/// resolved, i.e. whether [`kafka_admin_DescribeConfigsResult_all`] (`all()`)
+/// would return without waiting. True when nothing was requested. Never blocks.
+///
+/// Also true once the admin client has been destroyed while a future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_configs` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_all_is_done(
+    result: *const kafka_admin_DescribeConfigsResult_t,
+) -> bool {
+    // SAFETY: `describe_configs_result_ref` requires a non-null `describe_configs` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check, so
+    // the C caller's contract is the sole source); the reference is used only for this check
+    // within the call, during which the C caller keeps the handle alive.
+    keyed_all_is_done(&unsafe { describe_configs_result_ref(result) }.entries)
+}
+
 /// Destroys a `describe_configs` result handle, invalidating every borrowed
 /// sub-handle obtained from it. Safe with null (no-op).
 ///
@@ -9214,6 +9362,29 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_all(
     // check, so the C caller's contract is the sole source); the reference is used only for
     // the duration of this call, and the returned error is a fresh copy owned by the caller.
     keyed_all(&unsafe { alter_configs_result_ref(result) }.entries)
+}
+
+/// Java's `all().isDone()`: returns whether every resource's future has
+/// resolved, i.e. whether [`kafka_admin_AlterConfigsResult_all`] (`all()`)
+/// would return without waiting. True when nothing was requested. Never blocks.
+///
+/// Also true once the admin client has been destroyed while a future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
+/// # Safety
+///
+/// `result` must be a valid `incremental_alter_configs` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_all_is_done(
+    result: *const kafka_admin_AlterConfigsResult_t,
+) -> bool {
+    // SAFETY: `alter_configs_result_ref` requires a non-null `incremental_alter_configs`
+    // result handle, which this function's `# Safety` requires of `result` (no in-body null
+    // check, so the C caller's contract is the sole source); the reference is used only for
+    // this check within the call, during which the C caller keeps the handle alive.
+    keyed_all_is_done(&unsafe { alter_configs_result_ref(result) }.entries)
 }
 
 /// Destroys an `incremental_alter_configs` result handle. Safe with null
@@ -10083,6 +10254,30 @@ pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_all(
     keyed_all(&unsafe { describe_log_dirs_result_ref(result) }.entries)
 }
 
+/// Java's `allDescriptions().isDone()`: returns whether every broker's future
+/// has resolved, i.e. whether [`kafka_admin_DescribeLogDirsResult_all`]
+/// (`allDescriptions()`) would return without waiting. True when nothing was
+/// requested. Never blocks.
+///
+/// Also true once the admin client has been destroyed while a future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_log_dirs` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_all_is_done(
+    result: *const kafka_admin_DescribeLogDirsResult_t,
+) -> bool {
+    // SAFETY: `describe_log_dirs_result_ref` requires a non-null `describe_log_dirs` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check, so
+    // the C caller's contract is the sole source); the reference is used only for this check
+    // within the call, during which the C caller keeps the handle alive.
+    keyed_all_is_done(&unsafe { describe_log_dirs_result_ref(result) }.entries)
+}
+
 /// Destroys a `describe_log_dirs` result handle, invalidating every borrowed
 /// sub-handle obtained from it. Safe with null (no-op).
 ///
@@ -10565,6 +10760,30 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_all(
     // check, so the C caller's contract is the sole source); the reference is used only for
     // the duration of this call, and the returned error is a fresh copy owned by the caller.
     keyed_all(&unsafe { alter_replica_log_dirs_result_ref(result) }.entries)
+}
+
+/// Java's `all().isDone()`: returns whether every replica's future has
+/// resolved, i.e. whether [`kafka_admin_AlterReplicaLogDirsResult_all`]
+/// (`all()`) would return without waiting. True when nothing was requested.
+/// Never blocks.
+///
+/// Also true once the admin client has been destroyed while a future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_replica_log_dirs` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_all_is_done(
+    result: *const kafka_admin_AlterReplicaLogDirsResult_t,
+) -> bool {
+    // SAFETY: `alter_replica_log_dirs_result_ref` requires a non-null `alter_replica_log_dirs`
+    // result handle, which this function's `# Safety` requires of `result` (no in-body null
+    // check, so the C caller's contract is the sole source); the reference is used only for
+    // this check within the call, during which the C caller keeps the handle alive.
+    keyed_all_is_done(&unsafe { alter_replica_log_dirs_result_ref(result) }.entries)
 }
 
 /// Destroys an `alter_replica_log_dirs` result handle. Safe with null (no-op).
@@ -11155,6 +11374,31 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_all(
     // the reference is used only for the duration of this call, and the returned error is a
     // fresh copy owned by the caller.
     keyed_all(&unsafe { describe_replica_log_dirs_result_ref(result) }.entries)
+}
+
+/// Java's `all().isDone()`: returns whether every replica's future has
+/// resolved, i.e. whether [`kafka_admin_DescribeReplicaLogDirsResult_all`]
+/// (`all()`) would return without waiting. True when nothing was requested.
+/// Never blocks.
+///
+/// Also true once the admin client has been destroyed while a future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_replica_log_dirs` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_all_is_done(
+    result: *const kafka_admin_DescribeReplicaLogDirsResult_t,
+) -> bool {
+    // SAFETY: `describe_replica_log_dirs_result_ref` requires a non-null
+    // `describe_replica_log_dirs` result handle, which this function's `# Safety` requires of
+    // `result` (no in-body null check, so the C caller's contract is the sole source); the
+    // reference is used only for this check within the call, during which the C caller keeps
+    // the handle alive.
+    keyed_all_is_done(&unsafe { describe_replica_log_dirs_result_ref(result) }.entries)
 }
 
 /// Destroys a `describe_replica_log_dirs` result handle, invalidating every
@@ -12602,6 +12846,31 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_all(
     keyed_all(&unsafe { alter_partition_reassignments_result_ref(result) }.entries)
 }
 
+/// Java's `all().isDone()`: returns whether every partition's future has
+/// resolved, i.e. whether [`kafka_admin_AlterPartitionReassignmentsResult_all`]
+/// (`all()`) would return without waiting. True when nothing was requested.
+/// Never blocks.
+///
+/// Also true once the admin client has been destroyed while a future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_partition_reassignments` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_all_is_done(
+    result: *const kafka_admin_AlterPartitionReassignmentsResult_t,
+) -> bool {
+    // SAFETY: `alter_partition_reassignments_result_ref` requires a non-null
+    // `alter_partition_reassignments` result handle, which this function's `# Safety` requires
+    // of `result` (no in-body null check, so the C caller's contract is the sole source); the
+    // reference is used only for this check within the call, during which the C caller keeps
+    // the handle alive.
+    keyed_all_is_done(&unsafe { alter_partition_reassignments_result_ref(result) }.entries)
+}
+
 /// Destroys an `alter_partition_reassignments` result handle. Safe with null
 /// (no-op).
 ///
@@ -13119,6 +13388,29 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_all(
     // C caller's contract is the sole source); the reference is used only for the duration
     // of this call, and the returned error is a fresh copy owned by the caller.
     keyed_all(&unsafe { list_offsets_result_ref(result) }.entries)
+}
+
+/// Java's `all().isDone()`: returns whether every partition's future has
+/// resolved, i.e. whether [`kafka_admin_ListOffsetsResult_all`] (`all()`) would
+/// return without waiting. True when nothing was requested. Never blocks.
+///
+/// Also true once the admin client has been destroyed while a future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
+/// # Safety
+///
+/// `result` must be a valid `list_offsets` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_all_is_done(
+    result: *const kafka_admin_ListOffsetsResult_t,
+) -> bool {
+    // SAFETY: `list_offsets_result_ref` requires a non-null `list_offsets` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the C
+    // caller's contract is the sole source); the reference is used only for this check within
+    // the call, during which the C caller keeps the handle alive.
+    keyed_all_is_done(&unsafe { list_offsets_result_ref(result) }.entries)
 }
 
 /// Destroys a `list_offsets` result handle. Safe with null (no-op).
@@ -16976,6 +17268,30 @@ pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_all(
     keyed_all(&unsafe { describe_consumer_groups_result_ref(result) }.entries)
 }
 
+/// Java's `all().isDone()`: returns whether every group's future has resolved,
+/// i.e. whether [`kafka_admin_DescribeConsumerGroupsResult_all`] (`all()`)
+/// would return without waiting. True when nothing was requested. Never blocks.
+///
+/// Also true once the admin client has been destroyed while a future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_consumer_groups` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_all_is_done(
+    result: *const kafka_admin_DescribeConsumerGroupsResult_t,
+) -> bool {
+    // SAFETY: `describe_consumer_groups_result_ref` requires a non-null
+    // `describe_consumer_groups` result handle, which this function's `# Safety` requires of
+    // `result` (no in-body null check, so the C caller's contract is the sole source); the
+    // reference is used only for this check within the call, during which the C caller keeps
+    // the handle alive.
+    keyed_all_is_done(&unsafe { describe_consumer_groups_result_ref(result) }.entries)
+}
+
 /// Destroys a `describe_consumer_groups` result handle. Safe with null (no-op).
 ///
 /// # Safety
@@ -17201,6 +17517,30 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_all(
     // used only for the duration of this call, and the returned error is a fresh copy owned
     // by the caller.
     keyed_all(&unsafe { describe_classic_groups_result_ref(result) }.entries)
+}
+
+/// Java's `all().isDone()`: returns whether every group's future has resolved,
+/// i.e. whether [`kafka_admin_DescribeClassicGroupsResult_all`] (`all()`) would
+/// return without waiting. True when nothing was requested. Never blocks.
+///
+/// Also true once the admin client has been destroyed while a future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_classic_groups` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_all_is_done(
+    result: *const kafka_admin_DescribeClassicGroupsResult_t,
+) -> bool {
+    // SAFETY: `describe_classic_groups_result_ref` requires a non-null
+    // `describe_classic_groups` result handle, which this function's `# Safety` requires of
+    // `result` (no in-body null check, so the C caller's contract is the sole source); the
+    // reference is used only for this check within the call, during which the C caller keeps
+    // the handle alive.
+    keyed_all_is_done(&unsafe { describe_classic_groups_result_ref(result) }.entries)
 }
 
 /// Destroys a `describe_classic_groups` result handle. Safe with null (no-op).
@@ -17433,6 +17773,30 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_all(
     // reference is used only for the duration of this call, and the returned error is a
     // fresh copy owned by the caller.
     keyed_all(&unsafe { list_consumer_group_offsets_result_ref(result) }.entries)
+}
+
+/// Java's `all().isDone()`: returns whether every group's future has resolved,
+/// i.e. whether [`kafka_admin_ListConsumerGroupOffsetsResult_all`] (`all()`)
+/// would return without waiting. True when nothing was requested. Never blocks.
+///
+/// Also true once the admin client has been destroyed while a future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
+/// # Safety
+///
+/// `result` must be a valid `list_consumer_group_offsets_with_group_specs` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_all_is_done(
+    result: *const kafka_admin_ListConsumerGroupOffsetsResult_t,
+) -> bool {
+    // SAFETY: `list_consumer_group_offsets_result_ref` requires a non-null
+    // `list_consumer_group_offsets_with_group_specs` result handle, which this function's `#
+    // Safety` requires of `result` (no in-body null check, so the C caller's contract is the
+    // sole source); the reference is used only for this check within the call, during which
+    // the C caller keeps the handle alive.
+    keyed_all_is_done(&unsafe { list_consumer_group_offsets_result_ref(result) }.entries)
 }
 
 /// Destroys a `list_consumer_group_offsets_with_group_specs` result handle. Safe with null
@@ -18371,6 +18735,29 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_all(
     // used only for the duration of this call, and the returned error is a fresh copy owned
     // by the caller.
     keyed_all(&unsafe { delete_consumer_groups_result_ref(result) }.entries)
+}
+
+/// Java's `all().isDone()`: returns whether every group's future has resolved,
+/// i.e. whether [`kafka_admin_DeleteConsumerGroupsResult_all`] (`all()`) would
+/// return without waiting. True when nothing was requested. Never blocks.
+///
+/// Also true once the admin client has been destroyed while a future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_consumer_groups` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_all_is_done(
+    result: *const kafka_admin_DeleteConsumerGroupsResult_t,
+) -> bool {
+    // SAFETY: `delete_consumer_groups_result_ref` requires a non-null `delete_consumer_groups`
+    // result handle, which this function's `# Safety` requires of `result` (no in-body null
+    // check, so the C caller's contract is the sole source); the reference is used only for
+    // this check within the call, during which the C caller keeps the handle alive.
+    keyed_all_is_done(&unsafe { delete_consumer_groups_result_ref(result) }.entries)
 }
 
 /// Destroys a `delete_consumer_groups` result handle. Safe with null (no-op).
@@ -22400,6 +22787,29 @@ pub unsafe extern "C" fn kafka_admin_CreateAclsResult_all(
     keyed_all(&unsafe { create_acls_result_ref(result) }.entries)
 }
 
+/// Java's `all().isDone()`: returns whether every binding's future has
+/// resolved, i.e. whether [`kafka_admin_CreateAclsResult_all`] (`all()`) would
+/// return without waiting. True when nothing was requested. Never blocks.
+///
+/// Also true once the admin client has been destroyed while a future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
+/// # Safety
+///
+/// `result` must be a valid `create_acls` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_CreateAclsResult_all_is_done(
+    result: *const kafka_admin_CreateAclsResult_t,
+) -> bool {
+    // SAFETY: `create_acls_result_ref` requires a non-null `create_acls` result handle, which
+    // this function's `# Safety` requires of `result` (no in-body null check, so the C
+    // caller's contract is the sole source); the reference is used only for this check within
+    // the call, during which the C caller keeps the handle alive.
+    keyed_all_is_done(&unsafe { create_acls_result_ref(result) }.entries)
+}
+
 /// Destroys a `create_acls` result handle, invalidating every borrowed
 /// sub-handle obtained from it. Safe with null (no-op).
 ///
@@ -22932,6 +23342,29 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_all(
     // C caller's contract is the sole source); the reference is used only for the duration
     // of this call, and the returned error is a fresh copy owned by the caller.
     delete_acls_all(&unsafe { delete_acls_result_ref(result) }.entries)
+}
+
+/// Java's `all().isDone()`: returns whether every filter's future has resolved,
+/// i.e. whether [`kafka_admin_DeleteAclsResult_all`] (`all()`) would return
+/// without waiting. True when nothing was requested. Never blocks.
+///
+/// Also true once the admin client has been destroyed while a future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_acls` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_all_is_done(
+    result: *const kafka_admin_DeleteAclsResult_t,
+) -> bool {
+    // SAFETY: `delete_acls_result_ref` requires a non-null `delete_acls` result handle, which
+    // this function's `# Safety` requires of `result` (no in-body null check, so the C
+    // caller's contract is the sole source); the reference is used only for this check within
+    // the call, during which the C caller keeps the handle alive.
+    keyed_all_is_done(&unsafe { delete_acls_result_ref(result) }.entries)
 }
 
 /// Destroys a `delete_acls` result handle, invalidating every borrowed
@@ -23587,6 +24020,29 @@ pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_all(
     // check, so the C caller's contract is the sole source); the reference is used only for
     // the duration of this call, and the returned error is a fresh copy owned by the caller.
     keyed_all(&unsafe { alter_client_quotas_result_ref(result) }.entries)
+}
+
+/// Java's `all().isDone()`: returns whether every entity's future has resolved,
+/// i.e. whether [`kafka_admin_AlterClientQuotasResult_all`] (`all()`) would
+/// return without waiting. True when nothing was requested. Never blocks.
+///
+/// Also true once the admin client has been destroyed while a future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_client_quotas` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_all_is_done(
+    result: *const kafka_admin_AlterClientQuotasResult_t,
+) -> bool {
+    // SAFETY: `alter_client_quotas_result_ref` requires a non-null `alter_client_quotas`
+    // result handle, which this function's `# Safety` requires of `result` (no in-body null
+    // check, so the C caller's contract is the sole source); the reference is used only for
+    // this check within the call, during which the C caller keeps the handle alive.
+    keyed_all_is_done(&unsafe { alter_client_quotas_result_ref(result) }.entries)
 }
 
 /// Destroys an `alter_client_quotas` result handle, invalidating every borrowed
@@ -29031,6 +29487,30 @@ pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_all(
     keyed_all(&unsafe { alter_user_scram_credentials_result_ref(result) }.entries)
 }
 
+/// Java's `all().isDone()`: returns whether every user's future has resolved,
+/// i.e. whether [`kafka_admin_AlterUserScramCredentialsResult_all`] (`all()`)
+/// would return without waiting. True when nothing was requested. Never blocks.
+///
+/// Also true once the admin client has been destroyed while a future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_user_scram_credentials` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_all_is_done(
+    result: *const kafka_admin_AlterUserScramCredentialsResult_t,
+) -> bool {
+    // SAFETY: `alter_user_scram_credentials_result_ref` requires a non-null
+    // `alter_user_scram_credentials` result handle, which this function's `# Safety` requires
+    // of `result` (no in-body null check, so the C caller's contract is the sole source); the
+    // reference is used only for this check within the call, during which the C caller keeps
+    // the handle alive.
+    keyed_all_is_done(&unsafe { alter_user_scram_credentials_result_ref(result) }.entries)
+}
+
 /// Destroys an `alter_user_scram_credentials` result handle, invalidating every
 /// borrowed sub-handle obtained from it. Safe with null (no-op).
 ///
@@ -30211,6 +30691,29 @@ pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_all(
     keyed_all(&unsafe { update_features_result_ref(result) }.entries)
 }
 
+/// Java's `all().isDone()`: returns whether every feature's future has
+/// resolved, i.e. whether [`kafka_admin_UpdateFeaturesResult_all`] (`all()`)
+/// would return without waiting. True when nothing was requested. Never blocks.
+///
+/// Also true once the admin client has been destroyed while a future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
+/// # Safety
+///
+/// `result` must be a valid `update_features` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_all_is_done(
+    result: *const kafka_admin_UpdateFeaturesResult_t,
+) -> bool {
+    // SAFETY: `update_features_result_ref` requires a non-null `update_features` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check, so
+    // the C caller's contract is the sole source); the reference is used only for this check
+    // within the call, during which the C caller keeps the handle alive.
+    keyed_all_is_done(&unsafe { update_features_result_ref(result) }.entries)
+}
+
 /// Destroys an `update_features` result handle. Safe with null (no-op).
 ///
 /// # Safety
@@ -30827,6 +31330,29 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_all(
     keyed_all(&unsafe { describe_producers_result_ref(result) }.entries)
 }
 
+/// Java's `all().isDone()`: returns whether every partition's future has
+/// resolved, i.e. whether [`kafka_admin_DescribeProducersResult_all`] (`all()`)
+/// would return without waiting. True when nothing was requested. Never blocks.
+///
+/// Also true once the admin client has been destroyed while a future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_producers` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_all_is_done(
+    result: *const kafka_admin_DescribeProducersResult_t,
+) -> bool {
+    // SAFETY: `describe_producers_result_ref` requires a non-null `describe_producers` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check, so
+    // the C caller's contract is the sole source); the reference is used only for this check
+    // within the call, during which the C caller keeps the handle alive.
+    keyed_all_is_done(&unsafe { describe_producers_result_ref(result) }.entries)
+}
+
 /// Returns the number of active producers for the partition at `index`, or 0 if
 /// out of range or that partition failed.
 ///
@@ -31303,6 +31829,30 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_all(
     // check, so the C caller's contract is the sole source); the reference is used only for
     // the duration of this call, and the returned error is a fresh copy owned by the caller.
     keyed_all(&unsafe { describe_transactions_result_ref(result) }.entries)
+}
+
+/// Java's `all().isDone()`: returns whether every transactional id's future has
+/// resolved, i.e. whether [`kafka_admin_DescribeTransactionsResult_all`]
+/// (`all()`) would return without waiting. True when nothing was requested.
+/// Never blocks.
+///
+/// Also true once the admin client has been destroyed while a future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_transactions` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_all_is_done(
+    result: *const kafka_admin_DescribeTransactionsResult_t,
+) -> bool {
+    // SAFETY: `describe_transactions_result_ref` requires a non-null `describe_transactions`
+    // result handle, which this function's `# Safety` requires of `result` (no in-body null
+    // check, so the C caller's contract is the sole source); the reference is used only for
+    // this check within the call, during which the C caller keeps the handle alive.
+    keyed_all_is_done(&unsafe { describe_transactions_result_ref(result) }.entries)
 }
 
 /// Returns `TransactionDescription.coordinatorId()` for the row at `index`, or
@@ -31970,6 +32520,29 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_all(
     keyed_all(&unsafe { fence_producers_result_ref(result) }.entries)
 }
 
+/// Java's `all().isDone()`: returns whether every transactional id's future has
+/// resolved, i.e. whether [`kafka_admin_FenceProducersResult_all`] (`all()`)
+/// would return without waiting. True when nothing was requested. Never blocks.
+///
+/// Also true once the admin client has been destroyed while a future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
+/// # Safety
+///
+/// `result` must be a valid `fence_producers` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_FenceProducersResult_all_is_done(
+    result: *const kafka_admin_FenceProducersResult_t,
+) -> bool {
+    // SAFETY: `fence_producers_result_ref` requires a non-null `fence_producers` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check, so
+    // the C caller's contract is the sole source); the reference is used only for this check
+    // within the call, during which the C caller keeps the handle alive.
+    keyed_all_is_done(&unsafe { fence_producers_result_ref(result) }.entries)
+}
+
 /// Returns the producer id generated while initializing the transaction at
 /// `index` (Java's `FenceProducersResult.producerId(transactionalId).get()`), or
 /// -1 if out of range or that fencing failed. `-1` is Java's own
@@ -32270,6 +32843,55 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_all_by_broker_id(
     // so the C caller's contract is the sole source); the reference is used only for the
     // duration of this call, and the returned error is a fresh copy owned by the caller.
     single_error(&unsafe { list_transactions_result_ref(result) }.all_by_broker_id)
+}
+
+/// Java's `all().isDone()`. Never blocks. Java's `all()` fails fast, so this is
+/// true once every broker has succeeded, **or** as soon as broker discovery or
+/// any one broker has failed, even while other brokers are still pending —
+/// exactly when [`kafka_admin_ListTransactionsResult_all`] would return without
+/// waiting.
+///
+/// Also true once the admin client has been destroyed while it was still
+/// pending: it can then never resolve, and reading it fails at once (see
+/// [`kafka_admin_AdminClient_destroy`]).
+///
+/// # Safety
+///
+/// `result` must be a valid `list_transactions` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_all_is_done(
+    result: *const kafka_admin_ListTransactionsResult_t,
+) -> bool {
+    // SAFETY: `list_transactions_result_ref` requires a non-null `list_transactions` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for this
+    // check.
+    unsafe { list_transactions_result_ref(result) }.all.is_done()
+}
+
+/// Java's `allByBrokerId().isDone()`: the same as
+/// [`kafka_admin_ListTransactionsResult_all_is_done`] (Java derives `all()` from
+/// `allByBrokerId()`, which fails fast on the first failing broker). Never
+/// blocks.
+///
+/// Also true once the admin client has been destroyed while it was still
+/// pending: it can then never resolve, and reading it fails at once (see
+/// [`kafka_admin_AdminClient_destroy`]).
+///
+/// # Safety
+///
+/// `result` must be a valid `list_transactions` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_all_by_broker_id_is_done(
+    result: *const kafka_admin_ListTransactionsResult_t,
+) -> bool {
+    // SAFETY: `list_transactions_result_ref` requires a non-null `list_transactions` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for this
+    // check.
+    unsafe { list_transactions_result_ref(result) }.all_by_broker_id.is_done()
 }
 
 /// Returns the number of brokers the listing was fanned out to, or 0 if broker
@@ -34922,6 +35544,7 @@ mod tests {
             assert_eq!(kafka_admin_DescribeLogDirsResult_get_broker(result, 0), 1);
             assert_eq!(kafka_admin_DescribeLogDirsResult_get_broker(result, 1), 2);
             assert!(!kafka_admin_DescribeLogDirsResult_is_done(result, 0));
+            assert!(!kafka_admin_DescribeLogDirsResult_all_is_done(result));
             assert!(!kafka_admin_DescribeLogDirsResult_is_done(result, 1));
             assert!(kafka_admin_DescribeLogDirsResult_get_value(result, 2).is_null());
 
@@ -34944,6 +35567,7 @@ mod tests {
                 consume_message(kafka_admin_DescribeLogDirsResult_all(result)),
                 "broker 2 timed out"
             );
+            assert!(kafka_admin_DescribeLogDirsResult_all_is_done(result));
             completer.join().expect("completer thread");
             assert!(kafka_admin_DescribeLogDirsResult_is_done(result, 1));
             assert_eq!(
@@ -34982,6 +35606,7 @@ mod tests {
             assert_eq!(kafka_admin_AlterReplicaLogDirsResult_get_broker_id(result, 0), 1);
             assert_eq!(kafka_admin_AlterReplicaLogDirsResult_get_broker_id(result, 1), 2);
             assert!(!kafka_admin_AlterReplicaLogDirsResult_is_done(result, 0));
+            assert!(!kafka_admin_AlterReplicaLogDirsResult_all_is_done(result));
             assert!(!kafka_admin_AlterReplicaLogDirsResult_is_done(result, 1));
 
             fast.complete(());
@@ -34997,6 +35622,7 @@ mod tests {
             assert_eq!(common::kafka_common_Error_code(error) as i32, Errors::LogDirNotFound as i32);
             completer.join().expect("completer thread");
             let all = kafka_admin_AlterReplicaLogDirsResult_all(result);
+            assert!(kafka_admin_AlterReplicaLogDirsResult_all_is_done(result));
             assert_eq!(common::kafka_common_Error_code(all) as i32, Errors::LogDirNotFound as i32);
             common::kafka_common_Error_destroy(all);
             kafka_admin_AlterReplicaLogDirsResult_destroy(result);
@@ -35029,6 +35655,7 @@ mod tests {
             assert_eq!(kafka_admin_DescribeReplicaLogDirsResult_get_partition(result, 0), 3);
             assert_eq!(kafka_admin_DescribeReplicaLogDirsResult_get_broker_id(result, 0), 1);
             assert!(!kafka_admin_DescribeReplicaLogDirsResult_is_done(result, 0));
+            assert!(!kafka_admin_DescribeReplicaLogDirsResult_all_is_done(result));
             assert!(!kafka_admin_DescribeReplicaLogDirsResult_is_done(result, 1));
 
             fast.complete(ReplicaLogDirInfo::new(Some("/data/a".to_string()), 4, None, -1));
@@ -35052,6 +35679,7 @@ mod tests {
                 consume_message(kafka_admin_DescribeReplicaLogDirsResult_all(result)),
                 "replica b-0 timed out"
             );
+            assert!(kafka_admin_DescribeReplicaLogDirsResult_all_is_done(result));
             kafka_admin_DescribeReplicaLogDirsResult_destroy(result);
         }
     }
@@ -35210,6 +35838,7 @@ mod tests {
             assert_eq!(kafka_admin_AlterPartitionReassignmentsResult_get_partition(result, 0), 2);
             assert_eq!(kafka_admin_AlterPartitionReassignmentsResult_get_partition(result, 1), 10);
             assert!(!kafka_admin_AlterPartitionReassignmentsResult_is_done(result, 0));
+            assert!(!kafka_admin_AlterPartitionReassignmentsResult_all_is_done(result));
             assert!(!kafka_admin_AlterPartitionReassignmentsResult_is_done(result, 1));
 
             fast.complete(());
@@ -35221,6 +35850,7 @@ mod tests {
                 slow.complete_with_error(Error::new(Errors::NoReassignmentInProgress));
             });
             let all = kafka_admin_AlterPartitionReassignmentsResult_all(result);
+            assert!(kafka_admin_AlterPartitionReassignmentsResult_all_is_done(result));
             assert_eq!(
                 common::kafka_common_Error_code(all) as i32,
                 Errors::NoReassignmentInProgress as i32
@@ -35322,6 +35952,7 @@ mod tests {
             );
             assert_eq!(kafka_admin_ListOffsetsResult_get_partition(result, 1), 1);
             assert!(!kafka_admin_ListOffsetsResult_is_done(result, 0));
+            assert!(!kafka_admin_ListOffsetsResult_all_is_done(result));
             assert!(!kafka_admin_ListOffsetsResult_is_done(result, 1));
 
             fast.complete(ListOffsetsResultInfo::new(42, -1, None));
@@ -35340,6 +35971,7 @@ mod tests {
             assert_eq!(kafka_admin_ListOffsetsResultInfo_offset(info), 7);
             assert!(kafka_admin_ListOffsetsResult_get_error(result, 1).is_null());
             assert!(kafka_admin_ListOffsetsResult_all(result).is_null());
+            assert!(kafka_admin_ListOffsetsResult_all_is_done(result));
             kafka_admin_ListOffsetsResult_destroy(result);
         }
     }
@@ -36077,6 +36709,7 @@ mod tests {
                 Ok("slow")
             );
             assert!(!kafka_admin_DescribeConsumerGroupsResult_is_done(result, 0));
+            assert!(!kafka_admin_DescribeConsumerGroupsResult_all_is_done(result));
             assert!(!kafka_admin_DescribeConsumerGroupsResult_is_done(result, 1));
 
             fast.complete(lazy_consumer_group_description("fast"));
@@ -36110,6 +36743,7 @@ mod tests {
                 consume_message(kafka_admin_DescribeConsumerGroupsResult_all(result)),
                 "slow group timed out"
             );
+            assert!(kafka_admin_DescribeConsumerGroupsResult_all_is_done(result));
             kafka_admin_DescribeConsumerGroupsResult_destroy(result);
         }
     }
@@ -36194,6 +36828,7 @@ mod tests {
                 Ok("b-slow")
             );
             assert!(!kafka_admin_DescribeClassicGroupsResult_is_done(result, 0));
+            assert!(!kafka_admin_DescribeClassicGroupsResult_all_is_done(result));
 
             fast.complete(ClassicGroupDescription::new(
                 "a-fast",
@@ -36221,6 +36856,7 @@ mod tests {
                 consume_message(kafka_admin_DescribeClassicGroupsResult_all(result)),
                 "classic group timed out"
             );
+            assert!(kafka_admin_DescribeClassicGroupsResult_all_is_done(result));
             completer.join().expect("completer thread");
             assert!(kafka_admin_DescribeClassicGroupsResult_is_done(result, 1));
             assert_eq!(
@@ -37006,6 +37642,7 @@ mod tests {
                 Ok("g-fast")
             );
             assert!(!kafka_admin_ListConsumerGroupOffsetsResult_is_done(result, 0));
+            assert!(!kafka_admin_ListConsumerGroupOffsetsResult_all_is_done(result));
 
             fast.complete(HashMap::from([(
                 TopicPartition::new("t", 0),
@@ -37031,6 +37668,7 @@ mod tests {
                 consume_message(kafka_admin_ListConsumerGroupOffsetsResult_all(result)),
                 "offsets timed out"
             );
+            assert!(kafka_admin_ListConsumerGroupOffsetsResult_all_is_done(result));
             kafka_admin_ListConsumerGroupOffsetsResult_destroy(result);
         }
     }
@@ -37808,6 +38446,7 @@ mod tests {
                 Ok("a")
             );
             assert!(!kafka_admin_DeleteConsumerGroupsResult_is_done(result, 0));
+            assert!(!kafka_admin_DeleteConsumerGroupsResult_all_is_done(result));
             fast.complete(());
             assert!(kafka_admin_DeleteConsumerGroupsResult_get_error(result, 0).is_null());
             assert!(!kafka_admin_DeleteConsumerGroupsResult_is_done(result, 1));
@@ -37821,6 +38460,7 @@ mod tests {
                 consume_message(kafka_admin_DeleteConsumerGroupsResult_all(result)),
                 "delete timed out"
             );
+            assert!(kafka_admin_DeleteConsumerGroupsResult_all_is_done(result));
             completer.join().expect("completer thread");
             assert!(kafka_admin_DeleteConsumerGroupsResult_is_done(result, 1));
             assert_eq!(
@@ -38489,6 +39129,7 @@ mod tests {
                 Ok("z-topic")
             );
             assert!(!kafka_admin_CreateAclsResult_is_done(result, 0));
+            assert!(!kafka_admin_CreateAclsResult_all_is_done(result));
             assert!(!kafka_admin_CreateAclsResult_is_done(result, 1));
             assert!(!kafka_admin_CreateAclsResult_is_done(result, 2));
 
@@ -38503,6 +39144,7 @@ mod tests {
                 slow.complete_with_error(Error::with_message(Errors::SecurityDisabled, "no authorizer"));
             });
             assert_eq!(consume_message(kafka_admin_CreateAclsResult_all(result)), "no authorizer");
+            assert!(kafka_admin_CreateAclsResult_all_is_done(result));
             completer.join().expect("completer thread");
             assert!(kafka_admin_CreateAclsResult_is_done(result, 1));
             assert_eq!(
@@ -38596,6 +39238,7 @@ mod tests {
         unsafe {
             assert_eq!(kafka_admin_DeleteAclsResult_count(result), 2);
             assert!(!kafka_admin_DeleteAclsResult_is_done(result, 0));
+            assert!(!kafka_admin_DeleteAclsResult_all_is_done(result));
             assert!(kafka_admin_DeleteAclsResult_is_done(result, 1));
             // "a-filter" (index 0) is still pending, so reading "z-filter" must not wait on it.
             assert!(kafka_admin_DeleteAclsResult_get_error(result, 1).is_null());
@@ -38615,6 +39258,7 @@ mod tests {
                 consume_message(kafka_admin_DeleteAclsResult_all(result)),
                 "cannot delete stuck-topic"
             );
+            assert!(kafka_admin_DeleteAclsResult_all_is_done(result));
             completer.join().expect("completer thread");
             // A filter that matched nothing is not a failure.
             assert!(kafka_admin_DeleteAclsResult_get_error(result, 0).is_null());
@@ -39228,6 +39872,7 @@ mod tests {
                 Ok("alice")
             );
             assert!(!kafka_admin_AlterClientQuotasResult_is_done(result, 0));
+            assert!(!kafka_admin_AlterClientQuotasResult_all_is_done(result));
             fast.complete(());
             assert!(kafka_admin_AlterClientQuotasResult_is_done(result, 0));
             // "bob" is still pending, so reading "alice" must not wait on it.
@@ -39243,6 +39888,7 @@ mod tests {
                 consume_message(kafka_admin_AlterClientQuotasResult_all(result)),
                 "bad quota for bob"
             );
+            assert!(kafka_admin_AlterClientQuotasResult_all_is_done(result));
             completer.join().expect("completer thread");
             assert!(kafka_admin_AlterClientQuotasResult_is_done(result, 1));
             assert_eq!(
@@ -40305,6 +40951,7 @@ mod tests {
                 Ok("bob")
             );
             assert!(!kafka_admin_AlterUserScramCredentialsResult_is_done(result, 0));
+            assert!(!kafka_admin_AlterUserScramCredentialsResult_all_is_done(result));
             fast.complete(());
             assert!(kafka_admin_AlterUserScramCredentialsResult_is_done(result, 0));
             // "bob" is still pending, so reading "alice" must not wait on it.
@@ -40322,6 +40969,7 @@ mod tests {
                 consume_message(kafka_admin_AlterUserScramCredentialsResult_all(result)),
                 "Password must not be empty"
             );
+            assert!(kafka_admin_AlterUserScramCredentialsResult_all_is_done(result));
             completer.join().expect("completer thread");
             assert!(kafka_admin_AlterUserScramCredentialsResult_is_done(result, 1));
             assert_eq!(
@@ -40829,6 +41477,7 @@ mod tests {
             let feature0 = CStr::from_ptr(kafka_admin_UpdateFeaturesResult_get_feature(result, 0));
             assert_eq!(feature0.to_str().expect("utf8"), "metadata.version");
             assert!(!kafka_admin_UpdateFeaturesResult_is_done(result, 0));
+            assert!(!kafka_admin_UpdateFeaturesResult_all_is_done(result));
             assert!(!kafka_admin_UpdateFeaturesResult_is_done(result, 1));
 
             fast.complete(());
@@ -40845,6 +41494,7 @@ mod tests {
                 consume_message(kafka_admin_UpdateFeaturesResult_all(result)),
                 "transaction.version timed out"
             );
+            assert!(kafka_admin_UpdateFeaturesResult_all_is_done(result));
             completer.join().expect("completer thread");
             assert!(kafka_admin_UpdateFeaturesResult_is_done(result, 1));
             assert_eq!(
@@ -41483,6 +42133,7 @@ mod tests {
             assert_eq!(kafka_admin_DescribeProducersResult_get_partition(result, 0), 0);
             assert_eq!(kafka_admin_DescribeProducersResult_get_partition(result, 1), 1);
             assert!(!kafka_admin_DescribeProducersResult_is_done(result, 0));
+            assert!(!kafka_admin_DescribeProducersResult_all_is_done(result));
             assert!(!kafka_admin_DescribeProducersResult_is_done(result, 1));
 
             fast.complete(PartitionProducerState::new(vec![ProducerState::new(
@@ -41519,6 +42170,7 @@ mod tests {
                 consume_message(kafka_admin_DescribeProducersResult_all(result)),
                 "partition 1 timed out"
             );
+            assert!(kafka_admin_DescribeProducersResult_all_is_done(result));
             completer.join().expect("completer thread");
             assert!(kafka_admin_DescribeProducersResult_is_done(result, 1));
             assert_eq!(
@@ -41557,6 +42209,7 @@ mod tests {
             assert_eq!(id(0).to_str().unwrap(), "txn-fast");
             assert_eq!(id(1).to_str().unwrap(), "txn-slow");
             assert!(!kafka_admin_DescribeTransactionsResult_is_done(result, 0));
+            assert!(!kafka_admin_DescribeTransactionsResult_all_is_done(result));
 
             fast.complete(TransactionDescription::new(
                 5,
@@ -41596,6 +42249,7 @@ mod tests {
                 consume_message(kafka_admin_DescribeTransactionsResult_all(result)),
                 "txn-slow timed out"
             );
+            assert!(kafka_admin_DescribeTransactionsResult_all_is_done(result));
             kafka_admin_DescribeTransactionsResult_destroy(result);
         }
     }
@@ -41661,6 +42315,7 @@ mod tests {
             let id0 = CStr::from_ptr(kafka_admin_FenceProducersResult_get_transactional_id(result, 0));
             assert_eq!(id0.to_str().unwrap(), "fence-a");
             assert!(!kafka_admin_FenceProducersResult_is_done(result, 0));
+            assert!(!kafka_admin_FenceProducersResult_all_is_done(result));
 
             fast.complete(ProducerIdAndEpoch::new(9_009, 4));
             assert!(kafka_admin_FenceProducersResult_is_done(result, 0));
@@ -41687,6 +42342,7 @@ mod tests {
                 consume_message(kafka_admin_FenceProducersResult_all(result)),
                 "fence-b timed out"
             );
+            assert!(kafka_admin_FenceProducersResult_all_is_done(result));
             kafka_admin_FenceProducersResult_destroy(result);
         }
     }
@@ -42395,6 +43051,7 @@ mod tests {
                 Ok("1")
             );
             assert!(!kafka_admin_DescribeConfigsResult_is_done(result, 0));
+            assert!(!kafka_admin_DescribeConfigsResult_all_is_done(result));
             assert!(!kafka_admin_DescribeConfigsResult_is_done(result, 1));
 
             fast.complete(Config::new(vec![ConfigEntry::new(
@@ -42421,6 +43078,7 @@ mod tests {
                 consume_message(kafka_admin_DescribeConfigsResult_all(result)),
                 "broker config timed out"
             );
+            assert!(kafka_admin_DescribeConfigsResult_all_is_done(result));
             completer.join().expect("completer thread");
             assert!(kafka_admin_DescribeConfigsResult_is_done(result, 1));
             assert_eq!(
@@ -42683,6 +43341,7 @@ mod tests {
                 Ok("topic-b")
             );
             assert!(!kafka_admin_AlterConfigsResult_is_done(result, 0));
+            assert!(!kafka_admin_AlterConfigsResult_all_is_done(result));
             assert!(!kafka_admin_AlterConfigsResult_is_done(result, 1));
 
             fast.complete(());
@@ -42703,6 +43362,7 @@ mod tests {
             );
             completer.join().expect("completer thread");
             assert_eq!(consume_message(kafka_admin_AlterConfigsResult_all(result)), "alter timed out");
+            assert!(kafka_admin_AlterConfigsResult_all_is_done(result));
             kafka_admin_AlterConfigsResult_destroy(result);
         }
 
@@ -47287,6 +47947,111 @@ mod tests {
         assert!(single.is_done());
     }
 
+    /// Java's `all().isDone()` over per-key futures (`KafkaFuture.allOf`): false
+    /// while any key is pending, true once every key has resolved — failed or
+    /// not — and true for no keys. A destroy makes every pending key done.
+    #[test]
+    fn keyed_all_is_done_is_true_once_every_key_has_resolved() {
+        let (_runtime, waiter) = lazy_test_waiter();
+        assert!(keyed_all_is_done::<()>(&[]));
+
+        let first = crate::common::internals::KafkaFutureImpl::<()>::new();
+        let second = crate::common::internals::KafkaFutureImpl::<()>::new();
+        let entries: Vec<LazyKeyed<()>> = [&first, &second]
+            .into_iter()
+            .map(|f| lazy_keyed(&waiter, f.future(), |()| ()))
+            .collect();
+        assert!(!keyed_all_is_done(&entries));
+        first.complete_with_error(Error::timeout("first failed"));
+        // One key failed, but `allOf` waits for the other too.
+        assert!(!keyed_all_is_done(&entries));
+        second.complete(());
+        assert!(keyed_all_is_done(&entries));
+        assert_eq!(consume_message(keyed_all(&entries)), "first failed");
+
+        let pending = crate::common::internals::KafkaFutureImpl::<()>::new();
+        let entries = vec![lazy_keyed(&waiter, pending.future(), |()| ())];
+        assert!(!keyed_all_is_done(&entries));
+        waiter.destroyed.cancel();
+        assert!(keyed_all_is_done(&entries));
+    }
+
+    /// `ListTransactionsResult`'s `all().isDone()` / `allByBrokerId().isDone()`
+    /// follow Java's fail-fast `allByBrokerId()`: done as soon as one broker
+    /// fails, even while another is still pending; done once every broker
+    /// succeeded; done once broker discovery failed.
+    #[test]
+    fn list_transactions_all_is_done_fails_fast_like_java() {
+        let (_runtime, waiter) = lazy_test_waiter();
+        let discovery =
+            crate::common::internals::KafkaFutureImpl::<HashMap<i32, KafkaFuture<Vec<TransactionListing>>>>::new();
+        let broker1 = crate::common::internals::KafkaFutureImpl::<Vec<TransactionListing>>::new();
+        let broker2 = crate::common::internals::KafkaFutureImpl::<Vec<TransactionListing>>::new();
+        let core = ListTransactionsResult::new(discovery.future());
+        let result: *mut kafka_admin_ListTransactionsResult_t =
+            into_handle(list_transactions_result_inner(&waiter, &core));
+        // SAFETY: Test code: `result` was built just above by `into_handle` from a
+        // `ListTransactionsResultInner`, so it is a valid `list_transactions` result handle;
+        // owned errors are consumed once and it is destroyed once.
+        unsafe {
+            assert!(!kafka_admin_ListTransactionsResult_all_is_done(result));
+            assert!(!kafka_admin_ListTransactionsResult_all_by_broker_id_is_done(result));
+            discovery.complete(HashMap::from([(1, broker1.future()), (2, broker2.future())]));
+            assert!(!kafka_admin_ListTransactionsResult_all_is_done(result));
+            assert!(!kafka_admin_ListTransactionsResult_all_by_broker_id_is_done(result));
+
+            broker2.complete_with_error(Error::timeout("broker 2 timed out"));
+            // Broker 1 is still pending, yet `all()` is already done (fail-fast).
+            assert!(!kafka_admin_ListTransactionsResult_is_done(result, 0));
+            assert!(kafka_admin_ListTransactionsResult_all_is_done(result));
+            assert!(kafka_admin_ListTransactionsResult_all_by_broker_id_is_done(result));
+            let started = std::time::Instant::now();
+            assert_eq!(
+                consume_message(kafka_admin_ListTransactionsResult_all(result)),
+                "broker 2 timed out"
+            );
+            assert!(started.elapsed() < Duration::from_secs(1), "a done all() must not wait");
+            assert!(!kafka_admin_ListTransactionsResult_is_done(result, 0));
+            kafka_admin_ListTransactionsResult_destroy(result);
+        }
+
+        // Every broker succeeds: done only after the last one.
+        let discovery =
+            crate::common::internals::KafkaFutureImpl::<HashMap<i32, KafkaFuture<Vec<TransactionListing>>>>::new();
+        let broker1 = crate::common::internals::KafkaFutureImpl::<Vec<TransactionListing>>::new();
+        let broker2 = crate::common::internals::KafkaFutureImpl::<Vec<TransactionListing>>::new();
+        let core = ListTransactionsResult::new(discovery.future());
+        let result: *mut kafka_admin_ListTransactionsResult_t =
+            into_handle(list_transactions_result_inner(&waiter, &core));
+        discovery.complete(HashMap::from([(1, broker1.future()), (2, broker2.future())]));
+        // SAFETY: Test code: as above, a valid `list_transactions` result handle, destroyed once.
+        unsafe {
+            broker1.complete(vec![]);
+            assert!(!kafka_admin_ListTransactionsResult_all_is_done(result));
+            assert!(!kafka_admin_ListTransactionsResult_all_by_broker_id_is_done(result));
+            broker2.complete(vec![]);
+            assert!(kafka_admin_ListTransactionsResult_all_is_done(result));
+            assert!(kafka_admin_ListTransactionsResult_all_by_broker_id_is_done(result));
+            assert!(kafka_admin_ListTransactionsResult_all(result).is_null());
+            kafka_admin_ListTransactionsResult_destroy(result);
+        }
+
+        // A failed discovery makes both done.
+        let discovery =
+            crate::common::internals::KafkaFutureImpl::<HashMap<i32, KafkaFuture<Vec<TransactionListing>>>>::new();
+        let core = ListTransactionsResult::new(discovery.future());
+        let result: *mut kafka_admin_ListTransactionsResult_t =
+            into_handle(list_transactions_result_inner(&waiter, &core));
+        // SAFETY: Test code: as above, a valid `list_transactions` result handle, destroyed once.
+        unsafe {
+            assert!(!kafka_admin_ListTransactionsResult_all_is_done(result));
+            discovery.complete_with_error(Error::timeout("broker discovery timed out"));
+            assert!(kafka_admin_ListTransactionsResult_all_is_done(result));
+            assert!(kafka_admin_ListTransactionsResult_all_by_broker_id_is_done(result));
+            kafka_admin_ListTransactionsResult_destroy(result);
+        }
+    }
+
     /// A single-future result (Java's `listTopics`) reads its data and its
     /// `get()` error from the same lazily resolved future.
     #[test]
@@ -47365,9 +48130,11 @@ mod tests {
                 "lazy-topic"
             );
             assert!(!kafka_admin_CreateTopicsResult_is_done(result, 0));
+            assert!(!kafka_admin_CreateTopicsResult_all_is_done(result));
 
             let all = kafka_admin_CreateTopicsResult_all(result);
             assert!(!all.is_null(), "an unreachable cluster must time the request out");
+            assert!(kafka_admin_CreateTopicsResult_all_is_done(result));
             assert_eq!(common::kafka_common_Error_code(all) as i32, Errors::RequestTimedOut as i32);
             common::kafka_common_Error_destroy(all);
             assert!(kafka_admin_CreateTopicsResult_is_done(result, 0));
@@ -47477,6 +48244,82 @@ mod tests {
         }
     }
 
+    /// End to end, against the production client, for the rest of the topics
+    /// family: each synchronous entry point returns at once, `all().isDone()`
+    /// is false while its request is pending and true once `all()` has
+    /// returned the request's timeout.
+    #[test]
+    fn topics_family_all_is_done_tracks_the_pending_request() {
+        let admin = unreachable_admin_client();
+        let name = CString::new("lazy-topic").unwrap();
+        let names = [name.as_ptr()];
+        let partitions = [0i32];
+        let offsets = [5i64];
+        let new_partitions = kafka_admin_NewPartitions_new(3, false);
+        let specs = [new_partitions as *const kafka_admin_NewPartitions_t];
+        let mut deleted: *mut kafka_admin_DeleteTopicsResult_t = std::ptr::null_mut();
+        let mut described: *mut kafka_admin_DescribeTopicsResult_t = std::ptr::null_mut();
+        let mut created: *mut kafka_admin_CreatePartitionsResult_t = std::ptr::null_mut();
+        let mut records: *mut kafka_admin_DeleteRecordsResult_t = std::ptr::null_mut();
+        // SAFETY: Test code: `admin` is live; every array is a local holding the one entry
+        // passed with it (the name owned by a `CString` that outlives the calls, the
+        // `NewPartitions` live until destroyed below); each `out_result` is a writable slot.
+        // Each handle written is destroyed exactly once, after its last read, and `admin` last.
+        unsafe {
+            for error in [
+                kafka_admin_AdminClient_delete_topics(admin, names.as_ptr(), 1, 1_000, false, &mut deleted),
+                kafka_admin_AdminClient_describe_topics(admin, names.as_ptr(), 1, 1_000, false, 0, &mut described),
+                kafka_admin_AdminClient_create_partitions(
+                    admin,
+                    names.as_ptr(),
+                    specs.as_ptr(),
+                    1,
+                    1_000,
+                    false,
+                    false,
+                    &mut created,
+                ),
+                kafka_admin_AdminClient_delete_records(
+                    admin,
+                    names.as_ptr(),
+                    partitions.as_ptr(),
+                    offsets.as_ptr(),
+                    1,
+                    1_000,
+                    &mut records,
+                ),
+            ] {
+                assert!(error.is_null(), "submission must not fail");
+            }
+            assert!(!kafka_admin_DeleteTopicsResult_all_is_done(deleted));
+            assert!(!kafka_admin_DescribeTopicsResult_all_is_done(described));
+            assert!(!kafka_admin_CreatePartitionsResult_all_is_done(created));
+            assert!(!kafka_admin_DeleteRecordsResult_all_is_done(records));
+
+            for all in [
+                kafka_admin_DeleteTopicsResult_all(deleted),
+                kafka_admin_DescribeTopicsResult_all(described),
+                kafka_admin_CreatePartitionsResult_all(created),
+                kafka_admin_DeleteRecordsResult_all(records),
+            ] {
+                assert!(!all.is_null(), "an unreachable cluster must time the request out");
+                assert_eq!(common::kafka_common_Error_code(all) as i32, Errors::RequestTimedOut as i32);
+                common::kafka_common_Error_destroy(all);
+            }
+            assert!(kafka_admin_DeleteTopicsResult_all_is_done(deleted));
+            assert!(kafka_admin_DescribeTopicsResult_all_is_done(described));
+            assert!(kafka_admin_CreatePartitionsResult_all_is_done(created));
+            assert!(kafka_admin_DeleteRecordsResult_all_is_done(records));
+
+            kafka_admin_DeleteTopicsResult_destroy(deleted);
+            kafka_admin_DescribeTopicsResult_destroy(described);
+            kafka_admin_CreatePartitionsResult_destroy(created);
+            kafka_admin_DeleteRecordsResult_destroy(records);
+            kafka_admin_NewPartitions_destroy(new_partitions);
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
     /// The per-key form of the destroy-while-pending case: a topic whose
     /// creation is still pending at destroy reports done before any read, its
     /// error is the admin-thread-exited timeout, and `all()` returns it at once.
@@ -47500,9 +48343,11 @@ mod tests {
         // is destroyed last.
         unsafe {
             assert!(!kafka_admin_CreateTopicsResult_is_done(result, 0));
+            assert!(!kafka_admin_CreateTopicsResult_all_is_done(result));
             kafka_admin_NewTopic_destroy(topic);
             kafka_admin_AdminClient_destroy(admin);
             assert!(kafka_admin_CreateTopicsResult_is_done(result, 0));
+            assert!(kafka_admin_CreateTopicsResult_all_is_done(result));
             assert!(!kafka_admin_CreateTopicsResult_is_done(result, 1));
             let started = std::time::Instant::now();
             let all = kafka_admin_CreateTopicsResult_all(result);
