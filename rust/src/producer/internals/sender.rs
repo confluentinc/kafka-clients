@@ -1524,7 +1524,7 @@ impl<C: KafkaClient> Sender<C> {
     /// batches because `TxnPartitionEntry` tracks ordering keys only (rules §7).
     /// Those batches live in **either** owner: the Sender's
     /// [`Self::in_flight_batches`], or the accumulator's deques once
-    /// `reenqueueBatch` (`Sender.java:750-752`) has handed one back *without*
+    /// `reenqueueBatch` (`Sender.java:751-753`) has handed one back *without*
     /// untracking it. Drawing from only one owner is the anti-pattern rules §7
     /// names: a reenqueued batch would keep its old epoch's sequence and the broker
     /// would answer `OUT_OF_ORDER_SEQUENCE_NUMBER` on the very path this call exists

@@ -114,7 +114,7 @@ Milestone-13 is therefore also the 4.4.0-rc4 number.
 | §4 | "(462, 496, 509)" | 4.2.0 | 463, 497, 510 | 463, 497, 510 | The three `client.poll(retryBackoffMs, time.milliseconds());` calls. |
 | §4 | "`awaitNodeReady` (484)" | 4.2.0 | 485 | 485 | `if (!awaitNodeReady(targetNode, coordinatorType)) {` |
 | §4 | "`time.sleep(retryBackoffMs)` (501, 525)" | 4.2.0 | 502, 526 | 502, 526 | `time.sleep(nextRequestHandler.retryBackoffMs());` (502) and `time.sleep(retryBackoffMs);` (526). |
-| §7 | `Sender.java:750-752` | 4.2.0 | 751-753 | 751-753 | `private void reenqueueBatch(...)` → `accumulator.reenqueue(..)` → `maybeRemoveFromInflightBatches(batch)`. It still does **not** call `transactionManager.removeInFlightBatch`. |
+| §7 | `Sender.java:750-752` | 4.2.0 | 751-753 | 751-753 | `private void reenqueueBatch(...)` → `accumulator.reenqueue(..)` → `maybeRemoveFromInflightBatches(batch)`. It still does **not** call `transactionManager.removeInFlightBatch`. Corrected to `:751-753` in the rule and its five Rust copies on 2026-10-13. |
 | §7 | "path at `:685`" | 4.2.0 | 686-687 | 686-687 | The MESSAGE_TOO_LARGE split path: the `if (transactionManager != null)` guard (686) and `transactionManager.removeInFlightBatch(batch);` (687). The `Errors.MESSAGE_TOO_LARGE` test is at 676. |
 | §7 | `Sender.java:848` | 4.2.0 | 849 | 849 | `transactionManager.handleFailedBatch(batch, topLevelException, adjustSequenceNumbers);` in `failBatch` |
 | §7 | "`maybeRemoveAndDeallocateBatch` (`:854`)" | 4.2.0 | 855 | 855 | `maybeRemoveAndDeallocateBatch(batch);`, still after `handleFailedBatch`. |

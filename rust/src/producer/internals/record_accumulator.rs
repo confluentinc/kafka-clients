@@ -1565,7 +1565,7 @@ impl RecordAccumulator {
     /// [`Error::LocalIllegalState`] with Java's message when the batch has no
     /// sequence, or when it is not tracked as in flight. The second check is the one
     /// rules §7 cites as Java's proof that `reenqueueBatch` leaves a batch tracked:
-    /// `Sender.reenqueueBatch` (`Sender.java:750-752`) deliberately does **not** call
+    /// `Sender.reenqueueBatch` (`Sender.java:751-753`) deliberately does **not** call
     /// `removeInFlightBatch`, unlike the `MESSAGE_TOO_LARGE` split path at `:686-687`.
     ///
     /// The batch is consumed by value, so on either error it is handed **back** to
@@ -2654,7 +2654,7 @@ impl RecordAccumulator {
     /// help from their owners. Rust cannot: the entry tracks ordering keys only
     /// (`.claude/rules/producer-transactions.md` §7), so the batches have to come
     /// from whoever owns them — and **ownership alternates**. `Sender.reenqueueBatch`
-    /// (`Sender.java:750-752`) hands a batch back to the accumulator *without*
+    /// (`Sender.java:751-753`) hands a batch back to the accumulator *without*
     /// calling `removeInFlightBatch`, so a tracked batch may be sitting in a deque
     /// here while other tracked batches sit in `Sender::in_flight_batches`. Rules §7
     /// names "building the lookup pool from `Sender::in_flight_batches` alone" as an
