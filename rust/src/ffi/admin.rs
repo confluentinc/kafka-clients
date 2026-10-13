@@ -24479,9 +24479,6 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_
 /// Per-user outcomes of `alterUserScramCredentials`.
 type AlterScramOutcomes = HashMap<String, Result<(), Error>>;
 
-/// Per-feature outcomes of `updateFeatures`.
-type UpdateFeaturesOutcomes = HashMap<String, Result<(), Error>>;
-
 /// Reads `len` bytes into an owned buffer, or an empty one when the pointer is
 /// NULL or the length is not positive.
 ///
@@ -24890,8 +24887,10 @@ fn submit_describe_features(admin: &dyn Admin, options: DescribeFeaturesOptions)
     admin.describe_features_with_options(options).feature_metadata()
 }
 
-/// Submits `updateFeatures` and returns the collect-all future over its
-/// per-feature futures.
+/// Submits `updateFeatures`, unjoined: one future per feature, for the
+/// synchronous result handle and for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery; see the "RPC submission helpers — per-key
+/// (unjoined) variants" note above.
 ///
 /// # Errors
 ///
@@ -24904,24 +24903,6 @@ fn submit_describe_features(admin: &dyn Admin, options: DescribeFeaturesOptions)
 /// and the async entry point. Java's `MockAdminClient` does not
 /// validate (`MockAdminClient.java:1285-1300`), and neither does the Rust
 /// mock, so this arm is unreachable through a mock handle.
-fn submit_update_features(
-    admin: &dyn Admin,
-    feature_updates: &HashMap<String, FeatureUpdate>,
-    options: UpdateFeaturesOptions,
-) -> Result<KafkaFuture<UpdateFeaturesOutcomes>, Error> {
-    let result = admin.update_features_with_options(feature_updates, options)?;
-    let entries: Vec<(String, KafkaFuture<()>)> = result
-        .values()
-        .iter()
-        .map(|(feature, f)| (feature.clone(), f.clone()))
-        .collect();
-    Ok(KafkaFuture::join_map_results(entries))
-}
-
-/// Submits `updateFeatures`, unjoined, for [`admin_async_per_key_op`]'s
-/// independent-per-key delivery. Same `Admin` call as [`submit_update_features`],
-/// including its client-side-validation `Err` path; see the "RPC submission
-/// helpers — per-key (unjoined) variants" note above.
 fn submit_update_features_entries(
     admin: &dyn Admin,
     feature_updates: &HashMap<String, FeatureUpdate>,
@@ -25499,16 +25480,20 @@ unsafe fn read_optional_principal(principal_type: *const c_char, name: *const c_
 pub type kafka_admin_AdminClient_create_delegation_token_callback_t =
     unsafe extern "C" fn(*mut kafka_admin_CreateDelegationTokenResult_t, *mut kafka_common_Error_t, *mut c_void);
 
-/// Creates a delegation token, blocking until it has been issued
-/// (synchronous).
-///
-/// This is `createDelegationToken(CreateDelegationTokenOptions)`.
+/// Creates a delegation token — Java's
+/// `createDelegationToken(CreateDelegationTokenOptions)`. Like Java, this
+/// **does not wait**: it submits the request and returns at once.
 ///
 /// On success writes a [`kafka_admin_CreateDelegationTokenResult_t`] to
 /// `*out_result` (free it with
-/// [`kafka_admin_CreateDelegationTokenResult_destroy`]) and returns null.
-/// There is one future for the whole call, so any failure is returned and
-/// `*out_result` is left untouched.
+/// [`kafka_admin_CreateDelegationTokenResult_destroy`]) and returns null. The
+/// handle holds Java's single token future; every accessor waits for it, and
+/// its failure is read with
+/// [`kafka_admin_CreateDelegationTokenResult_delegation_token`] (Java's
+/// `get()`). **Every failure of the request — such as a timeout — is read from
+/// the handle**, as in Java. A non-null return means the request could not be
+/// submitted at all (a NULL `admin`, or a NULL renewer principal type or name
+/// entry), and `*out_result` is left untouched.
 ///
 /// # Parameters
 ///
@@ -25519,8 +25504,8 @@ pub type kafka_admin_AdminClient_create_delegation_token_callback_t =
 ///   a [`kafka_admin_MockAdminClient_new`] handle needs at least one:
 ///   `MockAdminClient.createDelegationToken` makes
 ///   `options.renewers().get(0)` the owner (`MockAdminClient.java:652`), so an
-///   empty list fails that call with an `IllegalArgument` error where Java
-///   throws `IndexOutOfBoundsException`.
+///   empty list fails the token future with an `IllegalArgument` error (read
+///   from the handle) where Java throws `IndexOutOfBoundsException`.
 /// - `owner_principal_type` / `owner_name`: the token owner. Pass NULL for
 ///   both to leave Java's owner empty, making the requesting principal the
 ///   owner; passing one without the other is read as NULL.
@@ -25559,28 +25544,25 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_delegation_token(
     // or valid C strings); the helper null-checks both before `CStr::from_ptr` and copies
     // the text during this synchronous call.
     let owner = unsafe { read_optional_principal(owner_principal_type, owner_name) };
-    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
-    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
-    // a valid handle); the helper itself returns an error for a NULL `admin` before
-    // dereferencing it. The `&dyn Admin` it derives through `handle_ref` is used only
-    // inside the `submit` closure (`submit_create_delegation_token`) and the following
-    // `block_on`, both on the calling thread during this synchronous call, while the C
-    // caller keeps the handle alive (it has not called `kafka_admin_AdminClient_destroy`);
-    // the awaited future owns its result and borrows nothing from the handle, so nothing
-    // derived from it outlives the call. A `renewers` marshaling error makes `submit`
-    // return `Err` without touching the handle.
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires of the C caller (the
+    // helper additionally turns a NULL `admin` into an illegal-argument error). The `submit`
+    // closure runs on the calling thread inside the helper and captures only the owned
+    // `renewers` / `owner` and scalars; a `renewers` marshaling error makes it return `Err`
+    // before the RPC is submitted, and the handle it builds holds only the future and the
+    // waiter.
     let outcome = unsafe {
-        admin_sync_value_op(admin, move |a| {
+        admin_sync_submit(admin, move |a, w| {
             let options = create_delegation_token_options(renewers?, owner, max_lifetime_ms, timeout_ms);
-            Ok(submit_create_delegation_token(a, options))
+            let future = submit_create_delegation_token(a, options);
+            Ok(CreateDelegationTokenResultInner { token: lazy_single(w, future, |t| DelegationTokenInner::new(&t)) })
         })
     };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
-    // which this function's `# Safety` promises (`out_result` must be null or writable);
-    // the helper null-checks `out_result` and on success writes exactly one element, the
-    // `kafka_admin_CreateDelegationTokenResult_t` freshly boxed by
-    // `box_create_delegation_token_result`, leaving it untouched on error.
-    unsafe { finish_sync(outcome, out_result, box_create_delegation_token_result) }
+    // which is exactly what this function's `# Safety` promises (`out_result` must be null
+    // or writable); it null-checks before writing exactly one freshly boxed
+    // `CreateDelegationTokenResult` handle, whose ownership passes to the C caller.
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// Creates a delegation token asynchronously. See
@@ -25697,16 +25679,20 @@ fn renew_delegation_token_options(renew_time_period_ms: i64, timeout_ms: i32) ->
 pub type kafka_admin_AdminClient_renew_delegation_token_callback_t =
     unsafe extern "C" fn(*mut kafka_admin_RenewDelegationTokenResult_t, *mut kafka_common_Error_t, *mut c_void);
 
-/// Renews a delegation token, blocking until the broker has answered
-/// (synchronous).
-///
-/// This is `renewDelegationToken(byte[], RenewDelegationTokenOptions)`.
+/// Renews a delegation token — Java's
+/// `renewDelegationToken(byte[], RenewDelegationTokenOptions)`. Like Java, this
+/// **does not wait**: it submits the request and returns at once.
 ///
 /// On success writes a [`kafka_admin_RenewDelegationTokenResult_t`] to
 /// `*out_result` (free it with
-/// [`kafka_admin_RenewDelegationTokenResult_destroy`]) and returns null. There
-/// is one future for the whole call, so any failure is returned and
-/// `*out_result` is left untouched.
+/// [`kafka_admin_RenewDelegationTokenResult_destroy`]) and returns null. The
+/// handle holds Java's single expiry-timestamp future;
+/// [`kafka_admin_RenewDelegationTokenResult_expiry_timestamp`] waits for it,
+/// and its failure is read with
+/// [`kafka_admin_RenewDelegationTokenResult_expiry_timestamp_error`] (Java's
+/// `get()`). **Every failure of the request — such as a timeout — is read from
+/// the handle**, as in Java. A non-null return means the request could not be
+/// submitted at all (a NULL `admin`), and `*out_result` is left untouched.
 ///
 /// # Parameters
 ///
@@ -25738,23 +25724,23 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_renew_delegation_token(
     // bytes into an owned `Vec<u8>` on the calling thread during this call.
     let hmac = unsafe { read_bytes(hmac, hmac_len) };
     let options = renew_delegation_token_options(renew_time_period_ms, timeout_ms);
-    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
-    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
-    // a valid handle); the helper itself returns an error for a NULL `admin` before
-    // dereferencing it. The `&dyn Admin` it derives through `handle_ref` is used only
-    // inside the `submit` closure (`submit_renew_delegation_token`) and the following
-    // `block_on`, both on the calling thread during this synchronous call, while the C
-    // caller keeps the handle alive (it has not called `kafka_admin_AdminClient_destroy`);
-    // the awaited future owns its result and borrows nothing from the handle, so nothing
-    // derived from it outlives the call. `hmac` is an owned `Vec<u8>` copied before the
-    // call, not C memory.
-    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_renew_delegation_token(a, &hmac, options))) };
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires of the C caller (the
+    // helper additionally turns a NULL `admin` into an illegal-argument error). The `submit`
+    // closure runs on the calling thread inside the helper and captures only the owned
+    // `hmac` (copied before the call, not C memory) and `options`; the handle it builds
+    // holds only the future and the waiter.
+    let outcome = unsafe {
+        admin_sync_submit(admin, move |a, w| {
+            let future = submit_renew_delegation_token(a, &hmac, options);
+            Ok(RenewDelegationTokenResultInner { expiry_timestamp: lazy_single(w, future, |t| t) })
+        })
+    };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
-    // which this function's `# Safety` promises (`out_result` must be null or writable);
-    // the helper null-checks `out_result` and on success writes exactly one element, the
-    // `kafka_admin_RenewDelegationTokenResult_t` freshly boxed by
-    // `box_renew_delegation_token_result`, leaving it untouched on error.
-    unsafe { finish_sync(outcome, out_result, box_renew_delegation_token_result) }
+    // which is exactly what this function's `# Safety` promises (`out_result` must be null
+    // or writable); it null-checks before writing exactly one freshly boxed
+    // `RenewDelegationTokenResult` handle, whose ownership passes to the C caller.
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// Renews a delegation token asynchronously. See
@@ -25856,16 +25842,20 @@ fn expire_delegation_token_options(expiry_time_period_ms: i64, timeout_ms: i32) 
 pub type kafka_admin_AdminClient_expire_delegation_token_callback_t =
     unsafe extern "C" fn(*mut kafka_admin_ExpireDelegationTokenResult_t, *mut kafka_common_Error_t, *mut c_void);
 
-/// Expires a delegation token, blocking until the broker has answered
-/// (synchronous).
-///
-/// This is `expireDelegationToken(byte[], ExpireDelegationTokenOptions)`.
+/// Expires a delegation token — Java's
+/// `expireDelegationToken(byte[], ExpireDelegationTokenOptions)`. Like Java,
+/// this **does not wait**: it submits the request and returns at once.
 ///
 /// On success writes a [`kafka_admin_ExpireDelegationTokenResult_t`] to
 /// `*out_result` (free it with
-/// [`kafka_admin_ExpireDelegationTokenResult_destroy`]) and returns null. There
-/// is one future for the whole call, so any failure is returned and
-/// `*out_result` is left untouched.
+/// [`kafka_admin_ExpireDelegationTokenResult_destroy`]) and returns null. The
+/// handle holds Java's single expiry-timestamp future;
+/// [`kafka_admin_ExpireDelegationTokenResult_expiry_timestamp`] waits for it,
+/// and its failure is read with
+/// [`kafka_admin_ExpireDelegationTokenResult_expiry_timestamp_error`] (Java's
+/// `get()`). **Every failure of the request — such as a timeout — is read from
+/// the handle**, as in Java. A non-null return means the request could not be
+/// submitted at all (a NULL `admin`), and `*out_result` is left untouched.
 ///
 /// # Parameters
 ///
@@ -25898,23 +25888,23 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_expire_delegation_token(
     // bytes into an owned `Vec<u8>` on the calling thread during this call.
     let hmac = unsafe { read_bytes(hmac, hmac_len) };
     let options = expire_delegation_token_options(expiry_time_period_ms, timeout_ms);
-    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
-    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
-    // a valid handle); the helper itself returns an error for a NULL `admin` before
-    // dereferencing it. The `&dyn Admin` it derives through `handle_ref` is used only
-    // inside the `submit` closure (`submit_expire_delegation_token`) and the following
-    // `block_on`, both on the calling thread during this synchronous call, while the C
-    // caller keeps the handle alive (it has not called `kafka_admin_AdminClient_destroy`);
-    // the awaited future owns its result and borrows nothing from the handle, so nothing
-    // derived from it outlives the call. `hmac` is an owned `Vec<u8>` copied before the
-    // call, not C memory.
-    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_expire_delegation_token(a, &hmac, options))) };
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires of the C caller (the
+    // helper additionally turns a NULL `admin` into an illegal-argument error). The `submit`
+    // closure runs on the calling thread inside the helper and captures only the owned
+    // `hmac` (copied before the call, not C memory) and `options`; the handle it builds
+    // holds only the future and the waiter.
+    let outcome = unsafe {
+        admin_sync_submit(admin, move |a, w| {
+            let future = submit_expire_delegation_token(a, &hmac, options);
+            Ok(ExpireDelegationTokenResultInner { expiry_timestamp: lazy_single(w, future, |t| t) })
+        })
+    };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
-    // which this function's `# Safety` promises (`out_result` must be null or writable);
-    // the helper null-checks `out_result` and on success writes exactly one element, the
-    // `kafka_admin_ExpireDelegationTokenResult_t` freshly boxed by
-    // `box_expire_delegation_token_result`, leaving it untouched on error.
-    unsafe { finish_sync(outcome, out_result, box_expire_delegation_token_result) }
+    // which is exactly what this function's `# Safety` promises (`out_result` must be null
+    // or writable); it null-checks before writing exactly one freshly boxed
+    // `ExpireDelegationTokenResult` handle, whose ownership passes to the C caller.
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// Expires a delegation token asynchronously. See
@@ -26026,16 +26016,20 @@ fn describe_delegation_token_options(
 pub type kafka_admin_AdminClient_describe_delegation_token_callback_t =
     unsafe extern "C" fn(*mut kafka_admin_DescribeDelegationTokenResult_t, *mut kafka_common_Error_t, *mut c_void);
 
-/// Describes delegation tokens, blocking until the broker has answered
-/// (synchronous).
-///
-/// This is `describeDelegationToken(DescribeDelegationTokenOptions)`.
+/// Describes delegation tokens — Java's
+/// `describeDelegationToken(DescribeDelegationTokenOptions)`. Like Java, this
+/// **does not wait**: it submits the request and returns at once.
 ///
 /// On success writes a [`kafka_admin_DescribeDelegationTokenResult_t`] to
 /// `*out_result` (free it with
 /// [`kafka_admin_DescribeDelegationTokenResult_destroy`]) and returns null.
-/// There is one future for the whole call, so any failure is returned and
-/// `*out_result` is left untouched.
+/// The handle holds Java's single token-list future; every accessor waits for
+/// it, and its failure is read with
+/// [`kafka_admin_DescribeDelegationTokenResult_delegation_tokens`] (Java's
+/// `get()`). **Every failure of the request — such as a timeout — is read from
+/// the handle**, as in Java. A non-null return means the request could not be
+/// submitted at all (a NULL `admin`, or a NULL owner principal type or name
+/// entry), and `*out_result` is left untouched.
 ///
 /// # Parameters
 ///
@@ -26071,28 +26065,24 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_delegation_token(
     // synchronous-failure path of `kafka_admin_AdminClient_describe_delegation_token` /
     // `_async`), reading only on the calling thread during this call.
     let owners = unsafe { read_kafka_principals(owner_principal_types, owner_names, owner_count, "owner") };
-    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
-    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
-    // a valid handle); the helper itself returns an error for a NULL `admin` before
-    // dereferencing it. The `&dyn Admin` it derives through `handle_ref` is used only
-    // inside the `submit` closure (`submit_describe_delegation_token`) and the following
-    // `block_on`, both on the calling thread during this synchronous call, while the C
-    // caller keeps the handle alive (it has not called `kafka_admin_AdminClient_destroy`);
-    // the awaited future owns its result and borrows nothing from the handle, so nothing
-    // derived from it outlives the call. An `owners` marshaling error makes `submit` return
-    // `Err` without touching the handle.
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires of the C caller (the
+    // helper additionally turns a NULL `admin` into an illegal-argument error). The `submit`
+    // closure runs on the calling thread inside the helper and captures only the owned
+    // `owners` and scalars; an `owners` marshaling error makes it return `Err` before the
+    // RPC is submitted, and the handle it builds holds only the future and the waiter.
     let outcome = unsafe {
-        admin_sync_value_op(admin, move |a| {
+        admin_sync_submit(admin, move |a, w| {
             let options = describe_delegation_token_options(owners?, has_owners_filter, timeout_ms);
-            Ok(submit_describe_delegation_token(a, options))
+            let future = submit_describe_delegation_token(a, options);
+            Ok(DescribeDelegationTokenResultInner { tokens: lazy_single(w, future, describe_delegation_token_data) })
         })
     };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
-    // which this function's `# Safety` promises (`out_result` must be null or writable);
-    // the helper null-checks `out_result` and on success writes exactly one element, the
-    // `kafka_admin_DescribeDelegationTokenResult_t` freshly boxed by
-    // `box_describe_delegation_token_result`, leaving it untouched on error.
-    unsafe { finish_sync(outcome, out_result, box_describe_delegation_token_result) }
+    // which is exactly what this function's `# Safety` promises (`out_result` must be null
+    // or writable); it null-checks before writing exactly one freshly boxed
+    // `DescribeDelegationTokenResult` handle, whose ownership passes to the C caller.
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// Describes delegation tokens asynchronously. See
@@ -26206,15 +26196,18 @@ fn describe_features_options(node_id: i32, has_node_id: bool, timeout_ms: i32) -
 pub type kafka_admin_AdminClient_describe_features_callback_t =
     unsafe extern "C" fn(*mut kafka_admin_DescribeFeaturesResult_t, *mut kafka_common_Error_t, *mut c_void);
 
-/// Describes the cluster's finalized and supported features, blocking until the
-/// broker has answered (synchronous).
-///
-/// This is `describeFeatures(DescribeFeaturesOptions)`.
+/// Describes the cluster's finalized and supported features — Java's
+/// `describeFeatures(DescribeFeaturesOptions)`. Like Java, this **does not
+/// wait**: it submits the request and returns at once.
 ///
 /// On success writes a [`kafka_admin_DescribeFeaturesResult_t`] to
 /// `*out_result` (free it with [`kafka_admin_DescribeFeaturesResult_destroy`])
-/// and returns null. There is one future for the whole call, so any failure is
-/// returned and `*out_result` is left untouched.
+/// and returns null. The handle holds Java's single metadata future; every
+/// accessor waits for it, and its failure is read with
+/// [`kafka_admin_DescribeFeaturesResult_feature_metadata`] (Java's `get()`).
+/// **Every failure of the request — such as a timeout — is read from the
+/// handle**, as in Java. A non-null return means the request could not be
+/// submitted at all (a NULL `admin`), and `*out_result` is left untouched.
 ///
 /// # Parameters
 ///
@@ -26237,22 +26230,22 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_features(
     out_result: *mut *mut kafka_admin_DescribeFeaturesResult_t,
 ) -> *mut kafka_common_Error_t {
     let options = describe_features_options(node_id, has_node_id, timeout_ms);
-    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
-    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
-    // a valid handle); the helper itself returns an error for a NULL `admin` before
-    // dereferencing it. The `&dyn Admin` it derives through `handle_ref` is used only
-    // inside the `submit` closure (`submit_describe_features`) and the following
-    // `block_on`, both on the calling thread during this synchronous call, while the C
-    // caller keeps the handle alive (it has not called `kafka_admin_AdminClient_destroy`);
-    // the awaited future owns its result and borrows nothing from the handle, so nothing
-    // derived from it outlives the call.
-    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_describe_features(a, options))) };
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires of the C caller (the
+    // helper additionally turns a NULL `admin` into an illegal-argument error). The `submit`
+    // closure runs on the calling thread inside the helper and captures only the owned
+    // `options`; the handle it builds holds only the future and the waiter.
+    let outcome = unsafe {
+        admin_sync_submit(admin, move |a, w| {
+            let future = submit_describe_features(a, options);
+            Ok(DescribeFeaturesResultInner { metadata: lazy_single(w, future, describe_features_data) })
+        })
+    };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
-    // which this function's `# Safety` promises (`out_result` must be null or writable);
-    // the helper null-checks `out_result` and on success writes exactly one element, the
-    // `kafka_admin_DescribeFeaturesResult_t` freshly boxed by
-    // `box_describe_features_result`, leaving it untouched on error.
-    unsafe { finish_sync(outcome, out_result, box_describe_features_result) }
+    // which is exactly what this function's `# Safety` promises (`out_result` must be null
+    // or writable); it null-checks before writing exactly one freshly boxed
+    // `DescribeFeaturesResult` handle, whose ownership passes to the C caller.
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// Describes the cluster's features asynchronously. See
@@ -26351,26 +26344,29 @@ fn update_features_options(timeout_ms: i32, validate_only: bool) -> UpdateFeatur
 pub type kafka_admin_AdminClient_update_features_callback_t =
     unsafe extern "C" fn(*const c_char, *mut kafka_common_Error_t, *mut c_void);
 
-/// Applies feature updates, blocking until every per-feature future has
-/// resolved (synchronous).
-///
-/// This is `updateFeatures(Map<String, FeatureUpdate>, UpdateFeaturesOptions)`.
+/// Applies feature updates — Java's
+/// `updateFeatures(Map<String, FeatureUpdate>, UpdateFeaturesOptions)`. Like
+/// Java, this **does not wait**: it submits the request and returns at once.
 /// The updates cross as parallel arrays; row `i` of each describes one update.
 ///
 /// On success writes a [`kafka_admin_UpdateFeaturesResult_t`] to `*out_result`
 /// (free it with [`kafka_admin_UpdateFeaturesResult_destroy`]) and returns
-/// null. **A per-feature failure is not a call failure**: it is reported by
-/// [`kafka_admin_UpdateFeaturesResult_get_error`] for that feature. A non-null
-/// return means the request could not be submitted at all, and `*out_result` is
-/// left untouched.
+/// null. The handle holds one future per feature, as Java's `values()` does.
+/// Its feature names are readable at once;
+/// [`kafka_admin_UpdateFeaturesResult_get_error`] waits for that feature's
+/// future only, and [`kafka_admin_UpdateFeaturesResult_all`] waits for every
+/// feature (Java's `get()`). **Every failure of the request — per feature, or
+/// of the request as a whole, such as a timeout — is read from the handle**, as
+/// in Java. A non-null return means the request could not be submitted at all,
+/// and `*out_result` is left untouched.
 ///
 /// `updateFeatures` is the one admin RPC with client-side validation that runs
 /// **before** the request is enqueued: Java's *real* client
-/// (`KafkaAdminClient.updateFeatures`) throws `IllegalArgumentException` for an
-/// empty update map or a blank feature name, and `FeatureUpdate`'s own
-/// constructor throws for a zero `max_version_level` with an UPGRADE upgrade
-/// type or for a negative one. All of those are returned here rather than
-/// reported per feature. Java's `MockAdminClient.updateFeatures` performs
+/// (`KafkaAdminClient.updateFeatures`) throws `IllegalArgumentException` from
+/// the call for an empty update map or a blank feature name, and
+/// `FeatureUpdate`'s own constructor throws for a zero `max_version_level` with
+/// an UPGRADE upgrade type or for a negative one. All of those are returned
+/// here, synchronously, rather than reported per feature. Java's `MockAdminClient.updateFeatures` performs
 /// **no** such check (`MockAdminClient.java:1285-1300` goes straight to the
 /// per-feature loop), so against a mock handle an empty request yields an empty
 /// result rather than an error, exactly as in Java.
@@ -26412,24 +26408,26 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_update_features(
     // reading only on the calling thread during this call.
     let updates = unsafe { read_feature_updates(features, max_version_levels, upgrade_types, count) };
     let options = update_features_options(timeout_ms, validate_only);
-    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
-    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
-    // a valid handle); the helper itself returns an error for a NULL `admin` before
-    // dereferencing it. The `&dyn Admin` it derives through `handle_ref` is used only
-    // inside the `submit` closure (`submit_update_features`) and the following `block_on`,
-    // both on the calling thread during this synchronous call, while the C caller keeps the
-    // handle alive (it has not called `kafka_admin_AdminClient_destroy`); the awaited
-    // future owns its result and borrows nothing from the handle, so nothing derived from
-    // it outlives the call. An `updates` marshaling error, or `submit_update_features`' own
-    // client-side validation error, makes `submit` return `Err` and is returned as the
-    // call's error.
-    let outcome = unsafe { admin_sync_value_op(admin, move |a| submit_update_features(a, &updates?, options)) };
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires of the C caller (the
+    // helper additionally turns a NULL `admin` into an illegal-argument error). The `submit`
+    // closure runs on the calling thread inside the helper, borrowing `updates` only there;
+    // an `updates` marshaling error, or `submit_update_features_entries`' own client-side
+    // validation error, makes it return `Err`, which is returned as the call's error. The
+    // handle it builds holds only owned futures and the waiter.
+    let outcome = unsafe {
+        admin_sync_submit(admin, move |a, w| {
+            Ok(update_features_result_inner(
+                w,
+                submit_update_features_entries(a, &updates?, options)?,
+            ))
+        })
+    };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
-    // which this function's `# Safety` promises (`out_result` must be null or writable);
-    // the helper null-checks `out_result` and on success writes exactly one element, the
-    // `kafka_admin_UpdateFeaturesResult_t` freshly boxed by `box_update_features_result`,
-    // leaving it untouched on error.
-    unsafe { finish_sync(outcome, out_result, box_update_features_result) }
+    // which is exactly what this function's `# Safety` promises (`out_result` must be null
+    // or writable); it null-checks before writing exactly one freshly boxed
+    // `UpdateFeaturesResult` handle, whose ownership passes to the C caller.
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// Applies feature updates asynchronously. See
@@ -26569,9 +26567,9 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_update_features_async(
 //     accessors (`describeUserScramCredentials`, whose `all()` / `users()` /
 //     `description(user)` views have different RESOURCE_NOT_FOUND semantics; see
 //     [`DescribeUserScramCredentialsResultInner`])
-//   - one `KafkaFuture<V>` for the whole call -> value accessors and **no**
-//     `_get_error`, because a failure is the call's error
-//     (`createDelegationToken`, `renewDelegationToken`,
+//   - one `KafkaFuture<V>` for the whole call -> value accessors plus a
+//     Java-named getter returning that future's `get()` error, and **no**
+//     `_get_error` (`createDelegationToken`, `renewDelegationToken`,
 //     `expireDelegationToken`, `describeDelegationToken`, `describeFeatures`)
 //
 // The two `KafkaFuture<Long>` results still get a handle each, rather than
@@ -27305,16 +27303,20 @@ pub struct kafka_admin_CreateDelegationTokenResult_t {
 /// Backing state for [`kafka_admin_CreateDelegationTokenResult_t`].
 ///
 /// `CreateDelegationTokenResult` holds one `KafkaFuture<DelegationToken>` for
-/// the whole call, so there is no per-key error: a failure is the call's error.
+/// the whole call, so there is no per-key error: a failure of the request is
+/// read with [`kafka_admin_CreateDelegationTokenResult_delegation_token`]. On a
+/// handle from the synchronous entry point that future may still be
+/// unresolved, and every accessor waits for it; a handle from the `_async`
+/// callback is always resolved.
 struct CreateDelegationTokenResultInner {
-    token: DelegationTokenInner,
+    token: LazySingle<DelegationTokenInner>,
 }
 
-/// Boxes the created token into the C handle.
+/// Moves an already-resolved token (the `_async` path) into the C handle.
 fn box_create_delegation_token_result(token: DelegationToken) -> *mut kafka_admin_CreateDelegationTokenResult_t {
-    Box::into_raw(Box::new(CreateDelegationTokenResultInner {
-        token: DelegationTokenInner::new(&token),
-    })) as *mut kafka_admin_CreateDelegationTokenResult_t
+    into_handle(CreateDelegationTokenResultInner {
+        token: LazyOutcome::resolved(Ok(DelegationTokenInner::new(&token))),
+    })
 }
 
 /// Casts a `*const kafka_admin_CreateDelegationTokenResult_t` to a reference.
@@ -27326,18 +27328,60 @@ unsafe fn create_delegation_token_result_ref(
     result: *const kafka_admin_CreateDelegationTokenResult_t,
 ) -> &'static CreateDelegationTokenResultInner {
     // SAFETY: `result` is, per this helper's `# Safety`, a non-null handle from a
-    // `create_delegation_token` call; such handles are produced only by
-    // `box_create_delegation_token_result` via
-    // `Box::into_raw(Box::new(CreateDelegationTokenResultInner { .. }))`, so casting back
-    // to `*const CreateDelegationTokenResultInner` names that same live allocation. The
+    // `create_delegation_token` call; such handles are produced only by `into_handle`
+    // (in `kafka_admin_AdminClient_create_delegation_token` and
+    // `box_create_delegation_token_result`) via `Box::into_raw(Box::new(..))` of a
+    // `CreateDelegationTokenResultInner`, so casting back to
+    // `*const CreateDelegationTokenResultInner` names that same live allocation. The
     // `&'static` is used only for the duration of the calling getter, during which the C
     // caller keeps the handle alive by not yet having called
     // `kafka_admin_CreateDelegationTokenResult_destroy`, the only path that frees it.
     unsafe { &*(result as *const CreateDelegationTokenResultInner) }
 }
 
-/// Returns the created token (borrowed). Do not free it; it dies with the
-/// result handle.
+/// Java's `delegationToken().get()`: **blocks** until the token future has
+/// resolved, then returns null on success, or an **owned** error — free it
+/// with `kafka_common_Error_destroy` — if the request failed. The token itself
+/// is read with [`kafka_admin_CreateDelegationTokenResult_get_token`].
+///
+/// # Safety
+///
+/// `result` must be a valid `create_delegation_token` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenResult_delegation_token(
+    result: *const kafka_admin_CreateDelegationTokenResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `create_delegation_token_result_ref` requires a non-null
+    // `create_delegation_token` result handle, which this function's `# Safety` requires of
+    // `result` (no in-body null check, so the C caller's contract is the sole source); the
+    // reference is used only for the duration of this call, and the returned error is a
+    // fresh copy owned by the caller.
+    single_error(&unsafe { create_delegation_token_result_ref(result) }.token)
+}
+
+/// Returns whether the token future has resolved — Java's
+/// `delegationToken().isDone()`. Never blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `create_delegation_token` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenResult_is_done(
+    result: *const kafka_admin_CreateDelegationTokenResult_t,
+) -> bool {
+    // SAFETY: `create_delegation_token_result_ref` requires a non-null
+    // `create_delegation_token` result handle, which this function's `# Safety` requires of
+    // `result` (no in-body null check, so the C caller's contract is the sole source); the
+    // reference is used only for this check.
+    unsafe { create_delegation_token_result_ref(result) }.token.is_done()
+}
+
+/// Returns the created token (borrowed), or null if the request failed (see
+/// [`kafka_admin_CreateDelegationTokenResult_delegation_token`]). Do not free
+/// it; it dies with the result handle. **Blocks** until the token future has
+/// resolved.
 ///
 /// # Safety
 ///
@@ -27354,9 +27398,12 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenResult_get_token(
     // non-null). The reference is used only for the duration of this synchronous call,
     // during which the C caller keeps the handle alive by not yet having called
     // `kafka_admin_CreateDelegationTokenResult_destroy`. The pointer this getter returns is
-    // an interior pointer into the same allocation and is documented as borrowed, valid
-    // until that `_destroy`.
-    unsafe { create_delegation_token_result_ref(result) }.token.as_ptr()
+    // an interior pointer into the token cached in the same allocation and is documented as
+    // borrowed, valid until that `_destroy`.
+    match single_data(&unsafe { create_delegation_token_result_ref(result) }.token) {
+        Some(token) => token.as_ptr(),
+        None => std::ptr::null(),
+    }
 }
 
 /// Destroys a `create_delegation_token` result handle. Safe with null (no-op).
@@ -27371,13 +27418,13 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenResult_destroy(
 ) {
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
-        // a valid `create_delegation_token` result handle, i.e. the pointer
-        // `box_create_delegation_token_result` produced with
-        // `Box::into_raw(Box::new(CreateDelegationTokenResultInner { .. }))`.
-        // Reconstituting and dropping the `Box` here is the single, final use: the result
-        // documentation tells the caller to free the handle exactly once with
-        // `kafka_admin_CreateDelegationTokenResult_destroy`, after which it and every
-        // pointer borrowed from it are invalid.
+        // a valid `create_delegation_token` result handle, i.e. the
+        // `Box<CreateDelegationTokenResultInner>` leaked by `into_handle` in
+        // `kafka_admin_AdminClient_create_delegation_token` or
+        // `box_create_delegation_token_result`. Reconstituting and dropping the `Box` here is
+        // the single, final use: the result documentation tells the caller to free the
+        // handle exactly once with `kafka_admin_CreateDelegationTokenResult_destroy`, after
+        // which it and every pointer borrowed from it are invalid.
         unsafe { drop(Box::from_raw(result as *mut CreateDelegationTokenResultInner)) };
     }
 }
@@ -27389,18 +27436,45 @@ pub struct kafka_admin_RenewDelegationTokenResult_t {
 }
 
 /// Backing state for [`kafka_admin_RenewDelegationTokenResult_t`].
+///
+/// `RenewDelegationTokenResult` holds one `KafkaFuture<Long>` for the whole call, so there is no
+/// per-key error: a failure of the request is read with
+/// [`kafka_admin_RenewDelegationTokenResult_expiry_timestamp_error`]. On a handle from the
+/// synchronous entry point that future may still be unresolved, and every
+/// accessor waits for it; a handle from the `_async` callback is always
+/// resolved.
 struct RenewDelegationTokenResultInner {
-    expiry_timestamp: i64,
+    expiry_timestamp: LazySingle<i64>,
 }
 
-/// Boxes the new expiry timestamp into the C handle.
+/// Moves an already-resolved expiry timestamp (the `_async` path) into the C
+/// handle.
 fn box_renew_delegation_token_result(expiry_timestamp: i64) -> *mut kafka_admin_RenewDelegationTokenResult_t {
-    Box::into_raw(Box::new(RenewDelegationTokenResultInner { expiry_timestamp }))
-        as *mut kafka_admin_RenewDelegationTokenResult_t
+    into_handle(RenewDelegationTokenResultInner { expiry_timestamp: LazyOutcome::resolved(Ok(expiry_timestamp)) })
 }
 
-/// Returns `expiryTimestamp()`: the token's new expiry, in milliseconds since
-/// the epoch.
+/// Casts a `*const kafka_admin_RenewDelegationTokenResult_t` to a reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a `renew_delegation_token` call.
+unsafe fn renew_delegation_token_result_ref(
+    result: *const kafka_admin_RenewDelegationTokenResult_t,
+) -> &'static RenewDelegationTokenResultInner {
+    // SAFETY: `result` is, per this helper's `# Safety`, a non-null handle from a
+    // `renew_delegation_token` call; such handles are produced only by `into_handle` (in
+    // `kafka_admin_AdminClient_renew_delegation_token` and `box_renew_delegation_token_result`) via
+    // `Box::into_raw(Box::new(..))` of a `RenewDelegationTokenResultInner`, so casting back to
+    // `*const RenewDelegationTokenResultInner` names that same live allocation. The `&'static` is used only for
+    // the duration of the calling getter, during which the C caller keeps the handle alive
+    // by not yet having called `kafka_admin_RenewDelegationTokenResult_destroy`, the only path that frees it.
+    unsafe { &*(result as *const RenewDelegationTokenResultInner) }
+}
+
+/// Returns `expiryTimestamp().get()`: the token's new expiry, in milliseconds
+/// since the epoch, or -1 if the request failed (see
+/// [`kafka_admin_RenewDelegationTokenResult_expiry_timestamp_error`]).
+/// **Blocks** until the expiry-timestamp future has resolved.
 ///
 /// # Safety
 ///
@@ -27410,15 +27484,49 @@ fn box_renew_delegation_token_result(expiry_timestamp: i64) -> *mut kafka_admin_
 pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenResult_expiry_timestamp(
     result: *const kafka_admin_RenewDelegationTokenResult_t,
 ) -> i64 {
-    // SAFETY: `result` is, per this function's `# Safety`, a valid `renew_delegation_token`
-    // result handle (non-null, since only `kafka_admin_RenewDelegationTokenResult_destroy`
-    // admits null); such handles are produced only by `box_renew_delegation_token_result`
-    // via `Box::into_raw(Box::new(RenewDelegationTokenResultInner { .. }))`, so casting
-    // back to `*const RenewDelegationTokenResultInner` names that live allocation. The
-    // reference is used only to copy `expiry_timestamp` during this synchronous call, while
-    // the C caller keeps the handle alive by not yet having called
-    // `kafka_admin_RenewDelegationTokenResult_destroy`.
-    unsafe { &*(result as *const RenewDelegationTokenResultInner) }.expiry_timestamp
+    // SAFETY: `renew_delegation_token_result_ref` requires a non-null `renew_delegation_token` result handle, which
+    // this function's `# Safety` requires of `result` (no in-body null check, so the C
+    // caller's contract is the sole source); the reference is used only to copy the cached
+    // timestamp within the call, during which the C caller keeps the handle alive.
+    single_data(&unsafe { renew_delegation_token_result_ref(result) }.expiry_timestamp).map_or(-1, |t| *t)
+}
+
+/// Java's `expiryTimestamp().get()` outcome: **blocks** until the
+/// expiry-timestamp future has resolved, then returns null on success, or an
+/// **owned** error — free it with `kafka_common_Error_destroy` — if the
+/// request failed. (`_expiry_timestamp` is already the value accessor, hence
+/// the `_error` suffix.)
+///
+/// # Safety
+///
+/// `result` must be a valid `renew_delegation_token` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenResult_expiry_timestamp_error(
+    result: *const kafka_admin_RenewDelegationTokenResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `renew_delegation_token_result_ref` requires a non-null `renew_delegation_token` result handle, which
+    // this function's `# Safety` requires of `result` (no in-body null check, so the C
+    // caller's contract is the sole source); the reference is used only for the duration of
+    // this call, and the returned error is a fresh copy owned by the caller.
+    single_error(&unsafe { renew_delegation_token_result_ref(result) }.expiry_timestamp)
+}
+
+/// Returns whether the expiry-timestamp future has resolved — Java's
+/// `expiryTimestamp().isDone()`. Never blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `renew_delegation_token` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenResult_is_done(
+    result: *const kafka_admin_RenewDelegationTokenResult_t,
+) -> bool {
+    // SAFETY: `renew_delegation_token_result_ref` requires a non-null `renew_delegation_token` result handle, which
+    // this function's `# Safety` requires of `result` (no in-body null check, so the C
+    // caller's contract is the sole source); the reference is used only for this check.
+    unsafe { renew_delegation_token_result_ref(result) }.expiry_timestamp.is_done()
 }
 
 /// Destroys a `renew_delegation_token` result handle. Safe with null (no-op).
@@ -27433,13 +27541,12 @@ pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenResult_destroy(
 ) {
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
-        // a valid `renew_delegation_token` result handle, i.e. the pointer
-        // `box_renew_delegation_token_result` produced with
-        // `Box::into_raw(Box::new(RenewDelegationTokenResultInner { .. }))`. Reconstituting
-        // and dropping the `Box` here is the single, final use: the result documentation
-        // tells the caller to free the handle exactly once with
-        // `kafka_admin_RenewDelegationTokenResult_destroy`, after which it and every
-        // pointer borrowed from it are invalid.
+        // a valid `renew_delegation_token` result handle, i.e. the `Box<RenewDelegationTokenResultInner>` leaked by
+        // `into_handle` in `kafka_admin_AdminClient_renew_delegation_token` or `box_renew_delegation_token_result`.
+        // Reconstituting and dropping the `Box` here is the single, final use: the result
+        // documentation tells the caller to free the handle exactly once with
+        // `kafka_admin_RenewDelegationTokenResult_destroy`, after which it and every pointer borrowed from it are
+        // invalid.
         unsafe { drop(Box::from_raw(result as *mut RenewDelegationTokenResultInner)) };
     }
 }
@@ -27451,19 +27558,46 @@ pub struct kafka_admin_ExpireDelegationTokenResult_t {
 }
 
 /// Backing state for [`kafka_admin_ExpireDelegationTokenResult_t`].
+///
+/// `ExpireDelegationTokenResult` holds one `KafkaFuture<Long>` for the whole call, so there is no
+/// per-key error: a failure of the request is read with
+/// [`kafka_admin_ExpireDelegationTokenResult_expiry_timestamp_error`]. On a handle from the
+/// synchronous entry point that future may still be unresolved, and every
+/// accessor waits for it; a handle from the `_async` callback is always
+/// resolved.
 struct ExpireDelegationTokenResultInner {
-    expiry_timestamp: i64,
+    expiry_timestamp: LazySingle<i64>,
 }
 
-/// Boxes the new expiry timestamp into the C handle.
+/// Moves an already-resolved expiry timestamp (the `_async` path) into the C
+/// handle.
 fn box_expire_delegation_token_result(expiry_timestamp: i64) -> *mut kafka_admin_ExpireDelegationTokenResult_t {
-    Box::into_raw(Box::new(ExpireDelegationTokenResultInner { expiry_timestamp }))
-        as *mut kafka_admin_ExpireDelegationTokenResult_t
+    into_handle(ExpireDelegationTokenResultInner { expiry_timestamp: LazyOutcome::resolved(Ok(expiry_timestamp)) })
 }
 
-/// Returns `expiryTimestamp()`: when the token now expires, in milliseconds
-/// since the epoch. A token expired immediately reports the timestamp at which
-/// the broker expired it.
+/// Casts a `*const kafka_admin_ExpireDelegationTokenResult_t` to a reference.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from an `expire_delegation_token` call.
+unsafe fn expire_delegation_token_result_ref(
+    result: *const kafka_admin_ExpireDelegationTokenResult_t,
+) -> &'static ExpireDelegationTokenResultInner {
+    // SAFETY: `result` is, per this helper's `# Safety`, a non-null handle from an
+    // `expire_delegation_token` call; such handles are produced only by `into_handle` (in
+    // `kafka_admin_AdminClient_expire_delegation_token` and `box_expire_delegation_token_result`) via
+    // `Box::into_raw(Box::new(..))` of a `ExpireDelegationTokenResultInner`, so casting back to
+    // `*const ExpireDelegationTokenResultInner` names that same live allocation. The `&'static` is used only for
+    // the duration of the calling getter, during which the C caller keeps the handle alive
+    // by not yet having called `kafka_admin_ExpireDelegationTokenResult_destroy`, the only path that frees it.
+    unsafe { &*(result as *const ExpireDelegationTokenResultInner) }
+}
+
+/// Returns `expiryTimestamp().get()`: when the token now expires, in
+/// milliseconds since the epoch, or -1 if the request failed (see
+/// [`kafka_admin_ExpireDelegationTokenResult_expiry_timestamp_error`]). A
+/// token expired immediately reports the timestamp at which the broker expired
+/// it. **Blocks** until the expiry-timestamp future has resolved.
 ///
 /// # Safety
 ///
@@ -27473,16 +27607,49 @@ fn box_expire_delegation_token_result(expiry_timestamp: i64) -> *mut kafka_admin
 pub unsafe extern "C" fn kafka_admin_ExpireDelegationTokenResult_expiry_timestamp(
     result: *const kafka_admin_ExpireDelegationTokenResult_t,
 ) -> i64 {
-    // SAFETY: `result` is, per this function's `# Safety`, a valid
-    // `expire_delegation_token` result handle (non-null, since only
-    // `kafka_admin_ExpireDelegationTokenResult_destroy` admits null); such handles are
-    // produced only by `box_expire_delegation_token_result` via
-    // `Box::into_raw(Box::new(ExpireDelegationTokenResultInner { .. }))`, so casting back
-    // to `*const ExpireDelegationTokenResultInner` names that live allocation. The
-    // reference is used only to copy `expiry_timestamp` during this synchronous call, while
-    // the C caller keeps the handle alive by not yet having called
-    // `kafka_admin_ExpireDelegationTokenResult_destroy`.
-    unsafe { &*(result as *const ExpireDelegationTokenResultInner) }.expiry_timestamp
+    // SAFETY: `expire_delegation_token_result_ref` requires a non-null `expire_delegation_token` result handle, which
+    // this function's `# Safety` requires of `result` (no in-body null check, so the C
+    // caller's contract is the sole source); the reference is used only to copy the cached
+    // timestamp within the call, during which the C caller keeps the handle alive.
+    single_data(&unsafe { expire_delegation_token_result_ref(result) }.expiry_timestamp).map_or(-1, |t| *t)
+}
+
+/// Java's `expiryTimestamp().get()` outcome: **blocks** until the
+/// expiry-timestamp future has resolved, then returns null on success, or an
+/// **owned** error — free it with `kafka_common_Error_destroy` — if the
+/// request failed. (`_expiry_timestamp` is already the value accessor, hence
+/// the `_error` suffix.)
+///
+/// # Safety
+///
+/// `result` must be a valid `expire_delegation_token` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ExpireDelegationTokenResult_expiry_timestamp_error(
+    result: *const kafka_admin_ExpireDelegationTokenResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `expire_delegation_token_result_ref` requires a non-null `expire_delegation_token` result handle, which
+    // this function's `# Safety` requires of `result` (no in-body null check, so the C
+    // caller's contract is the sole source); the reference is used only for the duration of
+    // this call, and the returned error is a fresh copy owned by the caller.
+    single_error(&unsafe { expire_delegation_token_result_ref(result) }.expiry_timestamp)
+}
+
+/// Returns whether the expiry-timestamp future has resolved — Java's
+/// `expiryTimestamp().isDone()`. Never blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `expire_delegation_token` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ExpireDelegationTokenResult_is_done(
+    result: *const kafka_admin_ExpireDelegationTokenResult_t,
+) -> bool {
+    // SAFETY: `expire_delegation_token_result_ref` requires a non-null `expire_delegation_token` result handle, which
+    // this function's `# Safety` requires of `result` (no in-body null check, so the C
+    // caller's contract is the sole source); the reference is used only for this check.
+    unsafe { expire_delegation_token_result_ref(result) }.expiry_timestamp.is_done()
 }
 
 /// Destroys an `expire_delegation_token` result handle. Safe with null (no-op).
@@ -27497,13 +27664,12 @@ pub unsafe extern "C" fn kafka_admin_ExpireDelegationTokenResult_destroy(
 ) {
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
-        // a valid `expire_delegation_token` result handle, i.e. the pointer
-        // `box_expire_delegation_token_result` produced with
-        // `Box::into_raw(Box::new(ExpireDelegationTokenResultInner { .. }))`.
+        // a valid `expire_delegation_token` result handle, i.e. the `Box<ExpireDelegationTokenResultInner>` leaked by
+        // `into_handle` in `kafka_admin_AdminClient_expire_delegation_token` or `box_expire_delegation_token_result`.
         // Reconstituting and dropping the `Box` here is the single, final use: the result
         // documentation tells the caller to free the handle exactly once with
-        // `kafka_admin_ExpireDelegationTokenResult_destroy`, after which it and every
-        // pointer borrowed from it are invalid.
+        // `kafka_admin_ExpireDelegationTokenResult_destroy`, after which it and every pointer borrowed from it are
+        // invalid.
         unsafe { drop(Box::from_raw(result as *mut ExpireDelegationTokenResultInner)) };
     }
 }
@@ -27517,18 +27683,27 @@ pub struct kafka_admin_DescribeDelegationTokenResult_t {
 /// Backing state for [`kafka_admin_DescribeDelegationTokenResult_t`].
 ///
 /// One `KafkaFuture<List<DelegationToken>>` for the whole call, so there is no
-/// per-token error: a failure is the call's error.
+/// per-token error: a failure of the request is read with
+/// [`kafka_admin_DescribeDelegationTokenResult_delegation_tokens`]. On a handle
+/// from the synchronous entry point that future may still be unresolved, and
+/// every accessor waits for it; a handle from the `_async` callback is always
+/// resolved.
 struct DescribeDelegationTokenResultInner {
-    tokens: Vec<DelegationTokenInner>,
+    tokens: LazySingle<Vec<DelegationTokenInner>>,
 }
 
-/// Boxes the described tokens into the C handle.
+/// Flattens the described tokens, keeping the broker's order.
+fn describe_delegation_token_data(tokens: Vec<DelegationToken>) -> Vec<DelegationTokenInner> {
+    tokens.iter().map(DelegationTokenInner::new).collect()
+}
+
+/// Moves already-resolved tokens (the `_async` path) into the C handle.
 fn box_describe_delegation_token_result(
     tokens: Vec<DelegationToken>,
 ) -> *mut kafka_admin_DescribeDelegationTokenResult_t {
-    let tokens = tokens.iter().map(DelegationTokenInner::new).collect();
-    Box::into_raw(Box::new(DescribeDelegationTokenResultInner { tokens }))
-        as *mut kafka_admin_DescribeDelegationTokenResult_t
+    into_handle(DescribeDelegationTokenResultInner {
+        tokens: LazyOutcome::resolved(Ok(describe_delegation_token_data(tokens))),
+    })
 }
 
 /// Casts a `*const kafka_admin_DescribeDelegationTokenResult_t` to a reference.
@@ -27540,17 +27715,60 @@ unsafe fn describe_delegation_token_result_ref(
     result: *const kafka_admin_DescribeDelegationTokenResult_t,
 ) -> &'static DescribeDelegationTokenResultInner {
     // SAFETY: `result` is, per this helper's `# Safety`, a non-null handle from a
-    // `describe_delegation_token` call; such handles are produced only by
-    // `box_describe_delegation_token_result` via
-    // `Box::into_raw(Box::new(DescribeDelegationTokenResultInner { .. }))`, so casting back
-    // to `*const DescribeDelegationTokenResultInner` names that same live allocation. The
+    // `describe_delegation_token` call; such handles are produced only by `into_handle`
+    // (in `kafka_admin_AdminClient_describe_delegation_token` and
+    // `box_describe_delegation_token_result`) via `Box::into_raw(Box::new(..))` of a
+    // `DescribeDelegationTokenResultInner`, so casting back to
+    // `*const DescribeDelegationTokenResultInner` names that same live allocation. The
     // `&'static` is used only for the duration of the calling getter, during which the C
     // caller keeps the handle alive by not yet having called
     // `kafka_admin_DescribeDelegationTokenResult_destroy`, the only path that frees it.
     unsafe { &*(result as *const DescribeDelegationTokenResultInner) }
 }
 
-/// Returns the number of described tokens.
+/// Java's `delegationTokens().get()`: **blocks** until the token-list future
+/// has resolved, then returns null on success, or an **owned** error — free it
+/// with `kafka_common_Error_destroy` — if the request failed. The tokens are
+/// read with [`kafka_admin_DescribeDelegationTokenResult_count`] /
+/// [`kafka_admin_DescribeDelegationTokenResult_get_token`].
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_delegation_token` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_delegation_tokens(
+    result: *const kafka_admin_DescribeDelegationTokenResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `describe_delegation_token_result_ref` requires a non-null
+    // `describe_delegation_token` result handle, which this function's `# Safety` requires
+    // of `result` (no in-body null check, so the C caller's contract is the sole source);
+    // the reference is used only for the duration of this call, and the returned error is a
+    // fresh copy owned by the caller.
+    single_error(&unsafe { describe_delegation_token_result_ref(result) }.tokens)
+}
+
+/// Returns whether the token-list future has resolved — Java's
+/// `delegationTokens().isDone()`. Never blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_delegation_token` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_is_done(
+    result: *const kafka_admin_DescribeDelegationTokenResult_t,
+) -> bool {
+    // SAFETY: `describe_delegation_token_result_ref` requires a non-null
+    // `describe_delegation_token` result handle, which this function's `# Safety` requires
+    // of `result` (no in-body null check, so the C caller's contract is the sole source);
+    // the reference is used only for this check.
+    unsafe { describe_delegation_token_result_ref(result) }.tokens.is_done()
+}
+
+/// Returns the number of described tokens, or 0 if the request failed (see
+/// [`kafka_admin_DescribeDelegationTokenResult_delegation_tokens`]).
+/// **Blocks** until the token-list future has resolved.
 ///
 /// # Safety
 ///
@@ -27567,11 +27785,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_count(
     // non-null). The reference is used only for the duration of this synchronous call,
     // during which the C caller keeps the handle alive by not yet having called
     // `kafka_admin_DescribeDelegationTokenResult_destroy`.
-    unsafe { describe_delegation_token_result_ref(result) }.tokens.len() as i32
+    single_data(&unsafe { describe_delegation_token_result_ref(result) }.tokens).map_or(0, |t| t.len() as i32)
 }
 
-/// Returns the token at `index` (borrowed), or null if out of range. Tokens
-/// keep the order the broker reported, as Java's `List` does. Do not free it.
+/// Returns the token at `index` (borrowed), or null if out of range or the
+/// request failed. Tokens keep the order the broker reported, as Java's `List`
+/// does. Do not free it. **Blocks** until the token-list future has resolved.
 ///
 /// # Safety
 ///
@@ -27592,12 +27811,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_get_token(
     // non-null). The reference is used only for the duration of this synchronous call,
     // during which the C caller keeps the handle alive by not yet having called
     // `kafka_admin_DescribeDelegationTokenResult_destroy`. The pointer this getter returns
-    // is an interior pointer into the same allocation and is documented as borrowed, valid
-    // until that `_destroy`. The negative `index` was rejected above and `get`
-    // bounds-checks the rest.
-    match unsafe { describe_delegation_token_result_ref(result) }
-        .tokens
-        .get(index as usize)
+    // is an interior pointer into the tokens cached in the same allocation and is
+    // documented as borrowed, valid until that `_destroy`. The negative `index` was
+    // rejected above and `get` bounds-checks the rest.
+    match single_data(&unsafe { describe_delegation_token_result_ref(result) }.tokens)
+        .and_then(|tokens| tokens.get(index as usize))
     {
         Some(token) => token.as_ptr(),
         None => std::ptr::null(),
@@ -27617,13 +27835,13 @@ pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_destroy(
 ) {
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
-        // a valid `describe_delegation_token` result handle, i.e. the pointer
-        // `box_describe_delegation_token_result` produced with
-        // `Box::into_raw(Box::new(DescribeDelegationTokenResultInner { .. }))`.
-        // Reconstituting and dropping the `Box` here is the single, final use: the result
-        // documentation tells the caller to free the handle exactly once with
-        // `kafka_admin_DescribeDelegationTokenResult_destroy`, after which it and every
-        // pointer borrowed from it are invalid.
+        // a valid `describe_delegation_token` result handle, i.e. the
+        // `Box<DescribeDelegationTokenResultInner>` leaked by `into_handle` in
+        // `kafka_admin_AdminClient_describe_delegation_token` or
+        // `box_describe_delegation_token_result`. Reconstituting and dropping the `Box` here
+        // is the single, final use: the result documentation tells the caller to free the
+        // handle exactly once with `kafka_admin_DescribeDelegationTokenResult_destroy`, after
+        // which it and every pointer borrowed from it are invalid.
         unsafe { drop(Box::from_raw(result as *mut DescribeDelegationTokenResultInner)) };
     }
 }
@@ -27636,6 +27854,18 @@ pub struct kafka_admin_DescribeFeaturesResult_t {
 
 /// Backing state for [`kafka_admin_DescribeFeaturesResult_t`].
 ///
+/// `DescribeFeaturesResult` holds one `KafkaFuture<FeatureMetadata>` for the
+/// whole call, so there is no per-key error: a failure of the request is read
+/// with [`kafka_admin_DescribeFeaturesResult_feature_metadata`]. On a handle
+/// from the synchronous entry point that future may still be unresolved, and
+/// every accessor waits for it; a handle from the `_async` callback is always
+/// resolved.
+struct DescribeFeaturesResultInner {
+    metadata: LazySingle<DescribeFeaturesData>,
+}
+
+/// The resolved `FeatureMetadata`, flattened.
+///
 /// `FeatureMetadata` is a single record keyed directly by the result, so its
 /// two maps sit at one index each on the handle and its epoch is a scalar on
 /// it; nothing is minted (`PLAN-bindings.md` §7 D2, fifth rule). The two maps
@@ -27643,7 +27873,7 @@ pub struct kafka_admin_DescribeFeaturesResult_t {
 /// `supportedFeatures()` need not have the same size or the same feature names,
 /// so `_get_finalized_feature(i)` and `_get_supported_feature(i)` are not
 /// co-indexed. This is the `ListGroupsResult.valid()`/`errors()` shape.
-struct DescribeFeaturesResultInner {
+struct DescribeFeaturesData {
     finalized_features: Vec<CString>,
     finalized_min_version_levels: Vec<i16>,
     finalized_max_version_levels: Vec<i16>,
@@ -27653,11 +27883,11 @@ struct DescribeFeaturesResultInner {
     supported_max_versions: Vec<i16>,
 }
 
-/// Flattens the feature metadata into the C handle.
-fn box_describe_features_result(metadata: FeatureMetadata) -> *mut kafka_admin_DescribeFeaturesResult_t {
+/// Flattens the feature metadata, each map sorted by feature name.
+fn describe_features_data(metadata: FeatureMetadata) -> DescribeFeaturesData {
     let finalized = sorted_entries(metadata.finalized_features().clone());
     let supported = sorted_entries(metadata.supported_features().clone());
-    let inner = DescribeFeaturesResultInner {
+    DescribeFeaturesData {
         finalized_features: finalized.iter().map(|(name, _)| to_cstring(name)).collect(),
         finalized_min_version_levels: finalized.iter().map(|(_, r)| r.min_version_level()).collect(),
         finalized_max_version_levels: finalized.iter().map(|(_, r)| r.max_version_level()).collect(),
@@ -27665,8 +27895,13 @@ fn box_describe_features_result(metadata: FeatureMetadata) -> *mut kafka_admin_D
         supported_features: supported.iter().map(|(name, _)| to_cstring(name)).collect(),
         supported_min_versions: supported.iter().map(|(_, r)| r.min_version()).collect(),
         supported_max_versions: supported.iter().map(|(_, r)| r.max_version()).collect(),
-    };
-    Box::into_raw(Box::new(inner)) as *mut kafka_admin_DescribeFeaturesResult_t
+    }
+}
+
+/// Moves already-resolved feature metadata (the `_async` path) into the C
+/// handle.
+fn box_describe_features_result(metadata: FeatureMetadata) -> *mut kafka_admin_DescribeFeaturesResult_t {
+    into_handle(DescribeFeaturesResultInner { metadata: LazyOutcome::resolved(Ok(describe_features_data(metadata))) })
 }
 
 /// Casts a `*const kafka_admin_DescribeFeaturesResult_t` to a reference.
@@ -27678,9 +27913,9 @@ unsafe fn describe_features_result_ref(
     result: *const kafka_admin_DescribeFeaturesResult_t,
 ) -> &'static DescribeFeaturesResultInner {
     // SAFETY: `result` is, per this helper's `# Safety`, a non-null handle from a
-    // `describe_features` call; such handles are produced only by
-    // `box_describe_features_result` via
-    // `Box::into_raw(Box::new(DescribeFeaturesResultInner { .. }))`, so casting back to
+    // `describe_features` call; such handles are produced only by `into_handle` (in
+    // `kafka_admin_AdminClient_describe_features` and `box_describe_features_result`) via
+    // `Box::into_raw(Box::new(..))` of a `DescribeFeaturesResultInner`, so casting back to
     // `*const DescribeFeaturesResultInner` names that same live allocation. The `&'static`
     // is used only for the duration of the calling getter, during which the C caller keeps
     // the handle alive by not yet having called
@@ -27688,7 +27923,63 @@ unsafe fn describe_features_result_ref(
     unsafe { &*(result as *const DescribeFeaturesResultInner) }
 }
 
-/// Returns the number of finalized features. Features are sorted by name.
+/// The resolved feature metadata of a `describe_features` result handle,
+/// waiting for it first; `None` if the request failed.
+///
+/// # Safety
+///
+/// `result` must be a non-null handle from a `describe_features` call.
+unsafe fn describe_features_data_ref(
+    result: *const kafka_admin_DescribeFeaturesResult_t,
+) -> Option<&'static DescribeFeaturesData> {
+    // SAFETY: `describe_features_result_ref` requires a non-null `describe_features` result
+    // handle, which this helper's `# Safety` requires of `result`; the data it borrows is
+    // cached in that handle's allocation, and callers use it only within their own
+    // synchronous getter call, during which the C caller keeps the handle alive.
+    single_data(&unsafe { describe_features_result_ref(result) }.metadata)
+}
+
+/// Java's `featureMetadata().get()`: **blocks** until the metadata future has
+/// resolved, then returns null on success, or an **owned** error — free it
+/// with `kafka_common_Error_destroy` — if the request failed. The metadata is
+/// read with the other `kafka_admin_DescribeFeaturesResult_*` accessors.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_features` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_feature_metadata(
+    result: *const kafka_admin_DescribeFeaturesResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `describe_features_result_ref` requires a non-null `describe_features` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for the
+    // duration of this call, and the returned error is a fresh copy owned by the caller.
+    single_error(&unsafe { describe_features_result_ref(result) }.metadata)
+}
+
+/// Returns whether the metadata future has resolved — Java's
+/// `featureMetadata().isDone()`. Never blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_features` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_is_done(
+    result: *const kafka_admin_DescribeFeaturesResult_t,
+) -> bool {
+    // SAFETY: `describe_features_result_ref` requires a non-null `describe_features` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for this
+    // check.
+    unsafe { describe_features_result_ref(result) }.metadata.is_done()
+}
+
+/// Returns the number of finalized features, or 0 if the request failed (see
+/// [`kafka_admin_DescribeFeaturesResult_feature_metadata`]). Features are
+/// sorted by name. **Blocks** until the metadata future has resolved.
 ///
 /// # Safety
 ///
@@ -27698,18 +27989,19 @@ unsafe fn describe_features_result_ref(
 pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_finalized_count(
     result: *const kafka_admin_DescribeFeaturesResult_t,
 ) -> i32 {
-    // SAFETY: `describe_features_result_ref` requires a non-null handle from a
+    // SAFETY: `describe_features_data_ref` requires a non-null handle from a
     // `describe_features` call, which this function's `# Safety` promises (`result` must be
     // a valid `describe_features` result handle; only
     // `kafka_admin_DescribeFeaturesResult_destroy` admits null, so a valid handle is
     // non-null). The reference is used only for the duration of this synchronous call,
     // during which the C caller keeps the handle alive by not yet having called
     // `kafka_admin_DescribeFeaturesResult_destroy`.
-    unsafe { describe_features_result_ref(result) }.finalized_features.len() as i32
+    unsafe { describe_features_data_ref(result) }.map_or(0, |d| d.finalized_features.len() as i32)
 }
 
 /// Returns the finalized feature name at `index` (borrowed), or null if out of
-/// range. Do not free it.
+/// range or the request failed. Do not free it. **Blocks** until the metadata
+/// future has resolved.
 ///
 /// # Safety
 ///
@@ -27720,20 +28012,24 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_finalized_featur
     result: *const kafka_admin_DescribeFeaturesResult_t,
     index: i32,
 ) -> *const c_char {
-    // SAFETY: `describe_features_result_ref` requires a non-null handle from a
+    // SAFETY: `describe_features_data_ref` requires a non-null handle from a
     // `describe_features` call, which this function's `# Safety` promises (`result` must be
     // a valid `describe_features` result handle; only
     // `kafka_admin_DescribeFeaturesResult_destroy` admits null, so a valid handle is
     // non-null). The reference is used only for the duration of this synchronous call,
     // during which the C caller keeps the handle alive by not yet having called
-    // `kafka_admin_DescribeFeaturesResult_destroy`. The pointer this getter returns is an
-    // interior pointer into the same allocation and is documented as borrowed, valid until
-    // that `_destroy`.
-    cstring_at(&unsafe { describe_features_result_ref(result) }.finalized_features, index)
+    // `kafka_admin_DescribeFeaturesResult_destroy`.
+    // The pointer this getter returns is an interior pointer into the metadata cached in
+    // the same allocation and is documented as borrowed, valid until that `_destroy`.
+    match unsafe { describe_features_data_ref(result) } {
+        Some(d) => cstring_at(&d.finalized_features, index),
+        None => std::ptr::null(),
+    }
 }
 
 /// Returns `FinalizedVersionRange.minVersionLevel()` for the finalized feature
-/// at `index`, or -1 if out of range.
+/// at `index`, or -1 if out of range or the request failed. **Blocks** until
+/// the metadata future has resolved.
 ///
 /// # Safety
 ///
@@ -27744,21 +28040,19 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_finalized_min_ve
     result: *const kafka_admin_DescribeFeaturesResult_t,
     index: i32,
 ) -> i16 {
-    indexed_i16_at(
-        // SAFETY: `describe_features_result_ref` requires a non-null handle from a
-        // `describe_features` call, which this function's `# Safety` promises (`result`
-        // must be a valid `describe_features` result handle; only
-        // `kafka_admin_DescribeFeaturesResult_destroy` admits null, so a valid handle is
-        // non-null). The reference is used only for the duration of this synchronous call,
-        // during which the C caller keeps the handle alive by not yet having called
-        // `kafka_admin_DescribeFeaturesResult_destroy`.
-        &unsafe { describe_features_result_ref(result) }.finalized_min_version_levels,
-        index,
-    )
+    // SAFETY: `describe_features_data_ref` requires a non-null handle from a
+    // `describe_features` call, which this function's `# Safety` promises (`result` must be
+    // a valid `describe_features` result handle; only
+    // `kafka_admin_DescribeFeaturesResult_destroy` admits null, so a valid handle is
+    // non-null). The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_DescribeFeaturesResult_destroy`.
+    unsafe { describe_features_data_ref(result) }.map_or(-1, |d| indexed_i16_at(&d.finalized_min_version_levels, index))
 }
 
 /// Returns `FinalizedVersionRange.maxVersionLevel()` for the finalized feature
-/// at `index`, or -1 if out of range.
+/// at `index`, or -1 if out of range or the request failed. **Blocks** until
+/// the metadata future has resolved.
 ///
 /// # Safety
 ///
@@ -27769,22 +28063,20 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_finalized_max_ve
     result: *const kafka_admin_DescribeFeaturesResult_t,
     index: i32,
 ) -> i16 {
-    indexed_i16_at(
-        // SAFETY: `describe_features_result_ref` requires a non-null handle from a
-        // `describe_features` call, which this function's `# Safety` promises (`result`
-        // must be a valid `describe_features` result handle; only
-        // `kafka_admin_DescribeFeaturesResult_destroy` admits null, so a valid handle is
-        // non-null). The reference is used only for the duration of this synchronous call,
-        // during which the C caller keeps the handle alive by not yet having called
-        // `kafka_admin_DescribeFeaturesResult_destroy`.
-        &unsafe { describe_features_result_ref(result) }.finalized_max_version_levels,
-        index,
-    )
+    // SAFETY: `describe_features_data_ref` requires a non-null handle from a
+    // `describe_features` call, which this function's `# Safety` promises (`result` must be
+    // a valid `describe_features` result handle; only
+    // `kafka_admin_DescribeFeaturesResult_destroy` admits null, so a valid handle is
+    // non-null). The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_DescribeFeaturesResult_destroy`.
+    unsafe { describe_features_data_ref(result) }.map_or(-1, |d| indexed_i16_at(&d.finalized_max_version_levels, index))
 }
 
 /// Writes `finalizedFeaturesEpoch()` to `out_epoch` and returns true, or
 /// returns false when the broker did not report one (Java's empty
-/// `Optional<Long>`).
+/// `Optional<Long>`) or the request failed. **Blocks** until the metadata
+/// future has resolved.
 ///
 /// A nullable *number* needs an explicit discriminant: every `int64_t`,
 /// including 0 and -1, is a legal epoch, so no sentinel would work.
@@ -27799,7 +28091,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_finalized_features_e
     result: *const kafka_admin_DescribeFeaturesResult_t,
     out_epoch: *mut i64,
 ) -> bool {
-    // SAFETY: `describe_features_result_ref` requires a non-null handle from a
+    // SAFETY: `describe_features_data_ref` requires a non-null handle from a
     // `describe_features` call, which this function's `# Safety` promises (`result` must be
     // a valid `describe_features` result handle; only
     // `kafka_admin_DescribeFeaturesResult_destroy` admits null), and the reference is used
@@ -27807,12 +28099,18 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_finalized_features_e
     // caller keeps the handle alive. `write_optional` requires `out_epoch` to be null or
     // writable, which the same `# Safety` promises; it null-checks `out_epoch` and writes
     // exactly one `i64` when the epoch is present.
-    unsafe { write_optional(describe_features_result_ref(result).finalized_features_epoch, out_epoch) }
+    unsafe {
+        write_optional(
+            describe_features_data_ref(result).and_then(|d| d.finalized_features_epoch),
+            out_epoch,
+        )
+    }
 }
 
-/// Returns the number of supported features. Features are sorted by name, and
-/// are **not** co-indexed with the finalized ones: the two maps can differ in
-/// both size and contents.
+/// Returns the number of supported features, or 0 if the request failed.
+/// Features are sorted by name, and are **not** co-indexed with the finalized
+/// ones: the two maps can differ in both size and contents. **Blocks** until
+/// the metadata future has resolved.
 ///
 /// # Safety
 ///
@@ -27822,18 +28120,19 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_finalized_features_e
 pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_supported_count(
     result: *const kafka_admin_DescribeFeaturesResult_t,
 ) -> i32 {
-    // SAFETY: `describe_features_result_ref` requires a non-null handle from a
+    // SAFETY: `describe_features_data_ref` requires a non-null handle from a
     // `describe_features` call, which this function's `# Safety` promises (`result` must be
     // a valid `describe_features` result handle; only
     // `kafka_admin_DescribeFeaturesResult_destroy` admits null, so a valid handle is
     // non-null). The reference is used only for the duration of this synchronous call,
     // during which the C caller keeps the handle alive by not yet having called
     // `kafka_admin_DescribeFeaturesResult_destroy`.
-    unsafe { describe_features_result_ref(result) }.supported_features.len() as i32
+    unsafe { describe_features_data_ref(result) }.map_or(0, |d| d.supported_features.len() as i32)
 }
 
 /// Returns the supported feature name at `index` (borrowed), or null if out of
-/// range. Do not free it.
+/// range or the request failed. Do not free it. **Blocks** until the metadata
+/// future has resolved.
 ///
 /// # Safety
 ///
@@ -27844,20 +28143,24 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_supported_featur
     result: *const kafka_admin_DescribeFeaturesResult_t,
     index: i32,
 ) -> *const c_char {
-    // SAFETY: `describe_features_result_ref` requires a non-null handle from a
+    // SAFETY: `describe_features_data_ref` requires a non-null handle from a
     // `describe_features` call, which this function's `# Safety` promises (`result` must be
     // a valid `describe_features` result handle; only
     // `kafka_admin_DescribeFeaturesResult_destroy` admits null, so a valid handle is
     // non-null). The reference is used only for the duration of this synchronous call,
     // during which the C caller keeps the handle alive by not yet having called
-    // `kafka_admin_DescribeFeaturesResult_destroy`. The pointer this getter returns is an
-    // interior pointer into the same allocation and is documented as borrowed, valid until
-    // that `_destroy`.
-    cstring_at(&unsafe { describe_features_result_ref(result) }.supported_features, index)
+    // `kafka_admin_DescribeFeaturesResult_destroy`.
+    // The pointer this getter returns is an interior pointer into the metadata cached in
+    // the same allocation and is documented as borrowed, valid until that `_destroy`.
+    match unsafe { describe_features_data_ref(result) } {
+        Some(d) => cstring_at(&d.supported_features, index),
+        None => std::ptr::null(),
+    }
 }
 
 /// Returns `SupportedVersionRange.minVersion()` for the supported feature at
-/// `index`, or -1 if out of range.
+/// `index`, or -1 if out of range or the request failed. **Blocks** until the
+/// metadata future has resolved.
 ///
 /// # Safety
 ///
@@ -27868,18 +28171,19 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_supported_min_ve
     result: *const kafka_admin_DescribeFeaturesResult_t,
     index: i32,
 ) -> i16 {
-    // SAFETY: `describe_features_result_ref` requires a non-null handle from a
+    // SAFETY: `describe_features_data_ref` requires a non-null handle from a
     // `describe_features` call, which this function's `# Safety` promises (`result` must be
     // a valid `describe_features` result handle; only
     // `kafka_admin_DescribeFeaturesResult_destroy` admits null, so a valid handle is
     // non-null). The reference is used only for the duration of this synchronous call,
     // during which the C caller keeps the handle alive by not yet having called
     // `kafka_admin_DescribeFeaturesResult_destroy`.
-    indexed_i16_at(&unsafe { describe_features_result_ref(result) }.supported_min_versions, index)
+    unsafe { describe_features_data_ref(result) }.map_or(-1, |d| indexed_i16_at(&d.supported_min_versions, index))
 }
 
 /// Returns `SupportedVersionRange.maxVersion()` for the supported feature at
-/// `index`, or -1 if out of range.
+/// `index`, or -1 if out of range or the request failed. **Blocks** until the
+/// metadata future has resolved.
 ///
 /// # Safety
 ///
@@ -27890,14 +28194,14 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_supported_max_ve
     result: *const kafka_admin_DescribeFeaturesResult_t,
     index: i32,
 ) -> i16 {
-    // SAFETY: `describe_features_result_ref` requires a non-null handle from a
+    // SAFETY: `describe_features_data_ref` requires a non-null handle from a
     // `describe_features` call, which this function's `# Safety` promises (`result` must be
     // a valid `describe_features` result handle; only
     // `kafka_admin_DescribeFeaturesResult_destroy` admits null, so a valid handle is
     // non-null). The reference is used only for the duration of this synchronous call,
     // during which the C caller keeps the handle alive by not yet having called
     // `kafka_admin_DescribeFeaturesResult_destroy`.
-    indexed_i16_at(&unsafe { describe_features_result_ref(result) }.supported_max_versions, index)
+    unsafe { describe_features_data_ref(result) }.map_or(-1, |d| indexed_i16_at(&d.supported_max_versions, index))
 }
 
 /// Destroys a `describe_features` result handle. Safe with null (no-op).
@@ -27910,11 +28214,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_supported_max_ve
 pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_destroy(result: *mut kafka_admin_DescribeFeaturesResult_t) {
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
-        // a valid `describe_features` result handle, i.e. the pointer
-        // `box_describe_features_result` produced with
-        // `Box::into_raw(Box::new(DescribeFeaturesResultInner { .. }))`. Reconstituting and
-        // dropping the `Box` here is the single, final use: the result documentation tells
-        // the caller to free the handle exactly once with
+        // a valid `describe_features` result handle, i.e. the
+        // `Box<DescribeFeaturesResultInner>` leaked by `into_handle` in
+        // `kafka_admin_AdminClient_describe_features` or `box_describe_features_result`.
+        // Reconstituting and dropping the `Box` here is the single, final use: the result
+        // documentation tells the caller to free the handle exactly once with
         // `kafka_admin_DescribeFeaturesResult_destroy`, after which it and every pointer
         // borrowed from it are invalid.
         unsafe { drop(Box::from_raw(result as *mut DescribeFeaturesResultInner)) };
@@ -27931,16 +28235,28 @@ pub struct kafka_admin_UpdateFeaturesResult_t {
 ///
 /// `UpdateFeaturesResult.values()` is `Map<String, KafkaFuture<Void>>`: a
 /// per-feature future carrying no value, so the handle exposes the feature and
-/// its error and nothing else.
+/// its error and nothing else — a null error *is* the success value. The
+/// feature names are stored eagerly; each feature's future may still be
+/// unresolved.
 struct UpdateFeaturesResultInner {
     features: Vec<CString>,
-    errors: Vec<Option<ErrorInner>>,
+    entries: Vec<LazyKeyed<()>>,
 }
 
-/// Flattens the per-feature `updateFeatures` outcomes into the C handle.
-fn box_update_features_result(outcomes: UpdateFeaturesOutcomes) -> *mut kafka_admin_UpdateFeaturesResult_t {
-    let (features, errors) = flatten_keyed_void_outcomes(outcomes);
-    Box::into_raw(Box::new(UpdateFeaturesResultInner { features, errors })) as *mut kafka_admin_UpdateFeaturesResult_t
+/// Wraps `updateFeatures`' per-feature futures, unresolved, as the C handle's
+/// backing state, sorted by feature name.
+fn update_features_result_inner(
+    waiter: &FutureWaiter,
+    futures: Vec<(String, KafkaFuture<()>)>,
+) -> UpdateFeaturesResultInner {
+    let mut futures = futures;
+    futures.sort_by(|a, b| a.0.cmp(&b.0));
+    let features = futures.iter().map(|(name, _)| to_cstring(name)).collect();
+    let entries = futures
+        .into_iter()
+        .map(|(_, future)| lazy_keyed(waiter, future, |()| ()))
+        .collect();
+    UpdateFeaturesResultInner { features, entries }
 }
 
 /// Casts a `*const kafka_admin_UpdateFeaturesResult_t` to a reference.
@@ -27951,17 +28267,18 @@ fn box_update_features_result(outcomes: UpdateFeaturesOutcomes) -> *mut kafka_ad
 unsafe fn update_features_result_ref(
     result: *const kafka_admin_UpdateFeaturesResult_t,
 ) -> &'static UpdateFeaturesResultInner {
-    // SAFETY: `result` is, per this helper's `# Safety`, a non-null handle from a
-    // `update_features` call; such handles are produced only by
-    // `box_update_features_result` via `Box::into_raw(Box::new(UpdateFeaturesResultInner {
-    // .. }))`, so casting back to `*const UpdateFeaturesResultInner` names that same live
-    // allocation. The `&'static` is used only for the duration of the calling getter,
-    // during which the C caller keeps the handle alive by not yet having called
-    // `kafka_admin_UpdateFeaturesResult_destroy`, the only path that frees it.
+    // SAFETY: `result` is, per this helper's `# Safety`, a non-null handle from an
+    // `update_features` call, i.e. the `Box<UpdateFeaturesResultInner>` leaked by
+    // `into_handle` in `kafka_admin_AdminClient_update_features` and freed only by
+    // `kafka_admin_UpdateFeaturesResult_destroy`, so casting back to
+    // `*const UpdateFeaturesResultInner` names that same live allocation. The `&'static` is
+    // used only for the duration of the calling getter, during which the C caller keeps the
+    // handle alive.
     unsafe { &*(result as *const UpdateFeaturesResultInner) }
 }
 
 /// Returns the number of updated features. Features are sorted by name.
+/// Never blocks.
 ///
 /// # Safety
 ///
@@ -27982,7 +28299,7 @@ pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_count(
 }
 
 /// Returns the feature name at `index` (borrowed), or null if out of range. Do
-/// not free it.
+/// not free it. Never blocks.
 ///
 /// # Safety
 ///
@@ -28008,6 +28325,11 @@ pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_get_feature(
 /// Returns the error for the feature at `index` (borrowed), or null if the
 /// update succeeded or `index` is out of range. Do not destroy it.
 ///
+/// **Blocks** until that feature's future has resolved — Java's
+/// `values().get(feature).get()` — but not on any other feature. Never blocks
+/// for an out-of-range index. A failure of the whole request is reported here
+/// for every feature, as Java completes every feature's future with it.
+///
 /// # Safety
 ///
 /// `result` must be a valid `update_features` result handle.
@@ -28023,10 +28345,50 @@ pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_get_error(
     // `kafka_admin_UpdateFeaturesResult_destroy` admits null, so a valid handle is
     // non-null). The reference is used only for the duration of this synchronous call,
     // during which the C caller keeps the handle alive by not yet having called
-    // `kafka_admin_UpdateFeaturesResult_destroy`. The pointer this getter returns is an
-    // interior pointer into the same allocation and is documented as borrowed, valid until
-    // that `_destroy`.
-    optional_error_at(&unsafe { update_features_result_ref(result) }.errors, index)
+    // `kafka_admin_UpdateFeaturesResult_destroy`. The pointer this getter returns borrows
+    // an `ErrorInner` owned by the handle (not to be destroyed), valid until that
+    // `_destroy`.
+    keyed_error_at(&unsafe { update_features_result_ref(result) }.entries, index)
+}
+
+/// Returns whether the future of the feature at `index` has resolved — Java's
+/// `isDone()` on that feature's future. False if `index` is out of range.
+/// Never blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `update_features` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_is_done(
+    result: *const kafka_admin_UpdateFeaturesResult_t,
+    index: i32,
+) -> bool {
+    // SAFETY: `update_features_result_ref` requires a non-null `update_features` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for this
+    // check within the call, during which the C caller keeps the handle alive.
+    keyed_is_done_at(&unsafe { update_features_result_ref(result) }.entries, index)
+}
+
+/// Java's `all().get()`: **blocks** until every feature's future has
+/// resolved, then returns null if all succeeded, or an **owned** error — free
+/// it with `kafka_common_Error_destroy` — of a failed feature (the first in
+/// index order; Java leaves which one unspecified).
+///
+/// # Safety
+///
+/// `result` must be a valid `update_features` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_all(
+    result: *const kafka_admin_UpdateFeaturesResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `update_features_result_ref` requires a non-null `update_features` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for the
+    // duration of this call, and the returned error is a fresh copy owned by the caller.
+    keyed_all(&unsafe { update_features_result_ref(result) }.entries)
 }
 
 /// Destroys an `update_features` result handle. Safe with null (no-op).
@@ -28039,13 +28401,12 @@ pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_get_error(
 pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_destroy(result: *mut kafka_admin_UpdateFeaturesResult_t) {
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
-        // a valid `update_features` result handle, i.e. the pointer
-        // `box_update_features_result` produced with
-        // `Box::into_raw(Box::new(UpdateFeaturesResultInner { .. }))`. Reconstituting and
-        // dropping the `Box` here is the single, final use: the result documentation tells
-        // the caller to free the handle exactly once with
-        // `kafka_admin_UpdateFeaturesResult_destroy`, after which it and every pointer
-        // borrowed from it are invalid.
+        // a valid `update_features` result handle, i.e. the
+        // `Box<UpdateFeaturesResultInner>` leaked by `into_handle` in
+        // `kafka_admin_AdminClient_update_features`. Reconstituting and dropping the `Box`
+        // here is the single, final use: the result documentation tells the caller to free
+        // the handle exactly once with `kafka_admin_UpdateFeaturesResult_destroy`, after
+        // which it and every pointer borrowed from it are invalid.
         unsafe { drop(Box::from_raw(result as *mut UpdateFeaturesResultInner)) };
     }
 }
@@ -35972,12 +36333,18 @@ mod tests {
             kafka_admin_AlterUserScramCredentialsResult_destroy(result);
         }
 
-        let mut features: UpdateFeaturesOutcomes = HashMap::new();
-        features.insert("metadata.version".to_string(), Err(Error::local_illegal_argument("nope")));
-        features.insert("transaction.version".to_string(), Ok(()));
-        let result = box_update_features_result(features);
-        // SAFETY: Test code: the rebound `result` was built just above by
-        // `box_update_features_result`, so it is a valid handle for every
+        let (_runtime, waiter) = lazy_test_waiter();
+        let features = vec![
+            ("transaction.version".to_string(), KafkaFuture::completed(Ok(()))),
+            (
+                "metadata.version".to_string(),
+                KafkaFuture::completed(Err(Error::local_illegal_argument("nope"))),
+            ),
+        ];
+        let result: *mut kafka_admin_UpdateFeaturesResult_t =
+            into_handle(update_features_result_inner(&waiter, features));
+        // SAFETY: Test code: the rebound `result` was built just above by `into_handle` of an
+        // `UpdateFeaturesResultInner`, so it is a valid handle for every
         // `kafka_admin_UpdateFeaturesResult_*` getter; the feature string and error
         // pointers are borrowed from it and read while it lives, and
         // `kafka_admin_UpdateFeaturesResult_destroy(result)` is the single destroy.
@@ -35985,7 +36352,7 @@ mod tests {
             assert_eq!(kafka_admin_UpdateFeaturesResult_count(result), 2);
             let feature0 = CStr::from_ptr(kafka_admin_UpdateFeaturesResult_get_feature(result, 0));
             assert_eq!(feature0.to_str().expect("utf8"), "metadata.version");
-            assert!(!kafka_admin_UpdateFeaturesResult_get_error(result, 0).is_null());
+            assert_eq!(borrowed_message(kafka_admin_UpdateFeaturesResult_get_error(result, 0)), "nope");
             assert!(kafka_admin_UpdateFeaturesResult_get_error(result, 1).is_null());
             kafka_admin_UpdateFeaturesResult_destroy(result);
         }
@@ -36040,6 +36407,420 @@ mod tests {
                 0
             );
             kafka_admin_CreateDelegationTokenResult_destroy(result);
+        }
+    }
+
+    /// A token with id `id` and one renewer, for the lazily resolved token
+    /// results below.
+    fn lazy_test_token(id: &str) -> DelegationToken {
+        let info = TokenInformation::new(
+            id.to_string(),
+            KafkaPrincipal::new("User", "owner"),
+            vec![KafkaPrincipal::new("User", "renewer")],
+            10,
+            30,
+            20,
+        );
+        DelegationToken::new(info, vec![0x0a])
+    }
+
+    /// Completes `future` with `outcome` from another thread after a short
+    /// delay, so the accessor the test calls meanwhile has to wait for it.
+    fn complete_later<T: Clone + Send + Sync + 'static>(
+        future: crate::common::internals::KafkaFutureImpl<T>,
+        outcome: Result<T, Error>,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            match outcome {
+                Ok(value) => future.complete(value),
+                Err(error) => future.complete_with_error(error),
+            };
+        })
+    }
+
+    /// The four delegation-token results each hold Java's single future:
+    /// `_is_done` is false until it resolves, every accessor waits for it, and
+    /// its `get()` error is read from the Java-named getter while the value
+    /// accessors return null / -1 / 0.
+    #[test]
+    fn delegation_token_results_wait_on_their_single_future() {
+        use crate::common::internals::KafkaFutureImpl;
+        let (_runtime, waiter) = lazy_test_waiter();
+
+        // createDelegationToken: delegationToken().
+        let created = KafkaFutureImpl::<DelegationToken>::new();
+        let result: *mut kafka_admin_CreateDelegationTokenResult_t = into_handle(CreateDelegationTokenResultInner {
+            token: lazy_single(&waiter, created.future(), |t| DelegationTokenInner::new(&t)),
+        });
+        // SAFETY: Test code: `result` was built just above by `into_handle` of a
+        // `CreateDelegationTokenResultInner`, so it is a valid handle for every
+        // `kafka_admin_CreateDelegationTokenResult_*` getter; the borrowed token handles are
+        // read while it lives, and its `_destroy` is the single destroy.
+        unsafe {
+            assert!(!kafka_admin_CreateDelegationTokenResult_is_done(result));
+            let completer = complete_later(created, Ok(lazy_test_token("created-token")));
+            let token = kafka_admin_CreateDelegationTokenResult_get_token(result);
+            completer.join().expect("completer thread");
+            assert!(!token.is_null());
+            let id = CStr::from_ptr(kafka_common_security_token_delegation_TokenInformation_token_id(
+                kafka_common_security_token_delegation_DelegationToken_token_info(token),
+            ));
+            assert_eq!(id.to_str().expect("utf8"), "created-token");
+            assert!(kafka_admin_CreateDelegationTokenResult_is_done(result));
+            assert!(kafka_admin_CreateDelegationTokenResult_delegation_token(result).is_null());
+            kafka_admin_CreateDelegationTokenResult_destroy(result);
+        }
+        let failed = KafkaFutureImpl::<DelegationToken>::new();
+        failed.complete_with_error(Error::timeout("create timed out"));
+        let result: *mut kafka_admin_CreateDelegationTokenResult_t = into_handle(CreateDelegationTokenResultInner {
+            token: lazy_single(&waiter, failed.future(), |t| DelegationTokenInner::new(&t)),
+        });
+        // SAFETY: Test code: the rebound `result` was built just above by `into_handle` of a
+        // `CreateDelegationTokenResultInner`; the owned error is consumed by
+        // `consume_message`, and its `_destroy` is the single destroy.
+        unsafe {
+            assert_eq!(
+                consume_message(kafka_admin_CreateDelegationTokenResult_delegation_token(result)),
+                "create timed out"
+            );
+            assert!(kafka_admin_CreateDelegationTokenResult_get_token(result).is_null());
+            kafka_admin_CreateDelegationTokenResult_destroy(result);
+        }
+
+        // renewDelegationToken / expireDelegationToken: expiryTimestamp().
+        let renewed = KafkaFutureImpl::<i64>::new();
+        let result: *mut kafka_admin_RenewDelegationTokenResult_t = into_handle(RenewDelegationTokenResultInner {
+            expiry_timestamp: lazy_single(&waiter, renewed.future(), |t| t),
+        });
+        // SAFETY: Test code: `result` was built just above by `into_handle` of a
+        // `RenewDelegationTokenResultInner`, so it is a valid handle for every
+        // `kafka_admin_RenewDelegationTokenResult_*` getter, and its `_destroy` is the single
+        // destroy.
+        unsafe {
+            assert!(!kafka_admin_RenewDelegationTokenResult_is_done(result));
+            let completer = complete_later(renewed, Ok(1_234));
+            assert_eq!(kafka_admin_RenewDelegationTokenResult_expiry_timestamp(result), 1_234);
+            completer.join().expect("completer thread");
+            assert!(kafka_admin_RenewDelegationTokenResult_is_done(result));
+            assert!(kafka_admin_RenewDelegationTokenResult_expiry_timestamp_error(result).is_null());
+            kafka_admin_RenewDelegationTokenResult_destroy(result);
+        }
+        let expired = KafkaFutureImpl::<i64>::new();
+        let result: *mut kafka_admin_ExpireDelegationTokenResult_t = into_handle(ExpireDelegationTokenResultInner {
+            expiry_timestamp: lazy_single(&waiter, expired.future(), |t| t),
+        });
+        // SAFETY: Test code: `result` was built just above by `into_handle` of an
+        // `ExpireDelegationTokenResultInner`, so it is a valid handle for every
+        // `kafka_admin_ExpireDelegationTokenResult_*` getter; the owned error is consumed by
+        // `consume_message`, and its `_destroy` is the single destroy.
+        unsafe {
+            assert!(!kafka_admin_ExpireDelegationTokenResult_is_done(result));
+            let completer = complete_later(expired, Err(Error::timeout("expire timed out")));
+            assert_eq!(
+                consume_message(kafka_admin_ExpireDelegationTokenResult_expiry_timestamp_error(result)),
+                "expire timed out"
+            );
+            completer.join().expect("completer thread");
+            assert!(kafka_admin_ExpireDelegationTokenResult_is_done(result));
+            assert_eq!(kafka_admin_ExpireDelegationTokenResult_expiry_timestamp(result), -1);
+            kafka_admin_ExpireDelegationTokenResult_destroy(result);
+        }
+
+        // describeDelegationToken: delegationTokens().
+        let described = KafkaFutureImpl::<Vec<DelegationToken>>::new();
+        let result: *mut kafka_admin_DescribeDelegationTokenResult_t =
+            into_handle(DescribeDelegationTokenResultInner {
+                tokens: lazy_single(&waiter, described.future(), describe_delegation_token_data),
+            });
+        // SAFETY: Test code: `result` was built just above by `into_handle` of a
+        // `DescribeDelegationTokenResultInner`, so it is a valid handle for every
+        // `kafka_admin_DescribeDelegationTokenResult_*` getter; the borrowed token handles
+        // are read while it lives, and its `_destroy` is the single destroy.
+        unsafe {
+            assert!(!kafka_admin_DescribeDelegationTokenResult_is_done(result));
+            let completer = complete_later(described, Ok(vec![lazy_test_token("first"), lazy_test_token("second")]));
+            assert_eq!(kafka_admin_DescribeDelegationTokenResult_count(result), 2);
+            completer.join().expect("completer thread");
+            assert!(kafka_admin_DescribeDelegationTokenResult_is_done(result));
+            assert!(kafka_admin_DescribeDelegationTokenResult_delegation_tokens(result).is_null());
+            let second = kafka_admin_DescribeDelegationTokenResult_get_token(result, 1);
+            let id = CStr::from_ptr(kafka_common_security_token_delegation_TokenInformation_token_id(
+                kafka_common_security_token_delegation_DelegationToken_token_info(second),
+            ));
+            assert_eq!(id.to_str().expect("utf8"), "second");
+            kafka_admin_DescribeDelegationTokenResult_destroy(result);
+        }
+        let failed = KafkaFutureImpl::<Vec<DelegationToken>>::new();
+        failed.complete_with_error(Error::timeout("describe timed out"));
+        let result: *mut kafka_admin_DescribeDelegationTokenResult_t =
+            into_handle(DescribeDelegationTokenResultInner {
+                tokens: lazy_single(&waiter, failed.future(), describe_delegation_token_data),
+            });
+        // SAFETY: Test code: the rebound `result` was built just above by `into_handle` of a
+        // `DescribeDelegationTokenResultInner`; the owned error is consumed by
+        // `consume_message`, and its `_destroy` is the single destroy.
+        unsafe {
+            assert_eq!(
+                consume_message(kafka_admin_DescribeDelegationTokenResult_delegation_tokens(result)),
+                "describe timed out"
+            );
+            assert_eq!(kafka_admin_DescribeDelegationTokenResult_count(result), 0);
+            assert!(kafka_admin_DescribeDelegationTokenResult_get_token(result, 0).is_null());
+            kafka_admin_DescribeDelegationTokenResult_destroy(result);
+        }
+    }
+
+    /// `describeFeatures` holds Java's single `featureMetadata()` future: every
+    /// accessor waits for it, and when it fails `feature_metadata` returns the
+    /// error while the counts are 0, names null, levels -1 and the epoch absent.
+    #[test]
+    fn describe_features_result_waits_on_its_metadata_future() {
+        use crate::common::internals::KafkaFutureImpl;
+        let (_runtime, waiter) = lazy_test_waiter();
+
+        let metadata = KafkaFutureImpl::<FeatureMetadata>::new();
+        let result: *mut kafka_admin_DescribeFeaturesResult_t = into_handle(DescribeFeaturesResultInner {
+            metadata: lazy_single(&waiter, metadata.future(), describe_features_data),
+        });
+        let mut finalized = HashMap::new();
+        finalized.insert(
+            "metadata.version".to_string(),
+            FinalizedVersionRange::new(14, 17).expect("valid"),
+        );
+        let mut supported = HashMap::new();
+        supported.insert(
+            "metadata.version".to_string(),
+            SupportedVersionRange::new(3, 21).expect("valid"),
+        );
+        // SAFETY: Test code: `result` was built just above by `into_handle` of a
+        // `DescribeFeaturesResultInner`, so it is a valid handle for every
+        // `kafka_admin_DescribeFeaturesResult_*` getter; `&mut epoch` is a writable local, and
+        // its `_destroy` is the single destroy.
+        unsafe {
+            assert!(!kafka_admin_DescribeFeaturesResult_is_done(result));
+            let completer = complete_later(metadata, Ok(FeatureMetadata::new(finalized, Some(7), supported)));
+            assert_eq!(kafka_admin_DescribeFeaturesResult_finalized_count(result), 1);
+            completer.join().expect("completer thread");
+            assert!(kafka_admin_DescribeFeaturesResult_is_done(result));
+            assert!(kafka_admin_DescribeFeaturesResult_feature_metadata(result).is_null());
+            assert_eq!(
+                kafka_admin_DescribeFeaturesResult_get_finalized_max_version_level(result, 0),
+                17
+            );
+            assert_eq!(kafka_admin_DescribeFeaturesResult_get_supported_min_version(result, 0), 3);
+            let mut epoch = 0i64;
+            assert!(kafka_admin_DescribeFeaturesResult_finalized_features_epoch(result, &mut epoch));
+            assert_eq!(epoch, 7);
+            kafka_admin_DescribeFeaturesResult_destroy(result);
+        }
+
+        let failed = KafkaFutureImpl::<FeatureMetadata>::new();
+        let result: *mut kafka_admin_DescribeFeaturesResult_t = into_handle(DescribeFeaturesResultInner {
+            metadata: lazy_single(&waiter, failed.future(), describe_features_data),
+        });
+        // SAFETY: Test code: the rebound `result` was built just above by `into_handle` of a
+        // `DescribeFeaturesResultInner`; the owned error is consumed by `consume_message`,
+        // `&mut epoch` is a writable local, and its `_destroy` is the single destroy.
+        unsafe {
+            let completer = complete_later(failed, Err(Error::timeout("features timed out")));
+            assert_eq!(
+                consume_message(kafka_admin_DescribeFeaturesResult_feature_metadata(result)),
+                "features timed out"
+            );
+            completer.join().expect("completer thread");
+            assert_eq!(kafka_admin_DescribeFeaturesResult_finalized_count(result), 0);
+            assert_eq!(kafka_admin_DescribeFeaturesResult_supported_count(result), 0);
+            assert!(kafka_admin_DescribeFeaturesResult_get_finalized_feature(result, 0).is_null());
+            assert!(kafka_admin_DescribeFeaturesResult_get_supported_feature(result, 0).is_null());
+            assert_eq!(
+                kafka_admin_DescribeFeaturesResult_get_finalized_min_version_level(result, 0),
+                -1
+            );
+            assert_eq!(kafka_admin_DescribeFeaturesResult_get_supported_max_version(result, 0), -1);
+            let mut epoch = -7i64;
+            assert!(!kafka_admin_DescribeFeaturesResult_finalized_features_epoch(result, &mut epoch));
+            assert_eq!(epoch, -7);
+            kafka_admin_DescribeFeaturesResult_destroy(result);
+        }
+    }
+
+    /// `updateFeatures().values().get(f).get()` waits for feature `f` only: the
+    /// feature names and a resolved feature read while another is still
+    /// pending, `_is_done` never blocks, and `_all` waits for every feature.
+    #[test]
+    fn update_features_result_waits_for_each_feature_only() {
+        use crate::common::internals::KafkaFutureImpl;
+        let (_runtime, waiter) = lazy_test_waiter();
+        let fast = KafkaFutureImpl::<()>::new();
+        let slow = KafkaFutureImpl::<()>::new();
+        let result: *mut kafka_admin_UpdateFeaturesResult_t = into_handle(update_features_result_inner(
+            &waiter,
+            vec![
+                ("transaction.version".to_string(), slow.future()),
+                ("metadata.version".to_string(), fast.future()),
+            ],
+        ));
+        // SAFETY: Test code: `result` was built just above by `into_handle` of an
+        // `UpdateFeaturesResultInner`, so it is a valid handle for every
+        // `kafka_admin_UpdateFeaturesResult_*` getter; borrowed strings and errors are read
+        // while it lives, owned errors are consumed by `consume_message`, and its `_destroy`
+        // is the single destroy.
+        unsafe {
+            // Keys never block, even with both features pending.
+            assert_eq!(kafka_admin_UpdateFeaturesResult_count(result), 2);
+            let feature0 = CStr::from_ptr(kafka_admin_UpdateFeaturesResult_get_feature(result, 0));
+            assert_eq!(feature0.to_str().expect("utf8"), "metadata.version");
+            assert!(!kafka_admin_UpdateFeaturesResult_is_done(result, 0));
+            assert!(!kafka_admin_UpdateFeaturesResult_is_done(result, 1));
+
+            fast.complete(());
+            assert!(kafka_admin_UpdateFeaturesResult_is_done(result, 0));
+            // Feature 1 is still pending, so reading feature 0 must not wait on it.
+            assert!(kafka_admin_UpdateFeaturesResult_get_error(result, 0).is_null());
+            assert!(!kafka_admin_UpdateFeaturesResult_is_done(result, 1));
+            assert!(kafka_admin_UpdateFeaturesResult_get_error(result, 2).is_null());
+            assert!(!kafka_admin_UpdateFeaturesResult_is_done(result, 2));
+            assert!(!kafka_admin_UpdateFeaturesResult_is_done(result, -1));
+
+            let completer = complete_later(slow, Err(Error::timeout("transaction.version timed out")));
+            assert_eq!(
+                consume_message(kafka_admin_UpdateFeaturesResult_all(result)),
+                "transaction.version timed out"
+            );
+            completer.join().expect("completer thread");
+            assert!(kafka_admin_UpdateFeaturesResult_is_done(result, 1));
+            assert_eq!(
+                borrowed_message(kafka_admin_UpdateFeaturesResult_get_error(result, 1)),
+                "transaction.version timed out"
+            );
+            kafka_admin_UpdateFeaturesResult_destroy(result);
+        }
+    }
+
+    /// End to end, against the production client: every delegation-token and
+    /// feature RPC returns before its request resolves (Java's methods do not
+    /// block), and the request's timeout is read from each handle rather than
+    /// returned by the call. `updateFeatures`' client-side validation is still
+    /// returned by the call, as Java throws it from `updateFeatures` itself.
+    #[test]
+    fn delegation_token_and_feature_rpcs_return_before_the_request_resolves_and_report_its_timeout_from_the_handle() {
+        let admin = unreachable_admin_client();
+        let feature = CString::new("metadata.version").unwrap();
+        let features = [feature.as_ptr()];
+        let levels = [5i16];
+        let upgrade_types = [1i32];
+        let renewer_type = CString::new("User").unwrap();
+        let renewer_name = CString::new("alice").unwrap();
+        let renewer_types = [renewer_type.as_ptr()];
+        let renewer_names = [renewer_name.as_ptr()];
+        let hmac = [0x01u8, 0x02];
+
+        let mut described: *mut kafka_admin_DescribeFeaturesResult_t = std::ptr::null_mut();
+        let mut updated: *mut kafka_admin_UpdateFeaturesResult_t = std::ptr::null_mut();
+        let mut created: *mut kafka_admin_CreateDelegationTokenResult_t = std::ptr::null_mut();
+        let mut renewed: *mut kafka_admin_RenewDelegationTokenResult_t = std::ptr::null_mut();
+        let mut expired: *mut kafka_admin_ExpireDelegationTokenResult_t = std::ptr::null_mut();
+        let mut tokens: *mut kafka_admin_DescribeDelegationTokenResult_t = std::ptr::null_mut();
+        let started = std::time::Instant::now();
+        // SAFETY: Test code: `admin` is live; every array has the one entry its count states,
+        // the strings are valid C strings and `hmac` is readable for its length, all outliving
+        // the calls; every out-parameter is a writable slot.
+        let errors = unsafe {
+            [
+                kafka_admin_AdminClient_describe_features(admin, false, 0, 1_000, &mut described),
+                kafka_admin_AdminClient_update_features(
+                    admin,
+                    features.as_ptr(),
+                    levels.as_ptr(),
+                    upgrade_types.as_ptr(),
+                    1,
+                    1_000,
+                    false,
+                    &mut updated,
+                ),
+                kafka_admin_AdminClient_create_delegation_token(
+                    admin,
+                    renewer_types.as_ptr(),
+                    renewer_names.as_ptr(),
+                    1,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    -1,
+                    1_000,
+                    &mut created,
+                ),
+                kafka_admin_AdminClient_renew_delegation_token(admin, hmac.as_ptr(), 2, -1, 1_000, &mut renewed),
+                kafka_admin_AdminClient_expire_delegation_token(admin, hmac.as_ptr(), 2, -1, 1_000, &mut expired),
+                kafka_admin_AdminClient_describe_delegation_token(
+                    admin,
+                    false,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    0,
+                    1_000,
+                    &mut tokens,
+                ),
+            ]
+        };
+        assert!(errors.iter().all(|e| e.is_null()), "submission must not fail");
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "an entry point waited for its request"
+        );
+
+        // SAFETY: Test code: every handle is the live result written above; owned errors are
+        // destroyed exactly once, borrowed ones are read before their handle is destroyed, and
+        // each handle and the client are destroyed exactly once.
+        unsafe {
+            assert!(!kafka_admin_DescribeFeaturesResult_is_done(described));
+            assert_eq!(kafka_admin_UpdateFeaturesResult_count(updated), 1);
+            assert!(!kafka_admin_UpdateFeaturesResult_is_done(updated, 0));
+
+            let timed_out = |error: *mut kafka_common_Error_t| {
+                assert!(!error.is_null(), "an unreachable cluster must time the request out");
+                assert_eq!(common::kafka_common_Error_code(error) as i32, Errors::RequestTimedOut as i32);
+                common::kafka_common_Error_destroy(error);
+            };
+            timed_out(kafka_admin_DescribeFeaturesResult_feature_metadata(described));
+            assert_eq!(kafka_admin_DescribeFeaturesResult_finalized_count(described), 0);
+            timed_out(kafka_admin_UpdateFeaturesResult_all(updated));
+            assert_eq!(
+                common::kafka_common_Error_code(kafka_admin_UpdateFeaturesResult_get_error(updated, 0)) as i32,
+                Errors::RequestTimedOut as i32
+            );
+            timed_out(kafka_admin_CreateDelegationTokenResult_delegation_token(created));
+            assert!(kafka_admin_CreateDelegationTokenResult_get_token(created).is_null());
+            timed_out(kafka_admin_RenewDelegationTokenResult_expiry_timestamp_error(renewed));
+            assert_eq!(kafka_admin_RenewDelegationTokenResult_expiry_timestamp(renewed), -1);
+            timed_out(kafka_admin_ExpireDelegationTokenResult_expiry_timestamp_error(expired));
+            assert_eq!(kafka_admin_ExpireDelegationTokenResult_expiry_timestamp(expired), -1);
+            timed_out(kafka_admin_DescribeDelegationTokenResult_delegation_tokens(tokens));
+            assert_eq!(kafka_admin_DescribeDelegationTokenResult_count(tokens), 0);
+
+            // Java's `updateFeatures` throws for an empty update map before creating any
+            // future, so that is still the call's error and no handle is written.
+            let mut rejected: *mut kafka_admin_UpdateFeaturesResult_t = std::ptr::null_mut();
+            let error = kafka_admin_AdminClient_update_features(
+                admin,
+                features.as_ptr(),
+                levels.as_ptr(),
+                upgrade_types.as_ptr(),
+                0,
+                1_000,
+                false,
+                &mut rejected,
+            );
+            assert_eq!(consume_message(error), "Feature updates can not be null or empty.");
+            assert!(rejected.is_null());
+
+            kafka_admin_DescribeFeaturesResult_destroy(described);
+            kafka_admin_UpdateFeaturesResult_destroy(updated);
+            kafka_admin_CreateDelegationTokenResult_destroy(created);
+            kafka_admin_RenewDelegationTokenResult_destroy(renewed);
+            kafka_admin_ExpireDelegationTokenResult_destroy(expired);
+            kafka_admin_DescribeDelegationTokenResult_destroy(tokens);
+            kafka_admin_AdminClient_destroy(admin);
         }
     }
 
