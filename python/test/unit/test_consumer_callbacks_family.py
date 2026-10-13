@@ -316,6 +316,134 @@ def test_async_coroutine_callback_calls_back_into_the_consumer(make: Any) -> Non
 
 
 # ---------------------------------------------------------------------------
+# A commit from inside a callback (the ConsumerHandle): Java's commit() runs
+# executeCallbacks() first (AsyncKafkaConsumer.java:1126-1128), so the commit
+# callbacks queued behind the running one run inside it; Java's MockConsumer
+# runs commitAsync's callback inline
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("nested", ["commit_nowait", "commit"])
+def test_kafka_consumer_commit_inside_a_callback_runs_the_queued_callbacks_first(
+        nested: str) -> None:
+    consumer = kafka_consumer()
+    events: list[str] = []
+
+    def first(offsets: Any, exception: Any) -> None:
+        events.append("first")
+        # An empty commit completes at once: its callback is queued.
+        consumer.commit_nowait(offsets={}, callback=lambda o, e: events.append("queued"))
+        events.append("queued it")
+        if nested == "commit_nowait":
+            consumer.commit_nowait(offsets={}, callback=lambda o, e: events.append("nested"))
+        else:
+            consumer.commit(offsets={})
+        events.append("first end")
+
+    consumer.commit_nowait(offsets={}, callback=first)
+    consumer.commit(offsets={})
+    consumer.commit(offsets={})
+    expected = ["first", "queued it", "queued", "first end"]
+    assert events == (expected + ["nested"] if nested == "commit_nowait" else expected)
+    close(consumer)
+
+
+def test_kafka_consumer_commit_nowait_inside_a_callback_passes_the_offsets() -> None:
+    consumer = kafka_consumer()
+    seen: list[Any] = []
+
+    def first(offsets: Any, exception: Any) -> None:
+        consumer.commit_nowait(offsets={}, callback=lambda o, e: seen.append((o, e)))
+
+    consumer.commit_nowait(offsets={}, callback=first)
+    consumer.commit(offsets={})
+    consumer.commit(offsets={})
+    # The empty commit's callback gets (null, null), as outside a callback.
+    assert seen == [(None, None)]
+    close(consumer)
+
+
+def test_mock_commit_nowait_inside_a_callback_runs_its_callback_inline() -> None:
+    consumer = mock_consumer()
+    events: list[Any] = []
+    offsets = {TP: OffsetAndMetadata(offset=2)}
+
+    def first(o: Any, e: Any) -> None:
+        events.append("first")
+        consumer.commit_nowait(offsets=offsets, callback=lambda o, e: events.append(("nested", o)))
+        events.append("first end")
+
+    consumer.commit_nowait(offsets={TP: OffsetAndMetadata(offset=1)}, callback=first)
+    assert events == ["first", ("nested", offsets), "first end"]
+    assert consumer.committed(partitions=[TP]) == {TP: OffsetAndMetadata(offset=2)}
+    close(consumer)
+
+
+@pytest.mark.parametrize("nested", ["commit_nowait", "commit"])
+@pytest.mark.parametrize("queued", ["plain", "coroutine"])
+def test_async_kafka_consumer_commit_inside_a_coroutine_callback_runs_the_queued_callbacks(
+        nested: str, queued: str) -> None:
+    async def main() -> None:
+        consumer = await async_kafka_consumer()
+        events: list[str] = []
+
+        def queued_plain(offsets: Any, exception: Any) -> None:
+            events.append("queued")
+
+        async def queued_coroutine(offsets: Any, exception: Any) -> None:
+            await asyncio.sleep(0)
+            events.append("queued")
+
+        async def first(offsets: Any, exception: Any) -> None:
+            await asyncio.sleep(0)
+            events.append("first")
+            consumer.commit_nowait(offsets={}, callback=queued_plain if queued == "plain"
+                                   else queued_coroutine)
+            events.append("queued it")
+            if nested == "commit_nowait":
+                consumer.commit_nowait(offsets={}, callback=lambda o, e: events.append("nested"))
+            else:
+                await consumer.commit(offsets={})
+            events.append("first end")
+
+        consumer.commit_nowait(offsets={}, callback=first)
+        await asyncio.wait_for(consumer.commit(offsets={}), 10)
+        await asyncio.wait_for(consumer.commit(offsets={}), 10)
+        if queued == "plain":
+            # Run inside the nested commit, as Java does.
+            expected = ["first", "queued it", "queued", "first end"]
+        else:
+            # Scheduled inside the nested commit, which blocks the loop, and
+            # awaited by the delivering call after it (deviation).
+            expected = ["first", "queued it", "first end", "queued"]
+        assert events == (expected + ["nested"] if nested == "commit_nowait" else expected)
+        await consumer.close(option=CloseOptions.timeout(5))
+
+    asyncio.run(main())
+
+
+def test_async_mock_commit_nowait_inside_a_coroutine_callback_runs_its_callback() -> None:
+    async def main() -> None:
+        consumer = await async_mock_consumer()
+        events: list[Any] = []
+
+        async def first(o: Any, e: Any) -> None:
+            await asyncio.sleep(0)
+            events.append("first")
+            consumer.commit_nowait(offsets={TP: OffsetAndMetadata(offset=2)},
+                                   callback=lambda o, e: events.append("nested"))
+            events.append("first end")
+
+        consumer.commit_nowait(offsets={TP: OffsetAndMetadata(offset=1)}, callback=first)
+        await consumer.commit(offsets={})
+        # Callbacks start one at a time in commit order: the nested one waits
+        # for the coroutine one still running (AsyncMockConsumer.commit_nowait).
+        assert events == ["first", "first end", "nested"]
+        assert await consumer.committed(partitions=[TP]) == {TP: OffsetAndMetadata(offset=2)}
+        await consumer.close(option=CloseOptions.timeout(5))
+
+    asyncio.run(main())
+
+
+# ---------------------------------------------------------------------------
 # The listener's registration lifetime (retained while subscribed and across
 # unsubscribe; released by a replacing or listener-less subscribe, and by close)
 # ---------------------------------------------------------------------------

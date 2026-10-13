@@ -183,7 +183,16 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         core's ``ConsumerHandle``, a further ``commit_nowait()`` follows it,
         ``metrics()`` answers (Java's takes no ``acquire()``), and
         ``group_metadata()`` / ``current_lag()``, which the handle lacks, raise
-        ``ConcurrentModificationError``."""
+        ``ConcurrentModificationError``.
+
+        Called from inside a callback this consumer delivers, it commits through
+        the core's ``ConsumerHandle`` and first runs the commit callbacks queued
+        behind the running one, inside this call, as Java's ``commitAsync``
+        does; it blocks the event loop meanwhile, so an ``async def`` callback
+        among them is scheduled there and awaited after this call returns, by
+        the call delivering the outer callback, and the callbacks after it may
+        start before it ends (*deviation*). ``await commit()`` from inside a
+        callback does the same."""
         self._c_commit_nowait(offsets, callback)
 
     @overload
@@ -452,11 +461,21 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         core delivers them, and the rebalance does not advance before a
         listener returns (``consumer-threading.md`` §31). The task is created
         inside the callback window, so a consumer operation the callback issues
-        goes through the ConsumerHandle."""
+        goes through the ConsumerHandle.
+
+        A commit callback a blocking ConsumerHandle commit runs inside it
+        (``_handle_commit``: a callback committing again, as Java's ``commit()``
+        runs ``executeCallbacks()`` first) is delivered while that commit blocks
+        the loop, so its task cannot run before the commit returns: it is
+        reported to the core at once, and the task only awaits it. Its exception
+        is still logged; the callbacks after it may start before it ends, and
+        the delivering call still waits for it (*deviation*: Java runs it to its
+        end inside that commit)."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return False
+        report_now = self._handle_commit_running()
 
         async def run() -> None:
             error: BaseException | None = None
@@ -466,6 +485,8 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
                 error = exc
             if error is not None and failed is not None:
                 failed(error)
+            if report_now:
+                return
             # Under the lifecycle lock: close() clears the handle under it
             # before it frees the handle, so a live handle is not freed meanwhile.
             with self._lifecycle:
@@ -475,6 +496,10 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         task = loop.create_task(run())
         self._listener_tasks.add(task)
         task.add_done_callback(self._listener_tasks.discard)
+        if report_now:
+            with self._lifecycle:
+                if self._h:
+                    _lib.Consumer__set_callback_result(self._h, callback_id, None)
         return True
 
     # ---- commit_nowait (Java's commitAsync) on the event loop ----------------

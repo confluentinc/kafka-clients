@@ -243,6 +243,11 @@ class Consumer(Generic[K, V], _ConsumerState):
         for the offsets to commit (``consumer-threading.md`` §31); a listener
         error it raised is then raised here.
 
+        Called from inside a callback this consumer delivers (a listener method
+        or another commit's ``callback``), it first runs the commit callbacks
+        queued behind the running one, inside this call, as Java's
+        ``commitAsync`` does; its own ``callback`` runs inside a later call.
+
         The ``callback`` is a plain function here: an ``async def`` one is
         rejected when it is delivered, its coroutine closed, not awaited, and an
         error logged (``MockConsumer`` raises ``TypeError``). Only

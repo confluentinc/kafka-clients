@@ -4603,6 +4603,36 @@ DEF_COMMIT_OPS_NT(ConsumerHandle_commit_async, HANDLE_T, handle_self,
                   kafka_consumer_ConsumerHandle_commit_async, kafka_consumer_ConsumerHandle_commit_async_offsets,
                   kafka_consumer_ConsumerHandle_commit_async_cb, kafka_consumer_ConsumerHandle_commit_async_offsets_cb)
 
+// ConsumerHandle_commit_async_callback(h, hh, spec | None, adapter) -> err | None
+//
+// Java's commitAsync(callback) and commitAsync(offsets, callback) from inside a
+// callback, through the ConsumerHandle `hh` of the consumer `h`. Blocking: the
+// commit callbacks queued behind the running one run on this thread inside the
+// call, as Java's commit() runs executeCallbacks() first. The commit's own
+// callback runs inside a later call, like Consumer_commit_async's; its context
+// is orphaned when the call fails, since the callback then never fires.
+static PyObject* py_ConsumerHandle_commit_async_callback(PyObject* self, PyObject* args) {
+    unsigned long long h; unsigned long long hh; PyObject* spec; PyObject* adapter;
+    if (!PyArg_ParseTuple(args, "KKOO", &h, &hh, &spec, &adapter)) return NULL;
+    Consumer* c = consumer_from_handle(h);
+    const kafka_consumer_ConsumerHandle_t* s = handle_self(hh);
+    offsets_map_t m; memset(&m, 0, sizeof(m));
+    int with_offsets = spec != Py_None;
+    if (with_offsets && offsets_map_build(spec, &m) < 0) return NULL;
+    CommitCbCtx* ctx = commit_ctx_new(c, adapter == Py_None ? NULL : adapter);
+    if (ctx == NULL) { if (with_offsets) offsets_map_free(&m); return NULL; }
+    kafka_consumer_OffsetCommitCallback_t* cbh = kafka_consumer_OffsetCommitCallback_new(ctx, commit_on_complete);
+    kafka_common_Error_t* err;
+    Py_BEGIN_ALLOW_THREADS
+    err = with_offsets ? kafka_consumer_ConsumerHandle_commit_async_with_offsets_callback(s, m.map, cbh)
+                       : kafka_consumer_ConsumerHandle_commit_async_with_callback(s, cbh);
+    Py_END_ALLOW_THREADS
+    kafka_consumer_OffsetCommitCallback_destroy(cbh);  // registration copied
+    if (with_offsets) offsets_map_free(&m);
+    if (err != NULL) consumer_orphan_commit(c, ctx);
+    return err_result(err);
+}
+
 #undef HANDLE_T
 
 // ---- MockConsumer drivers --------------------------------------------------
@@ -9003,6 +9033,8 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"ConsumerHandle_commit_sync_cb", py_ConsumerHandle_commit_sync_cb, METH_VARARGS, "commit_sync twin; cb(err | None)"},
     {"ConsumerHandle_commit_async", py_ConsumerHandle_commit_async, METH_VARARGS, "commit_async(hh, offsets_spec | None) -> err | None"},
     {"ConsumerHandle_commit_async_cb", py_ConsumerHandle_commit_async_cb, METH_VARARGS, "commit_async twin; cb(err | None)"},
+    {"ConsumerHandle_commit_async_callback", py_ConsumerHandle_commit_async_callback, METH_VARARGS,
+     "commit_async_callback(h, hh, offsets_spec | None, adapter) -> err | None"},
     // ---- MockConsumer drivers ----
     {"MockConsumer_rebalance", py_MockConsumer_rebalance, METH_VARARGS, "Mock: drive a rebalance to an assignment (invokes the listener) -> err | None"},
     {"MockConsumer_rebalance_cb", py_MockConsumer_rebalance_cb, METH_VARARGS, "rebalance twin; cb(err | None)"},

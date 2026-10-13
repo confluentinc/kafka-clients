@@ -92,7 +92,9 @@ pub struct MockConsumer<K, V> {
     beginning_offsets: HashMap<TopicPartition, i64>,
     end_offsets: HashMap<TopicPartition, i64>,
     duration_reset_offsets: HashMap<TopicPartition, i64>,
-    committed: HashMap<TopicPartition, OffsetAndMetadata>,
+    /// Shared so a [`Consumer::handle`] obtained from this mock commits into
+    /// the same map, as a Java callback calling back into the mock does.
+    committed: Arc<Mutex<HashMap<TopicPartition, OffsetAndMetadata>>>,
     /// Java stores `Runnable` tasks that capture `MockConsumer` implicitly.
     /// Rust closures cannot capture the outer struct safely without
     /// `Arc<Mutex<...>>` wrapping, so we deviate: tasks receive `&mut
@@ -145,7 +147,7 @@ impl<K, V> MockConsumer<K, V> {
             beginning_offsets: HashMap::new(),
             end_offsets: HashMap::new(),
             duration_reset_offsets: HashMap::new(),
-            committed: HashMap::new(),
+            committed: Arc::new(Mutex::new(HashMap::new())),
             poll_tasks: VecDeque::new(),
             paused: HashSet::new(),
             wakeup: Arc::new(AtomicBool::new(false)),
@@ -374,11 +376,12 @@ impl<K, V> MockConsumer<K, V> {
     /// `IllegalStateException("This consumer has already been closed.")`.
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#ensureNotClosed")]
     fn ensure_not_closed(&self) -> Result<(), Error> {
-        if self.closed() {
-            Err(Error::local_illegal_state("This consumer has already been closed."))
-        } else {
-            Ok(())
-        }
+        ensure_mock_not_closed(&self.closed)
+    }
+
+    /// The shared committed-offsets map, locked for a read or a merge.
+    fn lock_committed(&self) -> std::sync::MutexGuard<'_, HashMap<TopicPartition, OffsetAndMetadata>> {
+        self.committed.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Mirrors Java's private
@@ -390,7 +393,7 @@ impl<K, V> MockConsumer<K, V> {
         listener: Option<Arc<dyn ConsumerRebalanceListener>>,
     ) -> Result<(), Error> {
         self.ensure_not_closed()?;
-        self.committed.clear();
+        self.lock_committed().clear();
         self.subscriptions
             .subscribe_with_topics(topics.into_iter().collect(), listener)?;
         Ok(())
@@ -418,7 +421,7 @@ impl<K, V> MockConsumer<K, V> {
             return Err(Error::local_illegal_argument("Topic pattern cannot be empty"));
         }
         self.ensure_not_closed()?;
-        self.committed.clear();
+        self.lock_committed().clear();
         self.subscriptions.subscribe_with_pattern(pattern, listener)?;
         Ok(())
     }
@@ -429,13 +432,15 @@ impl<K, V> MockConsumer<K, V> {
     fn update_fetch_position(&mut self, tp: &TopicPartition) -> Result<(), Error> {
         if self.subscriptions.is_offset_reset_needed(tp)? {
             self.reset_offset_position(tp)
-        } else if !self.committed.contains_key(tp) {
-            self.subscriptions.request_offset_reset_default(tp)?;
-            self.reset_offset_position(tp)
         } else {
-            // Safe: presence checked just above.
-            let offset = self.committed.get(tp).expect("checked containsKey").offset();
-            self.subscriptions.seek(tp, offset)
+            let committed_offset = self.lock_committed().get(tp).map(OffsetAndMetadata::offset);
+            match committed_offset {
+                None => {
+                    self.subscriptions.request_offset_reset_default(tp)?;
+                    self.reset_offset_position(tp)
+                },
+                Some(offset) => self.subscriptions.seek(tp, offset),
+            }
         }
     }
 
@@ -601,7 +606,7 @@ where
     async fn assign(&mut self, partitions: Vec<TopicPartition>) -> Result<(), Error> {
         // Java line 235-239.
         self.ensure_not_closed()?;
-        self.committed.clear();
+        self.lock_committed().clear();
         self.subscriptions.assign_from_user(partitions.into_iter().collect())?;
         Ok(())
     }
@@ -609,7 +614,7 @@ where
     async fn unsubscribe(&mut self) -> Result<(), Error> {
         // Java line 242-246.
         self.ensure_not_closed()?;
-        self.committed.clear();
+        self.lock_committed().clear();
         self.subscriptions.unsubscribe();
         Ok(())
     }
@@ -910,8 +915,9 @@ where
         // Java line 405-412.
         self.ensure_not_closed()?;
         let mut result = HashMap::new();
+        let committed = self.lock_committed();
         for tp in partitions {
-            if let Some(om) = self.committed.get(tp) {
+            if let Some(om) = committed.get(tp) {
                 // Java: `subscriptions.isAssigned(tp) ? committed.get(tp) : new OffsetAndMetadata(0)`.
                 let value = if self.subscriptions.is_assigned(tp) {
                     om.clone()
@@ -1101,38 +1107,58 @@ where
             Arc::clone(&self.closed),
             Arc::clone(&self.should_rebalance),
             Arc::clone(&self.last_poll_timeout),
+            Arc::clone(&self.committed),
         )
     }
 }
 
 impl<K, V> MockConsumer<K, V> {
-    /// Shared implementation for all `commit_*` variants. Java's
-    /// `commitAsync(Map, OffsetCommitCallback)` (`MockConsumer.java:353-358`)
-    /// invokes the callback inline (synchronously) — the Rust translation
-    /// awaits the callback before returning, matching that contract.
+    /// Shared implementation for all `commit_*` variants; see
+    /// [`mock_commit_async`].
     async fn commit_async_impl(
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         callback: Option<Arc<dyn OffsetCommitCallback>>,
     ) -> Result<(), Error> {
-        self.ensure_not_closed()?;
-        // Invoke the callback FIRST with a borrowed reference, then move the
-        // map into `self.committed`. Avoids the clone that would otherwise be
-        // required to satisfy both `extend(offsets)` (consumes the map) and
-        // `on_complete(&offsets, ...)` (borrows the map).
-        //
-        // Java's ordering (`MockConsumer.java:355-358`) is
-        // `committed.putAll(offsets); callback.onComplete(offsets, null);` —
-        // the callback observes the post-merge state. Rust observes the
-        // pre-merge state. The only practical divergence is a callback that
-        // calls back into `committed(...)`; no Java test exercises this and
-        // the MockConsumer contract does not document the order.
-        if let Some(cb) = callback {
-            cb.on_complete(&offsets, None).await;
-        }
-        self.committed.extend(offsets);
+        mock_commit_async(&self.closed, &self.committed, offsets, callback).await
+    }
+}
+
+/// Java's `ensureNotClosed()` (`MockConsumer.java:617-620`) over the mock's
+/// shared `closed` flag, so a [`ConsumerHandle`] obtained from the mock
+/// checks it too.
+fn ensure_mock_not_closed(closed: &AtomicBool) -> Result<(), Error> {
+    if closed.load(Ordering::SeqCst) {
+        Err(Error::local_illegal_state("This consumer has already been closed."))
+    } else {
         Ok(())
     }
+}
+
+/// Java's `commitAsync(Map, OffsetCommitCallback)` (`MockConsumer.java:353-358`)
+/// over the mock's shared state: the commit path of the mock and of every
+/// [`ConsumerHandle`] obtained from it.
+///
+/// Java's order: `committed.putAll(offsets)`, then
+/// `callback.onComplete(offsets, null)` inline, so the callback (which may
+/// commit again through a handle) observes the merged offsets and its own
+/// commits land after them. The lock is released before the callback runs.
+pub(crate) async fn mock_commit_async(
+    closed: &AtomicBool,
+    committed: &Mutex<HashMap<TopicPartition, OffsetAndMetadata>>,
+    offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+    callback: Option<Arc<dyn OffsetCommitCallback>>,
+) -> Result<(), Error> {
+    ensure_mock_not_closed(closed)?;
+    let lock = || committed.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    match callback {
+        None => lock().extend(offsets),
+        Some(cb) => {
+            lock().extend(offsets.iter().map(|(tp, om)| (tp.clone(), om.clone())));
+            cb.on_complete(&offsets, None).await;
+        },
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1290,5 +1316,149 @@ mod tests {
             .await
             .expect_err("Java's mock does not implement this");
         assert_eq!("Not implemented yet.", err.message());
+    }
+
+    // ─── ConsumerHandle commits (Java callbacks calling back into the mock) ───
+
+    fn offsets(tp: &TopicPartition, offset: i64) -> HashMap<TopicPartition, OffsetAndMetadata> {
+        HashMap::from([(tp.clone(), OffsetAndMetadata::new(offset).expect("non-negative"))])
+    }
+
+    /// Java's `MockConsumer.commitSync(Map)` records the offsets in the
+    /// mock's `committed` map; through a handle it records them in the same
+    /// map, so the consumer's `committed()` returns them.
+    #[tokio::test]
+    async fn handle_commit_sync_with_offsets_records_committed() {
+        let mut c: MockConsumer<String, String> =
+            MockConsumer::with_auto_offset_reset_strategy(AutoOffsetResetStrategy::EARLIEST);
+        let tp = tp_of("test");
+        c.assign(vec![tp.clone()]).await.expect("assign");
+
+        let handle = c.handle();
+        handle.commit_sync_with_offsets(offsets(&tp, 5)).await.expect("commit sync");
+        assert_eq!(
+            c.committed(std::slice::from_ref(&tp)).await.expect("committed"),
+            offsets(&tp, 5)
+        );
+
+        handle.commit_async_offsets(offsets(&tp, 6)).await.expect("commit async");
+        assert_eq!(
+            c.committed(std::slice::from_ref(&tp)).await.expect("committed"),
+            offsets(&tp, 6)
+        );
+    }
+
+    fn tp_of(topic: &str) -> TopicPartition {
+        TopicPartition::new(topic.to_string(), 0)
+    }
+
+    /// A callback's label and the offsets it was handed.
+    type Seen = (&'static str, HashMap<TopicPartition, OffsetAndMetadata>);
+
+    /// Records `(label, offsets)` and, with `nested`, commits again through
+    /// the handle from inside the callback.
+    struct RecordingCallback {
+        label: &'static str,
+        seen: Arc<Mutex<Vec<Seen>>>,
+        nested: Option<(ConsumerHandle, HashMap<TopicPartition, OffsetAndMetadata>)>,
+    }
+
+    #[async_trait]
+    impl OffsetCommitCallback for RecordingCallback {
+        async fn on_complete(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
+            assert!(error.is_none(), "the mock completes commits without an error");
+            self.seen.lock().unwrap().push((self.label, offsets.clone()));
+            if let Some((handle, nested)) = &self.nested {
+                let inner = Arc::new(RecordingCallback { label: "inner", seen: Arc::clone(&self.seen), nested: None });
+                handle
+                    .commit_async_with_offsets_callback(nested.clone(), inner)
+                    .await
+                    .expect("nested commit");
+                self.seen.lock().unwrap().push(("outer-end", HashMap::new()));
+            }
+        }
+    }
+
+    /// Java's `MockConsumer.commitAsync(Map, OffsetCommitCallback)` puts the
+    /// offsets, then calls the callback inline. A callback committing through
+    /// the handle runs its own callback inline too, before the outer one
+    /// returns, and its offsets land after the outer ones.
+    #[tokio::test]
+    async fn handle_commit_async_with_offsets_callback_nests_inline() {
+        let mut c: MockConsumer<String, String> =
+            MockConsumer::with_auto_offset_reset_strategy(AutoOffsetResetStrategy::EARLIEST);
+        let tp = tp_of("test");
+        c.assign(vec![tp.clone()]).await.expect("assign");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let outer = Arc::new(RecordingCallback {
+            label: "outer",
+            seen: Arc::clone(&seen),
+            nested: Some((c.handle(), offsets(&tp, 9))),
+        });
+
+        c.commit_async_with_offsets_callback(offsets(&tp, 3), outer)
+            .await
+            .expect("commit");
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                ("outer", offsets(&tp, 3)),
+                ("inner", offsets(&tp, 9)),
+                ("outer-end", HashMap::new())
+            ]
+        );
+        assert_eq!(
+            c.committed(std::slice::from_ref(&tp)).await.expect("committed"),
+            offsets(&tp, 9)
+        );
+    }
+
+    /// The handle's no-offset commits need the mock's consumed positions
+    /// (Java's `subscriptions.allConsumed()`), which the mock's handle does
+    /// not reach; they fail with the handle's unsupported error.
+    #[tokio::test]
+    async fn handle_commit_without_offsets_is_unsupported() {
+        let c: MockConsumer<String, String> =
+            MockConsumer::with_auto_offset_reset_strategy(AutoOffsetResetStrategy::EARLIEST);
+        let handle = c.handle();
+        let expected = "ConsumerHandle async operations are not supported on a MockConsumer handle; drive the \
+                        MockConsumer directly.";
+        for err in [
+            handle.commit_sync().await.expect_err("unsupported"),
+            handle.commit_async().await.expect_err("unsupported"),
+            handle
+                .commit_async_with_callback(Arc::new(RecordingCallback {
+                    label: "x",
+                    seen: Arc::new(Mutex::new(Vec::new())),
+                    nested: None,
+                }))
+                .await
+                .expect_err("unsupported"),
+        ] {
+            assert!(err.is_unsupported_version_error(), "unexpected error: {err:?}");
+            assert_eq!(err.message(), expected);
+        }
+    }
+
+    /// Java's `commitAsync` starts with `ensureNotClosed()`, so a handle
+    /// commit after `close()` fails with the mock's closed error.
+    #[tokio::test]
+    async fn handle_commit_after_close_fails() {
+        let mut c: MockConsumer<String, String> =
+            MockConsumer::with_auto_offset_reset_strategy(AutoOffsetResetStrategy::EARLIEST);
+        let handle = c.handle();
+        c.close().await.expect("close");
+        let tp = tp_of("test");
+        let err = handle.commit_sync_with_offsets(offsets(&tp, 1)).await.expect_err("closed");
+        assert_eq!(err.message(), "This consumer has already been closed.");
+        let err = handle
+            .commit_async_with_offsets_callback(
+                offsets(&tp, 1),
+                Arc::new(RecordingCallback { label: "x", seen: Arc::new(Mutex::new(Vec::new())), nested: None }),
+            )
+            .await
+            .expect_err("closed");
+        assert_eq!(err.message(), "This consumer has already been closed.");
     }
 }

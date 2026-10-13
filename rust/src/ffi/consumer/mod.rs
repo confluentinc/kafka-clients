@@ -182,14 +182,43 @@ pub(crate) struct Delivery {
     results: Arc<CallbackResults>,
 }
 
+/// Where [`Delivery::invoke`] sends the interface methods a
+/// `ConsumerHandle` operation triggers, set for the task that drives the
+/// operation (`consumer_handle`'s `HandleInner::run_blocking` /
+/// `run_cb`).
+///
+/// No Java counterpart (DoD #7): a Java callback calling the consumer back
+/// runs the nested callbacks on its own thread, inside the call
+/// (`AsyncKafkaConsumer.commit()` runs `executeCallbacks()` first). A
+/// handle operation runs on a task of the runtime instead (a nested
+/// `block_on` is forbidden there), so without a route the callbacks its
+/// commit drains would run on that task's worker thread whenever a blocking
+/// consumer operation has the blocking flag set.
+#[derive(Clone)]
+pub(crate) enum InvokeRoute {
+    /// To the thread waiting for a blocking handle operation, which runs it
+    /// there.
+    Caller(Arc<dyn Fn(CallbackJob) + Send + Sync>),
+    /// To the callbacks vector, for a `_cb` handle operation.
+    Queue,
+}
+
+tokio::task_local! {
+    /// The route of the handle operation the current task drives, if any.
+    pub(crate) static INVOKE_ROUTE: InvokeRoute;
+}
+
 impl Delivery {
     /// Runs `job` now when a blocking operation is on the calling thread,
-    /// queues it otherwise.
+    /// queues it otherwise. Inside a `ConsumerHandle` operation the
+    /// operation's [`InvokeRoute`] decides instead: the thread waiting for a
+    /// blocking one runs it, a `_cb` one queues it.
     pub(crate) fn invoke(&self, job: CallbackJob) {
-        if self.blocking.load(Ordering::Acquire) {
-            job();
-        } else {
-            self.queue.push(job);
+        match INVOKE_ROUTE.try_with(InvokeRoute::clone) {
+            Ok(InvokeRoute::Caller(send)) => send(job),
+            Ok(InvokeRoute::Queue) => self.queue.push(job),
+            Err(_) if self.blocking.load(Ordering::Acquire) => job(),
+            Err(_) => self.queue.push(job),
         }
     }
 

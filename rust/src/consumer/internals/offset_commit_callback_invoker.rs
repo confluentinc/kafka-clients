@@ -29,6 +29,8 @@
 //! enqueue from BG, dequeue + invoke from app side.
 
 use std::collections::{HashMap, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use crate::common::{Error, TopicPartition};
@@ -137,6 +139,57 @@ where
 
     fn has_interceptors(&self) -> bool {
         !self.interceptors_empty
+    }
+}
+
+/// Type-erased view of an [`OffsetCommitCallbackInvoker`] for the commit path
+/// a [`ConsumerHandle`](crate::consumer::ConsumerHandle) shares with
+/// its owning consumer.
+///
+/// Rust-only shim (no Java analog as a named type, DoD #7): Java's
+/// `AsyncKafkaConsumer.commit(...)` calls
+/// `offsetCommitCallbackInvoker.executeCallbacks()` and its `commitAsync`
+/// continuation enqueues on the same invoker. In Java a callback reaches that
+/// code by calling back into the `consumer` it captured. In Rust it reaches it
+/// through a `ConsumerHandle`, which is not generic over `<K, V>`, so it holds
+/// the consumer's invoker through this trait. The three methods are the
+/// invoker's own, none of which carries `K` or `V` in its signature.
+pub(crate) trait OffsetCommitCallbackQueue: Send + Sync + 'static {
+    /// [`OffsetCommitCallbackInvoker::enqueue_interceptor_invocation`].
+    fn enqueue_interceptor_invocation(&self, offsets: HashMap<TopicPartition, OffsetAndMetadata>);
+
+    /// [`OffsetCommitCallbackInvoker::enqueue_user_callback_invocation`].
+    fn enqueue_user_callback_invocation(
+        &self,
+        callback: Arc<dyn OffsetCommitCallback>,
+        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+        error: Option<Error>,
+    );
+
+    /// [`OffsetCommitCallbackInvoker::invoke_pending_callbacks`].
+    fn invoke_pending_callbacks(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+}
+
+impl<K, V> OffsetCommitCallbackQueue for OffsetCommitCallbackInvoker<K, V>
+where
+    K: Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
+    fn enqueue_interceptor_invocation(&self, offsets: HashMap<TopicPartition, OffsetAndMetadata>) {
+        OffsetCommitCallbackInvoker::enqueue_interceptor_invocation(self, offsets);
+    }
+
+    fn enqueue_user_callback_invocation(
+        &self,
+        callback: Arc<dyn OffsetCommitCallback>,
+        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+        error: Option<Error>,
+    ) {
+        OffsetCommitCallbackInvoker::enqueue_user_callback_invocation(self, callback, offsets, error);
+    }
+
+    fn invoke_pending_callbacks(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(OffsetCommitCallbackInvoker::invoke_pending_callbacks(self))
     }
 }
 

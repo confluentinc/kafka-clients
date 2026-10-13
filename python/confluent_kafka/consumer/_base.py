@@ -54,13 +54,14 @@ never touches a freed handle.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import inspect
 import logging
 import math
 import threading
 import weakref
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Iterator
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, NoReturn, TypeVar, cast
 
@@ -380,6 +381,10 @@ class _ConsumerState:
         # the next awaited call.
         self._commit_continuation: asyncio.Task[None] | None = None
         self._deferred_error: BaseException | None = None
+        # The threads inside a blocking ConsumerHandle commit, with their
+        # counts: the commit callbacks it runs inside it run on that thread
+        # while it waits (AsyncConsumer's _defer_callback reads it).
+        self._handle_commit_threads: dict[int, int] = {}
 
     # ---- construction ---------------------------------------------------
     def _start(self, configs: dict[str, Any], key_deserializer: Deserializer[Any] | None,
@@ -530,6 +535,29 @@ class _ConsumerState:
             if not self._reentrant_handle:
                 self._reentrant_handle = _lib.Consumer_handle(self._h)
             return self._reentrant_handle
+
+    @contextlib.contextmanager
+    def _handle_commit(self) -> Iterator[None]:
+        """A blocking ConsumerHandle commit on this thread. Like Java's
+        ``commit()``, which runs ``executeCallbacks()`` first, it runs the
+        commit callbacks queued behind the running one on this thread while it
+        waits (``_handle_commit_running`` tells them so)."""
+        thread = threading.get_ident()
+        with self._lifecycle:
+            self._handle_commit_threads[thread] = self._handle_commit_threads.get(thread, 0) + 1
+        try:
+            yield
+        finally:
+            with self._lifecycle:
+                count = self._handle_commit_threads.pop(thread) - 1
+                if count:
+                    self._handle_commit_threads[thread] = count
+
+    def _handle_commit_running(self) -> bool:
+        """Whether this thread is inside a blocking ConsumerHandle commit
+        (``_handle_commit``), so it cannot run its event loop meanwhile."""
+        with self._lifecycle:
+            return threading.get_ident() in self._handle_commit_threads
 
 
     def _on_pending_notify(self) -> None:
@@ -1021,15 +1049,25 @@ class _ConsumerState:
         background events meanwhile (``consumer-threading.md`` §31; Java's
         ``commitAsync`` does not), so a listener callback can be queued during
         it: like every waiting call it submits the ``_cb`` form and runs the
-        queued callbacks on this thread while it waits. Inside a callback, the
-        commit goes through the ConsumerHandle, which has no commit callback
-        (``kafka_consumer_ConsumerHandle_commit_async``)."""
+        queued callbacks on this thread while it waits.
+
+        Inside a callback, the commit goes through the ConsumerHandle
+        (``kafka_consumer_ConsumerHandle_commit_async``, or its
+        ``_with_callback`` / ``_with_offsets_callback`` forms), whose plain
+        entry point first runs the commit callbacks queued behind the running
+        one on this thread, as Java's ``commit()`` runs ``executeCallbacks()``
+        first; this commit's own callback runs inside a later call."""
         if self._in_callback():
-            with self._use():
+            with self._use() as h:
                 spec = None if offsets is None else offsets_to_spec(offsets)
-                if callback is not None:
-                    raise ConcurrentModificationError(message=CONCURRENT_MESSAGE)
-                raise_if_error(_lib.ConsumerHandle_commit_async(self._handle(), spec))
+                adapter = self._wrap_commit_callback(
+                    callback, empty_offsets=offsets is not None and not offsets)
+                with self._handle_commit():
+                    if adapter is None:
+                        raise_if_error(_lib.ConsumerHandle_commit_async(self._handle(), spec))
+                    else:
+                        raise_if_error(_lib.ConsumerHandle_commit_async_callback(
+                            h, self._handle(), spec, adapter))
                 return
         with self._use():
             spec = None if offsets is None else offsets_to_spec(offsets)
@@ -1061,8 +1099,9 @@ class _ConsumerState:
         handle = self._handle()
         if op == "commit":
             (offsets,) = args
-            raise_if_error(_lib.ConsumerHandle_commit_sync(
-                handle, None if offsets is None else offsets_to_spec(offsets)))
+            spec = None if offsets is None else offsets_to_spec(offsets)
+            with self._handle_commit():
+                raise_if_error(_lib.ConsumerHandle_commit_sync(handle, spec))
             return None
         if op == "seek":
             partition, offset, oam = args

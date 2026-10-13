@@ -84,6 +84,7 @@ use crate::consumer::internals::MemberState;
 use crate::consumer::internals::MemberStateListener;
 use crate::consumer::internals::OffsetAndTimestampInternal;
 use crate::consumer::internals::OffsetCommitCallbackInvoker;
+use crate::consumer::internals::OffsetCommitCallbackQueue;
 use crate::consumer::internals::PositionsValidator;
 use crate::consumer::internals::RequestManagers;
 use crate::consumer::internals::SubscriptionState;
@@ -171,7 +172,16 @@ enum BgJoin {
 /// [`end_offsets`](Self::end_offsets),
 /// [`offsets_for_times`](Self::offsets_for_times),
 /// [`commit_sync`](Self::commit_sync),
-/// [`commit_async`](Self::commit_async).
+/// [`commit_sync_with_offsets`](Self::commit_sync_with_offsets),
+/// [`commit_async`](Self::commit_async),
+/// [`commit_async_with_callback`](Self::commit_async_with_callback),
+/// [`commit_async_offsets`](Self::commit_async_offsets),
+/// [`commit_async_with_offsets_callback`](Self::commit_async_with_offsets_callback).
+///
+/// The commits run the owning consumer's own commit path, as a Java callback
+/// calling `consumer.commitSync()` / `commitAsync()` does: they run the
+/// consumer's queued commit callbacks first, an async commit is one a later
+/// `commit_sync` or `close` waits for, and `interceptors.onCommit` fires.
 ///
 /// Lifecycle / ownership operations (`poll`, `subscribe`, `unsubscribe`,
 /// `close`) are intentionally NOT exposed — Java does not invoke these
@@ -213,6 +223,14 @@ pub(crate) struct AsyncConsumerHandleState {
     default_api_timeout_ms: i64,
     /// The consumer's metrics registry, read by [`ConsumerHandle::metrics`].
     metrics: Arc<Metrics>,
+    /// The consumer's commit bookkeeping, so the handle's commits run the
+    /// consumer's own commit path.
+    commit_state: Arc<AsyncCommitState>,
+    /// The consumer's `group.id`, checked by the handle's commits.
+    group_id: Option<String>,
+    /// The consumer's metrics, whose `commit-sync` sensor the handle's
+    /// `commit_sync` records.
+    kafka_consumer_metrics: Arc<KafkaConsumerMetrics>,
 }
 
 #[derive(Clone)]
@@ -220,18 +238,25 @@ enum ConsumerHandleInner {
     /// `AsyncKafkaConsumer`: full reentrant-safe op surface backed by the
     /// shared `Arc` state.
     Async(AsyncConsumerHandleState),
-    /// `MockConsumer`: only `wakeup()` is meaningful — it sets the shared
-    /// wakeup flag observed by the next `poll()`. The mock has no bg task
-    /// / event pipeline, so the async ops are not wired (they return an
+    /// `MockConsumer`: `wakeup()` sets the shared wakeup flag observed by the
+    /// next `poll()`, and the commits with explicit offsets commit into the
+    /// mock's shared committed offsets as Java's `MockConsumer.commitAsync` /
+    /// `commitSync` do inside a callback. The mock has no bg task / event
+    /// pipeline, so the other async ops are not wired (they return an
     /// `unsupported_version` error — the mock test surface drives the
-    /// concrete `MockConsumer` directly). The other three fields are the
-    /// mock's own `closed`, `should_rebalance` and `last_poll_timeout`,
-    /// read by the C binding while an operation borrows the mock.
+    /// concrete `MockConsumer` directly); neither are the commits without
+    /// offsets, which Java's mock resolves from its `SubscriptionState`
+    /// (`commitSync(subscriptions.allConsumed())`), owned by the mock alone.
+    /// `closed`, `should_rebalance` and `last_poll_timeout` are the mock's
+    /// own, read by the C binding while an operation borrows the mock.
     Mock {
         flag: Arc<AtomicBool>,
         closed: Arc<AtomicBool>,
         should_rebalance: Arc<AtomicBool>,
         last_poll_timeout: Arc<Mutex<Option<Duration>>>,
+        /// The mock's committed offsets, which the handle's commits with
+        /// explicit offsets merge into as the mock's own do.
+        committed: Arc<Mutex<HashMap<TopicPartition, OffsetAndMetadata>>>,
     },
 }
 
@@ -433,24 +458,71 @@ impl ConsumerHandle {
     }
 
     /// [`Consumer::commit_sync_with_offsets`](crate::consumer::Consumer::commit_sync_with_offsets).
+    /// On a `MockConsumer` handle, commits into the mock's committed offsets
+    /// (Java's `MockConsumer.commitSync(Map)`).
     pub async fn commit_sync_with_offsets(
         &self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
     ) -> Result<(), Error> {
-        let state = self.async_state()?;
-        let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
-        state.commit_sync(Some(offsets), timeout).await
+        match &self.inner {
+            ConsumerHandleInner::Async(state) => {
+                let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
+                state.commit_sync(Some(offsets), timeout).await
+            },
+            ConsumerHandleInner::Mock { closed, committed, .. } => {
+                crate::consumer::mock_consumer::mock_commit_async(closed, committed, offsets, None).await
+            },
+        }
     }
 
-    /// [`Consumer::commit_async`](crate::consumer::Consumer::commit_async). Fire-and-forget commit of the
-    /// offsets the bg task has consumed.
+    /// [`Consumer::commit_async`](crate::consumer::Consumer::commit_async): commits the offsets the bg
+    /// task has consumed without waiting for the result. A later
+    /// `commit_sync` or `close` waits for it.
     pub async fn commit_async(&self) -> Result<(), Error> {
-        self.async_state()?.commit_async(None).await
+        self.async_state()?.commit_async(None, None).await
     }
 
-    /// `AsyncKafkaConsumer::commit_async_offsets`.
+    /// [`Consumer::commit_async_with_callback`](crate::consumer::Consumer::commit_async_with_callback):
+    /// as [`commit_async`](Self::commit_async), then `callback` runs on the
+    /// consumer's caller task, in commit order with the consumer's other
+    /// commit callbacks.
+    pub async fn commit_async_with_callback(
+        &self,
+        callback: Arc<dyn crate::consumer::OffsetCommitCallback>,
+    ) -> Result<(), Error> {
+        self.async_state()?.commit_async(None, Some(callback)).await
+    }
+
+    /// `AsyncKafkaConsumer::commit_async_offsets`: commits `offsets` without
+    /// waiting for the result or a callback.
+    /// On a `MockConsumer` handle, commits into the mock's committed offsets.
     pub async fn commit_async_offsets(&self, offsets: HashMap<TopicPartition, OffsetAndMetadata>) -> Result<(), Error> {
-        self.async_state()?.commit_async(Some(offsets)).await
+        match &self.inner {
+            ConsumerHandleInner::Async(state) => state.commit_async(Some(offsets), None).await,
+            ConsumerHandleInner::Mock { closed, committed, .. } => {
+                crate::consumer::mock_consumer::mock_commit_async(closed, committed, offsets, None).await
+            },
+        }
+    }
+
+    /// [`Consumer::commit_async_with_offsets_callback`](crate::consumer::Consumer::commit_async_with_offsets_callback):
+    /// commits `offsets`, then `callback` runs as for
+    /// [`commit_async_with_callback`](Self::commit_async_with_callback).
+    ///
+    /// On a `MockConsumer` handle, commits into the mock's committed offsets
+    /// and invokes `callback` inline before returning (Java's
+    /// `MockConsumer.commitAsync(Map, OffsetCommitCallback)`).
+    pub async fn commit_async_with_offsets_callback(
+        &self,
+        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+        callback: Arc<dyn crate::consumer::OffsetCommitCallback>,
+    ) -> Result<(), Error> {
+        match &self.inner {
+            ConsumerHandleInner::Async(state) => state.commit_async(Some(offsets), Some(callback)).await,
+            ConsumerHandleInner::Mock { closed, committed, .. } => {
+                crate::consumer::mock_consumer::mock_commit_async(closed, committed, offsets, Some(callback)).await
+            },
+        }
     }
 
     /// Returns the shared async state, or an error if this handle was
@@ -473,15 +545,17 @@ impl ConsumerHandle {
     }
 
     /// Builds a mock-consumer handle from its shared wakeup flag and the
-    /// mock's shared `closed`, `should_rebalance` and `last_poll_timeout`.
+    /// mock's shared `closed`, `should_rebalance`, `last_poll_timeout` and
+    /// committed offsets.
     pub(crate) fn for_mock(
         flag: Arc<AtomicBool>,
         closed: Arc<AtomicBool>,
         should_rebalance: Arc<AtomicBool>,
         last_poll_timeout: Arc<Mutex<Option<Duration>>>,
+        committed: Arc<Mutex<HashMap<TopicPartition, OffsetAndMetadata>>>,
     ) -> Self {
         Self {
-            inner: ConsumerHandleInner::Mock { flag, closed, should_rebalance, last_poll_timeout },
+            inner: ConsumerHandleInner::Mock { flag, closed, should_rebalance, last_poll_timeout, committed },
         }
     }
 }
@@ -843,47 +917,55 @@ impl AsyncConsumerHandleState {
         }
     }
 
-    /// Reentrant-safe [`AsyncKafkaConsumer::commit_sync`].
+    /// Reentrant-safe [`AsyncKafkaConsumer::commit_sync`]: Java's
+    /// `commitSync(Optional<Map>, Duration)` (`AsyncKafkaConsumer.java:1794-1812`)
+    /// called back from inside a callback.
     ///
-    /// Deviation from `AsyncKafkaConsumer::commit_sync`: the handle does
-    /// NOT own the `OffsetCommitCallbackInvoker`, the interceptor chain,
-    /// or `last_pending_async_commit`, so it does not (a) drain pending
-    /// async-commit callbacks, (b) run `interceptors.onCommit(...)`. It
-    /// submits a `CommitSync` event and awaits the committed offsets. The
-    /// interceptor `onCommit` hook fires from the owning consumer's own
-    /// `commit_*` path, not from a reentrant handle call — matching the
-    /// fact that a listener flushing offsets via `commit_sync` is
-    /// concerned with durability, not with the interceptor side-channel.
+    /// Runs the owning consumer's commit path through the shared
+    /// [`AsyncCommitState`]: it runs the queued commit callbacks, waits for
+    /// the consumer's earlier async commits (made through the consumer or a
+    /// handle) and runs their callbacks, fires `interceptors.onCommit` and
+    /// records the `commit-sync` metric. Only the waits differ: they do not
+    /// process background events, which the consumer delivering this
+    /// callback already does.
     async fn commit_sync(
         &self,
         offsets: Option<HashMap<TopicPartition, OffsetAndMetadata>>,
         timeout: Duration,
     ) -> Result<(), Error> {
-        // Empty-offsets short-circuit (Java's `completedFuture(null)`).
-        if let Some(map) = &offsets
-            && map.is_empty()
-        {
-            return Ok(());
-        }
+        // Java: `long commitStart = time.nanoseconds()`, recorded in `finally`.
+        let commit_start_ns = self.time.nanoseconds();
+        let result = self.commit_sync_inner(offsets, timeout).await;
+        self.kafka_consumer_metrics
+            .record_commit_sync(self.time.nanoseconds() - commit_start_ns);
+        result
+    }
+
+    /// The `try`-body of [`Self::commit_sync`], as
+    /// [`AsyncKafkaConsumer::commit_sync_inner`] is the consumer's.
+    async fn commit_sync_inner(
+        &self,
+        offsets: Option<HashMap<TopicPartition, OffsetAndMetadata>>,
+        timeout: Duration,
+    ) -> Result<(), Error> {
         let now_ms = self.time.milliseconds();
         let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
-        let (handle, receiver, _erased) =
-            CompletableEvent::make_completable_event::<HashMap<TopicPartition, OffsetAndMetadata>>(deadline_ms);
-        let (offsets_ready_handle, offsets_ready_rx, _erased_or) =
-            CompletableEvent::make_completable_event::<()>(deadline_ms);
-        self.application_event_handler.add(
-            ApplicationEvent::CommitSync { handle, offsets_ready: offsets_ready_handle, offsets },
-            now_ms,
-        )?;
-        // Wait until the bg task has resolved which offsets to commit.
-        self.await_completion::<()>(
-            offsets_ready_rx,
-            deadline_ms,
-            "Timeout expired while waiting for commit offsets to be ready",
-            true,
-        )
-        .await?;
-        // Wait for the commit RPC result.
+        let receiver = self
+            .commit(CommitEventKind::Sync { offsets, deadline_ms }, /* enable_wakeup = */ true)
+            .await?
+            .unwrap_or_else(completed_commit_result);
+
+        // Java: `awaitPendingAsyncCommitsAndExecuteCommitCallbacks(requestTimer, true)`.
+        self.commit_state
+            .await_pending_async_commits_and_execute_commit_callbacks(
+                &self.wakeup_trigger,
+                self.time.as_ref(),
+                deadline_ms,
+                true,
+            )
+            .await?;
+
+        // Java: `ConsumerUtils.getResult(commitFuture, requestTimer)`.
         //
         // RECORDED DEVIATION (definition-of-done.md §7): Java's
         // `commitSync(Duration)` attaches no message of its own —
@@ -894,59 +976,76 @@ impl AsyncConsumerHandleState {
         // error class, code and retriable ancestry are the ones Java produces,
         // and it deliberately does NOT format the offsets map. See the same
         // note on `AsyncKafkaConsumer::commit_sync_with_offsets_timeout`.
-        self.await_completion::<HashMap<TopicPartition, OffsetAndMetadata>>(
-            receiver,
-            deadline_ms,
-            format!(
-                "Timeout of {}ms expired before successfully committing offsets",
-                timeout.as_millis()
-            ),
-            true,
-        )
-        .await
-        .map(|_committed| ())
+        let committed = self
+            .await_completion::<HashMap<TopicPartition, OffsetAndMetadata>>(
+                receiver,
+                deadline_ms,
+                format!(
+                    "Timeout of {}ms expired before successfully committing offsets",
+                    timeout.as_millis()
+                ),
+                true,
+            )
+            .await?;
+
+        // Java: `interceptors.onCommit(committedOffsets)`.
+        self.commit_state.on_commit(&committed);
+        Ok(())
     }
 
-    /// Reentrant-safe [`AsyncKafkaConsumer::commit_async`]. Fire-and-forget:
-    /// submits a `CommitAsync` event and spawns a detached task to consume
-    /// the result (logging failures). The handle cannot store
-    /// `last_pending_async_commit` or run the callback invoker, so user
-    /// `OffsetCommitCallback`s are NOT supported on the handle — the
-    /// no-callback overload mirrors Java's `commitAsync()`.
-    async fn commit_async(&self, offsets: Option<HashMap<TopicPartition, OffsetAndMetadata>>) -> Result<(), Error> {
-        if let Some(map) = &offsets
-            && map.is_empty()
-        {
-            return Ok(());
-        }
-        let now_ms = self.time.milliseconds();
-        let deadline_ms = self.default_api_timeout_deadline_ms();
-        let (handle, receiver, _erased) =
-            CompletableEvent::make_completable_event::<HashMap<TopicPartition, OffsetAndMetadata>>(deadline_ms);
-        let (offsets_ready_handle, offsets_ready_rx, _erased_or) =
-            CompletableEvent::make_completable_event::<()>(deadline_ms);
-        self.application_event_handler.add(
-            ApplicationEvent::CommitAsync { handle, offsets_ready: offsets_ready_handle, offsets },
-            now_ms,
-        )?;
-        // Java's commitAsync is non-blocking and never throws Wakeup; wait
-        // only for offsets-ready (so the commit window is pinned) with
-        // wakeup disabled, then detach.
+    /// Reentrant-safe [`AsyncKafkaConsumer::commit_async_with_offsets_callback`]
+    /// and its siblings: Java's
+    /// `commitAsync(Optional<Map>, OffsetCommitCallback)`
+    /// (`AsyncKafkaConsumer.java:1103-1124`) called back from inside a
+    /// callback.
+    ///
+    /// The commit becomes the consumer's last pending async commit, which a
+    /// later `commit_sync` or `close` waits for, through the consumer or a
+    /// handle. Its interceptor `onCommit` and its `callback` are queued in
+    /// commit order on the consumer's callback invoker, which runs them as
+    /// it runs the consumer's own.
+    async fn commit_async(
+        &self,
+        offsets: Option<HashMap<TopicPartition, OffsetAndMetadata>>,
+        callback: Option<Arc<dyn crate::consumer::OffsetCommitCallback>>,
+    ) -> Result<(), Error> {
+        // Java's commitAsync is non-blocking and never throws Wakeup: the
+        // offsets-ready wait runs with wakeup disabled.
+        let receiver = self
+            .commit(CommitEventKind::Async { offsets }, /* enable_wakeup = */ false)
+            .await?;
+        self.commit_state.register_async_commit(receiver, callback);
+        Ok(())
+    }
+
+    /// Java's `commit(CommitEvent)` (`AsyncKafkaConsumer.java:1126-1140`) for
+    /// a handle: [`AsyncCommitState::submit_commit`], then the offsets-ready
+    /// wait, bounded by `default.api.timeout.ms` as the consumer's.
+    async fn commit(
+        &self,
+        commit_event: CommitEventKind,
+        enable_wakeup: bool,
+    ) -> Result<Option<CommitResultReceiver>, Error> {
+        let Some((offsets_ready_rx, receiver)) = self
+            .commit_state
+            .submit_commit(
+                self.group_id.as_deref(),
+                commit_event,
+                &self.application_event_handler,
+                self.time.as_ref(),
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
         self.await_completion::<()>(
             offsets_ready_rx,
-            deadline_ms,
-            "Timeout expired while waiting for commit offsets to be ready",
-            false,
+            self.default_api_timeout_deadline_ms(),
+            OFFSETS_READY_TIMEOUT_MSG,
+            enable_wakeup,
         )
         .await?;
-        tokio::spawn(async move {
-            match receiver.await {
-                Ok(Ok(_committed)) => {},
-                Ok(Err(err)) => log::error!("Offset commit (via ConsumerHandle) failed: {err}"),
-                Err(_recv_err) => log::error!("commit_async (via ConsumerHandle) receiver dropped without completion"),
-            }
-        });
-        Ok(())
+        Ok(Some(receiver))
     }
 
     /// The shared wakeup-aware, no-drain await core (see
@@ -1407,39 +1506,11 @@ where
     config: ConsumerConfig,
     /// Time source used for `current_time_ms` arguments to events.
     time: Arc<dyn Time>,
-    /// Java: `private CompletableFuture<...> lastPendingAsyncCommit`.
-    ///
-    /// Tracks the most-recently-submitted async commit so that
-    /// `commit_sync` and `close` can wait for in-flight async commits to
-    /// complete before continuing (mirrors Java's
-    /// `awaitPendingAsyncCommitsAndExecuteCommitCallbacks`). The wrapped
-    /// receiver resolves to `()` only after the interceptor / callback
-    /// invocations of this commit (success OR failure) and of every earlier
-    /// async commit have been enqueued — the actual commit result is
-    /// delivered via the registered [`crate::consumer::OffsetCommitCallback`],
-    /// not via this receiver.
-    ///
-    /// Exception: after an empty-offsets `commit_async` this is an
-    /// already-completed receiver covering only that commit, as Java's
-    /// `completedFuture(null)` replaces `lastPendingAsyncCommit`. The earlier
-    /// in-flight commits it displaced are kept in
-    /// [`async_commit_ordering_tail`](Self::async_commit_ordering_tail).
-    last_pending_async_commit: Option<tokio::sync::oneshot::Receiver<()>>,
-    /// Rust-specific, no Java counterpart. The in-flight async commit that an
-    /// empty-offsets `commit_async` displaced from
-    /// [`last_pending_async_commit`](Self::last_pending_async_commit), which
-    /// the next non-empty `commit_async` chains behind instead.
-    ///
-    /// Needed because Rust enqueues each async commit's callbacks from its own
-    /// spawned task, which the runtime may schedule in any order, so each
-    /// continuation awaits its predecessor to keep callbacks in commit order
-    /// (`KafkaConsumer.java:1122-1123`). Java needs no equivalent: its
-    /// `whenComplete` actions run on the single background thread in
-    /// completion order. Without this, a non-empty commit issued after an
-    /// empty one would chain behind the already-completed empty commit, and
-    /// its callbacks could be enqueued before those of an earlier, still
-    /// in-flight commit.
-    async_commit_ordering_tail: Option<tokio::sync::oneshot::Receiver<()>>,
+    /// The commit bookkeeping shared with every [`ConsumerHandle`]: Java's
+    /// `lastPendingAsyncCommit`, plus type-erased views of
+    /// `offset_commit_callback_invoker` and `interceptors` (see
+    /// [`AsyncCommitState`]).
+    commit_state: Arc<AsyncCommitState>,
 }
 
 /// Tracks the state of the currently-inflight `AsyncPoll` event.
@@ -1491,6 +1562,399 @@ impl CommitEventKind {
             Self::Async { .. } => i64::MAX,
             Self::Sync { deadline_ms, .. } => *deadline_ms,
         }
+    }
+}
+
+/// The consumer's commit-sync `interceptors.onCommit`, shared with its handles.
+type OnCommitHook = Arc<dyn Fn(&HashMap<TopicPartition, OffsetAndMetadata>) + Send + Sync>;
+
+/// The result receiver of a submitted commit event: resolves with the
+/// committed offsets, Java's `CommitEvent.future()`.
+type CommitResultReceiver = tokio::sync::oneshot::Receiver<Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>>;
+
+/// The offsets-ready receiver of a submitted commit event, Java's
+/// `CommitEvent.offsetsReady()`.
+type OffsetsReadyReceiver = tokio::sync::oneshot::Receiver<Result<(), Error>>;
+
+/// Timeout message of the offsets-ready wait in Java's `commit(CommitEvent)`,
+/// shared by the owning consumer and its [`ConsumerHandle`].
+const OFFSETS_READY_TIMEOUT_MSG: &str = "Timed out waiting for offsetsReady on commit event";
+
+/// Timeout message of the wait for the last pending async commit in Java's
+/// `awaitPendingAsyncCommitsAndExecuteCommitCallbacks`.
+const PENDING_ASYNC_COMMIT_TIMEOUT_MSG: &str = "Timed out waiting for last pending async commit to complete";
+
+/// Translates Java's `throwIfGroupIdNotDefined()`
+/// (`AsyncKafkaConsumer.java:1192-1197`) over a borrowed `group.id`, so the
+/// owning consumer and its [`ConsumerHandle`] run the same check.
+fn return_error_if_group_id_not_defined(group_id: Option<&str>) -> Result<(), Error> {
+    if group_id.map(str::is_empty).unwrap_or(true) {
+        return Err(Error::invalid_group_id(
+            "To use the group management or offset commit APIs, you must provide a valid \
+             group.id in the consumer configuration.",
+        ));
+    }
+    Ok(())
+}
+
+/// An already-completed commit result, Java's `completedFuture(null)` for
+/// empty explicit offsets, read by `commitSync` as no committed offsets.
+fn completed_commit_result() -> CommitResultReceiver {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let _ = tx.send(Ok(HashMap::new()));
+    rx
+}
+
+/// A pending async commit: done once the interceptor and user-callback
+/// invocations of its commit, and of every earlier async commit, have been
+/// enqueued on the callback invoker.
+///
+/// A `watch` receiver rather than a `oneshot`, so the owning consumer and
+/// every [`ConsumerHandle`] can wait for the same commit without taking it
+/// from the shared slot: Java's `lastPendingAsyncCommit` is a
+/// `CompletableFuture`, which any number of callers can wait for. A dropped
+/// sender counts as done, as Java's `whenComplete` wrapper completes on
+/// either outcome.
+#[derive(Clone)]
+struct PendingAsyncCommit(tokio::sync::watch::Receiver<bool>);
+
+impl PendingAsyncCommit {
+    /// An incomplete pending commit and the sender that completes it.
+    fn incomplete() -> (tokio::sync::watch::Sender<bool>, Self) {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        (tx, Self(rx))
+    }
+
+    /// An already-completed pending commit, Java's `completedFuture(null)`.
+    fn completed() -> Self {
+        let (_tx, rx) = tokio::sync::watch::channel(true);
+        Self(rx)
+    }
+
+    /// Waits until the commit is done (or its sender is dropped).
+    async fn wait(&mut self) {
+        let _ = self.0.wait_for(|done| *done).await;
+    }
+
+    /// `true` when both refer to the same pending commit.
+    fn is_same(&self, other: &Self) -> bool {
+        self.0.same_channel(&other.0)
+    }
+}
+
+/// The two pending-commit slots of [`AsyncCommitState`].
+#[derive(Default)]
+struct PendingAsyncCommits {
+    /// Java: `private CompletableFuture<...> lastPendingAsyncCommit`.
+    ///
+    /// Tracks the most-recently-submitted async commit so that
+    /// `commit_sync` and `close` can wait for in-flight async commits to
+    /// complete before continuing (mirrors Java's
+    /// `awaitPendingAsyncCommitsAndExecuteCommitCallbacks`). It is done only
+    /// after the interceptor / callback invocations of this commit (success
+    /// OR failure) and of every earlier async commit have been enqueued —
+    /// the actual commit result is delivered via the registered
+    /// [`crate::consumer::OffsetCommitCallback`], not via this slot.
+    ///
+    /// Exception: after an empty-offsets `commit_async` this is an
+    /// already-completed commit covering only that commit, as Java's
+    /// `completedFuture(null)` replaces `lastPendingAsyncCommit`. The earlier
+    /// in-flight commits it displaced are kept in
+    /// [`ordering_tail`](Self::ordering_tail).
+    last: Option<PendingAsyncCommit>,
+    /// Rust-specific, no Java counterpart. The in-flight async commit that an
+    /// empty-offsets `commit_async` displaced from [`last`](Self::last), which
+    /// the next non-empty `commit_async` chains behind instead.
+    ///
+    /// Needed because Rust enqueues each async commit's callbacks from its own
+    /// spawned task, which the runtime may schedule in any order, so each
+    /// continuation awaits its predecessor to keep callbacks in commit order
+    /// (`KafkaConsumer.java:1122-1123`). Java needs no equivalent: its
+    /// `whenComplete` actions run on the single background thread in
+    /// completion order. Without this, a non-empty commit issued after an
+    /// empty one would chain behind the already-completed empty commit, and
+    /// its callbacks could be enqueued before those of an earlier, still
+    /// in-flight commit.
+    ordering_tail: Option<PendingAsyncCommit>,
+}
+
+/// The commit bookkeeping an [`AsyncKafkaConsumer`] shares with every
+/// [`ConsumerHandle`] it hands out: the callback invoker, the interceptor
+/// `onCommit` hook and the pending async commits.
+///
+/// Rust-only (DoD #7). In Java these are fields of `AsyncKafkaConsumer`
+/// (`offsetCommitCallbackInvoker`, `interceptors`, `lastPendingAsyncCommit`),
+/// and a callback that commits reaches them by calling back into the
+/// `consumer` it captured. A Rust callback calls back through a
+/// `ConsumerHandle`, which cannot borrow the consumer (it is `&mut`-borrowed
+/// by the call that runs the callback) and is not generic over `<K, V>`. So
+/// the fields move into this `Arc`-shared struct, type-erased where they
+/// mention `K` / `V`, and both the consumer and its handles run the commit
+/// path through its methods: one implementation of `commit`, the `commitAsync`
+/// continuation and `awaitPendingAsyncCommitsAndExecuteCommitCallbacks`.
+pub(crate) struct AsyncCommitState {
+    /// The consumer's `OffsetCommitCallbackInvoker`.
+    invoker: Arc<dyn OffsetCommitCallbackQueue>,
+    /// Java's `interceptors.onCommit(committedOffsets)` in `commitSync`, over
+    /// the consumer's interceptor chain.
+    on_commit: OnCommitHook,
+    /// Java's `lastPendingAsyncCommit` plus the Rust ordering tail. Locked
+    /// only to read or replace a slot, never across an `.await`.
+    pending: Mutex<PendingAsyncCommits>,
+}
+
+impl AsyncCommitState {
+    fn new(invoker: Arc<dyn OffsetCommitCallbackQueue>, on_commit: OnCommitHook) -> Self {
+        Self { invoker, on_commit, pending: Mutex::new(PendingAsyncCommits::default()) }
+    }
+
+    fn lock_pending(&self) -> std::sync::MutexGuard<'_, PendingAsyncCommits> {
+        self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Java's `offsetCommitCallbackInvoker.executeCallbacks()`.
+    async fn invoke_pending_callbacks(&self) {
+        self.invoker.invoke_pending_callbacks().await;
+    }
+
+    /// Java's `interceptors.onCommit(committedOffsets)`.
+    fn on_commit(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>) {
+        (self.on_commit)(offsets);
+    }
+
+    /// Translates Java's
+    /// `private CompletableFuture<Map<TopicPartition, OffsetAndMetadata>> commit(CommitEvent)`
+    /// (`AsyncKafkaConsumer.java:1126-1140`) up to the offsets-ready wait,
+    /// which the caller runs: the owning consumer processes background
+    /// events while it waits, a handle (already running inside a callback
+    /// that consumer delivers) does not.
+    ///
+    /// Checks `group.id`, runs the queued commit callbacks, and returns
+    /// `None` for empty explicit offsets (Java's `completedFuture(null)`);
+    /// otherwise submits the event and returns its offsets-ready and result
+    /// receivers.
+    async fn submit_commit(
+        &self,
+        group_id: Option<&str>,
+        commit_event: CommitEventKind,
+        application_event_handler: &ApplicationEventHandler,
+        time: &dyn Time,
+    ) -> Result<Option<(OffsetsReadyReceiver, CommitResultReceiver)>, Error> {
+        return_error_if_group_id_not_defined(group_id)?;
+        self.invoke_pending_callbacks().await;
+
+        // Java's `if (event.offsets().isPresent() && event.offsets().get().isEmpty())`
+        // short-circuits with `completedFuture(null)`.
+        if let Some(map) = commit_event.offsets()
+            && map.is_empty()
+        {
+            return Ok(None);
+        }
+
+        let now_ms = time.milliseconds();
+        let deadline_ms = commit_event.deadline_ms();
+        let (handle, receiver, _erased) =
+            CompletableEvent::make_completable_event::<HashMap<TopicPartition, OffsetAndMetadata>>(deadline_ms);
+        let (offsets_ready_handle, offsets_ready_rx, _erased_or) =
+            CompletableEvent::make_completable_event::<()>(deadline_ms);
+
+        // Build and enqueue the matching event variant.
+        let event = match commit_event {
+            CommitEventKind::Async { offsets } => {
+                ApplicationEvent::CommitAsync { handle, offsets_ready: offsets_ready_handle, offsets }
+            },
+            CommitEventKind::Sync { offsets, .. } => {
+                ApplicationEvent::CommitSync { handle, offsets_ready: offsets_ready_handle, offsets }
+            },
+        };
+        application_event_handler.add(event, now_ms)?;
+        Ok(Some((offsets_ready_rx, receiver)))
+    }
+
+    /// Translates Java's `lastPendingAsyncCommit = commit(asyncCommitEvent).whenComplete(...)`
+    /// in `commitAsync` (`AsyncKafkaConsumer.java:1103-1124`), after
+    /// `commit(...)` returned `receiver` (`None` for the empty explicit
+    /// offsets Java completes at once).
+    fn register_async_commit(
+        &self,
+        receiver: Option<CommitResultReceiver>,
+        callback: Option<Arc<dyn crate::consumer::OffsetCommitCallback>>,
+    ) {
+        let Some(receiver) = receiver else {
+            // Empty explicit offsets: Java's `commit()` returns an
+            // already-completed future (`AsyncKafkaConsumer.java:1129-1131`),
+            // so `whenComplete` runs inline on the calling thread and the
+            // result replaces `lastPendingAsyncCommit` (`:1106`). Enqueue the
+            // callbacks here and store an already-completed pending commit,
+            // without chaining behind earlier in-flight commits: a later
+            // `commitSync` / `close` does not wait for them, and they still
+            // enqueue their own callbacks when they complete.
+            //
+            // The displaced in-flight commit moves to `ordering_tail` rather
+            // than being dropped, so the next non-empty commit still chains
+            // behind it. If the tail is already set, an earlier empty commit
+            // has displaced it and the pending commit is an already-completed
+            // one.
+            self.invoker.enqueue_interceptor_invocation(HashMap::new());
+            if let Some(cb) = callback {
+                self.invoker.enqueue_user_callback_invocation(cb, HashMap::new(), None);
+            }
+            let mut pending = self.lock_pending();
+            if pending.ordering_tail.is_none() {
+                pending.ordering_tail = pending.last.take();
+            }
+            pending.last = Some(PendingAsyncCommit::completed());
+            return;
+        };
+
+        // Java: `lastPendingAsyncCommit = commit(asyncCommitEvent).whenComplete(...)`
+        // — the resulting future is stored so a later `commitSync` / `close`
+        // can wait for it to complete. The Rust analog spawns the
+        // continuation, which invokes the callback chain and then completes
+        // the pending commit.
+        //
+        // Each continuation is a separate task that the runtime may schedule
+        // in any order, so it awaits its predecessor before enqueueing. Hence
+        // callbacks are enqueued in commit order, as the `commitAsync` javadoc
+        // requires (`KafkaConsumer.java:1122-1123`), and the pending commit
+        // completing implies every earlier callback is enqueued, which is why
+        // `commit_sync` and `close` await only the most recent commit. The
+        // predecessor is the commit an empty-offsets commit displaced, if any
+        // (the empty commit itself has already enqueued its callbacks).
+        let (pending_tx, pending_commit) = PendingAsyncCommit::incomplete();
+        let previous_pending = {
+            let mut pending = self.lock_pending();
+            let previous = pending.ordering_tail.take().or_else(|| pending.last.take());
+            pending.last = Some(pending_commit);
+            previous
+        };
+        let invoker = Arc::clone(&self.invoker);
+        tokio::spawn(async move {
+            let result = receiver.await;
+            if let Some(mut previous) = previous_pending {
+                // Done or dropped: the predecessor has enqueued its callbacks,
+                // or its task is gone. Proceed in either case.
+                previous.wait().await;
+            }
+            match result {
+                Ok(Ok(committed)) => {
+                    // Java: `if (throwable == null)
+                    //          offsetCommitCallbackInvoker.enqueueInterceptorInvocation(committedOffsets)`.
+                    invoker.enqueue_interceptor_invocation(committed.clone());
+                    if let Some(cb) = callback {
+                        invoker.enqueue_user_callback_invocation(cb, committed, None);
+                    }
+                },
+                Ok(Err(err)) => {
+                    if let Some(cb) = callback {
+                        invoker.enqueue_user_callback_invocation(cb, HashMap::new(), Some(err.clone()));
+                    } else {
+                        log::error!("Offset commit failed: {err}");
+                    }
+                },
+                Err(_recv_err) => {
+                    log::error!("commit_async receiver dropped without completion");
+                },
+            }
+            pending_tx.send_replace(true);
+        });
+    }
+
+    /// Translates Java's
+    /// `private void awaitPendingAsyncCommitsAndExecuteCommitCallbacks(Timer timer, boolean enableWakeup)`
+    /// (`AsyncKafkaConsumer.java:1814-1836`).
+    ///
+    /// If there is a pending async commit, await it (bounded by the
+    /// deadline) and then drain the callback invoker queue. The
+    /// `enable_wakeup` flag mirrors Java's
+    /// `wakeupTrigger.setActiveTask(futureToAwait)` — `true` makes a
+    /// concurrent `wakeup()` interrupt the wait.
+    ///
+    /// The wait is a plain deadline-bounded await on the pending commit — it
+    /// does NOT drain or process background events. Java only waits on the
+    /// commit future via `ConsumerUtils.getResult(futureToAwait, timer)` and
+    /// never calls `processBackgroundEvents`, so it never invokes
+    /// rebalance-listener callbacks here. Routing this wait through
+    /// `process_background_events_until` (which invokes pending
+    /// `RebalanceListenerCallbackNeeded` callbacks) is NOT faithful: a
+    /// failing rebalance listener would propagate its error out of
+    /// `close()`, which Java never does.
+    async fn await_pending_async_commits_and_execute_commit_callbacks(
+        &self,
+        wakeup_trigger: &WakeupTrigger,
+        time: &dyn Time,
+        deadline_ms: i64,
+        enable_wakeup: bool,
+    ) -> Result<(), Error> {
+        // Java clears `lastPendingAsyncCommit` only *after*
+        // `getResult(futureToAwait, timer)` returns normally; its `finally`
+        // deliberately does NOT clear it, so a timeout or a wakeup leaves the
+        // pending commit in place and a later `commit_sync` still waits for
+        // it. Waiting on a clone leaves the slot untouched on every exit; the
+        // success exit clears it unless a newer commit replaced it meanwhile.
+        let awaited = self.lock_pending().last.clone();
+        if let Some(mut pending_commit) = awaited.clone() {
+            // A deadline-bounded await in short `tokio::time::timeout` slices,
+            // so the deadline is driven by the mock-clock-safe `time`.
+            loop {
+                // §11: observe a pending wakeup at the top of each iteration
+                // when wakeups are enabled (Java's
+                // `wakeupTrigger.setActiveTask(futureToAwait)`).
+                if enable_wakeup && let Err(err) = wakeup_trigger.maybe_trigger_wakeup() {
+                    wakeup_trigger.rotate();
+                    return Err(err);
+                }
+
+                let remaining = deadline_ms.saturating_sub(time.milliseconds()).max(0);
+                if remaining <= 0 {
+                    return Err(Error::timeout(PENDING_ASYNC_COMMIT_TIMEOUT_MSG.to_string()));
+                }
+                let wait = std::cmp::min(remaining, 100) as u64;
+
+                // §11: race the wait against the wakeup token's cancellation so
+                // `wakeup()` from another task interrupts it immediately.
+                let wait_fut = pending_commit.wait();
+                if enable_wakeup {
+                    let tok = wakeup_trigger.current_token();
+                    tokio::select! {
+                        biased;
+                        _ = tok.cancelled() => {
+                            // Loop top surfaces Error::Wakeup via
+                            // maybe_trigger_wakeup + rotate.
+                        },
+                        res = tokio::time::timeout(Duration::from_millis(wait), wait_fut) => {
+                            if res.is_ok() {
+                                break;
+                            }
+                        },
+                    }
+                } else if tokio::time::timeout(Duration::from_millis(wait), wait_fut).await.is_ok() {
+                    break;
+                }
+            }
+            // Java: `lastPendingAsyncCommit = null`.
+            let mut pending = self.lock_pending();
+            if let (Some(last), Some(awaited)) = (pending.last.as_ref(), awaited.as_ref())
+                && last.is_same(awaited)
+            {
+                pending.last = None;
+            }
+        }
+        // Java: `offsetCommitCallbackInvoker.executeCallbacks()`.
+        self.invoke_pending_callbacks().await;
+        Ok(())
+    }
+
+    /// Whether an async commit is pending, for tests.
+    #[cfg(test)]
+    fn has_last_pending_async_commit(&self) -> bool {
+        self.lock_pending().last.is_some()
+    }
+
+    /// The last pending async commit, for tests.
+    #[cfg(test)]
+    fn last_pending_async_commit(&self) -> Option<PendingAsyncCommit> {
+        self.lock_pending().last.clone()
     }
 }
 
@@ -2753,6 +3217,16 @@ where
         let auto_commit_enabled = components.config.enable_auto_commit();
         let default_api_timeout_ms = components.config.default_api_timeout_ms as i64;
         let retry_backoff_ms = components.config.retry_backoff_ms();
+        let interceptors_for_commit = Arc::clone(&components.interceptors);
+        let commit_state = Arc::new(AsyncCommitState::new(
+            Arc::clone(&components.offset_commit_callback_invoker) as Arc<dyn OffsetCommitCallbackQueue>,
+            Arc::new(move |offsets: &HashMap<TopicPartition, OffsetAndMetadata>| {
+                interceptors_for_commit
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .on_commit(offsets);
+            }),
+        ));
 
         // The `state_notifier`, `group_metadata`, and
         // `group_assignment_snapshot` slots are constructed by the caller
@@ -2788,7 +3262,7 @@ where
             state_notifier: components.state_notifier,
             positions_validator: components.positions_validator,
             rebalance_listener_invoker: components.rebalance_listener_invoker,
-            offset_commit_callback_invoker: components.offset_commit_callback_invoker,
+            offset_commit_callback_invoker: Arc::clone(&components.offset_commit_callback_invoker),
             deserializers: components.deserializers,
             interceptors: components.interceptors,
             auto_commit_enabled,
@@ -2800,8 +3274,7 @@ where
             inflight_poll: None,
             config: components.config,
             time: components.time,
-            last_pending_async_commit: None,
-            async_commit_ordering_tail: None,
+            commit_state,
         }
     }
 
@@ -3016,6 +3489,9 @@ where
             time: Arc::clone(&self.time),
             default_api_timeout_ms: self.default_api_timeout_ms,
             metrics: Arc::clone(&self.metrics),
+            commit_state: Arc::clone(&self.commit_state),
+            group_id: self.group_id.clone(),
+            kafka_consumer_metrics: Arc::clone(&self.kafka_consumer_metrics),
         })
     }
 
@@ -3070,13 +3546,7 @@ where
     /// variant carrying `Errors::InvalidGroupId` so user code can
     /// dispatch on the error code.
     fn return_error_if_group_id_not_defined(&self) -> Result<(), Error> {
-        if self.group_id.as_deref().map(str::is_empty).unwrap_or(true) {
-            return Err(Error::invalid_group_id(
-                "To use the group management or offset commit APIs, you must provide a valid \
-                 group.id in the consumer configuration.",
-            ));
-        }
-        Ok(())
+        return_error_if_group_id_not_defined(self.group_id.as_deref())
     }
 
     /// Translates Java's `acquireAndEnsureOpen()` — the runtime
@@ -4534,57 +5004,37 @@ where
     // The receiver from the underlying `CommitAsync` / `CommitSync` event
     // resolves with the committed-offsets map (or an error). Java uses a
     // single `CompletableFuture<Map>` for both arms; Rust uses two: a
-    // public `oneshot::Receiver<()>` exposed for app-side completion
-    // ordering (`last_pending_async_commit`) and the typed handle
-    // returned to the caller.
+    // `PendingAsyncCommit` for app-side completion ordering (Java's
+    // `lastPendingAsyncCommit`, in the `AsyncCommitState` shared with every
+    // `ConsumerHandle`) and the typed receiver returned to the caller.
 
     /// Translates Java's
     /// `private CompletableFuture<Map<TopicPartition, OffsetAndMetadata>> commit(CommitEvent)`
-    /// (`AsyncKafkaConsumer.java:1038-1052`).
+    /// (`AsyncKafkaConsumer.java:1126-1140`), shared with every
+    /// [`ConsumerHandle`] through [`AsyncCommitState::submit_commit`]; this
+    /// side adds the offsets-ready wait, which processes background events.
     ///
-    /// Returns the typed receiver from the commit event's handle. Callers
+    /// Returns the typed receiver from the commit event's handle, or `None`
+    /// for empty explicit offsets (Java's `completedFuture(null)`). Callers
     /// either await it (sync path) or attach a spawned-task continuation
-    /// (async-with-callback path).
-    ///
-    /// On the empty-offsets early-exit Java returns
-    /// `CompletableFuture.completedFuture(null)`; the Rust analog is a
-    /// pre-completed `oneshot` channel resolving to `Ok(HashMap::new())`.
+    /// (async path).
     async fn commit_inner(
         &mut self,
         commit_event: CommitEventKind,
         enable_wakeup: bool,
-    ) -> Result<tokio::sync::oneshot::Receiver<Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>>, Error> {
-        self.return_error_if_group_id_not_defined()?;
-        self.offset_commit_callback_invoker.invoke_pending_callbacks().await;
-
-        // Java's `if (event.offsets().isPresent() && event.offsets().get().isEmpty())`
-        // short-circuits with `completedFuture(null)`. Mirror by sending
-        // `Ok(empty)` on a pre-completed oneshot.
-        if let Some(map) = commit_event.offsets()
-            && map.is_empty()
-        {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            let _ = tx.send(Ok(HashMap::new()));
-            return Ok(rx);
-        }
-
-        let now_ms = self.time.milliseconds();
-        let deadline_ms = commit_event.deadline_ms();
-        let (handle, receiver, _erased) =
-            CompletableEvent::make_completable_event::<HashMap<TopicPartition, OffsetAndMetadata>>(deadline_ms);
-        let (offsets_ready_handle, offsets_ready_rx, _erased_or) =
-            CompletableEvent::make_completable_event::<()>(deadline_ms);
-
-        // Build and enqueue the matching event variant.
-        let event = match commit_event {
-            CommitEventKind::Async { offsets } => {
-                ApplicationEvent::CommitAsync { handle, offsets_ready: offsets_ready_handle, offsets }
-            },
-            CommitEventKind::Sync { offsets, .. } => {
-                ApplicationEvent::CommitSync { handle, offsets_ready: offsets_ready_handle, offsets }
-            },
+    ) -> Result<Option<CommitResultReceiver>, Error> {
+        let Some((offsets_ready_rx, receiver)) = self
+            .commit_state
+            .submit_commit(
+                self.group_id.as_deref(),
+                commit_event,
+                &self.application_event_handler,
+                self.time.as_ref(),
+            )
+            .await?
+        else {
+            return Ok(None);
         };
-        self.application_event_handler.add(event, now_ms)?;
 
         // Java: `ConsumerUtils.getResult(commitEvent.offsetsReady(), defaultApiTimeoutMs.toMillis())`.
         // This blocks until the bg task has resolved which offsets to
@@ -4610,12 +5060,12 @@ where
             offsets_ready_rx,
             or_deadline_ms,
             |_| false,
-            "Timed out waiting for offsetsReady on commit event",
+            OFFSETS_READY_TIMEOUT_MSG,
             enable_wakeup,
         )
         .await?;
 
-        Ok(receiver)
+        Ok(Some(receiver))
     }
 
     /// Translates Java's `void commitSync()` (uses default API timeout).
@@ -4698,11 +5148,9 @@ where
         let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
 
         let receiver = self
-            .commit_inner(
-                CommitEventKind::Sync { offsets: offsets.clone(), deadline_ms },
-                /* enable_wakeup = */ true,
-            )
-            .await?;
+            .commit_inner(CommitEventKind::Sync { offsets, deadline_ms }, /* enable_wakeup = */ true)
+            .await?
+            .unwrap_or_else(completed_commit_result);
 
         // Java: `awaitPendingAsyncCommitsAndExecuteCommitCallbacks(requestTimer, true)`
         // — drain any pending async commits BEFORE blocking on this sync
@@ -4742,10 +5190,7 @@ where
         };
 
         // Java: `interceptors.onCommit(committedOffsets)`.
-        {
-            let chain = self.interceptors.lock().unwrap();
-            chain.on_commit(&committed);
-        }
+        self.commit_state.on_commit(&committed);
         Ok(())
     }
 
@@ -4787,204 +5232,30 @@ where
         // `wakeup()` does NOT interrupt the preliminary offsets-ready
         // wait — the commit completes normally on the bg task.
         let receiver = self
-            .commit_inner(
-                CommitEventKind::Async { offsets: offsets.clone() },
-                /* enable_wakeup = */ false,
-            )
+            .commit_inner(CommitEventKind::Async { offsets }, /* enable_wakeup = */ false)
             .await?;
-
-        // Empty explicit offsets: Java's `commit()` returns an already-completed
-        // future (`AsyncKafkaConsumer.java:1042-1044`), so `whenComplete` runs
-        // inline on the calling thread and the result replaces
-        // `lastPendingAsyncCommit` (`:1019`). Enqueue the callbacks here and
-        // store an already-completed pending commit, without chaining behind
-        // earlier in-flight commits: a later `commitSync` / `close` does not
-        // wait for them, and they still enqueue their own callbacks when they
-        // complete.
-        //
-        // The displaced in-flight commit moves to `async_commit_ordering_tail`
-        // rather than being dropped, so the next non-empty commit still chains
-        // behind it. If the tail is already set, an earlier empty commit has
-        // displaced it and the pending commit is an already-completed one.
-        if offsets.as_ref().is_some_and(HashMap::is_empty) {
-            self.offset_commit_callback_invoker
-                .enqueue_interceptor_invocation(HashMap::new());
-            if let Some(cb) = callback {
-                self.offset_commit_callback_invoker
-                    .enqueue_user_callback_invocation(cb, HashMap::new(), None);
-            }
-            if self.async_commit_ordering_tail.is_none() {
-                self.async_commit_ordering_tail = self.last_pending_async_commit.take();
-            }
-            let (pending_tx, pending_rx) = tokio::sync::oneshot::channel::<()>();
-            let _ = pending_tx.send(());
-            self.last_pending_async_commit = Some(pending_rx);
-            return Ok(());
-        }
-
-        // Java: `lastPendingAsyncCommit = commit(asyncCommitEvent).whenComplete(...)`
-        // — the resulting future is stored on the consumer so a later
-        // `commitSync` / `close` can wait for it to complete. The Rust
-        // analog uses a oneshot bridge: we spawn the continuation, the
-        // continuation invokes the callback chain, and signals `pending_tx`
-        // when finished.
-        //
-        // Each continuation is a separate task that the runtime may schedule
-        // in any order, so it awaits its predecessor before enqueueing. Hence
-        // callbacks are enqueued in commit order, as the `commitAsync` javadoc
-        // requires (`KafkaConsumer.java:1122-1123`), and `pending_rx`
-        // resolving implies every earlier callback is enqueued, which is why
-        // `commit_sync` and `close` await only the most recent commit. The
-        // predecessor is the commit an empty-offsets commit displaced, if any
-        // (the empty commit itself has already enqueued its callbacks).
-        let (pending_tx, pending_rx) = tokio::sync::oneshot::channel::<()>();
-        let previous_pending = self
-            .async_commit_ordering_tail
-            .take()
-            .or_else(|| self.last_pending_async_commit.take());
-        let invoker = Arc::clone(&self.offset_commit_callback_invoker);
-        tokio::spawn(async move {
-            let result = receiver.await;
-            if let Some(previous) = previous_pending {
-                // `Ok(())`: the predecessor has enqueued its callbacks.
-                // `Err(RecvError)`: its task was dropped without sending.
-                // Proceed in either case.
-                let _ = previous.await;
-            }
-            match result {
-                Ok(Ok(committed)) => {
-                    // Java: `if (throwable == null)
-                    //          offsetCommitCallbackInvoker.enqueueInterceptorInvocation(committedOffsets)`.
-                    invoker.enqueue_interceptor_invocation(committed.clone());
-                    if let Some(cb) = callback {
-                        invoker.enqueue_user_callback_invocation(cb, committed, None);
-                    }
-                },
-                Ok(Err(err)) => {
-                    if let Some(cb) = callback {
-                        invoker.enqueue_user_callback_invocation(cb, HashMap::new(), Some(err.clone()));
-                    } else {
-                        log::error!("Offset commit failed: {err}");
-                    }
-                },
-                Err(_recv_err) => {
-                    log::error!("commit_async receiver dropped without completion");
-                },
-            }
-            let _ = pending_tx.send(());
-        });
-        self.last_pending_async_commit = Some(pending_rx);
+        self.commit_state.register_async_commit(receiver, callback);
         Ok(())
     }
 
     /// Translates Java's
     /// `private void awaitPendingAsyncCommitsAndExecuteCommitCallbacks(Timer timer, boolean enableWakeup)`
-    /// (`AsyncKafkaConsumer.java:1726-1749`).
-    ///
-    /// If there is a pending async commit, await it (bounded by the
-    /// deadline) and then drain the callback invoker queue. The
-    /// `enable_wakeup` flag mirrors Java's
-    /// `wakeupTrigger.setActiveTask(futureToAwait)` at line 1738 —
-    /// `true` makes a concurrent `wakeup()` interrupt the wait.
-    ///
-    /// The wait is a plain deadline-bounded await on the pending-commit
-    /// receiver — it does NOT drain or process background events. Java's
-    /// `awaitPendingAsyncCommitsAndExecuteCommitCallbacks` only waits on
-    /// the commit future via `ConsumerUtils.getResult(futureToAwait,
-    /// timer)` (line 1740) and never calls `processBackgroundEvents`, so
-    /// it never invokes rebalance-listener callbacks here. Routing this
-    /// wait through `process_background_events_until` (which drains the
-    /// background-event channel and invokes pending
-    /// `RebalanceListenerCallbackNeeded` callbacks) is NOT faithful: a
-    /// failing rebalance listener would propagate its error out of
-    /// `close()`, which Java never does (Java runs rebalance callbacks on
-    /// close only via `runRebalanceCallbacksOnClose`, revoked/lost only).
-    ///
-    /// The commit completion is delivered by the background task via the
-    /// `last_pending_async_commit` oneshot, so awaiting that receiver
-    /// alone is sufficient — no bg-event drain is required for
-    /// commit-completion delivery.
+    /// (`AsyncKafkaConsumer.java:1814-1836`); see
+    /// [`AsyncCommitState::await_pending_async_commits_and_execute_commit_callbacks`],
+    /// which every [`ConsumerHandle`] shares.
     async fn await_pending_async_commits_and_execute_commit_callbacks(
         &mut self,
         deadline_ms: i64,
         enable_wakeup: bool,
     ) -> Result<(), Error> {
-        // Java clears `lastPendingAsyncCommit` *after* `getResult(futureToAwait,
-        // timer)` returns normally (line 1741); its `finally` (`:1742-1747`)
-        // deliberately does NOT clear it, so a timeout or a wakeup leaves the
-        // handle in place and a later `commit_sync` still waits for the pending
-        // async commit — preserving the documented
-        // callback-before-sync-commit ordering. The `take()` here is therefore
-        // paired with a restore on every non-success exit below.
-        if let Some(mut rx) = self.last_pending_async_commit.take() {
-            // Mirror Java's plain `ConsumerUtils.getResult(futureToAwait,
-            // timer)` (line 1740): a deadline-bounded await on the
-            // receiver, with no background-event processing. Loop with
-            // short `tokio::time::timeout` slices so the deadline is
-            // driven by the mock-clock-safe `self.time` (via
-            // `remaining_ms`), matching the deadline pattern used by
-            // `process_background_events_until`.
-            loop {
-                // §11: observe a pending wakeup at the top of each
-                // iteration when wakeups are enabled. Java's pattern is
-                // `wakeupTrigger.setActiveTask(futureToAwait)` (line
-                // 1737-1739) before the wait; our rotating-token
-                // equivalent re-checks here so a concurrent `wakeup()`
-                // surfaces `Error::Wakeup`.
-                if enable_wakeup && let Err(err) = self.wakeup_trigger.maybe_trigger_wakeup() {
-                    self.wakeup_trigger.rotate();
-                    // Not a success exit: keep the pending handle (Java's
-                    // `finally` does not clear it).
-                    self.last_pending_async_commit = Some(rx);
-                    return Err(err);
-                }
-
-                let remaining = self.remaining_ms(deadline_ms);
-                if remaining <= 0 {
-                    // Not a success exit: keep the pending handle (Java's
-                    // `finally` does not clear it).
-                    self.last_pending_async_commit = Some(rx);
-                    return Err(Error::timeout(
-                        "Timed out waiting for last pending async commit to complete".to_string(),
-                    ));
-                }
-                let wait = std::cmp::min(remaining, 100) as u64;
-
-                // §11: race the receiver against the wakeup token's
-                // cancellation so `wakeup()` from another task interrupts
-                // the wait immediately. Java treats a dropped sender
-                // (RecvError) as "the commit already completed" (line
-                // 1740-1742 — `CompletableFuture.getOrThrow()` returns
-                // normally for already-completed futures).
-                let recv_fut = &mut rx;
-                if enable_wakeup {
-                    let tok = self.wakeup_trigger.current_token();
-                    tokio::select! {
-                        biased;
-                        _ = tok.cancelled() => {
-                            // Loop top surfaces Error::Wakeup via
-                            // maybe_trigger_wakeup + rotate.
-                        },
-                        res = tokio::time::timeout(Duration::from_millis(wait), recv_fut) => {
-                            match res {
-                                // Commit completed (or sender dropped) — done.
-                                Ok(_) => break,
-                                // Timeout slice elapsed — keep looping.
-                                Err(_elapsed) => {},
-                            }
-                        },
-                    }
-                } else {
-                    match tokio::time::timeout(Duration::from_millis(wait), recv_fut).await {
-                        Ok(_) => break,
-                        Err(_elapsed) => {},
-                    }
-                }
-            }
-        }
-        // Java: `offsetCommitCallbackInvoker.executeCallbacks()`.
-        self.offset_commit_callback_invoker.invoke_pending_callbacks().await;
-        Ok(())
+        self.commit_state
+            .await_pending_async_commits_and_execute_commit_callbacks(
+                &self.wakeup_trigger,
+                self.time.as_ref(),
+                deadline_ms,
+                enable_wakeup,
+            )
+            .await
     }
 
     // ── Seek / position / committed / lag ──────────────────────────────
@@ -6402,6 +6673,16 @@ mod tests {
     /// Builds a consumer along with the test-side channel handles needed
     /// to act as the bg task during a test.
     fn make_test_consumer_with_channels() -> (AsyncKafkaConsumer<Vec<u8>, Vec<u8>>, ConsumerTestHandles) {
+        make_test_consumer_with_channels_and_invoker_interceptors(Vec::new())
+    }
+
+    /// [`make_test_consumer_with_channels`] whose `OffsetCommitCallbackInvoker`
+    /// runs `invoker_interceptors` — the chain whose `onCommit` an async
+    /// commit fires (Java's `MockConsumerInterceptor` from
+    /// `interceptor.classes`, which production does not load yet).
+    fn make_test_consumer_with_channels_and_invoker_interceptors(
+        invoker_interceptors: Vec<Box<dyn crate::consumer::ConsumerInterceptor<Vec<u8>, Vec<u8>>>>,
+    ) -> (AsyncKafkaConsumer<Vec<u8>, Vec<u8>>, ConsumerTestHandles) {
         let mut config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
         config.client_id = "test-client".to_string();
         config.group_id = Some("test-group".to_string());
@@ -6457,7 +6738,7 @@ mod tests {
                 Vec<u8>,
                 Vec<u8>,
             >::new(
-                Vec::new()
+                invoker_interceptors
             )));
         let deserializers = Arc::new(Deserializers::<Vec<u8>, Vec<u8>>::new(
             Box::new(TestBytesDeserializer),
@@ -9496,12 +9777,12 @@ mod tests {
         });
         consumer.commit_async().await.expect("async ok");
         assert!(
-            consumer.last_pending_async_commit.is_some(),
+            consumer.commit_state.has_last_pending_async_commit(),
             "async commit must register pending"
         );
         consumer.commit_sync().await.expect("sync ok");
         assert!(
-            consumer.last_pending_async_commit.is_none(),
+            !consumer.commit_state.has_last_pending_async_commit(),
             "sync must consume the pending async commit"
         );
         assert!(async_completer.await.expect("task ok"));
@@ -10068,8 +10349,8 @@ mod tests {
         consumer.commit_async_with_offsets_callback(offsets, cb).await.expect("ok");
 
         // Wait for the spawned continuation to enqueue the callback.
-        if let Some(rx) = consumer.last_pending_async_commit.take() {
-            let _ = rx.await;
+        if let Some(mut rx) = consumer.commit_state.last_pending_async_commit() {
+            rx.wait().await;
         }
 
         // Drain the callback so it fires (Java's `forceCommitCallbackInvocation`).
@@ -10139,14 +10420,14 @@ mod tests {
             .await
             .expect("commit 2");
 
-        let mut last = consumer.last_pending_async_commit.take().expect("pending async commit");
+        let mut last = consumer.commit_state.last_pending_async_commit().expect("pending async commit");
         assert!(
-            tokio::time::timeout(Duration::from_millis(200), &mut last).await.is_err(),
+            tokio::time::timeout(Duration::from_millis(200), last.wait()).await.is_err(),
             "last pending commit must not resolve while an earlier commit is outstanding"
         );
 
         release_first_tx.send(()).expect("completer alive");
-        let _ = last.await;
+        last.wait().await;
         consumer.offset_commit_callback_invoker.invoke_pending_callbacks().await;
 
         assert!(completer.await.expect("task ok"));
@@ -10217,14 +10498,14 @@ mod tests {
             .await
             .expect("commit 3");
 
-        let mut last = consumer.last_pending_async_commit.take().expect("pending async commit");
+        let mut last = consumer.commit_state.last_pending_async_commit().expect("pending async commit");
         assert!(
-            tokio::time::timeout(Duration::from_millis(200), &mut last).await.is_err(),
+            tokio::time::timeout(Duration::from_millis(200), last.wait()).await.is_err(),
             "last pending commit must not resolve while an earlier commit is outstanding"
         );
 
         release_first_tx.send(()).expect("completer alive");
-        let _ = last.await;
+        last.wait().await;
         consumer.offset_commit_callback_invoker.invoke_pending_callbacks().await;
 
         assert!(completer.await.expect("task ok"));
@@ -10259,6 +10540,17 @@ mod tests {
         tp: &TopicPartition,
         callback: Option<Arc<dyn crate::consumer::OffsetCommitCallback>>,
     ) -> IncompleteAsyncCommit {
+        set_up_consumer_with_incomplete_async_commit_via(tp, callback, false).await
+    }
+
+    /// [`set_up_consumer_with_incomplete_async_commit`], issuing the
+    /// `commit_async` through a [`ConsumerHandle`] when `via_handle`, as a
+    /// Java callback calling back into the consumer does.
+    async fn set_up_consumer_with_incomplete_async_commit_via(
+        tp: &TopicPartition,
+        callback: Option<Arc<dyn crate::consumer::OffsetCommitCallback>>,
+        via_handle: bool,
+    ) -> IncompleteAsyncCommit {
         let (mut consumer, handles) = make_test_consumer_with_channels();
         let ConsumerTestHandles { mut app_event_rx, bg_event_tx, .. } = handles;
         let (async_commit_tx, async_commit_rx) = tokio::sync::oneshot::channel();
@@ -10288,9 +10580,17 @@ mod tests {
 
         consumer.assign(vec![tp.clone()]).await.expect("assign");
         consumer.seek_with_offset(tp.clone(), 20).await.expect("seek");
-        match callback {
-            Some(cb) => consumer.commit_async_with_callback(cb).await.expect("commit_async"),
-            None => consumer.commit_async().await.expect("commit_async"),
+        if via_handle {
+            let handle = consumer.handle();
+            match callback {
+                Some(cb) => handle.commit_async_with_callback(cb).await.expect("commit_async"),
+                None => handle.commit_async().await.expect("commit_async"),
+            }
+        } else {
+            match callback {
+                Some(cb) => consumer.commit_async_with_callback(cb).await.expect("commit_async"),
+                None => consumer.commit_async().await.expect("commit_async"),
+            }
         }
         let async_commit = async_commit_rx.await.expect("CommitAsync event enqueued");
         IncompleteAsyncCommit { consumer, async_commit, _bg_event_tx: bg_event_tx }
@@ -11095,7 +11395,7 @@ mod tests {
     //   - testCloseAwaitPendingAsyncCommitIncomplete — requires the
     //     `lastPendingAsyncCommit` future to be held in an incomplete
     //     state past the close-timeout. The Rust analog
-    //     (`last_pending_async_commit: Option<oneshot::Receiver<()>>`)
+    //     (`AsyncCommitState`'s `PendingAsyncCommit`)
     //     is exercised by `close_awaits_pending_async_commit_complete`
     //     for the happy path; the timeout-cause-of-incomplete path
     //     requires injecting a never-completing handle that is
@@ -12109,5 +12409,478 @@ mod tests {
         // The consumer is still marked closed — the wrap happens after the
         // state flip, as in Java.
         assert!(consumer.is_closed());
+    }
+
+    // ─── ConsumerHandle commits (Java callbacks calling back into the consumer) ───
+    //
+    // A Java callback commits by calling `consumer.commitSync()` /
+    // `commitAsync()` on the consumer it captured, which runs the consumer's
+    // own commit path. A Rust callback commits through a `ConsumerHandle`;
+    // these tests translate the Java cases with the commit made through it.
+
+    /// The commit a [`NestingCallback`] makes through the handle.
+    type NestedCommit = (
+        ConsumerHandle,
+        HashMap<TopicPartition, OffsetAndMetadata>,
+        Arc<dyn crate::consumer::OffsetCommitCallback>,
+    );
+
+    /// Records `label` (and `label-end` after its nested commit) into `order`;
+    /// with `nested`, commits through the handle from inside the callback.
+    struct NestingCallback {
+        label: &'static str,
+        order: Arc<std::sync::Mutex<Vec<String>>>,
+        nested: Option<NestedCommit>,
+        errors: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::consumer::OffsetCommitCallback for NestingCallback {
+        async fn on_complete(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
+            self.errors.lock().unwrap().push(error.map(|e| e.to_string()));
+            self.order.lock().unwrap().push(self.label.to_string());
+            if let Some((handle, offsets, callback)) = &self.nested {
+                handle
+                    .commit_async_with_offsets_callback(offsets.clone(), Arc::clone(callback))
+                    .await
+                    .expect("nested commit_async");
+                self.order.lock().unwrap().push(format!("{}-end", self.label));
+            }
+        }
+    }
+
+    fn nesting_callback(
+        label: &'static str,
+        order: &Arc<std::sync::Mutex<Vec<String>>>,
+        nested: Option<NestedCommit>,
+    ) -> Arc<dyn crate::consumer::OffsetCommitCallback> {
+        Arc::new(NestingCallback {
+            label,
+            order: Arc::clone(order),
+            nested,
+            errors: Arc::new(std::sync::Mutex::new(Vec::new())),
+        })
+    }
+
+    /// Stands in for the background task: completes every commit event at
+    /// once with its explicit offsets.
+    fn spawn_commit_completer(mut app_event_rx: mpsc::UnboundedReceiver<ApplicationEventEnvelope>) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            while let Some(env) = app_event_rx.recv().await {
+                match env.event {
+                    ApplicationEvent::CommitAsync { handle, offsets_ready, offsets }
+                    | ApplicationEvent::CommitSync { handle, offsets_ready, offsets } => {
+                        offsets_ready.complete(());
+                        handle.complete(offsets.unwrap_or_default());
+                    },
+                    ApplicationEvent::LeaveGroupOnClose { handle, .. } => {
+                        handle.complete(());
+                    },
+                    _ => {},
+                }
+            }
+        })
+    }
+
+    async fn wait_last_pending_async_commit(consumer: &AsyncKafkaConsumer<Vec<u8>, Vec<u8>>) {
+        if let Some(mut pending) = consumer.commit_state.last_pending_async_commit() {
+            pending.wait().await;
+        }
+    }
+
+    /// Java's `commit()` runs `offsetCommitCallbackInvoker.executeCallbacks()`
+    /// first (`AsyncKafkaConsumer.java:1126-1128`), so a callback calling
+    /// `commitAsync` runs the callbacks queued behind it before that call
+    /// returns. Through the handle: callback "a" commits from inside, and "b",
+    /// queued after "a", runs before the nested commit returns.
+    #[tokio::test]
+    async fn handle_commit_async_inside_callback_runs_later_queued_callbacks_first() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let completer = spawn_commit_completer(handles.app_event_rx);
+        let tp = TopicPartition::new("foo".to_string(), 0);
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let nested = (
+            consumer.handle(),
+            singleton_offsets(tp.clone(), 3),
+            nesting_callback("c", &order, None),
+        );
+        let a = nesting_callback("a", &order, Some(nested));
+        consumer
+            .commit_async_with_offsets_callback(singleton_offsets(tp.clone(), 1), a)
+            .await
+            .expect("commit a");
+        consumer
+            .commit_async_with_offsets_callback(singleton_offsets(tp.clone(), 2), nesting_callback("b", &order, None))
+            .await
+            .expect("commit b");
+        wait_last_pending_async_commit(&consumer).await;
+
+        // Java's `forceCommitCallbackInvocation()`.
+        consumer.offset_commit_callback_invoker.invoke_pending_callbacks().await;
+        assert_eq!(*order.lock().unwrap(), vec!["a", "b", "a-end"]);
+
+        // The nested commit is the consumer's last pending async commit, so
+        // the consumer's next drain runs its callback.
+        wait_last_pending_async_commit(&consumer).await;
+        consumer.offset_commit_callback_invoker.invoke_pending_callbacks().await;
+        assert_eq!(*order.lock().unwrap(), vec!["a", "b", "a-end", "c"]);
+        completer.abort();
+    }
+
+    /// Java: `testCommitSyncAwaitsCommitAsyncCompletionWithNonEmptyOffsets`
+    /// with the async commit made through a handle: the consumer's
+    /// `commit_sync` waits for it.
+    #[tokio::test]
+    async fn commit_sync_awaits_handle_commit_async_completion() {
+        let tp = TopicPartition::new("foo".to_string(), 0);
+        let IncompleteAsyncCommit { mut consumer, async_commit, _bg_event_tx } =
+            set_up_consumer_with_incomplete_async_commit_via(&tp, None, true).await;
+
+        let err = consumer
+            .commit_sync_with_offsets_timeout(singleton_offsets(tp.clone(), 20), Duration::from_millis(100))
+            .await
+            .expect_err("commit sync must time out");
+        assert_pending_async_commit_timeout(&err);
+
+        async_commit.complete(HashMap::new());
+
+        consumer
+            .commit_sync_with_offsets_timeout(singleton_offsets(tp, 20), Duration::from_millis(100))
+            .await
+            .expect("commit sync must succeed");
+    }
+
+    /// Java: `testCommitSyncAwaitsCommitAsyncCompletionWithNonEmptyOffsets`
+    /// with the sync commit made through a handle: the handle's
+    /// `commit_sync` waits for the consumer's async commit, as `commitSync`
+    /// does (`awaitPendingAsyncCommitsAndExecuteCommitCallbacks`).
+    #[tokio::test]
+    async fn handle_commit_sync_awaits_commit_async_completion() {
+        let tp = TopicPartition::new("foo".to_string(), 0);
+        let IncompleteAsyncCommit { mut consumer, async_commit, _bg_event_tx } =
+            set_up_consumer_with_incomplete_async_commit(&tp, None).await;
+        // The handle's commit_sync is bounded by `default.api.timeout.ms`.
+        consumer.default_api_timeout_ms = 100;
+        let handle = consumer.handle();
+
+        let err = handle
+            .commit_sync_with_offsets(singleton_offsets(tp.clone(), 20))
+            .await
+            .expect_err("commit sync must time out");
+        assert_pending_async_commit_timeout(&err);
+
+        async_commit.complete(HashMap::new());
+
+        handle
+            .commit_sync_with_offsets(singleton_offsets(tp, 20))
+            .await
+            .expect("commit sync must succeed");
+    }
+
+    /// Java: `testCommitSyncAwaitsCommitAsyncButDoesNotFail` through a handle,
+    /// both commits made through it: a failed async commit is reported to its
+    /// callback, and the handle's `commit_sync` runs that callback.
+    #[tokio::test]
+    async fn handle_commit_sync_awaits_handle_commit_async_but_does_not_fail() {
+        let tp = TopicPartition::new("foo".to_string(), 0);
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let errors = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let callback: Arc<dyn crate::consumer::OffsetCommitCallback> = Arc::new(NestingCallback {
+            label: "async",
+            order: Arc::clone(&order),
+            nested: None,
+            errors: Arc::clone(&errors),
+        });
+        let IncompleteAsyncCommit { mut consumer, async_commit, _bg_event_tx } =
+            set_up_consumer_with_incomplete_async_commit_via(&tp, Some(callback), true).await;
+        consumer.default_api_timeout_ms = 100;
+        let handle = consumer.handle();
+
+        let err = handle
+            .commit_sync_with_offsets(singleton_offsets(tp.clone(), 20))
+            .await
+            .expect_err("commit sync must time out");
+        assert_pending_async_commit_timeout(&err);
+        assert!(order.lock().unwrap().is_empty(), "the async commit has not completed");
+
+        async_commit.complete_with_error(Error::kafka_message("Test error"));
+
+        handle
+            .commit_sync_with_offsets(singleton_offsets(tp, 20))
+            .await
+            .expect("commit sync must not fail");
+        assert_eq!(*order.lock().unwrap(), vec!["async"]);
+        assert_eq!(
+            *errors.lock().unwrap(),
+            vec![Some(Error::kafka_message("Test error").to_string())]
+        );
+    }
+
+    /// Java: `testCloseAwaitPendingAsyncCommitComplete` with the async commit
+    /// made through a handle: `close` waits for it and runs its callback.
+    #[tokio::test]
+    async fn close_awaits_handle_commit_async() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                match env.event {
+                    ApplicationEvent::CommitAsync { handle, offsets_ready, offsets } => {
+                        offsets_ready.complete(());
+                        // Complete later, so close finds the commit in flight.
+                        tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                            handle.complete(offsets.unwrap_or_default());
+                        });
+                    },
+                    ApplicationEvent::CommitSync { handle, offsets_ready, .. } => {
+                        offsets_ready.complete(());
+                        handle.complete(HashMap::new());
+                    },
+                    ApplicationEvent::LeaveGroupOnClose { handle, .. } => {
+                        handle.complete(());
+                    },
+                    _ => {},
+                }
+            }
+        });
+
+        let tp = TopicPartition::new("foo".to_string(), 0);
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        consumer
+            .handle()
+            .commit_async_with_offsets_callback(singleton_offsets(tp, 5), nesting_callback("async", &order, None))
+            .await
+            .expect("commit_async");
+        assert!(order.lock().unwrap().is_empty(), "the commit is still in flight");
+
+        consumer.close().await.expect("close ok");
+        assert_eq!(*order.lock().unwrap(), vec!["async"], "close must wait for the handle's commit");
+        drop(drainer);
+    }
+
+    /// Counts `on_commit` calls; one instance per chain, sharing the count.
+    struct CountingInterceptor {
+        on_commit_count: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl crate::consumer::ConsumerInterceptor<Vec<u8>, Vec<u8>> for CountingInterceptor {
+        fn on_consume(&self, _records: &mut ConsumerRecords<Vec<u8>, Vec<u8>>) {}
+        fn on_commit(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>) {
+            self.on_commit_count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// A consumer whose commit-sync and async-commit interceptor chains both
+    /// count into the returned counter (Java's
+    /// `MockConsumerInterceptor.ON_COMMIT_COUNT`).
+    fn make_test_consumer_with_counting_interceptors() -> (
+        AsyncKafkaConsumer<Vec<u8>, Vec<u8>>,
+        ConsumerTestHandles,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (consumer, handles) =
+            make_test_consumer_with_channels_and_invoker_interceptors(vec![Box::new(CountingInterceptor {
+                on_commit_count: Arc::clone(&count),
+            })]);
+        *consumer.interceptors.lock().unwrap() =
+            ConsumerInterceptors::new(vec![Box::new(CountingInterceptor { on_commit_count: Arc::clone(&count) })]);
+        (consumer, handles, count)
+    }
+
+    /// Completes every commit event with `error` (Java's
+    /// `completeCommit{Sync,Async}ApplicationEventExceptionally`).
+    fn spawn_failing_commit_completer(
+        mut app_event_rx: mpsc::UnboundedReceiver<ApplicationEventEnvelope>,
+        error: Error,
+    ) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            while let Some(env) = app_event_rx.recv().await {
+                if let ApplicationEvent::CommitAsync { handle, offsets_ready, .. }
+                | ApplicationEvent::CommitSync { handle, offsets_ready, .. } = env.event
+                {
+                    offsets_ready.complete(());
+                    handle.complete_with_error(error.clone());
+                }
+            }
+        })
+    }
+
+    /// Java: `testInterceptorCommitSync`, committing through a handle.
+    #[tokio::test]
+    async fn handle_interceptor_commit_sync() {
+        let (consumer, handles, count) = make_test_consumer_with_counting_interceptors();
+        let completer = spawn_commit_completer(handles.app_event_rx);
+
+        consumer
+            .handle()
+            .commit_sync_with_offsets(singleton_offsets(TopicPartition::new("t".to_string(), 0), 1))
+            .await
+            .expect("commit sync");
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        completer.abort();
+    }
+
+    /// Java: `testNoInterceptorCommitSyncFailed`, committing through a handle.
+    #[tokio::test]
+    async fn handle_no_interceptor_commit_sync_failed() {
+        let (consumer, handles, count) = make_test_consumer_with_counting_interceptors();
+        let expected = Error::kafka_message("Test error");
+        let completer = spawn_failing_commit_completer(handles.app_event_rx, expected.clone());
+
+        let actual = consumer
+            .handle()
+            .commit_sync_with_offsets(singleton_offsets(TopicPartition::new("t".to_string(), 0), 1))
+            .await
+            .expect_err("commit sync must fail");
+        assert!(matches!(actual, Error::KafkaError(_)), "unexpected error: {actual:?}");
+        assert_eq!(actual.message(), expected.message());
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+        completer.abort();
+    }
+
+    /// Java: `testInterceptorCommitAsync`, committing through a handle.
+    #[tokio::test]
+    async fn handle_interceptor_commit_async() {
+        let (consumer, handles, count) = make_test_consumer_with_counting_interceptors();
+        let completer = spawn_commit_completer(handles.app_event_rx);
+
+        consumer
+            .handle()
+            .commit_async_with_offsets_callback(
+                singleton_offsets(TopicPartition::new("t".to_string(), 0), 1),
+                Arc::new(NoopCallback),
+            )
+            .await
+            .expect("commit async");
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+
+        // Java's `forceCommitCallbackInvocation()`.
+        wait_last_pending_async_commit(&consumer).await;
+        consumer.offset_commit_callback_invoker.invoke_pending_callbacks().await;
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        completer.abort();
+    }
+
+    /// Java: `testNoInterceptorCommitAsyncFailed`, committing through a handle.
+    #[tokio::test]
+    async fn handle_no_interceptor_commit_async_failed() {
+        let (consumer, handles, count) = make_test_consumer_with_counting_interceptors();
+        let completer = spawn_failing_commit_completer(handles.app_event_rx, Error::kafka_message("Test error"));
+
+        consumer
+            .handle()
+            .commit_async_with_offsets_callback(
+                singleton_offsets(TopicPartition::new("t".to_string(), 0), 1),
+                Arc::new(NoopCallback),
+            )
+            .await
+            .expect("commit async");
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+
+        wait_last_pending_async_commit(&consumer).await;
+        consumer.offset_commit_callback_invoker.invoke_pending_callbacks().await;
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+        completer.abort();
+    }
+
+    /// Java: `testCommitAsyncUserSuppliedCallbackNoException` through the
+    /// handle's `commit_async_with_callback` (no explicit offsets): the
+    /// callback receives the committed offsets without an error.
+    #[tokio::test]
+    async fn handle_commit_async_with_callback_invokes_callback() {
+        let (consumer, mut handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("t".to_string(), 0);
+        let committed = singleton_offsets(tp.clone(), 7);
+        let committed_for_completer = committed.clone();
+        let completer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::CommitAsync { handle, offsets_ready, offsets } = env.event {
+                    assert!(offsets.is_none(), "commit_async_with_callback commits all consumed offsets");
+                    offsets_ready.complete(());
+                    handle.complete(committed_for_completer.clone());
+                }
+            }
+        });
+
+        /// The offsets a callback was handed, and whether it got an error.
+        type Seen = (HashMap<TopicPartition, OffsetAndMetadata>, bool);
+        struct RecordingCallback {
+            seen: Arc<std::sync::Mutex<Vec<Seen>>>,
+        }
+        #[async_trait::async_trait]
+        impl crate::consumer::OffsetCommitCallback for RecordingCallback {
+            async fn on_complete(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
+                self.seen.lock().unwrap().push((offsets.clone(), error.is_some()));
+            }
+        }
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        consumer
+            .handle()
+            .commit_async_with_callback(Arc::new(RecordingCallback { seen: Arc::clone(&seen) }))
+            .await
+            .expect("commit async");
+
+        wait_last_pending_async_commit(&consumer).await;
+        consumer.offset_commit_callback_invoker.invoke_pending_callbacks().await;
+        assert_eq!(*seen.lock().unwrap(), vec![(committed, false)]);
+        completer.abort();
+    }
+
+    /// Java's `commit()` checks `group.id` first (`throwIfGroupIdNotDefined`),
+    /// so a handle commit on a consumer without one fails as the consumer's.
+    #[tokio::test]
+    async fn handle_commits_without_group_id_fail() {
+        let (consumer, _handles) = make_test_consumer_without_group_id();
+        let handle = consumer.handle();
+        let expected = "To use the group management or offset commit APIs, you must provide a valid group.id in \
+                        the consumer configuration.";
+
+        let err = handle
+            .commit_async_with_callback(Arc::new(NoopCallback))
+            .await
+            .expect_err("no group.id");
+        assert!(err.is_invalid_group_id_error(), "unexpected error: {err:?}");
+        assert_eq!(err.message(), expected);
+
+        let tp = TopicPartition::new("t".to_string(), 0);
+        let err = handle
+            .commit_async_with_offsets_callback(singleton_offsets(tp.clone(), 1), Arc::new(NoopCallback))
+            .await
+            .expect_err("no group.id");
+        assert_eq!(err.message(), expected);
+
+        let err = handle
+            .commit_sync_with_offsets(singleton_offsets(tp, 1))
+            .await
+            .expect_err("no group.id");
+        assert_eq!(err.message(), expected);
+    }
+
+    /// The handle's `commit_sync` records the consumer's `commit-sync`
+    /// metric, as `commitSync`'s `finally` does
+    /// (`kafkaConsumerMetrics.recordCommitSync`).
+    #[tokio::test]
+    async fn handle_commit_sync_records_commit_sync_metric() {
+        let (consumer, handles) = make_test_consumer_with_channels();
+        let completer = spawn_commit_completer(handles.app_event_rx);
+        let total = || {
+            consumer
+                .metrics
+                .metrics()
+                .into_iter()
+                .find(|(name, _)| name.name() == "commit-sync-time-ns-total")
+                .and_then(|(_, metric)| crate::common::Metric::metric_value(metric.as_ref()).as_double())
+                .expect("commit-sync-time-ns-total registered")
+        };
+        let before = total();
+        consumer
+            .handle()
+            .commit_sync_with_offsets(singleton_offsets(TopicPartition::new("t".to_string(), 0), 1))
+            .await
+            .expect("commit sync");
+        assert!(total() > before, "commit-sync-time-ns-total must grow");
+        completer.abort();
     }
 }

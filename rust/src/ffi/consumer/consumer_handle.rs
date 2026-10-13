@@ -58,7 +58,10 @@ use crate::ffi::consumer::offset_and_metadata::{
     kafka_consumer_OffsetAndMetadata_t, map_offset_and_metadata, offset_and_metadata_map, offset_and_metadata_ref,
 };
 use crate::ffi::consumer::offset_and_timestamp::offset_and_timestamp_map;
-use crate::ffi::consumer::{Client, deliver_i64, deliver_ptr, deliver_void, error_slot, ms, out_slot};
+use crate::ffi::consumer::offset_commit_callback::{commit_callback_adapter, kafka_consumer_OffsetCommitCallback_t};
+use crate::ffi::consumer::{
+    Client, INVOKE_ROUTE, InvokeRoute, deliver_i64, deliver_ptr, deliver_void, error_slot, ms, out_slot,
+};
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{kafka_List_t, kafka_Map_t, sorted_string_list};
 
@@ -129,13 +132,33 @@ impl HandleInner {
                 future.await
             }
         };
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel::<Wait<T>>();
+        // The interface methods the operation triggers (the commit callbacks
+        // a handle commit drains) come back here and run on this thread, as
+        // Java runs them nested inside the call (see `InvokeRoute`).
+        let route = {
+            let tx = tx.clone();
+            InvokeRoute::Caller(Arc::new(move |job: CallbackJob| {
+                // The waiter leaves only after `Done`, which this task sends
+                // after its last job; run the job here should it be gone.
+                if let Err(std::sync::mpsc::SendError(Wait::Job(job))) = tx.send(Wait::Job(job)) {
+                    job();
+                }
+            }))
+        };
         client.spawn(async move {
-            let _ = tx.send(catch_task_panic(fn_name, future).await);
+            let result = INVOKE_ROUTE.scope(route, catch_task_panic(fn_name, future)).await;
+            let _ = tx.send(Wait::Done(result));
         });
         // Not kept alive while waiting: the handle holds the consumer weakly.
         drop(client);
-        rx.recv().unwrap_or_else(|_| Err(destroyed()))
+        loop {
+            match rx.recv() {
+                Ok(Wait::Job(job)) => job(),
+                Ok(Wait::Done(result)) => return result,
+                Err(_) => return Err(destroyed()),
+            }
+        }
     }
 
     /// Drives `future` as a tracked task of the consumer and hands its
@@ -157,13 +180,23 @@ impl HandleInner {
             Some(client) => {
                 let client2 = Arc::clone(&client);
                 client.spawn(async move {
-                    let result = catch_task_panic(fn_name, future).await;
+                    // The interface methods the operation triggers are queued
+                    // with its completion (see `InvokeRoute`).
+                    let result = INVOKE_ROUTE.scope(InvokeRoute::Queue, catch_task_panic(fn_name, future)).await;
                     deliver(&client2, result);
                 });
             },
             None => fallback(destroyed()),
         }
     }
+}
+
+/// What the task of a blocking handle operation sends the waiting thread.
+enum Wait<T> {
+    /// An interface method the operation triggered, to run on that thread.
+    Job(CallbackJob),
+    /// The operation's result.
+    Done(Result<T, Error>),
 }
 
 /// Where the guard of a `_cb` entry point delivers a caught panic: the
@@ -1513,6 +1546,222 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_offsets_cb(
     inner.run_cb(
         "kafka_consumer_ConsumerHandle_commit_async_offsets_cb",
         async move { h.commit_async_offsets(offsets).await },
+        move |client, result| deliver_void(client, cb, opaque, result),
+        // SAFETY: `cb` and `opaque` are this call's own arguments, and `cb` is valid per this
+        // function's `# Safety`. `run_cb` calls this fallback only when the consumer is gone and
+        // nothing was spawned, so `deliver` never runs and `cb` fires here exactly once, with an
+        // owned error.
+        |error| unsafe { cb(box_error(error), opaque.get()) },
+    )
+}
+
+/// `commitAsync(OffsetCommitCallback callback)`: the callback
+/// registration is copied during the call; its `self` must stay alive
+/// until `onComplete` has fired (or the consumer is destroyed).
+///
+/// `onComplete` runs where the consumer runs its other commit callbacks, in
+/// commit order: on the thread of the next blocking consumer or handle
+/// operation that drains them (a later handle commit included, as Java's
+/// `commit()` runs `executeCallbacks()` first), or queued for
+/// `kafka_consumer_Consumer__execute_callbacks` by a `_cb` one. On a
+/// `MockConsumer` handle this commit fails as the handle's other no-offset
+/// commits do.
+///
+/// Blocking; callable from inside a listener or an `onComplete`. Fails with
+/// `LocalIllegalState` once the consumer is destroyed.
+///
+/// # Safety
+///
+/// `self_` must be a live handle and `callback` a live callback handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_with_callback(
+    self_: *const kafka_consumer_ConsumerHandle_t,
+    callback: *mut kafka_consumer_OffsetCommitCallback_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
+    let inner = unsafe { inner(self_) };
+    let Some(client) = inner.client.upgrade() else {
+        return error_slot(Err(destroyed()));
+    };
+    // SAFETY: Per this function's `# Safety`, `callback` is a live callback handle, as
+    // `commit_callback_adapter` requires; the registration is copied, so the handle is borrowed for
+    // this call only. Its `self` stays alive until `onComplete` fires, as
+    // `kafka_consumer_OffsetCommitCallback_new` documents.
+    let callback = unsafe { commit_callback_adapter(callback, Arc::clone(client.delivery())) };
+    // Not kept alive while the operation runs: the handle holds the consumer weakly.
+    drop(client);
+    let h = inner.handle.clone();
+    error_slot(
+        inner.run_blocking("kafka_consumer_ConsumerHandle_commit_async_with_callback", async move {
+            h.commit_async_with_callback(callback).await
+        }),
+    )
+}
+
+/// The completion of the `_cb` twin: `error` is `NULL` on success,
+/// owned otherwise.
+pub type kafka_consumer_ConsumerHandle_commit_async_with_callback_cb_t =
+    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+
+/// The non-blocking twin: `cb` and the `onComplete` calls the operation
+/// triggers are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Safety
+///
+/// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments and
+    // building the adapter come first and hand nothing over; the body hands `cb` over only as the
+    // last step of `HandleInner::run_cb`: to the task `Client::spawn` registers, after which nothing
+    // can panic, or, once the consumer is destroyed, to the inline fallback, which fires `cb` as its
+    // last action. So `cb` has not fired for this `opaque`, as `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_with_callback_cb(
+    self_: *const kafka_consumer_ConsumerHandle_t,
+    callback: *mut kafka_consumer_OffsetCommitCallback_t,
+    cb: kafka_consumer_ConsumerHandle_commit_async_with_callback_cb_t,
+    opaque: *mut c_void,
+) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
+    let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `callback` is a live callback handle, as
+    // `commit_callback_adapter` requires; the registration is copied, so the handle is borrowed for
+    // this call only. Its `self` stays alive until `onComplete` fires, as
+    // `kafka_consumer_OffsetCommitCallback_new` documents.
+    let callback = inner
+        .client
+        .upgrade()
+        .map(|client| unsafe { commit_callback_adapter(callback, Arc::clone(client.delivery())) });
+    let h = inner.handle.clone();
+    let opaque = SendPtr(opaque);
+    inner.run_cb(
+        "kafka_consumer_ConsumerHandle_commit_async_with_callback_cb",
+        async move {
+            match callback {
+                Some(callback) => h.commit_async_with_callback(callback).await,
+                None => Err(destroyed()),
+            }
+        },
+        move |client, result| deliver_void(client, cb, opaque, result),
+        // SAFETY: `cb` and `opaque` are this call's own arguments, and `cb` is valid per this
+        // function's `# Safety`. `run_cb` calls this fallback only when the consumer is gone and
+        // nothing was spawned, so `deliver` never runs and `cb` fires here exactly once, with an
+        // owned error.
+        |error| unsafe { cb(box_error(error), opaque.get()) },
+    )
+}
+
+/// `commitAsync(Map<TopicPartition, OffsetAndMetadata> offsets, OffsetCommitCallback callback)`:
+/// `offsets` is copied, and the callback registration too; its `self` must
+/// stay alive until `onComplete` has fired (or the consumer is destroyed).
+///
+/// `onComplete` runs as for
+/// [`kafka_consumer_ConsumerHandle_commit_async_with_callback`]. On a
+/// `MockConsumer` handle the offsets are committed into the mock and
+/// `onComplete` runs before this call returns, on the calling thread, as
+/// Java's `MockConsumer.commitAsync` invokes it inline.
+///
+/// Blocking; callable from inside a listener or an `onComplete`. Fails with
+/// `LocalIllegalState` once the consumer is destroyed.
+///
+/// # Safety
+///
+/// `self_` must be a live handle, `offsets` null or a valid map of
+/// `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *`
+/// that no other call mutates during this one, and `callback` a live
+/// callback handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_with_offsets_callback(
+    self_: *const kafka_consumer_ConsumerHandle_t,
+    offsets: *const kafka_Map_t,
+    callback: *mut kafka_consumer_OffsetCommitCallback_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
+    let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `offsets` is null or a valid map of
+    // `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *` that no other
+    // call mutates during this one, as `map_offset_and_metadata` requires; the entries are copied.
+    let offsets = unsafe { map_offset_and_metadata(offsets) };
+    let Some(client) = inner.client.upgrade() else {
+        return error_slot(Err(destroyed()));
+    };
+    // SAFETY: Per this function's `# Safety`, `callback` is a live callback handle, as
+    // `commit_callback_adapter` requires; the registration is copied, so the handle is borrowed for
+    // this call only. Its `self` stays alive until `onComplete` fires, as
+    // `kafka_consumer_OffsetCommitCallback_new` documents.
+    let callback = unsafe { commit_callback_adapter(callback, Arc::clone(client.delivery())) };
+    // Not kept alive while the operation runs: the handle holds the consumer weakly.
+    drop(client);
+    let h = inner.handle.clone();
+    error_slot(
+        inner.run_blocking("kafka_consumer_ConsumerHandle_commit_async_with_offsets_callback", async move {
+            h.commit_async_with_offsets_callback(offsets, callback).await
+        }),
+    )
+}
+
+/// The completion of the `_cb` twin: `error` is `NULL` on success,
+/// owned otherwise.
+pub type kafka_consumer_ConsumerHandle_commit_async_with_offsets_callback_cb_t =
+    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+
+/// The non-blocking twin: `cb` and the `onComplete` calls the operation
+/// triggers (on a `MockConsumer` handle, this commit's own `onComplete`
+/// first) are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Safety
+///
+/// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. Reading the arguments and
+    // building the adapter come first and hand nothing over; the body hands `cb` over only as the
+    // last step of `HandleInner::run_cb`: to the task `Client::spawn` registers, after which nothing
+    // can panic, or, once the consumer is destroyed, to the inline fallback, which fires `cb` as its
+    // last action. So `cb` has not fired for this `opaque`, as `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_with_offsets_callback_cb(
+    self_: *const kafka_consumer_ConsumerHandle_t,
+    offsets: *const kafka_Map_t,
+    callback: *mut kafka_consumer_OffsetCommitCallback_t,
+    cb: kafka_consumer_ConsumerHandle_commit_async_with_offsets_callback_cb_t,
+    opaque: *mut c_void,
+) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `inner` requires.
+    let inner = unsafe { inner(self_) };
+    // SAFETY: Per this function's `# Safety`, `offsets` is null or a valid map of
+    // `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *` that no other
+    // call mutates during this one, as `map_offset_and_metadata` requires; the entries are copied.
+    let offsets = unsafe { map_offset_and_metadata(offsets) };
+    // SAFETY: Per this function's `# Safety`, `callback` is a live callback handle, as
+    // `commit_callback_adapter` requires; the registration is copied, so the handle is borrowed for
+    // this call only. Its `self` stays alive until `onComplete` fires, as
+    // `kafka_consumer_OffsetCommitCallback_new` documents.
+    let callback = inner
+        .client
+        .upgrade()
+        .map(|client| unsafe { commit_callback_adapter(callback, Arc::clone(client.delivery())) });
+    let h = inner.handle.clone();
+    let opaque = SendPtr(opaque);
+    inner.run_cb(
+        "kafka_consumer_ConsumerHandle_commit_async_with_offsets_callback_cb",
+        async move {
+            match callback {
+                Some(callback) => h.commit_async_with_offsets_callback(offsets, callback).await,
+                None => Err(destroyed()),
+            }
+        },
         move |client, result| deliver_void(client, cb, opaque, result),
         // SAFETY: `cb` and `opaque` are this call's own arguments, and `cb` is valid per this
         // function's `# Safety`. `run_cb` calls this fallback only when the consumer is gone and
