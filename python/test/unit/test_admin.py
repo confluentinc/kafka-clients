@@ -975,6 +975,18 @@ def test_to_full_config_entry_preserves_nulls_and_empty_synonyms():
     assert entry.is_default is True
 
 
+def test_config_entry_repr_redacts_sensitive_value():
+    """Java's `toString` prints "Redacted" for every sensitive entry, even one
+    whose value is null, and the value itself otherwise."""
+    sensitive = ConfigEntry("ssl.key.password", "secret", False, True, False)
+    assert repr(sensitive) == "ConfigEntry(name='ssl.key.password', value=Redacted)"
+    assert "secret" not in str(sensitive)
+    assert (repr(ConfigEntry("ssl.key.password", None, False, True, False))
+            == "ConfigEntry(name='ssl.key.password', value=Redacted)")
+    assert (repr(ConfigEntry("retention.ms", "1000", False, False, False))
+            == "ConfigEntry(name='retention.ms', value='1000')")
+
+
 def test_to_log_dir_description_carries_error_and_volume_bytes():
     description = _to_log_dir_description(
         ((KAFKA_STORAGE_ERROR, "offline", 0, 0), 2000, 1000,
@@ -2425,6 +2437,22 @@ def test_to_delegation_token_unpacks_the_whole_chain():
     assert token.hmac == b"\x01\x00\x02"
     assert token.hmac_as_base64_string == "AQAC"
     assert str(token.token_info.owner) == "User:owner"
+
+
+def test_delegation_token_repr_hides_the_hmac():
+    """The token id and the HMAC together are a delegation-token login, so the
+    repr masks the HMAC as Java's `toString` does. The token id stays: Java
+    prints it too."""
+    raw = ("token-1", ("User", "owner", False), ("User", "owner", False), [],
+           1000, 5000, 9000, b"\x01\x00\x02", "AQAC")
+    token = _to_delegation_token(raw)
+    assert repr(token) == (
+        "DelegationToken(token_info=TokenInformation(token_id='token-1', "
+        "owner=KafkaPrincipal(principal_type='User', name='owner', token_authenticated=False), "
+        "renewers=[], expiry_timestamp=5000), hmac=[*******])")
+    assert "AQAC" not in repr(token)
+    assert "AQAC" not in str(token)
+    assert "token_id='token-1'" in repr(token)
 
 
 def test_to_describe_user_scram_credentials_splits_errors_from_descriptions():
