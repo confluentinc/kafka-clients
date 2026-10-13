@@ -207,8 +207,8 @@ struct FfiConsumerHandle {
     /// inside the blocking API it is running (poll / commit / …), runs the user
     /// listener, and acks — so the listener runs on the caller's thread, and a
     /// reentrant op the listener submits is not gated behind a parked dispatcher
-    /// (closing the D25 gap-1/8 deadlock).
-    pending_rebalance_callbacks: Arc<Mutex<std::collections::VecDeque<PendingRebalanceCallback>>>,
+    /// (closing the D25 gap-1/8 deadlock). `destroy` closes it (`None`).
+    pending_rebalance_callbacks: Arc<PendingQueue>,
     /// C notification fired (on the dispatcher thread) when a callback is
     /// enqueued above, so the embedder's blocking-API wait loop wakes and drains.
     /// Set via [`kafka_consumer_Consumer_set_pending_callback_notify`]; shared
@@ -281,7 +281,7 @@ fn build_consumer_handle(
         pending_tasks: Mutex::new(Vec::new()),
         consumer_handle,
         is_mock,
-        pending_rebalance_callbacks: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+        pending_rebalance_callbacks: Arc::new(Mutex::new(Some(std::collections::VecDeque::new()))),
         pending_callback_notify: Arc::new(Mutex::new(None)),
     });
     Box::into_raw(handle) as *mut kafka_consumer_Consumer_t
@@ -696,6 +696,15 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_new(
 /// does not observe wakeups, such as [`kafka_consumer_Consumer_close_async`],
 /// is waited for until it completes.
 ///
+/// A rebalance-listener or commit callback still queued for delivery on the
+/// caller's thread ([`kafka_consumer_Consumer_set_pending_callback_notify`]) is
+/// dropped without running, as is one queued after this function was called:
+/// the operation waiting for it carries on as if the callback had returned
+/// without an error, and a dropped commit callback never fires. An entry
+/// already taken with [`kafka_consumer_Consumer_next_pending_callback`] is not
+/// dropped, and the operation waiting for it can hold this function up until
+/// it is acked, so ack it first.
+///
 /// Called on the consumer's callback dispatcher thread (from inside one of its
 /// callbacks) or inside a tokio runtime, where that wait could deadlock, this
 /// function returns at once, and the wait and the free happen on a new thread.
@@ -738,10 +747,10 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_destroy(consumer: *mut kafka_co
     }
 }
 
-/// The body of [`kafka_consumer_Consumer_destroy`]: wakes and joins the tasks of
-/// the handle's in-flight `_async` operations, then frees it. Runs on the thread
-/// that called `destroy`, or on a thread of its own where waiting there could
-/// deadlock.
+/// The body of [`kafka_consumer_Consumer_destroy`]: closes the caller-thread
+/// callback queue, wakes and joins the tasks of the handle's in-flight `_async`
+/// operations, then frees it. Runs on the thread that called `destroy`, or on a
+/// thread of its own where waiting there could deadlock.
 ///
 /// # Safety
 ///
@@ -752,9 +761,21 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_destroy(consumer: *mut kafka_co
 unsafe fn teardown_consumer(addr: usize) {
     // SAFETY: per this function's `# Safety`, `addr` is a live, non-null handle from a
     // consumer constructor, which is what `handle_ref` requires. The shared reference is
-    // used only to wake and join the tasks below, which hold shared references of their
-    // own, and is dead before the `Box` is reclaimed.
+    // used only to close the callback queue and to wake and join the tasks below, which
+    // hold shared references of their own, and is dead before the `Box` is reclaimed.
     let h = unsafe { handle_ref(addr as *const kafka_consumer_Consumer_t) };
+    // Close the caller-thread queue first: a task parked on a callback queued there would
+    // wait for an ack that no call will send now. Dropping the entries resolves those tasks
+    // as if the callbacks had returned (`CallerThreadRebalanceListener::enqueue_and_wait`),
+    // and a callback queued from now on is dropped at once (`enqueue_pending`). An entry
+    // the embedder has already taken is its to ack. Read poison-tolerantly for the reason
+    // given below: skipping the close on poison would leave the join below hung.
+    let queued = h
+        .pending_rebalance_callbacks
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    drop(queued);
     // Read poison-tolerantly, as the producer's `destroy` does: a lock is poisoned only by
     // a panic `#[ffi_guard]` caught, after which the C caller is told to destroy the
     // handle, so this must still work on a poisoned handle. Reading poison as "no tasks"
@@ -2484,6 +2505,10 @@ const PENDING_METHOD_COMMIT: i32 = 3;
 /// A commit callback's C invocation, run by the thread that acks its entry.
 type PendingJob = Box<dyn FnOnce() + Send>;
 
+/// The callbacks awaiting delivery on the embedder's thread, in order; `None`
+/// once [`kafka_consumer_Consumer_destroy`] has closed the queue.
+type PendingQueue = Mutex<Option<std::collections::VecDeque<PendingRebalanceCallback>>>;
+
 /// One callback awaiting delivery on the embedder's thread.
 struct PendingRebalanceCallback {
     method: i32,
@@ -2504,13 +2529,19 @@ struct PendingRebalanceCallback {
 /// `user_data` is released only after the notification has run, even if the
 /// consumer is destroyed (which detaches the dispatcher with jobs still queued)
 /// or the notify is replaced in the meantime.
+///
+/// Once `destroy` has closed the queue, `entry` is dropped instead, which
+/// resolves the operation waiting for it at once, and nothing is notified.
 fn enqueue_pending(
-    queue: &Mutex<std::collections::VecDeque<PendingRebalanceCallback>>,
+    queue: &PendingQueue,
     completion_tx: &std::sync::mpsc::Sender<CompletionJob>,
     notify: &Mutex<Option<Arc<PendingCallbackNotify>>>,
     entry: PendingRebalanceCallback,
 ) {
-    queue.lock().unwrap().push_back(entry);
+    match queue.lock().unwrap().as_mut() {
+        Some(entries) => entries.push_back(entry),
+        None => return,
+    }
     let registration = notify.lock().unwrap().clone();
     if let Some(registration) = registration {
         enqueue_or_run_inline(
@@ -2540,7 +2571,7 @@ unsafe impl Send for PendingCallbackNotify {}
 /// Adapts the core [`ConsumerRebalanceListener`] trait to the caller-thread
 /// delivery queue on an [`FfiConsumerHandle`].
 struct CallerThreadRebalanceListener {
-    queue: Arc<Mutex<std::collections::VecDeque<PendingRebalanceCallback>>>,
+    queue: Arc<PendingQueue>,
     completion_tx: std::sync::mpsc::Sender<CompletionJob>,
     /// The handle's notify slot, read at callback time, so a notify registered
     /// after subscribing is used. `None` inside means the embedder has not
@@ -2696,8 +2727,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_caller_thread_listene
     // the guard is rejected, and otherwise exactly once from the dispatcher thread after
     // `release`, with null or a fresh error handle the callback owns. Under the one-shot
     // `OperationCallbackTarget` convention the C caller keeps `user_data` valid across that
-    // single completion, and must not destroy the consumer while the op is in flight
-    // (`kafka_consumer_Consumer_destroy`'s documented precondition).
+    // single completion; the handle outlives the op because
+    // `kafka_consumer_Consumer_destroy` joins the op's task before freeing it.
     unsafe {
         async_void_op(consumer, callback, user_data, move |c| {
             c.subscribe_with_topics_listener(topic_vec, listener)
@@ -2759,8 +2790,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_pattern_caller_thread
     // the guard is rejected, and otherwise exactly once from the dispatcher thread after
     // `release`, with null or a fresh error handle the callback owns. Under the one-shot
     // `OperationCallbackTarget` convention the C caller keeps `user_data` valid across that
-    // single completion, and must not destroy the consumer while the op is in flight
-    // (`kafka_consumer_Consumer_destroy`'s documented precondition).
+    // single completion; the handle outlives the op because
+    // `kafka_consumer_Consumer_destroy` joins the op's task before freeing it.
     unsafe {
         async_void_op(consumer, callback, user_data, move |c| {
             c.subscribe_with_pattern_listener(subscription_pattern, listener)
@@ -2800,7 +2831,12 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_next_pending_callback(
     // is used only within this synchronous call, to pop the handle's pending queue, during
     // which the C caller keeps the handle alive.
     let h = unsafe { handle_ref(consumer) };
-    let popped = h.pending_rebalance_callbacks.lock().unwrap().pop_front();
+    let popped = h
+        .pending_rebalance_callbacks
+        .lock()
+        .unwrap()
+        .as_mut()
+        .and_then(std::collections::VecDeque::pop_front);
     match popped {
         Some(pending) => Box::into_raw(Box::new(pending)) as *mut kafka_consumer_PendingCallback_t,
         None => std::ptr::null_mut(),
@@ -5590,8 +5626,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_pattern_async(
     // the guard is rejected, and otherwise exactly once from the dispatcher thread after
     // `release`, with null or a fresh error handle the callback owns. Under the one-shot
     // `OperationCallbackTarget` convention the C caller keeps `user_data` valid across that
-    // single completion, and must not destroy the consumer while the op is in flight
-    // (`kafka_consumer_Consumer_destroy`'s documented precondition).
+    // single completion; the handle outlives the op because
+    // `kafka_consumer_Consumer_destroy` joins the op's task before freeing it.
     unsafe {
         async_void_op(consumer, callback, user_data, move |c| {
             c.subscribe_with_pattern(subscription_pattern)
@@ -5654,8 +5690,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_pattern_with_listener
     // the guard is rejected, and otherwise exactly once from the dispatcher thread after
     // `release`, with null or a fresh error handle the callback owns. Under the one-shot
     // `OperationCallbackTarget` convention the C caller keeps `user_data` valid across that
-    // single completion, and must not destroy the consumer while the op is in flight
-    // (`kafka_consumer_Consumer_destroy`'s documented precondition).
+    // single completion; the handle outlives the op because
+    // `kafka_consumer_Consumer_destroy` joins the op's task before freeing it.
     unsafe {
         async_void_op(consumer, callback, user_data, move |c| {
             c.subscribe_with_pattern_listener(subscription_pattern, listener)
@@ -6799,10 +6835,10 @@ struct FfiOffsetCommitCallback {
     /// moves the fields out of the box, and drops the consumer holding the
     /// registrations only afterwards. The reference is sound because it is only
     /// read inside `on_complete`, which runs only from the application-side
-    /// futures of calls on this consumer; by the time `destroy` runs, those have
-    /// finished or are cancelled by the runtime shutdown that comes before the
-    /// consumer's drop, and dropping a registration only releases `user_data`
-    /// (the same argument as the `&'static` handle of the poll completion).
+    /// futures of calls on this consumer, and those have all finished by the
+    /// time `destroy` frees the handle: no synchronous call may still be
+    /// running, and `destroy` joins the task of every `_async` one first.
+    /// Dropping a registration afterwards only releases `user_data`.
     handle: &'static FfiConsumerHandle,
 }
 
@@ -7241,8 +7277,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_close_with_option_async(
     // the guard is rejected, and otherwise exactly once from the dispatcher thread after
     // `release`, with null or a fresh error handle the callback owns. Under the one-shot
     // `OperationCallbackTarget` convention the C caller keeps `user_data` valid across that
-    // single completion, and must not destroy the consumer while the op is in flight
-    // (`kafka_consumer_Consumer_destroy`'s documented precondition).
+    // single completion; the handle outlives the op because
+    // `kafka_consumer_Consumer_destroy` joins the op's task before freeing it.
     unsafe { async_void_op(consumer, callback, user_data, move |c| c.close_with_options(options)) };
 }
 
@@ -9500,6 +9536,77 @@ mod tests {
         unsafe { kafka_consumer_Consumer_destroy(c) };
     }
 
+    /// Once `destroy` has closed the queue, a callback queued by an operation still
+    /// finishing is dropped at once, which resolves the operation's wait, and
+    /// nothing is notified.
+    #[test]
+    fn enqueue_pending_on_a_closed_queue_drops_the_entry() {
+        let queue: PendingQueue = Mutex::new(None);
+        let (completion_tx, completion_rx) = std::sync::mpsc::channel::<CompletionJob>();
+        let notified = AtomicI32::new(0);
+        let notify = Mutex::new(Some(Arc::new(PendingCallbackNotify {
+            notify: count_notify,
+            target: CallbackTarget { user_data: &notified as *const AtomicI32 as *mut c_void, destroy: None },
+        })));
+        let (ack, mut ack_rx) = tokio::sync::oneshot::channel();
+        enqueue_pending(
+            &queue,
+            &completion_tx,
+            &notify,
+            PendingRebalanceCallback { method: PENDING_METHOD_REVOKED, partitions: Vec::new(), ack, job: None },
+        );
+        assert!(
+            matches!(ack_rx.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Closed)),
+            "the entry must be dropped, resolving its wait"
+        );
+        assert!(completion_rx.try_recv().is_err(), "no notification must be queued");
+        assert!(queue.lock().unwrap().is_none(), "the queue must stay closed");
+    }
+
+    /// A commit callback invoked on a runtime worker once `destroy` has closed the
+    /// queue is dropped: `on_complete` returns at once, and the C callback never
+    /// fires.
+    #[test]
+    fn commit_callback_on_a_closed_queue_is_dropped() {
+        let c = assigned_mock();
+        let notified = AtomicI32::new(0);
+        // SAFETY: Test: `c` is the live mock handle `assigned_mock` returned, `count_notify` a
+        // valid notify, and `user_data` the local `notified`, which outlives the registration
+        // (released when `c` is destroyed below); no destroy hook.
+        unsafe {
+            kafka_consumer_Consumer_set_pending_callback_notify(
+                c,
+                count_notify,
+                &notified as *const AtomicI32 as *mut c_void,
+                None,
+            )
+        };
+        let probe = CommitCallbackProbe { thread: Mutex::new(None), calls: AtomicI32::new(0) };
+        // SAFETY: Test: `c` is the non-null handle `assigned_mock` built with a consumer
+        // constructor, destroyed only at the end of the test, after its last use of `h`.
+        let h = unsafe { handle_ref(c) };
+        let callback = make_commit_callback(
+            probe_commit_callback,
+            &probe as *const CommitCallbackProbe as *mut c_void,
+            None,
+            h,
+        );
+        // What `destroy` does first.
+        drop(h.pending_rebalance_callbacks.lock().unwrap().take());
+        let offsets = HashMap::from([(TopicPartition::new("t", 0), OffsetAndMetadata::new(3).unwrap())]);
+        let task = h
+            .runtime_handle
+            .spawn(async move { callback.on_complete(&offsets, None).await });
+        h.runtime
+            .block_on(async { tokio::time::timeout(Duration::from_secs(5), task).await })
+            .expect("on_complete must not wait for an ack")
+            .expect("on_complete must return");
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 0, "the commit callback must not fire");
+        // SAFETY: Test: `c` is the live consumer handle; the commit task has finished, so
+        // nothing is in flight, and this single destroy is its final use.
+        unsafe { kafka_consumer_Consumer_destroy(c) };
+    }
+
     /// The order in which a pending-callback notify and its destroy hook ran.
     type NotifyLog = Mutex<Vec<&'static str>>;
 
@@ -10129,6 +10236,108 @@ mod tests {
         assert!(
             wait_until(Duration::from_secs(5), || task_done.load(Ordering::SeqCst)),
             "the task must finish once the dispatcher is free again"
+        );
+    }
+
+    /// `destroy` with an `_async` operation parked on a caller-thread callback that
+    /// nobody takes drops the queued entry: the operation carries on as if the
+    /// listener had returned, its callback fires once, and the handle is freed.
+    /// Waiting for the operation's task while the entry stayed queued hung, since
+    /// nothing would ever ack it.
+    #[test]
+    fn test_destroy_drops_the_queued_caller_thread_callbacks() {
+        // SAFETY: Test: `auto_offset_reset` is a deliberate NULL, which
+        // `kafka_consumer_MockConsumer_new`'s `# Safety` permits; the returned handle is
+        // destroyed once, on the `destroyer` thread below.
+        let consumer = unsafe { kafka_consumer_MockConsumer_new(std::ptr::null()) };
+        let dispatcher = take_dispatcher(consumer);
+        let notified: &'static AtomicI32 = Box::leak(Box::default());
+        // SAFETY: Test: `consumer` is the live mock handle, `count_notify` a valid notify, and
+        // `user_data` the leaked `notified`, valid for the rest of the process, so a
+        // notification may still run after the destroy; no destroy hook.
+        unsafe {
+            kafka_consumer_Consumer_set_pending_callback_notify(
+                consumer,
+                count_notify,
+                notified as *const AtomicI32 as *mut c_void,
+                None,
+            )
+        };
+        let topic = std::ffi::CString::new("t").unwrap();
+        let topics = [topic.as_ptr()];
+        let subscribed: &'static CallbackLog = Box::leak(Box::default());
+        // SAFETY: Test: `consumer` is the live mock handle, `topics` one valid C string,
+        // matching `count = 1`, that outlives the call, `log_op_callback` a valid operation
+        // callback, and `user_data` the leaked `subscribed`, valid whenever it fires.
+        unsafe {
+            kafka_consumer_Consumer_subscribe_caller_thread_listener_async(
+                consumer,
+                topics.as_ptr(),
+                1,
+                log_op_callback,
+                subscribed as *const CallbackLog as *mut c_void,
+            )
+        };
+        assert!(
+            wait_until(Duration::from_secs(5), || subscribed.calls.load(Ordering::SeqCst) == 1),
+            "the subscribe must complete"
+        );
+        assert_eq!(subscribed.code.load(Ordering::SeqCst), kafka_common_ErrorCode_NONE as i32);
+
+        // A rebalance onto `t-0` calls `onPartitionsAssigned`, which is queued for the
+        // embedder's thread; the rebalance's task parks on its ack.
+        let partitions = [0i32];
+        let rebalanced: &'static CallbackLog = Box::leak(Box::default());
+        // SAFETY: Test: `consumer` is the live mock handle, `topics` / `partitions` one-entry
+        // locals (the `topic` `CString` outlives the call, which copies them),
+        // `log_op_callback` a valid operation callback, and `user_data` the leaked
+        // `rebalanced`, valid whenever it fires.
+        unsafe {
+            kafka_consumer_MockConsumer_rebalance_async(
+                consumer,
+                topics.as_ptr(),
+                partitions.as_ptr(),
+                1,
+                log_op_callback,
+                rebalanced as *const CallbackLog as *mut c_void,
+            )
+        };
+        assert!(
+            wait_until(Duration::from_secs(5), || notified.load(Ordering::SeqCst) == 1),
+            "the listener callback must be queued"
+        );
+        assert_eq!(
+            rebalanced.calls.load(Ordering::SeqCst),
+            0,
+            "the rebalance must wait for the ack"
+        );
+
+        let addr = consumer as usize;
+        let destroyer = std::thread::spawn(move || {
+            // SAFETY: Test: `addr` is the live mock handle created above and this is its single
+            // destroy, outside any tokio runtime, with no other call running on it; the test
+            // does not use the pointer afterwards.
+            unsafe { kafka_consumer_Consumer_destroy(addr as *mut kafka_consumer_Consumer_t) }
+        });
+        assert!(
+            wait_until(Duration::from_secs(5), || destroyer.is_finished()),
+            "destroy must not wait for a callback nobody takes"
+        );
+        destroyer.join().unwrap();
+        assert!(
+            wait_until(Duration::from_secs(5), || rebalanced.calls.load(Ordering::SeqCst) > 0),
+            "the rebalance's callback must still fire"
+        );
+        assert_eq!(rebalanced.code.load(Ordering::SeqCst), kafka_common_ErrorCode_NONE as i32);
+        assert!(
+            wait_until(Duration::from_secs(10), || dispatcher.is_finished()),
+            "destroy must free the handle once the rebalance's task has finished"
+        );
+        dispatcher.join().unwrap();
+        assert_eq!(
+            rebalanced.calls.load(Ordering::SeqCst),
+            1,
+            "the rebalance callback must fire exactly once"
         );
     }
 
