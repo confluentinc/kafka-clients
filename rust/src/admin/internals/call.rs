@@ -130,18 +130,28 @@ impl NodeProvider {
     /// Returns `Ok(Some(node))` when a node is assigned, `Ok(None)` when the
     /// call must stay pending (metadata not ready / no available node), and
     /// `Err(_)` when the call should fail (a stored fatal metadata error).
+    ///
+    /// `metadata_recovery_strategy` is the `KafkaAdminClient` field
+    /// `MetadataUpdateNodeIdProvider` reads (`KafkaAdminClient.java:411`, `:635`).
     pub(crate) fn provide<C: KafkaClient>(
         &self,
         metadata_manager: &AdminMetadataManager,
         client: &C,
+        metadata_recovery_strategy: MetadataRecoveryStrategy,
         now: i64,
     ) -> Result<Option<Node>, Error> {
         match self {
             NodeProvider::MetadataUpdate => {
-                // Mirrors MetadataUpdateNodeIdProvider (rebootstrap only applies
-                // under MetadataRecoveryStrategy::Rebootstrap, deferred here).
-                let _ = MetadataRecoveryStrategy::None;
-                Ok(client.least_loaded_node(now).node().cloned())
+                // Mirrors MetadataUpdateNodeIdProvider (`KafkaAdminClient.java:724-733`):
+                // with no node available or connection-ready, go back to the
+                // bootstrap cluster, and still return whatever node was found.
+                let least_loaded_node = client.least_loaded_node(now);
+                if metadata_recovery_strategy == MetadataRecoveryStrategy::Rebootstrap
+                    && !least_loaded_node.has_node_available_or_connection_ready()
+                {
+                    metadata_manager.rebootstrap(now);
+                }
+                Ok(least_loaded_node.node().cloned())
             },
             NodeProvider::Controller => {
                 if metadata_manager.is_ready()? {
