@@ -20,7 +20,8 @@ Methodology (matches the C benchmark):
     ``int(time.time()*1000)``), read right after touching the record bytes.
   * Consumer config: ``group.protocol=consumer`` (KIP-848),
     ``auto.offset.reset=latest``, ``fetch.min.bytes`` / ``max.partition.fetch.bytes``
-    = 4 MiB, ``check.crcs=false`` (v2 only — the Rust client does not surface it).
+    = 4 MiB, ``check.crcs=false`` (v2/librdkafka only; the Rust client keeps its
+    default ``check.crcs=true``, matching the Java client).
   * Settle to the live edge (poll until empty) before load starts.
   * Time-based ``WARMUP_SECONDS`` (excluded from stats) then
     ``TEST_DURATION_SECONDS`` measured; per-``INTERVAL_SECONDS`` snapshots to
@@ -168,7 +169,6 @@ class _RustConsumer:
             "fetch.min.bytes": str(cfg.fetch_min_bytes),
             "max.partition.fetch.bytes": str(cfg.fetch_max_bytes),
             "max.poll.records": str(cfg.batch_size + 500),
-            "check.crcs": "false",
         }
         conf = {
             "bootstrap.servers": cfg.bootstrap_servers,
@@ -293,7 +293,6 @@ class _AsyncRustConsumer:
             "fetch.min.bytes": str(cfg.fetch_min_bytes),
             "max.partition.fetch.bytes": str(cfg.fetch_max_bytes),
             "max.poll.records": str(cfg.batch_size + 500),
-            "check.crcs": "false",
         }
         conf = {
             "bootstrap.servers": cfg.bootstrap_servers,
@@ -496,7 +495,21 @@ class _Measurement:
         self.measure_start = None
         self.no_data_deadline = None
 
+    def _reset_cpu_baseline(self):
+        # psutil's cpu_percent() (what the shared CPUBucket samples each window)
+        # reports CPU over the span since its previous call, and its very first
+        # call returns a meaningless 0.0. Calling it here restarts that span at
+        # "now", so the first measured sample covers only measured time: no
+        # warmup CPU (warmup completing mid-window) and no spurious 0.0 (warmup
+        # disabled, measurement starting with the sampler).
+        try:
+            self.metrics.cpu.process.cpu_percent()
+        except Exception:  # noqa: BLE001
+            pass
+
     def begin(self):
+        # Prime the CPU baseline before the sampler starts (no race with it).
+        self._reset_cpu_baseline()
         self.metrics.start_collecting(interval_s=self.cfg.interval_seconds)
         if self.warmup_complete:
             self.measure_start = time.monotonic()
@@ -512,6 +525,8 @@ class _Measurement:
             if now - self.consume_start >= self.cfg.warmup_seconds:
                 self.warmup_complete = True
                 self.measure_start = now
+                # Exclude warmup CPU from the first measured CPU sample.
+                self._reset_cpu_baseline()
                 self.metrics.measurement_start_ms = _now_ms()
                 print(f">>> warmup complete ({self.cfg.warmup_seconds}s); measuring", flush=True)
             return
@@ -657,7 +672,8 @@ def run(cfg, metrics=None):
         if own_metrics:
             metrics.stop_collecting()
 
-    return _summarize(cfg, meas.latency_hist, meas.measured_messages, measured_duration)
+    return _summarize(cfg, meas.latency_hist, meas.measured_messages, measured_duration,
+                      metrics)
 
 
 async def run_async(cfg, metrics=None):
@@ -751,10 +767,12 @@ async def run_async(cfg, metrics=None):
         if own_metrics:
             metrics.stop_collecting()
 
-    return _summarize(cfg, meas.latency_hist, meas.measured_messages, measured_duration)
+    return _summarize(cfg, meas.latency_hist, meas.measured_messages, measured_duration,
+                      metrics)
 
 
-def _summarize(cfg, latency_hist, measured_messages, measured_duration):
+def _summarize(cfg, latency_hist, measured_messages, measured_duration,
+               metrics=None):
     p50 = percentile_from_hist(latency_hist, 0.50)
     p90 = percentile_from_hist(latency_hist, 0.90)
     p95 = percentile_from_hist(latency_hist, 0.95)
@@ -774,6 +792,18 @@ def _summarize(cfg, latency_hist, measured_messages, measured_duration):
         "latency_ms": {"min": mn, "avg": round(avg, 2), "p50": p50, "p90": p90,
                        "p95": p95, "p99": p99, "p999": p999, "max": mx},
     }
+    # CPU/RSS averages over the measured interval, from the shared Metrics
+    # sampler (psutil, per-interval buckets already written to metrics.jsonl).
+    # Same keys and units (rss_avg_mb, MB) as the other consumer harnesses'
+    # summaries (rust/consumer-perf, librdkafka_e2e.c, JavaE2E.java); the
+    # producer harnesses' results.json use rss_avg_kib instead.
+    cpu_avg = rss_avg_mb = None
+    if metrics is not None and metrics.total_external_metrics > 0:
+        n = metrics.total_external_metrics
+        cpu_avg = metrics.total_cpu / n
+        rss_avg_mb = metrics.total_rss / n / (1024.0 * 1024.0)
+        stats["cpu_avg_pct"] = round(cpu_avg, 2)
+        stats["rss_avg_mb"] = round(rss_avg_mb, 2)
     print("\n" + "=" * 72)
     print(f"SUMMARY - CLIENT_VERSION={cfg.client_version} (warmup excluded)")
     print("=" * 72)
@@ -782,6 +812,9 @@ def _summarize(cfg, latency_hist, measured_messages, measured_duration):
     print(f"Throughput:        {thr_msg:.0f} msg/s  ({thr_mib:.2f} MiB/s)")
     print(f"E2E latency (ms):  min={mn} avg={avg:.2f} p50={p50} p90={p90} "
           f"p95={p95} p99={p99} p99.9={p999} max={mx}")
+    if cpu_avg is not None:
+        print(f"CPU (% one core):  avg={cpu_avg:.1f}")
+        print(f"RSS (MB):          avg={rss_avg_mb:.1f}")
     print("=" * 72, flush=True)
     try:
         with open("results.json", "w") as fh:
