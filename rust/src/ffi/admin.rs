@@ -9350,43 +9350,33 @@ unsafe fn read_config_resource_types(type_codes: *const i32, count: i32) -> Hash
 // describeLogDirs
 // ---------------------------------------------------------------------------
 
-/// Per-broker outcomes of `describeLogDirs`.
-type DescribeLogDirsOutcomes = HashMap<i32, Result<HashMap<String, LogDirDescription>, Error>>;
-
 /// Opaque handle to a flattened `DescribeLogDirsResult`, keyed by broker id.
 #[repr(C)]
 pub struct kafka_admin_DescribeLogDirsResult_t {
     _private: [u8; 0],
 }
 
-/// Backing state for [`kafka_admin_DescribeLogDirsResult_t`].
+/// Backing state for [`kafka_admin_DescribeLogDirsResult_t`]: one future per
+/// broker, as Java's `descriptions()` holds.
 struct DescribeLogDirsResultInner {
     brokers: Vec<i32>,
-    values: Vec<Option<LogDirDescriptionMapInner>>,
-    errors: Vec<Option<ErrorInner>>,
+    entries: Vec<LazyKeyed<LogDirDescriptionMapInner>>,
 }
 
-/// Flattens the per-broker `describeLogDirs` outcomes into the C handle.
-fn box_describe_log_dirs_result(outcomes: DescribeLogDirsOutcomes) -> *mut kafka_admin_DescribeLogDirsResult_t {
-    let entries = sorted_entries(outcomes);
-    let mut brokers = Vec::with_capacity(entries.len());
-    let mut values = Vec::with_capacity(entries.len());
-    let mut errors = Vec::with_capacity(entries.len());
-    for (broker, outcome) in entries {
-        brokers.push(broker);
-        match outcome {
-            Ok(map) => {
-                values.push(Some(LogDirDescriptionMapInner::new(&map)));
-                errors.push(None);
-            },
-            Err(e) => {
-                values.push(None);
-                errors.push(Some(error_inner(e)));
-            },
-        }
-    }
-    Box::into_raw(Box::new(DescribeLogDirsResultInner { brokers, values, errors }))
-        as *mut kafka_admin_DescribeLogDirsResult_t
+/// Wraps `describeLogDirs`' per-broker futures, unresolved, as the C handle's
+/// backing state, sorted by broker id.
+fn describe_log_dirs_result_inner(
+    waiter: &FutureWaiter,
+    futures: Vec<(i32, KafkaFuture<HashMap<String, LogDirDescription>>)>,
+) -> DescribeLogDirsResultInner {
+    let mut futures = futures;
+    futures.sort_by_key(|(broker, _)| *broker);
+    let brokers = futures.iter().map(|(broker, _)| *broker).collect();
+    let entries = futures
+        .into_iter()
+        .map(|(_, future)| lazy_keyed(waiter, future, |map| LogDirDescriptionMapInner::new(&map)))
+        .collect();
+    DescribeLogDirsResultInner { brokers, entries }
 }
 
 /// Casts a `*const kafka_admin_DescribeLogDirsResult_t` to a reference.
@@ -9399,14 +9389,15 @@ unsafe fn describe_log_dirs_result_ref(
 ) -> &'static DescribeLogDirsResultInner {
     // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
     // `describe_log_dirs` call, i.e. the `Box<DescribeLogDirsResultInner>` leaked by
-    // `Box::into_raw` in `box_describe_log_dirs_result` and freed only by
+    // `into_handle` in `kafka_admin_AdminClient_describe_log_dirs` and freed only by
     // `kafka_admin_DescribeLogDirsResult_destroy`, so it is aligned and live; callers use
     // the reference only within their own synchronous getter call, during which the C
     // caller keeps the handle alive.
     unsafe { &*(result as *const DescribeLogDirsResultInner) }
 }
 
-/// Returns the number of queried brokers.
+/// Returns the number of queried brokers. Never blocks: the brokers are known
+/// when the request is submitted (Java's `descriptions().keySet()`).
 ///
 /// # Safety
 ///
@@ -9424,7 +9415,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_count(
 }
 
 /// Returns the broker id at `index`, or -1 if out of range. Entries are sorted
-/// by broker id.
+/// by broker id. Never blocks.
 ///
 /// # Safety
 ///
@@ -9454,6 +9445,10 @@ pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_get_broker(
 /// broker failed (see [`kafka_admin_DescribeLogDirsResult_get_error`]) or `index`
 /// is out of range.
 ///
+/// **Blocks** until that broker's future has resolved — Java's
+/// `descriptions().get(broker).get()` — but not on any other broker. Never
+/// blocks for an out-of-range index.
+///
 /// # Safety
 ///
 /// `result` must be a valid `describe_log_dirs` result handle.
@@ -9463,26 +9458,28 @@ pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_get_value(
     result: *const kafka_admin_DescribeLogDirsResult_t,
     index: i32,
 ) -> *const kafka_admin_LogDirDescriptionMap_t {
-    if index < 0 {
-        return std::ptr::null();
-    }
     // SAFETY: `describe_log_dirs_result_ref` requires a non-null handle from a
     // `describe_log_dirs` call; per this function's `# Safety`, `result` is a valid
-    // `describe_log_dirs` result handle, i.e. one created by `Box::into_raw` in
-    // `box_describe_log_dirs_result` and not yet passed to
+    // `describe_log_dirs` result handle, i.e. one created by `into_handle` in
+    // `kafka_admin_AdminClient_describe_log_dirs` and not yet passed to
     // `kafka_admin_DescribeLogDirsResult_destroy`. The reference is used only for the
     // duration of this synchronous call, during which the C caller keeps the handle alive;
-    // the returned `kafka_admin_LogDirDescriptionMap_t` pointer borrows from the same
-    // `DescribeLogDirsResultInner` allocation and is documented valid only until the handle
-    // is destroyed.
-    match unsafe { describe_log_dirs_result_ref(result) }.values.get(index as usize) {
-        Some(Some(map)) => map as *const LogDirDescriptionMapInner as *const kafka_admin_LogDirDescriptionMap_t,
-        _ => std::ptr::null(),
+    // the returned `kafka_admin_LogDirDescriptionMap_t` pointer borrows the value cached in
+    // the same `DescribeLogDirsResultInner` allocation and is documented valid only until
+    // the handle is destroyed.
+    match keyed_value_at(&unsafe { describe_log_dirs_result_ref(result) }.entries, index) {
+        Some(map) => map as *const LogDirDescriptionMapInner as *const kafka_admin_LogDirDescriptionMap_t,
+        None => std::ptr::null(),
     }
 }
 
 /// Returns the error for the broker at `index` (borrowed), or null if it
 /// answered or `index` is out of range. Do not destroy it.
+///
+/// **Blocks** until that broker's future has resolved, but not on any other
+/// broker. Never blocks for an out-of-range index. A failure of the whole
+/// request is reported here for every broker, as Java completes every broker's
+/// future with it.
 ///
 /// A *per-log-dir* error is separate — see
 /// [`kafka_admin_LogDirDescription_error`].
@@ -9496,21 +9493,56 @@ pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_get_error(
     result: *const kafka_admin_DescribeLogDirsResult_t,
     index: i32,
 ) -> *const kafka_common_Error_t {
-    if index < 0 {
-        return std::ptr::null();
-    }
     // SAFETY: `describe_log_dirs_result_ref` requires a non-null handle from a
     // `describe_log_dirs` call; per this function's `# Safety`, `result` is a valid
-    // `describe_log_dirs` result handle, i.e. one created by `Box::into_raw` in
-    // `box_describe_log_dirs_result` and not yet passed to
+    // `describe_log_dirs` result handle, i.e. one created by `into_handle` in
+    // `kafka_admin_AdminClient_describe_log_dirs` and not yet passed to
     // `kafka_admin_DescribeLogDirsResult_destroy`. The reference is used only for the
     // duration of this synchronous call, during which the C caller keeps the handle alive;
-    // any error pointer returned borrows from the same allocation and is documented valid
-    // only until the handle is destroyed.
-    match unsafe { describe_log_dirs_result_ref(result) }.errors.get(index as usize) {
-        Some(slot) => error_ptr(slot.as_ref()),
-        None => std::ptr::null(),
-    }
+    // any error pointer returned borrows an `ErrorInner` owned by the handle (not to be
+    // destroyed) and is documented valid only until the handle is destroyed.
+    keyed_error_at(&unsafe { describe_log_dirs_result_ref(result) }.entries, index)
+}
+
+/// Returns whether the future of the broker at `index` has resolved — Java's
+/// `isDone()` on that broker's future. False if `index` is out of range. Never
+/// blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_log_dirs` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_is_done(
+    result: *const kafka_admin_DescribeLogDirsResult_t,
+    index: i32,
+) -> bool {
+    // SAFETY: `describe_log_dirs_result_ref` requires a non-null `describe_log_dirs` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for this
+    // check within the call, during which the C caller keeps the handle alive.
+    keyed_is_done_at(&unsafe { describe_log_dirs_result_ref(result) }.entries, index)
+}
+
+/// Java's `allDescriptions().get()`: **blocks** until every broker's future has
+/// resolved, then returns null if every broker answered, or an **owned** error
+/// — free it with `kafka_common_Error_destroy` — of a failed broker (the first
+/// in index order; Java leaves which one unspecified). The descriptions
+/// themselves are read with [`kafka_admin_DescribeLogDirsResult_get_value`].
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_log_dirs` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_all(
+    result: *const kafka_admin_DescribeLogDirsResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `describe_log_dirs_result_ref` requires a non-null `describe_log_dirs` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for the
+    // duration of this call, and the returned error is a fresh copy owned by the caller.
+    keyed_all(&unsafe { describe_log_dirs_result_ref(result) }.entries)
 }
 
 /// Destroys a `describe_log_dirs` result handle, invalidating every borrowed
@@ -9525,32 +9557,18 @@ pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_destroy(result: *mut 
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
         // a valid `describe_log_dirs` result handle: the pointer was created by
-        // `Box::into_raw(Box::new(DescribeLogDirsResultInner { .. }))` in
-        // `box_describe_log_dirs_result` and handed to C exactly once, either through
-        // `finish_sync`'s write to `*out_result` or as the owned `result` argument of the
-        // async callback. The destroy contract makes this the single, final release of that
+        // `into_handle` (a `Box<DescribeLogDirsResultInner>`) in
+        // `kafka_admin_AdminClient_describe_log_dirs` and handed to C exactly once, through
+        // `finish_sync`'s write to `*out_result`. The destroy contract makes this the single, final release of that
         // allocation; the borrowed sub-handles, strings and error pointers obtained from it
         // are documented valid only until this call.
         unsafe { drop(Box::from_raw(result as *mut DescribeLogDirsResultInner)) };
     }
 }
 
-/// Submits `describeLogDirs` and returns the collect-all future over its
-/// per-broker futures.
-fn submit_describe_log_dirs(
-    admin: &dyn Admin,
-    brokers: &[i32],
-    options: DescribeLogDirsOptions,
-) -> KafkaFuture<DescribeLogDirsOutcomes> {
-    let result = admin.describe_log_dirs_with_options(brokers, options);
-    let entries: Vec<(i32, KafkaFuture<HashMap<String, LogDirDescription>>)> =
-        result.descriptions().iter().map(|(b, f)| (*b, f.clone())).collect();
-    KafkaFuture::join_map_results(entries)
-}
-
-/// Submits `describeLogDirs`, unjoined, for [`admin_async_per_key_op`]'s
-/// independent-per-key delivery. Same `Admin` call as [`submit_describe_log_dirs`];
-/// see the "RPC submission helpers — per-key (unjoined) variants" note above.
+/// Submits `describeLogDirs`, unjoined: Java's `descriptions()` futures, for
+/// both the synchronous result handle and [`admin_async_per_key_op`]'s
+/// independent-per-key delivery.
 fn submit_describe_log_dirs_entries(
     admin: &dyn Admin,
     brokers: &[i32],
@@ -9581,14 +9599,20 @@ pub type kafka_admin_AdminClient_describe_log_dirs_callback_t = unsafe extern "C
     *mut c_void,
 );
 
-/// Queries the log directories of the given brokers, blocking until every
-/// per-broker future has resolved (synchronous).
+/// Queries the log directories of the given brokers — Java's
+/// `describeLogDirs`. Like Java, this **does not wait**: it submits the request
+/// and returns at once.
 ///
 /// On success writes a [`kafka_admin_DescribeLogDirsResult_t`] to `*out_result`
 /// (free it with [`kafka_admin_DescribeLogDirsResult_destroy`]) and returns null.
-/// **A per-broker failure is not a call failure**: it is reported by
-/// [`kafka_admin_DescribeLogDirsResult_get_error`] for that broker. A non-null
-/// return means the request could not be submitted at all.
+/// The handle holds one future per broker, as Java's `descriptions()` does. Its
+/// broker ids are readable at once; [`kafka_admin_DescribeLogDirsResult_get_value`]
+/// / [`kafka_admin_DescribeLogDirsResult_get_error`] wait for that broker's
+/// future only, and [`kafka_admin_DescribeLogDirsResult_all`] waits for every
+/// broker (Java's `allDescriptions().get()`). **Every failure of the request —
+/// per broker, or of the request as a whole, such as a timeout — is read from
+/// the handle**, as in Java. A non-null return means the request could not be
+/// submitted at all (a NULL `admin`).
 ///
 /// # Parameters
 ///
@@ -9616,21 +9640,28 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_log_dirs(
     // outlives this call.
     let broker_ids = unsafe { read_i32s(brokers, count) };
     let options = DescribeLogDirsOptions::new().set_timeout_ms(option_timeout(timeout_ms));
-    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
     // admin-client constructor, which this function's `# Safety` promises (`admin` must be
     // a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a NULL
-    // `admin` before `handle_ref` is reached. The `&'static AdminHandle` it derives is used
-    // only on the calling thread for the duration of this blocking call, during which the C
-    // caller keeps the handle alive, and the `submit` closure captures only the owned
-    // `broker_ids` and `options` copied out of the C arguments above.
-    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_describe_log_dirs(a, &broker_ids, options))) };
+    // `admin` before `handle_ref` is reached. The `submit` closure runs on the calling
+    // thread inside the helper and captures only the owned `broker_ids` and `options`
+    // copied out of the C arguments above; the handle it builds holds only owned futures
+    // and the waiter.
+    let outcome = unsafe {
+        admin_sync_submit(admin, move |a, w| {
+            Ok(describe_log_dirs_result_inner(
+                w,
+                submit_describe_log_dirs_entries(a, &broker_ids, options),
+            ))
+        })
+    };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
     // which this function's `# Safety` promises (`out_result` must be null or writable). It
-    // null-checks `out_result` and writes exactly one element, a handle freshly built by
-    // `box_describe_log_dirs_result`, only on `Ok`, giving the C caller sole ownership to
+    // null-checks `out_result` and writes exactly one element, a freshly boxed
+    // `DescribeLogDirsResult` handle, only on `Ok`, giving the C caller sole ownership to
     // release via `kafka_admin_DescribeLogDirsResult_destroy`; on `Err` it leaves
     // `*out_result` untouched and returns a fresh `box_error` handle the caller owns.
-    unsafe { finish_sync(outcome, out_result, box_describe_log_dirs_result) }
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// The body of [`kafka_admin_AdminClient_describe_log_dirs_async`], shared with its `#[ffi_guard]`'s `on_panic`.
@@ -9763,9 +9794,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_log_dirs_async(
 // alterReplicaLogDirs
 // ---------------------------------------------------------------------------
 
-/// Per-replica outcomes of `alterReplicaLogDirs`.
-type AlterReplicaLogDirsOutcomes = HashMap<TopicPartitionReplica, Result<(), Error>>;
-
 /// Opaque handle to a flattened `AlterReplicaLogDirsResult`, keyed by replica.
 #[repr(C)]
 pub struct kafka_admin_AlterReplicaLogDirsResult_t {
@@ -9781,30 +9809,24 @@ struct AlterReplicaLogDirsResultInner {
     topics: Vec<CString>,
     partitions: Vec<i32>,
     broker_ids: Vec<i32>,
-    errors: Vec<Option<ErrorInner>>,
+    entries: Vec<LazyKeyed<()>>,
 }
 
-/// Flattens the per-replica `alterReplicaLogDirs` outcomes into the C handle.
-fn box_alter_replica_log_dirs_result(
-    outcomes: AlterReplicaLogDirsOutcomes,
-) -> *mut kafka_admin_AlterReplicaLogDirsResult_t {
-    let entries = sorted_replica_entries(outcomes);
-    let mut topics = Vec::with_capacity(entries.len());
-    let mut partitions = Vec::with_capacity(entries.len());
-    let mut broker_ids = Vec::with_capacity(entries.len());
-    let mut errors = Vec::with_capacity(entries.len());
-    for (replica, outcome) in entries {
-        topics.push(to_cstring(replica.topic()));
-        partitions.push(replica.partition());
-        broker_ids.push(replica.broker_id());
-        errors.push(outcome.err().map(error_inner));
-    }
-    Box::into_raw(Box::new(AlterReplicaLogDirsResultInner {
-        topics,
-        partitions,
-        broker_ids,
-        errors,
-    })) as *mut kafka_admin_AlterReplicaLogDirsResult_t
+/// Wraps `alterReplicaLogDirs`' per-replica futures, unresolved, as the C
+/// handle's backing state, sorted by `(topic, partition, broker id)`.
+fn alter_replica_log_dirs_result_inner(
+    waiter: &FutureWaiter,
+    futures: Vec<(TopicPartitionReplica, KafkaFuture<()>)>,
+) -> AlterReplicaLogDirsResultInner {
+    let futures = sorted_replica_entries(futures.into_iter().collect());
+    let topics = futures.iter().map(|(replica, _)| to_cstring(replica.topic())).collect();
+    let partitions = futures.iter().map(|(replica, _)| replica.partition()).collect();
+    let broker_ids = futures.iter().map(|(replica, _)| replica.broker_id()).collect();
+    let entries = futures
+        .into_iter()
+        .map(|(_, future)| lazy_keyed(waiter, future, |()| ()))
+        .collect();
+    AlterReplicaLogDirsResultInner { topics, partitions, broker_ids, entries }
 }
 
 /// Casts a `*const kafka_admin_AlterReplicaLogDirsResult_t` to a reference.
@@ -9818,17 +9840,18 @@ unsafe fn alter_replica_log_dirs_result_ref(
     // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from an
     // `alter_replica_log_dirs` call, a requirement every caller discharges through its own
     // `# Safety` (`result` must be a valid `alter_replica_log_dirs` result handle). Such a
-    // pointer is only ever produced by
-    // `Box::into_raw(Box::new(AlterReplicaLogDirsResultInner { .. }))` in
-    // `box_alter_replica_log_dirs_result` and cast to the opaque marker type, so casting it
-    // back yields an aligned, initialized `AlterReplicaLogDirsResultInner`. The `&'static`
+    // pointer is only ever produced by `into_handle` (a
+    // `Box<AlterReplicaLogDirsResultInner>`) in
+    // `kafka_admin_AdminClient_alter_replica_log_dirs` and cast to the opaque marker type,
+    // so casting it back yields an aligned, initialized `AlterReplicaLogDirsResultInner`. The `&'static`
     // is used by each caller only for the duration of its synchronous call, during which
     // the C caller keeps the handle alive by not yet having called
     // `kafka_admin_AlterReplicaLogDirsResult_destroy`.
     unsafe { &*(result as *const AlterReplicaLogDirsResultInner) }
 }
 
-/// Returns the number of requested replica moves.
+/// Returns the number of requested replica moves. Never blocks: the replicas
+/// are known when the request is submitted (Java's `values().keySet()`).
 ///
 /// # Safety
 ///
@@ -9840,15 +9863,15 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_count(
 ) -> i32 {
     // SAFETY: `alter_replica_log_dirs_result_ref` requires a non-null handle from an
     // `alter_replica_log_dirs` call; per this function's `# Safety`, `result` is a valid
-    // `alter_replica_log_dirs` result handle, i.e. one created by `Box::into_raw` in
-    // `box_alter_replica_log_dirs_result` and not yet destroyed. The reference is used only
-    // for the duration of this synchronous call, during which the C caller keeps the handle
+    // `alter_replica_log_dirs` result handle, i.e. one created by `into_handle` in
+    // `kafka_admin_AdminClient_alter_replica_log_dirs` and not yet destroyed. The reference is used
+    // only for the duration of this synchronous call, during which the C caller keeps the handle
     // alive, and only a count is copied out.
     unsafe { alter_replica_log_dirs_result_ref(result) }.topics.len() as i32
 }
 
 /// Returns the topic of the replica at `index` (borrowed), or null if out of
-/// range. Entries are sorted by `(topic, partition, broker id)`.
+/// range. Entries are sorted by `(topic, partition, broker id)`. Never blocks.
 ///
 /// # Safety
 ///
@@ -9861,15 +9884,16 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_topic(
 ) -> *const c_char {
     // SAFETY: `alter_replica_log_dirs_result_ref` requires a non-null handle from an
     // `alter_replica_log_dirs` call; per this function's `# Safety`, `result` is a valid
-    // `alter_replica_log_dirs` result handle, i.e. one created by `Box::into_raw` in
-    // `box_alter_replica_log_dirs_result` and not yet destroyed. The reference is used only
-    // for the duration of this synchronous call, during which the C caller keeps the handle
+    // `alter_replica_log_dirs` result handle, i.e. one created by `into_handle` in
+    // `kafka_admin_AdminClient_alter_replica_log_dirs` and not yet destroyed. The reference is used
+    // only for the duration of this synchronous call, during which the C caller keeps the handle
     // alive; the returned topic string borrows from the same allocation and is documented
     // valid only until the handle is destroyed.
     cstring_at(&unsafe { alter_replica_log_dirs_result_ref(result) }.topics, index)
 }
 
 /// Returns the partition of the replica at `index`, or -1 if out of range.
+/// Never blocks.
 ///
 /// # Safety
 ///
@@ -9885,9 +9909,9 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_partition(
     }
     // SAFETY: `alter_replica_log_dirs_result_ref` requires a non-null handle from an
     // `alter_replica_log_dirs` call; per this function's `# Safety`, `result` is a valid
-    // `alter_replica_log_dirs` result handle, i.e. one created by `Box::into_raw` in
-    // `box_alter_replica_log_dirs_result` and not yet destroyed. The reference is used only
-    // for the duration of this synchronous call, during which the C caller keeps the handle
+    // `alter_replica_log_dirs` result handle, i.e. one created by `into_handle` in
+    // `kafka_admin_AdminClient_alter_replica_log_dirs` and not yet destroyed. The reference is used
+    // only for the duration of this synchronous call, during which the C caller keeps the handle
     // alive, and only a partition number is copied out.
     unsafe { alter_replica_log_dirs_result_ref(result) }
         .partitions
@@ -9897,6 +9921,7 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_partition(
 }
 
 /// Returns the broker id of the replica at `index`, or -1 if out of range.
+/// Never blocks.
 ///
 /// # Safety
 ///
@@ -9912,9 +9937,9 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_broker_id(
     }
     // SAFETY: `alter_replica_log_dirs_result_ref` requires a non-null handle from an
     // `alter_replica_log_dirs` call; per this function's `# Safety`, `result` is a valid
-    // `alter_replica_log_dirs` result handle, i.e. one created by `Box::into_raw` in
-    // `box_alter_replica_log_dirs_result` and not yet destroyed. The reference is used only
-    // for the duration of this synchronous call, during which the C caller keeps the handle
+    // `alter_replica_log_dirs` result handle, i.e. one created by `into_handle` in
+    // `kafka_admin_AdminClient_alter_replica_log_dirs` and not yet destroyed. The reference is used
+    // only for the duration of this synchronous call, during which the C caller keeps the handle
     // alive, and only a broker id is copied out.
     unsafe { alter_replica_log_dirs_result_ref(result) }
         .broker_ids
@@ -9925,6 +9950,11 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_broker_id(
 
 /// Returns the error for the replica at `index` (borrowed), or null if the move
 /// was accepted or `index` is out of range. Do not destroy it.
+///
+/// **Blocks** until that replica's future has resolved — Java's
+/// `values().get(replica).get()` — but not on any other replica. Never blocks
+/// for an out-of-range index. A failure of the whole request is reported here
+/// for every replica, as Java completes every replica's future with it.
 ///
 /// There is no `_get_value`: Java's per-replica future is `KafkaFuture<Void>`,
 /// so a null error *is* the success value.
@@ -9938,20 +9968,55 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_error(
     result: *const kafka_admin_AlterReplicaLogDirsResult_t,
     index: i32,
 ) -> *const kafka_common_Error_t {
-    if index < 0 {
-        return std::ptr::null();
-    }
     // SAFETY: `alter_replica_log_dirs_result_ref` requires a non-null handle from an
     // `alter_replica_log_dirs` call; per this function's `# Safety`, `result` is a valid
-    // `alter_replica_log_dirs` result handle, i.e. one created by `Box::into_raw` in
-    // `box_alter_replica_log_dirs_result` and not yet destroyed. The reference is used only
-    // for the duration of this synchronous call, during which the C caller keeps the handle
-    // alive; any error pointer returned borrows from the same allocation and is documented
-    // valid only until the handle is destroyed.
-    match unsafe { alter_replica_log_dirs_result_ref(result) }.errors.get(index as usize) {
-        Some(slot) => error_ptr(slot.as_ref()),
-        None => std::ptr::null(),
-    }
+    // `alter_replica_log_dirs` result handle, i.e. one created by `into_handle` in
+    // `kafka_admin_AdminClient_alter_replica_log_dirs` and not yet destroyed. The reference
+    // is used only for the duration of this synchronous call, during which the C caller
+    // keeps the handle alive; any error pointer returned borrows an `ErrorInner` owned by
+    // the handle (not to be destroyed) and is documented valid only until the handle is
+    // destroyed.
+    keyed_error_at(&unsafe { alter_replica_log_dirs_result_ref(result) }.entries, index)
+}
+
+/// Returns whether the future of the replica at `index` has resolved — Java's
+/// `isDone()` on that replica's future. False if `index` is out of range. Never
+/// blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_replica_log_dirs` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_is_done(
+    result: *const kafka_admin_AlterReplicaLogDirsResult_t,
+    index: i32,
+) -> bool {
+    // SAFETY: `alter_replica_log_dirs_result_ref` requires a non-null `alter_replica_log_dirs`
+    // result handle, which this function's `# Safety` requires of `result` (no in-body null
+    // check, so the C caller's contract is the sole source); the reference is used only for
+    // this check within the call, during which the C caller keeps the handle alive.
+    keyed_is_done_at(&unsafe { alter_replica_log_dirs_result_ref(result) }.entries, index)
+}
+
+/// Java's `all().get()`: **blocks** until every replica's future has resolved,
+/// then returns null if every move was accepted, or an **owned** error — free it
+/// with `kafka_common_Error_destroy` — of a failed replica (the first in index
+/// order; Java leaves which one unspecified).
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_replica_log_dirs` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_all(
+    result: *const kafka_admin_AlterReplicaLogDirsResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `alter_replica_log_dirs_result_ref` requires a non-null `alter_replica_log_dirs`
+    // result handle, which this function's `# Safety` requires of `result` (no in-body null
+    // check, so the C caller's contract is the sole source); the reference is used only for
+    // the duration of this call, and the returned error is a fresh copy owned by the caller.
+    keyed_all(&unsafe { alter_replica_log_dirs_result_ref(result) }.entries)
 }
 
 /// Destroys an `alter_replica_log_dirs` result handle. Safe with null (no-op).
@@ -9967,10 +10032,9 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_destroy(
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
         // a valid `alter_replica_log_dirs` result handle: the pointer was created by
-        // `Box::into_raw(Box::new(AlterReplicaLogDirsResultInner { .. }))` in
-        // `box_alter_replica_log_dirs_result` and handed to C exactly once, either through
-        // `finish_sync`'s write to `*out_result` or as the owned `result` argument of the
-        // async callback. The destroy contract makes this the single, final release of that
+        // `into_handle` (a `Box<AlterReplicaLogDirsResultInner>`) in
+        // `kafka_admin_AdminClient_alter_replica_log_dirs` and handed to C exactly once,
+        // through `finish_sync`'s write to `*out_result`. The destroy contract makes this the single, final release of that
         // allocation; the strings and error pointers borrowed from it are documented valid
         // only until this call.
         unsafe { drop(Box::from_raw(result as *mut AlterReplicaLogDirsResultInner)) };
@@ -10039,23 +10103,9 @@ unsafe fn read_replica_assignment(
     out
 }
 
-/// Submits `alterReplicaLogDirs` and returns the collect-all future over its
-/// per-replica futures.
-fn submit_alter_replica_log_dirs(
-    admin: &dyn Admin,
-    replica_assignment: &HashMap<TopicPartitionReplica, String>,
-    options: AlterReplicaLogDirsOptions,
-) -> KafkaFuture<AlterReplicaLogDirsOutcomes> {
-    let result = admin.alter_replica_log_dirs_with_options(replica_assignment, options);
-    let entries: Vec<(TopicPartitionReplica, KafkaFuture<()>)> =
-        result.values().iter().map(|(r, f)| (r.clone(), f.clone())).collect();
-    KafkaFuture::join_map_results(entries)
-}
-
-/// Submits `alterReplicaLogDirs`, unjoined, for [`admin_async_per_key_op`]'s
-/// independent-per-key delivery. Same `Admin` call as
-/// [`submit_alter_replica_log_dirs`]; see the "RPC submission helpers —
-/// per-key (unjoined) variants" note above.
+/// Submits `alterReplicaLogDirs`, unjoined: Java's `values()` futures, for both
+/// the synchronous result handle and [`admin_async_per_key_op`]'s
+/// independent-per-key delivery.
 fn submit_alter_replica_log_dirs_entries(
     admin: &dyn Admin,
     replica_assignment: &HashMap<TopicPartitionReplica, String>,
@@ -10083,19 +10133,23 @@ fn submit_alter_replica_log_dirs_entries(
 pub type kafka_admin_AdminClient_alter_replica_log_dirs_callback_t =
     unsafe extern "C" fn(*const c_char, i32, i32, *mut kafka_common_Error_t, *mut c_void);
 
-/// Moves the given replicas to new log directories, blocking until every
-/// per-replica future has resolved (synchronous).
-///
-/// This is `alterReplicaLogDirs(Map<TopicPartitionReplica, String>,
+/// Moves the given replicas to new log directories — Java's
+/// `alterReplicaLogDirs(Map<TopicPartitionReplica, String>,
 /// AlterReplicaLogDirsOptions)`. Java's map becomes four parallel arrays: entry
 /// `i` moves the replica `(topics[i], partitions[i], broker_ids[i])` to
 /// `log_dirs[i]`. An entry with a NULL topic or NULL log dir is skipped.
 ///
-/// On success writes a [`kafka_admin_AlterReplicaLogDirsResult_t`] to
+/// Like Java, this **does not wait**: it submits the request and returns at
+/// once. On success writes a [`kafka_admin_AlterReplicaLogDirsResult_t`] to
 /// `*out_result` (free it with
-/// [`kafka_admin_AlterReplicaLogDirsResult_destroy`]) and returns null.
-/// Per-replica failures are reported by
-/// [`kafka_admin_AlterReplicaLogDirsResult_get_error`], not by the return value.
+/// [`kafka_admin_AlterReplicaLogDirsResult_destroy`]) and returns null. The
+/// handle holds one future per replica; its keys are readable at once,
+/// [`kafka_admin_AlterReplicaLogDirsResult_get_error`] waits for that replica's
+/// future only, and [`kafka_admin_AlterReplicaLogDirsResult_all`] waits for
+/// every replica (Java's `get()`). **Every failure of the request — per
+/// replica, or of the request as a whole, such as a timeout — is read from the
+/// handle**, as in Java; a non-null return means the request could not be
+/// submitted at all.
 ///
 /// # Safety
 ///
@@ -10121,22 +10175,27 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_replica_log_dirs(
     // into owned values, so nothing borrowed from C outlives this call.
     let assignment = unsafe { read_replica_assignment(topics, partitions, broker_ids, log_dirs, count) };
     let options = AlterReplicaLogDirsOptions::new().set_timeout_ms(option_timeout(timeout_ms));
-    let outcome =
-        // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
-        // admin-client constructor, which this function's `# Safety` promises (`admin` must
-        // be a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a
-        // NULL `admin` before `handle_ref` is reached. The `&'static AdminHandle` it
-        // derives is used only on the calling thread for the duration of this blocking
-        // call, during which the C caller keeps the handle alive, and the `submit` closure
-        // captures only the owned `assignment` map and `options` built above.
-        unsafe { admin_sync_value_op(admin, move |a| Ok(submit_alter_replica_log_dirs(a, &assignment, options))) };
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
+    // a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a NULL
+    // `admin` before `handle_ref` is reached. The `submit` closure runs on the calling
+    // thread inside the helper, borrowing the owned `assignment` map only there; the handle
+    // it builds holds only owned futures and the waiter.
+    let outcome = unsafe {
+        admin_sync_submit(admin, move |a, w| {
+            Ok(alter_replica_log_dirs_result_inner(
+                w,
+                submit_alter_replica_log_dirs_entries(a, &assignment, options),
+            ))
+        })
+    };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
     // which this function's `# Safety` promises (`out_result` must be null or writable). It
-    // null-checks `out_result` and writes exactly one element, a handle freshly built by
-    // `box_alter_replica_log_dirs_result`, only on `Ok`, giving the C caller sole ownership
+    // null-checks `out_result` and writes exactly one element, a freshly boxed
+    // `AlterReplicaLogDirsResult` handle, only on `Ok`, giving the C caller sole ownership
     // to release via `kafka_admin_AlterReplicaLogDirsResult_destroy`; on `Err` it leaves
     // `*out_result` untouched and returns a fresh `box_error` handle the caller owns.
-    unsafe { finish_sync(outcome, out_result, box_alter_replica_log_dirs_result) }
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// The body of [`kafka_admin_AdminClient_alter_replica_log_dirs_async`], shared with its `#[ffi_guard]`'s `on_panic`.
@@ -10271,9 +10330,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_replica_log_dirs_async(
 // describeReplicaLogDirs
 // ---------------------------------------------------------------------------
 
-/// Per-replica outcomes of `describeReplicaLogDirs`.
-type DescribeReplicaLogDirsOutcomes = HashMap<TopicPartitionReplica, Result<ReplicaLogDirInfo, Error>>;
-
 /// Opaque handle to a flattened `DescribeReplicaLogDirsResult`, keyed by
 /// replica.
 #[repr(C)]
@@ -10286,42 +10342,24 @@ struct DescribeReplicaLogDirsResultInner {
     topics: Vec<CString>,
     partitions: Vec<i32>,
     broker_ids: Vec<i32>,
-    values: Vec<Option<ReplicaLogDirInfoInner>>,
-    errors: Vec<Option<ErrorInner>>,
+    entries: Vec<LazyKeyed<ReplicaLogDirInfoInner>>,
 }
 
-/// Flattens the per-replica `describeReplicaLogDirs` outcomes into the C handle.
-fn box_describe_replica_log_dirs_result(
-    outcomes: DescribeReplicaLogDirsOutcomes,
-) -> *mut kafka_admin_DescribeReplicaLogDirsResult_t {
-    let entries = sorted_replica_entries(outcomes);
-    let mut topics = Vec::with_capacity(entries.len());
-    let mut partitions = Vec::with_capacity(entries.len());
-    let mut broker_ids = Vec::with_capacity(entries.len());
-    let mut values = Vec::with_capacity(entries.len());
-    let mut errors = Vec::with_capacity(entries.len());
-    for (replica, outcome) in entries {
-        topics.push(to_cstring(replica.topic()));
-        partitions.push(replica.partition());
-        broker_ids.push(replica.broker_id());
-        match outcome {
-            Ok(info) => {
-                values.push(Some(ReplicaLogDirInfoInner::new(&info)));
-                errors.push(None);
-            },
-            Err(e) => {
-                values.push(None);
-                errors.push(Some(error_inner(e)));
-            },
-        }
-    }
-    Box::into_raw(Box::new(DescribeReplicaLogDirsResultInner {
-        topics,
-        partitions,
-        broker_ids,
-        values,
-        errors,
-    })) as *mut kafka_admin_DescribeReplicaLogDirsResult_t
+/// Wraps `describeReplicaLogDirs`' per-replica futures, unresolved, as the C
+/// handle's backing state, sorted by `(topic, partition, broker id)`.
+fn describe_replica_log_dirs_result_inner(
+    waiter: &FutureWaiter,
+    futures: Vec<(TopicPartitionReplica, KafkaFuture<ReplicaLogDirInfo>)>,
+) -> DescribeReplicaLogDirsResultInner {
+    let futures = sorted_replica_entries(futures.into_iter().collect());
+    let topics = futures.iter().map(|(replica, _)| to_cstring(replica.topic())).collect();
+    let partitions = futures.iter().map(|(replica, _)| replica.partition()).collect();
+    let broker_ids = futures.iter().map(|(replica, _)| replica.broker_id()).collect();
+    let entries = futures
+        .into_iter()
+        .map(|(_, future)| lazy_keyed(waiter, future, |info| ReplicaLogDirInfoInner::new(&info)))
+        .collect();
+    DescribeReplicaLogDirsResultInner { topics, partitions, broker_ids, entries }
 }
 
 /// Casts a `*const kafka_admin_DescribeReplicaLogDirsResult_t` to a reference.
@@ -10335,10 +10373,10 @@ unsafe fn describe_replica_log_dirs_result_ref(
     // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
     // `describe_replica_log_dirs` call, a requirement every caller discharges through its
     // own `# Safety` (`result` must be a valid `describe_replica_log_dirs` result handle).
-    // Such a pointer is only ever produced by
-    // `Box::into_raw(Box::new(DescribeReplicaLogDirsResultInner { .. }))` in
-    // `box_describe_replica_log_dirs_result` and cast to the opaque marker type, so casting
-    // it back yields an aligned, initialized `DescribeReplicaLogDirsResultInner`. The
+    // Such a pointer is only ever produced by `into_handle` (a
+    // `Box<DescribeReplicaLogDirsResultInner>`) in
+    // `kafka_admin_AdminClient_describe_replica_log_dirs` and cast to the opaque marker
+    // type, so casting it back yields an aligned, initialized `DescribeReplicaLogDirsResultInner`. The
     // `&'static` is used by each caller only for the duration of its synchronous call,
     // during which the C caller keeps the handle alive by not yet having called
     // `kafka_admin_DescribeReplicaLogDirsResult_destroy`.
@@ -10360,6 +10398,9 @@ unsafe fn describe_replica_log_dirs_result_ref(
 /// topic it does not know (`MockAdminClient.java:1112`), so against the mock
 /// this can be smaller than the number requested.
 ///
+/// Never blocks: the replicas are known when the request is submitted (Java's
+/// `values().keySet()`).
+///
 /// # Safety
 ///
 /// `result` must be a valid `describe_replica_log_dirs` result handle.
@@ -10370,15 +10411,15 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_count(
 ) -> i32 {
     // SAFETY: `describe_replica_log_dirs_result_ref` requires a non-null handle from a
     // `describe_replica_log_dirs` call; per this function's `# Safety`, `result` is a valid
-    // `describe_replica_log_dirs` result handle, i.e. one created by `Box::into_raw` in
-    // `box_describe_replica_log_dirs_result` and not yet destroyed. The reference is used
+    // `describe_replica_log_dirs` result handle, i.e. one created by `into_handle` in
+    // `kafka_admin_AdminClient_describe_replica_log_dirs` and not yet destroyed. The reference is used
     // only for the duration of this synchronous call, during which the C caller keeps the
     // handle alive, and only a count is copied out.
     unsafe { describe_replica_log_dirs_result_ref(result) }.topics.len() as i32
 }
 
 /// Returns the topic of the replica at `index` (borrowed), or null if out of
-/// range. Entries are sorted by `(topic, partition, broker id)`.
+/// range. Entries are sorted by `(topic, partition, broker id)`. Never blocks.
 ///
 /// # Safety
 ///
@@ -10391,8 +10432,8 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_topic(
 ) -> *const c_char {
     // SAFETY: `describe_replica_log_dirs_result_ref` requires a non-null handle from a
     // `describe_replica_log_dirs` call; per this function's `# Safety`, `result` is a valid
-    // `describe_replica_log_dirs` result handle, i.e. one created by `Box::into_raw` in
-    // `box_describe_replica_log_dirs_result` and not yet destroyed. The reference is used
+    // `describe_replica_log_dirs` result handle, i.e. one created by `into_handle` in
+    // `kafka_admin_AdminClient_describe_replica_log_dirs` and not yet destroyed. The reference is used
     // only for the duration of this synchronous call, during which the C caller keeps the
     // handle alive; the returned topic string borrows from the same allocation and is
     // documented valid only until the handle is destroyed.
@@ -10400,6 +10441,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_topic(
 }
 
 /// Returns the partition of the replica at `index`, or -1 if out of range.
+/// Never blocks.
 ///
 /// # Safety
 ///
@@ -10415,8 +10457,8 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_partition(
     }
     // SAFETY: `describe_replica_log_dirs_result_ref` requires a non-null handle from a
     // `describe_replica_log_dirs` call; per this function's `# Safety`, `result` is a valid
-    // `describe_replica_log_dirs` result handle, i.e. one created by `Box::into_raw` in
-    // `box_describe_replica_log_dirs_result` and not yet destroyed. The reference is used
+    // `describe_replica_log_dirs` result handle, i.e. one created by `into_handle` in
+    // `kafka_admin_AdminClient_describe_replica_log_dirs` and not yet destroyed. The reference is used
     // only for the duration of this synchronous call, during which the C caller keeps the
     // handle alive, and only a partition number is copied out.
     unsafe { describe_replica_log_dirs_result_ref(result) }
@@ -10427,6 +10469,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_partition(
 }
 
 /// Returns the broker id of the replica at `index`, or -1 if out of range.
+/// Never blocks.
 ///
 /// # Safety
 ///
@@ -10442,8 +10485,8 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_broker_id(
     }
     // SAFETY: `describe_replica_log_dirs_result_ref` requires a non-null handle from a
     // `describe_replica_log_dirs` call; per this function's `# Safety`, `result` is a valid
-    // `describe_replica_log_dirs` result handle, i.e. one created by `Box::into_raw` in
-    // `box_describe_replica_log_dirs_result` and not yet destroyed. The reference is used
+    // `describe_replica_log_dirs` result handle, i.e. one created by `into_handle` in
+    // `kafka_admin_AdminClient_describe_replica_log_dirs` and not yet destroyed. The reference is used
     // only for the duration of this synchronous call, during which the C caller keeps the
     // handle alive, and only a broker id is copied out.
     unsafe { describe_replica_log_dirs_result_ref(result) }
@@ -10458,6 +10501,10 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_broker_id(
 /// [`kafka_admin_DescribeReplicaLogDirsResult_get_error`]) or `index` is out of
 /// range.
 ///
+/// **Blocks** until that replica's future has resolved — Java's
+/// `values().get(replica).get()` — but not on any other replica. Never blocks
+/// for an out-of-range index.
+///
 /// # Safety
 ///
 /// `result` must be a valid `describe_replica_log_dirs` result handle.
@@ -10467,28 +10514,27 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_value(
     result: *const kafka_admin_DescribeReplicaLogDirsResult_t,
     index: i32,
 ) -> *const kafka_admin_ReplicaLogDirInfo_t {
-    if index < 0 {
-        return std::ptr::null();
-    }
     // SAFETY: `describe_replica_log_dirs_result_ref` requires a non-null handle from a
     // `describe_replica_log_dirs` call; per this function's `# Safety`, `result` is a valid
-    // `describe_replica_log_dirs` result handle, i.e. one created by `Box::into_raw` in
-    // `box_describe_replica_log_dirs_result` and not yet destroyed. The reference is used
-    // only for the duration of this synchronous call, during which the C caller keeps the
-    // handle alive; the returned `kafka_admin_ReplicaLogDirInfo_t` pointer borrows from the
-    // same `DescribeReplicaLogDirsResultInner` allocation and is documented valid only
-    // until the handle is destroyed.
-    match unsafe { describe_replica_log_dirs_result_ref(result) }
-        .values
-        .get(index as usize)
-    {
-        Some(Some(info)) => info as *const ReplicaLogDirInfoInner as *const kafka_admin_ReplicaLogDirInfo_t,
-        _ => std::ptr::null(),
+    // `describe_replica_log_dirs` result handle, i.e. one created by `into_handle` in
+    // `kafka_admin_AdminClient_describe_replica_log_dirs` and not yet destroyed. The
+    // reference is used only for the duration of this synchronous call, during which the C
+    // caller keeps the handle alive; the returned `kafka_admin_ReplicaLogDirInfo_t` pointer
+    // borrows the value cached in the same `DescribeReplicaLogDirsResultInner` allocation
+    // and is documented valid only until the handle is destroyed.
+    match keyed_value_at(&unsafe { describe_replica_log_dirs_result_ref(result) }.entries, index) {
+        Some(info) => info as *const ReplicaLogDirInfoInner as *const kafka_admin_ReplicaLogDirInfo_t,
+        None => std::ptr::null(),
     }
 }
 
 /// Returns the error for the replica at `index` (borrowed), or null if it was
 /// described successfully or `index` is out of range. Do not destroy it.
+///
+/// **Blocks** until that replica's future has resolved, but not on any other
+/// replica. Never blocks for an out-of-range index. A failure of the whole
+/// request is reported here for every replica, as Java completes every
+/// replica's future with it.
 ///
 /// # Safety
 ///
@@ -10499,23 +10545,58 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_error(
     result: *const kafka_admin_DescribeReplicaLogDirsResult_t,
     index: i32,
 ) -> *const kafka_common_Error_t {
-    if index < 0 {
-        return std::ptr::null();
-    }
     // SAFETY: `describe_replica_log_dirs_result_ref` requires a non-null handle from a
     // `describe_replica_log_dirs` call; per this function's `# Safety`, `result` is a valid
-    // `describe_replica_log_dirs` result handle, i.e. one created by `Box::into_raw` in
-    // `box_describe_replica_log_dirs_result` and not yet destroyed. The reference is used
-    // only for the duration of this synchronous call, during which the C caller keeps the
-    // handle alive; any error pointer returned borrows from the same allocation and is
-    // documented valid only until the handle is destroyed.
-    match unsafe { describe_replica_log_dirs_result_ref(result) }
-        .errors
-        .get(index as usize)
-    {
-        Some(slot) => error_ptr(slot.as_ref()),
-        None => std::ptr::null(),
-    }
+    // `describe_replica_log_dirs` result handle, i.e. one created by `into_handle` in
+    // `kafka_admin_AdminClient_describe_replica_log_dirs` and not yet destroyed. The
+    // reference is used only for the duration of this synchronous call, during which the C
+    // caller keeps the handle alive; any error pointer returned borrows an `ErrorInner`
+    // owned by the handle (not to be destroyed) and is documented valid only until the
+    // handle is destroyed.
+    keyed_error_at(&unsafe { describe_replica_log_dirs_result_ref(result) }.entries, index)
+}
+
+/// Returns whether the future of the replica at `index` has resolved — Java's
+/// `isDone()` on that replica's future. False if `index` is out of range. Never
+/// blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_replica_log_dirs` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_is_done(
+    result: *const kafka_admin_DescribeReplicaLogDirsResult_t,
+    index: i32,
+) -> bool {
+    // SAFETY: `describe_replica_log_dirs_result_ref` requires a non-null
+    // `describe_replica_log_dirs` result handle, which this function's `# Safety` requires
+    // of `result` (no in-body null check, so the C caller's contract is the sole source);
+    // the reference is used only for this check within the call, during which the C caller
+    // keeps the handle alive.
+    keyed_is_done_at(&unsafe { describe_replica_log_dirs_result_ref(result) }.entries, index)
+}
+
+/// Java's `all().get()`: **blocks** until every replica's future has resolved,
+/// then returns null if every replica was described, or an **owned** error —
+/// free it with `kafka_common_Error_destroy` — of a failed replica (the first in
+/// index order; Java leaves which one unspecified). The log-dir infos
+/// themselves are read with [`kafka_admin_DescribeReplicaLogDirsResult_get_value`].
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_replica_log_dirs` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_all(
+    result: *const kafka_admin_DescribeReplicaLogDirsResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `describe_replica_log_dirs_result_ref` requires a non-null
+    // `describe_replica_log_dirs` result handle, which this function's `# Safety` requires
+    // of `result` (no in-body null check, so the C caller's contract is the sole source);
+    // the reference is used only for the duration of this call, and the returned error is a
+    // fresh copy owned by the caller.
+    keyed_all(&unsafe { describe_replica_log_dirs_result_ref(result) }.entries)
 }
 
 /// Destroys a `describe_replica_log_dirs` result handle, invalidating every
@@ -10532,10 +10613,9 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_destroy(
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
         // a valid `describe_replica_log_dirs` result handle: the pointer was created by
-        // `Box::into_raw(Box::new(DescribeReplicaLogDirsResultInner { .. }))` in
-        // `box_describe_replica_log_dirs_result` and handed to C exactly once, either
-        // through `finish_sync`'s write to `*out_result` or as the owned `result` argument
-        // of the async callback. The destroy contract makes this the single, final release
+        // `into_handle` (a `Box<DescribeReplicaLogDirsResultInner>`) in
+        // `kafka_admin_AdminClient_describe_replica_log_dirs` and handed to C exactly once,
+        // through `finish_sync`'s write to `*out_result`. The destroy contract makes this the single, final release
         // of that allocation; the borrowed `kafka_admin_ReplicaLogDirInfo_t` pointers,
         // strings and error pointers obtained from it are documented valid only until this
         // call.
@@ -10543,23 +10623,9 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_destroy(
     }
 }
 
-/// Submits `describeReplicaLogDirs` and returns the collect-all future over its
-/// per-replica futures.
-fn submit_describe_replica_log_dirs(
-    admin: &dyn Admin,
-    replicas: &[TopicPartitionReplica],
-    options: DescribeReplicaLogDirsOptions,
-) -> KafkaFuture<DescribeReplicaLogDirsOutcomes> {
-    let result = admin.describe_replica_log_dirs_with_options(replicas, options);
-    let entries: Vec<(TopicPartitionReplica, KafkaFuture<ReplicaLogDirInfo>)> =
-        result.values().iter().map(|(r, f)| (r.clone(), f.clone())).collect();
-    KafkaFuture::join_map_results(entries)
-}
-
-/// Submits `describeReplicaLogDirs`, unjoined, for [`admin_async_per_key_op`]'s
-/// independent-per-key delivery. Same `Admin` call as
-/// [`submit_describe_replica_log_dirs`]; see the "RPC submission helpers —
-/// per-key (unjoined) variants" note above.
+/// Submits `describeReplicaLogDirs`, unjoined: Java's `values()` futures, for
+/// both the synchronous result handle and
+/// [`admin_async_per_key_outcome_op`]'s independent-per-key delivery.
 fn submit_describe_replica_log_dirs_entries(
     admin: &dyn Admin,
     replicas: &[TopicPartitionReplica],
@@ -10603,20 +10669,24 @@ pub type kafka_admin_AdminClient_describe_replica_log_dirs_callback_t = unsafe e
     *mut c_void,
 );
 
-/// Queries the log directories of the given replicas, blocking until every
-/// per-replica future has resolved (synchronous).
-///
-/// This is `describeReplicaLogDirs(Collection<TopicPartitionReplica>,
+/// Queries the log directories of the given replicas — Java's
+/// `describeReplicaLogDirs(Collection<TopicPartitionReplica>,
 /// DescribeReplicaLogDirsOptions)`. Java's collection becomes three parallel
 /// arrays: entry `i` is the replica `(topics[i], partitions[i],
 /// broker_ids[i])`. An entry with a NULL topic is skipped.
 ///
-/// On success writes a [`kafka_admin_DescribeReplicaLogDirsResult_t`] to
+/// Like Java, this **does not wait**: it submits the request and returns at
+/// once. On success writes a [`kafka_admin_DescribeReplicaLogDirsResult_t`] to
 /// `*out_result` (free it with
-/// [`kafka_admin_DescribeReplicaLogDirsResult_destroy`]) and returns null.
-/// Per-replica failures are reported by
-/// [`kafka_admin_DescribeReplicaLogDirsResult_get_error`], not by the return
-/// value.
+/// [`kafka_admin_DescribeReplicaLogDirsResult_destroy`]) and returns null. The
+/// handle holds one future per replica; its keys are readable at once,
+/// [`kafka_admin_DescribeReplicaLogDirsResult_get_value`] /
+/// [`kafka_admin_DescribeReplicaLogDirsResult_get_error`] wait for that
+/// replica's future only, and [`kafka_admin_DescribeReplicaLogDirsResult_all`]
+/// waits for every replica (Java's `get()`). **Every failure of the request —
+/// per replica, or of the request as a whole, such as a timeout — is read from
+/// the handle**, as in Java; a non-null return means the request could not be
+/// submitted at all.
 ///
 /// # Safety
 ///
@@ -10641,23 +10711,28 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_replica_log_dirs(
     // `TopicPartitionReplica` values, so nothing borrowed from C outlives this call.
     let replicas = unsafe { read_replicas(topics, partitions, broker_ids, count) };
     let options = DescribeReplicaLogDirsOptions::new().set_timeout_ms(option_timeout(timeout_ms));
-    let outcome =
-        // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
-        // admin-client constructor, which this function's `# Safety` promises (`admin` must
-        // be a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a
-        // NULL `admin` before `handle_ref` is reached. The `&'static AdminHandle` it
-        // derives is used only on the calling thread for the duration of this blocking
-        // call, during which the C caller keeps the handle alive, and the `submit` closure
-        // captures only the owned `replicas` and `options` built above.
-        unsafe { admin_sync_value_op(admin, move |a| Ok(submit_describe_replica_log_dirs(a, &replicas, options))) };
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
+    // a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a NULL
+    // `admin` before `handle_ref` is reached. The `submit` closure runs on the calling
+    // thread inside the helper, borrowing the owned `replicas` only there; the handle it
+    // builds holds only owned futures and the waiter.
+    let outcome = unsafe {
+        admin_sync_submit(admin, move |a, w| {
+            Ok(describe_replica_log_dirs_result_inner(
+                w,
+                submit_describe_replica_log_dirs_entries(a, &replicas, options),
+            ))
+        })
+    };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
     // which this function's `# Safety` promises (`out_result` must be null or writable). It
-    // null-checks `out_result` and writes exactly one element, a handle freshly built by
-    // `box_describe_replica_log_dirs_result`, only on `Ok`, giving the C caller sole
+    // null-checks `out_result` and writes exactly one element, a freshly boxed
+    // `DescribeReplicaLogDirsResult` handle, only on `Ok`, giving the C caller sole
     // ownership to release via `kafka_admin_DescribeReplicaLogDirsResult_destroy`; on `Err`
     // it leaves `*out_result` untouched and returns a fresh `box_error` handle the caller
     // owns.
-    unsafe { finish_sync(outcome, out_result, box_describe_replica_log_dirs_result) }
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// The body of [`kafka_admin_AdminClient_describe_replica_log_dirs_async`], shared with its `#[ffi_guard]`'s `on_panic`.
@@ -10869,8 +10944,8 @@ unsafe fn partition_reassignment_ref(
     // partition-reassignment pointer). Such pointers are only produced by
     // `kafka_admin_ListPartitionReassignmentsResult_get_value`, which returns `value as
     // *const PartitionReassignmentInner as *const kafka_admin_PartitionReassignment_t`
-    // pointing into the `values` of the owning `ListPartitionReassignmentsResultInner`, so
-    // casting back yields an aligned, initialized `PartitionReassignmentInner`. The
+    // pointing into the `values` of the `ListPartitionReassignmentsData` cached in the
+    // owning `ListPartitionReassignmentsResultInner`, so casting back yields an aligned, initialized `PartitionReassignmentInner`. The
     // `&'static` is used by each caller only for the duration of its synchronous call; the
     // opaque type is documented as borrowed from the owning result handle and valid until
     // that handle is destroyed, which the C caller has not yet done while still using the
@@ -11037,7 +11112,7 @@ unsafe fn list_offsets_info_ref(
     // `# Safety` (`info` must be a valid borrowed list-offsets info pointer). Such pointers
     // are only produced by `kafka_admin_ListOffsetsResult_get_value`, which returns `value
     // as *const ListOffsetsResultInfoInner as *const kafka_admin_ListOffsetsResultInfo_t`
-    // pointing into the `values` of the owning `ListOffsetsResultInner`, so casting back
+    // pointing into the `entries` of the owning `ListOffsetsResultInner`, so casting back
     // yields an aligned, initialized `ListOffsetsResultInfoInner`. The `&'static` is used
     // by each caller only for the duration of its synchronous call; the opaque type is
     // documented as borrowed from the owning result handle and valid until that handle is
@@ -11490,7 +11565,7 @@ fn list_offsets_options(timeout_ms: i32, isolation_level: i32) -> Result<ListOff
 ///
 /// `TopicPartition` is not `Ord` (matching Java, whose result maps are
 /// unordered), so this sorts by `(topic, partition)` the way
-/// [`box_delete_records_result`] already does.
+/// [`delete_records_result_inner`] already does.
 fn sorted_partition_entries<V>(map: HashMap<TopicPartition, V>) -> Vec<(TopicPartition, V)> {
     let mut entries: Vec<(TopicPartition, V)> = map.into_iter().collect();
     entries.sort_by(|a, b| a.0.topic().cmp(b.0.topic()).then(a.0.partition().cmp(&b.0.partition())));
@@ -11505,17 +11580,28 @@ pub struct kafka_admin_ElectLeadersResult_t {
 
 /// Backing state for [`kafka_admin_ElectLeadersResult_t`].
 ///
-/// Java's `ElectLeadersResult.partitions()` resolves to
-/// `Map<TopicPartition, Optional<Throwable>>` — a per-partition *error* with no
-/// per-partition value, so this handle has `_get_error(i)` and no `_get_value`.
+/// Java's `ElectLeadersResult.partitions()` is a *single*
+/// `KafkaFuture<Map<TopicPartition, Optional<Throwable>>>` — a per-partition
+/// *error* with no per-partition value, so this handle has `_get_error(i)` and
+/// no `_get_value`. The future's own failure is read with
+/// [`kafka_admin_ElectLeadersResult_partitions`]. On a handle from the
+/// synchronous entry point that future may still be unresolved, and every
+/// accessor waits for it; a handle from the `_async` callback is always
+/// resolved.
 struct ElectLeadersResultInner {
+    election: LazySingle<ElectLeadersData>,
+}
+
+/// The resolved election outcome, sorted by `(topic, partition)`.
+struct ElectLeadersData {
     topics: Vec<CString>,
     partitions: Vec<i32>,
     errors: Vec<Option<ErrorInner>>,
 }
 
-/// Flattens the per-partition `electLeaders` outcomes into the C handle.
-fn box_elect_leaders_result(outcomes: HashMap<TopicPartition, Option<Error>>) -> *mut kafka_admin_ElectLeadersResult_t {
+/// Flattens the per-partition `electLeaders` outcomes, sorted by
+/// `(topic, partition)`.
+fn elect_leaders_data(outcomes: HashMap<TopicPartition, Option<Error>>) -> ElectLeadersData {
     let entries = sorted_partition_entries(outcomes);
     let mut topics = Vec::with_capacity(entries.len());
     let mut partitions = Vec::with_capacity(entries.len());
@@ -11525,8 +11611,13 @@ fn box_elect_leaders_result(outcomes: HashMap<TopicPartition, Option<Error>>) ->
         partitions.push(tp.partition());
         errors.push(outcome.map(error_inner));
     }
-    Box::into_raw(Box::new(ElectLeadersResultInner { topics, partitions, errors }))
-        as *mut kafka_admin_ElectLeadersResult_t
+    ElectLeadersData { topics, partitions, errors }
+}
+
+/// Moves an already-resolved election outcome (the `_async` path) into the C
+/// handle.
+fn box_elect_leaders_result(outcomes: HashMap<TopicPartition, Option<Error>>) -> *mut kafka_admin_ElectLeadersResult_t {
+    into_handle(ElectLeadersResultInner { election: LazyOutcome::resolved(Ok(elect_leaders_data(outcomes))) })
 }
 
 /// Casts a `*const kafka_admin_ElectLeadersResult_t` to a reference.
@@ -11540,16 +11631,85 @@ unsafe fn elect_leaders_result_ref(
     // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from an
     // `elect_leaders` call, a requirement every caller discharges through its own `#
     // Safety` (`result` must be a valid `elect_leaders` result handle). Such a pointer is
-    // only ever produced by `Box::into_raw(Box::new(ElectLeadersResultInner { .. }))` in
-    // `box_elect_leaders_result` and cast to the opaque marker type, so casting it back
-    // yields an aligned, initialized `ElectLeadersResultInner`. The `&'static` is used by
-    // each caller only for the duration of its synchronous call, during which the C caller
-    // keeps the handle alive by not yet having called
-    // `kafka_admin_ElectLeadersResult_destroy`.
+    // only ever produced by `into_handle` (a `Box<ElectLeadersResultInner>`) in
+    // `kafka_admin_AdminClient_elect_leaders` or `box_elect_leaders_result` and cast to the
+    // opaque marker type, so casting it back yields an aligned, initialized
+    // `ElectLeadersResultInner`. The `&'static` is used by each caller only for the
+    // duration of its synchronous call, during which the C caller keeps the handle alive by
+    // not yet having called `kafka_admin_ElectLeadersResult_destroy`.
     unsafe { &*(result as *const ElectLeadersResultInner) }
 }
 
-/// Returns the number of partitions an election was attempted for.
+/// Java's `partitions().get()`: **blocks** until the election future has
+/// resolved, then returns null on success, or an **owned** error — free it with
+/// `kafka_common_Error_destroy` — if the request as a whole failed. A
+/// per-partition failure is not reported here: read it with
+/// [`kafka_admin_ElectLeadersResult_get_error`], or through
+/// [`kafka_admin_ElectLeadersResult_all`].
+///
+/// # Safety
+///
+/// `result` must be a valid `elect_leaders` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_partitions(
+    result: *const kafka_admin_ElectLeadersResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `elect_leaders_result_ref` requires a non-null `elect_leaders` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the
+    // C caller's contract is the sole source); the reference is used only for the duration
+    // of this call, and the returned error is a fresh copy owned by the caller.
+    single_error(&unsafe { elect_leaders_result_ref(result) }.election)
+}
+
+/// Returns whether the election future has resolved — Java's
+/// `partitions().isDone()`. Never blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `elect_leaders` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_is_done(
+    result: *const kafka_admin_ElectLeadersResult_t,
+) -> bool {
+    // SAFETY: `elect_leaders_result_ref` requires a non-null `elect_leaders` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the
+    // C caller's contract is the sole source); the reference is used only for this check.
+    unsafe { elect_leaders_result_ref(result) }.election.is_done()
+}
+
+/// Java's `all().get()`: **blocks** until the election future has resolved,
+/// then returns null if the election succeeded for every partition, or an
+/// **owned** error — free it with `kafka_common_Error_destroy`. That error is
+/// the request's own failure (as [`kafka_admin_ElectLeadersResult_partitions`]
+/// reports) if it failed as a whole, and otherwise a failed partition's error
+/// (the first in index order; Java leaves which one unspecified).
+///
+/// # Safety
+///
+/// `result` must be a valid `elect_leaders` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_all(
+    result: *const kafka_admin_ElectLeadersResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `elect_leaders_result_ref` requires a non-null `elect_leaders` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the
+    // C caller's contract is the sole source); the reference is used only for the duration
+    // of this call, and the returned error is a fresh copy owned by the caller.
+    match unsafe { elect_leaders_result_ref(result) }.election.get() {
+        Ok(data) => match data.errors.iter().flatten().next() {
+            Some(e) => box_error(e.error.clone()),
+            None => std::ptr::null_mut(),
+        },
+        Err(e) => box_error(e.error.clone()),
+    }
+}
+
+/// Returns the number of partitions an election was attempted for, or 0 if the
+/// request failed (see [`kafka_admin_ElectLeadersResult_partitions`]).
+/// **Blocks** until the election future has resolved.
 ///
 /// # Safety
 ///
@@ -11559,14 +11719,15 @@ unsafe fn elect_leaders_result_ref(
 pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_count(result: *const kafka_admin_ElectLeadersResult_t) -> i32 {
     // SAFETY: `elect_leaders_result_ref` requires a non-null handle from an `elect_leaders`
     // call; per this function's `# Safety`, `result` is a valid `elect_leaders` result
-    // handle, i.e. one created by `Box::into_raw` in `box_elect_leaders_result` and not yet
-    // destroyed. The reference is used only for the duration of this synchronous call,
-    // during which the C caller keeps the handle alive, and only a count is copied out.
-    unsafe { elect_leaders_result_ref(result) }.topics.len() as i32
+    // handle, i.e. one created by `into_handle` and not yet destroyed. The reference is used
+    // only for the duration of this synchronous call, during which the C caller keeps the
+    // handle alive, and only a count is copied out.
+    single_data(&unsafe { elect_leaders_result_ref(result) }.election).map_or(0, |d| d.topics.len() as i32)
 }
 
 /// Returns the topic name of the entry at `index` (borrowed), or null if out of
-/// range. Entries are sorted by topic name then partition id.
+/// range or the request failed. Entries are sorted by topic name then
+/// partition id. **Blocks** until the election future has resolved.
 ///
 /// # Safety
 ///
@@ -11579,14 +11740,18 @@ pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_get_topic(
 ) -> *const c_char {
     // SAFETY: `elect_leaders_result_ref` requires a non-null handle from an `elect_leaders`
     // call; per this function's `# Safety`, `result` is a valid `elect_leaders` result
-    // handle, i.e. one created by `Box::into_raw` in `box_elect_leaders_result` and not yet
-    // destroyed. The reference is used only for the duration of this synchronous call,
-    // during which the C caller keeps the handle alive; the returned topic string borrows
-    // from the same allocation and is documented valid only until the handle is destroyed.
-    cstring_at(&unsafe { elect_leaders_result_ref(result) }.topics, index)
+    // handle, i.e. one created by `into_handle` and not yet destroyed. The reference is used
+    // only for the duration of this synchronous call, during which the C caller keeps the
+    // handle alive; the returned topic string borrows from the data cached in the same
+    // allocation and is documented valid only until the handle is destroyed.
+    match single_data(&unsafe { elect_leaders_result_ref(result) }.election) {
+        Some(d) => cstring_at(&d.topics, index),
+        None => std::ptr::null(),
+    }
 }
 
-/// Returns the partition id of the entry at `index`, or -1 if out of range.
+/// Returns the partition id of the entry at `index`, or -1 if out of range or
+/// the request failed. **Blocks** until the election future has resolved.
 ///
 /// # Safety
 ///
@@ -11602,20 +11767,18 @@ pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_get_partition(
     }
     // SAFETY: `elect_leaders_result_ref` requires a non-null handle from an `elect_leaders`
     // call; per this function's `# Safety`, `result` is a valid `elect_leaders` result
-    // handle, i.e. one created by `Box::into_raw` in `box_elect_leaders_result` and not yet
-    // destroyed. The reference is used only for the duration of this synchronous call,
-    // during which the C caller keeps the handle alive, and only a partition number is
-    // copied out.
-    unsafe { elect_leaders_result_ref(result) }
-        .partitions
-        .get(index as usize)
-        .copied()
+    // handle, i.e. one created by `into_handle` and not yet destroyed. The reference is used
+    // only for the duration of this synchronous call, during which the C caller keeps the
+    // handle alive, and only a partition number is copied out.
+    single_data(&unsafe { elect_leaders_result_ref(result) }.election)
+        .and_then(|d| d.partitions.get(index as usize).copied())
         .unwrap_or(-1)
 }
 
 /// Returns the error for the entry at `index` (borrowed), or null if the
-/// election succeeded for that partition or `index` is out of range. Do not
-/// destroy it.
+/// election succeeded for that partition, `index` is out of range, or the
+/// request failed as a whole (see [`kafka_admin_ElectLeadersResult_partitions`]).
+/// Do not destroy it. **Blocks** until the election future has resolved.
 ///
 /// # Safety
 ///
@@ -11631,11 +11794,13 @@ pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_get_error(
     }
     // SAFETY: `elect_leaders_result_ref` requires a non-null handle from an `elect_leaders`
     // call; per this function's `# Safety`, `result` is a valid `elect_leaders` result
-    // handle, i.e. one created by `Box::into_raw` in `box_elect_leaders_result` and not yet
-    // destroyed. The reference is used only for the duration of this synchronous call,
-    // during which the C caller keeps the handle alive; any error pointer returned borrows
-    // from the same allocation and is documented valid only until the handle is destroyed.
-    match unsafe { elect_leaders_result_ref(result) }.errors.get(index as usize) {
+    // handle, i.e. one created by `into_handle` and not yet destroyed. The reference is used
+    // only for the duration of this synchronous call, during which the C caller keeps the
+    // handle alive; any error pointer returned borrows an `ErrorInner` cached in the same
+    // allocation (not to be destroyed) and is documented valid only until the handle is
+    // destroyed.
+    match single_data(&unsafe { elect_leaders_result_ref(result) }.election).and_then(|d| d.errors.get(index as usize))
+    {
         Some(slot) => error_ptr(slot.as_ref()),
         None => std::ptr::null(),
     }
@@ -11651,8 +11816,8 @@ pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_get_error(
 pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_destroy(result: *mut kafka_admin_ElectLeadersResult_t) {
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
-        // a valid `elect_leaders` result handle: the pointer was created by
-        // `Box::into_raw(Box::new(ElectLeadersResultInner { .. }))` in
+        // a valid `elect_leaders` result handle: the pointer was created by `into_handle` (a
+        // `Box<ElectLeadersResultInner>`) in `kafka_admin_AdminClient_elect_leaders` or
         // `box_elect_leaders_result` and handed to C exactly once, either through
         // `finish_sync`'s write to `*out_result` or as the owned `result` argument of the
         // async callback. The destroy contract makes this the single, final release of that
@@ -11669,32 +11834,31 @@ pub struct kafka_admin_AlterPartitionReassignmentsResult_t {
     _private: [u8; 0],
 }
 
-/// Backing state for [`kafka_admin_AlterPartitionReassignmentsResult_t`].
+/// Backing state for [`kafka_admin_AlterPartitionReassignmentsResult_t`]: one
+/// future per partition, as Java's `values()` holds.
 ///
 /// Java's per-partition future is `KafkaFuture<Void>`, so there is no per-key
 /// value: a null `_get_error(i)` is the success signal.
 struct AlterPartitionReassignmentsResultInner {
     topics: Vec<CString>,
     partitions: Vec<i32>,
-    errors: Vec<Option<ErrorInner>>,
+    entries: Vec<LazyKeyed<()>>,
 }
 
-/// Flattens the per-partition `alterPartitionReassignments` outcomes into the C
-/// handle.
-fn box_alter_partition_reassignments_result(
-    outcomes: HashMap<TopicPartition, Result<(), Error>>,
-) -> *mut kafka_admin_AlterPartitionReassignmentsResult_t {
-    let entries = sorted_partition_entries(outcomes);
-    let mut topics = Vec::with_capacity(entries.len());
-    let mut partitions = Vec::with_capacity(entries.len());
-    let mut errors = Vec::with_capacity(entries.len());
-    for (tp, outcome) in entries {
-        topics.push(to_cstring(tp.topic()));
-        partitions.push(tp.partition());
-        errors.push(outcome.err().map(error_inner));
-    }
-    Box::into_raw(Box::new(AlterPartitionReassignmentsResultInner { topics, partitions, errors }))
-        as *mut kafka_admin_AlterPartitionReassignmentsResult_t
+/// Wraps `alterPartitionReassignments`' per-partition futures, unresolved, as
+/// the C handle's backing state, sorted by `(topic, partition)`.
+fn alter_partition_reassignments_result_inner(
+    waiter: &FutureWaiter,
+    futures: Vec<(TopicPartition, KafkaFuture<()>)>,
+) -> AlterPartitionReassignmentsResultInner {
+    let futures = sorted_partition_entries(futures.into_iter().collect());
+    let topics = futures.iter().map(|(tp, _)| to_cstring(tp.topic())).collect();
+    let partitions = futures.iter().map(|(tp, _)| tp.partition()).collect();
+    let entries = futures
+        .into_iter()
+        .map(|(_, future)| lazy_keyed(waiter, future, |()| ()))
+        .collect();
+    AlterPartitionReassignmentsResultInner { topics, partitions, entries }
 }
 
 /// Casts a `*const kafka_admin_AlterPartitionReassignmentsResult_t` to a
@@ -11710,10 +11874,10 @@ unsafe fn alter_partition_reassignments_result_ref(
     // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from an
     // `alter_partition_reassignments` call, a requirement every caller discharges through
     // its own `# Safety` (`result` must be a valid `alter_partition_reassignments` result
-    // handle). Such a pointer is only ever produced by
-    // `Box::into_raw(Box::new(AlterPartitionReassignmentsResultInner { .. }))` in
-    // `box_alter_partition_reassignments_result` and cast to the opaque marker type, so
-    // casting it back yields an aligned, initialized
+    // handle). Such a pointer is only ever produced by `into_handle` (a
+    // `Box<AlterPartitionReassignmentsResultInner>`) in
+    // `kafka_admin_AdminClient_alter_partition_reassignments` and cast to the opaque marker
+    // type, so casting it back yields an aligned, initialized
     // `AlterPartitionReassignmentsResultInner`. The `&'static` is used by each caller only
     // for the duration of its synchronous call, during which the C caller keeps the handle
     // alive by not yet having called
@@ -11721,7 +11885,8 @@ unsafe fn alter_partition_reassignments_result_ref(
     unsafe { &*(result as *const AlterPartitionReassignmentsResultInner) }
 }
 
-/// Returns the number of requested partitions.
+/// Returns the number of requested partitions. Never blocks: the partitions are
+/// known when the request is submitted (Java's `values().keySet()`).
 ///
 /// # Safety
 ///
@@ -11734,14 +11899,14 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_count(
     // SAFETY: `alter_partition_reassignments_result_ref` requires a non-null handle from an
     // `alter_partition_reassignments` call; per this function's `# Safety`, `result` is a
     // valid `alter_partition_reassignments` result handle, i.e. one created by
-    // `Box::into_raw` in `box_alter_partition_reassignments_result` and not yet destroyed.
-    // The reference is used only for the duration of this synchronous call, during which
-    // the C caller keeps the handle alive, and only a count is copied out.
+    // `into_handle` and not yet destroyed. The reference is used only for the duration of
+    // this synchronous call, during which the C caller keeps the handle alive, and only a
+    // count is copied out.
     unsafe { alter_partition_reassignments_result_ref(result) }.topics.len() as i32
 }
 
 /// Returns the topic name of the entry at `index` (borrowed), or null if out of
-/// range. Entries are sorted by topic name then partition id.
+/// range. Entries are sorted by topic name then partition id. Never blocks.
 ///
 /// # Safety
 ///
@@ -11755,14 +11920,15 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_get_topic
     // SAFETY: `alter_partition_reassignments_result_ref` requires a non-null handle from an
     // `alter_partition_reassignments` call; per this function's `# Safety`, `result` is a
     // valid `alter_partition_reassignments` result handle, i.e. one created by
-    // `Box::into_raw` in `box_alter_partition_reassignments_result` and not yet destroyed.
-    // The reference is used only for the duration of this synchronous call, during which
-    // the C caller keeps the handle alive; the returned topic string borrows from the same
-    // allocation and is documented valid only until the handle is destroyed.
+    // `into_handle` and not yet destroyed. The reference is used only for the duration of
+    // this synchronous call, during which the C caller keeps the handle alive; the returned
+    // topic string borrows from the same allocation and is documented valid only until the
+    // handle is destroyed.
     cstring_at(&unsafe { alter_partition_reassignments_result_ref(result) }.topics, index)
 }
 
 /// Returns the partition id of the entry at `index`, or -1 if out of range.
+/// Never blocks.
 ///
 /// # Safety
 ///
@@ -11779,9 +11945,9 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_get_parti
     // SAFETY: `alter_partition_reassignments_result_ref` requires a non-null handle from an
     // `alter_partition_reassignments` call; per this function's `# Safety`, `result` is a
     // valid `alter_partition_reassignments` result handle, i.e. one created by
-    // `Box::into_raw` in `box_alter_partition_reassignments_result` and not yet destroyed.
-    // The reference is used only for the duration of this synchronous call, during which
-    // the C caller keeps the handle alive, and only a partition number is copied out.
+    // `into_handle` and not yet destroyed. The reference is used only for the duration of
+    // this synchronous call, during which the C caller keeps the handle alive, and only a
+    // partition number is copied out.
     unsafe { alter_partition_reassignments_result_ref(result) }
         .partitions
         .get(index as usize)
@@ -11792,6 +11958,11 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_get_parti
 /// Returns the error for the entry at `index` (borrowed), or null if that
 /// partition succeeded or `index` is out of range. Do not destroy it.
 ///
+/// **Blocks** until that partition's future has resolved — Java's
+/// `values().get(tp).get()` — but not on any other partition. Never blocks for
+/// an out-of-range index. A failure of the whole request is reported here for
+/// every partition, as Java completes every partition's future with it.
+///
 /// # Safety
 ///
 /// `result` must be a valid `alter_partition_reassignments` result handle.
@@ -11801,23 +11972,56 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_get_error
     result: *const kafka_admin_AlterPartitionReassignmentsResult_t,
     index: i32,
 ) -> *const kafka_common_Error_t {
-    if index < 0 {
-        return std::ptr::null();
-    }
     // SAFETY: `alter_partition_reassignments_result_ref` requires a non-null handle from an
     // `alter_partition_reassignments` call; per this function's `# Safety`, `result` is a
     // valid `alter_partition_reassignments` result handle, i.e. one created by
-    // `Box::into_raw` in `box_alter_partition_reassignments_result` and not yet destroyed.
-    // The reference is used only for the duration of this synchronous call, during which
-    // the C caller keeps the handle alive; any error pointer returned borrows from the same
-    // allocation and is documented valid only until the handle is destroyed.
-    match unsafe { alter_partition_reassignments_result_ref(result) }
-        .errors
-        .get(index as usize)
-    {
-        Some(slot) => error_ptr(slot.as_ref()),
-        None => std::ptr::null(),
-    }
+    // `into_handle` and not yet destroyed. The reference is used only for the duration of
+    // this synchronous call, during which the C caller keeps the handle alive; any error
+    // pointer returned borrows an `ErrorInner` owned by the handle (not to be destroyed)
+    // and is documented valid only until the handle is destroyed.
+    keyed_error_at(&unsafe { alter_partition_reassignments_result_ref(result) }.entries, index)
+}
+
+/// Returns whether the future of the partition at `index` has resolved —
+/// Java's `isDone()` on that partition's future. False if `index` is out of
+/// range. Never blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_partition_reassignments` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_is_done(
+    result: *const kafka_admin_AlterPartitionReassignmentsResult_t,
+    index: i32,
+) -> bool {
+    // SAFETY: `alter_partition_reassignments_result_ref` requires a non-null
+    // `alter_partition_reassignments` result handle, which this function's `# Safety`
+    // requires of `result` (no in-body null check, so the C caller's contract is the sole
+    // source); the reference is used only for this check within the call, during which the
+    // C caller keeps the handle alive.
+    keyed_is_done_at(&unsafe { alter_partition_reassignments_result_ref(result) }.entries, index)
+}
+
+/// Java's `all().get()`: **blocks** until every partition's future has
+/// resolved, then returns null if all succeeded, or an **owned** error — free it
+/// with `kafka_common_Error_destroy` — of a failed partition (the first in index
+/// order; Java leaves which one unspecified).
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_partition_reassignments` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_all(
+    result: *const kafka_admin_AlterPartitionReassignmentsResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `alter_partition_reassignments_result_ref` requires a non-null
+    // `alter_partition_reassignments` result handle, which this function's `# Safety`
+    // requires of `result` (no in-body null check, so the C caller's contract is the sole
+    // source); the reference is used only for the duration of this call, and the returned
+    // error is a fresh copy owned by the caller.
+    keyed_all(&unsafe { alter_partition_reassignments_result_ref(result) }.entries)
 }
 
 /// Destroys an `alter_partition_reassignments` result handle. Safe with null
@@ -11835,12 +12039,11 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_destroy(
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
         // a valid `alter_partition_reassignments` result handle: the pointer was created by
-        // `Box::into_raw(Box::new(AlterPartitionReassignmentsResultInner { .. }))` in
-        // `box_alter_partition_reassignments_result` and handed to C exactly once, either
-        // through `finish_sync`'s write to `*out_result` or as the owned `result` argument
-        // of the async callback. The destroy contract makes this the single, final release
-        // of that allocation; the strings and error pointers borrowed from it are
-        // documented valid only until this call.
+        // `into_handle` (a `Box<AlterPartitionReassignmentsResultInner>`) in
+        // `kafka_admin_AdminClient_alter_partition_reassignments` and handed to C exactly
+        // once, through `finish_sync`'s write to `*out_result`. The destroy contract makes
+        // this the single, final release of that allocation; the strings and error pointers
+        // borrowed from it are documented valid only until this call.
         unsafe { drop(Box::from_raw(result as *mut AlterPartitionReassignmentsResultInner)) };
     }
 }
@@ -11856,18 +12059,28 @@ pub struct kafka_admin_ListPartitionReassignmentsResult_t {
 ///
 /// Java's `reassignments()` is a *single* `KafkaFuture<Map<TopicPartition,
 /// PartitionReassignment>>`, not one future per key, so there is no per-key
-/// error to report: a failure fails the whole call. Hence `_get_value(i)` and no
-/// `_get_error(i)` (same shape as `listTopics`).
+/// error to report: a failure fails the whole listing, and is read with
+/// [`kafka_admin_ListPartitionReassignmentsResult_reassignments`]. Hence
+/// `_get_value(i)` and no `_get_error(i)` (same shape as `listTopics`). On a
+/// handle from the synchronous entry point that future may still be
+/// unresolved, and every accessor waits for it; a handle from the `_async`
+/// callback is always resolved.
 struct ListPartitionReassignmentsResultInner {
+    reassignments: LazySingle<ListPartitionReassignmentsData>,
+}
+
+/// The resolved reassignments, sorted by `(topic, partition)`.
+struct ListPartitionReassignmentsData {
     topics: Vec<CString>,
     partitions: Vec<i32>,
     values: Vec<PartitionReassignmentInner>,
 }
 
-/// Flattens the `listPartitionReassignments` map into the C handle.
-fn box_list_partition_reassignments_result(
+/// Flattens the `listPartitionReassignments` map, sorted by
+/// `(topic, partition)`.
+fn list_partition_reassignments_data(
     reassignments: HashMap<TopicPartition, PartitionReassignment>,
-) -> *mut kafka_admin_ListPartitionReassignmentsResult_t {
+) -> ListPartitionReassignmentsData {
     let entries = sorted_partition_entries(reassignments);
     let mut topics = Vec::with_capacity(entries.len());
     let mut partitions = Vec::with_capacity(entries.len());
@@ -11877,8 +12090,16 @@ fn box_list_partition_reassignments_result(
         partitions.push(tp.partition());
         values.push(PartitionReassignmentInner::new(&reassignment));
     }
-    Box::into_raw(Box::new(ListPartitionReassignmentsResultInner { topics, partitions, values }))
-        as *mut kafka_admin_ListPartitionReassignmentsResult_t
+    ListPartitionReassignmentsData { topics, partitions, values }
+}
+
+/// Moves an already-resolved listing (the `_async` path) into the C handle.
+fn box_list_partition_reassignments_result(
+    reassignments: HashMap<TopicPartition, PartitionReassignment>,
+) -> *mut kafka_admin_ListPartitionReassignmentsResult_t {
+    into_handle(ListPartitionReassignmentsResultInner {
+        reassignments: LazyOutcome::resolved(Ok(list_partition_reassignments_data(reassignments))),
+    })
 }
 
 /// Casts a `*const kafka_admin_ListPartitionReassignmentsResult_t` to a
@@ -11894,8 +12115,9 @@ unsafe fn list_partition_reassignments_result_ref(
     // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
     // `list_partition_reassignments` call, a requirement every caller discharges through
     // its own `# Safety` (`result` must be a valid `list_partition_reassignments` result
-    // handle). Such a pointer is only ever produced by
-    // `Box::into_raw(Box::new(ListPartitionReassignmentsResultInner { .. }))` in
+    // handle). Such a pointer is only ever produced by `into_handle` (a
+    // `Box<ListPartitionReassignmentsResultInner>`) in
+    // `kafka_admin_AdminClient_list_partition_reassignments` or
     // `box_list_partition_reassignments_result` and cast to the opaque marker type, so
     // casting it back yields an aligned, initialized
     // `ListPartitionReassignmentsResultInner`. The `&'static` is used by each caller only
@@ -11905,7 +12127,54 @@ unsafe fn list_partition_reassignments_result_ref(
     unsafe { &*(result as *const ListPartitionReassignmentsResultInner) }
 }
 
-/// Returns the number of partitions with an ongoing reassignment.
+/// Java's `reassignments().get()`: **blocks** until the listing has resolved,
+/// then returns null on success, or an **owned** error — free it with
+/// `kafka_common_Error_destroy` — if the request failed. The reassignments are
+/// read with [`kafka_admin_ListPartitionReassignmentsResult_count`] /
+/// [`kafka_admin_ListPartitionReassignmentsResult_get_topic`] /
+/// [`kafka_admin_ListPartitionReassignmentsResult_get_partition`] /
+/// [`kafka_admin_ListPartitionReassignmentsResult_get_value`].
+///
+/// # Safety
+///
+/// `result` must be a valid `list_partition_reassignments` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_reassignments(
+    result: *const kafka_admin_ListPartitionReassignmentsResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `list_partition_reassignments_result_ref` requires a non-null
+    // `list_partition_reassignments` result handle, which this function's `# Safety`
+    // requires of `result` (no in-body null check, so the C caller's contract is the sole
+    // source); the reference is used only for the duration of this call, and the returned
+    // error is a fresh copy owned by the caller.
+    single_error(&unsafe { list_partition_reassignments_result_ref(result) }.reassignments)
+}
+
+/// Returns whether the listing future has resolved — Java's
+/// `reassignments().isDone()`. Never blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_partition_reassignments` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_is_done(
+    result: *const kafka_admin_ListPartitionReassignmentsResult_t,
+) -> bool {
+    // SAFETY: `list_partition_reassignments_result_ref` requires a non-null
+    // `list_partition_reassignments` result handle, which this function's `# Safety`
+    // requires of `result` (no in-body null check, so the C caller's contract is the sole
+    // source); the reference is used only for this check.
+    unsafe { list_partition_reassignments_result_ref(result) }
+        .reassignments
+        .is_done()
+}
+
+/// Returns the number of partitions with an ongoing reassignment, or 0 if the
+/// request failed (see
+/// [`kafka_admin_ListPartitionReassignmentsResult_reassignments`]). **Blocks**
+/// until the listing has resolved.
 ///
 /// # Safety
 ///
@@ -11918,14 +12187,16 @@ pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_count(
     // SAFETY: `list_partition_reassignments_result_ref` requires a non-null handle from a
     // `list_partition_reassignments` call; per this function's `# Safety`, `result` is a
     // valid `list_partition_reassignments` result handle, i.e. one created by
-    // `Box::into_raw` in `box_list_partition_reassignments_result` and not yet destroyed.
-    // The reference is used only for the duration of this synchronous call, during which
-    // the C caller keeps the handle alive, and only a count is copied out.
-    unsafe { list_partition_reassignments_result_ref(result) }.topics.len() as i32
+    // `into_handle` and not yet destroyed. The reference is used only for the duration of
+    // this synchronous call, during which the C caller keeps the handle alive, and only a
+    // count is copied out.
+    single_data(&unsafe { list_partition_reassignments_result_ref(result) }.reassignments)
+        .map_or(0, |d| d.topics.len() as i32)
 }
 
 /// Returns the topic name of the entry at `index` (borrowed), or null if out of
-/// range. Entries are sorted by topic name then partition id.
+/// range or the request failed. Entries are sorted by topic name then
+/// partition id. **Blocks** until the listing has resolved.
 ///
 /// # Safety
 ///
@@ -11939,14 +12210,18 @@ pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_get_topic(
     // SAFETY: `list_partition_reassignments_result_ref` requires a non-null handle from a
     // `list_partition_reassignments` call; per this function's `# Safety`, `result` is a
     // valid `list_partition_reassignments` result handle, i.e. one created by
-    // `Box::into_raw` in `box_list_partition_reassignments_result` and not yet destroyed.
-    // The reference is used only for the duration of this synchronous call, during which
-    // the C caller keeps the handle alive; the returned topic string borrows from the same
-    // allocation and is documented valid only until the handle is destroyed.
-    cstring_at(&unsafe { list_partition_reassignments_result_ref(result) }.topics, index)
+    // `into_handle` and not yet destroyed. The reference is used only for the duration of
+    // this synchronous call, during which the C caller keeps the handle alive; the returned
+    // topic string borrows from the data cached in the same allocation and is documented
+    // valid only until the handle is destroyed.
+    match single_data(&unsafe { list_partition_reassignments_result_ref(result) }.reassignments) {
+        Some(d) => cstring_at(&d.topics, index),
+        None => std::ptr::null(),
+    }
 }
 
-/// Returns the partition id of the entry at `index`, or -1 if out of range.
+/// Returns the partition id of the entry at `index`, or -1 if out of range or
+/// the request failed. **Blocks** until the listing has resolved.
 ///
 /// # Safety
 ///
@@ -11963,18 +12238,17 @@ pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_get_partit
     // SAFETY: `list_partition_reassignments_result_ref` requires a non-null handle from a
     // `list_partition_reassignments` call; per this function's `# Safety`, `result` is a
     // valid `list_partition_reassignments` result handle, i.e. one created by
-    // `Box::into_raw` in `box_list_partition_reassignments_result` and not yet destroyed.
-    // The reference is used only for the duration of this synchronous call, during which
-    // the C caller keeps the handle alive, and only a partition number is copied out.
-    unsafe { list_partition_reassignments_result_ref(result) }
-        .partitions
-        .get(index as usize)
-        .copied()
+    // `into_handle` and not yet destroyed. The reference is used only for the duration of
+    // this synchronous call, during which the C caller keeps the handle alive, and only a
+    // partition number is copied out.
+    single_data(&unsafe { list_partition_reassignments_result_ref(result) }.reassignments)
+        .and_then(|d| d.partitions.get(index as usize).copied())
         .unwrap_or(-1)
 }
 
 /// Returns the reassignment of the entry at `index` (borrowed; valid until
-/// `result` is destroyed), or null if out of range.
+/// `result` is destroyed), or null if out of range or the request failed.
+/// **Blocks** until the listing has resolved.
 ///
 /// # Safety
 ///
@@ -11991,15 +12265,13 @@ pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_get_value(
     // SAFETY: `list_partition_reassignments_result_ref` requires a non-null handle from a
     // `list_partition_reassignments` call; per this function's `# Safety`, `result` is a
     // valid `list_partition_reassignments` result handle, i.e. one created by
-    // `Box::into_raw` in `box_list_partition_reassignments_result` and not yet destroyed.
-    // The reference is used only for the duration of this synchronous call, during which
-    // the C caller keeps the handle alive; the returned
-    // `kafka_admin_PartitionReassignment_t` pointer borrows from the `values` of the same
-    // `ListPartitionReassignmentsResultInner` allocation and is documented valid only until
-    // the handle is destroyed.
-    match unsafe { list_partition_reassignments_result_ref(result) }
-        .values
-        .get(index as usize)
+    // `into_handle` and not yet destroyed. The reference is used only for the duration of
+    // this synchronous call, during which the C caller keeps the handle alive; the returned
+    // `kafka_admin_PartitionReassignment_t` pointer borrows from the `values` of the data
+    // cached in the same `ListPartitionReassignmentsResultInner` allocation and is
+    // documented valid only until the handle is destroyed.
+    match single_data(&unsafe { list_partition_reassignments_result_ref(result) }.reassignments)
+        .and_then(|d| d.values.get(index as usize))
     {
         Some(value) => value as *const PartitionReassignmentInner as *const kafka_admin_PartitionReassignment_t,
         None => std::ptr::null(),
@@ -12021,7 +12293,8 @@ pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_destroy(
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
         // a valid `list_partition_reassignments` result handle: the pointer was created by
-        // `Box::into_raw(Box::new(ListPartitionReassignmentsResultInner { .. }))` in
+        // `into_handle` (a `Box<ListPartitionReassignmentsResultInner>`) in
+        // `kafka_admin_AdminClient_list_partition_reassignments` or
         // `box_list_partition_reassignments_result` and handed to C exactly once, either
         // through `finish_sync`'s write to `*out_result` or as the owned `result` argument
         // of the async callback. The destroy contract makes this the single, final release
@@ -12039,41 +12312,30 @@ pub struct kafka_admin_ListOffsetsResult_t {
 
 /// Backing state for [`kafka_admin_ListOffsetsResult_t`].
 ///
-/// Java holds one `KafkaFuture<ListOffsetsResultInfo>` per partition, so this is
-/// the full D2 shape: a per-key value *and* a per-key error, exactly one of
-/// which is present for each entry.
+/// Java holds one `KafkaFuture<ListOffsetsResultInfo>` per partition (read with
+/// `partitionResult(tp)`), so this is the full D2 shape: a per-key value *and* a
+/// per-key error, exactly one of which is present for each entry once that
+/// partition's future has resolved.
 struct ListOffsetsResultInner {
     topics: Vec<CString>,
     partitions: Vec<i32>,
-    values: Vec<Option<ListOffsetsResultInfoInner>>,
-    errors: Vec<Option<ErrorInner>>,
+    entries: Vec<LazyKeyed<ListOffsetsResultInfoInner>>,
 }
 
-/// Flattens the per-partition `listOffsets` outcomes into the C handle.
-fn box_list_offsets_result(
-    outcomes: HashMap<TopicPartition, Result<ListOffsetsResultInfo, Error>>,
-) -> *mut kafka_admin_ListOffsetsResult_t {
-    let entries = sorted_partition_entries(outcomes);
-    let mut topics = Vec::with_capacity(entries.len());
-    let mut partitions = Vec::with_capacity(entries.len());
-    let mut values = Vec::with_capacity(entries.len());
-    let mut errors = Vec::with_capacity(entries.len());
-    for (tp, outcome) in entries {
-        topics.push(to_cstring(tp.topic()));
-        partitions.push(tp.partition());
-        match outcome {
-            Ok(info) => {
-                values.push(Some(ListOffsetsResultInfoInner { info }));
-                errors.push(None);
-            },
-            Err(e) => {
-                values.push(None);
-                errors.push(Some(error_inner(e)));
-            },
-        }
-    }
-    Box::into_raw(Box::new(ListOffsetsResultInner { topics, partitions, values, errors }))
-        as *mut kafka_admin_ListOffsetsResult_t
+/// Wraps `listOffsets`' per-partition futures, unresolved, as the C handle's
+/// backing state, sorted by `(topic, partition)`.
+fn list_offsets_result_inner(
+    waiter: &FutureWaiter,
+    futures: Vec<(TopicPartition, KafkaFuture<ListOffsetsResultInfo>)>,
+) -> ListOffsetsResultInner {
+    let futures = sorted_partition_entries(futures.into_iter().collect());
+    let topics = futures.iter().map(|(tp, _)| to_cstring(tp.topic())).collect();
+    let partitions = futures.iter().map(|(tp, _)| tp.partition()).collect();
+    let entries = futures
+        .into_iter()
+        .map(|(_, future)| lazy_keyed(waiter, future, |info| ListOffsetsResultInfoInner { info }))
+        .collect();
+    ListOffsetsResultInner { topics, partitions, entries }
 }
 
 /// Casts a `*const kafka_admin_ListOffsetsResult_t` to a reference.
@@ -12085,16 +12347,17 @@ unsafe fn list_offsets_result_ref(result: *const kafka_admin_ListOffsetsResult_t
     // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
     // `list_offsets` call, a requirement every caller discharges through its own `# Safety`
     // (`result` must be a valid `list_offsets` result handle). Such a pointer is only ever
-    // produced by `Box::into_raw(Box::new(ListOffsetsResultInner { .. }))` in
-    // `box_list_offsets_result` and cast to the opaque marker type, so casting it back
-    // yields an aligned, initialized `ListOffsetsResultInner`. The `&'static` is used by
-    // each caller only for the duration of its synchronous call, during which the C caller
-    // keeps the handle alive by not yet having called
+    // produced by `into_handle` (a `Box<ListOffsetsResultInner>`) in
+    // `kafka_admin_AdminClient_list_offsets` and cast to the opaque marker type, so casting
+    // it back yields an aligned, initialized `ListOffsetsResultInner`. The `&'static` is
+    // used by each caller only for the duration of its synchronous call, during which the C
+    // caller keeps the handle alive by not yet having called
     // `kafka_admin_ListOffsetsResult_destroy`.
     unsafe { &*(result as *const ListOffsetsResultInner) }
 }
 
-/// Returns the number of requested partitions.
+/// Returns the number of requested partitions. Never blocks: the partitions are
+/// known when the request is submitted.
 ///
 /// # Safety
 ///
@@ -12104,14 +12367,15 @@ unsafe fn list_offsets_result_ref(result: *const kafka_admin_ListOffsetsResult_t
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_count(result: *const kafka_admin_ListOffsetsResult_t) -> i32 {
     // SAFETY: `list_offsets_result_ref` requires a non-null handle from a `list_offsets`
     // call; per this function's `# Safety`, `result` is a valid `list_offsets` result
-    // handle, i.e. one created by `Box::into_raw` in `box_list_offsets_result` and not yet
-    // destroyed. The reference is used only for the duration of this synchronous call,
-    // during which the C caller keeps the handle alive, and only a count is copied out.
+    // handle, i.e. one created by `into_handle` in `kafka_admin_AdminClient_list_offsets`
+    // and not yet destroyed. The reference is used only for the duration of this
+    // synchronous call, during which the C caller keeps the handle alive, and only a count
+    // is copied out.
     unsafe { list_offsets_result_ref(result) }.topics.len() as i32
 }
 
 /// Returns the topic name of the entry at `index` (borrowed), or null if out of
-/// range. Entries are sorted by topic name then partition id.
+/// range. Entries are sorted by topic name then partition id. Never blocks.
 ///
 /// # Safety
 ///
@@ -12124,14 +12388,16 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_topic(
 ) -> *const c_char {
     // SAFETY: `list_offsets_result_ref` requires a non-null handle from a `list_offsets`
     // call; per this function's `# Safety`, `result` is a valid `list_offsets` result
-    // handle, i.e. one created by `Box::into_raw` in `box_list_offsets_result` and not yet
-    // destroyed. The reference is used only for the duration of this synchronous call,
-    // during which the C caller keeps the handle alive; the returned topic string borrows
-    // from the same allocation and is documented valid only until the handle is destroyed.
+    // handle, i.e. one created by `into_handle` in `kafka_admin_AdminClient_list_offsets`
+    // and not yet destroyed. The reference is used only for the duration of this
+    // synchronous call, during which the C caller keeps the handle alive; the returned
+    // topic string borrows from the same allocation and is documented valid only until the
+    // handle is destroyed.
     cstring_at(&unsafe { list_offsets_result_ref(result) }.topics, index)
 }
 
 /// Returns the partition id of the entry at `index`, or -1 if out of range.
+/// Never blocks.
 ///
 /// # Safety
 ///
@@ -12147,10 +12413,10 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_partition(
     }
     // SAFETY: `list_offsets_result_ref` requires a non-null handle from a `list_offsets`
     // call; per this function's `# Safety`, `result` is a valid `list_offsets` result
-    // handle, i.e. one created by `Box::into_raw` in `box_list_offsets_result` and not yet
-    // destroyed. The reference is used only for the duration of this synchronous call,
-    // during which the C caller keeps the handle alive, and only a partition number is
-    // copied out.
+    // handle, i.e. one created by `into_handle` in `kafka_admin_AdminClient_list_offsets`
+    // and not yet destroyed. The reference is used only for the duration of this
+    // synchronous call, during which the C caller keeps the handle alive, and only a
+    // partition number is copied out.
     unsafe { list_offsets_result_ref(result) }
         .partitions
         .get(index as usize)
@@ -12162,6 +12428,10 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_partition(
 /// until `result` is destroyed), or null if that partition failed (see
 /// [`kafka_admin_ListOffsetsResult_get_error`]) or `index` is out of range.
 ///
+/// **Blocks** until that partition's future has resolved — Java's
+/// `partitionResult(tp).get()` — but not on any other partition. Never blocks
+/// for an out-of-range index.
+///
 /// # Safety
 ///
 /// `result` must be a valid `list_offsets` result handle.
@@ -12171,25 +12441,27 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_value(
     result: *const kafka_admin_ListOffsetsResult_t,
     index: i32,
 ) -> *const kafka_admin_ListOffsetsResultInfo_t {
-    if index < 0 {
-        return std::ptr::null();
-    }
     // SAFETY: `list_offsets_result_ref` requires a non-null handle from a `list_offsets`
     // call; per this function's `# Safety`, `result` is a valid `list_offsets` result
-    // handle, i.e. one created by `Box::into_raw` in `box_list_offsets_result` and not yet
-    // destroyed. The reference is used only for the duration of this synchronous call,
-    // during which the C caller keeps the handle alive; the returned
-    // `kafka_admin_ListOffsetsResultInfo_t` pointer borrows from the `values` of the same
-    // `ListOffsetsResultInner` allocation and is documented valid only until the handle is
-    // destroyed.
-    match unsafe { list_offsets_result_ref(result) }.values.get(index as usize) {
-        Some(Some(value)) => value as *const ListOffsetsResultInfoInner as *const kafka_admin_ListOffsetsResultInfo_t,
-        _ => std::ptr::null(),
+    // handle, i.e. one created by `into_handle` in `kafka_admin_AdminClient_list_offsets`
+    // and not yet destroyed. The reference is used only for the duration of this
+    // synchronous call, during which the C caller keeps the handle alive; the returned
+    // `kafka_admin_ListOffsetsResultInfo_t` pointer borrows the value cached in the
+    // `entries` of the same `ListOffsetsResultInner` allocation and is documented valid
+    // only until the handle is destroyed.
+    match keyed_value_at(&unsafe { list_offsets_result_ref(result) }.entries, index) {
+        Some(value) => value as *const ListOffsetsResultInfoInner as *const kafka_admin_ListOffsetsResultInfo_t,
+        None => std::ptr::null(),
     }
 }
 
 /// Returns the error for the entry at `index` (borrowed), or null if that
 /// partition succeeded or `index` is out of range. Do not destroy it.
+///
+/// **Blocks** until that partition's future has resolved, but not on any other
+/// partition. Never blocks for an out-of-range index. A failure of the whole
+/// request is reported here for every partition, as Java completes every
+/// partition's future with it.
 ///
 /// # Safety
 ///
@@ -12200,19 +12472,55 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_error(
     result: *const kafka_admin_ListOffsetsResult_t,
     index: i32,
 ) -> *const kafka_common_Error_t {
-    if index < 0 {
-        return std::ptr::null();
-    }
     // SAFETY: `list_offsets_result_ref` requires a non-null handle from a `list_offsets`
     // call; per this function's `# Safety`, `result` is a valid `list_offsets` result
-    // handle, i.e. one created by `Box::into_raw` in `box_list_offsets_result` and not yet
-    // destroyed. The reference is used only for the duration of this synchronous call,
-    // during which the C caller keeps the handle alive; any error pointer returned borrows
-    // from the same allocation and is documented valid only until the handle is destroyed.
-    match unsafe { list_offsets_result_ref(result) }.errors.get(index as usize) {
-        Some(slot) => error_ptr(slot.as_ref()),
-        None => std::ptr::null(),
-    }
+    // handle, i.e. one created by `into_handle` in `kafka_admin_AdminClient_list_offsets`
+    // and not yet destroyed. The reference is used only for the duration of this
+    // synchronous call, during which the C caller keeps the handle alive; any error pointer
+    // returned borrows an `ErrorInner` owned by the handle (not to be destroyed) and is
+    // documented valid only until the handle is destroyed.
+    keyed_error_at(&unsafe { list_offsets_result_ref(result) }.entries, index)
+}
+
+/// Returns whether the future of the partition at `index` has resolved —
+/// Java's `partitionResult(tp).isDone()`. False if `index` is out of range.
+/// Never blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_offsets` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_is_done(
+    result: *const kafka_admin_ListOffsetsResult_t,
+    index: i32,
+) -> bool {
+    // SAFETY: `list_offsets_result_ref` requires a non-null `list_offsets` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the
+    // C caller's contract is the sole source); the reference is used only for this check
+    // within the call, during which the C caller keeps the handle alive.
+    keyed_is_done_at(&unsafe { list_offsets_result_ref(result) }.entries, index)
+}
+
+/// Java's `all().get()`: **blocks** until every partition's future has
+/// resolved, then returns null if all succeeded, or an **owned** error — free it
+/// with `kafka_common_Error_destroy` — of a failed partition (the first in index
+/// order; Java leaves which one unspecified). The offsets themselves are read
+/// with [`kafka_admin_ListOffsetsResult_get_value`].
+///
+/// # Safety
+///
+/// `result` must be a valid `list_offsets` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_all(
+    result: *const kafka_admin_ListOffsetsResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `list_offsets_result_ref` requires a non-null `list_offsets` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the
+    // C caller's contract is the sole source); the reference is used only for the duration
+    // of this call, and the returned error is a fresh copy owned by the caller.
+    keyed_all(&unsafe { list_offsets_result_ref(result) }.entries)
 }
 
 /// Destroys a `list_offsets` result handle. Safe with null (no-op).
@@ -12225,13 +12533,12 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_error(
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_destroy(result: *mut kafka_admin_ListOffsetsResult_t) {
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
-        // a valid `list_offsets` result handle: the pointer was created by
-        // `Box::into_raw(Box::new(ListOffsetsResultInner { .. }))` in
-        // `box_list_offsets_result` and handed to C exactly once, either through
-        // `finish_sync`'s write to `*out_result` or as the owned `result` argument of the
-        // async callback. The destroy contract makes this the single, final release of that
-        // allocation; the borrowed `kafka_admin_ListOffsetsResultInfo_t` pointers, strings
-        // and error pointers obtained from it are documented valid only until this call.
+        // a valid `list_offsets` result handle: the pointer was created by `into_handle` (a
+        // `Box<ListOffsetsResultInner>`) in `kafka_admin_AdminClient_list_offsets` and
+        // handed to C exactly once, through `finish_sync`'s write to `*out_result`. The
+        // destroy contract makes this the single, final release of that allocation; the
+        // borrowed `kafka_admin_ListOffsetsResultInfo_t` pointers, strings and error
+        // pointers obtained from it are documented valid only until this call.
         unsafe { drop(Box::from_raw(result as *mut ListOffsetsResultInner)) };
     }
 }
@@ -12243,12 +12550,8 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_destroy(result: *mut kafk
 /// Per-partition outcomes of `electLeaders`. Java's
 /// `Map<TopicPartition, Optional<Throwable>>` maps to `Option<Error>`.
 type ElectLeadersOutcomes = HashMap<TopicPartition, Option<Error>>;
-/// Per-partition outcomes of `alterPartitionReassignments`.
-type AlterPartitionReassignmentsOutcomes = HashMap<TopicPartition, Result<(), Error>>;
 /// The single `listPartitionReassignments` map.
 type ListPartitionReassignmentsOutcomes = HashMap<TopicPartition, PartitionReassignment>;
-/// Per-partition outcomes of `listOffsets`.
-type ListOffsetsOutcomes = HashMap<TopicPartition, Result<ListOffsetsResultInfo, Error>>;
 
 /// Submits `electLeaders` and returns its single `partitions()` future.
 ///
@@ -12265,23 +12568,9 @@ fn submit_elect_leaders(
         .partitions()
 }
 
-/// Submits `alterPartitionReassignments` and returns the collect-all future over
-/// its per-partition futures.
-fn submit_alter_partition_reassignments(
-    admin: &dyn Admin,
-    reassignments: &HashMap<TopicPartition, Option<NewPartitionReassignment>>,
-    options: AlterPartitionReassignmentsOptions,
-) -> KafkaFuture<AlterPartitionReassignmentsOutcomes> {
-    let result = admin.alter_partition_reassignments_with_options(reassignments, options);
-    let entries: Vec<(TopicPartition, KafkaFuture<()>)> =
-        result.values().iter().map(|(tp, f)| (tp.clone(), f.clone())).collect();
-    KafkaFuture::join_map_results(entries)
-}
-
-/// Submits `alterPartitionReassignments`, unjoined, for
-/// [`admin_async_per_key_op`]'s independent-per-key delivery. Same `Admin` call
-/// as [`submit_alter_partition_reassignments`]; see the "RPC submission
-/// helpers — per-key (unjoined) variants" note above.
+/// Submits `alterPartitionReassignments`, unjoined: Java's `values()` futures,
+/// for both the synchronous result handle and [`admin_async_per_key_op`]'s
+/// independent-per-key delivery.
 fn submit_alter_partition_reassignments_entries(
     admin: &dyn Admin,
     reassignments: &HashMap<TopicPartition, Option<NewPartitionReassignment>>,
@@ -12303,31 +12592,15 @@ fn submit_list_partition_reassignments(
         .reassignments()
 }
 
-/// Submits `listOffsets` and returns the collect-all future over its
-/// per-partition futures.
+/// Submits `listOffsets`, unjoined: one `partitionResult(tp)` future per
+/// requested partition, for both the synchronous result handle and
+/// [`admin_async_per_key_op`]'s independent-per-key delivery.
 ///
 /// `ListOffsetsResult` exposes its futures through `partitionResult(tp)` rather
-/// than as a map, so the requested keys drive the join. Both the production
+/// than as a map, so the requested keys drive the lookup. Both the production
 /// client and the mock seed one future per requested partition, so no key is
 /// missing; a `partition_result` error is nevertheless propagated rather than
 /// dropped.
-fn submit_list_offsets(
-    admin: &dyn Admin,
-    topic_partition_offsets: &HashMap<TopicPartition, OffsetSpec>,
-    options: ListOffsetsOptions,
-) -> Result<KafkaFuture<ListOffsetsOutcomes>, Error> {
-    let result = admin.list_offsets_with_options(topic_partition_offsets, options);
-    let mut entries: Vec<(TopicPartition, KafkaFuture<ListOffsetsResultInfo>)> =
-        Vec::with_capacity(topic_partition_offsets.len());
-    for tp in topic_partition_offsets.keys() {
-        entries.push((tp.clone(), result.partition_result(tp)?));
-    }
-    Ok(KafkaFuture::join_map_results(entries))
-}
-
-/// Submits `listOffsets`, unjoined, for [`admin_async_per_key_op`]'s
-/// independent-per-key delivery. Same `Admin` call as [`submit_list_offsets`];
-/// see the "RPC submission helpers — per-key (unjoined) variants" note above.
 ///
 /// `listOffsets` is the first RPC in this file whose real (non-mock) `Admin`
 /// implementation resolves its per-key futures through the
@@ -12370,16 +12643,20 @@ fn submit_list_offsets_entries(
 pub type kafka_admin_AdminClient_elect_leaders_callback_t =
     unsafe extern "C" fn(*mut kafka_admin_ElectLeadersResult_t, *mut kafka_common_Error_t, *mut c_void);
 
-/// Elects a leader for the given partitions, blocking until the election future
-/// has resolved (synchronous).
-///
-/// This is `electLeaders(ElectionType, Set<TopicPartition>, ElectLeadersOptions)`.
+/// Elects a leader for the given partitions — Java's
+/// `electLeaders(ElectionType, Set<TopicPartition>, ElectLeadersOptions)`. Like
+/// Java, this **does not wait**: it submits the request and returns at once.
 ///
 /// On success writes a [`kafka_admin_ElectLeadersResult_t`] to `*out_result`
 /// (free it with [`kafka_admin_ElectLeadersResult_destroy`]) and returns null.
-/// **A per-partition failure is not a call failure**: it is reported by
-/// [`kafka_admin_ElectLeadersResult_get_error`]. A non-null return means the
-/// election could not be run at all, and `*out_result` is left untouched.
+/// The handle holds Java's single `partitions()` future; every accessor waits
+/// for it. Its failure (the request as a whole, such as a timeout) is read with
+/// [`kafka_admin_ElectLeadersResult_partitions`] (Java's `get()`), a
+/// per-partition failure with [`kafka_admin_ElectLeadersResult_get_error`], and
+/// both together with [`kafka_admin_ElectLeadersResult_all`]. A non-null return
+/// means the election could not be submitted at all (a NULL `admin`, or an
+/// `election_type` that is neither 0 nor 1), and `*out_result` is left
+/// untouched.
 ///
 /// # Parameters
 ///
@@ -12424,26 +12701,27 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_elect_leaders(
     // outlives this call.
     let selection = unsafe { read_optional_partition_set(all_partitions, topics, partitions, count) };
     let options = elect_leaders_options(timeout_ms);
-    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
     // admin-client constructor, which this function's `# Safety` promises (`admin` must be
     // a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a NULL
-    // `admin` before `handle_ref` is reached. The `&'static AdminHandle` it derives is used
-    // only on the calling thread for the duration of this blocking call, during which the C
-    // caller keeps the handle alive, and the `submit` closure captures only the by-value
-    // `election_type` code, the owned `selection` and `options` built above.
+    // `admin` before `handle_ref` is reached. The `submit` closure runs on the calling
+    // thread inside the helper and captures only the by-value `election_type` code, the
+    // owned `selection` and `options` built above; the handle it builds holds only the
+    // future and the waiter.
     let outcome = unsafe {
-        admin_sync_value_op(admin, move |a| {
+        admin_sync_submit(admin, move |a, w| {
             let election_type = read_election_type(election_type)?;
-            Ok(submit_elect_leaders(a, election_type, selection, options))
+            let future = submit_elect_leaders(a, election_type, selection, options);
+            Ok(ElectLeadersResultInner { election: lazy_single(w, future, elect_leaders_data) })
         })
     };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
     // which this function's `# Safety` promises (`out_result` must be null or writable). It
-    // null-checks `out_result` and writes exactly one element, a handle freshly built by
-    // `box_elect_leaders_result`, only on `Ok`, giving the C caller sole ownership to
+    // null-checks `out_result` and writes exactly one element, a freshly boxed
+    // `ElectLeadersResult` handle, only on `Ok`, giving the C caller sole ownership to
     // release via `kafka_admin_ElectLeadersResult_destroy`; on `Err` it leaves
     // `*out_result` untouched and returns a fresh `box_error` handle the caller owns.
-    unsafe { finish_sync(outcome, out_result, box_elect_leaders_result) }
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// Elects leaders asynchronously. See [`kafka_admin_AdminClient_elect_leaders`].
@@ -12570,21 +12848,25 @@ fn read_election_type(election_type: i32) -> Result<ElectionType, Error> {
 pub type kafka_admin_AdminClient_alter_partition_reassignments_callback_t =
     unsafe extern "C" fn(*const c_char, i32, *mut kafka_common_Error_t, *mut c_void);
 
-/// Changes the reassignments of one or more partitions, blocking until every
-/// per-partition future has resolved (synchronous).
-///
-/// This is `alterPartitionReassignments(Map<TopicPartition,
+/// Changes the reassignments of one or more partitions — Java's
+/// `alterPartitionReassignments(Map<TopicPartition,
 /// Optional<NewPartitionReassignment>>, AlterPartitionReassignmentsOptions)`.
 /// Java's map becomes parallel arrays: entry `i` is `(topics[i],
 /// partitions[i])`.
 ///
-/// On success writes a [`kafka_admin_AlterPartitionReassignmentsResult_t`] to
-/// `*out_result` (free it with
+/// Like Java, this **does not wait**: it submits the request and returns at
+/// once. On success writes a [`kafka_admin_AlterPartitionReassignmentsResult_t`]
+/// to `*out_result` (free it with
 /// [`kafka_admin_AlterPartitionReassignmentsResult_destroy`]) and returns null.
-/// **A per-partition failure is not a call failure**: it is reported by
-/// [`kafka_admin_AlterPartitionReassignmentsResult_get_error`]. A non-null
-/// return means the request could not be submitted at all, and `*out_result` is
-/// left untouched.
+/// The handle holds one future per partition; its keys are readable at once,
+/// [`kafka_admin_AlterPartitionReassignmentsResult_get_error`] waits for that
+/// partition's future only, and
+/// [`kafka_admin_AlterPartitionReassignmentsResult_all`] waits for every
+/// partition (Java's `get()`). **Every failure of the request — per partition,
+/// or of the request as a whole, such as a timeout — is read from the handle**,
+/// as in Java. A non-null return means the request could not be submitted at
+/// all (a NULL `admin`, or a non-cancelled entry with no target replicas), and
+/// `*out_result` is left untouched.
 ///
 /// # Parameters
 ///
@@ -12641,26 +12923,26 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_partition_reassignments(
         // C outlives this call.
         unsafe { read_reassignments(topics, partitions, cancel, target_replicas, target_replica_counts, count) };
     let options = alter_partition_reassignments_options(timeout_ms, allow_replication_factor_change);
-    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
     // admin-client constructor, which this function's `# Safety` promises (`admin` must be
     // a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a NULL
-    // `admin` before `handle_ref` is reached. The `&'static AdminHandle` it derives is used
-    // only on the calling thread for the duration of this blocking call, during which the C
-    // caller keeps the handle alive, and the `submit` closure captures only the owned
-    // `reassignments` result and `options` built above.
+    // `admin` before `handle_ref` is reached. The `submit` closure runs on the calling
+    // thread inside the helper and captures only the owned `reassignments` result and
+    // `options` built above; the handle it builds holds only owned futures and the waiter.
     let outcome = unsafe {
-        admin_sync_value_op(admin, move |a| {
-            Ok(submit_alter_partition_reassignments(a, &reassignments?, options))
+        admin_sync_submit(admin, move |a, w| {
+            let futures = submit_alter_partition_reassignments_entries(a, &reassignments?, options);
+            Ok(alter_partition_reassignments_result_inner(w, futures))
         })
     };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
     // which this function's `# Safety` promises (`out_result` must be null or writable). It
-    // null-checks `out_result` and writes exactly one element, a handle freshly built by
-    // `box_alter_partition_reassignments_result`, only on `Ok`, giving the C caller sole
+    // null-checks `out_result` and writes exactly one element, a freshly boxed
+    // `AlterPartitionReassignmentsResult` handle, only on `Ok`, giving the C caller sole
     // ownership to release via `kafka_admin_AlterPartitionReassignmentsResult_destroy`; on
     // `Err` it leaves `*out_result` untouched and returns a fresh `box_error` handle the
     // caller owns.
-    unsafe { finish_sync(outcome, out_result, box_alter_partition_reassignments_result) }
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// The body of [`kafka_admin_AdminClient_alter_partition_reassignments_async`], shared with its `#[ffi_guard]`'s `on_panic`.
@@ -12836,18 +13118,19 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_partition_reassignments_a
 pub type kafka_admin_AdminClient_list_partition_reassignments_callback_t =
     unsafe extern "C" fn(*mut kafka_admin_ListPartitionReassignmentsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
-/// Lists the ongoing partition reassignments, blocking until the listing future
-/// has resolved (synchronous).
-///
-/// This is `listPartitionReassignments(Optional<Set<TopicPartition>>,
-/// ListPartitionReassignmentsOptions)`.
+/// Lists the ongoing partition reassignments — Java's
+/// `listPartitionReassignments(Optional<Set<TopicPartition>>,
+/// ListPartitionReassignmentsOptions)`. Like Java, this **does not wait**: it
+/// submits the request and returns at once.
 ///
 /// On success writes a [`kafka_admin_ListPartitionReassignmentsResult_t`] to
 /// `*out_result` (free it with
 /// [`kafka_admin_ListPartitionReassignmentsResult_destroy`]) and returns null.
-/// Java holds a **single** future here rather than one per partition, so unlike
-/// the per-key RPCs there is no `_get_error(i)`: any failure is a call failure
-/// and is returned, leaving `*out_result` untouched.
+/// The handle holds Java's **single** `reassignments()` future rather than one
+/// per partition; every accessor waits for it, and its failure is read with
+/// [`kafka_admin_ListPartitionReassignmentsResult_reassignments`] (Java's
+/// `get()`). A non-null return means the request could not be submitted at
+/// all.
 ///
 /// Only partitions with an ongoing reassignment appear in the result, so it can
 /// be shorter than the request.
@@ -12890,23 +13173,28 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_partition_reassignments(
     // outlives this call.
     let selection = unsafe { read_optional_partition_set(all_partitions, topics, partitions, count) };
     let options = list_partition_reassignments_options(timeout_ms);
-    let outcome =
-        // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
-        // admin-client constructor, which this function's `# Safety` promises (`admin` must
-        // be a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a
-        // NULL `admin` before `handle_ref` is reached. The `&'static AdminHandle` it
-        // derives is used only on the calling thread for the duration of this blocking
-        // call, during which the C caller keeps the handle alive, and the `submit` closure
-        // captures only the owned `selection` and `options` built above.
-        unsafe { admin_sync_value_op(admin, move |a| Ok(submit_list_partition_reassignments(a, selection, options))) };
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
+    // a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a NULL
+    // `admin` before `handle_ref` is reached. The `submit` closure runs on the calling
+    // thread inside the helper and captures only the owned `selection` and `options` built
+    // above; the handle it builds holds only the future and the waiter.
+    let outcome = unsafe {
+        admin_sync_submit(admin, move |a, w| {
+            let future = submit_list_partition_reassignments(a, selection, options);
+            Ok(ListPartitionReassignmentsResultInner {
+                reassignments: lazy_single(w, future, list_partition_reassignments_data),
+            })
+        })
+    };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
     // which this function's `# Safety` promises (`out_result` must be null or writable). It
-    // null-checks `out_result` and writes exactly one element, a handle freshly built by
-    // `box_list_partition_reassignments_result`, only on `Ok`, giving the C caller sole
+    // null-checks `out_result` and writes exactly one element, a freshly boxed
+    // `ListPartitionReassignmentsResult` handle, only on `Ok`, giving the C caller sole
     // ownership to release via `kafka_admin_ListPartitionReassignmentsResult_destroy`; on
     // `Err` it leaves `*out_result` untouched and returns a fresh `box_error` handle the
     // caller owns.
-    unsafe { finish_sync(outcome, out_result, box_list_partition_reassignments_result) }
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// Lists partition reassignments asynchronously. See
@@ -13019,18 +13307,25 @@ pub type kafka_admin_AdminClient_list_offsets_callback_t = unsafe extern "C" fn(
     *mut c_void,
 );
 
-/// Lists the offsets of the given partitions, blocking until every
-/// per-partition future has resolved (synchronous).
+/// Lists the offsets of the given partitions — Java's
+/// `listOffsets(Map<TopicPartition, OffsetSpec>, ListOffsetsOptions)`. Java's
+/// map becomes parallel arrays: entry `i` is `(topics[i], partitions[i])` with
+/// the `OffsetSpec` described below.
 ///
-/// This is `listOffsets(Map<TopicPartition, OffsetSpec>, ListOffsetsOptions)`.
-/// Java's map becomes parallel arrays: entry `i` is `(topics[i], partitions[i])`
-/// with the `OffsetSpec` described below.
-///
-/// On success writes a [`kafka_admin_ListOffsetsResult_t`] to `*out_result`
-/// (free it with [`kafka_admin_ListOffsetsResult_destroy`]) and returns null.
-/// **A per-partition failure is not a call failure**: it is reported by
-/// [`kafka_admin_ListOffsetsResult_get_error`]. A non-null return means the
-/// request could not be submitted at all, and `*out_result` is left untouched.
+/// Like Java, this **does not wait**: it submits the request and returns at
+/// once. On success writes a [`kafka_admin_ListOffsetsResult_t`] to
+/// `*out_result` (free it with [`kafka_admin_ListOffsetsResult_destroy`]) and
+/// returns null. The handle holds one future per partition, as Java's
+/// `partitionResult(tp)` does. Its keys are readable at once;
+/// [`kafka_admin_ListOffsetsResult_get_value`] /
+/// [`kafka_admin_ListOffsetsResult_get_error`] wait for that partition's future
+/// only, and [`kafka_admin_ListOffsetsResult_all`] waits for every partition
+/// (Java's `all().get()`). **Every failure of the request — per partition, or
+/// of the request as a whole, such as a timeout — is read from the handle**, as
+/// in Java. A non-null return means the request could not be submitted at all
+/// (a NULL `admin`, an unknown `isolation_level`, or a `spec_timestamps` entry
+/// that is neither flagged as a timestamp nor a recognised sentinel), and
+/// `*out_result` is left untouched.
 ///
 /// # Parameters
 ///
@@ -13078,25 +13373,26 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_offsets(
     // topics, and copies every entry into owned `TopicPartition` / `OffsetSpec` values, so
     // nothing borrowed from C outlives this call.
     let specs = unsafe { read_offset_specs(topics, partitions, is_timestamp, spec_timestamps, count) };
-    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
     // admin-client constructor, which this function's `# Safety` promises (`admin` must be
     // a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a NULL
-    // `admin` before `handle_ref` is reached. The `&'static AdminHandle` it derives is used
-    // only on the calling thread for the duration of this blocking call, during which the C
-    // caller keeps the handle alive, and the `submit` closure captures only the owned
-    // `specs` result and the by-value `timeout_ms` and `isolation_level` arguments.
+    // `admin` before `handle_ref` is reached. The `submit` closure runs on the calling
+    // thread inside the helper and captures only the owned `specs` result and the by-value
+    // `timeout_ms` and `isolation_level` arguments; the handle it builds holds only owned
+    // futures and the waiter.
     let outcome = unsafe {
-        admin_sync_value_op(admin, move |a| {
-            submit_list_offsets(a, &specs?, list_offsets_options(timeout_ms, isolation_level)?)
+        admin_sync_submit(admin, move |a, w| {
+            let futures = submit_list_offsets_entries(a, &specs?, list_offsets_options(timeout_ms, isolation_level)?)?;
+            Ok(list_offsets_result_inner(w, futures))
         })
     };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
     // which this function's `# Safety` promises (`out_result` must be null or writable). It
-    // null-checks `out_result` and writes exactly one element, a handle freshly built by
-    // `box_list_offsets_result`, only on `Ok`, giving the C caller sole ownership to
+    // null-checks `out_result` and writes exactly one element, a freshly boxed
+    // `ListOffsetsResult` handle, only on `Ok`, giving the C caller sole ownership to
     // release via `kafka_admin_ListOffsetsResult_destroy`; on `Err` it leaves `*out_result`
     // untouched and returns a fresh `box_error` handle the caller owns.
-    unsafe { finish_sync(outcome, out_result, box_list_offsets_result) }
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// The body of [`kafka_admin_AdminClient_list_offsets_async`], shared with its `#[ffi_guard]`'s `on_panic`.
@@ -32060,16 +32356,18 @@ mod tests {
 
     #[test]
     fn alter_partition_reassignments_result_reports_per_partition_errors() {
-        let outcomes = HashMap::from([
-            (TopicPartition::new("t".to_string(), 0), Ok(())),
+        let (_runtime, waiter) = lazy_test_waiter();
+        let futures = vec![
             (
                 TopicPartition::new("t".to_string(), 1),
-                Err(Error::new(Errors::UnknownTopicOrPartition)),
+                KafkaFuture::completed(Err(Error::new(Errors::UnknownTopicOrPartition))),
             ),
-        ]);
-        let result = box_alter_partition_reassignments_result(outcomes);
-        // SAFETY: Test code: `result` was built just above by
-        // `box_alter_partition_reassignments_result`, so it is a valid handle for the count
+            (TopicPartition::new("t".to_string(), 0), KafkaFuture::completed(Ok(()))),
+        ];
+        let result: *mut kafka_admin_AlterPartitionReassignmentsResult_t =
+            into_handle(alter_partition_reassignments_result_inner(&waiter, futures));
+        // SAFETY: Test code: `result` was built just above by `into_handle` over
+        // `alter_partition_reassignments_result_inner`, so it is a valid handle for the count
         // / partition / error getters, whose borrowed error pointer is read before the
         // handle is freed; `kafka_admin_AlterPartitionReassignmentsResult_destroy(result)`
         // is its single destroy.
@@ -32132,23 +32430,24 @@ mod tests {
 
     #[test]
     fn list_offsets_result_carries_value_and_error_per_partition() {
-        let outcomes = HashMap::from([
+        let (_runtime, waiter) = lazy_test_waiter();
+        let futures = vec![
+            (
+                TopicPartition::new("t".to_string(), 2),
+                KafkaFuture::completed(Err(Error::new(Errors::UnknownTopicOrPartition))),
+            ),
             (
                 TopicPartition::new("t".to_string(), 0),
-                Ok(ListOffsetsResultInfo::new(42, 1_700_000_000_000, Some(7))),
+                KafkaFuture::completed(Ok(ListOffsetsResultInfo::new(42, 1_700_000_000_000, Some(7)))),
             ),
             (
                 TopicPartition::new("t".to_string(), 1),
-                Ok(ListOffsetsResultInfo::new(5, -1, None)),
+                KafkaFuture::completed(Ok(ListOffsetsResultInfo::new(5, -1, None))),
             ),
-            (
-                TopicPartition::new("t".to_string(), 2),
-                Err(Error::new(Errors::UnknownTopicOrPartition)),
-            ),
-        ]);
-        let result = box_list_offsets_result(outcomes);
-        // SAFETY: Test code: `result` was built just above by `box_list_offsets_result`;
-        // each `info` is a borrowed `ListOffsetsResultInfo` handle read only while `result`
+        ];
+        let result: *mut kafka_admin_ListOffsetsResult_t = into_handle(list_offsets_result_inner(&waiter, futures));
+        // SAFETY: Test code: `result` was built just above by `into_handle` over
+        // `list_offsets_result_inner`; each `info` is a borrowed `ListOffsetsResultInfo` handle read only while `result`
         // lives, `&mut epoch` is a writable local for the single-element out-param write,
         // and `std::ptr::null_mut()` is passed deliberately to exercise the documented null
         // out-param path. Out-of-range indices exercise the null paths, and
@@ -32188,6 +32487,533 @@ mod tests {
             assert!(kafka_admin_ListOffsetsResult_get_value(result, 3).is_null());
             assert!(kafka_admin_ListOffsetsResult_get_error(result, -1).is_null());
             kafka_admin_ListOffsetsResult_destroy(result);
+        }
+    }
+
+    // -- Java-shaped synchronous results (log dirs, partitions, offsets) -----
+    //
+    // Each handle is built straight from unresolved `KafkaFutureImpl` futures, as
+    // the synchronous entry point builds it, so these show which future every
+    // accessor waits on.
+
+    /// Completes `complete` on another thread after a short delay, so the caller's
+    /// next accessor demonstrably waits for it.
+    fn complete_later(complete: impl FnOnce() + Send + 'static) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            complete();
+        })
+    }
+
+    /// Java's `descriptions().get(broker).get()` waits for that broker only;
+    /// `allDescriptions().get()` waits for every broker.
+    #[test]
+    fn describe_log_dirs_result_accessors_wait_for_their_own_broker_only() {
+        let (_runtime, waiter) = lazy_test_waiter();
+        let fast = crate::common::internals::KafkaFutureImpl::<HashMap<String, LogDirDescription>>::new();
+        let slow = crate::common::internals::KafkaFutureImpl::<HashMap<String, LogDirDescription>>::new();
+        let result: *mut kafka_admin_DescribeLogDirsResult_t = into_handle(describe_log_dirs_result_inner(
+            &waiter,
+            vec![(2, slow.future()), (1, fast.future())],
+        ));
+        // SAFETY: Test code: `result` is the live handle built above and destroyed exactly
+        // once at the end; borrowed pointers are read before then.
+        unsafe {
+            // The brokers are known at once, sorted by id, while both futures pend.
+            assert_eq!(kafka_admin_DescribeLogDirsResult_count(result), 2);
+            assert_eq!(kafka_admin_DescribeLogDirsResult_get_broker(result, 0), 1);
+            assert_eq!(kafka_admin_DescribeLogDirsResult_get_broker(result, 1), 2);
+            assert!(!kafka_admin_DescribeLogDirsResult_is_done(result, 0));
+            assert!(!kafka_admin_DescribeLogDirsResult_is_done(result, 1));
+            assert!(kafka_admin_DescribeLogDirsResult_get_value(result, 2).is_null());
+
+            fast.complete(HashMap::from([(
+                "/data/a".to_string(),
+                LogDirDescription::new(None, HashMap::new()),
+            )]));
+            assert!(kafka_admin_DescribeLogDirsResult_is_done(result, 0));
+            // Broker 2 is still pending, so reading broker 1 must not wait on it.
+            let map = kafka_admin_DescribeLogDirsResult_get_value(result, 0);
+            assert!(!map.is_null());
+            assert_eq!(kafka_admin_LogDirDescriptionMap_count(map), 1);
+            assert!(kafka_admin_DescribeLogDirsResult_get_error(result, 0).is_null());
+            assert!(!kafka_admin_DescribeLogDirsResult_is_done(result, 1));
+
+            let completer = complete_later(move || {
+                slow.complete_with_error(Error::timeout("broker 2 timed out"));
+            });
+            assert_eq!(
+                consume_message(kafka_admin_DescribeLogDirsResult_all(result)),
+                "broker 2 timed out"
+            );
+            completer.join().expect("completer thread");
+            assert!(kafka_admin_DescribeLogDirsResult_is_done(result, 1));
+            assert_eq!(
+                borrowed_message(kafka_admin_DescribeLogDirsResult_get_error(result, 1)),
+                "broker 2 timed out"
+            );
+            assert!(kafka_admin_DescribeLogDirsResult_get_value(result, 1).is_null());
+            kafka_admin_DescribeLogDirsResult_destroy(result);
+        }
+    }
+
+    /// Java's `values().get(replica).get()` waits for that replica only; `all()`
+    /// waits for every replica.
+    #[test]
+    fn alter_replica_log_dirs_result_accessors_wait_for_their_own_replica_only() {
+        let (_runtime, waiter) = lazy_test_waiter();
+        let fast = crate::common::internals::KafkaFutureImpl::<()>::new();
+        let slow = crate::common::internals::KafkaFutureImpl::<()>::new();
+        let futures = vec![
+            (TopicPartitionReplica::new("t", 0, 2), slow.future()),
+            (TopicPartitionReplica::new("t", 0, 1), fast.future()),
+        ];
+        let result: *mut kafka_admin_AlterReplicaLogDirsResult_t =
+            into_handle(alter_replica_log_dirs_result_inner(&waiter, futures));
+        // SAFETY: Test code: `result` is the live handle built above and destroyed exactly
+        // once at the end; borrowed pointers are read before then.
+        unsafe {
+            assert_eq!(kafka_admin_AlterReplicaLogDirsResult_count(result), 2);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_AlterReplicaLogDirsResult_get_topic(result, 1))
+                    .to_str()
+                    .unwrap(),
+                "t"
+            );
+            assert_eq!(kafka_admin_AlterReplicaLogDirsResult_get_partition(result, 1), 0);
+            assert_eq!(kafka_admin_AlterReplicaLogDirsResult_get_broker_id(result, 0), 1);
+            assert_eq!(kafka_admin_AlterReplicaLogDirsResult_get_broker_id(result, 1), 2);
+            assert!(!kafka_admin_AlterReplicaLogDirsResult_is_done(result, 0));
+            assert!(!kafka_admin_AlterReplicaLogDirsResult_is_done(result, 1));
+
+            fast.complete(());
+            assert!(kafka_admin_AlterReplicaLogDirsResult_is_done(result, 0));
+            assert!(kafka_admin_AlterReplicaLogDirsResult_get_error(result, 0).is_null());
+            assert!(!kafka_admin_AlterReplicaLogDirsResult_is_done(result, 1));
+
+            let completer = complete_later(move || {
+                slow.complete_with_error(Error::new(Errors::LogDirNotFound));
+            });
+            let error = kafka_admin_AlterReplicaLogDirsResult_get_error(result, 1);
+            assert!(!error.is_null());
+            assert_eq!(common::kafka_common_Error_code(error) as i32, Errors::LogDirNotFound as i32);
+            completer.join().expect("completer thread");
+            let all = kafka_admin_AlterReplicaLogDirsResult_all(result);
+            assert_eq!(common::kafka_common_Error_code(all) as i32, Errors::LogDirNotFound as i32);
+            common::kafka_common_Error_destroy(all);
+            kafka_admin_AlterReplicaLogDirsResult_destroy(result);
+        }
+    }
+
+    /// Java's `values().get(replica).get()` waits for that replica only; `all()`
+    /// waits for every replica.
+    #[test]
+    fn describe_replica_log_dirs_result_accessors_wait_for_their_own_replica_only() {
+        let (_runtime, waiter) = lazy_test_waiter();
+        let fast = crate::common::internals::KafkaFutureImpl::<ReplicaLogDirInfo>::new();
+        let slow = crate::common::internals::KafkaFutureImpl::<ReplicaLogDirInfo>::new();
+        let futures = vec![
+            (TopicPartitionReplica::new("b", 0, 1), slow.future()),
+            (TopicPartitionReplica::new("a", 3, 1), fast.future()),
+        ];
+        let result: *mut kafka_admin_DescribeReplicaLogDirsResult_t =
+            into_handle(describe_replica_log_dirs_result_inner(&waiter, futures));
+        // SAFETY: Test code: `result` is the live handle built above and destroyed exactly
+        // once at the end; borrowed pointers are read before then.
+        unsafe {
+            assert_eq!(kafka_admin_DescribeReplicaLogDirsResult_count(result), 2);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_DescribeReplicaLogDirsResult_get_topic(result, 0))
+                    .to_str()
+                    .unwrap(),
+                "a"
+            );
+            assert_eq!(kafka_admin_DescribeReplicaLogDirsResult_get_partition(result, 0), 3);
+            assert_eq!(kafka_admin_DescribeReplicaLogDirsResult_get_broker_id(result, 0), 1);
+            assert!(!kafka_admin_DescribeReplicaLogDirsResult_is_done(result, 0));
+            assert!(!kafka_admin_DescribeReplicaLogDirsResult_is_done(result, 1));
+
+            fast.complete(ReplicaLogDirInfo::new(Some("/data/a".to_string()), 4, None, -1));
+            assert!(kafka_admin_DescribeReplicaLogDirsResult_is_done(result, 0));
+            let info = kafka_admin_DescribeReplicaLogDirsResult_get_value(result, 0);
+            assert!(!info.is_null());
+            assert_eq!(kafka_admin_ReplicaLogDirInfo_current_replica_offset_lag(info), 4);
+            assert!(kafka_admin_DescribeReplicaLogDirsResult_get_error(result, 0).is_null());
+            assert!(!kafka_admin_DescribeReplicaLogDirsResult_is_done(result, 1));
+
+            let completer = complete_later(move || {
+                slow.complete_with_error(Error::timeout("replica b-0 timed out"));
+            });
+            assert_eq!(
+                borrowed_message(kafka_admin_DescribeReplicaLogDirsResult_get_error(result, 1)),
+                "replica b-0 timed out"
+            );
+            completer.join().expect("completer thread");
+            assert!(kafka_admin_DescribeReplicaLogDirsResult_get_value(result, 1).is_null());
+            assert_eq!(
+                consume_message(kafka_admin_DescribeReplicaLogDirsResult_all(result)),
+                "replica b-0 timed out"
+            );
+            kafka_admin_DescribeReplicaLogDirsResult_destroy(result);
+        }
+    }
+
+    /// `electLeaders` has one future (`partitions()`): every accessor, `_count`
+    /// included, waits for it. `partitions().get()` reports only a request-wide
+    /// failure, while `all().get()` also reports a failed partition.
+    #[test]
+    fn elect_leaders_result_accessors_all_wait_for_the_single_election_future() {
+        let (_runtime, waiter) = lazy_test_waiter();
+        let election = crate::common::internals::KafkaFutureImpl::<HashMap<TopicPartition, Option<Error>>>::new();
+        let result: *mut kafka_admin_ElectLeadersResult_t = into_handle(ElectLeadersResultInner {
+            election: lazy_single(&waiter, election.future(), elect_leaders_data),
+        });
+        // SAFETY: Test code: `result` is the live handle built above and destroyed exactly
+        // once at the end; borrowed pointers are read before then.
+        unsafe {
+            assert!(!kafka_admin_ElectLeadersResult_is_done(result));
+            let completer = complete_later(move || {
+                election.complete(HashMap::from([
+                    (
+                        TopicPartition::new("t".to_string(), 1),
+                        Some(Error::new(Errors::ElectionNotNeeded)),
+                    ),
+                    (TopicPartition::new("t".to_string(), 0), None),
+                ]));
+            });
+            // `_count` waits for the election, then reads its partitions.
+            assert_eq!(kafka_admin_ElectLeadersResult_count(result), 2);
+            completer.join().expect("completer thread");
+            assert!(kafka_admin_ElectLeadersResult_is_done(result));
+            assert!(kafka_admin_ElectLeadersResult_partitions(result).is_null());
+            assert_eq!(kafka_admin_ElectLeadersResult_get_partition(result, 0), 0);
+            assert!(kafka_admin_ElectLeadersResult_get_error(result, 0).is_null());
+            let failed = kafka_admin_ElectLeadersResult_get_error(result, 1);
+            assert_eq!(common::kafka_common_Error_code(failed) as i32, Errors::ElectionNotNeeded as i32);
+            let all = kafka_admin_ElectLeadersResult_all(result);
+            assert_eq!(common::kafka_common_Error_code(all) as i32, Errors::ElectionNotNeeded as i32);
+            common::kafka_common_Error_destroy(all);
+            kafka_admin_ElectLeadersResult_destroy(result);
+        }
+
+        // A request-wide failure fails `partitions()` and `all()` alike, and leaves
+        // no partitions to read.
+        let failing = crate::common::internals::KafkaFutureImpl::<HashMap<TopicPartition, Option<Error>>>::new();
+        let result: *mut kafka_admin_ElectLeadersResult_t = into_handle(ElectLeadersResultInner {
+            election: lazy_single(&waiter, failing.future(), elect_leaders_data),
+        });
+        failing.complete_with_error(Error::timeout("election timed out"));
+        // SAFETY: Test code: `result` is the live handle built above and destroyed exactly
+        // once at the end.
+        unsafe {
+            assert_eq!(
+                consume_message(kafka_admin_ElectLeadersResult_partitions(result)),
+                "election timed out"
+            );
+            assert_eq!(
+                consume_message(kafka_admin_ElectLeadersResult_all(result)),
+                "election timed out"
+            );
+            assert_eq!(kafka_admin_ElectLeadersResult_count(result), 0);
+            assert!(kafka_admin_ElectLeadersResult_get_topic(result, 0).is_null());
+            assert_eq!(kafka_admin_ElectLeadersResult_get_partition(result, 0), -1);
+            assert!(kafka_admin_ElectLeadersResult_get_error(result, 0).is_null());
+            kafka_admin_ElectLeadersResult_destroy(result);
+        }
+
+        // An election in which every partition succeeded: `all()` is null too.
+        let succeeded = crate::common::internals::KafkaFutureImpl::<HashMap<TopicPartition, Option<Error>>>::new();
+        succeeded.complete(HashMap::from([(TopicPartition::new("t".to_string(), 0), None)]));
+        let result: *mut kafka_admin_ElectLeadersResult_t = into_handle(ElectLeadersResultInner {
+            election: lazy_single(&waiter, succeeded.future(), elect_leaders_data),
+        });
+        // SAFETY: Test code: `result` is the live handle built above and destroyed exactly
+        // once at the end.
+        unsafe {
+            assert!(kafka_admin_ElectLeadersResult_all(result).is_null());
+            kafka_admin_ElectLeadersResult_destroy(result);
+        }
+    }
+
+    /// Against the mock, whose `electLeaders` fails with "Not implemented yet",
+    /// the synchronous entry point still returns a handle, and the failure is
+    /// read from it as Java's `partitions().get()` / `all().get()` would throw
+    /// it. An election type outside `{0, 1}` is still rejected by the call
+    /// itself, before anything is submitted.
+    #[test]
+    fn elect_leaders_reports_the_mock_failure_from_the_handle_and_a_bad_election_type_from_the_call() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+        let mut result: *mut kafka_admin_ElectLeadersResult_t = std::ptr::null_mut();
+        // SAFETY: Test code: `admin` is live and `result` a writable slot; the NULL
+        // `topics` / `partitions` arrays are not read with `all_partitions` true. `result`
+        // and `admin` are each destroyed exactly once.
+        unsafe {
+            let error = kafka_admin_AdminClient_elect_leaders(
+                admin,
+                0,
+                true,
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                -1,
+                &mut result,
+            );
+            assert!(error.is_null(), "the mock's failure is the future's, not the call's");
+            assert!(!result.is_null());
+            let partitions = kafka_admin_ElectLeadersResult_partitions(result);
+            assert_eq!(
+                common::kafka_common_Error_code(partitions) as i32,
+                Errors::UnsupportedVersion as i32
+            );
+            assert_eq!(consume_message(partitions), "Not implemented yet");
+            assert_eq!(
+                consume_message(kafka_admin_ElectLeadersResult_all(result)),
+                "Not implemented yet"
+            );
+            assert_eq!(kafka_admin_ElectLeadersResult_count(result), 0);
+            kafka_admin_ElectLeadersResult_destroy(result);
+
+            let mut untouched: *mut kafka_admin_ElectLeadersResult_t = std::ptr::null_mut();
+            let error = kafka_admin_AdminClient_elect_leaders(
+                admin,
+                7,
+                true,
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                -1,
+                &mut untouched,
+            );
+            assert_eq!(consume_message(error), "Value 7 must be one of [PREFERRED, UNCLEAN]");
+            assert!(untouched.is_null());
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// Java's `values().get(tp).get()` waits for that partition only; `all()`
+    /// waits for every partition.
+    #[test]
+    fn alter_partition_reassignments_result_accessors_wait_for_their_own_partition_only() {
+        let (_runtime, waiter) = lazy_test_waiter();
+        let fast = crate::common::internals::KafkaFutureImpl::<()>::new();
+        let slow = crate::common::internals::KafkaFutureImpl::<()>::new();
+        let futures = vec![
+            (TopicPartition::new("t".to_string(), 10), slow.future()),
+            (TopicPartition::new("t".to_string(), 2), fast.future()),
+        ];
+        let result: *mut kafka_admin_AlterPartitionReassignmentsResult_t =
+            into_handle(alter_partition_reassignments_result_inner(&waiter, futures));
+        // SAFETY: Test code: `result` is the live handle built above and destroyed exactly
+        // once at the end; borrowed pointers are read before then.
+        unsafe {
+            assert_eq!(kafka_admin_AlterPartitionReassignmentsResult_count(result), 2);
+            // Sorted by *numeric* partition: 2 before 10.
+            assert_eq!(kafka_admin_AlterPartitionReassignmentsResult_get_partition(result, 0), 2);
+            assert_eq!(kafka_admin_AlterPartitionReassignmentsResult_get_partition(result, 1), 10);
+            assert!(!kafka_admin_AlterPartitionReassignmentsResult_is_done(result, 0));
+            assert!(!kafka_admin_AlterPartitionReassignmentsResult_is_done(result, 1));
+
+            fast.complete(());
+            assert!(kafka_admin_AlterPartitionReassignmentsResult_is_done(result, 0));
+            assert!(kafka_admin_AlterPartitionReassignmentsResult_get_error(result, 0).is_null());
+            assert!(!kafka_admin_AlterPartitionReassignmentsResult_is_done(result, 1));
+
+            let completer = complete_later(move || {
+                slow.complete_with_error(Error::new(Errors::NoReassignmentInProgress));
+            });
+            let all = kafka_admin_AlterPartitionReassignmentsResult_all(result);
+            assert_eq!(
+                common::kafka_common_Error_code(all) as i32,
+                Errors::NoReassignmentInProgress as i32
+            );
+            common::kafka_common_Error_destroy(all);
+            completer.join().expect("completer thread");
+            assert!(kafka_admin_AlterPartitionReassignmentsResult_is_done(result, 1));
+            let failed = kafka_admin_AlterPartitionReassignmentsResult_get_error(result, 1);
+            assert_eq!(
+                common::kafka_common_Error_code(failed) as i32,
+                Errors::NoReassignmentInProgress as i32
+            );
+            kafka_admin_AlterPartitionReassignmentsResult_destroy(result);
+        }
+    }
+
+    /// `listPartitionReassignments` has one future (`reassignments()`): every
+    /// accessor, `_count` included, waits for it, and its error is read with
+    /// `_reassignments`.
+    #[test]
+    fn list_partition_reassignments_result_accessors_all_wait_for_the_single_listing_future() {
+        let (_runtime, waiter) = lazy_test_waiter();
+        let listing =
+            crate::common::internals::KafkaFutureImpl::<HashMap<TopicPartition, PartitionReassignment>>::new();
+        let result: *mut kafka_admin_ListPartitionReassignmentsResult_t =
+            into_handle(ListPartitionReassignmentsResultInner {
+                reassignments: lazy_single(&waiter, listing.future(), list_partition_reassignments_data),
+            });
+        // SAFETY: Test code: `result` is the live handle built above and destroyed exactly
+        // once at the end; borrowed pointers are read before then.
+        unsafe {
+            assert!(!kafka_admin_ListPartitionReassignmentsResult_is_done(result));
+            let completer = complete_later(move || {
+                listing.complete(HashMap::from([(
+                    TopicPartition::new("t".to_string(), 4),
+                    PartitionReassignment::new(vec![1, 2], vec![2], vec![]),
+                )]));
+            });
+            let value = kafka_admin_ListPartitionReassignmentsResult_get_value(result, 0);
+            completer.join().expect("completer thread");
+            assert!(!value.is_null());
+            assert_eq!(kafka_admin_PartitionReassignment_replica_count(value), 2);
+            assert!(kafka_admin_ListPartitionReassignmentsResult_is_done(result));
+            assert!(kafka_admin_ListPartitionReassignmentsResult_reassignments(result).is_null());
+            assert_eq!(kafka_admin_ListPartitionReassignmentsResult_count(result), 1);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_ListPartitionReassignmentsResult_get_topic(result, 0))
+                    .to_str()
+                    .unwrap(),
+                "t"
+            );
+            assert_eq!(kafka_admin_ListPartitionReassignmentsResult_get_partition(result, 0), 4);
+            kafka_admin_ListPartitionReassignmentsResult_destroy(result);
+        }
+
+        let failing =
+            crate::common::internals::KafkaFutureImpl::<HashMap<TopicPartition, PartitionReassignment>>::new();
+        let result: *mut kafka_admin_ListPartitionReassignmentsResult_t =
+            into_handle(ListPartitionReassignmentsResultInner {
+                reassignments: lazy_single(&waiter, failing.future(), list_partition_reassignments_data),
+            });
+        failing.complete_with_error(Error::timeout("listing timed out"));
+        // SAFETY: Test code: `result` is the live handle built above and destroyed exactly
+        // once at the end.
+        unsafe {
+            assert_eq!(
+                consume_message(kafka_admin_ListPartitionReassignmentsResult_reassignments(result)),
+                "listing timed out"
+            );
+            assert_eq!(kafka_admin_ListPartitionReassignmentsResult_count(result), 0);
+            assert!(kafka_admin_ListPartitionReassignmentsResult_get_topic(result, 0).is_null());
+            assert_eq!(kafka_admin_ListPartitionReassignmentsResult_get_partition(result, 0), -1);
+            assert!(kafka_admin_ListPartitionReassignmentsResult_get_value(result, 0).is_null());
+            kafka_admin_ListPartitionReassignmentsResult_destroy(result);
+        }
+    }
+
+    /// Java's `partitionResult(tp).get()` waits for that partition only; `all()`
+    /// waits for every partition.
+    #[test]
+    fn list_offsets_result_accessors_wait_for_their_own_partition_only() {
+        let (_runtime, waiter) = lazy_test_waiter();
+        let fast = crate::common::internals::KafkaFutureImpl::<ListOffsetsResultInfo>::new();
+        let slow = crate::common::internals::KafkaFutureImpl::<ListOffsetsResultInfo>::new();
+        let futures = vec![
+            (TopicPartition::new("t".to_string(), 1), slow.future()),
+            (TopicPartition::new("t".to_string(), 0), fast.future()),
+        ];
+        let result: *mut kafka_admin_ListOffsetsResult_t = into_handle(list_offsets_result_inner(&waiter, futures));
+        // SAFETY: Test code: `result` is the live handle built above and destroyed exactly
+        // once at the end; borrowed pointers are read before then.
+        unsafe {
+            assert_eq!(kafka_admin_ListOffsetsResult_count(result), 2);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_ListOffsetsResult_get_topic(result, 0))
+                    .to_str()
+                    .unwrap(),
+                "t"
+            );
+            assert_eq!(kafka_admin_ListOffsetsResult_get_partition(result, 1), 1);
+            assert!(!kafka_admin_ListOffsetsResult_is_done(result, 0));
+            assert!(!kafka_admin_ListOffsetsResult_is_done(result, 1));
+
+            fast.complete(ListOffsetsResultInfo::new(42, -1, None));
+            assert!(kafka_admin_ListOffsetsResult_is_done(result, 0));
+            let info = kafka_admin_ListOffsetsResult_get_value(result, 0);
+            assert!(!info.is_null());
+            assert_eq!(kafka_admin_ListOffsetsResultInfo_offset(info), 42);
+            assert!(!kafka_admin_ListOffsetsResult_is_done(result, 1));
+
+            let completer = complete_later(move || {
+                slow.complete(ListOffsetsResultInfo::new(7, 1_000, Some(3)));
+            });
+            let info = kafka_admin_ListOffsetsResult_get_value(result, 1);
+            completer.join().expect("completer thread");
+            assert!(!info.is_null());
+            assert_eq!(kafka_admin_ListOffsetsResultInfo_offset(info), 7);
+            assert!(kafka_admin_ListOffsetsResult_get_error(result, 1).is_null());
+            assert!(kafka_admin_ListOffsetsResult_all(result).is_null());
+            kafka_admin_ListOffsetsResult_destroy(result);
+        }
+    }
+
+    /// End to end, against the production client: `describe_log_dirs` and
+    /// `list_partition_reassignments` return before their requests resolve
+    /// (Java's `describeLogDirs` / `listPartitionReassignments` do not block),
+    /// the broker id is readable at once, and each request's timeout is read
+    /// from the handle rather than returned by the call.
+    #[test]
+    fn describe_log_dirs_and_list_partition_reassignments_return_before_the_request_resolves() {
+        let admin = unreachable_admin_client();
+        let brokers = [1i32];
+        let mut log_dirs: *mut kafka_admin_DescribeLogDirsResult_t = std::ptr::null_mut();
+        let mut listing: *mut kafka_admin_ListPartitionReassignmentsResult_t = std::ptr::null_mut();
+
+        let started = std::time::Instant::now();
+        // SAFETY: Test code: `admin` is live; `brokers` holds one id; the result slots are
+        // writable; the NULL `topics` / `partitions` arrays are not read with
+        // `all_partitions` true.
+        let (log_dirs_error, listing_error) = unsafe {
+            (
+                kafka_admin_AdminClient_describe_log_dirs(admin, brokers.as_ptr(), 1, 1_000, &mut log_dirs),
+                kafka_admin_AdminClient_list_partition_reassignments(
+                    admin,
+                    true,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    0,
+                    1_000,
+                    &mut listing,
+                ),
+            )
+        };
+        assert!(log_dirs_error.is_null(), "describe_log_dirs submission must not fail");
+        assert!(listing_error.is_null(), "list_partition_reassignments submission must not fail");
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "the entry points waited for their requests"
+        );
+
+        // SAFETY: Test code: both results are the live handles written above; borrowed
+        // pointers are read before they are destroyed, and `admin` is destroyed once.
+        unsafe {
+            assert_eq!(kafka_admin_DescribeLogDirsResult_count(log_dirs), 1);
+            assert_eq!(kafka_admin_DescribeLogDirsResult_get_broker(log_dirs, 0), 1);
+            assert!(!kafka_admin_DescribeLogDirsResult_is_done(log_dirs, 0));
+            assert!(!kafka_admin_ListPartitionReassignmentsResult_is_done(listing));
+
+            let all = kafka_admin_DescribeLogDirsResult_all(log_dirs);
+            assert!(!all.is_null(), "an unreachable cluster must time the request out");
+            assert_eq!(common::kafka_common_Error_code(all) as i32, Errors::RequestTimedOut as i32);
+            common::kafka_common_Error_destroy(all);
+            let per_broker = kafka_admin_DescribeLogDirsResult_get_error(log_dirs, 0);
+            assert_eq!(
+                common::kafka_common_Error_code(per_broker) as i32,
+                Errors::RequestTimedOut as i32
+            );
+            assert!(kafka_admin_DescribeLogDirsResult_get_value(log_dirs, 0).is_null());
+
+            let reassignments = kafka_admin_ListPartitionReassignmentsResult_reassignments(listing);
+            assert!(!reassignments.is_null(), "an unreachable cluster must time the request out");
+            assert_eq!(
+                common::kafka_common_Error_code(reassignments) as i32,
+                Errors::RequestTimedOut as i32
+            );
+            common::kafka_common_Error_destroy(reassignments);
+            assert_eq!(kafka_admin_ListPartitionReassignmentsResult_count(listing), 0);
+
+            kafka_admin_AdminClient_destroy(admin);
+            kafka_admin_DescribeLogDirsResult_destroy(log_dirs);
+            kafka_admin_ListPartitionReassignmentsResult_destroy(listing);
         }
     }
 
