@@ -2891,6 +2891,49 @@ bootstrap-window spin.)
   broker); Python unit 1101 passed, 2 skipped, integration 45; C suites hand-built with `cc`, all pass;
   `build-c` fails only for want of cmake.
 
+### Merge of origin/master 95f67984 (#197) (agent 116)
+
+- **`29deadd7`: `origin/master` at `95f67984` merged in** — #197, "Add transactional send latency
+  metrics", a squash of 13 commits (10 changes plus three fixups). The merge-commit body lists every
+  resolution. In short:
+  - `kafka_producer.rs` `send_offsets_to_transaction` follows `KafkaProducer.java` at 4.4.0-rc4
+    (`:794-810`): the latency timer starts inside the non-empty branch **before** the KIP-1319
+    `awaitTopicMetadata` wait (which is also where the KIP-909 bootstrap error surfaces), the
+    `TxnOffsetCommit` result is awaited with the remaining `max.block.ms`, and `record_send_offsets`
+    runs only after success. The other four transaction methods have no 4.4 change beyond line shifts.
+  - `record_accumulator.rs` takes master's set-aside-and-fail handling of split sub-batches;
+    `async_kafka_consumer.rs` and `producer_config.rs` were doc-cite conflicts only.
+  - Semantic fixes: `ByteUtils` moved to `common::utils::internals` in 4.4, and the M16 KIP-1242
+    `test_metadata_cluster_check_enable` tests now expect #197's Java boolean-parse message.
+- Follow-ups: `f0eeac09` (cite moves, including the pre-existing `TransactionManager.java:443/:446`
+  and their `TransactionManagerTest` neighbours) and `45be1d2a` (the admin config, whose only boolean
+  `metadata.cluster.check.enable` arrived with M16, parses booleans the same way).
+- `EndTransactionMarker` is `pub` inside the `pub(crate) mod internal` of `common::record`, so it is
+  crate-private as Java's `common.record.internal` requires; `cargo xtask lint` (public-audience and
+  deprecated lints) is clean.
+
+| #197 change | Java it translates | 4.4 delta? | Cites |
+|---|---|---|---|
+| Txn latency metrics wired | `KafkaProducer` `initTransactions` / `beginTransaction` / `sendOffsetsToTransaction` / `commitTransaction` / `abortTransaction`; `KafkaProducerTest` `testMeasureTransactionDurations`, `testMeasureAbortTransactionDuration`, `getMetricValue`, `assertDurationAtLeast`, `getAndAssertDurationAtLeast` | Yes: send-offsets timer now also covers the KIP-1319 metadata wait, and the durations test pre-tracks the topic (Java 2006-2009). Ported in the `29deadd7` resolution; the test already tracks the topic (`TxnProducerContext::new`), noted in `f0eeac09` | moved (`f0eeac09`) |
+| Keep batches reachable when produce-response handling fails | `Sender` `completeBatch` / `reenqueueBatch` / `failBatch`; `RecordAccumulator` `reenqueue` / `insertInSequenceOrder` / `splitAndReenqueue` | none (`Sender.java` import swap only; the accumulator methods are untouched by KIP-1332) | `Sender.java` keeps its numbers (two off-by-ones fixed); `RecordAccumulator` 528-537 -> 573-582 |
+| Per-partition in-flight lookup | `TxnPartitionMap` `get` / `adjustSequencesDueToFailedBatch`; `TransactionManager` `startSequencesAtBeginning` callers | none (imports only; `TransactionManager` shifts +8) | moved |
+| Cite fixup `TxnPartitionMap.java:114` | — | none | unchanged |
+| Python `txn_requires_abort` for per-key admin errors | no Java counterpart (`Errors.TRANSACTION_ABORTABLE` = 120 in both) | none | — |
+| Seed `ConsumerGroupMetadata` at construction | `AsyncKafkaConsumer` `initializeGroupMetadata` / `initializeConsumerGroupMetadata` / `updateGroupMetadata` / `resetGroupMetadata`; five `AsyncKafkaConsumerTest` group-metadata tests | none (code and tests byte-identical, shifted) | moved |
+| Reject bad `acks` | `ProducerConfig` `acks` define, `ConfigDef.ValidString` | none | moved |
+| Reject empty `transactional.id` | `ProducerConfig` `transactional.id` define, `ConfigDef.NonEmptyString` | none | moved |
+| Case-insensitive boolean parsing | `ConfigDef.parseType(BOOLEAN)` | none; the admin config is aligned in `45be1d2a` | moved |
+| `EndTransactionMarker` + end-txn-marker builder/factory | `EndTransactionMarker`, `MemoryRecords.withEndTransactionMarker`, `MemoryRecordsBuilder.appendEndTxnMarker`, `DefaultRecordBatch` control batch; `EndTransactionMarkerTest`, `MemoryRecordsTest`, `MemoryRecordsBuilderTest`, `DefaultRecordBatchTest` | none (4.4 touches only imports, `filterTo`'s `maxRecordBodySize` and the KIP-1332 size estimates) | unchanged (`EndTransactionMarker.java` is identical) |
+| `FetchRequestManagerTest` abort-marker tests | `testReadCommittedWithCommittedAndAbortedTransactions`, `testMultipleAbortMarkers`, `testReadCommittedAbortMarkerWithNoData`, `testConsumerPositionUpdatedWhenSkippingAbortedTransactions` and their three helpers | none (byte-identical, shifted +246; the 11 tests 4.4 adds to the class are not abort-marker tests) | moved |
+| Fixups (clock labels, "exception" wording) | — | none | — |
+
+- Gates after `45be1d2a` (`make -k verify`): format-check, check-generated and lint clean;
+  `cargo test --all-features` lib 4927 / 0 / 3, integration 326/326 (Docker broker), producer 8,
+  doc-tests 5 (7 ignored); Python unit 1103 passed, 2 skipped (`test_admin.py` 191 passed),
+  integration 45, static 25, soak 160; the Python container arm skips on Darwin. `build-c` fails only
+  for want of cmake; the seven C suites hand-built with `cc` against the release `.a` all pass
+  (65 + 14 + 25 + 7 + 27 + 160 + 26, 0 failures).
+
 ## 7. Completeness audit (Phase 13, agent 103)
 
 Every commit of `git -C kafka log --no-merges --right-only --cherry-pick 4.3.1...4.4.0-rc4 -- clients/src`
