@@ -1365,7 +1365,11 @@ struct RetryCommitCallback {
 
 #[async_trait]
 impl OffsetCommitCallback for RetryCommitCallback {
-    async fn on_complete(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
+    async fn on_complete(
+        &self,
+        _offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+        error: Option<&Error>,
+    ) -> Result<(), Error> {
         match error {
             Some(Error::ConsumerRetriableCommitFailed(_)) => {
                 self.retriable.fetch_add(1, Ordering::SeqCst);
@@ -1375,6 +1379,7 @@ impl OffsetCommitCallback for RetryCommitCallback {
                 self.is_complete.fetch_add(1, Ordering::SeqCst);
             },
         }
+        Ok(())
     }
 }
 

@@ -167,7 +167,7 @@ pub(crate) trait OffsetCommitCallbackQueue: Send + Sync + 'static {
     );
 
     /// [`OffsetCommitCallbackInvoker::invoke_pending_callbacks`].
-    fn invoke_pending_callbacks(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    fn invoke_pending_callbacks(&self) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + '_>>;
 }
 
 impl<K, V> OffsetCommitCallbackQueue for OffsetCommitCallbackInvoker<K, V>
@@ -188,7 +188,7 @@ where
         OffsetCommitCallbackInvoker::enqueue_user_callback_invocation(self, callback, offsets, error);
     }
 
-    fn invoke_pending_callbacks(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+    fn invoke_pending_callbacks(&self) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + '_>> {
         Box::pin(OffsetCommitCallbackInvoker::invoke_pending_callbacks(self))
     }
 }
@@ -263,7 +263,13 @@ where
     /// each `pop_front` and the subsequent `await` so concurrent
     /// `enqueue_*` calls from the BG task are not blocked while a callback
     /// runs.
-    pub(crate) async fn invoke_pending_callbacks(&self) {
+    ///
+    /// # Errors
+    ///
+    /// The first error a user callback returns, as Java's loop lets the
+    /// first exception `onComplete` throws escape: that task has been
+    /// popped, and the tasks behind it stay queued for the next call.
+    pub(crate) async fn invoke_pending_callbacks(&self) -> Result<(), Error> {
         loop {
             // Pop one task with the lock held; release before awaiting.
             let task = {
@@ -274,7 +280,7 @@ where
                 guard.pop_front()
             };
             let Some(task) = task else {
-                return;
+                return Ok(());
             };
             match task.kind {
                 CallbackKind::Interceptor => {
@@ -288,7 +294,7 @@ where
                     drop(guard);
                 },
                 CallbackKind::User { callback } => {
-                    callback.on_complete(&task.offsets, task.error.as_ref()).await;
+                    callback.on_complete(&task.offsets, task.error.as_ref()).await?;
                 },
             }
         }
@@ -357,9 +363,14 @@ mod tests {
 
     #[async_trait]
     impl OffsetCommitCallback for RecordingCallback {
-        async fn on_complete(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
+        async fn on_complete(
+            &self,
+            offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+            error: Option<&Error>,
+        ) -> Result<(), Error> {
             self.invocations.fetch_add(1, Ordering::SeqCst);
             self.recorded.lock().unwrap().push((offsets.clone(), error.cloned()));
+            Ok(())
         }
     }
 
@@ -392,16 +403,62 @@ mod tests {
         assert_eq!(cb1.invocations(), 0);
         assert_eq!(cb2.invocations(), 0);
 
-        invoker.invoke_pending_callbacks().await;
+        invoker.invoke_pending_callbacks().await.unwrap();
         assert_eq!(cb1.invocations(), 1);
         assert_eq!(cb2.invocations(), 1);
         assert_eq!(cb1.calls()[0].0, offsets1);
         assert_eq!(cb2.calls()[0].0, offsets2);
 
         // Re-invoking with an empty queue must not double-fire.
-        invoker.invoke_pending_callbacks().await;
+        invoker.invoke_pending_callbacks().await.unwrap();
         assert_eq!(cb1.invocations(), 1);
         assert_eq!(cb2.invocations(), 1);
+    }
+
+    /// A callback returning an error (Java's `onComplete` throwing).
+    struct RaisingCallback(&'static str);
+
+    #[async_trait]
+    impl OffsetCommitCallback for RaisingCallback {
+        async fn on_complete(
+            &self,
+            _offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+            _error: Option<&Error>,
+        ) -> Result<(), Error> {
+            Err(Error::local_illegal_state(self.0))
+        }
+    }
+
+    /// Java's `executeCallbacks()` has no try/catch: the first exception a
+    /// callback throws escapes, its task already polled, and the tasks
+    /// behind it stay queued for the next drain.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_callback_error_stops_the_drain_and_keeps_the_rest_queued() {
+        let tp = TopicPartition::new("t0".to_string(), 2);
+        let offsets = singleton_offset(tp, 10);
+        let before = Arc::new(RecordingCallback::new());
+        let after = Arc::new(RecordingCallback::new());
+        let interceptors: ConsumerInterceptors<String, String> = ConsumerInterceptors::new(Vec::new());
+        let invoker = OffsetCommitCallbackInvoker::new(interceptors);
+
+        invoker.enqueue_user_callback_invocation(before.clone(), offsets.clone(), None);
+        invoker.enqueue_user_callback_invocation(Arc::new(RaisingCallback("first")), offsets.clone(), None);
+        invoker.enqueue_user_callback_invocation(Arc::new(RaisingCallback("second")), offsets.clone(), None);
+        invoker.enqueue_user_callback_invocation(after.clone(), offsets.clone(), None);
+
+        let err = invoker.invoke_pending_callbacks().await.expect_err("first error escapes");
+        assert!(err.is_local_illegal_state_error(), "unexpected error: {err:?}");
+        assert_eq!(err.message(), "first");
+        assert_eq!(before.invocations(), 1);
+        assert_eq!(after.invocations(), 0, "the tasks behind the error stay queued");
+
+        let err = invoker.invoke_pending_callbacks().await.expect_err("second error escapes");
+        assert_eq!(err.message(), "second");
+        assert_eq!(after.invocations(), 0);
+
+        invoker.invoke_pending_callbacks().await.expect("the rest run");
+        assert_eq!(before.invocations(), 1);
+        assert_eq!(after.invocations(), 1);
     }
 
     /// Translated from
@@ -434,14 +491,14 @@ mod tests {
         let cb = Arc::new(RecordingCallback::new());
         invoker.enqueue_user_callback_invocation(cb.clone(), singleton_offset(tp, 30), None);
 
-        invoker.invoke_pending_callbacks().await;
+        invoker.invoke_pending_callbacks().await.unwrap();
         // User callback fired exactly once after passing through the
         // no-op interceptor entries.
         assert_eq!(cb.invocations(), 1);
 
         // Re-draining should produce no additional invocations — the
         // empty-interceptor entries did not leave stale work behind.
-        invoker.invoke_pending_callbacks().await;
+        invoker.invoke_pending_callbacks().await.unwrap();
         assert_eq!(cb.invocations(), 1);
     }
 
@@ -466,14 +523,14 @@ mod tests {
         invoker.enqueue_interceptor_invocation(offsets2.clone());
         assert!(recording.calls().is_empty());
 
-        invoker.invoke_pending_callbacks().await;
+        invoker.invoke_pending_callbacks().await.unwrap();
         let calls = recording.calls();
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0], offsets1);
         assert_eq!(calls[1], offsets2);
 
         // Subsequent calls don't re-invoke.
-        invoker.invoke_pending_callbacks().await;
+        invoker.invoke_pending_callbacks().await.unwrap();
         assert_eq!(recording.calls().len(), 2);
     }
 
@@ -501,7 +558,7 @@ mod tests {
         assert!(recording.calls().is_empty());
         assert_eq!(cb1.invocations(), 0);
 
-        invoker.invoke_pending_callbacks().await;
+        invoker.invoke_pending_callbacks().await.unwrap();
         let intercept_calls = recording.calls();
         assert_eq!(intercept_calls.len(), 2);
         assert_eq!(intercept_calls[0], offsets1);
@@ -509,7 +566,7 @@ mod tests {
         assert_eq!(cb1.invocations(), 1);
         assert_eq!(cb1.calls()[0].0, offsets1);
 
-        invoker.invoke_pending_callbacks().await;
+        invoker.invoke_pending_callbacks().await.unwrap();
         assert_eq!(recording.calls().len(), 2);
         assert_eq!(cb1.invocations(), 1);
     }

@@ -1170,7 +1170,9 @@ pub(crate) async fn mock_commit_async(
         None => lock().extend(offsets),
         Some(cb) => {
             lock().extend(offsets.iter().map(|(tp, om)| (tp.clone(), om.clone())));
-            cb.on_complete(&offsets, None).await;
+            // Java calls `onComplete` with no try/catch: an exception it
+            // throws propagates out of `commitAsync`.
+            cb.on_complete(&offsets, None).await?;
         },
     }
     Ok(())
@@ -1397,7 +1399,11 @@ mod tests {
 
     #[async_trait]
     impl OffsetCommitCallback for RecordingCallback {
-        async fn on_complete(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
+        async fn on_complete(
+            &self,
+            offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+            error: Option<&Error>,
+        ) -> Result<(), Error> {
             assert!(error.is_none(), "the mock completes commits without an error");
             self.seen.lock().unwrap().push((self.label, offsets.clone()));
             if let Some((handle, nested)) = &self.nested {
@@ -1408,6 +1414,7 @@ mod tests {
                     .expect("nested commit");
                 self.seen.lock().unwrap().push(("outer-end", HashMap::new()));
             }
+            Ok(())
         }
     }
 
@@ -1555,6 +1562,66 @@ mod tests {
         // The commit recorded the consumed position (read directly: the
         // mock's `committed()` answers 0 for a partition no longer assigned).
         assert_eq!(*c.lock_committed(), offsets(&tp, 2));
+    }
+
+    /// An error the callback returns (Java's `onComplete` throwing) propagates
+    /// out of the mock's commit, after the offsets were committed: Java's
+    /// `MockConsumer.commitAsync` calls the callback with no try/catch. The
+    /// handle's commits behave the same.
+    #[tokio::test]
+    async fn commit_callback_error_propagates() {
+        struct Raising;
+        #[async_trait]
+        impl OffsetCommitCallback for Raising {
+            async fn on_complete(
+                &self,
+                _offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+                _error: Option<&Error>,
+            ) -> Result<(), Error> {
+                Err(Error::local_illegal_state("callback failed"))
+            }
+        }
+
+        let mut c: MockConsumer<String, String> =
+            MockConsumer::with_auto_offset_reset_strategy(AutoOffsetResetStrategy::EARLIEST);
+        let tp = tp_of("test");
+        c.assign(vec![tp.clone()]).await.expect("assign");
+        c.update_beginning_offsets(HashMap::from([(tp.clone(), 0)]));
+        consume(&mut c, &tp, 0, 3).await;
+
+        let err = c
+            .commit_async_with_offsets_callback(offsets(&tp, 2), Arc::new(Raising))
+            .await
+            .expect_err("propagates");
+        assert!(err.is_local_illegal_state_error(), "unexpected error: {err:?}");
+        assert_eq!(err.message(), "callback failed");
+        assert_eq!(
+            c.committed(std::slice::from_ref(&tp)).await.expect("committed"),
+            offsets(&tp, 2)
+        );
+
+        let err = c.commit_async_with_callback(Arc::new(Raising)).await.expect_err("propagates");
+        assert_eq!(err.message(), "callback failed");
+        assert_eq!(
+            c.committed(std::slice::from_ref(&tp)).await.expect("committed"),
+            offsets(&tp, 3)
+        );
+
+        let handle = c.handle();
+        let err = handle
+            .commit_async_with_offsets_callback(offsets(&tp, 5), Arc::new(Raising))
+            .await
+            .expect_err("propagates");
+        assert_eq!(err.message(), "callback failed");
+        let err = handle
+            .commit_async_with_callback(Arc::new(Raising))
+            .await
+            .expect_err("propagates");
+        assert_eq!(err.message(), "callback failed");
+        assert_eq!(
+            c.committed(std::slice::from_ref(&tp)).await.expect("committed"),
+            offsets(&tp, 3)
+        );
     }
 
     /// Java's `commitAsync` starts with `ensureNotClosed()`, so a handle

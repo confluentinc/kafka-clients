@@ -102,7 +102,7 @@
 //! calling thread before returning, as it runs every completion. A completion
 //! with no error parameter (`kafka_admin_Admin_close_cb`,
 //! `kafka_admin_Admin_close_with_timeout_cb`,
-//! `kafka_consumer_OffsetCommitCallback_on_complete_cb`) fires with `opaque`
+//! `kafka_producer_Callback_on_completion_cb`) fires with `opaque`
 //! alone, the panic showing only in the log. That completion is where `opaque`
 //! comes back to be released; there is no other release hook.
 //!

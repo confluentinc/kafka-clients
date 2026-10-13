@@ -679,7 +679,11 @@ struct ChaosCommitCallback {
 
 #[async_trait]
 impl OffsetCommitCallback for ChaosCommitCallback {
-    async fn on_complete(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
+    async fn on_complete(
+        &self,
+        _offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+        error: Option<&Error>,
+    ) -> Result<(), Error> {
         if let Some(err) = error {
             eprintln!("chaos {}: async commit failed: {err}", self.consumer);
             self.verifier.record(WorkloadEvent::ConsumerError {
@@ -688,6 +692,7 @@ impl OffsetCommitCallback for ChaosCommitCallback {
                 error: err.to_string(),
             });
         }
+        Ok(())
     }
 }
 
@@ -1156,11 +1161,12 @@ mod tests {
     async fn async_commit_callback_records_a_failed_commit() {
         let verifier = Arc::new(ConservationVerifier::new());
         let callback = ChaosCommitCallback { consumer: "consumer-rust-1".into(), verifier: verifier.clone() };
-        callback.on_complete(&HashMap::new(), None).await;
+        callback.on_complete(&HashMap::new(), None).await.unwrap();
         assert_eq!(verifier.verdict(0).commit_errors, 0);
         callback
             .on_complete(&HashMap::new(), Some(&Error::timeout("commit timed out")))
-            .await;
+            .await
+            .unwrap();
         let verdict = verifier.verdict(0);
         assert_eq!(verdict.commit_errors, 1, "{verdict}");
         assert!(verdict.is_pass(), "commit errors are not scored: {verdict}");

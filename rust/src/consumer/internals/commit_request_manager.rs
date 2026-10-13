@@ -6117,7 +6117,7 @@ mod tests {
         for _ in 0..16 {
             tokio::task::yield_now().await;
         }
-        invoker.invoke_pending_callbacks().await;
+        invoker.invoke_pending_callbacks().await.unwrap();
 
         let calls = recorder.calls();
         assert_eq!(
@@ -6158,7 +6158,7 @@ mod tests {
         for _ in 0..16 {
             tokio::task::yield_now().await;
         }
-        invoker.invoke_pending_callbacks().await;
+        invoker.invoke_pending_callbacks().await.unwrap();
         assert!(recorder.calls().is_empty(), "interceptor must NOT fire on auto-commit error");
     }
 

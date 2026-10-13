@@ -303,6 +303,7 @@ typedef struct {
     int64_t first_offset;         /* of the first entry */
     char first_metadata[64];
     int sequence;
+    const char *raise; /* reports this message as the callback's error */
 } commit_probe_t;
 
 static void commit_probe_init(commit_probe_t *p, kafka_consumer_Consumer_t *consumer, int report) {
@@ -332,7 +333,9 @@ static void commit_probe_on_complete(void *self_, const kafka_Map_t *offsets, co
     p->sequence = atomic_fetch_add(&g_sequence, 1);
     atomic_fetch_add(&p->calls, 1);
     if (p->report) {
-        kafka_consumer_Consumer__set_callback_result(p->consumer, callback_id, NULL, NULL);
+        /* Java's onComplete throwing: the error is owned and taken over. */
+        kafka_common_Error_t *raised = p->raise == NULL ? NULL : kafka_common_Error_kafka_message(p->raise);
+        kafka_consumer_Consumer__set_callback_result(p->consumer, callback_id, NULL, raised);
     } else {
         atomic_store(&p->pending_id, callback_id);
     }
@@ -456,6 +459,61 @@ static void test_commit_async_with_callback_cb_queues_the_callback(void) {
     fixture_destroy(&f);
 }
 
+// An error the callback reports is Java's onComplete throwing: like Java's
+// `MockConsumer.commitAsync`, which calls the callback with no try/catch, the
+// commit returns it verbatim, after the offsets were committed.
+static void test_commit_callback_error_propagates_from_commit(void) {
+    fixture_t f;
+    make_consumed_mock(&f, "test");
+
+    commit_probe_t probe;
+    commit_probe_init(&probe, f.consumer, 1);
+    probe.raise = "callback failed";
+    kafka_consumer_OffsetCommitCallback_t *cb = commit_probe_callback(&probe);
+    kafka_common_Error_t *err = kafka_consumer_Consumer_commit_async_with_callback(f.consumer, cb);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_kafka_error(err));
+    TEST_ASSERT_EQUAL_STRING("callback failed", kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&probe.calls));
+
+    kafka_List_t *list = tp_list("test", 1);
+    kafka_Map_t *committed = NULL;
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_committed(f.consumer, list, &committed));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_Map_size(committed));
+    kafka_Map_destroy(committed);
+    tp_list_destroy(list);
+
+    /* The consumer is usable again. */
+    probe.raise = NULL;
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_commit_async_with_callback(f.consumer, cb));
+    TEST_ASSERT_EQUAL_INT(2, atomic_load(&probe.calls));
+    kafka_consumer_OffsetCommitCallback_destroy(cb);
+    fixture_destroy(&f);
+}
+
+// The `_cb` form delivers the callback's error through its completion.
+static void test_commit_callback_error_propagates_from_commit_cb(void) {
+    fixture_t f;
+    make_consumed_mock(&f, "test");
+
+    commit_probe_t probe;
+    commit_probe_init(&probe, f.consumer, 1);
+    probe.raise = "queued callback failed";
+    kafka_consumer_OffsetCommitCallback_t *cb = commit_probe_callback(&probe);
+    completion_t completion;
+    completion_init(&completion);
+    kafka_consumer_Consumer_commit_async_with_callback_cb(f.consumer, cb, on_void_op, &completion);
+    TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &completion.fired, 1));
+    kafka_consumer_OffsetCommitCallback_destroy(cb);
+
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&probe.calls));
+    TEST_ASSERT_NOT_NULL(completion.error);
+    TEST_ASSERT_EQUAL_STRING("queued callback failed", kafka_common_Error_message(completion.error));
+    kafka_common_Error_destroy(completion.error);
+    fixture_destroy(&f);
+}
+
 typedef struct {
     fixture_t *f;
     kafka_consumer_OffsetCommitCallback_t *cb;
@@ -510,7 +568,7 @@ static void test_offset_commit_callback_standalone_invoker(void) {
     kafka_Map_put(offsets, tp, oam);
     kafka_common_Error_t *error = kafka_common_Error_timeout("commit timed out");
 
-    kafka_consumer_OffsetCommitCallback_on_complete(cb, offsets, error);
+    TEST_ASSERT_NULL(kafka_consumer_OffsetCommitCallback_on_complete(cb, offsets, error));
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&probe.calls));
     TEST_ASSERT_FALSE(probe.error_was_null);
     TEST_ASSERT_EQUAL_INT(1, probe.offsets_size);
@@ -518,9 +576,17 @@ static void test_offset_commit_callback_standalone_invoker(void) {
     TEST_ASSERT_EQUAL_STRING("md", probe.first_metadata);
     TEST_ASSERT_TRUE(pthread_equal(pthread_self(), probe.thread));
 
-    kafka_consumer_OffsetCommitCallback_on_complete(cb, offsets, NULL);
+    TEST_ASSERT_NULL(kafka_consumer_OffsetCommitCallback_on_complete(cb, offsets, NULL));
     TEST_ASSERT_EQUAL_INT(2, atomic_load(&probe.calls));
     TEST_ASSERT_TRUE(probe.error_was_null);
+
+    /* The error the callback reports is the invoker's result. */
+    probe.raise = "raised by onComplete";
+    kafka_common_Error_t *raised = kafka_consumer_OffsetCommitCallback_on_complete(cb, offsets, NULL);
+    TEST_ASSERT_NOT_NULL(raised);
+    TEST_ASSERT_EQUAL_STRING("raised by onComplete", kafka_common_Error_message(raised));
+    kafka_common_Error_destroy(raised);
+    TEST_ASSERT_EQUAL_INT(3, atomic_load(&probe.calls));
 
     kafka_common_Error_destroy(error); /* borrowed by the invoker */
     kafka_Map_destroy(offsets);
@@ -660,7 +726,7 @@ static int64_t mock_committed_offset(fixture_t *f, const char *topic) {
 // The handle's commits naming no offsets commit the mock's consumed positions
 // (Java's `MockConsumer.commitSync()` / `commitAsync()` /
 // `commitAsync(callback)`, all `subscriptions.allConsumed()`), the callback
-// running inline.
+// running inline; a callback error propagates out of the commit.
 static void test_mock_handle_commits_commit_into_the_mock(void) {
     fixture_t f;
     make_consumed_mock(&f, "test"); /* consumed position 1 */
@@ -686,6 +752,12 @@ static void test_mock_handle_commits_commit_into_the_mock(void) {
     TEST_ASSERT_TRUE(pthread_equal(pthread_self(), probe.thread));
     TEST_ASSERT_EQUAL_INT64(8, mock_committed_offset(&f, "test"));
 
+    probe.raise = "handle callback failed";
+    kafka_common_Error_t *err = kafka_consumer_ConsumerHandle_commit_async_with_callback(h, cb);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_STRING("handle callback failed", kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
+    TEST_ASSERT_EQUAL_INT(2, atomic_load(&probe.calls));
 
     kafka_consumer_OffsetCommitCallback_destroy(cb);
     kafka_common_TopicPartition_destroy(tp);
@@ -1470,6 +1542,8 @@ int main(void) {
     RUN_TEST(test_commit_async_with_offsets_callback_echoes_offsets);
     RUN_TEST(test_commit_async_with_callback_cb_queues_the_callback);
     RUN_TEST(test_commit_returns_only_after_callback_reports);
+    RUN_TEST(test_commit_callback_error_propagates_from_commit);
+    RUN_TEST(test_commit_callback_error_propagates_from_commit_cb);
     RUN_TEST(test_offset_commit_callback_standalone_invoker);
     RUN_TEST(test_consumer_handle_new_destroy);
     RUN_TEST(test_consumer_handle_sync_getters_read_the_mock);

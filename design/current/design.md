@@ -1115,7 +1115,7 @@ by-design gaps, all closure parameters whose C shape the lint cannot derive):
   completion, whether it happened on the calling thread or on the task running
   the operation; the three completions without an error parameter
   (`Admin_close_cb`, `Admin_close_with_timeout_cb`,
-  `OffsetCommitCallback_on_complete_cb`) fire with `opaque` alone. A task
+  `Callback_on_completion_cb`) fire with `opaque` alone. A task
   owning a callback runs its body under `catch_task_panic`, so a panic inside
   it still completes the callback once, and is spawned through
   `spawn_callback_task`, which aborts the process if Tokio itself panics while

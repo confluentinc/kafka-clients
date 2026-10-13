@@ -18,8 +18,11 @@
 //! `onComplete` is an `async fn` in Rust, so the C method returns `void`,
 //! takes a trailing `int64_t callback_id` and reports through
 //! `kafka_consumer_Consumer__set_callback_result`. Java's `onComplete` is
-//! `void`: a reported error is ignored (freed), the report only tells the
-//! consumer the callback finished. The consumer invokes it from the
+//! `void` but may throw, and the exception propagates out of the call that
+//! ran the callback: a reported error is that exception, returned by that
+//! `poll`, `commit_*` or `close` (wrapped by `poll` unless it is a Kafka
+//! error, and by `close`, as Java does), the callbacks queued behind it
+//! staying queued for a later call. The consumer invokes it from the
 //! application thread during the next blocking-style call (`poll`,
 //! `commit_*`, ...; consumer-threading.md §31), on the calling thread for a
 //! blocking entry point and through `kafka_consumer_Consumer__execute_callbacks`
@@ -38,10 +41,10 @@ use crate::consumer::{OffsetAndMetadata, OffsetCommitCallback};
 use crate::ffi::callback_queue::SendPtr;
 use crate::ffi::callback_result::{CallbackResults, INVOKER_RESULTS, void_sink};
 use crate::ffi::common::{
-    box_error, deliver_panic_opaque, error_ref, kafka_common_Error_destroy, kafka_common_Error_t, run_inline,
+    box_error, deliver_panic, error_ref, kafka_common_Error_destroy, kafka_common_Error_t, run_inline,
 };
-use crate::ffi::consumer::Delivery;
 use crate::ffi::consumer::offset_and_metadata::{map_offset_and_metadata, offset_and_metadata_map};
+use crate::ffi::consumer::{Delivery, error_slot};
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{kafka_Map_destroy, kafka_Map_t};
 
@@ -58,8 +61,10 @@ pub struct kafka_consumer_OffsetCommitCallback_t {
 /// call; `error` is `NULL` on success, otherwise borrowed for the call. The
 /// method is `async` in Rust (CLAUDE.md §4 rule 3): it reports completion
 /// with `kafka_consumer_Consumer__set_callback_result(consumer, callback_id, NULL, error)`,
-/// `error` `NULL` or an owned `kafka_common_Error_t *` (an error passed there
-/// is ignored, freed, `onComplete` being `void` in Java).
+/// `error` `NULL` on success or an owned `kafka_common_Error_t *`, taken over:
+/// Java's exception thrown from `onComplete`, which propagates out of the
+/// consumer call that ran the callback (`poll`, `commit_*`, `close`); the
+/// callbacks queued behind it run at the next such call.
 pub type kafka_consumer_OffsetCommitCallback_on_complete_fn_t = unsafe extern "C" fn(
     self_: *mut c_void,
     offsets: *const kafka_Map_t,
@@ -117,7 +122,11 @@ struct CCommitCallback {
 
 #[async_trait]
 impl OffsetCommitCallback for CCommitCallback {
-    async fn on_complete(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
+    async fn on_complete(
+        &self,
+        offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+        error: Option<&Error>,
+    ) -> Result<(), Error> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let registration = self.registration;
         let offsets = offsets.clone();
@@ -133,8 +142,12 @@ impl OffsetCommitCallback for CCommitCallback {
                 }),
             );
         }));
-        // `onComplete` is void in Java: the report only marks completion.
-        let _ = rx.await;
+        // Java's `onComplete` may throw: a reported error is that exception.
+        rx.await.unwrap_or_else(|_| {
+            Err(Error::local_illegal_state(
+                "consumer destroyed before the commit callback reported",
+            ))
+        })
     }
 }
 
@@ -185,7 +198,8 @@ pub extern "C" fn kafka_consumer_OffsetCommitCallback_new(
 /// Invokes the implementation's `onComplete` on the calling thread with
 /// copies of `offsets` (a map of `kafka_common_TopicPartition_t *` to
 /// `kafka_consumer_OffsetAndMetadata_t *`) and `error` (`NULL` for
-/// success), and waits for its `__set_callback_result` report.
+/// success), and waits for its `__set_callback_result` report; returns the
+/// reported error (owned), or `NULL`.
 ///
 /// # Safety
 ///
@@ -199,7 +213,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetCommitCallback_on_complete(
     self_: *const kafka_consumer_OffsetCommitCallback_t,
     offsets: *const kafka_Map_t,
     error: *const kafka_common_Error_t,
-) {
+) -> *mut kafka_common_Error_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live callback handle, as
     // `commit_callback_registration` requires.
     let registration = unsafe { commit_callback_registration(self_) };
@@ -220,16 +234,22 @@ pub unsafe extern "C" fn kafka_consumer_OffsetCommitCallback_on_complete(
             let _ = tx.send(result);
         }),
     );
-    let _ = rx.recv();
+    error_slot(
+        rx.recv()
+            .unwrap_or_else(|_| Err(Error::local_illegal_state("commit callback result dropped"))),
+    )
 }
 
 /// Completion of [`kafka_consumer_OffsetCommitCallback_on_complete_cb`]:
-/// `onComplete` is void, so only `opaque` is passed.
-pub type kafka_consumer_OffsetCommitCallback_on_complete_cb_t = unsafe extern "C" fn(opaque: *mut c_void);
+/// `error` is `NULL` on success, owned otherwise (the error `onComplete`
+/// reported).
+pub type kafka_consumer_OffsetCommitCallback_on_complete_cb_t =
+    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
 /// Non-blocking `on_complete`: the method runs on the calling thread, `cb`
-/// fires when its completion is reported (a standalone callback has no
-/// callbacks vector to queue on, so `cb` runs on the reporting thread).
+/// fires with the reported error when its completion is reported (a
+/// standalone callback has no callbacks vector to queue on, so `cb` runs on
+/// the reporting thread).
 ///
 /// # Safety
 ///
@@ -238,9 +258,9 @@ pub type kafka_consumer_OffsetCommitCallback_on_complete_cb_t = unsafe extern "C
     // SAFETY: The guard runs this only when the body did not return. The body hands `cb` over only
     // as the last step, to the sink `fire` registers right before calling the C method; nothing
     // after that can panic, as the C method cannot unwind into Rust and the two destroys are
-    // guarded. So `cb` has not fired for this `opaque`, as `deliver_panic_opaque` requires;
-    // `run_inline` fires it on this thread.
-    unsafe { deliver_panic_opaque(run_inline, cb, opaque, err) }
+    // guarded. So `cb` has not fired for this `opaque`, as `deliver_panic` requires; `run_inline`
+    // fires it on this thread.
+    unsafe { deliver_panic(run_inline, cb, opaque, err) }
 })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetCommitCallback_on_complete_cb(
@@ -267,12 +287,13 @@ pub unsafe extern "C" fn kafka_consumer_OffsetCommitCallback_on_complete_cb(
     // SAFETY: `cb` and `opaque` are the pair the C caller passed to this function, per its
     // `# Safety` a valid completion; `cb` fires only from this sink, which
     // `INVOKER_RESULTS` holds under a fresh id and runs at most once, as a `FnOnce`, when
-    // the report for that id arrives.
+    // the report for that id arrives. `error_slot` returns null or a fresh owned error, handed
+    // over to `cb`.
     registration.fire(
         &offsets,
         error.as_ref(),
         &INVOKER_RESULTS,
-        Box::new(move |_| unsafe { cb(opaque.get()) }),
+        Box::new(move |result| unsafe { cb(error_slot(result), opaque.get()) }),
     );
 }
 
@@ -303,7 +324,7 @@ mod tests {
     use super::*;
     use crate::ffi::common::fail_point;
     use crate::ffi::common::kafka_common_Error_message;
-    use crate::ffi::common::panic_probe::{Probe, on_opaque};
+    use crate::ffi::common::panic_probe::{Probe, on_error};
     use crate::ffi::consumer::offset_and_metadata::kafka_consumer_OffsetAndMetadata_offset;
     use crate::ffi::util::{c_str_to_string, kafka_Map_size, kafka_Map_value};
 
@@ -328,20 +349,26 @@ mod tests {
         // SAFETY: Test code: `error` is non-null (checked in this expression) and borrowed for the
         // call, and its message is a NUL-terminated string owned by it.
         let error = (!error.is_null()).then(|| unsafe { c_str_to_string(kafka_common_Error_message(error)) });
+        // A commit that failed makes this callback raise, Java's `onComplete` throwing.
+        let raised = error
+            .as_ref()
+            .map(|message| box_error(Error::local_illegal_state(format!("raised: {message}"))));
         log.0.lock().unwrap().push((values, error));
-        // Reporting an error is allowed and ignored: `onComplete` is void.
         // SAFETY: Test code: `callback_id` is the pending id an invoker issued, so the function does
-        // not read its consumer handle and null is fine; the error is an owned handle, handed over.
+        // not read its consumer handle and null is fine; the error is null or an owned handle,
+        // handed over.
         unsafe {
             crate::ffi::consumer::kafka_consumer_Consumer__set_callback_result(
                 std::ptr::null(),
                 callback_id,
                 std::ptr::null_mut(),
-                box_error(Error::local_illegal_state("ignored")),
+                raised.unwrap_or(std::ptr::null_mut()),
             )
         };
     }
 
+    /// The invokers copy their arguments, wait for the report and hand back
+    /// the error the C method reported, as Java's `onComplete` throwing.
     #[test]
     fn invoker_copies_its_arguments_and_waits_for_the_report() {
         let log = Log::default();
@@ -352,9 +379,12 @@ mod tests {
         // SAFETY: Test code: `handle`, `c_offsets` and `error` are live handles this test made,
         // each destroyed once, after its last use.
         unsafe {
-            kafka_consumer_OffsetCommitCallback_on_complete(handle, c_offsets, std::ptr::null());
-            kafka_consumer_OffsetCommitCallback_on_complete(handle, c_offsets, error);
+            let none = kafka_consumer_OffsetCommitCallback_on_complete(handle, c_offsets, std::ptr::null());
+            assert!(none.is_null(), "no error reported");
+            let raised = kafka_consumer_OffsetCommitCallback_on_complete(handle, c_offsets, error);
             assert_eq!(error_ref(error).error.message(), "late", "borrowed, not consumed");
+            assert_eq!(error_ref(raised).error.message(), "raised: late", "the reported error, owned");
+            kafka_common_Error_destroy(raised);
             kafka_common_Error_destroy(error);
             kafka_Map_destroy(c_offsets);
         }
@@ -363,12 +393,19 @@ mod tests {
             vec![(vec![7], None), (vec![7], Some("late".to_string()))]
         );
 
-        let fired = Mutex::new(0);
-        unsafe extern "C" fn cb(opaque: *mut c_void) {
+        let fired: Mutex<Vec<Option<String>>> = Mutex::new(Vec::new());
+        unsafe extern "C" fn cb(error: *mut kafka_common_Error_t, opaque: *mut c_void) {
+            // SAFETY: Test code: `error` is null or the owned handle the completion hands over,
+            // taken here exactly once.
+            let error = unsafe { crate::ffi::common::take_error(error) }.map(|e| e.message().to_string());
             // SAFETY: Test code: `opaque` is `&fired`, alive until the test ends.
-            *unsafe { &*(opaque as *const Mutex<i32>) }.lock().unwrap() += 1;
+            unsafe { &*(opaque as *const Mutex<Vec<Option<String>>>) }
+                .lock()
+                .unwrap()
+                .push(error);
         }
         let c_offsets = offset_and_metadata_map(&offsets);
+        let late = box_error(Error::timeout("late"));
         // SAFETY: Test code: `handle` and `c_offsets` are live handles this test made, each
         // destroyed once, after its last use; `cb` matches the completion type and `&fired`
         // outlives the call.
@@ -380,16 +417,24 @@ mod tests {
                 cb,
                 &fired as *const _ as *mut c_void,
             );
+            kafka_consumer_OffsetCommitCallback_on_complete_cb(
+                handle,
+                c_offsets,
+                late,
+                cb,
+                &fired as *const _ as *mut c_void,
+            );
+            kafka_common_Error_destroy(late);
             kafka_Map_destroy(c_offsets);
             kafka_consumer_OffsetCommitCallback_destroy(handle);
         }
-        assert_eq!(*fired.lock().unwrap(), 1);
-        assert_eq!(log.0.lock().unwrap().len(), 3);
+        assert_eq!(*fired.lock().unwrap(), vec![None, Some("raised: late".to_string())]);
+        assert_eq!(log.0.lock().unwrap().len(), 4);
     }
 
     /// A standalone callback has no callbacks vector, so a panic before
-    /// `onComplete` fires `cb` once on the calling thread, before the call
-    /// returns, and the C method never runs.
+    /// `onComplete` fires `cb` once with the panic error on the calling
+    /// thread, before the call returns, and the C method never runs.
     #[test]
     fn a_panicking_on_complete_cb_fires_cb_once_inline() {
         let log = Log::default();
@@ -404,13 +449,13 @@ mod tests {
                 handle,
                 c_offsets,
                 std::ptr::null(),
-                on_opaque,
+                on_error,
                 probe.as_opaque(),
             );
             kafka_Map_destroy(c_offsets);
             kafka_consumer_OffsetCommitCallback_destroy(handle);
         }
-        assert_eq!(probe.fired(), ["<no error>"]);
+        probe.assert_one_panic("kafka_consumer_OffsetCommitCallback_on_complete_cb", fail_point::MESSAGE);
         assert!(log.0.lock().unwrap().is_empty(), "onComplete never ran");
     }
 }
