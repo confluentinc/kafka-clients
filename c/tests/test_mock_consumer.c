@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <confluent_kafka.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdint.h>
 #include <inttypes.h>
@@ -926,6 +927,146 @@ static void test_mock_consumer_caller_thread_rebalance(void) {
     kafka_consumer_Consumer_destroy(c);
 }
 
+// lose_partitions_async: the caller-thread listener's on_partitions_lost
+// (method 2) is delivered to, and runs on, the thread that drains the pending
+// queue -- here the single test thread -- while the loss is parked on its ack,
+// and the completion fires exactly once (KAFKA-20575, §31).
+
+typedef struct {
+    atomic_int fired;
+    int32_t error_code;
+    char error_message[256];
+} counted_op_result_t;
+
+static void counted_op_cb(kafka_common_Error_t *error, void *user_data) {
+    counted_op_result_t *r = (counted_op_result_t *)user_data;
+    r->error_code = error ? kafka_common_Error_code(error) : 0;
+    r->error_message[0] = '\0';
+    if (error) {
+        const char *m = kafka_common_Error_message(error);
+        if (m) snprintf(r->error_message, sizeof r->error_message, "%s", m);
+        kafka_common_Error_destroy(error);
+    }
+    atomic_fetch_add(&r->fired, 1);
+}
+
+typedef struct {
+    int lost_seen;
+    int lost_count;
+    int lost_on_caller_thread;
+    pthread_t caller;
+} lost_drain_t;
+
+static int drain_pending_recording_lost(kafka_consumer_Consumer_t *c,
+                                        lost_drain_t *d) {
+    int seen = 0;
+    for (;;) {
+        kafka_consumer_PendingCallback_t *p =
+            kafka_consumer_Consumer_next_pending_callback(c);
+        if (p == NULL) break;
+        int32_t method = kafka_consumer_PendingCallback_method(p);
+        kafka_common_TopicPartitionList_t *parts =
+            kafka_consumer_PendingCallback_partitions(p);
+        if (method == 2) {
+            d->lost_seen++;
+            d->lost_count = kafka_common_TopicPartitionList_count(parts);
+            d->lost_on_caller_thread = pthread_equal(pthread_self(), d->caller);
+        }
+        kafka_common_TopicPartitionList_destroy(parts);
+        kafka_consumer_Consumer_ack_pending_callback(p, NULL);
+        seen++;
+    }
+    return seen;
+}
+
+static void test_mock_consumer_caller_thread_lose_partitions(void) {
+    kafka_consumer_Consumer_t *c = kafka_consumer_MockConsumer_new("earliest");
+    caller_thread_ctx_t notify_ctx = {0};
+    kafka_consumer_Consumer_set_pending_callback_notify(
+        c, pending_notify_cb, &notify_ctx, NULL);
+    lost_drain_t d = {0};
+    d.caller = pthread_self();
+
+    op_result_t sub_res = {0};
+    const char *topics[1] = {"test"};
+    kafka_consumer_Consumer_subscribe_caller_thread_listener_async(
+        c, topics, 1, op_cb, &sub_res);
+    for (int i = 0; i < 1000 && !atomic_load(&sub_res.fired); i++) {
+        drain_pending_recording_lost(c, &d);
+        struct timespec ts = {0, 1000000};  // 1ms
+        nanosleep(&ts, NULL);
+    }
+    TEST_ASSERT_TRUE(atomic_load(&sub_res.fired));
+
+    // Assign [test-0, test-1] through a rebalance.
+    op_result_t reb_res = {0};
+    const char *rtopics[2] = {"test", "test"};
+    int32_t rparts[2] = {0, 1};
+    kafka_consumer_MockConsumer_rebalance_async(
+        c, rtopics, rparts, 2, op_cb, &reb_res);
+    for (int i = 0; i < 2000 && !atomic_load(&reb_res.fired); i++) {
+        drain_pending_recording_lost(c, &d);
+        struct timespec ts = {0, 1000000};
+        nanosleep(&ts, NULL);
+    }
+    TEST_ASSERT_TRUE(atomic_load(&reb_res.fired));
+    TEST_ASSERT_EQUAL_INT32(0, reb_res.error_code);
+    TEST_ASSERT_EQUAL_INT(0, d.lost_seen);
+
+    // Lose test-0 (listed twice: duplicates are dropped). The loss parks on
+    // the on_partitions_lost ack, which only this thread can deliver.
+    counted_op_result_t lose_res = {0};
+    const char *ltopics[2] = {"test", "test"};
+    int32_t lparts[2] = {0, 0};
+    kafka_consumer_MockConsumer_lose_partitions_async(
+        c, ltopics, lparts, 2, counted_op_cb, &lose_res);
+    // The loss does not complete before its on_partitions_lost is acked (§31):
+    // nothing has drained the pending queue yet.
+    struct timespec before_ack = {0, 50000000};  // 50ms
+    nanosleep(&before_ack, NULL);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&lose_res.fired));
+    for (int i = 0; i < 2000 && atomic_load(&lose_res.fired) == 0; i++) {
+        drain_pending_recording_lost(c, &d);
+        struct timespec ts = {0, 1000000};
+        nanosleep(&ts, NULL);
+    }
+    drain_pending_recording_lost(c, &d);
+    // Give a duplicate completion a chance to show up before asserting once.
+    struct timespec settle = {0, 20000000};  // 20ms
+    nanosleep(&settle, NULL);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&lose_res.fired));
+    TEST_ASSERT_EQUAL_INT32(0, lose_res.error_code);
+    TEST_ASSERT_EQUAL_INT(1, d.lost_seen);
+    TEST_ASSERT_EQUAL_INT(1, d.lost_count);
+    TEST_ASSERT_TRUE(d.lost_on_caller_thread);
+
+    // Only test-1 remains assigned.
+    kafka_common_TopicPartitionList_t *a = kafka_consumer_Consumer_assignment(c);
+    TEST_ASSERT_NOT_NULL(a);
+    TEST_ASSERT_EQUAL_INT(1, kafka_common_TopicPartitionList_count(a));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_common_TopicPartition_partition(
+        kafka_common_TopicPartitionList_get(a, 0)));
+    kafka_common_TopicPartitionList_destroy(a);
+
+    // Losing a partition that is no longer assigned completes with
+    // illegal_state, once, and fires no listener callback.
+    counted_op_result_t bad_res = {0};
+    kafka_consumer_MockConsumer_lose_partitions_async(
+        c, ltopics, lparts, 1, counted_op_cb, &bad_res);
+    for (int i = 0; i < 2000 && atomic_load(&bad_res.fired) == 0; i++) {
+        drain_pending_recording_lost(c, &d);
+        struct timespec ts = {0, 1000000};
+        nanosleep(&ts, NULL);
+    }
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&bad_res.fired));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE, bad_res.error_code);
+    TEST_ASSERT_EQUAL_STRING("Cannot lose partitions that are not currently assigned: [test-0]",
+                             bad_res.error_message);
+    TEST_ASSERT_EQUAL_INT(1, d.lost_seen);
+
+    kafka_consumer_Consumer_destroy(c);
+}
+
 // KafkaError source/cause accessor.
 static void test_error_source_accessor(void) {
     // An error with no cause returns null for source.
@@ -963,6 +1104,7 @@ int main(void) {
     RUN_TEST(test_mock_consumer_p5_mock_helpers);
     RUN_TEST(test_mock_consumer_close_with_option);
     RUN_TEST(test_mock_consumer_caller_thread_rebalance);
+    RUN_TEST(test_mock_consumer_caller_thread_lose_partitions);
     RUN_TEST(test_error_source_accessor);
     return UNITY_END();
 }

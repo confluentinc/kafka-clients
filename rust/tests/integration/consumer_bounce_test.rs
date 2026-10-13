@@ -22,16 +22,38 @@
 //!
 //! - `testAsyncConsumerReceivesFatalExceptionWhenGroupPassesMaxSize` (line 414).
 //!   Java parameterizes it over two `@ClusterTest` arms that set the broker's
-//!   `group.consumer.assignment.interval.ms` to `0` and `1000`. That broker
-//!   config is new in 4.3 and does not exist on the `apache/kafka:4.2.0` image
-//!   the harness runs, so:
-//!     - `test_async_consumer_receives_fatal_exception_when_group_passes_max_size`
-//!       runs the same body with the broker's default assignment behaviour
-//!       (the only behaviour a 4.2 broker has);
-//!     - `..._assignment_interval_0` and `..._assignment_interval_1000` carry
-//!       the two Java arms verbatim and are `#[ignore]`d until the image is
-//!       bumped to 4.3.x (on 4.2 the property would be silently ignored and
-//!       the arms would duplicate the default one).
+//!   `group.consumer.assignment.interval.ms` to `0` and `1000` (KIP-1263
+//!   assignment batching). That broker config is new in 4.3; a 4.2 broker
+//!   ignores it and always assigns at once. The arms are selected at runtime
+//!   from the broker tag (`INTEGRATION_TEST_BROKER_TAG`, default 4.2.0):
+//!     - on a broker older than 4.3,
+//!       `test_async_consumer_receives_fatal_exception_when_group_passes_max_size`
+//!       runs the body with the broker's only assignment behaviour (no
+//!       batching, the `0` arm's behaviour), and the two Java arms skip
+//!       themselves, since there they would duplicate it;
+//!     - on 4.3 and later, `..._assignment_interval_0` and
+//!       `..._assignment_interval_1000` run the two Java arms verbatim, and the
+//!       default-config test skips itself: on 4.4 its default interval is 1000,
+//!       so it would duplicate the `1000` arm. This keeps exactly Java's two
+//!       arms wherever the broker has the config.
+//!
+//!   **Deviation (the `1000` arm's assignment bound):** Java waits 10 s for a
+//!   valid group assignment (`validateGroupAssignment`, line 579); the `1000`
+//!   arm waits 20 s. Under KIP-848 with batching, a target assignment is
+//!   recomputed only on a heartbeat that arrives after the interval, so the
+//!   four members joining just after the first get the stale (empty) target
+//!   and need two `group.consumer.heartbeat.interval.ms` rounds (5 s each) to
+//!   converge: measured at about 10.1–10.5 s for the Java KIP-848 client and
+//!   for this one alike, on a 4.4 broker (Critic 99, Phase 9 notes). Java's 10 s
+//!   holds only because its test runs classic (next paragraph).
+//!
+//!   **Upstream quirk:** Java's "async" test never sets `group.protocol`.
+//!   `testConsumerReceivesFatalExceptionWhenGroupPassesMaxSize(GroupProtocol)`
+//!   uses the parameter only for `heartbeat.interval.ms`, and
+//!   `ClusterInstance.consumer(...)` adds no protocol, so it runs the default,
+//!   classic, for which the assignment interval is inert. These Rust arms are
+//!   the only KIP-848 runs of this body (the same quirk as
+//!   `testAsyncCloseDuringRebalance` below).
 //!
 //! The broker-bounce tests (Phase 17) run on a dedicated `Type.KRAFT` cluster
 //! (3 brokers + 1 isolated controller, [`bounce_cluster_config`]) and stop /
@@ -89,6 +111,7 @@ use rand::seq::IndexedRandom;
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::consumer_assignment_poller::BytesConsumer;
 use crate::common::consumer_assignment_poller::ConsumerAssignmentPoller;
+use crate::common::kafka_cluster;
 use crate::common::kafka_cluster::KafkaCluster;
 use crate::common::test_context::TestContext;
 use crate::common::test_utils;
@@ -242,11 +265,18 @@ fn is_partition_assignment_valid(
     partitions.iter().all(|tp| all_assigned_partitions.contains(tp))
 }
 
-/// Java's two-argument `validateGroupAssignment` (line 579): wait up to 10 s
-/// for a valid assignment across `consumer_pollers`.
+/// Java's `validateGroupAssignment` default bound (line 579).
+const DEFAULT_ASSIGNMENT_TIMEOUT_MS: u64 = 10_000;
+/// The bound of the `group.consumer.assignment.interval.ms=1000` arm: two
+/// broker heartbeat rounds plus reconcile slack (deviation, see the module docs).
+const BATCHED_ASSIGNMENT_TIMEOUT_MS: u64 = 20_000;
+
+/// Java's two-argument `validateGroupAssignment` (line 579): wait up to
+/// `timeout_ms` (Java: 10 s) for a valid assignment across `consumer_pollers`.
 async fn validate_group_assignment(
     consumer_pollers: &[ConsumerAssignmentPoller],
     subscriptions: &HashSet<TopicPartition>,
+    timeout_ms: u64,
 ) {
     test_utils::wait_until_true_with_timeout(
         || {
@@ -263,13 +293,15 @@ async fn validate_group_assignment(
             async move { valid }
         },
         &format!("Did not get valid assignment for partitions {subscriptions:?}"),
-        10_000,
+        timeout_ms,
         100,
     )
     .await;
 }
 
-/// Java's `addConsumersToGroupAndWaitForGroupAssignment` (line 486).
+/// Java's `addConsumersToGroupAndWaitForGroupAssignment` (line 486), with the
+/// assignment bound passed through to [`validate_group_assignment`].
+#[expect(clippy::too_many_arguments)]
 async fn add_consumers_to_group_and_wait_for_group_assignment(
     ctx: &TestContext,
     consumer_pollers: &mut Vec<ConsumerAssignmentPoller>,
@@ -278,6 +310,7 @@ async fn add_consumers_to_group_and_wait_for_group_assignment(
     subscriptions: &HashSet<TopicPartition>,
     group: &str,
     consumer_config: &HashMap<String, String>,
+    assignment_timeout_ms: u64,
 ) {
     // Validation: number of consumers should not exceed number of partitions
     assert!(
@@ -293,12 +326,16 @@ async fn add_consumers_to_group_and_wait_for_group_assignment(
         consumer_config,
     )
     .await;
-    validate_group_assignment(consumer_pollers, subscriptions).await;
+    validate_group_assignment(consumer_pollers, subscriptions, assignment_timeout_ms).await;
 }
 
 /// Java's `testConsumerReceivesFatalExceptionWhenGroupPassesMaxSize(CONSUMER)`
-/// (line 418), run against `config`.
-async fn test_consumer_receives_fatal_exception_when_group_passes_max_size(config: ClusterConfig) {
+/// (line 418), run against `config`, waiting up to `assignment_timeout_ms` for
+/// the group's assignment.
+async fn test_consumer_receives_fatal_exception_when_group_passes_max_size(
+    config: ClusterConfig,
+    assignment_timeout_ms: u64,
+) {
     let mut ctx = TestContext::new(config).await;
     let group = ctx.group_id("fatal-exception-test");
     let topic = ctx.topic("fatal-exception-test");
@@ -325,6 +362,7 @@ async fn test_consumer_receives_fatal_exception_when_group_passes_max_size(confi
         &partitions,
         &group,
         &consumer_config,
+        assignment_timeout_ms,
     )
     .await;
 
@@ -397,34 +435,74 @@ async fn test_consumer_receives_fatal_exception_when_group_passes_max_size(confi
     ctx.cleanup().await;
 }
 
+/// The first broker release with `group.consumer.assignment.interval.ms`
+/// (KIP-1263).
+const ASSIGNMENT_INTERVAL_RELEASE: (u32, u32) = (4, 3);
+
+/// Whether this run's broker has `group.consumer.assignment.interval.ms`; the
+/// three arms below pick themselves from it (see the module docs).
+fn broker_has_assignment_interval() -> bool {
+    kafka_cluster::broker_release() >= ASSIGNMENT_INTERVAL_RELEASE
+}
+
 /// Translates `testAsyncConsumerReceivesFatalExceptionWhenGroupPassesMaxSize`
 /// (`ConsumerBounceTest.java:414`) with the broker's default assignment
-/// behaviour — see the module docs for why the two Java arms are separate.
+/// behaviour, on a broker older than 4.3 only: there the broker has no
+/// assignment interval and the two Java arms skip themselves. On 4.3+ this
+/// test skips itself, since the Java arms run and the default interval would
+/// duplicate the `1000` arm. See the module docs.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_receives_fatal_exception_when_group_passes_max_size() {
-    test_consumer_receives_fatal_exception_when_group_passes_max_size(cluster_config()).await;
+    if broker_has_assignment_interval() {
+        eprintln!(
+            "skipped: the broker {:?} has group.consumer.assignment.interval.ms; the two Java arms run instead",
+            kafka_cluster::broker_release()
+        );
+        return;
+    }
+    test_consumer_receives_fatal_exception_when_group_passes_max_size(cluster_config(), DEFAULT_ASSIGNMENT_TIMEOUT_MS)
+        .await;
 }
 
 /// The `group.consumer.assignment.interval.ms=0` arm of
 /// `testAsyncConsumerReceivesFatalExceptionWhenGroupPassesMaxSize`
-/// (`ConsumerBounceTest.java:407-409`).
+/// (`ConsumerBounceTest.java:407-409`). Skips itself on a broker older than 4.3,
+/// which ignores the config.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "group.consumer.assignment.interval.ms is a 4.3 broker config; the harness image is apache/kafka:4.2.0, \
-            which ignores it"]
 async fn test_async_consumer_receives_fatal_exception_when_group_passes_max_size_assignment_interval_0() {
-    test_consumer_receives_fatal_exception_when_group_passes_max_size(cluster_config_with_assignment_interval("0"))
-        .await;
+    if !broker_has_assignment_interval() {
+        eprintln!(
+            "skipped: group.consumer.assignment.interval.ms is a 4.3 broker config; the broker is {:?}",
+            kafka_cluster::broker_release()
+        );
+        return;
+    }
+    test_consumer_receives_fatal_exception_when_group_passes_max_size(
+        cluster_config_with_assignment_interval("0"),
+        DEFAULT_ASSIGNMENT_TIMEOUT_MS,
+    )
+    .await;
 }
 
 /// The `group.consumer.assignment.interval.ms=1000` arm of
 /// `testAsyncConsumerReceivesFatalExceptionWhenGroupPassesMaxSize`
-/// (`ConsumerBounceTest.java:410-412`).
+/// (`ConsumerBounceTest.java:410-412`), with the 20 s assignment bound
+/// (deviation, see the module docs). Skips itself on a broker older than 4.3,
+/// which ignores the config.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "group.consumer.assignment.interval.ms is a 4.3 broker config; the harness image is apache/kafka:4.2.0, \
-            which ignores it"]
 async fn test_async_consumer_receives_fatal_exception_when_group_passes_max_size_assignment_interval_1000() {
-    test_consumer_receives_fatal_exception_when_group_passes_max_size(cluster_config_with_assignment_interval("1000"))
-        .await;
+    if !broker_has_assignment_interval() {
+        eprintln!(
+            "skipped: group.consumer.assignment.interval.ms is a 4.3 broker config; the broker is {:?}",
+            kafka_cluster::broker_release()
+        );
+        return;
+    }
+    test_consumer_receives_fatal_exception_when_group_passes_max_size(
+        cluster_config_with_assignment_interval("1000"),
+        BATCHED_ASSIGNMENT_TIMEOUT_MS,
+    )
+    .await;
 }
 
 // ── Broker bounces (Phase 17) ──────────────────────────────────────────

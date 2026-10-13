@@ -765,7 +765,7 @@ async fn fence_producers_allocates_producer_id_for_fresh_id<F: AdminBackendFacto
     );
     // Deliberately *not* `producer.is_valid()`: that predicate is
     // `RecordBatch::NO_PRODUCER_ID < producer_id`
-    // (`src/common/utils/producer_id_and_epoch.rs:50-52`), i.e. `producer_id > -1`,
+    // (`src/common/utils/internals/producer_id_and_epoch.rs:59-61`), i.e. `producer_id > -1`,
     // which is entailed by the `>= 0` assertion above and so can never fire on its
     // own. The independent observable is that the coordinator *persisted* this
     // exact pair: the transactional id did not exist before this call (its sibling

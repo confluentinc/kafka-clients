@@ -132,14 +132,6 @@ impl AlterClientQuotasResponse {
         Ok(Self::new(data, version))
     }
 
-    /// Whether the client should throttle on this response.
-    ///
-    /// Mirrors `AlterClientQuotasResponse` which does not override
-    /// `AbstractResponse.shouldClientThrottle` (always `false`).
-    pub fn should_client_throttle(&self, _version: i16) -> bool {
-        false
-    }
-
     /// Builds a response from a per-entity error result.
     ///
     /// Mirrors `AlterClientQuotasResponse.fromQuotaEntities`. Java takes a
@@ -244,11 +236,5 @@ mod tests {
         let counts = response.error_counts();
         assert_eq!(counts.get(&Errors::ClusterAuthorizationFailed), Some(&2));
         assert_eq!(counts.get(&Errors::InvalidRequest), Some(&1));
-    }
-
-    #[test]
-    fn does_not_throttle() {
-        let response = AlterClientQuotasResponse::new(AlterClientQuotasResponseData::new(), 1);
-        assert!(!response.should_client_throttle(1));
     }
 }

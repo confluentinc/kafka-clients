@@ -218,7 +218,7 @@ impl std::hash::Hash for EndTransactionMarker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::utils::ByteUtils;
+    use crate::common::utils::internals::ByteUtils;
 
     /// Java's `VALID_CONTROLLER_RECORD_TYPE`: `[COMMIT, ABORT]`.
     const VALID_CONTROLLER_RECORD_TYPE: [ControlRecordType; 2] = [ControlRecordType::Commit, ControlRecordType::Abort];

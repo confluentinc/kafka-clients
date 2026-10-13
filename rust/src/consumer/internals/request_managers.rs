@@ -314,10 +314,12 @@ mod tests {
     // Java `RequestManagersTest` cases deferred until the supplier
     // factory lands (still out of scope here):
     //
-    //   - testMemberStateListenerRegistered: exercises
-    //     `RequestManagers.supplier(...)` plumbing the `MemberStateListener`
-    //     into `ConsumerMembershipManager`.
-    //   - testStreamMemberStateListenerRegistered: same shape but for
+    //   - testConsumerGroupRequestManagersAndListenersWired (Kafka 4.4's
+    //     successor of `testMemberStateListenerRegistered`, renamed by
+    //     a3362c491e): exercises `RequestManagers.supplier(...)` plumbing the
+    //     `MemberStateListener` into `ConsumerMembershipManager`.
+    //   - testStreamsGroupRequestManagersAndListenersWired (successor of
+    //     `testStreamMemberStateListenerRegistered`): same shape but for
     //     the Streams variant. Streams support is out of milestone scope
     //     per `consumer-threading.md` §20.
     //
@@ -432,6 +434,7 @@ mod tests {
             FetchRequestManager::no_auth_failure(),
             std::sync::Arc::new(crate::ApiVersions::new()),
             crate::consumer::internals::FetchMetricsManager::for_test(),
+            100,
         )
     }
 

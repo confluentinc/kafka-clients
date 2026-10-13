@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``MockConsumer``: Java's ``MockConsumerTest`` in full (8 tests), then the
+"""``MockConsumer``: Java's ``MockConsumerTest`` in full (13 tests), then the
 Java mock's other documented behaviours with Java's messages
 (``MockConsumer.java``), each also on ``AsyncMockConsumer`` where the method
 differs by async-ness, and the two ``consumer-threading.md`` §31 regression
@@ -223,6 +223,95 @@ def test_re2j_pattern_subscription() -> None:
     assert str(mixed.value) == "Subscription to topics, partitions and pattern are mutually exclusive"
 
 
+def test_lose_partitions_calls_on_partitions_lost() -> None:
+    consumer = earliest()
+    tp0, tp1 = tp("test", 0), tp("test", 1)
+    lost: list[TopicPartition] = []
+    revoked: list[TopicPartition] = []
+
+    class Listener(ConsumerRebalanceListener):
+        def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+            revoked.extend(partitions)
+
+        def on_partitions_lost(self, partitions: set[TopicPartition]) -> None:
+            lost.extend(partitions)
+
+    consumer.subscribe(topics=["test"], callback=Listener())
+    consumer.rebalance(new_assignment=[tp0, tp1])
+    consumer.lose_partitions(partitions_lost=[tp0])
+
+    assert lost == [tp0]
+    assert revoked == []
+
+
+def test_lose_partitions_removes_from_assignment() -> None:
+    consumer = earliest()
+    tp0, tp1 = tp("test", 0), tp("test", 1)
+
+    consumer.subscribe(topics=["test"])
+    consumer.rebalance(new_assignment=[tp0, tp1])
+    consumer.lose_partitions(partitions_lost=[tp0])
+
+    assert tp0 not in consumer.assignment()
+    assert tp1 in consumer.assignment()
+
+
+def test_lose_partitions_throws_if_not_assigned() -> None:
+    consumer = earliest()
+    tp0, tp1 = tp("test", 0), tp("test", 1)
+
+    consumer.subscribe(topics=["test"])
+    consumer.rebalance(new_assignment=[tp0])
+
+    with pytest.raises(IllegalStateError) as e:
+        consumer.lose_partitions(partitions_lost=[tp1])
+    assert str(e.value) == "Cannot lose partitions that are not currently assigned: [test-1]"
+
+
+def test_lose_partitions_clears_only_lost_records() -> None:
+    consumer = earliest()
+    tp0, tp1 = tp("test", 0), tp("test", 1)
+
+    consumer.subscribe(topics=["test"])
+    consumer.rebalance(new_assignment=[tp0, tp1])
+    consumer.update_beginning_offsets(new_offsets={tp0: 0, tp1: 0})
+    consumer.seek(partition=tp0, offset=0)
+    consumer.seek(partition=tp1, offset=0)
+
+    consumer.add_record(record=ConsumerRecord(topic="test", partition=0, offset=0,
+                                              key=None, value=None))
+    consumer.add_record(record=ConsumerRecord(topic="test", partition=1, offset=0,
+                                              key=None, value=None))
+
+    consumer.lose_partitions(partitions_lost=[tp0])
+
+    records = consumer.poll(timeout=timedelta(milliseconds=1))
+    assert len(records) == 1
+
+    rec = next(iter(records))
+    assert tp(rec.topic(), rec.partition()) == tp1
+
+
+def test_lose_partitions_then_rebalance() -> None:
+    consumer = earliest()
+    tp0, tp1, tp2 = tp("test", 0), tp("test", 1), tp("test", 2)
+    assigned: list[TopicPartition] = []
+
+    class Listener(ConsumerRebalanceListener):
+        def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
+            assigned.extend(partitions)
+
+    consumer.subscribe(topics=["test"], callback=Listener())
+    consumer.rebalance(new_assignment=[tp0, tp1])
+    assigned.clear()
+
+    consumer.lose_partitions(partitions_lost=[tp0])
+    consumer.rebalance(new_assignment=[tp1, tp2])
+
+    assert assigned == [tp2]
+    assert consumer.assignment() == {tp1, tp2}
+
+
 def test_should_return_max_poll_records() -> None:
     consumer = earliest()
     partition = tp("test", 0)
@@ -429,7 +518,7 @@ def test_set_poll_exception_raises_the_injected_instance_once() -> None:
 
 
 def test_set_poll_exception_none_clears_a_pending_one() -> None:
-    # Java: setPollException(null) clears the field (MockConsumer.java:344-346).
+    # Java: setPollException(null) clears the field (MockConsumer.java:385-387).
     consumer = earliest()
     consumer.set_poll_exception(exception=IllegalStateError(message="boom"))  # type: ignore[arg-type]
     consumer.set_poll_exception(exception=None)
@@ -684,6 +773,72 @@ def test_listener_exception_propagates_from_rebalance() -> None:
     consumer.subscribe(topics=["t"], callback=Boom())
     with pytest.raises(ValueError, match="boom in assigned"):
         consumer.rebalance(new_assignment=[tp("t", 0)])
+
+
+def test_lose_partitions_default_on_partitions_lost_calls_revoked() -> None:
+    # ConsumerRebalanceListener's default onPartitionsLost calls
+    # onPartitionsRevoked.
+    consumer = earliest()
+    revoked: list[set[TopicPartition]] = []
+
+    class Revokes(ConsumerRebalanceListener):
+        def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+            revoked.append(partitions)
+
+    consumer.subscribe(topics=["t"], callback=Revokes())
+    consumer.rebalance(new_assignment=[tp("t", 0)])
+    consumer.lose_partitions(partitions_lost=[tp("t", 0)])
+    assert revoked == [{tp("t", 0)}]
+    assert consumer.assignment() == set()
+
+
+def test_lose_partitions_listener_exception_propagates() -> None:
+    # Java's losePartitions lets the listener's exception propagate, after the
+    # lost partitions' records are cleared and before the assignment changes.
+    consumer = earliest()
+
+    class Boom(ConsumerRebalanceListener):
+        def on_partitions_lost(self, partitions: set[TopicPartition]) -> None:
+            raise ValueError("boom in lost")
+
+    consumer.subscribe(topics=["t"], callback=Boom())
+    consumer.rebalance(new_assignment=[tp("t", 0)])
+    with pytest.raises(ValueError, match="boom in lost"):
+        consumer.lose_partitions(partitions_lost=[tp("t", 0)])
+    assert consumer.assignment() == {tp("t", 0)}
+
+
+def test_lose_partitions_needs_a_subscription() -> None:
+    # Java's assignFromSubscribed throws once the listener has run.
+    consumer = earliest()
+    consumer.assign(partitions=[tp("t", 0)])
+    with pytest.raises(IllegalArgumentError) as e:
+        consumer.lose_partitions(partitions_lost=[tp("t", 0)])
+    assert str(e.value) == ("Attempt to dynamically assign partitions while manual assignment "
+                            "in use")
+
+
+def test_async_lose_partitions_awaits_a_coroutine_listener() -> None:
+    async def main() -> None:
+        consumer: AsyncMockConsumer[str, str] = AsyncMockConsumer(offset_reset_strategy="earliest")
+        lost: list[set[TopicPartition]] = []
+
+        class Listener(ConsumerRebalanceListener):
+            async def on_partitions_lost(self, partitions: set[TopicPartition]) -> None:  # type: ignore[override]
+                await asyncio.sleep(0)
+                lost.append(partitions)
+                assert consumer.assignment() == {tp("t", 0), tp("t", 1)}
+
+        await consumer.subscribe(topics=["t"], callback=Listener())
+        await consumer.rebalance(new_assignment=[tp("t", 0), tp("t", 1)])
+        await consumer.lose_partitions(partitions_lost=[tp("t", 0)])
+        assert lost == [{tp("t", 0)}]
+        assert consumer.assignment() == {tp("t", 1)}
+        with pytest.raises(IllegalStateError) as e:
+            await consumer.lose_partitions(partitions_lost=[tp("t", 0)])
+        assert str(e.value) == "Cannot lose partitions that are not currently assigned: [t-0]"
+
+    asyncio.run(main())
 
 
 def test_a_coroutine_listener_needs_the_async_mock() -> None:

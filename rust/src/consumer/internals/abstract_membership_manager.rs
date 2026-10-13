@@ -57,13 +57,16 @@ use std::sync::Mutex;
 
 use tokio::sync::oneshot;
 
+use crate::common::protocol::Errors;
+use crate::common::requests::ConsumerGroupHeartbeatResponse;
 use crate::common::utils::Time;
 use crate::common::{Error, TopicPartition, Uuid};
 use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
-use crate::consumer::internals::ConsumerRebalanceMetricsManager;
 use crate::consumer::internals::events::BackgroundEvent;
 use crate::consumer::internals::events::BackgroundEventHandler;
+use crate::consumer::internals::metrics::ConsumerRebalanceMetricsManager;
 
+use super::ConsumerMembershipManager;
 use super::ConsumerMetadata;
 use super::MemberState;
 use super::MemberStateListener;
@@ -156,7 +159,7 @@ pub(crate) struct MembershipInner {
     /// (`transition_to_stale`) is in flight. Mirrors the lifetime of
     /// Java's `staleMemberAssignmentRelease` `CompletableFuture` between
     /// its creation in `transitionToStale()` and its `whenComplete`
-    /// firing (`AbstractMembershipManager.java:791-806`). While this is
+    /// firing (`AbstractMembershipManager.java:839-854`). While this is
     /// `true`, `maybe_rejoin_stale_member` must NOT transition STALE →
     /// JOINING — it records the intent in
     /// [`Self::stale_rejoin_requested`] and the release-completion path
@@ -380,6 +383,115 @@ impl AbstractMembershipManager {
             Err(p) => p.into_inner(),
         };
         guard.state_updates_listeners.push(listener);
+    }
+
+    /// Update member info and transition member state based on a successful
+    /// heartbeat response. The common response handling lives here
+    /// (KAFKA-20681, 6a6b536fbc); group type specifics are provided by
+    /// [`ConsumerMembershipManager::error_code`],
+    /// [`ConsumerMembershipManager::member_epoch_with_response`] and
+    /// [`ConsumerMembershipManager::extract_assignment`].
+    ///
+    /// Java: `public final void onHeartbeatSuccess(R response)`
+    /// (`AbstractMembershipManager.java:299-340`). The Rust abstract layer is
+    /// hard-wired to [`ConsumerGroupHeartbeatResponse`] (Share / Streams are
+    /// out of scope per `consumer-threading.md` §20), so the three hooks
+    /// Java declares `protected abstract` are plain associated functions of
+    /// the one subclass in scope, called directly rather than dispatched.
+    ///
+    /// Returns `Err(LocalIllegalArgument)` for an unexpected error in the
+    /// response body — Java throws `IllegalArgumentException`.
+    ///
+    /// Java's `maybeCompleteLeaveInProgress()` (the UNSUBSCRIBED and the
+    /// invalid-epoch branches) has no Rust counterpart: there is no leave
+    /// future here, the leave completes through the state machine
+    /// (`on_heartbeat_request_generated` moves LEAVING to UNSUBSCRIBED). Java
+    /// returns from both branches whatever that call answers (the
+    /// UNSUBSCRIBED member that finds no leave in progress returns at the
+    /// `isNotInGroup()` check right after), so the outcome is the same.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#onHeartbeatSuccess")]
+    pub(crate) fn on_heartbeat_success(&self, response: &ConsumerGroupHeartbeatResponse) -> Result<(), Error> {
+        Self::return_if_unexpected_error(response)?;
+
+        let response_member_epoch = ConsumerMembershipManager::member_epoch_with_response(response);
+        let guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let state = guard.state;
+        if state == MemberState::Leaving {
+            log::debug!(
+                "Ignoring heartbeat response received from broker. Member {} with epoch {} is \
+                 already leaving the group.",
+                guard.member_id,
+                guard.member_epoch
+            );
+            return Ok(());
+        }
+
+        if state == MemberState::Unsubscribed && response_member_epoch < 0 {
+            log::debug!(
+                "Member {} with epoch {} received a successful response to the heartbeat \
+                 to leave the group and completed the leave operation. ",
+                guard.member_id,
+                guard.member_epoch
+            );
+            return Ok(());
+        }
+        if guard.is_not_in_group() {
+            log::debug!(
+                "Ignoring heartbeat response received from broker. Member {} is in {} state \
+                 so it's not a member of the group. ",
+                guard.member_id,
+                state
+            );
+            return Ok(());
+        }
+        if response_member_epoch < 0 {
+            log::debug!(
+                "Ignoring heartbeat response received from broker. Member {} with epoch {} \
+                 is in {} state and the member epoch is invalid: {}. ",
+                guard.member_id,
+                guard.member_epoch,
+                state,
+                response_member_epoch
+            );
+            return Ok(());
+        }
+
+        let mut guard = guard;
+        guard.update_member_epoch(response_member_epoch);
+
+        if let Some(assignment) = ConsumerMembershipManager::extract_assignment(response) {
+            if !state.can_handle_new_assignment() {
+                // New assignment received but member is in a state where it cannot take new
+                // assignments (ex. preparing to leave the group)
+                log::debug!(
+                    "Ignoring new assignment {:?} received from server because member is in {} state.",
+                    assignment,
+                    state
+                );
+                return Ok(());
+            }
+            // Release the guard: `process_assignment_received` re-acquires it.
+            drop(guard);
+            self.process_assignment_received(assignment)?;
+        }
+        Ok(())
+    }
+
+    /// Java: `private void throwIfUnexpectedError(R response)`
+    /// (`AbstractMembershipManager.java:342-349`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#throwIfUnexpectedError")]
+    fn return_if_unexpected_error(response: &ConsumerGroupHeartbeatResponse) -> Result<(), Error> {
+        let error_code = ConsumerMembershipManager::error_code(response);
+        if error_code != Errors::None.code() {
+            return Err(Error::local_illegal_argument(format!(
+                "Unexpected error in Heartbeat response. Expected no error, but received: {}",
+                Errors::for_code(error_code)
+            )));
+        }
+        Ok(())
     }
 
     /// Process a newly received target assignment. If the assignment
@@ -621,7 +733,7 @@ impl AbstractMembershipManager {
             // earlier Rust form gated the clear on `state == Unsubscribed`,
             // which leaked the flag when polling while in-group (observable
             // via `subscription_updated()` staying true) — diverging from
-            // Java. (`AbstractMembershipManager.java:491`).
+            // Java. (`AbstractMembershipManager.java:552`).
             let was_updated = guard.subscription_updated;
             guard.subscription_updated = false;
             was_updated && guard.state == MemberState::Unsubscribed
@@ -735,7 +847,7 @@ impl AbstractMembershipManager {
                 if guard.is_poll_timer_expired {
                     // Java transitions to STALE here via `transitionToStale()`,
                     // which also schedules the onPartitionsLost assignment
-                    // release (`AbstractMembershipManager.java:791-806`). The
+                    // release (`AbstractMembershipManager.java:839-854`). The
                     // release is async (it awaits the §31 listener) and cannot
                     // run inside this sync method; the concrete
                     // `ConsumerMembershipManager::transition_to_stale` performs
@@ -757,7 +869,7 @@ impl AbstractMembershipManager {
     }
 
     /// Java: `maybeRejoinStaleMember()`
-    /// (`AbstractMembershipManager.java:776-783`). Resets the
+    /// (`AbstractMembershipManager.java:823-830`). Resets the
     /// `isPollTimerExpired` flag; if the member is currently STALE,
     /// transitions it to JOINING so the next heartbeat re-joins the
     /// group with `memberEpoch=0`.
@@ -791,7 +903,7 @@ impl AbstractMembershipManager {
                 // `transition_to_stale` has not completed yet. Java chains
                 // `transitionToJoining` onto the in-flight
                 // `staleMemberAssignmentRelease` future
-                // (`AbstractMembershipManager.java:781`); we record the
+                // (`AbstractMembershipManager.java:828`); we record the
                 // intent and let the release-completion path perform the
                 // transition once the callback returns. The member stays
                 // STALE in the meantime (it must not clear its assignment
@@ -849,30 +961,6 @@ impl AbstractMembershipManager {
         guard.state == MemberState::Unsubscribed
     }
 
-    /// Invokes a rebalance listener callback per §31.
-    ///
-    /// Mechanism:
-    /// 1. Short-circuit if no [`ConsumerRebalanceListener`] is
-    ///    registered on the subscription state. Java's
-    ///    `invokeOnPartitions{Revoked,Assigned,Lost}Callback` all check
-    ///    `subscriptions.rebalanceListener().isPresent()` and return a
-    ///    completed future without enqueueing anything. Without this
-    ///    guard the bg task would hang forever awaiting an ack that no
-    ///    one will send (Phase 10's app-side drain only invokes the
-    ///    listener when one exists). See `ConsumerMembershipManager.java:352-383`.
-    /// 2. Create a fresh `oneshot::channel`.
-    /// 3. Enqueue a [`BackgroundEvent::PartitionsRemoved`]
-    ///    carrying the sender half.
-    /// 4. **Await** the receiver. The membership state machine does NOT
-    ///    advance until this resolves.
-    ///
-    /// `MutexGuard`s are NEVER held across this `.await`.
-    ///
-    /// [`ConsumerRebalanceListener`]: crate::consumer::ConsumerRebalanceListener
-    ///
-    /// Java: `enqueueConsumerRebalanceListenerCallback(methodName, partitions)`
-    /// (defined on `ConsumerMembershipManager`, but the contract is
-    /// shared across all subclasses).
     /// Non-blocking sibling of [`Self::invoke_rebalance_callback`]
     /// (Phase 41b). Enqueues the §31 `RebalanceListenerCallbackNeeded`
     /// event and returns the ack [`oneshot::Receiver`] **without awaiting
@@ -942,6 +1030,32 @@ impl AbstractMembershipManager {
         Ok(ack_rx)
     }
 
+    /// Invokes a rebalance listener callback per §31.
+    ///
+    /// Mechanism:
+    /// 1. Short-circuit if no [`ConsumerRebalanceListener`] is
+    ///    registered on the subscription state. Java's
+    ///    `invokeOnPartitions{Revoked,Lost}Callback` both check
+    ///    `subscriptions.rebalanceListener().isPresent()` and return a
+    ///    completed future without enqueueing anything. Without this
+    ///    guard the bg task would hang forever awaiting an ack that no
+    ///    one will send (Phase 10's app-side drain only invokes the
+    ///    listener when one exists). See `ConsumerMembershipManager.java:320-341`.
+    ///    (The assigned path has no such check since KAFKA-20106: it always
+    ///    enqueues, see [`Self::enqueue_partitions_assigned_event`].)
+    /// 2. Create a fresh `oneshot::channel`.
+    /// 3. Enqueue a [`BackgroundEvent::PartitionsRemoved`]
+    ///    carrying the sender half.
+    /// 4. **Await** the receiver. The membership state machine does NOT
+    ///    advance until this resolves.
+    ///
+    /// `MutexGuard`s are NEVER held across this `.await`.
+    ///
+    /// [`ConsumerRebalanceListener`]: crate::consumer::ConsumerRebalanceListener
+    ///
+    /// Java: `enqueueConsumerRebalanceListenerCallback(methodName, partitions)`
+    /// (defined on `ConsumerMembershipManager`, but the contract is
+    /// shared across all subclasses).
     pub(crate) async fn invoke_rebalance_callback(
         &self,
         method: ConsumerRebalanceListenerMethodName,

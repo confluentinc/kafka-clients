@@ -28,7 +28,7 @@ use crate::admin::PartitionProducerState;
 use crate::admin::ProducerState;
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, RequestBuilder, describe_producers_request};
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::LogContext;
 use crate::common::{Error, Node, TopicPartition};
 use crate::describe_producers_request_data::TopicRequest;
 use crate::{kafka_debug, kafka_error};
