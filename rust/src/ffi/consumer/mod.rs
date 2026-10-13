@@ -88,8 +88,8 @@ use std::collections::HashMap;
 use std::ffi::{CString, c_char, c_void};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::Duration;
 
 use tokio::task::JoinHandle;
@@ -97,6 +97,7 @@ use tokio::task::JoinHandle;
 use crate::common::{Error, TopicPartition};
 use crate::consumer::{Consumer, ConsumerHandle, MockConsumer};
 use crate::ffi::callback_queue::{CallbackJob, CallbackQueue, SendPtr};
+use crate::ffi::callback_result::CallbackResults;
 use crate::ffi::common::metrics::box_metrics_map;
 use crate::ffi::common::partition_info::partition_info_list;
 use crate::ffi::common::topic_partition::{
@@ -174,6 +175,11 @@ impl ConsumerKind {
 pub(crate) struct Delivery {
     queue: CallbackQueue,
     blocking: AtomicBool,
+    /// The consumer's pending interface calls, by the id they report with
+    /// through [`kafka_consumer_Consumer__set_callback_result`]. An `Arc`,
+    /// so a report and a queued invocation keep it alive without keeping
+    /// the rest of the delivery (and its queue) alive.
+    results: Arc<CallbackResults>,
 }
 
 impl Delivery {
@@ -187,6 +193,11 @@ impl Delivery {
         }
     }
 
+    /// The registry the invocations this delivery runs report to.
+    pub(crate) fn results(&self) -> &Arc<CallbackResults> {
+        &self.results
+    }
+
     #[cfg(test)]
     pub(crate) fn queue(&self) -> &CallbackQueue {
         &self.queue
@@ -194,7 +205,11 @@ impl Delivery {
 
     #[cfg(test)]
     pub(crate) fn for_tests(queue: CallbackQueue) -> Self {
-        Self { queue, blocking: AtomicBool::new(false) }
+        Self {
+            queue,
+            blocking: AtomicBool::new(false),
+            results: Arc::new(CallbackResults::new()),
+        }
     }
 
     #[cfg(test)]
@@ -377,7 +392,11 @@ impl ConsumerClassHandle {
         let client = Arc::new(Client {
             consumer: UnsafeCell::new(kind),
             busy: AtomicBool::new(false),
-            delivery: Arc::new(Delivery { queue: CallbackQueue::new(), blocking: AtomicBool::new(false) }),
+            delivery: Arc::new(Delivery {
+                queue: CallbackQueue::new(),
+                blocking: AtomicBool::new(false),
+                results: Arc::new(CallbackResults::new()),
+            }),
             runtime: runtime.handle().clone(),
             tasks: Mutex::new(Vec::new()),
             handle,
@@ -393,7 +412,8 @@ impl ConsumerClassHandle {
     }
 
     /// Awaits every spawned task, fires the pending callbacks, drops the
-    /// consumer inside the runtime context and shuts the runtime down.
+    /// consumer inside the runtime context, shuts the runtime down and frees
+    /// the handle.
     ///
     /// The queue is drained *while* the tasks are awaited: a `_cb` task may
     /// be waiting for the report of a listener or commit-callback invocation
@@ -401,33 +421,60 @@ impl ConsumerClassHandle {
     /// never return. Every pending callback thus fires exactly once, on the
     /// destroying thread (CLAUDE.md §4 rule 5).
     ///
+    /// The handle is reached through shared references until then and freed
+    /// only at the end, because those callbacks report through
+    /// `__set_callback_result` on this very handle, from the destroying
+    /// thread or another one. A report reads the handle only to clone the
+    /// registry's `Arc`, before it delivers, and the task waiting for that
+    /// delivery holds this call up, so no report still reads the handle once
+    /// it is freed.
+    ///
     /// A panic caught earlier may have poisoned `tasks`; it is taken
     /// regardless, so the handle is still freed and every pending callback
     /// still fires exactly once.
-    pub(crate) fn destroy(self) {
-        let Self { client, runtime } = self;
-        loop {
-            let tasks: Vec<JoinHandle<()>> =
-                std::mem::take(&mut *client.tasks.lock().unwrap_or_else(PoisonError::into_inner));
-            if tasks.is_empty() {
-                break;
-            }
-            runtime.block_on(async {
-                for mut task in tasks {
-                    loop {
-                        client.delivery.queue.execute();
-                        // Both branches are cancellation-safe: polling a
-                        // `JoinHandle` has no side effect, and a push that
-                        // races the `notified()` leaves its permit behind.
-                        tokio::select! {
-                            _ = &mut task => break,
-                            () = client.delivery.queue.pushed() => {},
+    ///
+    /// # Safety
+    ///
+    /// `handle` must be an owned handle, the `Box::into_raw` of a
+    /// `Box<ConsumerClassHandle>` not yet destroyed, that no other call uses
+    /// at the same time except the `__set_callback_result` reports of the
+    /// callbacks this call runs or waits for; it is freed here.
+    pub(crate) unsafe fn destroy(handle: *mut Self) {
+        {
+            // SAFETY: Per this function's `# Safety`, `handle` is a live `Box<ConsumerClassHandle>`
+            // not yet destroyed, and the only other users are reports, which take shared references
+            // too, so a shared reference to it is valid until the `Box::from_raw` below, which comes
+            // after this block's last use of it.
+            let Self { client, runtime } = unsafe { &*handle };
+            loop {
+                let tasks: Vec<JoinHandle<()>> =
+                    std::mem::take(&mut *client.tasks.lock().unwrap_or_else(PoisonError::into_inner));
+                if tasks.is_empty() {
+                    break;
+                }
+                runtime.block_on(async {
+                    for mut task in tasks {
+                        loop {
+                            client.delivery.queue.execute();
+                            // Both branches are cancellation-safe: polling a
+                            // `JoinHandle` has no side effect, and a push that
+                            // races the `notified()` leaves its permit behind.
+                            tokio::select! {
+                                _ = &mut task => break,
+                                () = client.delivery.queue.pushed() => {},
+                            }
                         }
                     }
-                }
-            });
+                });
+            }
+            client.delivery.queue.execute();
         }
-        client.delivery.queue.execute();
+        // SAFETY: Per this function's `# Safety`, `handle` is the `Box::into_raw` of a
+        // `Box<ConsumerClassHandle>` not yet destroyed, so taking it back frees it exactly once. The
+        // shared reference above is no longer used, and no report still reads the handle: every
+        // task is finished, so the reports they waited for were delivered, and a report reads the
+        // handle only before it delivers (see the docs above).
+        let Self { client, runtime } = *unsafe { Box::from_raw(handle) };
         {
             let _enter = runtime.enter();
             drop(client);
@@ -485,70 +532,75 @@ pub(crate) fn ms(timeout: i64) -> Result<Duration, Error> {
 // Callback results (CLAUDE.md §4 rule 3: async interface methods)
 // ---------------------------------------------------------------------------
 
-/// What a pending async interface call does with its result.
-pub(crate) type ResultSink = Box<dyn FnOnce(Result<(), Error>) + Send>;
-
-static NEXT_CALLBACK_ID: AtomicI64 = AtomicI64::new(1);
-/// The sinks awaiting a `__set_callback_result`, by id. A `Vec` because it
-/// can be built in a `const` context; it holds the in-flight callbacks
-/// only, a handful at most.
-static PENDING: Mutex<Vec<(i64, ResultSink)>> = Mutex::new(Vec::new());
-
-/// Registers `sink` and returns the id C reports with.
-pub(crate) fn register_callback_result(sink: ResultSink) -> i64 {
-    let id = NEXT_CALLBACK_ID.fetch_add(1, Ordering::Relaxed);
-    PENDING.lock().unwrap().push((id, sink));
-    id
-}
-
-/// Delivers `result` to the sink registered under `id`; `false` for an
-/// unknown (or already reported) id.
-pub(crate) fn complete_callback_result(id: i64, result: Result<(), Error>) -> bool {
-    let sink = {
-        let mut pending = PENDING.lock().unwrap();
-        pending
-            .iter()
-            .position(|(pending_id, _)| *pending_id == id)
-            .map(|index| pending.swap_remove(index).1)
-    };
-    match sink {
-        Some(sink) => {
-            sink(result);
-            true
-        },
-        None => false,
-    }
-}
+/// The pending calls of the standalone invokers
+/// (`kafka_consumer_ConsumerRebalanceListener_on_partitions_*` and their
+/// `_cb` forms, `kafka_consumer_OffsetCommitCallback_on_complete*`), which
+/// invoke a C implementation with no consumer of their own.
+///
+/// The one process-wide registry, against the rule that each client holds
+/// its own: the C implementation reports through
+/// [`kafka_consumer_Consumer__set_callback_result`] whatever consumer it was
+/// written for, or `NULL`, since it cannot tell an invoker's call from a
+/// consumer's. So this registry is tagged ([`CallbackResults::new_tagged`])
+/// and a report routes its id by the tag, never through `self_`.
+pub(crate) static INVOKER_RESULTS: LazyLock<CallbackResults> = LazyLock::new(CallbackResults::new_tagged);
 
 /// Reports the result of an async interface method (`ConsumerRebalanceListener`,
 /// `OffsetCommitCallback`) invoked with `callback_id` (CLAUDE.md §4): once the
-/// callback finishes, the Rust task that invoked it completes with this value.
-/// The double underscore marks a function derived by convention, with no Java
-/// counterpart.
-/// `result` is `NULL` for success or an owned `kafka_common_Error_t *` for
-/// failure, taken over by Rust. Callable from inside the method or later,
-/// from any thread; the ids are process-unique, so `self_` only names the
-/// consumer that issued the call. A second report for the same id, or one
-/// for an unknown id, is ignored (its error freed).
+/// callback finishes, the Rust task that invoked it completes with this
+/// report. The double underscore marks a function derived by convention, with
+/// no Java counterpart.
+///
+/// `error` is `NULL` for success; otherwise it is an owned
+/// `kafka_common_Error_t *` that Rust takes over, and `result` is then
+/// ignored and stays the caller's. On success `result` is the method's return
+/// value, which Rust takes over as the method's `_fn_t` documents; for a
+/// `void` method it is ignored, so pass `NULL`. Every method the consumer
+/// invokes is `void` in Java (`ConsumerRebalanceListener`'s three methods,
+/// `OffsetCommitCallback.onComplete`).
+///
+/// `self_` is the consumer that invoked the method: each consumer keeps its
+/// own ids. A method invoked through `kafka_consumer_ConsumerRebalanceListener_on_partitions_*`
+/// or `kafka_consumer_OffsetCommitCallback_on_complete*`, which have no
+/// consumer, is reported the same way; its id says so and `self_` is then
+/// not read, so it may be any consumer or `NULL`.
+///
+/// Callable from inside the method or later, from any thread, including
+/// while `kafka_consumer_Consumer_destroy` or `kafka_consumer_MockConsumer_destroy`
+/// runs the consumer's pending callbacks, but never once it returned. A
+/// second report for the same id, or one for an id the consumer did not
+/// issue, is ignored: its error is freed and its `result` is not taken.
 ///
 /// # Safety
 ///
-/// `result` must be null or a valid owned error not used afterwards.
+/// `self_` must be the live consumer handle that issued `callback_id`
+/// (unless an invoker issued it, see above), `error` null or a valid owned
+/// error not used afterwards, and `result` what the method's `_fn_t`
+/// documents for a successful report.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer__set_callback_result(
     self_: *const kafka_consumer_Consumer_t,
     callback_id: i64,
     result: *mut c_void,
+    error: *mut kafka_common_Error_t,
 ) {
-    let _ = self_;
-    // SAFETY: Per this function's `# Safety`, `result` is null or a valid owned error not used
+    // SAFETY: Per this function's `# Safety`, `error` is null or a valid owned error not used
     // afterwards, i.e. a `box_error` handle the C side hands over here, as `take_error` requires.
-    let result = match unsafe { take_error(result as *mut kafka_common_Error_t) } {
-        Some(error) => Err(error),
-        None => Ok(()),
-    };
-    complete_callback_result(callback_id, result);
+    let error = unsafe { take_error(error) };
+    // `result` is only passed on: the sink registered under `callback_id` takes it over as its
+    // method's `_fn_t` documents, which this function's `# Safety` has the caller follow.
+    if CallbackResults::is_tagged(callback_id) {
+        INVOKER_RESULTS.complete(callback_id, result, error);
+    } else {
+        // SAFETY: Per this function's `# Safety`, `self_` is the live consumer handle that issued
+        // the untagged `callback_id`, as `client_ref` requires, possibly while its destroy runs, which
+        // reaches the handle through shared references only until it frees it. The reference is used
+        // only to clone the registry's `Arc`, before the report is delivered, so the handle is not
+        // read once the sink ran, which is what lets that destroy free it afterwards.
+        let results = Arc::clone(unsafe { client_ref(self_) }.delivery.results());
+        results.complete(callback_id, result, error);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3911,34 +3963,139 @@ pub unsafe extern "C" fn kafka_consumer_Consumer__set_callbacks_notify(
 ///
 /// `self_` must be null or an owned handle from
 /// `kafka_consumer_KafkaConsumer_new` not yet destroyed, that no other call
-/// uses at the same time; it is not used afterwards, by the callbacks this
-/// call runs included.
+/// uses at the same time; the callbacks this call runs may use it only to
+/// report through `kafka_consumer_Consumer__set_callback_result`, and
+/// nothing uses it once this call returned.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_destroy(self_: *mut kafka_consumer_Consumer_t) {
     if !self_.is_null() {
         // SAFETY: Per this function's `# Safety`, `self_` (non-null, checked above) is an owned
-        // handle not yet destroyed, i.e. the `Box<ConsumerClassHandle>`
-        // `kafka_consumer_KafkaConsumer_new` delivered, that no other call uses at the same time,
-        // so taking it back frees it exactly once, through `destroy`, which awaits the tasks still
-        // holding the client. The box is freed before `destroy` runs, so the callbacks it runs must
-        // not use `self_`, which the doc's "not used afterwards" excludes.
-        unsafe { Box::from_raw(self_ as *mut ConsumerClassHandle) }.destroy();
+        // handle not yet destroyed, i.e. the `Box::into_raw` of the `Box<ConsumerClassHandle>`
+        // `kafka_consumer_KafkaConsumer_new` delivered, that no other call uses at the same time
+        // except the reports of the callbacks this call runs, as `ConsumerClassHandle::destroy`
+        // requires; it frees the handle exactly once, after awaiting the tasks still holding the
+        // client.
+        unsafe { ConsumerClassHandle::destroy(self_ as *mut ConsumerClassHandle) };
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::ptr;
+
     use super::*;
+    use crate::ffi::callback_result::{ResultSink, void_sink};
+    use crate::ffi::consumer::mock_consumer::{
+        kafka_consumer_MockConsumer__as_Consumer, kafka_consumer_MockConsumer_destroy, kafka_consumer_MockConsumer_new,
+        kafka_consumer_MockConsumer_t,
+    };
+
+    /// A mock consumer handle and its `Consumer` view.
+    fn new_mock() -> (*mut kafka_consumer_MockConsumer_t, *const kafka_consumer_Consumer_t) {
+        let mut mock = ptr::null_mut();
+        // SAFETY: Test code: a NUL-terminated literal and a valid out-pointer.
+        let error = unsafe { kafka_consumer_MockConsumer_new(c"earliest".as_ptr(), &mut mock) };
+        assert!(error.is_null());
+        // SAFETY: Test code: `mock` is the live handle just created.
+        (mock, unsafe { kafka_consumer_MockConsumer__as_Consumer(mock) })
+    }
+
+    /// Registers `sink` with the consumer's own registry, as its adapters do.
+    fn register(consumer: *const kafka_consumer_Consumer_t, sink: ResultSink) -> i64 {
+        // SAFETY: Test code: `consumer` is a live handle for the expression.
+        unsafe { client_ref(consumer) }.delivery.results().register(sink)
+    }
+
+    fn channel_sink() -> (ResultSink, std::sync::mpsc::Receiver<Result<(), Error>>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        (void_sink(move |r| tx.send(r).unwrap()), rx)
+    }
 
     #[test]
     fn callback_results_are_delivered_once() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let id = register_callback_result(Box::new(move |r| tx.send(r).unwrap()));
-        assert!(complete_callback_result(id, Ok(())));
+        let (mock, consumer) = new_mock();
+        let (sink, rx) = channel_sink();
+        let id = register(consumer, sink);
+        // SAFETY: Test code: `consumer` is the live handle that issued `id`, `error` is null and the
+        // void sink does not take `result`.
+        unsafe { kafka_consumer_Consumer__set_callback_result(consumer, id, ptr::null_mut(), ptr::null_mut()) };
         assert!(rx.recv().unwrap().is_ok());
-        assert!(!complete_callback_result(id, Ok(())));
-        assert!(!complete_callback_result(id + 1_000_000, Ok(())));
+        // A repeated report is ignored and its error freed.
+        // SAFETY: Test code: as above, with `error` an owned handle, handed over.
+        unsafe {
+            kafka_consumer_Consumer__set_callback_result(
+                consumer,
+                id,
+                ptr::null_mut(),
+                box_error(Error::timeout("repeated")),
+            )
+        };
+        assert!(rx.try_recv().is_err());
+        // SAFETY: Test code: `mock` is a live handle, destroyed once here.
+        unsafe { kafka_consumer_MockConsumer_destroy(mock) };
+    }
+
+    #[test]
+    fn a_reported_error_wins_over_the_value() {
+        let (mock, consumer) = new_mock();
+        let (sink, rx) = channel_sink();
+        let id = register(consumer, sink);
+        let mut value = 0_u8;
+        // SAFETY: Test code: `consumer` is the live handle that issued `id`; `error` is an owned
+        // handle, handed over, and the sink ignores `result`, which stays this test's.
+        unsafe {
+            kafka_consumer_Consumer__set_callback_result(
+                consumer,
+                id,
+                ptr::addr_of_mut!(value) as *mut c_void,
+                box_error(Error::timeout("failed")),
+            )
+        };
+        assert_eq!(rx.recv().unwrap().unwrap_err().message(), "failed");
+        // SAFETY: Test code: `mock` is a live handle, destroyed once here.
+        unsafe { kafka_consumer_MockConsumer_destroy(mock) };
+    }
+
+    /// Each consumer keeps its own ids: one reported to another consumer is
+    /// ignored there and stays pending on its own.
+    #[test]
+    fn ids_are_per_consumer() {
+        let (mock_a, a) = new_mock();
+        let (mock_b, b) = new_mock();
+        let (sink, rx) = channel_sink();
+        let id = register(a, sink);
+        // SAFETY: Test code: `b` is a live handle; the id is not one of its own, which the function
+        // ignores, freeing the owned error.
+        unsafe {
+            kafka_consumer_Consumer__set_callback_result(b, id, ptr::null_mut(), box_error(Error::timeout("wrong")))
+        };
+        assert!(rx.try_recv().is_err(), "not delivered through another consumer");
+        // SAFETY: Test code: `a` is the live handle that issued `id`, with a null error and value.
+        unsafe { kafka_consumer_Consumer__set_callback_result(a, id, ptr::null_mut(), ptr::null_mut()) };
+        assert!(rx.recv().unwrap().is_ok());
+        // SAFETY: Test code: each handle is live and destroyed once here.
+        unsafe {
+            kafka_consumer_MockConsumer_destroy(mock_a);
+            kafka_consumer_MockConsumer_destroy(mock_b);
+        }
+    }
+
+    /// An invoker's id is routed by its tag, whatever consumer, or `NULL`,
+    /// the report names.
+    #[test]
+    fn invoker_ids_need_no_consumer() {
+        let (mock, consumer) = new_mock();
+        for named in [ptr::null(), consumer] {
+            let (sink, rx) = channel_sink();
+            let id = INVOKER_RESULTS.register(sink);
+            // SAFETY: Test code: `id` is an invoker's, so the consumer handle is not read; `error` is
+            // null and the void sink does not take `result`.
+            unsafe { kafka_consumer_Consumer__set_callback_result(named, id, ptr::null_mut(), ptr::null_mut()) };
+            assert!(rx.recv().unwrap().is_ok());
+        }
+        // SAFETY: Test code: `mock` is a live handle, destroyed once here.
+        unsafe { kafka_consumer_MockConsumer_destroy(mock) };
     }
 
     #[test]

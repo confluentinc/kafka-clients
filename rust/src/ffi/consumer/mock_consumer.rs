@@ -149,19 +149,21 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer__as_Consumer(
 ///
 /// `self_` must be null or an owned handle from
 /// [`kafka_consumer_MockConsumer_new`] not yet destroyed, that no other call
-/// uses at the same time; neither it nor its `__as_Consumer` view is used
-/// afterwards, by the callbacks this call runs included.
+/// uses at the same time; the callbacks this call runs may use its
+/// `__as_Consumer` view only to report through
+/// `kafka_consumer_Consumer__set_callback_result`, and neither is used once
+/// this call returned.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_destroy(self_: *mut kafka_consumer_MockConsumer_t) {
     if !self_.is_null() {
         // SAFETY: Per this function's `# Safety`, `self_` (non-null, checked above) is an owned
-        // handle not yet destroyed, i.e. the `Box<ConsumerClassHandle>`
-        // `kafka_consumer_MockConsumer_new` delivered, that no other call uses at the same time, so
-        // taking it back frees it exactly once, through `destroy`, which awaits the tasks still
-        // holding the client. The box is freed before `destroy` runs, so the callbacks it runs must
-        // not use `self_` or its view, which the doc's "not used afterwards" excludes.
-        unsafe { Box::from_raw(self_ as *mut ConsumerClassHandle) }.destroy();
+        // handle not yet destroyed, i.e. the `Box::into_raw` of the `Box<ConsumerClassHandle>`
+        // `kafka_consumer_MockConsumer_new` delivered, that no other call uses at the same time
+        // except the reports of the callbacks this call runs, as `ConsumerClassHandle::destroy`
+        // requires; it frees the handle exactly once, after awaiting the tasks still holding the
+        // client.
+        unsafe { ConsumerClassHandle::destroy(self_ as *mut ConsumerClassHandle) };
     }
 }
 
@@ -536,7 +538,7 @@ mod tests {
     use std::ptr;
     use std::sync::Mutex;
     use std::sync::atomic::Ordering::SeqCst;
-    use std::sync::atomic::{AtomicI32, AtomicI64};
+    use std::sync::atomic::{AtomicI32, AtomicI64, AtomicPtr};
     use std::thread::{self, ThreadId};
     use std::time::{Duration, Instant};
 
@@ -614,6 +616,9 @@ mod tests {
         assigned: AtomicI32,
         revoked: AtomicI32,
         pending_id: AtomicI64,
+        /// The consumer `subscribe` registered the listener with, which the
+        /// reports name.
+        consumer: AtomicPtr<kafka_consumer_Consumer_t>,
     }
 
     impl ListenerProbe {
@@ -624,6 +629,7 @@ mod tests {
                 assigned: AtomicI32::new(0),
                 revoked: AtomicI32::new(0),
                 pending_id: AtomicI64::new(0),
+                consumer: AtomicPtr::new(ptr::null_mut()),
             }
         }
 
@@ -640,8 +646,16 @@ mod tests {
             // SAFETY: Test code: `partitions` is the live list Rust passed to the listener method.
             counter.fetch_add(unsafe { kafka_List_size(partitions) }, SeqCst);
             if self.report {
-                // SAFETY: Test code: the null error is a success report; `self_` is unused.
-                unsafe { kafka_consumer_Consumer__set_callback_result(ptr::null(), callback_id, ptr::null_mut()) };
+                // SAFETY: Test code: the consumer is the live handle that invoked this method, and the
+                // null error is a success report, with a null value since the method is void.
+                unsafe {
+                    kafka_consumer_Consumer__set_callback_result(
+                        self.consumer.load(SeqCst),
+                        callback_id,
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                    )
+                };
             } else {
                 self.pending_id.store(callback_id, SeqCst);
             }
@@ -668,6 +682,7 @@ mod tests {
     /// the listener handle is destroyed at once, its registration having
     /// been copied.
     unsafe fn subscribe(consumer: *mut kafka_consumer_Consumer_t, probe: &ListenerProbe) {
+        probe.consumer.store(consumer, SeqCst);
         let listener =
             kafka_consumer_ConsumerRebalanceListener_new(probe.as_self(), probe_revoked, probe_assigned, None);
         let topics = kafka_List_new();
@@ -769,10 +784,17 @@ mod tests {
 
         // Reported later, from another thread.
         let id = probe.pending_id.load(SeqCst);
-        // SAFETY: Test code: the null error is a success report for an id Rust issued; `self_` is
-        // unused.
+        let reporter = SendPtr(consumer as *mut c_void);
+        // SAFETY: Test code: the consumer is the live handle that issued `id`, alive until the
+        // thread is joined, and the null error is a success report, with a null value since the
+        // method is void.
         thread::spawn(move || unsafe {
-            kafka_consumer_Consumer__set_callback_result(ptr::null(), id, ptr::null_mut())
+            kafka_consumer_Consumer__set_callback_result(
+                reporter.get() as *const kafka_consumer_Consumer_t,
+                id,
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
         })
         .join()
         .unwrap();
@@ -961,9 +983,9 @@ mod tests {
             probe.pending_id.load(SeqCst) != 0
         });
         let id = probe.pending_id.load(SeqCst);
-        // SAFETY: Test code: the null error is a success report for an id Rust issued; `self_` is
-        // unused.
-        unsafe { kafka_consumer_Consumer__set_callback_result(ptr::null(), id, ptr::null_mut()) };
+        // SAFETY: Test code: `consumer` is the live handle that issued `id`, and the null error is a
+        // success report, with a null value since the method is void.
+        unsafe { kafka_consumer_Consumer__set_callback_result(consumer, id, ptr::null_mut(), ptr::null_mut()) };
         wait_until("the completion to run", || {
             // SAFETY: Test code: `consumer` is a live handle.
             unsafe { kafka_consumer_Consumer__execute_callbacks(consumer) };
@@ -1046,9 +1068,9 @@ mod tests {
             probe.pending_id.load(SeqCst) != 0
         });
         let id = probe.pending_id.load(SeqCst);
-        // SAFETY: Test code: the null error is a success report for an id Rust issued; `self_` is
-        // unused.
-        unsafe { kafka_consumer_Consumer__set_callback_result(ptr::null(), id, ptr::null_mut()) };
+        // SAFETY: Test code: `consumer` is the live handle that issued `id`, and the null error is a
+        // success report, with a null value since the method is void.
+        unsafe { kafka_consumer_Consumer__set_callback_result(consumer, id, ptr::null_mut(), ptr::null_mut()) };
         wait_until("the completion to run", || {
             // SAFETY: Test code: `consumer` is a live handle.
             unsafe { kafka_consumer_Consumer__execute_callbacks(consumer) };

@@ -99,9 +99,9 @@
 //!     `_fn_t` returns nothing and takes a trailing `int64_t callback_id`;
 //!   - a client trait ([`CLIENT_TRAITS`]): `__execute_callbacks`,
 //!     `__set_callbacks_notify` with its `_callbacks_notify_fn_t`, and
-//!     `__set_callback_result` when it accepts an interface with an async
-//!     method (the double underscore on all three: derived by convention,
-//!     no Java counterpart);
+//!     `__set_callback_result(self, callback_id, result, error)` when it
+//!     accepts an interface with an async method (the double underscore on
+//!     all three: derived by convention, no Java counterpart);
 //!   - `impl Trait for Struct`, both with a handle:
 //!     `<struct prefix>__as_<Trait>` returning the borrowed interface view,
 //!     `*mut` on both sides when a trait method takes `&mut self`; a blanket
@@ -1652,6 +1652,7 @@ impl FfiTranslation {
                                     Param::new("self", self_ty),
                                     Param::new("callback_id", "i64".to_string()),
                                     Param::new("result", "*mut c_void".to_string()),
+                                    Param::new("error", "*mut kafka_common_Error_t".to_string()),
                                 ],
                                 ret: None,
                             }),
@@ -3290,7 +3291,8 @@ mod tests {
         );
         assert_eq!(
             detail(&findings, "missing kafka_consumer_Consumer__set_callback_result"),
-            "expected `fn(self: *const kafka_consumer_Consumer_t, callback_id: i64, result: *mut c_void)`"
+            "expected `fn(self: *const kafka_consumer_Consumer_t, callback_id: i64, result: *mut c_void, \
+             error: *mut kafka_common_Error_t)`"
         );
         assert_eq!(
             detail(&findings, "missing kafka_consumer_Consumer_subscribe"),

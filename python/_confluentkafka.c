@@ -3112,7 +3112,7 @@ static void listener_fire(const char* method, void* self_, const kafka_List_t* p
             Py_DECREF(r);
         }
     }
-    if (!deferred) kafka_consumer_Consumer__set_callback_result(ctx->consumer, callback_id, err);
+    if (!deferred) kafka_consumer_Consumer__set_callback_result(ctx->consumer, callback_id, NULL, err);
     PyGILState_Release(g);
 }
 
@@ -3164,7 +3164,7 @@ static void commit_on_complete(void* self_, const kafka_Map_t* offsets,
         Py_XDECREF(py_offsets);
         Py_XDECREF(py_err);
     }
-    kafka_consumer_Consumer__set_callback_result(ctx->consumer, callback_id, NULL);
+    kafka_consumer_Consumer__set_callback_result(ctx->consumer, callback_id, NULL, NULL);
     if (!ctx->orphaned) commit_ctx_free(ctx);
     PyGILState_Release(g);
 }
@@ -3214,23 +3214,23 @@ static PyObject* py_Consumer__execute_callbacks(PyObject* self, PyObject* args) 
     return PyLong_FromLong((long)n);
 }
 
-// Consumer__set_callback_result(handle, callback_id, result): the deferred
+// Consumer__set_callback_result(handle, callback_id, error): the deferred
 // report of a listener invocation. None = success; an exception object = the
 // exception the listener raised, reported as a foreign callback error carrying
 // it (the caller has stashed it); a str = a message, reported as a
-// KafkaException.
+// KafkaException. The listener methods are void, so the C `result` is NULL.
 static PyObject* py_Consumer__set_callback_result(PyObject* self, PyObject* args) {
-    unsigned long long h; long long callback_id; PyObject* result;
-    if (!PyArg_ParseTuple(args, "KLO", &h, &callback_id, &result)) return NULL;
+    unsigned long long h; long long callback_id; PyObject* error;
+    if (!PyArg_ParseTuple(args, "KLO", &h, &callback_id, &error)) return NULL;
     kafka_common_Error_t* err = NULL;
-    if (PyExceptionInstance_Check(result)) {
-        err = callback_error_from_py(result);
-    } else if (result != Py_None) {
-        const char* msg = PyUnicode_AsUTF8(result);
+    if (PyExceptionInstance_Check(error)) {
+        err = callback_error_from_py(error);
+    } else if (error != Py_None) {
+        const char* msg = PyUnicode_AsUTF8(error);
         if (msg == NULL) return NULL;
         err = kafka_common_Error_kafka_message(msg);
     }
-    kafka_consumer_Consumer__set_callback_result(consumer_self(h), (int64_t)callback_id, err);
+    kafka_consumer_Consumer__set_callback_result(consumer_self(h), (int64_t)callback_id, NULL, err);
     Py_RETURN_NONE;
 }
 

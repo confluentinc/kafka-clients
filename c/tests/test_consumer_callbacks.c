@@ -175,7 +175,7 @@ static void on_void_op(kafka_common_Error_t *error, void *opaque) {
 // ---------------------------------------------------------------------------
 
 typedef struct {
-    kafka_consumer_Consumer_t *consumer;    /* informational for the report; NULL is fine */
+    kafka_consumer_Consumer_t *consumer;    /* the reports name it; NULL only for the standalone invokers */
     kafka_consumer_ConsumerHandle_t *handle; /* when set, assigned calls back through it */
     int report;
     kafka_common_Error_t *assigned_error;   /* reported by the next assigned call, ownership moves */
@@ -206,13 +206,13 @@ static void probe_init(listener_probe_t *p, kafka_consumer_Consumer_t *consumer,
 }
 
 static void probe_record(listener_probe_t *p, const kafka_List_t *partitions, int64_t callback_id,
-                         kafka_common_Error_t *result) {
+                         kafka_common_Error_t *error) {
     p->last_thread = pthread_self();
     p->last_count = kafka_List_size(partitions);
     snapshot_partitions(partitions, p->last_partitions, sizeof(p->last_partitions));
     p->sequence = atomic_fetch_add(&g_sequence, 1);
     if (p->report) {
-        kafka_consumer_Consumer__set_callback_result(p->consumer, callback_id, result);
+        kafka_consumer_Consumer__set_callback_result(p->consumer, callback_id, NULL, error);
     } else {
         atomic_store(&p->pending_id, callback_id);
     }
@@ -259,7 +259,7 @@ static void probe_on_lost(void *self_, const kafka_List_t *partitions, int64_t c
 static void probe_release(listener_probe_t *p) {
     int64_t id = atomic_exchange(&p->pending_id, 0);
     TEST_ASSERT_NOT_EQUAL(0, id);
-    kafka_consumer_Consumer__set_callback_result(p->consumer, id, NULL);
+    kafka_consumer_Consumer__set_callback_result(p->consumer, id, NULL, NULL);
 }
 
 static kafka_consumer_ConsumerRebalanceListener_t *probe_listener(listener_probe_t *p, int with_lost) {
@@ -332,7 +332,7 @@ static void commit_probe_on_complete(void *self_, const kafka_Map_t *offsets, co
     p->sequence = atomic_fetch_add(&g_sequence, 1);
     atomic_fetch_add(&p->calls, 1);
     if (p->report) {
-        kafka_consumer_Consumer__set_callback_result(p->consumer, callback_id, NULL);
+        kafka_consumer_Consumer__set_callback_result(p->consumer, callback_id, NULL, NULL);
     } else {
         atomic_store(&p->pending_id, callback_id);
     }
@@ -341,7 +341,7 @@ static void commit_probe_on_complete(void *self_, const kafka_Map_t *offsets, co
 static void commit_probe_release(commit_probe_t *p) {
     int64_t id = atomic_exchange(&p->pending_id, 0);
     TEST_ASSERT_NOT_EQUAL(0, id);
-    kafka_consumer_Consumer__set_callback_result(p->consumer, id, NULL);
+    kafka_consumer_Consumer__set_callback_result(p->consumer, id, NULL, NULL);
 }
 
 static kafka_consumer_OffsetCommitCallback_t *commit_probe_callback(commit_probe_t *p) {
@@ -499,6 +499,7 @@ static void test_commit_returns_only_after_callback_reports(void) {
 // waits for its report, with the map and error it was given.
 static void test_offset_commit_callback_standalone_invoker(void) {
     commit_probe_t probe;
+    /* No consumer: an invoker's callback_id is reported with a NULL one. */
     commit_probe_init(&probe, NULL, 1);
     kafka_consumer_OffsetCommitCallback_t *cb = commit_probe_callback(&probe);
 
@@ -852,7 +853,7 @@ static void *reporter_thread(void *arg) {
     reporter_t *r = (reporter_t *)arg;
     int64_t id = atomic_exchange(&r->probe->pending_id, 0);
     if (id != 0) {
-        kafka_consumer_Consumer__set_callback_result(r->probe->consumer, id, NULL);
+        kafka_consumer_Consumer__set_callback_result(r->probe->consumer, id, NULL, NULL);
     }
     atomic_store(&r->done, id != 0);
     return NULL;

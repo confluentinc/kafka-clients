@@ -121,6 +121,7 @@
 
 pub(crate) mod admin;
 pub(crate) mod callback_queue;
+pub(crate) mod callback_result;
 pub(crate) mod common;
 pub(crate) mod consumer;
 mod error_predicates;

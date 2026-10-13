@@ -36,9 +36,10 @@ use async_trait::async_trait;
 use crate::common::{Error, TopicPartition};
 use crate::consumer::ConsumerRebalanceListener;
 use crate::ffi::callback_queue::SendPtr;
+use crate::ffi::callback_result::{CallbackResults, void_sink};
 use crate::ffi::common::topic_partition::{list_topic_partitions, sorted_topic_partition_list};
 use crate::ffi::common::{deliver_panic, kafka_common_Error_t, run_inline};
-use crate::ffi::consumer::{Delivery, error_slot, register_callback_result};
+use crate::ffi::consumer::{Delivery, INVOKER_RESULTS, error_slot};
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{kafka_List_destroy, kafka_List_t};
 
@@ -53,8 +54,9 @@ pub struct kafka_consumer_ConsumerRebalanceListener_t {
 /// `partitions` is a list of `kafka_common_TopicPartition_t *`, sorted by
 /// topic and partition and borrowed for the call. The method is `async` in
 /// Rust (CLAUDE.md §4 rule 3): it reports its result with
-/// `kafka_consumer_Consumer__set_callback_result(consumer, callback_id, result)`,
-/// `NULL` for success or an owned `kafka_common_Error_t *` for failure.
+/// `kafka_consumer_Consumer__set_callback_result(consumer, callback_id, NULL, error)`,
+/// `error` `NULL` for success or an owned `kafka_common_Error_t *` for
+/// failure; the method is `void` in Java, so `result` is `NULL`.
 pub type kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_fn_t =
     unsafe extern "C" fn(self_: *mut c_void, partitions: *const kafka_List_t, callback_id: i64);
 
@@ -90,13 +92,20 @@ impl ListenerRegistration {
     }
 
     /// Invokes `method` on the calling thread with `partitions` and a fresh
-    /// callback id whose report reaches `sink`; the list is freed after the
-    /// method returned (C copies what it keeps). The id is registered only
-    /// once the list is built, right before the call, so a `_cb` entry
-    /// point's guard that reports a panic before then is the only completion.
-    fn fire(self, method: Method, partitions: &[TopicPartition], sink: Box<dyn FnOnce(Result<(), Error>) + Send>) {
+    /// callback id of `results` whose report reaches `sink`; the list is
+    /// freed after the method returned (C copies what it keeps). The id is
+    /// registered only once the list is built, right before the call, so a
+    /// `_cb` entry point's guard that reports a panic before then is the only
+    /// completion.
+    fn fire(
+        self,
+        method: Method,
+        partitions: &[TopicPartition],
+        results: &CallbackResults,
+        sink: Box<dyn FnOnce(Result<(), Error>) + Send>,
+    ) {
         let list = sorted_topic_partition_list(partitions.iter());
-        let callback_id = register_callback_result(sink);
+        let callback_id = results.register(void_sink(sink));
         // SAFETY: `method` is one of the method pointers registered with `self.self_` through
         // `kafka_consumer_ConsumerRebalanceListener_new` (every caller passes a field of `self` or
         // `lost_or_revoked`), whose rustdoc has the caller keep `self_` alive until the handle is
@@ -129,10 +138,12 @@ impl CRebalanceListener {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let registration = self.registration;
         let partitions = partitions.to_vec();
+        let results = Arc::clone(self.delivery.results());
         self.delivery.invoke(Box::new(move || {
             registration.fire(
                 method,
                 &partitions,
+                &results,
                 Box::new(move |result| {
                     // The awaiting side may have been dropped with the consumer.
                     let _ = tx.send(result);
@@ -228,6 +239,7 @@ unsafe fn invoke_blocking(
     registration.fire(
         method,
         &partitions,
+        &INVOKER_RESULTS,
         Box::new(move |result| {
             let _ = tx.send(result);
         }),
@@ -262,9 +274,10 @@ unsafe fn invoke_cb(
     registration.fire(
         method,
         &partitions,
+        &INVOKER_RESULTS,
         // SAFETY: Per this function's `# Safety`, `cb` and `opaque` are the pair the C caller
         // passed to the `_cb` entry point, which has not fired `cb`; `cb` fires only from this
-        // sink, which `register_callback_result` holds under a fresh id and runs at most once, as a
+        // sink, which `INVOKER_RESULTS` holds under a fresh id and runs at most once, as a
         // `FnOnce`, when the report for that id arrives. `error_slot` returns null or a fresh owned
         // error, handed over to `cb`.
         Box::new(move |result| unsafe { cb(error_slot(result), opaque.get()) }),
@@ -480,7 +493,6 @@ mod tests {
         kafka_common_TopicPartition_partition, kafka_common_TopicPartition_topic,
     };
     use crate::ffi::common::{box_error, error_ref, kafka_common_Error_destroy};
-    use crate::ffi::consumer::complete_callback_result;
     use crate::ffi::util::{c_str_to_string, kafka_List_destroy, kafka_List_get, kafka_List_new, kafka_List_size};
 
     /// One logged call: the method name and the partitions it received.
@@ -494,6 +506,22 @@ mod tests {
         deferred: Mutex<Option<i64>>,
         defer: AtomicBool,
         fail: AtomicBool,
+        /// The registry of the delivery an adapter invokes through; the
+        /// invokers' ids are tagged and go to `INVOKER_RESULTS` instead, as
+        /// `kafka_consumer_Consumer__set_callback_result` routes them.
+        results: Mutex<Option<Arc<CallbackResults>>>,
+    }
+
+    impl Impl {
+        fn report(&self, callback_id: i64, error: Option<Error>) {
+            let delivered = if CallbackResults::is_tagged(callback_id) {
+                INVOKER_RESULTS.complete(callback_id, std::ptr::null_mut(), error)
+            } else {
+                let results = self.results.lock().unwrap().clone().expect("an adapter's registry");
+                results.complete(callback_id, std::ptr::null_mut(), error)
+            };
+            assert!(delivered, "a pending id");
+        }
     }
 
     unsafe fn record(self_: *mut c_void, name: &'static str, partitions: *const kafka_List_t, callback_id: i64) {
@@ -520,9 +548,9 @@ mod tests {
         if imp.defer.load(Ordering::Relaxed) {
             *imp.deferred.lock().unwrap() = Some(callback_id);
         } else if imp.fail.load(Ordering::Relaxed) {
-            complete_callback_result(callback_id, Err(Error::local_illegal_state("listener failed")));
+            imp.report(callback_id, Some(Error::local_illegal_state("listener failed")));
         } else {
-            complete_callback_result(callback_id, Ok(()));
+            imp.report(callback_id, None);
         }
     }
 
@@ -600,13 +628,15 @@ mod tests {
         assert_eq!(*fired.lock().unwrap(), None, "not reported yet");
         let id = imp.deferred.lock().unwrap().take().unwrap();
         let error = box_error(Error::timeout("late"));
-        // SAFETY: Test code: `id` is the pending id the deferred method stored and `error` an owned
-        // error, handed over; the function ignores its consumer handle, so null is fine.
+        // SAFETY: Test code: `id` is the pending id the deferred method stored, issued by an invoker,
+        // so the function does not read its consumer handle and null is fine; `error` is an owned
+        // error, handed over.
         unsafe {
             crate::ffi::consumer::kafka_consumer_Consumer__set_callback_result(
                 std::ptr::null(),
                 id,
-                error as *mut c_void,
+                std::ptr::null_mut(),
+                error,
             )
         };
         assert_eq!(*fired.lock().unwrap(), Some(false));
@@ -622,6 +652,7 @@ mod tests {
         // SAFETY: Test code: `listener` is a live handle this test made; the adapter copies the
         // registration, and `imp` outlives the adapter.
         let adapter = unsafe { listener_adapter(listener, Arc::clone(&delivery)) };
+        *imp.results.lock().unwrap() = Some(Arc::clone(delivery.results()));
         // SAFETY: Test code: `listener` is a live handle, destroyed once here; the adapter keeps
         // its own copy.
         unsafe { kafka_consumer_ConsumerRebalanceListener_destroy(listener) };

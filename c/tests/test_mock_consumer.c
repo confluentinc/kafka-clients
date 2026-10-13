@@ -238,7 +238,7 @@ static void holding_on_assigned(void *self_, const kafka_List_t *partitions, int
 static void holding_listener_release(holding_listener_t *l) {
     int64_t id = atomic_exchange(&l->pending_id, 0);
     TEST_ASSERT_NOT_EQUAL(0, id);
-    kafka_consumer_Consumer__set_callback_result(l->consumer, id, NULL);
+    kafka_consumer_Consumer__set_callback_result(l->consumer, id, NULL, NULL);
 }
 
 /* Subscribes `f` to `topic` with a holding listener; the listener handle is

@@ -1058,7 +1058,15 @@ by-design gaps, all closure parameters whose C shape the lint cannot derive):
 - **Traits** C implements are interfaces: `<Interface>_new(void *self, <method>_fn_t ...)`
   with the caller owning `self`; a method that is `async fn` in Rust returns
   `void`, takes an `int64_t callback_id` and reports through
-  `kafka_consumer_Consumer__set_callback_result`. A binding whose callback
+  `kafka_consumer_Consumer__set_callback_result(consumer, callback_id, result, error)`:
+  `error` is `NULL` on success, otherwise owned and taken over (`result` is
+  then ignored and stays the caller's); on success `result` is the method's
+  return value, taken over as its `_fn_t` documents, `NULL` for a void method
+  (every method the consumer invokes). Each consumer keeps its own ids, so
+  `consumer` is the one that invoked the method, except for an id from a
+  standalone invoker (`ConsumerRebalanceListener_on_partitions_*`,
+  `OffsetCommitCallback_on_complete*`), which is routed by the id alone. An
+  unknown or repeated id is ignored and its error freed. A binding whose callback
   raised one of its own language's errors reports
   `kafka_common_Error_local_callback(message, opaque)`: `LocalCallbackError`
   (no Java class) sits outside the Kafka hierarchy, so the client wraps it as
@@ -1199,7 +1207,9 @@ schedules; it never runs a callback.
     runs on a short-lived helper thread instead, so a completion whose loop
     has closed is dropped promptly.
   - An awaiting consumer call drains on its own loop. A coroutine listener
-    method is awaited there and reports through `Consumer__set_callback_result`.
+    method is awaited there and reports through the extension's
+    `Consumer__set_callback_result(h, callback_id, error)`, which passes a
+    `NULL` result to the C function, the listener methods being void.
 - **Admin.** The sync `admin.py` clients wait through `SyncWaiter`
   (`_sync_wait.py`) on `Admin_resolve_cb`.
 

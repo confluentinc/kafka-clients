@@ -572,8 +572,8 @@ class CallbackLog {
 struct LogState {
   CallbackLog* log;
   uint64_t client_id;
-  // The consumer's `Consumer` view, for `kafka_consumer_Consumer__set_callback_result`
-  // (informational there — the lookup is by callback_id — but named anyway).
+  // The consumer's `Consumer` view, for `kafka_consumer_Consumer__set_callback_result`,
+  // which resolves the callback_id through the consumer that issued it.
   // nullptr for a producer's state.
   const kafka_consumer_Consumer_t* consumer = nullptr;
 };
@@ -583,9 +583,9 @@ struct LogState {
 // BORROWED for the call (a `kafka_List_t` of `kafka_common_TopicPartition_t *`,
 // never destroyed here). The method is `async` in Rust, so it returns void and
 // MUST report its result exactly once through
-// `kafka_consumer_Consumer__set_callback_result`: NULL for success (an owned
-// `kafka_common_Error_t *` would fail the rebalance, like a throwing Java
-// listener). This server reports synchronously from inside the method, the
+// `kafka_consumer_Consumer__set_callback_result`: a NULL error for success (an
+// owned `kafka_common_Error_t *` would fail the rebalance, like a throwing Java
+// listener), and a NULL result, the method being void. This server reports synchronously from inside the method, the
 // model for a blocking-entry-point caller: the method runs on the gRPC worker
 // thread that is inside the consumer's poll() / close() / unsubscribe(), and
 // the membership state machine does not advance until the report
@@ -606,7 +606,7 @@ void log_rebalance(void* self, const kafka_List_t* partitions, int64_t callback_
     }
   }
   state->log->append(state->client_id, std::move(entry));
-  kafka_consumer_Consumer__set_callback_result(state->consumer, callback_id, nullptr);
+  kafka_consumer_Consumer__set_callback_result(state->consumer, callback_id, nullptr, nullptr);
 }
 
 extern "C" void log_partitions_assigned(void* self, const kafka_List_t* partitions,
@@ -658,8 +658,8 @@ void copy_offsets_into(CallbackLogEntry* entry, const kafka_Map_t* offsets) {
 // registers with with_callback; `self` is the consumer's LogState. Both
 // `offsets` and `error` are BORROWED for the call (the FFI frees its copies
 // after it returns), so nothing is destroyed here. Java's onComplete is void,
-// so the mandatory report is always NULL: the result is ignored, the report
-// tells the consumer the callback finished. It runs on the gRPC worker thread
+// so the mandatory report always passes NULL for both the result and the error:
+// the report only tells the consumer the callback finished. It runs on the gRPC worker thread
 // inside the blocking consumer call that drove the callback (the next poll /
 // commit / close after the commit completed).
 extern "C" void log_commit_complete(void* self, const kafka_Map_t* offsets,
@@ -670,7 +670,7 @@ extern "C" void log_commit_complete(void* self, const kafka_Map_t* offsets,
   copy_offsets_into(&entry, offsets);
   copy_error_into(&entry, error);
   state->log->append(state->client_id, std::move(entry));
-  kafka_consumer_Consumer__set_callback_result(state->consumer, callback_id, nullptr);
+  kafka_consumer_Consumer__set_callback_result(state->consumer, callback_id, nullptr, nullptr);
 }
 
 // Java's commitAsync(offsets, null) is legal, but
@@ -684,7 +684,7 @@ extern "C" void discard_commit_complete(void* self, const kafka_Map_t* /*offsets
                                         const kafka_common_Error_t* /*error*/,
                                         int64_t callback_id) {
   auto* state = static_cast<LogState*>(self);
-  kafka_consumer_Consumer__set_callback_result(state->consumer, callback_id, nullptr);
+  kafka_consumer_Consumer__set_callback_result(state->consumer, callback_id, nullptr, nullptr);
 }
 
 // The `on_completion` of the kafka_producer_Callback_t registered by Send with
@@ -5605,8 +5605,8 @@ struct ChaosListenerState {
       : events(std::move(queue)), consumer(owner), check_commits(check), handle(consumer_handle) {}
 
   std::shared_ptr<ChaosEventQueue> events;
-  // The consumer, for kafka_consumer_Consumer__set_callback_result
-  // (informational there: the report is matched by callback_id).
+  // The consumer, for kafka_consumer_Consumer__set_callback_result, which
+  // resolves the callback_id through the consumer that issued it.
   const kafka_consumer_Consumer_t* consumer;
   // Read committed offsets back after the revoke-time commit
   // (commit_check_interval_ms > 0).
@@ -5668,8 +5668,8 @@ void chaos_push_committed(ChaosEventQueue& events, kafka_Map_t* map) {
 // they report (consumer-threading.md §31): their events therefore land in the
 // queue before that poll's Consumed events, and none is still running once
 // close returns. Each method is `async` in Rust, so it MUST report exactly once
-// through kafka_consumer_Consumer__set_callback_result; NULL means the listener
-// succeeded -- like the Rust and Python listeners, a failed commit is
+// through kafka_consumer_Consumer__set_callback_result; a NULL error (and a
+// NULL result, the methods being void) means the listener succeeded -- like the Rust and Python listeners, a failed commit is
 // reported, not raised.
 
 extern "C" void chaos_partitions_assigned(void* self, const kafka_List_t* partitions,
@@ -5678,7 +5678,7 @@ extern "C" void chaos_partitions_assigned(void* self, const kafka_List_t* partit
   auto* state = static_cast<ChaosListenerState*>(self);
   state->events->push(
       chaos_rebalance(REBALANCE_KIND_ASSIGNED, chaos_partitions(partitions), observed_at));
-  kafka_consumer_Consumer__set_callback_result(state->consumer, callback_id, nullptr);
+  kafka_consumer_Consumer__set_callback_result(state->consumer, callback_id, nullptr, nullptr);
 }
 
 // Flushes offsets before the partitions move -- the canonical listener
@@ -5722,7 +5722,7 @@ extern "C" void chaos_partitions_revoked(void* self, const kafka_List_t* partiti
   state->events->push(
       chaos_rebalance(REBALANCE_KIND_REVOKED, chaos_partitions(partitions), observed_at));
   chaos_revoke_commit(state, partitions);
-  kafka_consumer_Consumer__set_callback_result(state->consumer, callback_id, nullptr);
+  kafka_consumer_Consumer__set_callback_result(state->consumer, callback_id, nullptr, nullptr);
 }
 
 // Registered explicitly rather than left NULL (which reproduces Java's
@@ -5734,7 +5734,7 @@ extern "C" void chaos_partitions_lost(void* self, const kafka_List_t* partitions
   auto* state = static_cast<ChaosListenerState*>(self);
   state->events->push(
       chaos_rebalance(REBALANCE_KIND_LOST, chaos_partitions(partitions), observed_at));
-  kafka_consumer_Consumer__set_callback_result(state->consumer, callback_id, nullptr);
+  kafka_consumer_Consumer__set_callback_result(state->consumer, callback_id, nullptr, nullptr);
 }
 
 // Completion of a poll-loop commit_async (COMMIT_MODE_ASYNC): reports a failed
@@ -5749,7 +5749,7 @@ extern "C" void chaos_on_commit_async(void* self, const kafka_Map_t* /*offsets*/
   if (error != nullptr) {
     state->events->push(chaos_consumer_error(CONSUMER_OP_COMMIT, chaos_borrowed_error(error)));
   }
-  kafka_consumer_Consumer__set_callback_result(state->consumer, callback_id, nullptr);
+  kafka_consumer_Consumer__set_callback_result(state->consumer, callback_id, nullptr, nullptr);
 }
 
 // committed() of the current assignment, as Committed events (grpc_chaos.py
