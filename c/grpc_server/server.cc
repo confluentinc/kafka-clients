@@ -1838,7 +1838,9 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
 };
 
 // Drives the **bare sync** admin C entry points (kafka_admin_AdminClient_*),
-// as the producer and consumer services above do for theirs. The `_async`
+// as the producer and consumer services above do for theirs. Like Java's
+// Admin methods they return their *Result at once; the handlers then wait on
+// it through the result's accessors (Java's KafkaFuture.get()). The `_async`
 // variants are covered by the committed C unit tests; re-testing them here
 // would trade differential coverage for redundancy.
 class AdminServiceImpl final : public AdminService::Service {
@@ -1885,14 +1887,17 @@ class AdminServiceImpl final : public AdminService::Service {
   // -- Topics & partitions (slice G1) ---------------------------------------
   //
   // Every handler: resolve the handle, call the **bare sync** entry point
-  // (which blocks this gRPC worker thread until every per-key future has
-  // resolved, exactly as the FFI contract says), then walk the flattened result
-  // handle into the per-key envelope and destroy it.
+  // (which, like Java's Admin method, submits the request and returns the
+  // *Result at once), then walk the flattened result handle into the per-key
+  // envelope and destroy it. Its accessors block this gRPC worker thread until
+  // the future they read has resolved, exactly as Java's get() does.
   //
-  // The sync entry points distinguish the two failure levels for us: a non-null
-  // return means the request could not be submitted at all, which is the
-  // response's top-level `error`; a per-key failure comes back inside the result
-  // handle with a null return.
+  // A non-null return means the request could not be submitted at all, which
+  // is the response's top-level `error`; a per-key failure (including a
+  // request-wide failure, which every key then reports) comes back inside the
+  // result handle. Where a Java *Result holds a single future, its failure is
+  // read with the Java-named getter right after the call and becomes the
+  // top-level `error`, exactly as the call's own error used to.
 
   grpc::Status CreateTopics(grpc::ServerContext*, const CreateTopicsRequest* req,
                             CreateTopicsResponse* resp) override {
@@ -2218,8 +2223,9 @@ class AdminServiceImpl final : public AdminService::Service {
   // -- Cluster, configs & log dirs (slice G2) -------------------------------
   //
   // Same three steps as G1. The two whole-value RPCs (describeCluster,
-  // listConfigResources) have no per-key errors at all, so for them the sync entry point's return value carries *every*
-  // failure; the per-key RPCs keep the two-level split.
+  // listConfigResources) have no per-key errors at all, so for them a non-null
+  // return (submission failed) or a failed future read from the handle (Java's
+  // get()) is the top-level `error`; the per-key RPCs keep the two-level split.
 
   grpc::Status DescribeCluster(grpc::ServerContext*, const DescribeClusterRequest* req,
                                DescribeClusterResponse* resp) override {
@@ -2234,6 +2240,30 @@ class AdminServiceImpl final : public AdminService::Service {
         req->include_fenced_brokers(), &result);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+    // The call returned before the four attribute futures resolved (as Java's
+    // describeCluster does). Waiting on them in Java's attribute order, the
+    // first failure is the whole call's error, as it was when the call itself
+    // waited.
+    kafka_common_Error_t* attribute_errors[4] = {
+        kafka_admin_DescribeClusterResult_nodes_error(result),
+        kafka_admin_DescribeClusterResult_controller_error(result),
+        kafka_admin_DescribeClusterResult_cluster_id_error(result),
+        kafka_admin_DescribeClusterResult_authorized_operations_error(result),
+    };
+    kafka_common_Error_t* cluster_err = nullptr;
+    for (kafka_common_Error_t* attribute_err : attribute_errors) {
+      if (attribute_err == nullptr) continue;
+      if (cluster_err == nullptr) {
+        cluster_err = attribute_err;
+      } else {
+        kafka_common_Error_destroy(attribute_err);
+      }
+    }
+    if (cluster_err != nullptr) {
+      fill_proto_error(resp->mutable_error(), cluster_err);
+      kafka_admin_DescribeClusterResult_destroy(result);
       return grpc::Status::OK;
     }
     ClusterDescription* dst = resp->mutable_description();
@@ -2391,6 +2421,14 @@ class AdminServiceImpl final : public AdminService::Service {
         admin, types.data(), static_cast<int32_t>(types.size()), timeout_ms(*req), &result);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+    // Java's ListConfigResourcesResult holds one future; the call returned
+    // before it resolved, and all().get() reports its failure.
+    kafka_common_Error_t* future_err = kafka_admin_ListConfigResourcesResult_all(result);
+    if (future_err != nullptr) {
+      fill_proto_error(resp->mutable_error(), future_err);
+      kafka_admin_ListConfigResourcesResult_destroy(result);
       return grpc::Status::OK;
     }
     const int32_t count = kafka_admin_ListConfigResourcesResult_count(result);
@@ -2576,8 +2614,8 @@ class AdminServiceImpl final : public AdminService::Service {
   // electLeaders and alterPartitionReassignments both answer with the shared
   // VoidKeyedResponse, but their two error levels do not mean the same thing:
   // alterPartitionReassignments has one Java future per partition, whereas
-  // electLeaders has *one* future for the whole map, so the sync entry point's
-  // non-null return is a whole-call failure that leaves `entries` empty.
+  // electLeaders has *one* future for the whole map, so its failure — read with
+  // partitions().get() — is a whole-call failure that leaves `entries` empty.
   // listPartitionReassignments is whole-value (its result handle has no
   // _get_error(i) at all), listOffsets is an ordinary per-key result.
 
@@ -2612,6 +2650,14 @@ class AdminServiceImpl final : public AdminService::Service {
         static_cast<int32_t>(topics.size()), timeout_ms(*req), &result);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+    // The request-wide failure of Java's single partitions() future (not a
+    // per-partition one, which stays in its entry).
+    kafka_common_Error_t* future_err = kafka_admin_ElectLeadersResult_partitions(result);
+    if (future_err != nullptr) {
+      fill_proto_error(resp->mutable_error(), future_err);
+      kafka_admin_ElectLeadersResult_destroy(result);
       return grpc::Status::OK;
     }
 
@@ -2731,6 +2777,14 @@ class AdminServiceImpl final : public AdminService::Service {
         static_cast<int32_t>(topics.size()), timeout_ms(*req), &result);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+    // Java's single reassignments() future; the call returned before it
+    // resolved, and get() reports its failure.
+    kafka_common_Error_t* future_err = kafka_admin_ListPartitionReassignmentsResult_reassignments(result);
+    if (future_err != nullptr) {
+      fill_proto_error(resp->mutable_error(), future_err);
+      kafka_admin_ListPartitionReassignmentsResult_destroy(result);
       return grpc::Status::OK;
     }
 
@@ -2870,9 +2924,9 @@ class AdminServiceImpl final : public AdminService::Service {
   //
   // The other seven are ordinary keyed handles. The three whose Java result holds
   // ONE future over the whole map (alter/deleteConsumerGroupOffsets,
-  // removeMembersFromConsumerGroup) report that future's failure through the
-  // entry point's non-null return, i.e. the response's top-level error — and with
-  // an empty input the handle is empty, so that is the only observable.
+  // removeMembersFromConsumerGroup) report that future's failure per key; with
+  // an empty input the handle is empty, so all().get() is the only observable
+  // and its failure becomes the response's top-level error.
 
   grpc::Status ListGroups(grpc::ServerContext*, const ListGroupsRequest* req,
                           ListGroupsResponse* resp) override {
@@ -2894,6 +2948,20 @@ class AdminServiceImpl final : public AdminService::Service {
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
+    }
+    // The call returned before the listing resolved (as Java's listGroups
+    // does). all().get() fails both when the listing as a whole failed and,
+    // with the first entry of errors(), when some broker failed; only the
+    // former — no per-broker error to carry — is the whole call's error. A
+    // per-broker failure stays in `listing_errors` next to the partial listing.
+    kafka_common_Error_t* all_err = kafka_admin_ListGroupsResult_all(result);
+    if (all_err != nullptr) {
+      if (kafka_admin_ListGroupsResult_error_count(result) == 0) {
+        fill_proto_error(resp->mutable_error(), all_err);
+        kafka_admin_ListGroupsResult_destroy(result);
+        return grpc::Status::OK;
+      }
+      kafka_common_Error_destroy(all_err);
     }
 
     const int32_t valid = kafka_admin_ListGroupsResult_valid_count(result);
@@ -3174,6 +3242,16 @@ class AdminServiceImpl final : public AdminService::Service {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
+    // With no partition requested there is no per-key slot, so Java's all() is
+    // the only observable: its failure is the whole call's error.
+    if (kafka_admin_AlterConsumerGroupOffsetsResult_count(result) == 0) {
+      kafka_common_Error_t* all_err = kafka_admin_AlterConsumerGroupOffsetsResult_all(result);
+      if (all_err != nullptr) {
+        fill_proto_error(resp->mutable_error(), all_err);
+        kafka_admin_AlterConsumerGroupOffsetsResult_destroy(result);
+        return grpc::Status::OK;
+      }
+    }
 
     const int32_t count = kafka_admin_AlterConsumerGroupOffsetsResult_count(result);
     for (int32_t i = 0; i < count; i++) {
@@ -3207,6 +3285,16 @@ class AdminServiceImpl final : public AdminService::Service {
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
+    }
+    // With no partition requested there is no per-key slot, so Java's all() is
+    // the only observable: its failure is the whole call's error.
+    if (kafka_admin_DeleteConsumerGroupOffsetsResult_count(result) == 0) {
+      kafka_common_Error_t* all_err = kafka_admin_DeleteConsumerGroupOffsetsResult_all(result);
+      if (all_err != nullptr) {
+        fill_proto_error(resp->mutable_error(), all_err);
+        kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(result);
+        return grpc::Status::OK;
+      }
     }
 
     const int32_t count = kafka_admin_DeleteConsumerGroupOffsetsResult_count(result);
@@ -3293,10 +3381,20 @@ class AdminServiceImpl final : public AdminService::Service {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
+    // In removeAll mode the handle carries no keys (Java's memberResult is not
+    // applicable there), so all() is the only observable: its failure is the
+    // whole call's error.
+    if (kafka_admin_RemoveMembersFromConsumerGroupResult_count(result) == 0) {
+      kafka_common_Error_t* all_err = kafka_admin_RemoveMembersFromConsumerGroupResult_all(result);
+      if (all_err != nullptr) {
+        fill_proto_error(resp->mutable_error(), all_err);
+        kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(result);
+        return grpc::Status::OK;
+      }
+    }
 
-    // In removeAll mode the handle carries no keys at all (Java's memberResult is
-    // not applicable there), so `entries` comes back empty and the only outcome
-    // was the non-null return checked above.
+    // In removeAll mode `entries` comes back empty; the only outcome was the
+    // all() failure checked above.
     const int32_t count = kafka_admin_RemoveMembersFromConsumerGroupResult_count(result);
     for (int32_t i = 0; i < count; i++) {
       VoidResultEntry* entry = resp->add_entries();
@@ -3314,8 +3412,9 @@ class AdminServiceImpl final : public AdminService::Service {
   // -- ACLs, quotas, SCRAM, delegation tokens & features (slice G5) -----------
   //
   // Six of the thirteen have no keys at all — their Java result holds a single
-  // future — so the whole-call error is the entry point's non-null return and
-  // there is no per-key slot: describeAcls, describeClientQuotas,
+  // future — so the whole-call error is that future's failure, read with the
+  // Java-named getter (or the entry point's non-null return if the request
+  // could not be submitted), and there is no per-key slot: describeAcls, describeClientQuotas,
   // createDelegationToken, renew/expireDelegationToken, describeDelegationToken
   // and describeFeatures.
   //
@@ -3393,6 +3492,13 @@ class AdminServiceImpl final : public AdminService::Service {
         f.operation(), f.permission_type(), timeout_ms(*req), &result);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+    // Java's single values() future; the call returned before it resolved.
+    kafka_common_Error_t* future_err = kafka_admin_DescribeAclsResult_values(result);
+    if (future_err != nullptr) {
+      fill_proto_error(resp->mutable_error(), future_err);
+      kafka_admin_DescribeAclsResult_destroy(result);
       return grpc::Status::OK;
     }
 
@@ -3544,6 +3650,13 @@ class AdminServiceImpl final : public AdminService::Service {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
+    // Java's single entities() future; the call returned before it resolved.
+    kafka_common_Error_t* future_err = kafka_admin_DescribeClientQuotasResult_entities(result);
+    if (future_err != nullptr) {
+      fill_proto_error(resp->mutable_error(), future_err);
+      kafka_admin_DescribeClientQuotasResult_destroy(result);
+      return grpc::Status::OK;
+    }
 
     const int32_t count = kafka_admin_DescribeClientQuotasResult_count(result);
     for (int32_t i = 0; i < count; i++) {
@@ -3690,6 +3803,14 @@ class AdminServiceImpl final : public AdminService::Service {
         admin, users.data(), users.count(), timeout_ms(*req), &result);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+    // A failure of the whole request (not a user-level error) fails every view;
+    // users().get() reports exactly that, and it is the whole call's error.
+    kafka_common_Error_t* future_err = kafka_admin_DescribeUserScramCredentialsResult_users_error(result);
+    if (future_err != nullptr) {
+      fill_proto_error(resp->mutable_error(), future_err);
+      kafka_admin_DescribeUserScramCredentialsResult_destroy(result);
       return grpc::Status::OK;
     }
 
@@ -3840,6 +3961,14 @@ class AdminServiceImpl final : public AdminService::Service {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
+    // Java's single delegationToken() future; the call returned before it
+    // resolved.
+    kafka_common_Error_t* future_err = kafka_admin_CreateDelegationTokenResult_delegation_token(result);
+    if (future_err != nullptr) {
+      fill_proto_error(resp->mutable_error(), future_err);
+      kafka_admin_CreateDelegationTokenResult_destroy(result);
+      return grpc::Status::OK;
+    }
 
     const kafka_common_security_token_delegation_DelegationToken_t* token =
         kafka_admin_CreateDelegationTokenResult_get_token(result);
@@ -3870,6 +3999,14 @@ class AdminServiceImpl final : public AdminService::Service {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
+    // Java's single expiryTimestamp() future; the call returned before it
+    // resolved.
+    kafka_common_Error_t* future_err = kafka_admin_RenewDelegationTokenResult_expiry_timestamp_error(result);
+    if (future_err != nullptr) {
+      fill_proto_error(resp->mutable_error(), future_err);
+      kafka_admin_RenewDelegationTokenResult_destroy(result);
+      return grpc::Status::OK;
+    }
     resp->set_expiry_timestamp_ms(kafka_admin_RenewDelegationTokenResult_expiry_timestamp(result));
     kafka_admin_RenewDelegationTokenResult_destroy(result);
     return grpc::Status::OK;
@@ -3890,6 +4027,14 @@ class AdminServiceImpl final : public AdminService::Service {
         timeout_ms(*req), &result);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+    // Java's single expiryTimestamp() future; the call returned before it
+    // resolved.
+    kafka_common_Error_t* future_err = kafka_admin_ExpireDelegationTokenResult_expiry_timestamp_error(result);
+    if (future_err != nullptr) {
+      fill_proto_error(resp->mutable_error(), future_err);
+      kafka_admin_ExpireDelegationTokenResult_destroy(result);
       return grpc::Status::OK;
     }
     resp->set_expiry_timestamp_ms(kafka_admin_ExpireDelegationTokenResult_expiry_timestamp(result));
@@ -3919,6 +4064,14 @@ class AdminServiceImpl final : public AdminService::Service {
         timeout_ms(*req), &result);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+    // Java's single delegationTokens() future; the call returned before it
+    // resolved.
+    kafka_common_Error_t* future_err = kafka_admin_DescribeDelegationTokenResult_delegation_tokens(result);
+    if (future_err != nullptr) {
+      fill_proto_error(resp->mutable_error(), future_err);
+      kafka_admin_DescribeDelegationTokenResult_destroy(result);
       return grpc::Status::OK;
     }
 
@@ -3952,6 +4105,14 @@ class AdminServiceImpl final : public AdminService::Service {
         &result);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+    // Java's single featureMetadata() future; the call returned before it
+    // resolved.
+    kafka_common_Error_t* future_err = kafka_admin_DescribeFeaturesResult_feature_metadata(result);
+    if (future_err != nullptr) {
+      fill_proto_error(resp->mutable_error(), future_err);
+      kafka_admin_DescribeFeaturesResult_destroy(result);
       return grpc::Status::OK;
     }
 
@@ -4033,16 +4194,15 @@ class AdminServiceImpl final : public AdminService::Service {
 
   // -- Producers & transactions (slice G6) ------------------------------------
   //
-  // abort_transaction / force_terminate_transaction have **no result handle** at
-  // the C boundary: `AbortTransactionResult` exposes only `all()` and
-  // `TerminateTransactionResult` only `result()`, so a handle whose sole method
-  // is `_destroy` would be ceremony plus a leak to get wrong. Success is a null
-  // return, which maps straight onto the shared StatusResponse.
+  // abort_transaction / force_terminate_transaction hold a single future
+  // (`AbortTransactionResult.all()` / `TerminateTransactionResult.result()`):
+  // its failure, or a submission failure, maps straight onto the shared
+  // StatusResponse's error.
   //
   // The other four are keyed handles. list_transactions is keyed by broker, from
   // Java's byBrokerId(): the only view that keeps a per-broker error, so a
-  // partial listing survives. Only a failure of the broker-discovery step comes
-  // back as the entry point's non-null return.
+  // partial listing survives. Only a failure of the broker-discovery step
+  // (byBrokerId().get()) becomes the top-level error.
 
   grpc::Status DescribeProducers(grpc::ServerContext*, const DescribeProducersRequest* req,
                                  DescribeProducersResponse* resp) override {
@@ -4195,10 +4355,19 @@ class AdminServiceImpl final : public AdminService::Service {
       return grpc::Status::OK;
     }
     const std::string topic = req->topic_partition().topic();
+    kafka_admin_AbortTransactionResult_t* result = nullptr;
     kafka_common_Error_t* err = kafka_admin_AdminClient_abort_transaction(
         admin, topic.c_str(), req->topic_partition().partition(), req->producer_id(),
-        req->producer_epoch(), req->coordinator_epoch(), timeout_ms(*req));
-    if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
+        req->producer_epoch(), req->coordinator_epoch(), timeout_ms(*req), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+    // The call returned before the abort completed (as Java's abortTransaction
+    // does); all().get() waits for it and reports its failure.
+    kafka_common_Error_t* abort_err = kafka_admin_AbortTransactionResult_all(result);
+    if (abort_err != nullptr) fill_proto_error(resp->mutable_error(), abort_err);
+    kafka_admin_AbortTransactionResult_destroy(result);
     return grpc::Status::OK;
   }
 
@@ -4211,9 +4380,19 @@ class AdminServiceImpl final : public AdminService::Service {
       return grpc::Status::OK;
     }
     const std::string id = req->transactional_id();
+    kafka_admin_TerminateTransactionResult_t* result = nullptr;
     kafka_common_Error_t* err = kafka_admin_AdminClient_force_terminate_transaction(
-        admin, id.c_str(), timeout_ms(*req));
-    if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
+        admin, id.c_str(), timeout_ms(*req), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+    // The call returned before the termination completed (as Java's
+    // forceTerminateTransaction does); result().get() waits for it and reports
+    // its failure.
+    kafka_common_Error_t* terminate_err = kafka_admin_TerminateTransactionResult_result(result);
+    if (terminate_err != nullptr) fill_proto_error(resp->mutable_error(), terminate_err);
+    kafka_admin_TerminateTransactionResult_destroy(result);
     return grpc::Status::OK;
   }
 
@@ -4246,6 +4425,14 @@ class AdminServiceImpl final : public AdminService::Service {
         &result);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+    // Broker discovery (Java's byBrokerId().get()) is the one listTransactions
+    // failure that is the whole call's; a per-broker failure stays in its entry.
+    kafka_common_Error_t* future_err = kafka_admin_ListTransactionsResult_by_broker_id(result);
+    if (future_err != nullptr) {
+      fill_proto_error(resp->mutable_error(), future_err);
+      kafka_admin_ListTransactionsResult_destroy(result);
       return grpc::Status::OK;
     }
 
