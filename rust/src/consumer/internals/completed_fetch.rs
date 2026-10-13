@@ -1204,7 +1204,8 @@ impl CompletedFetch {
     ///   - `Ok(None)` when no record is positioned at the cursor — either the
     ///     declared record count is exhausted (`records_remaining <= 0`) or the
     ///     batch's record bytes are exhausted (`record_byte_offset` past end,
-    ///     or a compressed stream ended).
+    ///     a compressed stream ended, or the bytes end inside the next
+    ///     record's size).
     ///   - `Ok(Some(..))` when a record is parsed.
     ///   - `Err(..)` when the record body is individually malformed (e.g. a bad
     ///     varint). This is a recoverable [`Error`] — the receive path no
@@ -1235,14 +1236,12 @@ impl CompletedFetch {
             // `record_byte_offset` stays 0.
             RecordSource::Stream(stream) => &stream.chunk()[..],
         };
-        if cursor.record_byte_offset >= records_bytes.len() {
+        if cursor.record_byte_offset >= records_bytes.len()
+            || ends_inside_record_size(&records_bytes[cursor.record_byte_offset..])
+        {
             return Ok(None);
         }
-        let log_append_time = if batch_meta.timestamp_type == TimestampType::LogAppendTime {
-            Some(batch_meta.last_offset_timestamp)
-        } else {
-            None
-        };
+        let from_stream = matches!(cursor.record_source, RecordSource::Stream(_));
         // A parse failure here is bad input (the record body is malformed),
         // not a logic bug: the receive path no longer re-walks the batch's
         // records on load, so this is the first time the record body is
@@ -1256,21 +1255,15 @@ impl CompletedFetch {
         // `getMessage()` does not carry. Java propagates this exception
         // unwrapped; the wrapper that names the partition and offset is this
         // client's.
-        let (record, _consumed) = DefaultRecord::read_ref_from_buffer(
-            &records_bytes[cursor.record_byte_offset..],
-            batch_meta.base_offset,
-            batch_meta.base_timestamp,
-            batch_meta.base_sequence,
-            log_append_time,
-        )
-        .map_err(|e| {
-            Error::InvalidRecord(InvalidRecordError::new(format!(
-                "Record batch for partition {} at offset {} is invalid, cause: {}",
-                self.partition,
-                batch_meta.base_offset,
-                e.message()
-            )))
-        })?;
+        let (record, _consumed) = read_record(batch_meta, &records_bytes[cursor.record_byte_offset..], from_stream)
+            .map_err(|e| {
+                Error::InvalidRecord(InvalidRecordError::new(format!(
+                    "Record batch for partition {} at offset {} is invalid, cause: {}",
+                    self.partition,
+                    batch_meta.base_offset,
+                    e.message()
+                )))
+            })?;
         Ok(Some((record, batch_meta)))
     }
 
@@ -1331,7 +1324,7 @@ impl CompletedFetch {
                 if records_bytes.is_empty() {
                     return Ok(false);
                 }
-                let (record, _consumed) = self.read_control_record(batch, records_bytes)?;
+                let (record, _consumed) = self.read_control_record(batch, records_bytes, false)?;
                 return self.is_abort_marker(batch, &record);
             },
             PendingRecordSource::Compressed { records, compression_type } => (records, *compression_type),
@@ -1358,10 +1351,10 @@ impl CompletedFetch {
             let records_bytes = stream
                 .next_record()
                 .map_err(|e| invalid_batch_error(&self.partition, batch.base_offset, e.message()))?;
-            if records_bytes.is_empty() {
+            if ends_inside_record_size(records_bytes) {
                 return Err(premature_eof_error(&self.partition));
             }
-            let (record, consumed) = self.read_control_record(batch, records_bytes)?;
+            let (record, consumed) = self.read_control_record(batch, records_bytes, true)?;
             // The first record's key is parsed now but its fault reported only
             // once every record has been read, as Java parses it after
             // `iterator()` has returned.
@@ -1380,8 +1373,8 @@ impl CompletedFetch {
         first_is_abort_marker.unwrap_or(Ok(false))
     }
 
-    /// Parses the control record at the front of `records_bytes`, returning it
-    /// and its length.
+    /// Parses the control record at the front of `records_bytes`, read out of a
+    /// compressed stream when `from_stream`, returning it and its length.
     ///
     /// By the cause's message, as in `peek_current_record`: Java's
     /// `batchIterator.next()` throws the `InvalidRecordException` unwrapped.
@@ -1389,20 +1382,9 @@ impl CompletedFetch {
         &self,
         batch: &BatchMetadata,
         records_bytes: &'a [u8],
+        from_stream: bool,
     ) -> Result<(DefaultRecordRef<'a>, usize), Error> {
-        let log_append_time = if batch.timestamp_type == TimestampType::LogAppendTime {
-            Some(batch.last_offset_timestamp)
-        } else {
-            None
-        };
-        DefaultRecord::read_ref_from_buffer(
-            records_bytes,
-            batch.base_offset,
-            batch.base_timestamp,
-            batch.base_sequence,
-            log_append_time,
-        )
-        .map_err(|e| {
+        read_record(batch, records_bytes, from_stream).map_err(|e| {
             Error::InvalidRecord(InvalidRecordError::new(format!(
                 "Control batch for partition {} at offset {} is invalid, cause: {}",
                 self.partition,
@@ -1756,6 +1738,53 @@ fn premature_eof_error(partition: &TopicPartition) -> Error {
         "Incorrect declared batch size for partition {partition}, premature EOF reached \
          (declared record count exceeds the records present in the batch)"
     )))
+}
+
+/// Whether `records` end before a record's size does, so no record starts at
+/// their front. Java reports this as a premature EOF: the buffer reader runs
+/// out of bytes (`BufferUnderflowException`, `DefaultRecordBatch.java:308`), and
+/// the stream reader takes the end of the stream for a continuation byte
+/// (`IllegalArgumentException`, `:640`). A stream that fails rather than ends
+/// inside the size is reported by [`RecordStream::next_record`] first.
+fn ends_inside_record_size(records: &[u8]) -> bool {
+    records.len() < MAX_RECORD_SIZE_LENGTH && records.iter().all(|b| b & 0x80 != 0)
+}
+
+/// Parses the record at the front of `records`, the rest of `batch`'s record
+/// bytes, returning it and its length.
+///
+/// A record whose body is cut off fails with the text of the Java reader that
+/// reads it: the buffer reader's for an uncompressed batch
+/// (`DefaultRecord.java:312-315`), the stream reader's when `from_stream`
+/// (`DefaultRecord.java:288-290`). A stream's records end early only where the
+/// stream does, as [`RecordStream::next_record`] reads each record whole first.
+fn read_record<'a>(
+    batch: &BatchMetadata,
+    records: &'a [u8],
+    from_stream: bool,
+) -> Result<(DefaultRecordRef<'a>, usize), InvalidRecordError> {
+    let log_append_time = (batch.timestamp_type == TimestampType::LogAppendTime).then_some(batch.last_offset_timestamp);
+    DefaultRecord::read_ref_from_buffer(
+        records,
+        batch.base_offset,
+        batch.base_timestamp,
+        batch.base_sequence,
+        log_append_time,
+    )
+    .map_err(|e| {
+        // Checked only once parsing has failed, so a record read whole costs
+        // nothing more.
+        match ByteUtils::read_varint(records) {
+            Ok((size, size_length))
+                if from_stream && usize::try_from(size).is_ok_and(|size| records.len() - size_length < size) =>
+            {
+                InvalidRecordError::new(format!(
+                    "Invalid record size: expected {size} bytes in record payload, but the record payload reached EOF."
+                ))
+            },
+            _ => e,
+        }
+    })
 }
 
 /// The batch holds more records than it declares: Java's
@@ -3456,7 +3485,8 @@ mod tests {
     }
 
     /// A compressed batch whose records end inside a record fails at that
-    /// record, with the parser's text for a record longer than what is left.
+    /// record, with the text of Java's stream reader for a record the stream
+    /// ends inside of (`DefaultRecord.java:288-290`).
     #[test]
     fn test_compressed_batch_ending_inside_a_record_is_invalid() {
         for compression in codecs() {
@@ -3467,9 +3497,44 @@ mod tests {
                 assert!(matches!(fault, Error::InvalidRecord(_)), "{fault:?}");
                 assert_eq!(
                     "Record batch for partition test-0 at offset 0 is invalid, cause: Invalid record size: \
-                     expected 13 bytes in record payload, but instead the buffer has only 10 remaining bytes.",
+                     expected 13 bytes in record payload, but the record payload reached EOF.",
                     fault.message(),
                     "{compression:?} check.crcs={check_crcs}"
+                );
+            }
+        }
+    }
+
+    /// A batch whose records end inside a record's size fails with the
+    /// premature-EOF text, compressed or not, after the records before it are
+    /// returned: Java's buffer and stream readers both report it this way
+    /// (`DefaultRecordBatch.java:308, 640`).
+    #[test]
+    fn test_batch_ending_inside_a_record_size_is_premature_eof() {
+        // One whole record, then the first byte of a second record's size.
+        let batch = batch_with_overridden_record_count(0, 1, 2);
+        let records = [&batch[RecordBatch::RECORD_BATCH_OVERHEAD..], &[0x80][..]];
+        let mut uncompressed = [&batch[..], &[0x80][..]].concat();
+        let length = (uncompressed.len() - AbstractRecords::LOG_OVERHEAD) as i32;
+        put_i32(&mut uncompressed, RecordBatch::LENGTH_OFFSET, length);
+        recompute_crc(&mut uncompressed);
+        let mut cases = vec![("none".to_string(), uncompressed)];
+        for compression in codecs() {
+            cases.push((
+                format!("{compression:?}"),
+                compressed_batch_with_records(&batch, &records, &compression),
+            ));
+        }
+        for (compression, buf) in &cases {
+            for check_crcs in [false, true] {
+                let (offsets, fault) = records_then_fault(buf, check_crcs);
+                assert_eq!(vec![0], offsets, "{compression}");
+                assert!(matches!(fault, Error::InvalidRecord(_)), "{fault:?}");
+                assert_eq!(
+                    "Incorrect declared batch size for partition test-0, premature EOF reached \
+                     (declared record count exceeds the records present in the batch)",
+                    fault.message(),
+                    "{compression} check.crcs={check_crcs}"
                 );
             }
         }
@@ -3844,7 +3909,45 @@ mod tests {
             assert!(matches!(cause, Error::InvalidRecord(_)), "{cause:?}");
             assert_eq!(
                 "Control batch for partition test-0 at offset 0 is invalid, cause: Invalid record size: expected \
-                 13 bytes in record payload, but instead the buffer has only 10 remaining bytes.",
+                 13 bytes in record payload, but the record payload reached EOF.",
+                cause.message(),
+                "{compression:?}"
+            );
+            assert_eq!(0, cf.next_fetch_offset, "{compression:?}");
+        }
+    }
+
+    /// A compressed control batch whose stream ends inside a later record's
+    /// size fails with the premature-EOF text, as Java's stream reader reports
+    /// it (`DefaultRecordBatch.java:640`), before any of the batch's records is
+    /// consumed.
+    #[test]
+    fn test_compressed_control_batch_ending_inside_a_record_size_is_premature_eof() {
+        const PRODUCER_ID: i64 = 42;
+        for compression in codecs() {
+            // The marker, then the first byte of a second record's size.
+            let mut marker = marker_batch(0, 1, PRODUCER_ID, ControlRecordType::Abort);
+            put_i32(&mut marker, RecordBatch::RECORDS_COUNT_OFFSET, 2);
+            let records = [&marker[RecordBatch::RECORD_BATCH_OVERHEAD..], &[0x80][..]];
+            let buf = compressed_batch_with_records(&marker, &records, &compression);
+            let mut cf = CompletedFetch::with_full(
+                make_subscriptions(),
+                Arc::new(BufferSupplier::create()),
+                tp("test", 0),
+                partition_data_with_aborted_txn(buf, PRODUCER_ID, 0),
+                test_aggregator(),
+                0,
+            );
+            let config = make_fetch_config(IsolationLevel::ReadCommitted, true);
+            let err = cf
+                .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+                .expect_err("the second control record's size is cut off");
+            assert_eq!(SEEK_PAST_MESSAGE, err.message());
+            let cause = cause(&err);
+            assert!(matches!(cause, Error::InvalidRecord(_)), "{cause:?}");
+            assert_eq!(
+                "Incorrect declared batch size for partition test-0, premature EOF reached \
+                 (declared record count exceeds the records present in the batch)",
                 cause.message(),
                 "{compression:?}"
             );
