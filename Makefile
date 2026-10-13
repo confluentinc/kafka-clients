@@ -32,6 +32,7 @@ VENV = . venv/bin/activate
 	test-integration-perf-dotnet \
 	producer-perf-test producer-perf-test-c \
 	consumer-perf-test-python producer-perf-test-python \
+	transactional-producer-perf-test-python \
 	producer-perf-test-dotnet consumer-perf-test-dotnet \
 	verify verify-c verify-python verify-dotnet verify-rust \
 	verify-rust-macos-docker verify-python-macos-docker verify-c-macos-docker \
@@ -284,6 +285,9 @@ consumer-perf-test-python: build-python init-venv-librdkafka
 
 producer-perf-test-python: build-python init-venv-librdkafka
 	@($(VENV) && $(MAKE) -C python $(ROOTS) LIBRDKAFKA_PYTHON=$(LIBRDKAFKA_PYTHON) producer-perf-test)
+
+transactional-producer-perf-test-python: build-python init-venv-librdkafka
+	@($(VENV) && $(MAKE) -C python $(ROOTS) LIBRDKAFKA_PYTHON=$(LIBRDKAFKA_PYTHON) transactional-producer-perf-test)
 
 # Env-driven .NET producer/consumer performance benchmarks (manual; need a
 # reachable broker via BOOTSTRAP_SERVERS). Delegate into dotnet/ — its
