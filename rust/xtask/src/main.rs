@@ -1331,6 +1331,15 @@ mod signals {
         let last = LAST.load(Ordering::SeqCst);
         HANDLED.iter().find(|(n, _)| *n == last).map_or("a signal", |(_, name)| name)
     }
+
+    /// Serialises the tests that raise a handled signal or read [`count`]:
+    /// the counter is process-wide, so a test signalling the test binary would
+    /// otherwise look like an operator interrupt to one running concurrently.
+    #[cfg(test)]
+    pub fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 /// Run the transactional producer performance test as an env-driven benchmark
@@ -2345,6 +2354,7 @@ version = "0.1.0"
 
     #[test]
     fn a_caught_signal_is_recorded_not_fatal() {
+        let _signals = signals::test_lock();
         signals::install();
         let before = signals::count();
         Command::new("kill")

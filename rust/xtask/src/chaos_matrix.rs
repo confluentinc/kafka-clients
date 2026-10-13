@@ -1962,6 +1962,7 @@ fn now_utc() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead as _, BufReader};
 
     #[test]
     fn broker_tag_follows_kafka_cluster_rs() {
@@ -2480,6 +2481,9 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 70 filtered out
 
     #[test]
     fn stopping_a_run_sends_sigint_then_kills_after_the_grace() {
+        // `stop_group` ends its grace early on any signal the binary records,
+        // so keep the signalling tests out of it.
+        let _signals = crate::signals::test_lock();
         // Honours SIGINT, as the harness does: gone well before the grace.
         let mut polite = Command::new("sh").args(["-c", "sleep 30; :"]).process_group(0).spawn().unwrap();
         let pgid = polite.id();
@@ -2489,13 +2493,16 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 70 filtered out
         assert!(!group_alive(pgid));
         // Ignores it, like a wedged test: killed once the grace is over.
         let mut wedged = Command::new("sh")
-            .args(["-c", "trap '' INT; sleep 30; :"])
+            .args(["-c", "trap '' INT; echo ready; sleep 30; :"])
             .process_group(0)
+            .stdout(Stdio::piped())
             .spawn()
             .unwrap();
         let pgid = wedged.id();
-        // Let the shell install its trap before it is signalled.
-        std::thread::sleep(Duration::from_millis(300));
+        // The shell has installed its trap once it says so.
+        let mut ready = String::new();
+        BufReader::new(wedged.stdout.take().unwrap()).read_line(&mut ready).unwrap();
+        assert_eq!(ready, "ready\n");
         let started = Instant::now();
         stop_group(&mut wedged, pgid, Duration::from_secs(1)).unwrap();
         assert!(started.elapsed() >= Duration::from_secs(1));
