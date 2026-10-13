@@ -563,12 +563,17 @@ void test_transaction_methods_on_non_transactional_producer(void) {
      * group-metadata clone and the blocking call all run here. Nothing else in the
      * suite reaches it — the mock tests take the other arm.
      *
-     * Unlike the other four methods this one does not fail with the
-     * non-transactional error. Since Kafka 4.4 (KIP-1319) the producer first
-     * awaits metadata for the offsets' topics (KafkaProducer.java:803), and only
-     * then calls into the transaction manager. With no transactional.id the
-     * producer is still idempotent, so it does hold a manager, and with no
-     * reachable broker the metadata wait fails after max.block.ms first. */
+     * Since Kafka 4.4 (KIP-1319) the producer first awaits metadata for the
+     * offsets' topics (KafkaProducer.java:803), and only then calls into the
+     * transaction manager. With no transactional.id the producer is still
+     * idempotent, so it does hold a manager. Two outcomes are both Java-faithful:
+     *   - the metadata wait times out after max.block.ms (no reachable broker);
+     *   - the wait ends early because the sender's lazy bootstrap of
+     *     bootstrap.servers lands after the version was taken: Metadata.bootstrap
+     *     bumps updateVersion (Metadata.java:309), which satisfies
+     *     awaitUpdate, and the transaction manager then rejects the call with
+     *     the non-transactional error. That needs only a slow first sender poll,
+     *     as on a loaded CI runner, so neither outcome can be pinned here. */
     kafka_consumer_Consumer_t *consumer = kafka_consumer_MockConsumer_new("earliest");
     kafka_consumer_ConsumerGroupMetadata_t *group_metadata =
         kafka_consumer_Consumer_group_metadata(consumer);
@@ -583,8 +588,10 @@ void test_transaction_methods_on_non_transactional_producer(void) {
         group_metadata);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_FALSE(is_txn_guard_error(err));
-    TEST_ASSERT_EQUAL_STRING("Failed to update metadata after 300 ms.",
-                             kafka_common_Error_message(err));
+    const char *send_offsets_message = kafka_common_Error_message(err);
+    if (strcmp(send_offsets_message, "Failed to update metadata after 300 ms.") != 0)
+        TEST_ASSERT_EQUAL_STRING("Transactional method invoked on a non-transactional producer.",
+                                 send_offsets_message);
     kafka_common_Error_destroy(err);
 
     /* A null group_metadata is rejected before the guard is even taken, with a
