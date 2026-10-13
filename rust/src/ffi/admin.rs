@@ -131,6 +131,8 @@ use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use tokio_util::sync::CancellationToken;
+
 use crate::admin::KafkaAdminClient;
 use crate::admin::config_entry::{ConfigSource, ConfigType};
 use crate::admin::{
@@ -213,11 +215,21 @@ struct AdminHandle {
     completion_tx: std::sync::mpsc::Sender<CompletionJob>,
     /// Dispatcher thread join handle; detached on destroy.
     dispatcher: Mutex<Option<std::thread::JoinHandle<()>>>,
-    /// Join handles for the task of every `_async` operation that borrows the
-    /// admin client, i.e. every [`admin_async_void_op`] (`close_async`).
-    /// `destroy` joins them before freeing the handle. Finished ones are pruned
-    /// as new ones are registered ([`reserve_pending_task`]).
-    pending_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Join handles for the task of every [`admin_async_void_op`] operation
+    /// (`close_async`, the only one), which borrows the admin client until it
+    /// finishes. `destroy` waits for them to complete before freeing the handle.
+    /// Finished ones are pruned as new ones are registered
+    /// ([`reserve_pending_task`]), here and in `pending_calls`.
+    pending_closes: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Join handles for the task of every other `_async` operation
+    /// ([`admin_async_future_op`]), which owns everything it uses. `destroy`
+    /// fails the ones still waiting through `destroyed`, then joins them, so that
+    /// each callback still fires exactly once.
+    pending_calls: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Cancelled by `destroy` once the closes have completed. The task of every
+    /// operation in `pending_calls` still waiting then stops waiting and fires
+    /// its callback with a timeout error.
+    destroyed: CancellationToken,
     /// Whether this handle wraps a [`MockAdminClient`]. Read by the
     /// `kafka_admin_MockAdminClient_*` driver functions.
     is_mock: bool,
@@ -233,10 +245,10 @@ impl AdminHandle {
     }
 }
 
-/// Locks `pending_tasks` and reserves room for one more task, so the caller can
-/// register an `_async` operation's task for `destroy` to join before the
-/// handle is freed. Prunes finished handles first, so the list does not grow
-/// over the client's lifetime.
+/// Locks `tasks` (`pending_closes` or `pending_calls`) and reserves room for
+/// one more task, so the caller can register an `_async` operation's task for
+/// `destroy` to join before the handle is freed. Prunes finished handles first,
+/// so the list does not grow over the client's lifetime.
 ///
 /// This is the first half of the producer's two-phase registration: the caller
 /// keeps the returned guard across its `spawn` and then `push`es the new
@@ -246,8 +258,10 @@ impl AdminHandle {
 /// itself aborts ([`spawn_callback_task`]), so `#[ffi_guard]` never fires a
 /// callback that a spawned task also fires. The tasks never take this lock, so
 /// holding it across the `spawn` cannot deadlock.
-fn reserve_pending_task(h: &AdminHandle) -> std::sync::MutexGuard<'_, Vec<tokio::task::JoinHandle<()>>> {
-    let mut tasks = h.pending_tasks.lock().unwrap();
+fn reserve_pending_task(
+    tasks: &Mutex<Vec<tokio::task::JoinHandle<()>>>,
+) -> std::sync::MutexGuard<'_, Vec<tokio::task::JoinHandle<()>>> {
+    let mut tasks = tasks.lock().unwrap();
     tasks.retain(|t| !t.is_finished());
     tasks.reserve(1);
     tasks
@@ -274,7 +288,9 @@ fn build_admin_handle(
         runtime_handle,
         completion_tx,
         dispatcher: Mutex::new(Some(dispatcher)),
-        pending_tasks: Mutex::new(Vec::new()),
+        pending_closes: Mutex::new(Vec::new()),
+        pending_calls: Mutex::new(Vec::new()),
+        destroyed: CancellationToken::new(),
         is_mock,
     });
     Box::into_raw(handle) as *mut kafka_admin_AdminClient_t
@@ -651,17 +667,23 @@ pub extern "C" fn kafka_admin_MockAdminClient_new(num_brokers: i32) -> *mut kafk
 ///
 /// Safe to call with a null pointer (no-op).
 ///
-/// A [`kafka_admin_AdminClient_close_async`] still in flight is waited for
-/// until it completes, since a close cannot be interrupted. Its callback still
-/// fires exactly once, possibly after this function has returned. The other
-/// `_async` operations hold no reference into the handle and are not waited
-/// for: one whose callback has not fired yet may be dropped with the runtime,
-/// and then its callback never fires. To have every callback fire, wait for
-/// them all before destroying the handle.
+/// The callback of every `_async` operation still in flight fires exactly
+/// once, possibly after this function has returned, so its `user_data` must
+/// stay valid until the callback has run, not merely until this function
+/// returns:
+///
+/// - A [`kafka_admin_AdminClient_close_async`] still in flight is waited for
+///   until it completes, since a close cannot be interrupted. As in Java, the
+///   other operations get its grace period to complete.
+/// - Every other operation still in flight after that fails at once with a
+///   `TIMEOUT` error, "The AdminClient thread has exited.", the error Java gives
+///   a call that its exited admin thread will not run. This function does not
+///   wait on the network for them.
 ///
 /// Called inside a tokio runtime, where that wait is impossible
 /// (`Runtime::block_on` panics there), this function returns at once, and the
-/// wait and the free happen on a new thread.
+/// wait and the free happen on a new thread. If that thread cannot be started,
+/// the handle is leaked instead: nothing is freed, and an error is logged.
 ///
 /// # Safety
 ///
@@ -695,10 +717,11 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_destroy(admin: *mut kafka_admin
     }
 }
 
-/// The body of [`kafka_admin_AdminClient_destroy`]: joins the tasks of the
-/// handle's in-flight [`admin_async_void_op`] operations, then frees it. Runs
-/// on the thread that called `destroy`, or on a thread of its own when that one
-/// is inside a tokio runtime.
+/// The body of [`kafka_admin_AdminClient_destroy`]: waits for the handle's
+/// in-flight closes to complete, fails its other in-flight `_async` operations
+/// and joins their tasks, then frees it. Runs on the thread that called
+/// `destroy`, or on a thread of its own when that one is inside a tokio
+/// runtime.
 ///
 /// # Safety
 ///
@@ -715,33 +738,46 @@ unsafe fn teardown_admin(addr: usize) {
     // Read poison-tolerantly, as the producer's `destroy` does: a lock is poisoned only by
     // a panic `#[ffi_guard]` caught, after which the C caller is told to destroy the
     // handle, so this must still work on a poisoned handle. Reading poison as "no tasks"
-    // would free the handle under a task still using it.
-    let mut tasks = std::mem::take(&mut *h.pending_tasks.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
-    tasks.retain(|t| !t.is_finished());
-    if !tasks.is_empty() {
-        // Each task borrows the admin client until it finishes, and a close cannot be
-        // interrupted, so this waits until it completes. A task finishes right after
-        // queuing its callback, so this does not wait for the callback itself, which may
-        // run on the dispatcher thread after the handle is gone: no completion job touches
-        // the handle.
-        h.runtime.block_on(async {
-            for task in tasks {
-                let _ = task.await;
-            }
-        });
-    }
+    // would free the handle under a task still using it, or drop a task's callback.
+    let take = |tasks: &Mutex<Vec<tokio::task::JoinHandle<()>>>| {
+        let mut tasks = std::mem::take(&mut *tasks.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+        tasks.retain(|t| !t.is_finished());
+        tasks
+    };
+    // A task finishes right after queuing its callback, so this does not wait for the
+    // callback itself, which may run on the dispatcher thread after the handle is gone: no
+    // completion job touches the handle.
+    let join = |tasks: Vec<tokio::task::JoinHandle<()>>| {
+        if !tasks.is_empty() {
+            h.runtime.block_on(async {
+                for task in tasks {
+                    let _ = task.await;
+                }
+            });
+        }
+    };
+    let closes = take(&h.pending_closes);
+    let calls = take(&h.pending_calls);
+    // A close borrows the admin client until it finishes and cannot be interrupted, so this
+    // waits until it completes. Meanwhile the other operations get its grace period, as in
+    // Java: each completes, or fails when the I/O task exits at the end of the period.
+    join(closes);
+    // Then fail the operations still waiting, as Java's close does once its grace period is
+    // over, without waiting for the I/O task: each task stops waiting on its future and
+    // queues its callback with a timeout error (`admin_async_future_op`).
+    h.destroyed.cancel();
+    join(calls);
     // SAFETY: per this function's `# Safety`, `addr` is the `Box::into_raw` of
     // `build_admin_handle` and this is its only teardown, so reclaiming the `Box` is the
-    // single, final use. Every task that borrowed the client was joined above: each
-    // `admin_async_void_op` call registers its task before returning, and no call may
-    // start once `destroy` has been called. The other `_async` tasks capture nothing from
-    // the handle. `h` is not used past this point.
+    // single, final use. Every `_async` task was joined above: an `_async` call that spawns
+    // a task registers it before returning, and no call may start once `destroy` has been
+    // called. Only the close tasks borrowed the client; the others capture nothing from the
+    // handle. `h` is not used past this point.
     let handle = unsafe { Box::from_raw(addr as *mut AdminHandle) };
     let AdminHandle { kind, runtime, completion_tx, dispatcher, .. } = *handle;
 
-    // 1. Shut down the runtime. No task that borrows the client is left (all were joined
-    //    above), and `shutdown_background` drops the remaining awaiter tasks, and whatever
-    //    the client spawned on it, without waiting.
+    // 1. Shut down the runtime. No `_async` task is left (all were joined above), and
+    //    `shutdown_background` drops whatever the client spawned on it without waiting.
     runtime.shutdown_background();
     // 2. Drop the admin client.
     drop(kind);
@@ -876,8 +912,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_close_async(
 /// calling thread (see the module docs, *Callback thread*).
 ///
 /// `op` borrows the admin client from the spawned task, so the task is
-/// registered in `pending_tasks` for `destroy` to join before the handle is
-/// freed.
+/// registered in `pending_closes` for `destroy` to wait for before the handle
+/// is freed.
 ///
 /// # Safety
 ///
@@ -913,7 +949,7 @@ unsafe fn admin_async_void_op<F, Fut>(
     // handle. `h` itself is used only within this call (cloning `completion_tx`, resolving
     // `h.admin()`, registering and spawning the task), but the `&'static dyn Admin` derived
     // from it (`client`) is captured by the spawned task and used until `op(client)`
-    // completes. The task is registered in `pending_tasks` before this call returns, and
+    // completes. The task is registered in `pending_closes` before this call returns, and
     // `kafka_admin_AdminClient_destroy` joins every registered task before it frees the
     // handle, so the client outlives the task. No call may start once `destroy` has been
     // called, which means no task is registered after `destroy` has taken the list.
@@ -922,7 +958,7 @@ unsafe fn admin_async_void_op<F, Fut>(
     // `&'static dyn Admin` is `Send` because `Admin: Send + Sync`; resolving it
     // here keeps the (non-`Sync`) handle itself out of the spawned task.
     let client: &'static dyn Admin = h.admin();
-    let mut pending = reserve_pending_task(h);
+    let mut pending = reserve_pending_task(&h.pending_closes);
     let task = spawn_callback_task(&h.runtime_handle, async move {
         let target = target;
         let error = match op(client).await {
@@ -967,11 +1003,15 @@ impl SendUserData {
 /// to await. This mirrors Java, where `Admin.createTopics(...)` enqueues the
 /// request on the caller's thread and returns immediately.
 ///
-/// The spawned task only awaits that future. `complete` then runs on the
+/// The spawned task only awaits that future, or stops waiting with a timeout
+/// error when `destroy` gives up on the operation. `complete` then runs on the
 /// dispatcher thread, builds the C result handle from the `Ok` value (or an
 /// error handle from the `Err`), and fires the typed C callback. Building the
 /// handle inside `complete` (never inside the task) keeps the task's future free
-/// of non-`Send` raw pointers.
+/// of non-`Send` raw pointers. The task is registered in `pending_calls`, so
+/// `destroy` can fail and join it, and the callback still fires exactly once.
+/// So the future `submit` returns must be safe to drop at any `.await`: every
+/// one here only awaits the `*Result`'s `KafkaFuture`s.
 ///
 /// Two paths never reach the dispatcher and run `complete` **inline on the
 /// calling thread** instead: a NULL `admin`, and a `submit` that returns `Err`
@@ -1005,10 +1045,11 @@ unsafe fn admin_async_future_op<T, S, Fut, C>(
     // SAFETY: `handle_ref` requires a non-null handle from an admin-client constructor;
     // `admin` is non-null (checked above) and, per this function's `# Safety`, such a
     // handle. `h` is used only within this synchronous call (entering the runtime, running
-    // `submit(h.admin())` on the calling thread, cloning `completion_tx` and spawning) and
-    // nothing derived from it escapes: `submit` takes `&dyn Admin` for an anonymous
-    // lifetime and must return a `'static` future, so the spawned task captures only that
-    // future, the owned sender clone `tx`, `ud` and `complete`.
+    // `submit(h.admin())` on the calling thread, cloning `completion_tx` and `destroyed`,
+    // registering and spawning) and nothing derived from it escapes: `submit` takes
+    // `&dyn Admin` for an anonymous lifetime and must return a `'static` future, so the
+    // spawned task captures only that future, the owned clones `tx` and `destroyed`, `ud`
+    // and `complete`.
     let h = unsafe { handle_ref(admin) };
     // Scoped so the runtime `EnterGuard` is dropped before we spawn.
     let submitted = {
@@ -1026,12 +1067,25 @@ unsafe fn admin_async_future_op<T, S, Fut, C>(
     };
     let tx = h.completion_tx.clone();
     let ud = SendUserData(user_data);
-    spawn_callback_task(&h.runtime_handle, async move {
+    let destroyed = h.destroyed.clone();
+    let mut pending = reserve_pending_task(&h.pending_calls);
+    let task = spawn_callback_task(&h.runtime_handle, async move {
         let ud = ud;
-        let result = future.await;
+        // `biased`, so a result that is already in wins over a `destroy` that races it.
+        // Dropping `future` when `destroy` wins is safe: it only awaits `KafkaFuture`s,
+        // which the I/O task completes whether or not anyone still waits on them.
+        let result = tokio::select! {
+            biased;
+            result = future => result,
+            // `new TimeoutException("The AdminClient thread has exited.")`, what Java gives a
+            // call its exited admin thread will not run (`KafkaAdminClient.java:1573-1574`);
+            // see `KafkaAdminClient::submit`.
+            () = destroyed.cancelled() => Err(Error::timeout("The AdminClient thread has exited.")),
+        };
         let job: CompletionJob = Box::new(move || complete(result, ud.into_ptr()));
         enqueue_or_run_inline(&tx, job);
     });
+    pending.push(task);
 }
 
 /// Async dispatch for a value-returning admin RPC that resolves through one
@@ -30590,64 +30644,85 @@ mod tests {
 
     // -- destroy with an `_async` operation in flight ------------------------
 
-    /// Logs the invocations of [`log_close_callback`].
+    /// Logs the invocations of [`log_close_callback`] or [`log_list_topics_callback`].
     #[derive(Default)]
-    struct CloseCallbackLog {
+    struct CallbackLog {
         calls: std::sync::atomic::AtomicI32,
         errors: std::sync::atomic::AtomicI32,
+        /// The error code of the last invocation that carried an error.
+        code: std::sync::atomic::AtomicI32,
         /// The error message of the last invocation that carried an error.
         message: Mutex<Option<String>>,
     }
 
-    /// A close callback that logs itself in the [`CloseCallbackLog`] passed as
-    /// `user_data`, freeing the error handle if it is given one, as a C caller must.
+    impl CallbackLog {
+        /// Logs one invocation, freeing its error handle if it is given one, as a C
+        /// caller must.
+        ///
+        /// # Safety
+        ///
+        /// `error` must be null or an owned handle, which this destroys.
+        unsafe fn log(&self, error: *mut kafka_common_Error_t) {
+            if !error.is_null() {
+                // SAFETY: Test callback: `error` is non-null (checked above) and owned by the
+                // callback per this function's `# Safety`, live until the destroy below; the
+                // code and the message are copied out before that.
+                let (code, message) = unsafe {
+                    (
+                        common::kafka_common_Error_code(error) as i32,
+                        CStr::from_ptr(common::kafka_common_Error_message(error))
+                            .to_string_lossy()
+                            .into_owned(),
+                    )
+                };
+                // SAFETY: Test callback: `error` is owned by the callback (see above); this is
+                // its single destroy, after its last read.
+                unsafe { common::kafka_common_Error_destroy(error) };
+                self.code.store(code, std::sync::atomic::Ordering::SeqCst);
+                *self.message.lock().unwrap() = Some(message);
+                self.errors.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            // Last, so a test that sees the count also sees the error and its message.
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// A close callback that logs itself in the [`CallbackLog`] passed as
+    /// `user_data`.
     ///
     /// # Safety
     ///
     /// Called by the library through `kafka_admin_AdminClient_close_callback_t`:
     /// `error` must be null or an owned handle (destroyed here) and `user_data` a
-    /// leaked, so never freed, `&CloseCallbackLog`.
+    /// leaked, so never freed, `&CallbackLog`.
     unsafe extern "C" fn log_close_callback(error: *mut kafka_common_Error_t, user_data: *mut c_void) {
-        // SAFETY: Test callback: `user_data` is the leaked `&CloseCallbackLog` the test
-        // passed to `kafka_admin_AdminClient_close_async`, live whenever this fires, even
-        // after the test returns; the shared reborrow is used only for atomic writes and
-        // the `message` lock.
-        let log = unsafe { &*(user_data as *const CloseCallbackLog) };
-        if !error.is_null() {
-            // SAFETY: Test callback: `error` is non-null (checked above) and owned by this
-            // callback per `kafka_admin_AdminClient_close_callback_t`, live until the
-            // destroy below; the message is copied into an owned `String` before that.
-            let message = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
-                .to_string_lossy()
-                .into_owned();
-            // SAFETY: Test callback: `error` is owned by this callback (see above); this is
-            // its single destroy, after its last read.
-            unsafe { common::kafka_common_Error_destroy(error) };
-            *log.message.lock().unwrap() = Some(message);
-            log.errors.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        }
-        // Last, so a test that sees the count also sees the error and its message.
-        log.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // SAFETY: Test callback: `user_data` is the leaked `&CallbackLog` the test passed to
+        // `kafka_admin_AdminClient_close_async`, live whenever this fires, even after the
+        // test returns, and `error` is null or owned by this callback, as `log` requires.
+        unsafe { (*(user_data as *const CallbackLog)).log(error) };
     }
 
-    /// A `list_topics` callback that only frees whichever handle it is given.
+    /// A `list_topics` callback that frees the result handle it is given and logs
+    /// itself in the [`CallbackLog`] passed as `user_data`.
     ///
     /// # Safety
     ///
     /// Called by the library through `kafka_admin_AdminClient_list_topics_callback_t`:
     /// `result` and `error` must each be null or an owned handle (both are destroyed
-    /// here).
-    unsafe extern "C" fn discard_list_topics(
+    /// here) and `user_data` a leaked, so never freed, `&CallbackLog`.
+    unsafe extern "C" fn log_list_topics_callback(
         result: *mut kafka_admin_ListTopicsResult_t,
         error: *mut kafka_common_Error_t,
-        _user_data: *mut c_void,
+        user_data: *mut c_void,
     ) {
-        // SAFETY: Test callback: `result` and `error` are each null or owned by this
-        // callback per `kafka_admin_AdminClient_list_topics_callback_t`, both destroy
-        // functions accept null, and this is the single destroy of each.
+        // SAFETY: Test callback: `result` is null or owned by this callback per
+        // `kafka_admin_AdminClient_list_topics_callback_t`, the destroy function accepts null,
+        // and this is its single destroy. `user_data` is the leaked `&CallbackLog` the test
+        // passed to `kafka_admin_AdminClient_list_topics_async`, live whenever this fires, and
+        // `error` is null or owned by this callback, as `log` requires.
         unsafe {
             kafka_admin_ListTopicsResult_destroy(result);
-            common::kafka_common_Error_destroy(error);
+            (*(user_data as *const CallbackLog)).log(error);
         }
     }
 
@@ -30665,8 +30740,9 @@ mod tests {
 
     /// Builds a production admin client on an unreachable bootstrap server with
     /// one `list_topics_async` that can never be answered, so a close waits out
-    /// its whole timeout for that call before failing it, as Java's does.
-    fn unreachable_admin_with_a_pending_call() -> *mut kafka_admin_AdminClient_t {
+    /// its whole timeout for that call before failing it, as Java's does. Returns
+    /// the handle and the call's leaked callback log.
+    fn unreachable_admin_with_a_pending_call() -> (*mut kafka_admin_AdminClient_t, &'static CallbackLog) {
         let props = kafka_admin_AdminClientProperties_new();
         let key = CString::new("bootstrap.servers").unwrap();
         let value = CString::new("127.0.0.1:1").unwrap();
@@ -30683,17 +30759,58 @@ mod tests {
         // returned, no longer borrowed by the client, and this is its single destroy.
         unsafe { kafka_admin_AdminClientProperties_destroy(props) };
         assert!(error.is_null() && !admin.is_null(), "admin client construction failed");
-        // SAFETY: Test: `admin` is the live handle built above and `discard_list_topics` a
-        // valid `extern "C"` function of the `list_topics` callback signature, which never
-        // reads `user_data`.
+        let log: &'static CallbackLog = Box::leak(Box::default());
+        // SAFETY: Test: `admin` is the live handle built above, `log_list_topics_callback` a
+        // valid `extern "C"` function of the `list_topics` callback signature, and
+        // `user_data` the leaked `log`, valid for as long as the callback may fire.
         unsafe {
-            kafka_admin_AdminClient_list_topics_async(admin, 60_000, false, discard_list_topics, std::ptr::null_mut())
+            kafka_admin_AdminClient_list_topics_async(
+                admin,
+                60_000,
+                false,
+                log_list_topics_callback,
+                log as *const CallbackLog as *mut c_void,
+            )
         };
         // Let the I/O task move the call to its pending list first. Its loop checks
         // whether to exit before taking in new calls (Java takes them in first), so a
         // close submitted in the same poll would fail the call at once, not wait for it.
         std::thread::sleep(Duration::from_millis(300));
-        admin
+        assert_eq!(
+            log.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the call must still be pending"
+        );
+        (admin, log)
+    }
+
+    /// Asserts that the pending call logged by `log` fired its callback exactly
+    /// once, with a `TIMEOUT` error, and returns the error message. Call it once
+    /// the dispatcher has exited, so that every callback has run.
+    fn timed_out_call_message(log: &CallbackLog) -> String {
+        use std::sync::atomic::Ordering::SeqCst;
+        assert_eq!(log.calls.load(SeqCst), 1, "the pending call's callback must fire exactly once");
+        assert_eq!(log.errors.load(SeqCst), 1, "the pending call must fail");
+        assert_eq!(
+            log.code.load(SeqCst),
+            Errors::RequestTimedOut.code() as i32,
+            "the pending call must fail with a timeout"
+        );
+        log.message.lock().unwrap().clone().unwrap()
+    }
+
+    /// Asserts that the call logged by `log`, pending while a close was in flight,
+    /// failed once its grace period was over. The I/O task fails it as it exits,
+    /// naming the call (`fail_all_remaining`), unless the close stops waiting for
+    /// that task first, both being due at the end of the period: then `destroy`
+    /// fails it.
+    fn assert_call_failed_after_the_close(log: &CallbackLog) {
+        let message = timed_out_call_message(log);
+        assert!(
+            message == "The AdminClient thread has exited. Call: listTopics"
+                || message == "The AdminClient thread has exited.",
+            "unexpected error message: {message}"
+        );
     }
 
     /// Takes the dispatcher's join handle out of `admin`, so a test can watch the
@@ -30708,8 +30825,8 @@ mod tests {
 
     /// Submits a 1 s `close_async`, which waits for the pending call, and checks it
     /// is still in flight. Returns the leaked callback log.
-    fn submit_close(admin: *const kafka_admin_AdminClient_t) -> &'static CloseCallbackLog {
-        let log: &'static CloseCallbackLog = Box::leak(Box::default());
+    fn submit_close(admin: *const kafka_admin_AdminClient_t) -> &'static CallbackLog {
+        let log: &'static CallbackLog = Box::leak(Box::default());
         // SAFETY: Test: `admin` is a live handle from an admin-client constructor,
         // `log_close_callback` a valid `extern "C"` function of the close-callback
         // signature, and `user_data` the leaked `log`, valid for as long as the callback
@@ -30719,7 +30836,7 @@ mod tests {
                 admin,
                 1_000,
                 log_close_callback,
-                log as *const CloseCallbackLog as *mut c_void,
+                log as *const CallbackLog as *mut c_void,
             )
         };
         std::thread::sleep(Duration::from_millis(100));
@@ -30733,7 +30850,7 @@ mod tests {
 
     /// Asserts that the in-flight close logged by `log` completed, firing its
     /// callback once without an error, and that the handle was then freed.
-    fn assert_close_fired_once_and_handle_freed(log: &CloseCallbackLog, dispatcher: std::thread::JoinHandle<()>) {
+    fn assert_close_fired_once_and_handle_freed(log: &CallbackLog, dispatcher: std::thread::JoinHandle<()>) {
         use std::sync::atomic::Ordering::SeqCst;
         assert!(
             wait_until(Duration::from_secs(10), || log.calls.load(SeqCst) > 0),
@@ -30758,7 +30875,7 @@ mod tests {
     /// the callback never fired, or let it run on into the freed client.
     #[test]
     fn test_destroy_waits_for_an_in_flight_close_async() {
-        let admin = unreachable_admin_with_a_pending_call();
+        let (admin, call) = unreachable_admin_with_a_pending_call();
         let dispatcher = take_dispatcher(admin);
         let log = submit_close(admin);
         // SAFETY: Test: `admin` is the live handle built above and this is its single
@@ -30766,6 +30883,34 @@ mod tests {
         // pointer is not used afterwards.
         unsafe { kafka_admin_AdminClient_destroy(admin) };
         assert_close_fired_once_and_handle_freed(log, dispatcher);
+        assert_call_failed_after_the_close(call);
+    }
+
+    /// `destroy` with no close in flight fails a pending call at once, with the
+    /// `TIMEOUT` error Java gives a call its exited admin thread will not run,
+    /// instead of waiting until the call times out against the unreachable
+    /// broker. Shutting the runtime down under it instead dropped the call's task,
+    /// so its callback never fired.
+    #[test]
+    fn test_destroy_fails_a_pending_call_with_a_timeout() {
+        let (admin, call) = unreachable_admin_with_a_pending_call();
+        let dispatcher = take_dispatcher(admin);
+        let started = std::time::Instant::now();
+        // SAFETY: Test: `admin` is the live handle built above and this is its single
+        // destroy, called outside any tokio runtime with no other call running on it; the
+        // pointer is not used afterwards.
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
+        // The call itself times out only after 60 s.
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "destroy must not wait for the pending call to time out"
+        );
+        assert!(
+            wait_until(Duration::from_secs(10), || dispatcher.is_finished()),
+            "destroy must free the handle"
+        );
+        dispatcher.join().unwrap();
+        assert_eq!(timed_out_call_message(call), "The AdminClient thread has exited.");
     }
 
     /// `destroy` inside a tokio runtime, where `Runtime::block_on` panics, hands the
@@ -30773,7 +30918,7 @@ mod tests {
     /// callback fires once, and the handle is still freed.
     #[test]
     fn test_destroy_inside_a_tokio_runtime_hands_the_teardown_off() {
-        let admin = unreachable_admin_with_a_pending_call();
+        let (admin, call) = unreachable_admin_with_a_pending_call();
         let dispatcher = take_dispatcher(admin);
         let log = submit_close(admin);
         let outer = tokio::runtime::Builder::new_current_thread().build().unwrap();
@@ -30785,6 +30930,7 @@ mod tests {
         });
         drop(outer);
         assert_close_fired_once_and_handle_freed(log, dispatcher);
+        assert_call_failed_after_the_close(call);
     }
 
     /// `destroy` on the dispatcher thread, as from inside a callback, waits there
@@ -30792,15 +30938,15 @@ mod tests {
     /// handle and returns; the close's callback, queued behind it, then fires.
     #[test]
     fn test_destroy_on_the_dispatcher_thread_waits_for_an_in_flight_close_async() {
-        let admin = unreachable_admin_with_a_pending_call();
+        let (admin, call) = unreachable_admin_with_a_pending_call();
         let dispatcher = take_dispatcher(admin);
         let log = submit_close(admin);
         let (returned_tx, returned_rx) = std::sync::mpsc::channel::<()>();
         let addr = admin as usize;
         let destroy_job: CompletionJob = Box::new(move || {
             // SAFETY: Test: `addr` is the live handle built above and this is its single
-            // destroy; the test thread no longer uses it, and its only other user is the
-            // close's task, which `destroy` must wait for.
+            // destroy; the test thread no longer uses it, and its only other users are the
+            // `_async` operations' tasks, which `destroy` must wait for.
             unsafe { kafka_admin_AdminClient_destroy(addr as *mut kafka_admin_AdminClient_t) };
             returned_tx.send(()).unwrap();
         });
@@ -30814,6 +30960,7 @@ mod tests {
             "destroy on the dispatcher thread must return once the close completes"
         );
         assert_close_fired_once_and_handle_freed(log, dispatcher);
+        assert_call_failed_after_the_close(call);
     }
 
     /// Poisons `lock` the way a panic caught by `#[ffi_guard]` does: by panicking
@@ -30827,13 +30974,16 @@ mod tests {
         assert!(lock.is_poisoned(), "the lock must be poisoned");
     }
 
-    /// Regression for the two-phase task registration: with `pending_tasks`
-    /// poisoned, `close_async` must fail *before* it spawns its task.
-    /// `#[ffi_guard]` then reports the panic through the callback, which must fire
-    /// exactly once, before the call returns, and `destroy` must still free the
-    /// handle.
-    #[test]
-    fn test_close_async_with_poisoned_task_list_fires_callback_once() {
+    /// Regression for the two-phase task registration: with the task list that
+    /// `tasks` picks poisoned, the `_async` call that `submit` makes through
+    /// `entry_point` must fail *before* it spawns its task. `#[ffi_guard]` then
+    /// reports the panic through the callback, which must fire exactly once,
+    /// before the call returns, and `destroy` must still free the handle.
+    fn assert_poisoned_task_list_fires_callback_once(
+        tasks: fn(&AdminHandle) -> &Mutex<Vec<tokio::task::JoinHandle<()>>>,
+        entry_point: &str,
+        submit: impl FnOnce(*const kafka_admin_AdminClient_t, *mut c_void),
+    ) {
         use std::sync::atomic::Ordering::SeqCst;
         let admin = kafka_admin_MockAdminClient_new(1);
         assert!(!admin.is_null());
@@ -30841,19 +30991,9 @@ mod tests {
         // SAFETY: Test: `admin` is the live mock handle created above, as `handle_ref`
         // requires, and the reference is last used before the destroy at the end.
         let h = unsafe { handle_ref(admin) };
-        poison(&h.pending_tasks);
-        let log: &'static CloseCallbackLog = Box::leak(Box::default());
-        // SAFETY: Test: `admin` is the live mock handle, `log_close_callback` a valid
-        // `extern "C"` function of the close-callback signature, and `user_data` the leaked
-        // `log`, valid for as long as the callback may fire.
-        unsafe {
-            kafka_admin_AdminClient_close_async(
-                admin,
-                1_000,
-                log_close_callback,
-                log as *const CloseCallbackLog as *mut c_void,
-            )
-        };
+        poison(tasks(h));
+        let log: &'static CallbackLog = Box::leak(Box::default());
+        submit(admin, log as *const CallbackLog as *mut c_void);
         assert_eq!(log.calls.load(SeqCst), 1, "the panic must be reported before the call returns");
         // Give a stray task ample time to deliver a second completion.
         std::thread::sleep(Duration::from_millis(200));
@@ -30865,27 +31005,54 @@ mod tests {
             .clone()
             .expect("the callback must deliver the panic error");
         assert!(
-            msg.starts_with("Rust panic caught at the FFI boundary in kafka_admin_AdminClient_close_async:"),
+            msg.starts_with(&format!("Rust panic caught at the FFI boundary in {entry_point}:")),
             "unexpected error message: {msg}"
         );
         assert!(msg.contains("PoisonError"), "unexpected error message: {msg}");
         assert!(
-            h.pending_tasks
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_empty(),
+            tasks(h).lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty(),
             "no task may be registered"
         );
 
         // SAFETY: Test: `admin` is the mock handle created above and this is its single
         // destroy, called outside any tokio runtime with no operation in flight (the failed
-        // call spawned none); `destroy` reads the poisoned `pending_tasks` lock
-        // poison-tolerantly. Neither the pointer nor `h` is used afterwards.
+        // call spawned none); `destroy` reads the poisoned lock poison-tolerantly. Neither
+        // the pointer nor `h` is used afterwards.
         unsafe { kafka_admin_AdminClient_destroy(admin) };
         assert!(
             wait_until(Duration::from_secs(5), || dispatcher.is_finished()),
             "destroy must free a handle whose task list is poisoned"
         );
         dispatcher.join().unwrap();
+    }
+
+    #[test]
+    fn test_close_async_with_poisoned_task_list_fires_callback_once() {
+        assert_poisoned_task_list_fires_callback_once(
+            |h| &h.pending_closes,
+            "kafka_admin_AdminClient_close_async",
+            |admin, user_data| {
+                // SAFETY: Test: `admin` is the live mock handle, `log_close_callback` a valid
+                // `extern "C"` function of the close-callback signature, and `user_data` the
+                // leaked log, valid for as long as the callback may fire.
+                unsafe { kafka_admin_AdminClient_close_async(admin, 1_000, log_close_callback, user_data) }
+            },
+        );
+    }
+
+    #[test]
+    fn test_list_topics_async_with_poisoned_task_list_fires_callback_once() {
+        assert_poisoned_task_list_fires_callback_once(
+            |h| &h.pending_calls,
+            "kafka_admin_AdminClient_list_topics_async",
+            |admin, user_data| {
+                // SAFETY: Test: `admin` is the live mock handle, `log_list_topics_callback` a
+                // valid `extern "C"` function of the `list_topics` callback signature, and
+                // `user_data` the leaked log, valid for as long as the callback may fire.
+                unsafe {
+                    kafka_admin_AdminClient_list_topics_async(admin, -1, false, log_list_topics_callback, user_data)
+                }
+            },
+        );
     }
 }
