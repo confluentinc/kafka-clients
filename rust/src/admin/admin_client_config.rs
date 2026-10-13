@@ -366,11 +366,25 @@ fn parse_i64(key: &str, value: &str) -> Result<i64, Error> {
     value.trim().parse::<i64>().map_err(|_| Error::config_name_value(key, value))
 }
 
+/// Parses a string value as `bool`.
+///
+/// Java's `ConfigDef.parseType(BOOLEAN)` (`ConfigDef.java:703-737`) trims the
+/// value, then accepts `equalsIgnoreCase("true")` / `("false")`; anything else
+/// throws `ConfigException(name, value, "Expected value to be either true or
+/// false")`, where `value` is the **original, untrimmed** string. Same rule as
+/// the producer and consumer configs.
 fn parse_bool(key: &str, value: &str) -> Result<bool, Error> {
-    match value.trim() {
-        "true" => Ok(true),
-        "false" => Ok(false),
-        _ => Err(Error::config_name_value(key, value)),
+    let trimmed = value.trim();
+    if trimmed.eq_ignore_ascii_case("true") {
+        Ok(true)
+    } else if trimmed.eq_ignore_ascii_case("false") {
+        Ok(false)
+    } else {
+        Err(Error::config_name_value_message(
+            key,
+            value,
+            "Expected value to be either true or false",
+        ))
     }
 }
 
@@ -427,10 +441,14 @@ mod tests {
         props.insert("metadata.cluster.check.enable".to_string(), "false".to_string());
         assert!(!AdminClientConfig::new(&props).unwrap().metadata_cluster_check_enable());
 
+        // `ConfigDef.parseType(BOOLEAN)` is case-insensitive.
+        props.insert("metadata.cluster.check.enable".to_string(), " TRUE ".to_string());
+        assert!(AdminClientConfig::new(&props).unwrap().metadata_cluster_check_enable());
+
         props.insert("metadata.cluster.check.enable".to_string(), "maybe".to_string());
         assert_eq!(
             AdminClientConfig::new(&props).unwrap_err().message(),
-            "Invalid value maybe for configuration metadata.cluster.check.enable"
+            "Invalid value maybe for configuration metadata.cluster.check.enable: Expected value to be either true or false"
         );
     }
 
