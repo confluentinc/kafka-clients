@@ -43,6 +43,7 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <math.h>
 
 #define GENERATED_MESSAGE_COUNT 10000
@@ -82,6 +83,7 @@ static int BATCH_SIZE_KB = 1024;
 static int MAX_REQUEST_SIZE_KB = -1;
 static const char *MAX_IN_FLIGHT = "1000";
 static int BUFFER_MEMORY_MB = -1;
+static int PERF_DEBUG_TIMING = 0;
 static const char *COMPRESSION_TYPE = "none";
 static const char *LINGER_MS = "5";
 // When true, omit every performance-tuning knob and let the client run at its
@@ -101,7 +103,16 @@ static long first_message_time = 0;
 static long verified = 0;
 // Per-message p99 latency budget (ms). 0 disables the assertion.
 static long P99_LIMIT_MS = 0;
+// Machine-readable summary file, matching the other producer perf tests.
+static const char *RESULTS_FILE = "results.json";
 static bool latency_budget_exceeded = false;
+// Set when results.json could not be written; fails the run.
+static bool results_write_failed = false;
+// Set when the run cannot produce a trustworthy result: an early exit before
+// the summary (producer creation or warmup failure) or an inconsistent summary
+// (verified != completed, or completed != NUM_MESSAGES unless the duration cap
+// interrupted the run). Fails the run.
+static bool run_failed = false;
 // Latency histogram (ms resolution) for the p99 computation, mirroring the Rust
 // test. Written only by the single record-completed task and read after that
 // task is joined, so no locking is needed.
@@ -119,13 +130,26 @@ typedef struct {
     uint8_t* value;
 } Message;
 
+// v2 per-message future: one struct that is both the producev() opaque and
+// the completion handle. The delivery-report callback fills the metadata,
+// stamps `done_ns`, and release-stores `done`; the completion thread
+// acquire-loads `done` and then reads the fields. `topic` borrows the
+// rd_kafka_topic_name() pointer (valid until rd_kafka_destroy, which runs
+// only after the completion drain has joined), so the only per-message
+// allocation is this struct. Keeping it to one
+// allocation lets the completion thread keep pace with the producer at max
+// rate, so its backlog cannot turn into reported latency.
 typedef struct {
     int64_t offset;
     int32_t partition;
-    char* topic;
+    const char* topic;
     int64_t timestamp;
     rd_kafka_resp_err_t err;
-} V2RecordMetadata;
+    // Delivery-report timestamp (CLOCK_MONOTONIC ns). Latency is computed as
+    // done_ns - start_time, so completion-thread lag can never inflate it.
+    long done_ns;
+    atomic_bool done;
+} V2Future;
 
 typedef struct {
     test_Future_t future;
@@ -183,7 +207,12 @@ static Metrics metrics;
 
 static test_Future_t (*test_send) (test_Producer_t producer,
     Message *message);
-static bool (*test_verify_future) (test_Future_t future);
+// Blocks until the future completes, verifies it, and reports the completion
+// timestamp (CLOCK_MONOTONIC ns) through done_ns_out so latency is measured
+// send -> completion, independent of how far behind the completion thread is.
+// Both backends report the timestamp taken in their delivery callback (v2: the
+// librdkafka delivery report; v3: the send_with_callback callback).
+static bool (*test_verify_future) (test_Future_t future, long *done_ns_out);
 
 static long current_time_ms() {
     struct timeval tv;
@@ -239,20 +268,45 @@ static bool verify_record_metadata(kafka_producer_RecordMetadata_t* metadata) {
 }
 
 // Rust client C bindings backend (v3): KafkaProducer over confluent_kafka.h.
-// The producer owns an internal async runtime, so no polling thread is needed;
-// send returns a KafkaFuture_RecordMetadata whose _get blocks for the result.
+// The producer owns an internal async runtime, so no polling thread is needed.
+// Each send carries a delivery callback that stamps the ack time, so latency
+// does not depend on when the completion thread reaches the record's future
+// (head-of-line blocking on an earlier future would otherwise inflate it).
+typedef struct {
+    kafka_common_KafkaFuture_RecordMetadata_t *future;
+    // Ack timestamp (CLOCK_MONOTONIC ns), release-stored by test_v3_dr; 0 until
+    // the callback has fired.
+    atomic_long done_ns;
+} V3Future;
+
+// Delivery callback, run once per record on the producer's dispatcher thread.
+// It owns the metadata / error handles; the result itself is read through the
+// future. The store of done_ns is its last access to the V3Future.
+static void test_v3_dr(kafka_producer_RecordMetadata_t *metadata,
+                       kafka_common_Error_t *error, void *user_data) {
+    V3Future *f = (V3Future *)user_data;
+    long now = current_time_ns();
+    if (metadata) kafka_producer_RecordMetadata_destroy(metadata);
+    if (error) kafka_common_Error_destroy(error);
+    atomic_store_explicit(&f->done_ns, now, memory_order_release);
+}
+
 static test_Future_t test_v3_send(test_Producer_t producer, Message *message) {
     kafka_producer_Producer_t *p = (kafka_producer_Producer_t *)producer;
     kafka_common_Error_t *error = NULL;
-    kafka_common_KafkaFuture_RecordMetadata_t *future = NULL;
     const uint8_t *key = KEY_SIZE > 0 ? message->key : NULL;
     int32_t key_len = KEY_SIZE > 0 ? (int32_t)KEY_SIZE : -1;
+    V3Future *f = calloc(1, sizeof(V3Future));
+    atomic_init(&f->done_ns, 0);
     do {
         error = NULL;
-        future = kafka_producer_Producer_send(
+        // On a synchronous failure (error set) the callback is not invoked, so
+        // the same V3Future can be reused for the retry.
+        f->future = kafka_producer_Producer_send_with_callback(
             p, TOPIC, -1, -1,
             key, key_len,
             message->value, (int32_t)VALUE_SIZE,
+            test_v3_dr, f,
             &error);
 
         if (error) {
@@ -261,15 +315,38 @@ static test_Future_t test_v3_send(test_Producer_t producer, Message *message) {
             kafka_common_Error_destroy(error);
         }
     } while (error && !interrupted);
-    return future;
+    if (f->future == NULL) {
+        free(f);
+        return NULL;
+    }
+    return f;
 }
 
-static bool test_v3_verify_future(test_Future_t future) {
-    kafka_common_KafkaFuture_RecordMetadata_t *f =
-        (kafka_common_KafkaFuture_RecordMetadata_t *)future;
+static bool test_v3_verify_future(test_Future_t future, long *done_ns_out) {
+    V3Future *v3 = (V3Future *)future;
+    kafka_common_KafkaFuture_RecordMetadata_t *f = v3->future;
     kafka_common_Error_t* error = NULL;
     kafka_producer_RecordMetadata_t* metadata =
         kafka_common_KafkaFuture_RecordMetadata_get(f, &error);
+    // The callback fires on the dispatcher thread and may land just after the
+    // future resolves: wait for its ack timestamp (bounded, falling back to
+    // now if it never arrives) before releasing the V3Future it writes to.
+    long deadline = current_time_ns() + 10L * 1000000000L;
+    long done_ns;
+    while ((done_ns = atomic_load_explicit(&v3->done_ns, memory_order_acquire)) == 0) {
+        if (current_time_ns() > deadline) {
+            fprintf(stderr, "Delivery callback did not fire within 10 s\n");
+            done_ns = current_time_ns();
+            break;
+        }
+        struct timespec pause = {0, 20000};
+        nanosleep(&pause, NULL);
+    }
+    *done_ns_out = done_ns;
+    bool callback_fired = atomic_load_explicit(&v3->done_ns, memory_order_acquire) != 0;
+    // Only free the V3Future once the callback is done with it; if it never
+    // fired, leak it rather than risk a late write to freed memory.
+    if (callback_fired) free(v3);
 
     if (error) {
         const char* msg = kafka_common_Error_message(error);
@@ -292,7 +369,7 @@ static bool test_v3_verify_future(test_Future_t future) {
     return true;
 }
 
-static bool verify_rdkafka_message(V2RecordMetadata* rkmetadata) {
+static bool verify_rdkafka_message(V2Future* rkmetadata) {
     if (!DO_VERIFY) {
         verified++;
         return true;
@@ -343,29 +420,43 @@ static size_t queue_size(Queue* q);
 // metrics thread to report its average/peak depth. By Little's Law the depth
 // should sit at throughput * latency (rate * W); a depth that instead grows
 // over time signals the completion side lagging — produced-but-unverified
-// futures (and their librdkafka payload copies) piling up — rather than steady
-// in-flight buffering. NULL until main() points it at the queue.
+// futures piling up — rather than steady in-flight buffering. (Latency is
+// immune to that lag — it uses the future's own completion timestamp — but a
+// growing depth still inflates RSS and delays per-window metric attribution.)
+// NULL until main() points it at the queue.
 static Queue* g_future_queue = NULL;
 
 static void test_v2_dr(rd_kafka_t *rk,
                       const rd_kafka_message_t *rkmessage,
                       void *opaque) {
-    Queue *future = rkmessage->_private;
-    V2RecordMetadata *rkmetadata = malloc(sizeof(V2RecordMetadata));
-    rkmetadata->offset = rkmessage->offset;
-    rkmetadata->partition = rkmessage->partition;
-    rkmetadata->topic = strdup(rd_kafka_topic_name(rkmessage->rkt));
-    rkmetadata->timestamp = rd_kafka_message_timestamp(rkmessage, NULL);
-    rkmetadata->err = rkmessage->err;
-    queue_push(future, (void *)rkmetadata);
+    V2Future *f = rkmessage->_private;
+    f->offset = rkmessage->offset;
+    f->partition = rkmessage->partition;
+    // Borrowed pointer: valid until rd_kafka_destroy, which runs only after
+    // the completion drain has joined. No per-message strdup.
+    f->topic = rd_kafka_topic_name(rkmessage->rkt);
+    f->timestamp = rd_kafka_message_timestamp(rkmessage, NULL);
+    f->err = rkmessage->err;
+    f->done_ns = current_time_ns();
+    atomic_store_explicit(&f->done, true, memory_order_release);
+}
+
+/* PERF_LRK_STATS=1: librdkafka statistics JSON, one line per interval, for
+ * stage-level debugging (per-broker rtt / int_latency / outbuf_latency /
+ * batchsize, per-partition msgq). Written to stderr with a grep-able prefix. */
+static int v2_stats_cb(rd_kafka_t *rk, char *json, size_t json_len, void *opaque) {
+    (void)rk; (void)opaque;
+    fprintf(stderr, "[STATS-C] %.*s\n", (int)json_len, json);
+    return 0; /* librdkafka frees json */
 }
 
 static test_Future_t test_v2_send(test_Producer_t producer,  Message *message) {
     rd_kafka_t *rk = producer;
     rd_kafka_resp_err_t err = RD_KAFKA_RESP_ERR_NO_ERROR;
-    Queue *future = calloc(1, sizeof(Queue));
-    queue_init(future, 1);
+    V2Future *future = calloc(1, sizeof(V2Future));
+    atomic_init(&future->done, false);
 
+    long produce_start_ns = PERF_DEBUG_TIMING ? current_time_ns() : 0;
     do {
         if (err == RD_KAFKA_RESP_ERR__QUEUE_FULL && !interrupted) {
             // Wait a bit before retrying
@@ -376,11 +467,18 @@ static test_Future_t test_v2_send(test_Producer_t producer,  Message *message) {
             RD_KAFKA_V_KEY(message->key, KEY_SIZE),
             RD_KAFKA_V_VALUE(message->value, VALUE_SIZE),
             RD_KAFKA_V_OPAQUE(future),
-            RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_BLOCK),
+            RD_KAFKA_V_MSGFLAGS((getenv("NO_MSG_F_BLOCK") != NULL ? 0 : RD_KAFKA_MSG_F_BLOCK)),
             RD_KAFKA_V_END);
     } while (err == RD_KAFKA_RESP_ERR__QUEUE_FULL && !interrupted);
+    if (PERF_DEBUG_TIMING) {
+        long produce_ns = current_time_ns() - produce_start_ns;
+        /* Only blocked calls are interesting; unblocked producev is ~1us. */
+        if (produce_ns > 1000000) {
+            fprintf(stderr, "[TIMING][C] ts_ns=%ld tag=producev.blocked wait_ns=%ld\n",
+                    produce_start_ns, produce_ns);
+        }
+    }
     if (err) {
-        queue_destroy(future);
         free(future);
         return NULL;
     }
@@ -388,31 +486,26 @@ static test_Future_t test_v2_send(test_Producer_t producer,  Message *message) {
     return future;
 }
 
-static bool test_v2_verify_future(test_Future_t future) {
-    Queue *q = future;
-    V2RecordMetadata *rkmetadata = NULL;
-    if (!queue_pop(q, (void **)&rkmetadata, -1)) {
-        fprintf(stderr, "Failed to get message from queue\n");
-        goto fail;
+static bool test_v2_verify_future(test_Future_t future, long *done_ns_out) {
+    V2Future *f = future;
+    // Wait for the delivery report. The fast path (already done — the steady
+    // state whenever completions are pending) is a single acquire load;
+    // otherwise poll with a short sleep. The wait can never skew the
+    // measurement: latency uses the DR-side done_ns, not this thread's clock.
+    while (!atomic_load_explicit(&f->done, memory_order_acquire)) {
+        usleep(100);
     }
+    *done_ns_out = f->done_ns;
 
-    if (rkmetadata->err != RD_KAFKA_RESP_ERR_NO_ERROR ||
-        !verify_rdkafka_message(rkmetadata))
-        goto fail;
-
-    free(rkmetadata->topic);
-    free(rkmetadata);
-    queue_destroy(q);
-    free(q);
-    return true;
-fail:
-    if (rkmetadata) {
-        free(rkmetadata->topic);
-        free(rkmetadata);
+    bool ok;
+    if (f->err != RD_KAFKA_RESP_ERR_NO_ERROR) {
+        fprintf(stderr, "Delivery failed: %s\n", rd_kafka_err2str(f->err));
+        ok = false;
+    } else {
+        ok = verify_rdkafka_message(f);
     }
-    queue_destroy(q);
-    free(q);
-    return false;
+    free(f);
+    return ok;
 }
 
 // Process stats (CPU / RSS) — interval sampling, not a lifetime average.
@@ -1048,14 +1141,22 @@ static long percentile_from_hist(const long* hist, size_t len, double p) {
 }
 
 static void record_completed_calls(ProducedMessage* pm) {
-    if (!test_verify_future(pm->future)) {
+    long done_ns = 0;
+    if (!test_verify_future(pm->future, &done_ns)) {
+        // A failed record still completes, but contributes no latency — like
+        // the Rust and Java harnesses.
+        completed_messages++;
         return;
     }
 
     long start_time = pm->start_time;
     completed_messages++;
 
-    long current_latency = current_time_ns() - start_time;
+    // Latency ends at the future's completion timestamp (v2: the delivery
+    // report; v3: the blocking get() return), NOT at this thread's clock —
+    // otherwise any backlog in this completion thread would be misreported
+    // as client latency.
+    long current_latency = done_ns - start_time;
     if (current_latency > max_latency) {
         max_latency = current_latency;
     }
@@ -1215,6 +1316,25 @@ static void run_test() {
             rd_kafka_conf_set(conf, "max.in.flight.requests.per.connection", MAX_IN_FLIGHT, NULL, 0);
         }
 
+        /* A/B debugging knobs: PARTITIONER (e.g. murmur2_random) and
+         * STICKY_LINGER_MS (librdkafka sticky.partitioning.linger.ms; 0
+         * disables sticky assignment for NULL-key messages). */
+        if (getenv("PARTITIONER") != NULL) {
+            char errstr[256];
+            rd_kafka_conf_res_t r = rd_kafka_conf_set(conf, "partitioner", getenv("PARTITIONER"), errstr, sizeof(errstr));
+            fprintf(stderr, "A/B: partitioner=%s conf_set=%d %s\n", getenv("PARTITIONER"), (int)r,
+                    r == RD_KAFKA_CONF_OK ? "OK" : errstr);
+        }
+        if (getenv("STICKY_LINGER_MS") != NULL) {
+            char errstr[256];
+            rd_kafka_conf_res_t r = rd_kafka_conf_set(conf, "sticky.partitioning.linger.ms", getenv("STICKY_LINGER_MS"), errstr, sizeof(errstr));
+            fprintf(stderr, "A/B: sticky.partitioning.linger.ms=%s conf_set=%d %s\n", getenv("STICKY_LINGER_MS"), (int)r,
+                    r == RD_KAFKA_CONF_OK ? "OK" : errstr);
+        }
+        if (getenv("PERF_LRK_STATS") != NULL) {
+            rd_kafka_conf_set(conf, "statistics.interval.ms", "10000", NULL, 0);
+            rd_kafka_conf_set_stats_cb(conf, v2_stats_cb);
+        }
         rd_kafka_conf_set_dr_msg_cb(conf, test_v2_dr);
 
         producer = rd_kafka_new(RD_KAFKA_PRODUCER, conf, NULL, 0);
@@ -1228,6 +1348,7 @@ static void run_test() {
 
     if (!producer) {
         fprintf(stderr, "Failed to create producer\n");
+        run_failed = true;
         free_message_data(messages);
         return;
     }
@@ -1252,14 +1373,16 @@ static void run_test() {
         while (current_time_ns() < warmup_end_time) {
             Message* message = &messages[i % GENERATED_MESSAGE_COUNT];
             test_Future_t future = test_send(producer, message);
-            if (future && !test_verify_future(future)) {
+            long warmup_done_ns = 0;
+            if (future && !test_verify_future(future, &warmup_done_ns)) {
                 warmup_succeeded = false;
                 break;
             }
             usleep(100000);
         }
         if (!warmup_succeeded) {
-            printf("Warmup failed due to message verification error\n");
+            fprintf(stderr, "Warmup failed due to message verification error\n");
+            run_failed = true;
             goto end;
         } else {
             printf("Warmup complete.\n");
@@ -1329,62 +1452,134 @@ static void run_test() {
     after_ns = current_time_ns();
     long after_ms = current_time_ms();
 
-    // Verify all messages were verified
+    // An inconsistent summary fails the run, but the summary below is ALWAYS
+    // written so the run's numbers are not lost. Every queued future is
+    // drained above, so a verified/completed mismatch is a real verification
+    // or delivery failure and always fails. A short count is excused only when
+    // the duration cap in the send loop interrupted the run (that cap is also
+    // how a time-based run ends).
     if (verified != completed_messages) {
         fprintf(stderr, "Verified messages %ld does not match completed messages %ld\n",
             verified, completed_messages);
+        run_failed = true;
     } else if (NUM_MESSAGES > 0 && completed_messages != NUM_MESSAGES) {
         fprintf(stderr, "Completed messages %ld does not match produced messages %ld\n",
             completed_messages, NUM_MESSAGES);
-    } else {
-        metrics_set_measurement_end_ms(&metrics, after_ns);
-        long total_time_ns = after_ns - first_message_time;
-        double total_time_s = total_time_ns / 1e9;
-        double average_cpu, average_rss;
-        double message_rate = completed_messages / total_time_s;
-        metrics_external_metrics_aggregations(&metrics, &average_cpu, &average_rss);
-
-        printf("End time: %ld ms\n", after_ms);
-        printf("Duration: %.2f ms\n", (double)total_time_ns / 1e6);
-        printf("Average CPU: %.2f %%\n",
-            average_cpu);
-        printf("Average RSS: %.2f KiB\n",
-            average_rss / 1024.0);
-        printf("CPU efficiency: %.2f msg/(s * 1%% CPU)\n",
-            (double)message_rate / (average_cpu > 0.0 ? average_cpu : 1.0));
-        printf("Memory efficiency: %.2f msg/(s * KB RSS)\n",
-            (double)message_rate / (average_rss > 0.0 ? average_rss / 1024.0 : 1.0));
-        double average_queue_size;
-        size_t max_queue_size;
-        metrics_queue_aggregations(&metrics, &average_queue_size, &max_queue_size);
-        printf("Average future queue size: %.2f\n", average_queue_size);
-        printf("Max future queue size: %zu\n", max_queue_size);
-        printf("Average time: %.2f ms\n",
-            (double)total_time_ns / completed_messages / 1e6);
-        printf("Average rate msg/s: %.2f msg/s\n",
-            message_rate);
-        printf("Average rate MiB/s: %.2f MiB/s\n",
-            (completed_messages * MESSAGE_SIZE / (1024.0 * 1024.0)) / total_time_s);
-        printf("Average latency: %.2f ms\n",
-            (double)total_latency / completed_messages / 1e6);
-        printf("Max latency: %.2f ms\n", (double)max_latency / 1e6);
-
-        long p99_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.99);
-        printf("p99 latency: %ld ms\n", p99_ms);
-        // Latency budget — only asserted when set (P99_LIMIT_MS=0 disables it
-        // for max-rate benchmark runs, where queueing makes per-message latency
-        // moot). Mirrors the Rust producer_perf_test.
-        if (P99_LIMIT_MS > 0 && p99_ms > P99_LIMIT_MS) {
-            fprintf(stderr, "p99 latency %ld ms exceeds %ld ms budget\n",
-                p99_ms, P99_LIMIT_MS);
-            latency_budget_exceeded = true;
-        }
+        if (!interrupted) run_failed = true;
     }
 
-    // Stop sampling the queue before destroying it: the metrics thread runs
-    // until later, and the verification-failure branches above never set
-    // measurement_end_ms, so the measured-only guard alone would not prevent a
-    // sample after free. Clear under the metrics lock to avoid a data race.
+    metrics_set_measurement_end_ms(&metrics, after_ms);
+    long total_time_ns = after_ns - first_message_time;
+    double total_time_s = total_time_ns / 1e9;
+    double average_cpu, average_rss;
+    double message_rate = total_time_s > 0 ? completed_messages / total_time_s : 0.0;
+    metrics_external_metrics_aggregations(&metrics, &average_cpu, &average_rss);
+
+    printf("End time: %ld ms\n", after_ms);
+    printf("Duration: %.2f ms\n", (double)total_time_ns / 1e6);
+    printf("Average CPU: %.2f %%\n",
+        average_cpu);
+    printf("Average RSS: %.2f KiB\n",
+        average_rss / 1024.0);
+    printf("CPU efficiency: %.2f msg/(s * 1%% CPU)\n",
+        (double)message_rate / (average_cpu > 0.0 ? average_cpu : 1.0));
+    printf("Memory efficiency: %.2f msg/(s * KB RSS)\n",
+        (double)message_rate / (average_rss > 0.0 ? average_rss / 1024.0 : 1.0));
+    double average_queue_size;
+    size_t max_queue_size;
+    metrics_queue_aggregations(&metrics, &average_queue_size, &max_queue_size);
+    printf("Average future queue size: %.2f\n", average_queue_size);
+    printf("Max future queue size: %zu\n", max_queue_size);
+    printf("Average time: %.2f ms\n",
+        completed_messages > 0 ? (double)total_time_ns / completed_messages / 1e6 : 0.0);
+    printf("Average rate msg/s: %.2f msg/s\n",
+        message_rate);
+    printf("Average rate MiB/s: %.2f MiB/s\n",
+        total_time_s > 0 ? (completed_messages * MESSAGE_SIZE / (1024.0 * 1024.0)) / total_time_s : 0.0);
+    printf("Average latency: %.2f ms\n",
+        completed_messages > 0 ? (double)total_latency / completed_messages / 1e6 : 0.0);
+    printf("Max latency: %.2f ms\n", (double)max_latency / 1e6);
+
+    long p99_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.99);
+    printf("p99 latency: %ld ms\n", p99_ms);
+    // Latency budget — only asserted when set (P99_LIMIT_MS=0 disables it
+    // for max-rate benchmark runs, where queueing makes per-message latency
+    // moot). Mirrors the Rust producer_perf_test.
+    if (P99_LIMIT_MS > 0 && p99_ms > P99_LIMIT_MS) {
+        fprintf(stderr, "p99 latency %ld ms exceeds %ld ms budget\n",
+            p99_ms, P99_LIMIT_MS);
+        latency_budget_exceeded = true;
+    }
+
+    // Machine-readable summary, kept in sync with the other producer
+    // performance tests (same file name, keys and latency_ms shape as the
+    // consumer performance test's results.json; `client` identifies which
+    // implementation wrote it).
+    long p50_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.50);
+    long p90_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.90);
+    long p95_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.95);
+    long p999_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.999);
+    long min_latency_ms = 0;
+    for (size_t i = 0; i < MAX_LATENCY_MS + 2; i++) {
+        if (latency_hist[i] > 0) {
+            min_latency_ms = (long)i;
+            break;
+        }
+    }
+    // Guard the ratios: a run that completed no messages (or measured no
+    // time) must still write valid JSON, and nan / inf are not JSON numbers.
+    double results_rate = total_time_s > 0 ? message_rate : 0.0;
+    double results_mib_s = total_time_s > 0
+        ? (completed_messages * MESSAGE_SIZE / (1024.0 * 1024.0)) / total_time_s
+        : 0.0;
+    double results_avg_latency_ms = completed_messages > 0
+        ? (double)total_latency / completed_messages / 1e6
+        : 0.0;
+    FILE *results_fp = fopen(RESULTS_FILE, "w");
+    if (results_fp != NULL) {
+        fprintf(results_fp,
+            "{\n"
+            "  \"test\": \"producer\",\n"
+            "  \"client\": \"%s\",\n"
+            "  \"topic\": \"%s\",\n"
+            "  \"messages_measured\": %ld,\n"
+            "  \"duration_s\": %.2f,\n"
+            "  \"throughput_msg_s\": %.2f,\n"
+            "  \"throughput_mib_s\": %.2f,\n"
+            "  \"latency_ms\": {\"min\": %ld, \"avg\": %.2f, \"p50\": %ld, "
+            "\"p90\": %ld, \"p95\": %ld, \"p99\": %ld, \"p999\": %ld, "
+            "\"max\": %.2f},\n"
+            "  \"cpu_avg_pct\": %.2f,\n"
+            "  \"rss_avg_kib\": %.2f\n"
+            "}\n",
+            CLIENT_VERSION == 3 ? "rust-c-ffi" : "librdkafka",
+            TOPIC,
+            completed_messages,
+            total_time_s,
+            results_rate,
+            results_mib_s,
+            min_latency_ms,
+            results_avg_latency_ms,
+            p50_ms, p90_ms, p95_ms, p99_ms, p999_ms,
+            (double)max_latency / 1e6,
+            average_cpu,
+            average_rss / 1024.0);
+        if (fclose(results_fp) != 0) {
+            fprintf(stderr, "Failed to write %s\n", RESULTS_FILE);
+            results_write_failed = true;
+        } else {
+            printf("Results summary written to: %s\n", RESULTS_FILE);
+        }
+    } else {
+        // The machine-readable summary is the run's primary artifact:
+        // fail the run rather than exit 0 without it.
+        fprintf(stderr, "Failed to write %s\n", RESULTS_FILE);
+        results_write_failed = true;
+    }
+
+    // Stop sampling the queue before destroying it: the metrics thread keeps
+    // running until main stops it, so clear the pointer under the metrics lock
+    // to avoid a sample after free (and a data race).
     pthread_mutex_lock(&metrics.mutex);
     g_future_queue = NULL;
     pthread_mutex_unlock(&metrics.mutex);
@@ -1540,6 +1735,11 @@ int main(int argc, char** argv) {
         P99_LIMIT_MS = atol(p99_limit_ms_env);
     }
 
+    const char* results_file_env = getenv("RESULTS_FILE");
+    if (results_file_env != NULL) {
+        RESULTS_FILE = results_file_env;
+    }
+
     const char* bootstrap_servers_env = getenv("BOOTSTRAP_SERVERS");
     if (bootstrap_servers_env != NULL) {
         BOOTSTRAP_SERVERS = bootstrap_servers_env;
@@ -1576,6 +1776,7 @@ int main(int argc, char** argv) {
         COMPRESSION_TYPE = compression_type_env;
     }
 
+    PERF_DEBUG_TIMING = getenv("PERF_DEBUG_TIMING") != NULL && strcmp(getenv("PERF_DEBUG_TIMING"), "1") == 0;
     const char *buffer_memory_env = getenv("BUFFER_MEMORY");
     if (buffer_memory_env != NULL) {
         BUFFER_MEMORY_MB = atoi(buffer_memory_env);
@@ -1724,5 +1925,8 @@ int main(int argc, char** argv) {
     metrics_stop_collecting(&metrics);
     printf("Done\n");
 
-    return latency_budget_exceeded ? 1 : 0;
+    if (run_failed) {
+        fprintf(stderr, "Run failed (see above)\n");
+    }
+    return (latency_budget_exceeded || results_write_failed || run_failed) ? 1 : 0;
 }
