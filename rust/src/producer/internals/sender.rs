@@ -1319,7 +1319,7 @@ impl<C: KafkaClient> Sender<C> {
                 match action {
                     BatchAction::Reenqueue => {
                         // Java's `reenqueueBatch` records retries after re-enqueuing
-                        // (`Sender.java:753`). Capture the topic/count before the batch
+                        // (`Sender.java:754`). Capture the topic/count before the batch
                         // is moved. RecordAccumulator::reenqueue calls batch.reenqueued()
                         // internally, and on the idempotent sequence-order check failing
                         // it hands the batch back rather than dropping it — fail it inline
@@ -2417,7 +2417,7 @@ impl<C: KafkaClient> Sender<C> {
             );
             // The batch will be split and the sub-batches re-tracked with their own
             // sequences, so the big batch stops being tracked here
-            // (`Sender.java:685-686`).
+            // (`Sender.java:686-687`).
             if let Some(transaction_manager) = self.transaction_manager.clone() {
                 transaction_manager.lock().unwrap().remove_in_flight_batch(batch)?;
             }

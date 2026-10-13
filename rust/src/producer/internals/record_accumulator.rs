@@ -1566,7 +1566,7 @@ impl RecordAccumulator {
     /// sequence, or when it is not tracked as in flight. The second check is the one
     /// rules §7 cites as Java's proof that `reenqueueBatch` leaves a batch tracked:
     /// `Sender.reenqueueBatch` (`Sender.java:750-752`) deliberately does **not** call
-    /// `removeInFlightBatch`, unlike the `MESSAGE_TOO_LARGE` split path at `:685`.
+    /// `removeInFlightBatch`, unlike the `MESSAGE_TOO_LARGE` split path at `:686-687`.
     ///
     /// The batch is consumed by value, so on either error it is handed **back** to
     /// the caller as the `Err` payload rather than dropped: Java's
@@ -2808,7 +2808,7 @@ impl RecordAccumulator {
             .or_insert_with(|| Mutex::new(VecDeque::new()));
 
         // Java's caller does `accumulator.splitAndReenqueue(batch)` and then
-        // `maybeRemoveAndDeallocateBatch(batch)` (`Sender.java:686-688`). Rust's
+        // `maybeRemoveAndDeallocateBatch(batch)` (`Sender.java:688-689`). Rust's
         // `split_and_reenqueue` consumes the big batch, so the second statement has to
         // happen here: without it the big batch stays in `incomplete` — so
         // `has_incomplete()` never falls back to false — and its pooled buffer is never
@@ -4645,7 +4645,7 @@ mod tests {
 
         // A real appended batch is in the incomplete set; these hand-built ones are not,
         // and `split_and_reenqueue` now removes the big batch from it (Java
-        // `Sender.java:686-688`).
+        // `Sender.java:688-689`).
         accum.register_incomplete_for_test(&batch);
         // Enqueue the batch
         accum.reenqueue(batch, now).expect("reenqueue");
@@ -5647,7 +5647,7 @@ mod tests {
         accum.register_incomplete_for_test(&big_batch);
 
         // `Sender.completeBatch` removes the big batch from the txn map before
-        // splitting (`Sender.java:685-686`).
+        // splitting (`Sender.java:686-687`).
         transaction_manager
             .lock()
             .unwrap()
