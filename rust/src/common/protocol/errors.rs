@@ -983,7 +983,7 @@ impl Errors {
             },
             Self::FetchSessionTopicIdError => Some(Error::FetchSessionTopicId(FetchSessionTopicIdError::new(message))),
             Self::GroupAuthorizationFailed => {
-                Some(Error::GroupAuthorization(GroupAuthorizationError::new(String::new(), message)))
+                Some(Error::GroupAuthorization(GroupAuthorizationError::new(None, message)))
             },
             Self::GroupIdNotFound => Some(Error::GroupIdNotFound(GroupIdNotFoundError::new(message))),
             Self::GroupMaxSizeReached => Some(Error::GroupMaxSizeReached(GroupMaxSizeReachedError::new(message))),
