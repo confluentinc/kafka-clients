@@ -15638,9 +15638,6 @@ pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_destroy(map: *mut kafk
 // empty" stay distinguishable.
 // ---------------------------------------------------------------------------
 
-/// Per-key `KafkaFuture<Void>` outcomes keyed by a string (group id or group
-/// instance id).
-type GroupVoidOutcomes = HashMap<String, Result<(), Error>>;
 /// The resolved `valid()` listings, unkeyed `errors()` and `all()` outcome of
 /// `listGroups`.
 type ListGroupsOutcome = (Vec<GroupListing>, Vec<Error>, Result<(), Error>);
@@ -37264,7 +37261,7 @@ mod tests {
 
     #[test]
     fn string_keyed_void_results_report_success_as_a_null_error() {
-        let outcomes: GroupVoidOutcomes = HashMap::from([
+        let outcomes: HashMap<String, Result<(), Error>> = HashMap::from([
             ("a".to_string(), Ok(())),
             ("b".to_string(), Err(Error::new(Errors::GroupIdNotFound))),
         ]);
@@ -46744,10 +46741,8 @@ mod tests {
         assert_eq!(borrowed_message(error), "The AdminClient thread has exited.");
         // SAFETY: Test code: `error` is non-null (checked by `borrowed_message`) and borrowed
         // from `entries`, which is still alive.
-        assert_eq!(
-            unsafe { common::kafka_common_Error_code(error) } as i32,
-            Errors::RequestTimedOut as i32
-        );
+        let code = unsafe { common::kafka_common_Error_code(error) } as i32;
+        assert_eq!(code, Errors::RequestTimedOut as i32);
         destroyer.join().expect("destroyer thread");
 
         assert_eq!(
