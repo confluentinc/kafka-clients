@@ -424,3 +424,45 @@ def test_async_send_delivers_the_record_headers(kafka_broker: Any) -> None:
 
     asyncio.run(main())
     assert _consumed_headers(kafka_broker, topic) == HEADERS
+
+
+def test_async_commit_transaction_waits_for_an_async_def_callback(kafka_broker: Any) -> None:
+    # commitTransaction flushes the transaction's records, their callbacks
+    # fired first (ProducerBatch.completeFutureAndFireCallbacks before the
+    # EndTxn result completes): an awaited `async def` callback holds the
+    # commit until it returned and reported.
+    topic = _topic(kafka_broker)
+    configs = _configs(kafka_broker)
+
+    async def main() -> int:
+        release = asyncio.Event()
+        started = asyncio.Event()
+        finished: list[bool] = []
+
+        async def callback(metadata: RecordMetadata, exception: Exception | None) -> None:
+            assert exception is None
+            started.set()
+            await release.wait()
+            finished.append(True)
+
+        producer = AsyncKafkaProducer(configs=configs, key_serializer=string_serializer(),
+                                      value_serializer=string_serializer())
+        try:
+            await producer.init_transactions()
+            await producer.begin_transaction()
+            future = await producer.send(
+                record=ProducerRecord(topic=topic, key="key", value="value"),
+                callback=callback)
+            commit = asyncio.ensure_future(producer.commit_transaction())
+            await asyncio.wait_for(started.wait(), 60)
+            await asyncio.sleep(0.5)
+            assert not commit.done() and not future.done() and finished == []
+            release.set()
+            await asyncio.wait_for(commit, 60)
+            assert finished == [True]
+            return (await asyncio.wait_for(future, 30)).offset()
+        finally:
+            await producer.close(timeout=0)
+
+    offset = asyncio.run(main())
+    assert _committed(kafka_broker, topic) == [(offset, "key", "value")]

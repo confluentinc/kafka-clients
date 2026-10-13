@@ -1026,7 +1026,7 @@ plus the package-less helpers:
 | `util.rs` | 14 | `kafka_List_t`, `kafka_Map_t`, `kafka_Bytes_t`, `kafka_string_destroy` |
 | `kafka_future.rs` | 13 | the one generic `kafka_common_KafkaFuture_t` (`get`, `get_cb`, `is_done`, `all_of`, `then_apply` through a `BaseFunction_t` interface, `completed_future`) |
 | `callback_queue.rs` | 0 | `CallbackQueue`: the per-client callbacks vector behind `__execute_callbacks` / `__set_callbacks_notify` |
-| `producer/` (9 files) | 129 | `kafka_producer_Producer_t` interface, `KafkaProducer_t` / `MockProducer_t` with `__as_Producer`, `Callback_t`, `Partitioner_t`, `ProducerConfig_t`, records and metadata |
+| `producer/` (9 files) | 131 | `kafka_producer_Producer_t` interface, `KafkaProducer_t` / `MockProducer_t` with `__as_Producer`, `Callback_t` (the `callback_id` protocol), `Partitioner_t`, `ProducerConfig_t`, records and metadata |
 | `consumer/` (16 files) | 297 | `kafka_consumer_Consumer_t`, `MockConsumer_t` with `__as_Consumer`, `ConsumerRebalanceListener_t` / `OffsetCommitCallback_t` (the `callback_id` protocol), `Deserializer_t`, `ConsumerHandle_t`, `ConsumerConfig_t`, records |
 | `admin/` (130 files; `options/` 44, `rpc.rs` 94 invokers) | 844 | `kafka_admin_Admin_t`, `AdminClient_create`, `MockAdminClient_t` with `__as_Admin`, one `<Rpc>Options_t` per Java options class, one `<Rpc>Result_t` per Java result class with per-key `KafkaFuture_t`s, every admin data class |
 
@@ -1048,7 +1048,7 @@ by-design gaps, all closure parameters whose C shape the lint cannot derive):
   `(<fn>_cb_t cb, void *opaque)` whose `cb(value, error, opaque)` is queued on
   the client's `CallbackQueue` and run by `<Client>__execute_callbacks()` on the
   pumping thread; `<Client>__set_callbacks_notify(fn, opaque)` fires once per
-  empty→non-empty transition and may only schedule. There are 79 `_cb` twins
+  empty→non-empty transition and may only schedule. There are 80 `_cb` twins
   and no `_async` functions; Java's `commitAsync` keeps its name.
 - **Fixed-width scalars only**: `int8_t` for `boolean` / `byte`, no `bool`,
   `usize` or unsigned type in any signature, byte buffers as `kafka_Bytes_t`.
@@ -1065,7 +1065,22 @@ by-design gaps, all closure parameters whose C shape the lint cannot derive):
   (every method the consumer invokes). Each consumer keeps its own ids, so
   `consumer` is the one that invoked the method, except for an id from a
   standalone invoker (`ConsumerRebalanceListener_on_partitions_*`,
-  `OffsetCommitCallback_on_complete*`), which is routed by the id alone. An
+  `OffsetCommitCallback_on_complete*`), which is routed by the id alone.
+  The producer's delivery callback follows the same protocol, although
+  `onCompletion` is not `async` in Rust: `kafka_producer_Callback_on_completion_fn_t`
+  takes a trailing `callback_id` and reports through
+  `kafka_producer_Producer__set_callback_result(producer, callback_id, NULL, error)`,
+  inline or later from any thread. The record's C future completes with the
+  record's own outcome, and `flush`, `commit_transaction`, `abort_transaction`
+  and `close` return, only once the callbacks of the records they cover
+  reported, as Java fires the callbacks before `produceFuture.done()` and
+  joins its I/O thread on close; a blocking form runs the producer's callback
+  queue on the waiting thread meanwhile. A reported error is Java's throwing
+  `onCompletion`: logged, failing nothing. `close`'s timeout bounds only the
+  Rust close, the report wait after it is unbounded like Java's final
+  `ioThread.join()`; `_destroy` resolves any report still missing, so no
+  future or waiter hangs. Inside a delivery callback `flush` fails with Java's
+  error and `close` does not wait (Java's self-join guard). An
   unknown or repeated id is ignored and its error freed. A binding whose callback
   raised one of its own language's errors reports
   `kafka_common_Error_local_callback(message, opaque)`: `LocalCallbackError`
@@ -1189,7 +1204,9 @@ schedules; it never runs a callback.
   producer. That thread loops on the extension's `Producer_poll`, which waits
   on the condvar the notify hook signals and then runs
   `Producer__execute_callbacks`. So `send()` callbacks run one at a time, in
-  completion order, and never on the caller's thread.
+  completion order, and never on the caller's thread. A callback reports when
+  it returns (its exception, if it raised, logged as Java logs it); an
+  `async def` callback is closed and a `TypeError` logged.
 - **Sync consumer.** A waiting call (`poll`, `commit`, `committed`, `close`,
   ...) submits the `_cb` form and waits in 100 ms slices on a
   `threading.Event` the notify hook sets. Between slices it drains
@@ -1205,7 +1222,14 @@ schedules; it never runs a callback.
   - The producer pumps on the running loops it was used from, and once on
     entry to each async method. When none of those loops is running, the pump
     runs on a short-lived helper thread instead, so a completion whose loop
-    has closed is dropped promptly.
+    has closed is dropped promptly, reported at once. A `send()` callback runs
+    on the record's own loop and reports through the extension's
+    `Producer__set_callback_result(h, callback_id, error)` after it returned;
+    an `async def` callback is awaited there first, and later completions for
+    that loop wait behind it, so callbacks stay one at a time in completion
+    order. Inside its own `async def` callback `flush()` raises Java's error,
+    `close()` does not wait, and a transaction-end call is bounded by
+    `max.block.ms`.
   - An awaiting consumer call drains on its own loop. A coroutine listener
     method is awaited there and reports through the extension's
     `Consumer__set_callback_result(h, callback_id, error)`, which passes a

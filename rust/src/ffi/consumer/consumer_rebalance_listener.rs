@@ -36,10 +36,10 @@ use async_trait::async_trait;
 use crate::common::{Error, TopicPartition};
 use crate::consumer::ConsumerRebalanceListener;
 use crate::ffi::callback_queue::SendPtr;
-use crate::ffi::callback_result::{CallbackResults, void_sink};
+use crate::ffi::callback_result::{CallbackResults, INVOKER_RESULTS, void_sink};
 use crate::ffi::common::topic_partition::{list_topic_partitions, sorted_topic_partition_list};
 use crate::ffi::common::{deliver_panic, kafka_common_Error_t, run_inline};
-use crate::ffi::consumer::{Delivery, INVOKER_RESULTS, error_slot};
+use crate::ffi::consumer::{Delivery, error_slot};
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{kafka_List_destroy, kafka_List_t};
 

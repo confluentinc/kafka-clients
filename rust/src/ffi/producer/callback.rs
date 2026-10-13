@@ -25,10 +25,23 @@
 //!
 //! The callback is fired by the producer's background task, so it is always
 //! queued (§4 rule 5): `kafka_producer_Producer__execute_callbacks` invokes
-//! `on_completion(self, metadata, error)` on the pumping thread, exactly one
-//! of the two arguments being non-`NULL` the way Java hands exactly one
-//! non-`null` (a pre-accumulator rejection delivers the placeholder metadata
-//! Java delivers, beside the error). Both are borrowed for the call.
+//! `on_completion(self, metadata, error, callback_id)` on the pumping thread.
+//! `metadata` is always the record's metadata (the placeholder Java delivers
+//! for a failed record, whose offset is -1) and `error` is `NULL` on success,
+//! the record's failure otherwise; both are borrowed for the call.
+//!
+//! Java's `onCompletion` runs on the producer's I/O thread, and the record's
+//! future completes only once it returned (`ProducerBatch.completeFutureAndFireCallbacks`
+//! fires the callbacks before `produceFuture.done()`), so `flush()` and
+//! `commitTransaction()` return only after it. C's callback runs later, on
+//! whichever thread pumps the queue, so it reports that it finished: it
+//! calls `kafka_producer_Producer__set_callback_result(producer, callback_id,
+//! NULL, error)`, inside `on_completion` or later, from any thread. Until
+//! then the record's future does not complete and `flush` and the
+//! transaction commit and abort wait for it. A reported error is Java's
+//! `onCompletion` throwing: logged at error level, as Java logs it, and
+//! freed; it fails nothing, and the record's future completes with the
+//! record's own outcome.
 
 #![expect(non_camel_case_types)]
 
@@ -36,8 +49,12 @@ use std::ffi::c_void;
 use std::sync::Arc;
 
 use crate::common::Error;
+use crate::common::internals::KafkaFutureImpl;
 use crate::ffi::callback_queue::{CallbackQueue, SendPtr};
-use crate::ffi::common::{box_error, kafka_common_Error_destroy, kafka_common_Error_t};
+use crate::ffi::callback_result::{CallbackResults, INVOKER_RESULTS, ResultSink, void_sink};
+use crate::ffi::common::{
+    box_error, deliver_panic_opaque, kafka_common_Error_destroy, kafka_common_Error_t, run_inline,
+};
 use crate::ffi::ffi_guard;
 use crate::ffi::producer::record_metadata::{
     box_record_metadata, kafka_producer_RecordMetadata_destroy, kafka_producer_RecordMetadata_t,
@@ -51,13 +68,19 @@ pub struct kafka_producer_Callback_t {
 }
 
 /// `void onCompletion(RecordMetadata metadata, Exception exception)` of a C
-/// implementation: `metadata` and `error` are borrowed for the call, exactly
-/// one of them is `NULL` except for the pre-accumulator rejection described
-/// in the module documentation.
+/// implementation: `metadata` and `error` are borrowed for the call, as the
+/// module documentation describes. The method reports that it finished with
+/// `kafka_producer_Producer__set_callback_result(producer, callback_id, NULL, error)`,
+/// inside the call or later, from any thread; `error` is `NULL`, or an owned
+/// `kafka_common_Error_t *` standing for Java's `onCompletion` throwing,
+/// which the producer logs and frees. Until the report the record's future
+/// does not complete, and `flush`, `commit_transaction` and
+/// `abort_transaction` wait for it.
 pub type kafka_producer_Callback_on_completion_fn_t = unsafe extern "C" fn(
     self_: *mut c_void,
     metadata: *const kafka_producer_RecordMetadata_t,
     error: *const kafka_common_Error_t,
+    callback_id: i64,
 );
 
 /// The registration a handle holds; copied into every Rust closure built
@@ -69,7 +92,8 @@ pub(crate) struct CallbackRegistration {
 }
 
 impl CallbackRegistration {
-    /// Invokes the C implementation.
+    /// Invokes the C implementation with `callback_id`, which its report
+    /// carries.
     ///
     /// # Safety
     ///
@@ -78,36 +102,84 @@ impl CallbackRegistration {
         self,
         metadata: *const kafka_producer_RecordMetadata_t,
         error: *const kafka_common_Error_t,
+        callback_id: i64,
     ) {
         // SAFETY: `on_completion` and `self_` are the pair the C implementation registered with
         // `kafka_producer_Callback_new`, whose contract keeps `self_` alive until the callback
         // fired, so calling `on_completion` with them meets its contract; per this function's
         // `# Safety`, `metadata` and `error` are null or live handles, borrowed for the call as
         // `kafka_producer_Callback_on_completion_fn_t` documents.
-        unsafe { (self.on_completion)(self.self_.0, metadata, error) };
+        unsafe { (self.on_completion)(self.self_.0, metadata, error, callback_id) };
     }
 
-    /// The Rust delivery callback standing for this registration: it boxes
-    /// what the producer delivers and queues the C invocation on `queue`,
-    /// freeing both handles after it ran.
-    pub(crate) fn into_callback(self, queue: Arc<CallbackQueue>) -> Callback {
+    /// The Rust delivery callback standing for this registration. When the
+    /// record completes it registers, in `results`, the sink of the C
+    /// callback's report, which completes `completion` with the record's
+    /// outcome, and then queues the C invocation on `queue` with the id it
+    /// got, boxing what the producer delivers and freeing both handles after
+    /// the C call returned. A closure dropped without being called (a record
+    /// rejected before the accumulator) registers nothing.
+    ///
+    /// Per record this allocates the sink, the queued job and the metadata
+    /// handle, and the error handle for a failed record; no task is spawned
+    /// (CLAUDE.md §13).
+    pub(crate) fn into_callback(
+        self,
+        queue: Arc<CallbackQueue>,
+        results: Arc<CallbackResults>,
+        completion: KafkaFutureImpl<RecordMetadata>,
+    ) -> Callback {
         Box::new(move |metadata: Option<&RecordMetadata>, error: Option<&Error>| {
-            let metadata =
-                SendPtr(metadata.map_or(std::ptr::null_mut(), |m| box_record_metadata(m.clone()) as *mut c_void));
-            let error = SendPtr(error.map_or(std::ptr::null_mut(), |e| box_error(e.clone()) as *mut c_void));
+            let metadata = metadata.cloned();
+            let error = error.cloned();
+            let callback_id = results.register(report_sink(metadata.clone(), error.clone(), completion));
             // SAFETY: `metadata` and `error` are the `box_record_metadata` and `box_error` handles
-            // built above, or null, owned by this job alone: they are live for `fire`, which
+            // built inside the job, or null, owned by the job alone: they are live for `fire`, which
             // borrows them, and the two `_destroy` calls (each a no-op on null) free each exactly
             // once after it returned. The job is a `FnOnce`, so the queue runs it once.
             queue.push(Box::new(move || unsafe {
-                let metadata = metadata.get() as *mut kafka_producer_RecordMetadata_t;
-                let error = error.get() as *mut kafka_common_Error_t;
-                self.fire(metadata, error);
+                let metadata = metadata.map_or(std::ptr::null_mut(), box_record_metadata);
+                let error = error.map_or(std::ptr::null_mut(), box_error);
+                self.fire(metadata, error, callback_id);
                 kafka_producer_RecordMetadata_destroy(metadata);
                 kafka_common_Error_destroy(error);
             }));
         })
     }
+}
+
+/// The sink of a delivery callback's report: a reported error is Java's
+/// `onCompletion` throwing, logged as `ProducerBatch.completeFutureAndFireCallbacks`
+/// logs it (`ProducerBatch.java:319`) and then dropped; either way
+/// `completion` then completes with the record's own outcome, its `error`
+/// when it failed. A sink drained by the producer's `_destroy` completes it
+/// the same way.
+fn report_sink(
+    metadata: Option<RecordMetadata>,
+    error: Option<Error>,
+    completion: KafkaFutureImpl<RecordMetadata>,
+) -> ResultSink {
+    void_sink(move |reported| {
+        if let Err(thrown) = reported {
+            match &metadata {
+                Some(metadata) => log::error!(
+                    "Error executing user-provided callback on message for topic-partition '{}-{}': {}",
+                    metadata.topic(),
+                    metadata.partition(),
+                    thrown
+                ),
+                None => log::error!("Error executing user-provided callback on message: {thrown}"),
+            }
+        }
+        match (metadata, error) {
+            (_, Some(error)) => completion.complete_with_error(error),
+            (Some(metadata), None) => completion.complete(metadata),
+            // The producer always delivers one of the two.
+            (None, None) => completion.complete_with_error(Error::local_illegal_state(
+                "the record completed with neither metadata nor error",
+            )),
+        };
+    })
 }
 
 /// The registration behind a handle.
@@ -137,7 +209,10 @@ pub extern "C" fn kafka_producer_Callback_new(
 }
 
 /// `Callback.onCompletion(metadata, exception)`: invokes the C implementation
-/// on the calling thread with the borrowed arguments.
+/// on the calling thread with the borrowed arguments and waits for its
+/// `kafka_producer_Producer__set_callback_result` report. No producer is
+/// involved: the report's `producer` argument is not read, so it may be any
+/// producer or `NULL`, and a reported error is freed.
 ///
 /// # Safety
 ///
@@ -151,8 +226,59 @@ pub unsafe extern "C" fn kafka_producer_Callback_on_completion(
     error: *const kafka_common_Error_t,
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `callback_registration`
-    // requires, and `metadata` and `error` are null or live handles, as `fire` requires.
-    unsafe { callback_registration(self_).fire(metadata, error) };
+    // requires.
+    let registration = unsafe { callback_registration(self_) };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let callback_id = INVOKER_RESULTS.register(void_sink(move |result| {
+        let _ = tx.send(result);
+    }));
+    // SAFETY: Per this function's `# Safety`, `metadata` and `error` are null or live handles, as
+    // `fire` requires.
+    unsafe { registration.fire(metadata, error, callback_id) };
+    // `onCompletion` is void in Java: the report only marks completion.
+    let _ = rx.recv();
+}
+
+/// Completion of [`kafka_producer_Callback_on_completion_cb`]:
+/// `onCompletion` is void, so only `opaque` is passed.
+pub type kafka_producer_Callback_on_completion_cb_t = unsafe extern "C" fn(opaque: *mut c_void);
+
+/// Non-blocking `on_completion`: the method runs on the calling thread and
+/// `cb` fires when its completion is reported (a standalone callback has no
+/// callbacks vector to queue on, so `cb` runs on the reporting thread). The
+/// report is made as for [`kafka_producer_Callback_on_completion`].
+///
+/// # Safety
+///
+/// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: The guard runs this only when the body did not return. The body hands `cb` over only
+    // as its last step, to the sink it registers right before calling the C method; nothing after
+    // that can panic, as the C method cannot unwind into Rust. So `cb` has not fired for this
+    // `opaque`, as `deliver_panic_opaque` requires; `run_inline` fires it on this thread.
+    unsafe { deliver_panic_opaque(run_inline, cb, opaque, err) }
+})]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_Callback_on_completion_cb(
+    self_: *const kafka_producer_Callback_t,
+    metadata: *const kafka_producer_RecordMetadata_t,
+    error: *const kafka_common_Error_t,
+    cb: kafka_producer_Callback_on_completion_cb_t,
+    opaque: *mut c_void,
+) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `callback_registration`
+    // requires.
+    let registration = unsafe { callback_registration(self_) };
+    let opaque = SendPtr(opaque);
+    #[cfg(test)]
+    crate::ffi::common::fail_point::hit();
+    // SAFETY: `cb` and `opaque` are the pair the C caller passed to this function, per its
+    // `# Safety` a valid completion; `cb` fires only from this sink, which `INVOKER_RESULTS` holds
+    // under a fresh id and runs at most once, as a `FnOnce`, when the report for that id arrives.
+    let callback_id = INVOKER_RESULTS.register(void_sink(move |_| unsafe { cb(opaque.get()) }));
+    // SAFETY: Per this function's `# Safety`, `metadata` and `error` are null or live handles, as
+    // `fire` requires.
+    unsafe { registration.fire(metadata, error, callback_id) };
 }
 
 /// Frees the handle; null is a no-op.
@@ -177,18 +303,42 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+    use crate::common::KafkaFuture;
     use crate::common::TopicPartition;
+    use crate::ffi::common::fail_point;
+    use crate::ffi::common::panic_probe::{Probe, on_opaque};
     use crate::ffi::common::{error_ref, kafka_common_Error_message};
+    use crate::ffi::producer::kafka_producer_Producer__set_callback_result;
     use crate::ffi::producer::record_metadata::kafka_producer_RecordMetadata_offset;
     use crate::ffi::util::c_str_to_string;
 
+    /// Each invocation's offset (-1 without metadata), error message and id.
     #[derive(Default)]
-    struct Log(Mutex<Vec<(i64, Option<String>)>>);
+    struct Log(Mutex<Vec<(i64, Option<String>, i64)>>);
 
+    impl Log {
+        fn entries(&self) -> Vec<(i64, Option<String>)> {
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(offset, error, _)| (*offset, error.clone()))
+                .collect()
+        }
+
+        fn last_id(&self) -> i64 {
+            self.0.lock().unwrap().last().unwrap().2
+        }
+    }
+
+    /// Logs the invocation; an invoker's (tagged) id is reported at once,
+    /// with an error, which is allowed and ignored; a producer's is left to
+    /// the test.
     unsafe extern "C" fn on_completion(
         self_: *mut c_void,
         metadata: *const kafka_producer_RecordMetadata_t,
         error: *const kafka_common_Error_t,
+        callback_id: i64,
     ) {
         // SAFETY: Test code: `self_` is the test's `Log`, which outlives every invocation.
         let log = unsafe { &*(self_ as *const Log) };
@@ -201,14 +351,40 @@ mod tests {
         // SAFETY: Test code: a non-null `error` is a live handle, borrowed for this call; its
         // message is copied out.
         let error = (!error.is_null()).then(|| unsafe { c_str_to_string(kafka_common_Error_message(error)) });
-        log.0.lock().unwrap().push((offset, error));
+        log.0.lock().unwrap().push((offset, error, callback_id));
+        if CallbackResults::is_tagged(callback_id) {
+            // SAFETY: Test code: `callback_id` is the pending id an invoker issued, so the function
+            // does not read its producer view and null is fine; the error is an owned handle,
+            // handed over.
+            unsafe {
+                kafka_producer_Producer__set_callback_result(
+                    std::ptr::null(),
+                    callback_id,
+                    std::ptr::null_mut(),
+                    box_error(Error::local_illegal_state("ignored")),
+                )
+            };
+        }
+    }
+
+    /// The value of a completed future.
+    fn resolved(future: KafkaFuture<RecordMetadata>) -> Result<RecordMetadata, Error> {
+        assert!(future.is_done());
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(future.get())
+    }
+
+    fn record_metadata(offset: i64) -> RecordMetadata {
+        RecordMetadata::new(TopicPartition::new("t", 0), offset, 0, -1, -1, -1)
     }
 
     #[test]
-    fn invoker_and_queued_delivery_reach_the_implementation_once_each() {
+    fn invoker_runs_the_implementation_inline_and_waits_for_the_report() {
         let log = Log::default();
         let handle = kafka_producer_Callback_new(&log as *const Log as *mut c_void, on_completion);
-        let metadata = box_record_metadata(RecordMetadata::new(TopicPartition::new("t", 0), 5, 0, -1, -1, -1));
+        let metadata = box_record_metadata(record_metadata(5));
         let error = box_error(Error::timeout("late"));
         // SAFETY: Test code: `handle` comes from `kafka_producer_Callback_new` over the test's
         // `log`, which outlives every invocation, and `metadata` and `error` are live handles until
@@ -217,7 +393,8 @@ mod tests {
             kafka_producer_Callback_on_completion(handle, metadata, std::ptr::null());
             kafka_producer_Callback_on_completion(handle, std::ptr::null(), error);
         }
-        assert_eq!(*log.0.lock().unwrap(), vec![(5, None), (-1, Some("late".to_string()))]);
+        assert_eq!(log.entries(), vec![(5, None), (-1, Some("late".to_string()))]);
+        assert!(CallbackResults::is_tagged(log.last_id()), "an invoker's id is tagged");
         assert_eq!(
             // SAFETY: Test code: `error` is the live `box_error` handle above, destroyed only at
             // the end.
@@ -226,25 +403,168 @@ mod tests {
             "the invoker borrows its arguments"
         );
 
-        // Through the Rust closure the invocation is queued, not run inline.
-        let queue = Arc::new(CallbackQueue::new());
-        // SAFETY: Test code: `handle` is still live; it is destroyed right after its registration
-        // is copied out.
-        let callback = unsafe { callback_registration(handle) }.into_callback(Arc::clone(&queue));
-        // SAFETY: Test code: `handle` is destroyed once; the closure holds a copy of the
-        // registration, and `log` outlives the queued invocation.
-        unsafe { kafka_producer_Callback_destroy(handle) };
-        callback(Some(&RecordMetadata::new(TopicPartition::new("t", 0), 9, 1, -1, -1, -1)), None);
-        assert_eq!(log.0.lock().unwrap().len(), 2, "queued, not fired inline");
-        assert_eq!(queue.execute(), 1);
-        assert_eq!(log.0.lock().unwrap()[2], (10, None));
+        let fired = Mutex::new(0);
+        unsafe extern "C" fn cb(opaque: *mut c_void) {
+            // SAFETY: Test code: `opaque` is `&fired`, alive until the test ends.
+            *unsafe { &*(opaque as *const Mutex<i32>) }.lock().unwrap() += 1;
+        }
+        // SAFETY: Test code: `handle` and `metadata` are still live; `cb` matches the completion
+        // type and `&fired` outlives the call, which reports inline, so `cb` has fired on return.
+        unsafe {
+            kafka_producer_Callback_on_completion_cb(
+                handle,
+                metadata,
+                std::ptr::null(),
+                cb,
+                &fired as *const _ as *mut c_void,
+            );
+        }
+        assert_eq!(*fired.lock().unwrap(), 1);
+        assert_eq!(log.entries().len(), 3);
 
-        // SAFETY: Test code: `metadata` and `error` are destroyed once each, and destroying a null
-        // callback handle is a no-op.
+        // SAFETY: Test code: each handle is destroyed once, and destroying a null callback handle
+        // is a no-op.
         unsafe {
             kafka_producer_RecordMetadata_destroy(metadata);
             kafka_common_Error_destroy(error);
+            kafka_producer_Callback_destroy(handle);
             kafka_producer_Callback_destroy(std::ptr::null_mut());
         }
+    }
+
+    /// A standalone callback has no callbacks vector, so a panic before
+    /// `onCompletion` fires `cb` once on the calling thread, before the call
+    /// returns, and the C method never runs.
+    #[test]
+    fn a_panicking_on_completion_cb_fires_cb_once_inline() {
+        let log = Log::default();
+        let handle = kafka_producer_Callback_new(&log as *const Log as *mut c_void, on_completion);
+        let probe = Probe::default();
+        fail_point::arm();
+        // SAFETY: Test code: `handle` is a live handle this test made, destroyed once after its last
+        // use; null metadata and error are allowed, and the probe outlives the call.
+        unsafe {
+            kafka_producer_Callback_on_completion_cb(
+                handle,
+                std::ptr::null(),
+                std::ptr::null(),
+                on_opaque,
+                probe.as_opaque(),
+            );
+            kafka_producer_Callback_destroy(handle);
+        }
+        assert_eq!(probe.fired(), ["<no error>"]);
+        assert!(log.entries().is_empty(), "onCompletion never ran");
+    }
+
+    #[test]
+    fn a_queued_delivery_completes_its_future_only_once_reported() {
+        let log = Log::default();
+        let handle = kafka_producer_Callback_new(&log as *const Log as *mut c_void, on_completion);
+        let queue = Arc::new(CallbackQueue::new());
+        let results = Arc::new(CallbackResults::new());
+        // SAFETY: Test code: `handle` is still live; it is destroyed right after its registrations
+        // are copied out.
+        let registration = unsafe { callback_registration(handle) };
+        // SAFETY: Test code: `handle` is destroyed once; the closures hold copies of the
+        // registration, and `log` outlives the queued invocations.
+        unsafe { kafka_producer_Callback_destroy(handle) };
+
+        // A record that succeeds: queued, not fired inline, and its future waits for the report,
+        // whose error is only logged.
+        let completion = KafkaFutureImpl::new();
+        let callback = registration.into_callback(Arc::clone(&queue), Arc::clone(&results), completion.clone());
+        callback(Some(&record_metadata(9)), None);
+        assert!(log.entries().is_empty(), "queued, not fired inline");
+        assert_eq!(queue.execute(), 1);
+        assert_eq!(log.entries(), vec![(9, None)]);
+        let id = log.last_id();
+        assert!(!CallbackResults::is_tagged(id), "a producer's id is its own");
+        assert!(!completion.is_done(), "not done before the report");
+        assert!(results.complete(id, std::ptr::null_mut(), Some(Error::local_illegal_state("thrown"))));
+        assert_eq!(resolved(completion.future()).unwrap().offset(), 9);
+        assert!(!results.complete(id, std::ptr::null_mut(), None), "a second report is ignored");
+
+        // A record that fails: the future fails with the record's error, whatever the report.
+        let completion = KafkaFutureImpl::new();
+        let callback = registration.into_callback(Arc::clone(&queue), Arc::clone(&results), completion.clone());
+        callback(Some(&record_metadata(-1)), Some(&Error::timeout("expired")));
+        assert_eq!(queue.execute(), 1);
+        assert_eq!(log.entries()[1], (-1, Some("expired".to_string())));
+        assert!(!completion.is_done());
+        assert!(results.complete(log.last_id(), std::ptr::null_mut(), None));
+        assert_eq!(resolved(completion.future()).unwrap_err().message(), "expired");
+
+        // A closure dropped uncalled (a record rejected before the accumulator) registers nothing.
+        drop(registration.into_callback(Arc::clone(&queue), Arc::clone(&results), KafkaFutureImpl::new()));
+        assert!(results.drain().is_empty());
+        assert_eq!(queue.execute(), 0);
+    }
+
+    /// The ids a round of deliveries is invoked with, stored without
+    /// allocating.
+    struct Ids {
+        next: std::sync::atomic::AtomicUsize,
+        ids: [std::sync::atomic::AtomicI64; 8],
+    }
+
+    unsafe extern "C" fn store_id(
+        self_: *mut c_void,
+        _metadata: *const kafka_producer_RecordMetadata_t,
+        _error: *const kafka_common_Error_t,
+        callback_id: i64,
+    ) {
+        // SAFETY: Test code: `self_` is the test's `Ids`, which outlives every invocation.
+        let ids = unsafe { &*(self_ as *const Ids) };
+        let slot = ids.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        ids.ids[slot].store(callback_id, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The per-record cost of the C delivery path, from the record's
+    /// completion to its report: the sink, the queued job, and the metadata
+    /// handle with its topic `CString`, which the C callback borrows. Nothing
+    /// else: no task, no copy of the record (CLAUDE.md §13). A pump costs one
+    /// more, its snapshot of the queue, whatever the number of records.
+    #[test]
+    fn a_delivery_allocates_its_sink_job_and_metadata_handle_only() {
+        const RECORDS: usize = 8;
+        let ids = Ids { next: Default::default(), ids: Default::default() };
+        let handle = kafka_producer_Callback_new(&ids as *const Ids as *mut c_void, store_id);
+        // SAFETY: Test code: `handle` is live; it is destroyed right after its registration is
+        // copied out.
+        let registration = unsafe { callback_registration(handle) };
+        // SAFETY: Test code: `handle` is destroyed once; `ids` outlives every invocation.
+        unsafe { kafka_producer_Callback_destroy(handle) };
+        let queue = Arc::new(CallbackQueue::new());
+        let results = Arc::new(CallbackResults::new());
+        let metadata = record_metadata(3);
+        let mut counts = Vec::new();
+        for _ in 0..16 {
+            ids.next.store(0, std::sync::atomic::Ordering::SeqCst);
+            let completions: Vec<KafkaFutureImpl<RecordMetadata>> =
+                (0..RECORDS).map(|_| KafkaFutureImpl::new()).collect();
+            let mut callbacks: Vec<Callback> = completions
+                .iter()
+                .map(|completion| {
+                    registration.into_callback(Arc::clone(&queue), Arc::clone(&results), completion.clone())
+                })
+                .collect();
+            let count = {
+                let _guard = crate::AllocTrackingGuard::new();
+                for callback in callbacks.drain(..) {
+                    callback(Some(&metadata), None);
+                }
+                assert_eq!(queue.execute(), RECORDS as i32);
+                for id in &ids.ids {
+                    let id = id.load(std::sync::atomic::Ordering::SeqCst);
+                    assert!(results.complete(id, std::ptr::null_mut(), None));
+                }
+                crate::AllocTrackingGuard::count()
+            };
+            assert!(completions.iter().all(KafkaFutureImpl::is_done));
+            counts.push(count);
+        }
+        // The first round grows the registry's slab and the queue's buffer.
+        assert!(counts[1..].iter().all(|&count| count == 4 * RECORDS + 1), "{counts:?}");
     }
 }

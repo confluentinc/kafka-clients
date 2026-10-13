@@ -60,7 +60,7 @@
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
 
 use tokio::sync::Notify;
 
@@ -77,6 +77,20 @@ pub(crate) type ResultSink = Box<dyn FnOnce(Result<*mut c_void, Error>) + Send>;
 pub(crate) fn void_sink(deliver: impl FnOnce(Result<(), Error>) + Send + 'static) -> ResultSink {
     Box::new(move |result| deliver(result.map(|_| ())))
 }
+
+/// The pending calls of the standalone invokers, which invoke a C
+/// implementation with no client of their own:
+/// `kafka_consumer_ConsumerRebalanceListener_on_partitions_*`,
+/// `kafka_consumer_OffsetCommitCallback_on_complete*` and
+/// `kafka_producer_Callback_on_completion*`, with their `_cb` forms.
+///
+/// The one process-wide registry, against the rule that each client holds
+/// its own: the C implementation reports through its client's
+/// `__set_callback_result` whatever client it was written for, or `NULL`,
+/// since it cannot tell an invoker's call from a client's. So this registry
+/// is tagged ([`CallbackResults::new_tagged`]) and a report routes its id by
+/// the tag, never through the client handle.
+pub(crate) static INVOKER_RESULTS: LazyLock<CallbackResults> = LazyLock::new(CallbackResults::new_tagged);
 
 /// Bits of an id holding the slot index.
 const INDEX_BITS: u32 = 32;
@@ -267,7 +281,6 @@ impl CallbackResults {
 
     /// The point a later [`Self::wait_reported`] waits for: the callbacks
     /// registered from now on do not delay it.
-    #[cfg_attr(not(test), expect(dead_code, reason = "no client waits for its reports yet"))]
     pub(crate) fn mark(&self) -> Mark {
         let mut slab = self.lock();
         slab.outstanding.push_back(0);
@@ -283,7 +296,6 @@ impl CallbackResults {
     /// whenever they were registered, so reports whose sinks keep
     /// overlapping, from several threads, can hold it back past the last
     /// report it waits for; it returns once they stop overlapping.
-    #[cfg_attr(not(test), expect(dead_code, reason = "no client waits for its reports yet"))]
     pub(crate) async fn wait_reported(&self, mark: Mark) {
         // Counted before the first check. With `SinkRunning`, which decrements `in_sink` before it
         // reads `waiters` (all `SeqCst`), either a check sees the sink finished or the sink's thread
@@ -312,7 +324,6 @@ impl CallbackResults {
     /// Takes every sink still awaiting a report, in registration order, for
     /// a client that completes them itself when it is destroyed; their ids
     /// are unknown afterwards, and the waiters are released.
-    #[cfg_attr(not(test), expect(dead_code, reason = "no client drains its registry yet"))]
     pub(crate) fn drain(&self) -> Vec<ResultSink> {
         let mut drained = {
             let mut slab = self.lock();

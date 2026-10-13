@@ -586,7 +586,8 @@ static PyObject* error_handle_to_py(const kafka_common_Error_t* e) {
 // still-pending callback: a late `on_completion` still finds it alive, and
 // releases its callable when it has run.
 typedef struct DeliveryCtx {
-    PyObject* callable;        // Python callable(meta_tuple | None, borrowed_error_int)
+    PyObject* callable;        // Python callable(meta_tuple | None, borrowed_error_int, callback_id)
+    const kafka_producer_Producer_t* producer;  // the view the callback reports through
     int refs;                  // owners left: the callback and the send completion
     int orphaned;              // on the orphan list: freed at destroy, not here
     struct DeliveryCtx* next;  // orphan-list link
@@ -687,11 +688,12 @@ static PyObject* metadata_to_py(const kafka_producer_RecordMetadata_t* m) {
 
 // ---- delivery callback (kafka_producer_Callback_t) -------------------------
 
-static DeliveryCtx* delivery_ctx_new(PyObject* callable) {
+static DeliveryCtx* delivery_ctx_new(PyObject* callable, const kafka_producer_Producer_t* producer) {
     DeliveryCtx* ctx = (DeliveryCtx*)PyMem_Malloc(sizeof(DeliveryCtx));
     if (ctx == NULL) { PyErr_NoMemory(); return NULL; }
     Py_INCREF(callable);
     ctx->callable = callable;
+    ctx->producer = producer;
     ctx->refs = 2;
     ctx->orphaned = 0;
     ctx->next = NULL;
@@ -725,29 +727,55 @@ static void producer_orphan_delivery(Producer* p, DeliveryCtx* ctx) {
     p->orphans = ctx;
 }
 
+// Defined with the consumer's callbacks below.
+static kafka_common_Error_t* callback_error_from_py(PyObject* exc);
+static kafka_common_Error_t* callback_error_from_py_exception(void);
+
 // Runs inside kafka_producer_Producer__execute_callbacks, i.e. on the thread
-// that called Producer_poll / Producer__execute_callbacks / Producer_destroy,
-// with the GIL released by that wrapper. Both arguments are BORROWED; exactly
-// one is non-NULL except for a pre-accumulator rejection, which delivers the
-// placeholder metadata (offset/partition -1) beside the error, as Java's
-// `callback.onCompletion(nullMetadata, e)`. The Python callable gets the
-// metadata tuple and the borrowed error's address (0 for none), which it must
-// convert during the call and never destroy.
+// that called Producer_poll / Producer__execute_callbacks / Producer_destroy
+// or a blocking flush / close / commit / abort / future get running the queue
+// while it waits, with the GIL released by that wrapper. Both arguments are
+// BORROWED; exactly one is non-NULL except for a pre-accumulator rejection,
+// which delivers the placeholder metadata (offset/partition -1) beside the
+// error, as Java's `callback.onCompletion(nullMetadata, e)`. The Python
+// callable gets the metadata tuple, the borrowed error's address (0 for
+// none), which it must convert during the call and never destroy, and the
+// callback id, and follows listener_fire's split:
+//   * None  -> the callback returned: report now;
+//   * True  -> it deferred (an `async def` callback scheduled on the loop, or
+//              a hop to the record's loop) and reports through
+//              Producer__set_callback_result itself;
+//   * raise -> report the exception as a foreign callback error owning a
+//              reference to it; the core logs it, as Java logs a throwing
+//              onCompletion, and fails nothing.
+// The record's future, and a flush / close / commit / abort waiting for the
+// callback, completes on the report.
 static void producer_on_completion(void* self_,
                                    const kafka_producer_RecordMetadata_t* metadata,
-                                   const kafka_common_Error_t* error) {
+                                   const kafka_common_Error_t* error,
+                                   int64_t callback_id) {
     DeliveryCtx* ctx = (DeliveryCtx*)self_;
     PyGILState_STATE g = PyGILState_Ensure();
+    kafka_common_Error_t* report = NULL;
+    int deferred = 0;
     PyObject* meta = metadata ? metadata_to_py(metadata) : (Py_INCREF(Py_None), Py_None);
     PyObject* err = error_handle_to_py(error);
-    if (meta != NULL && err != NULL) {
-        PyObject* r = PyObject_CallFunctionObjArgs(ctx->callable, meta, err, NULL);
-        if (r == NULL) PyErr_WriteUnraisable(ctx->callable); else Py_DECREF(r);
+    PyObject* py_id = PyLong_FromLongLong((long long)callback_id);
+    if (meta != NULL && err != NULL && py_id != NULL) {
+        PyObject* r = PyObject_CallFunctionObjArgs(ctx->callable, meta, err, py_id, NULL);
+        if (r == NULL) {
+            report = callback_error_from_py_exception();
+        } else {
+            deferred = (r == Py_True);
+            Py_DECREF(r);
+        }
     } else {
         PyErr_WriteUnraisable(ctx->callable);
     }
     Py_XDECREF(meta);
     Py_XDECREF(err);
+    Py_XDECREF(py_id);
+    if (!deferred) kafka_producer_Producer__set_callback_result(ctx->producer, callback_id, NULL, report);
     delivery_ctx_release(ctx);
     PyGILState_Release(g);
 }
@@ -911,6 +939,27 @@ static PyObject* py_Producer__execute_callbacks(PyObject* self, PyObject* args) 
     n = kafka_producer_Producer__execute_callbacks(p->producer);
     Py_END_ALLOW_THREADS
     return PyLong_FromLong((long)n);
+}
+
+// Producer__set_callback_result(handle, callback_id, exception | None): the
+// deferred report of a delivery callback (see producer_on_completion). None =
+// the callback returned; an exception object = the exception it raised,
+// reported as a foreign callback error owning a reference to it, which the
+// core logs. Java's onCompletion is void, so the C `result` is NULL. Must not
+// be called once Producer_destroy began, except from a callback it runs.
+static PyObject* py_Producer__set_callback_result(PyObject* self, PyObject* args) {
+    unsigned long long ptr; long long callback_id; PyObject* error;
+    if (!PyArg_ParseTuple(args, "KLO", &ptr, &callback_id, &error)) return NULL;
+    Producer* p = producer_from_handle(ptr);
+    kafka_common_Error_t* err = NULL;
+    if (PyExceptionInstance_Check(error)) {
+        err = callback_error_from_py(error);
+    } else if (error != Py_None) {
+        PyErr_SetString(PyExc_TypeError, "Producer__set_callback_result: expected an exception or None");
+        return NULL;
+    }
+    kafka_producer_Producer__set_callback_result(p->producer, (int64_t)callback_id, NULL, err);
+    Py_RETURN_NONE;
 }
 
 // Producer_poll(handle, timeout_ms) -> int: the sync producer's pump. Runs the
@@ -1155,8 +1204,10 @@ static kafka_producer_ProducerRecord_t* producer_record_to_c(ProducerRecordObjec
 // Blocks (GIL released) until the record is registered, as Java's send(). The
 // on_completion callable is registered as a kafka_producer_Callback_t and is
 // run by Producer_poll / Producer__execute_callbacks / Producer_destroy, at
-// most once; it receives (meta_tuple | None, borrowed_error_int). After an
-// error return it still runs if the record had reached the accumulator (see
+// most once; it receives (meta_tuple | None, borrowed_error_int, callback_id)
+// and reports as producer_on_completion describes (returning None, raising, or
+// returning True to report later through Producer__set_callback_result). After
+// an error return it still runs if the record had reached the accumulator (see
 // Producer_send_cb). The error is OWNED by the caller. Neither Python producer
 // calls this.
 static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
@@ -1171,7 +1222,7 @@ static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
         producer_record_to_c((ProducerRecordObject*)rec_obj, &err);
     if (rec == NULL) return Py_BuildValue("(ON)", Py_None, error_handle_to_py(err));
 
-    DeliveryCtx* ctx = delivery_ctx_new(callable);
+    DeliveryCtx* ctx = delivery_ctx_new(callable, p->producer);
     if (ctx == NULL) { kafka_producer_ProducerRecord_destroy(rec); return NULL; }
     kafka_producer_Callback_t* cb = kafka_producer_Callback_new(ctx, producer_on_completion);
 
@@ -1233,8 +1284,11 @@ static void producer_send_cb(kafka_common_KafkaFuture_t* value, kafka_common_Err
 
 // Producer_send_cb(handle, record, on_completion, resolve) -> error_int
 // Queues the record on the producer's submission task and returns at once.
-// `on_completion(meta_tuple | None, borrowed_error_int)` is the record's
-// delivery callback (Java's Callback, run at most once).
+// `on_completion(meta_tuple | None, borrowed_error_int, callback_id)` is the
+// record's delivery callback (Java's Callback, run at most once); it reports as
+// producer_on_completion describes: returning None reports success, raising
+// reports the exception, and returning True defers the report to
+// Producer__set_callback_result(handle, callback_id, exception | None).
 // `resolve(owned_error_int)` runs from the callback pump once the record is
 // handed to the producer: 0 when it was, else the error the producer's send()
 // returned (Java's doSend rethrow). After an error `on_completion` still runs,
@@ -1257,7 +1311,7 @@ static PyObject* py_Producer_send_cb(PyObject* self, PyObject* args) {
 
     SendCtx* ctx = (SendCtx*)PyMem_Malloc(sizeof(SendCtx));
     if (ctx == NULL) { kafka_producer_ProducerRecord_destroy(rec); return PyErr_NoMemory(); }
-    ctx->delivery = delivery_ctx_new(callable);
+    ctx->delivery = delivery_ctx_new(callable, p->producer);
     if (ctx->delivery == NULL) {
         kafka_producer_ProducerRecord_destroy(rec);
         PyMem_Free(ctx);
@@ -8766,11 +8820,13 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"KafkaProducer_new", py_KafkaProducer_new, METH_VARARGS,
      "KafkaProducer_new(config_dict, notify_cb) -> (handle, 0) or (0, owned_error_int)"},
     {"Producer_send", py_Producer_send, METH_VARARGS,
-     "Blocking send(handle, record, on_completion) -> (KafkaFuture | None, owned_error_int); on_completion(meta | None, borrowed_error_int)"},
+     "Blocking send(handle, record, on_completion) -> (KafkaFuture | None, owned_error_int); on_completion(meta | None, borrowed_error_int, callback_id) -> None | True"},
     {"Producer_send_cb", py_Producer_send_cb, METH_VARARGS,
      "Queued send(handle, record, on_completion, resolve) -> owned_error_int; resolve(owned_error_int) once handed to the producer"},
     {"Producer_poll", py_Producer_poll, METH_VARARGS,
      "poll(timeout_ms): run queued callbacks on this thread, waiting up to timeout_ms; returns count"},
+    {"Producer__set_callback_result", py_Producer__set_callback_result, METH_VARARGS,
+     "Report a deferred delivery-callback result: (h, callback_id, exception | None)"},
     {"Producer__execute_callbacks", py_Producer__execute_callbacks, METH_VARARGS,
      "Run the queued callbacks on this thread; returns count"},
     {"Producer_flush", py_Producer_flush, METH_VARARGS, "Blocking flush -> owned_error_int"},

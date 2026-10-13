@@ -337,6 +337,8 @@ class Producer(Generic[K, V], _ProducerState):
         future does. Callbacks for records being sent to the same partition are
         guaranteed to execute in order. A raising callback is logged. It should
         be reasonably fast, or it will delay the completion of other records.
+        An ``async def`` callback cannot be awaited there: its coroutine is
+        closed and a ``TypeError`` is logged (``AsyncProducer`` awaits it).
 
         When used as part of a transaction, it is not necessary to define a
         callback or check the result of the future in order to detect errors
@@ -391,24 +393,31 @@ class Producer(Generic[K, V], _ProducerState):
         completed = False
         rethrown: Exception | None = None
 
-        def complete(metadata: RecordMetadata, exception: Exception | None) -> None:
+        def complete(metadata: RecordMetadata, exception: Exception | None) -> Exception | None:
             # Once per record. As in Java's
             # ProducerBatch.completeFutureAndFireCallbacks, the callback runs
-            # before the future completes.
+            # before the future completes. Returns the callback's exception.
             nonlocal completed
             with lock:
                 if completed:
-                    return
+                    return None
                 completed = True
-            invoke_callback(self, callback, metadata, exception)
+            failure = invoke_callback(self, callback, metadata, exception)
             if exception is not None:
                 future.set_exception(exception)
             else:
                 future.set_result(metadata)
+            return failure
 
-        def on_completion(metadata_tuple: MetadataTuple | None, error: int) -> None:
-            # The record's Callback, on the completion thread.
-            complete(*completion_to_python(metadata_tuple, error, topic, partition))
+        def on_completion(metadata_tuple: MetadataTuple | None, error: int,
+                          callback_id: int) -> None:
+            # The record's Callback, on the completion thread. Returning
+            # reports the callback to the C API, raising reports its exception
+            # (see _send); the C future, a flush() and the transaction-end calls
+            # wait for that report.
+            failure = complete(*completion_to_python(metadata_tuple, error, topic, partition))
+            if failure is not None:
+                raise failure
 
         def resolve(error: int) -> None:
             # The handover, on the completion thread: the error the Rust send()

@@ -540,7 +540,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_destroy(self_: *mut kafka_
         // not yet destroyed, i.e. the `Box::into_raw` of `kafka_producer_KafkaProducer_new`, so
         // `Box::from_raw` reclaims it exactly once; its `__as_Producer` views, addresses inside it,
         // are invalid afterwards, as the rustdoc states.
-        unsafe { *Box::from_raw(self_ as *mut Handle) }.destroy();
+        unsafe { Box::from_raw(self_ as *mut Handle) }.destroy();
     }
 }
 
@@ -743,6 +743,121 @@ mod tests {
             assert!(elapsed < std::time::Duration::from_secs(10), "destroy took {elapsed:?}");
             assert_eq!(*closes.lock().unwrap(), vec![None, None]);
             assert_eq!(sends.lock().unwrap().len(), 1);
+            kafka_producer_ProducerRecord_destroy(record);
+        }
+    }
+
+    /// What a delivery callback of [`a_delivery_callback_cannot_flush_and_closes_without_blocking`]
+    /// saw: the producer view it calls back into and each outcome.
+    struct InCallback {
+        view: *const kafka_producer_Producer_t,
+        outcomes: std::sync::Mutex<Vec<Option<String>>>,
+    }
+
+    /// Flushes (both forms) and closes its own producer from inside its
+    /// delivery callback, then reports.
+    unsafe extern "C" fn flush_and_close_from_the_callback(
+        self_: *mut c_void,
+        _metadata: *const crate::ffi::producer::record_metadata::kafka_producer_RecordMetadata_t,
+        _error: *const kafka_common_Error_t,
+        callback_id: i64,
+    ) {
+        // SAFETY: Test code: `self_` is the test's `InCallback`, alive until the producer is
+        // destroyed.
+        let ctx = unsafe { &*(self_ as *const InCallback) };
+        let opaque = &ctx.outcomes as *const std::sync::Mutex<Vec<Option<String>>> as *mut c_void;
+        // SAFETY: Test code: `ctx.view` is the live view of the producer whose callback this is;
+        // each error is read, then freed once.
+        unsafe {
+            let error = crate::ffi::producer::kafka_producer_Producer_flush(ctx.view);
+            record_void(error, opaque);
+            crate::ffi::producer::kafka_producer_Producer_flush_cb(ctx.view, record_void, opaque);
+            let start = std::time::Instant::now();
+            record_void(kafka_producer_Producer_close_with_timeout(ctx.view, 60_000), opaque);
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(10),
+                "the close timeout was overridden"
+            );
+            crate::ffi::producer::kafka_producer_Producer__set_callback_result(
+                ctx.view,
+                callback_id,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+        }
+    }
+
+    /// From inside a delivery callback `flush()` fails as Java's does
+    /// (`KafkaProducer.java:1217-1220`), and `close(Duration)` closes as for
+    /// a zero timeout without waiting for the report of the callback it runs
+    /// in (`KafkaProducer.java:1399-1403`, `:1426-1437`).
+    #[test]
+    fn a_delivery_callback_cannot_flush_and_closes_without_blocking() {
+        let props = box_string_map([("bootstrap.servers", "127.0.0.1:1"), ("max.block.ms", "100")]);
+        let topic = CString::new("topic").unwrap();
+        let bytes = kafka_Bytes_t::from_slice(b"v");
+        // SAFETY: Test code: `props`, `config`, `record`, `callback` and the producer are live from
+        // their constructor to their single destroy below, `view` is used only before the producer
+        // is destroyed, the future and each error are destroyed once after their last use, and
+        // `ctx` outlives the callback runs that read it.
+        unsafe {
+            let mut config = std::ptr::null_mut();
+            assert!(kafka_producer_ProducerConfig_new(props, &raw mut config).is_null());
+            kafka_Map_destroy(props);
+            let mut producer = std::ptr::null_mut();
+            let error =
+                kafka_producer_KafkaProducer_new(config, std::ptr::null_mut(), std::ptr::null_mut(), &raw mut producer);
+            assert!(error.is_null());
+            kafka_producer_ProducerConfig_destroy(config);
+            let view = kafka_producer_KafkaProducer__as_Producer(producer);
+            let ctx = InCallback { view, outcomes: std::sync::Mutex::new(Vec::new()) };
+            let callback = crate::ffi::producer::callback::kafka_producer_Callback_new(
+                &ctx as *const InCallback as *mut c_void,
+                flush_and_close_from_the_callback,
+            );
+            let record =
+                kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
+            // The metadata wait times out after `max.block.ms`, an `ApiException`, so the callback
+            // is invoked and the send hands back a future.
+            let mut future = std::ptr::null_mut();
+            let error = crate::ffi::producer::kafka_producer_Producer_send_with_callback(
+                view,
+                record,
+                callback,
+                &raw mut future,
+            );
+            assert!(error.is_null());
+            assert_eq!(crate::ffi::kafka_future::kafka_common_KafkaFuture_is_done(future), 0);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while ctx.outcomes.lock().unwrap().len() < 3 {
+                assert!(std::time::Instant::now() < deadline, "{:?}", ctx.outcomes.lock().unwrap());
+                kafka_producer_Producer__execute_callbacks(view);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let flush_error = Some(
+                "KafkaProducer.flush() invocation inside a callback is not permitted because it may lead to deadlock."
+                    .to_string(),
+            );
+            let outcomes = ctx.outcomes.lock().unwrap().clone();
+            assert_eq!(outcomes[0], flush_error, "the blocking flush");
+            assert!(outcomes.contains(&None), "the close succeeded: {outcomes:?}");
+            assert_eq!(
+                outcomes.iter().filter(|outcome| **outcome == flush_error).count(),
+                2,
+                "flush_cb too"
+            );
+            assert_eq!(
+                crate::ffi::kafka_future::kafka_common_KafkaFuture_is_done(future),
+                1,
+                "reported"
+            );
+            let mut value = std::ptr::null_mut();
+            let error = crate::ffi::kafka_future::kafka_common_KafkaFuture_get(future, &raw mut value);
+            assert!(!error.is_null(), "the record's own failure");
+            kafka_common_Error_destroy(error);
+            kafka_common_KafkaFuture_destroy(future);
+            crate::ffi::producer::callback::kafka_producer_Callback_destroy(callback);
+            kafka_producer_KafkaProducer_destroy(producer);
             kafka_producer_ProducerRecord_destroy(record);
         }
     }

@@ -576,6 +576,12 @@ struct LogState {
   // which resolves the callback_id through the consumer that issued it.
   // nullptr for a producer's state.
   const kafka_consumer_Consumer_t* consumer = nullptr;
+  // The producer's `Producer` view, for `kafka_producer_Producer__set_callback_result`,
+  // through which a delivery callback reports that it finished. nullptr for a
+  // consumer's state. Delivery callbacks run only while the producer handle is
+  // alive (its `_destroy` runs the pending ones), so the view never dangles
+  // when one reads it.
+  const kafka_producer_Producer_t* producer = nullptr;
 };
 
 // Shared body of the three rebalance trampolines, the C implementation of a
@@ -691,10 +697,14 @@ extern "C" void discard_commit_complete(void* self, const kafka_Map_t* /*offsets
 // with_callback; `self` is the producer's LogState. Both arguments are BORROWED
 // for the call (the FFI frees them after it returns), so nothing is destroyed
 // here. It runs on whichever gRPC worker thread pumps
-// kafka_producer_Producer__execute_callbacks (see pump_callbacks below), never
-// on a Rust thread.
+// kafka_producer_Producer__execute_callbacks (see pump_callbacks below), or
+// inside a blocking get / flush / close that runs the queue while it waits,
+// never on a Rust thread. It reports that it finished through
+// `kafka_producer_Producer__set_callback_result` at its end, synchronously,
+// with no error (Java's `onCompletion` returning normally): the record's
+// future, and any flush or close waiting for it, completes on that report.
 extern "C" void log_delivery(void* self, const kafka_producer_RecordMetadata_t* metadata,
-                             const kafka_common_Error_t* error) {
+                             const kafka_common_Error_t* error, int64_t callback_id) {
   auto* state = static_cast<LogState*>(self);
   CallbackLogEntry entry;
   entry.set_kind(KIND_DELIVERY);
@@ -711,6 +721,7 @@ extern "C" void log_delivery(void* self, const kafka_producer_RecordMetadata_t* 
   }
   copy_error_into(&entry, error);
   state->log->append(state->client_id, std::move(entry));
+  kafka_producer_Producer__set_callback_result(state->producer, callback_id, nullptr, nullptr);
 }
 
 // Server-side group-metadata handles, by id. ConsumerService.GroupMetadata
@@ -852,7 +863,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
       // One stable LogState per producer — see the struct's comment for why the
       // delivery callback's `self` cannot be per-send, and why it lives for
       // the whole session rather than being freed at Close.
-      log_states_[id] = std::unique_ptr<LogState>(new LogState{&callback_log_, id});
+      log_states_[id] = std::unique_ptr<LogState>(new LogState{&callback_log_, id, nullptr, handle.view});
     }
     resp->set_producer_id(id);
     std::cerr << "c server: created producer " << id << std::endl;
@@ -1269,10 +1280,13 @@ class ProducerServiceImpl final : public ProducerService::Service {
       // Idempotent close — silent success on unknown id.
       return grpc::Status::OK;
     }
-    // close() flushes, so every outstanding delivery callback is queued by the
-    // time this returns; pumping them here before destroying the handle makes
-    // a GetCallbackLog issued right after Close complete (destroy would run
-    // the still-pending ones anyway, so each fires exactly once either way).
+    // close() flushes and then waits for the reports of the delivery
+    // callbacks, running the queued ones on this thread meanwhile, so every
+    // outstanding delivery callback has fired by the time it returns; pumping
+    // here before destroying the handle also runs any `_cb` completion still
+    // queued, so a GetCallbackLog issued right after Close is complete
+    // (destroy would run the still-pending ones anyway, so each fires exactly
+    // once either way).
     kafka_common_Error_t* err =
         has_timeout ? kafka_producer_Producer_close_with_timeout(handle.view, timeout_ms)
                     : kafka_producer_Producer_close(handle.view);
@@ -5375,6 +5389,11 @@ struct ChaosProducerState {
   // This state's index in the producer-state table (chaos_send_cookie).
   uint64_t slot = 0;
 
+  // The producer's `Producer` view, for kafka_producer_Producer__set_callback_result,
+  // through which chaos_on_delivery reports. Set before the first send; the
+  // delivery callbacks run only while the producer is alive.
+  const kafka_producer_Producer_t* producer = nullptr;
+
   // Records handed to (or being handed to) the client and not yet settled by
   // their delivery callback, by index. The value is whether the send call
   // failed synchronously and that failure was already reported: the entry is
@@ -5440,8 +5459,12 @@ void* chaos_send_cookie(uint64_t slot, uint64_t index) {
 // A callback for a record that is no longer in flight -- the client fired its
 // callback a second time -- is reported as it is, so the verifier sees the
 // record settled twice instead of the server hiding it.
+//
+// It reports that it finished through kafka_producer_Producer__set_callback_result
+// at its end, synchronously and with no error (Java's onCompletion returning):
+// the close in chaos_shutdown_producer waits for every such report.
 extern "C" void chaos_on_delivery(void* self, const kafka_producer_RecordMetadata_t* metadata,
-                                  const kafka_common_Error_t* error) {
+                                  const kafka_common_Error_t* error, int64_t callback_id) {
   const uint64_t cookie = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(self));
   const uint64_t index = cookie & kChaosCookieIndexMask;
   ChaosProducerState* state = nullptr;
@@ -5480,6 +5503,7 @@ extern "C" void chaos_on_delivery(void* self, const kafka_producer_RecordMetadat
               << index << std::endl;
   }
   if (report) state->events->push(std::move(event));
+  kafka_producer_Producer__set_callback_result(state->producer, callback_id, nullptr, nullptr);
 }
 
 // Settles record `index` after kafka_producer_Producer_send_with_callback
@@ -5551,13 +5575,12 @@ extern "C" void chaos_on_producer_closed(kafka_common_Error_t* error, void* opaq
 // pump and destroys the producer. Returns close's error handle (owned by the
 // caller), or null; the producer is destroyed either way.
 //
-// kafka_producer_Producer_close flushes, so when it completes every record's
-// delivery callback is already queued on the callback vector. close_cb queues
-// its own completion on that same vector, behind every delivery callback the
-// flush queued, and the vector runs in order, so once the pump ran the
-// completion each record's Delivered / SendFailed is already in the event
-// queue -- which is what lets the caller end the stream with Finished without
-// losing a late outcome. (grpc_chaos.py's producer.close() is the same close_cb
+// kafka_producer_Producer_close flushes and then waits for the report of every
+// delivery callback queued by then, which chaos_on_delivery makes once it
+// pushed the record's outcome; close_cb queues its own completion only after
+// those reports, so once the pump ran the completion each record's Delivered /
+// SendFailed is already in the event queue -- which is what lets the caller
+// end the stream with Finished without losing a late outcome. (grpc_chaos.py's producer.close() is the same close_cb
 // + wait.) Without a pump (it could not be started) the blocking close is used
 // and the drain below runs the callbacks instead.
 //
@@ -5972,6 +5995,7 @@ class ChaosWorkloadServiceImpl final : public ChaosWorkloadService::Service {
     const kafka_producer_Producer_t* producer = kafka_producer_KafkaProducer__as_Producer(kafka);
 
     auto state = std::make_shared<ChaosProducerState>(events);
+    state->producer = producer;
     retain(state);
     std::thread pump;
     if (!chaos_register_producer_state(state.get())) {

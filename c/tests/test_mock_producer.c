@@ -150,8 +150,13 @@ static void assert_error_message(kafka_common_Error_t *err, const char *expected
 // ---------------------------------------------------------------------------
 
 /* What a `kafka_producer_Callback_t` (Java's delivery `Callback`) saw. Both
- * arguments are borrowed for the call. */
+ * arguments are borrowed for the call. The callback reports that it finished
+ * through `producer`'s `__set_callback_result`, at its end unless `defer` is
+ * set, in which case the test reports `callback_id` itself. */
 typedef struct {
+    const kafka_producer_Producer_t *producer;
+    int defer;
+    int64_t callback_id;
     atomic_int fired;
     int had_metadata;
     int64_t offset;
@@ -163,8 +168,9 @@ typedef struct {
 } record_result_t;
 
 static void on_completion(void *self_, const kafka_producer_RecordMetadata_t *metadata,
-                          const kafka_common_Error_t *error) {
+                          const kafka_common_Error_t *error, int64_t callback_id) {
     record_result_t *r = (record_result_t *)self_;
+    r->callback_id = callback_id;
     if (metadata != NULL) {
         r->had_metadata = 1;
         r->offset = kafka_producer_RecordMetadata_offset(metadata);
@@ -180,6 +186,9 @@ static void on_completion(void *self_, const kafka_producer_RecordMetadata_t *me
     }
     r->thread_id = pthread_self();
     atomic_fetch_add(&r->fired, 1);
+    if (!r->defer) {
+        kafka_producer_Producer__set_callback_result(r->producer, callback_id, NULL, NULL);
+    }
 }
 
 /* What a `send_cb` completion delivered: the owned future (kept for the test
@@ -1186,6 +1195,7 @@ void test_callbacks_notify_fires_once_per_transition(void) {
     kafka_common_KafkaFuture_t *futures[3];
     for (int i = 0; i < 3; i++) {
         kafka_producer_ProducerRecord_t *record = make_record("notify-topic", -1, NULL, &VALUE);
+        results[i].producer = f.producer;
         kafka_producer_Callback_t *callback = kafka_producer_Callback_new(&results[i], on_completion);
         TEST_ASSERT_NULL(kafka_producer_Producer_send_with_callback(f.producer, record, callback, &futures[i]));
         kafka_producer_Callback_destroy(callback);
@@ -2012,12 +2022,14 @@ void test_transaction_async_send_offsets_rejection_releases_guard(void) {
 
 /* `send_with_callback` of one record whose completion lands in `result`; the
  * registration handle is destroyed right after the send (it is read during
- * the call). The caller owns the future. */
+ * the call). The caller owns the future, which completes once the callback
+ * reported. */
 static kafka_common_KafkaFuture_t *send_with_callback(const kafka_producer_Producer_t *producer,
                                                       const char *topic, int32_t partition,
                                                       const void *key, const void *value,
                                                       record_result_t *result) {
     kafka_producer_ProducerRecord_t *record = make_record(topic, partition, key, value);
+    result->producer = producer;
     kafka_producer_Callback_t *callback = kafka_producer_Callback_new(result, on_completion);
     kafka_common_KafkaFuture_t *future = NULL;
     kafka_common_Error_t *err = kafka_producer_Producer_send_with_callback(producer, record, callback, &future);
@@ -2106,11 +2118,14 @@ void test_send_with_callback_future_and_callback_agree(void) {
     memset(&result, 0, sizeof(result));
     kafka_common_KafkaFuture_t *future = send_with_callback(f.producer, "agree-topic", 7, NULL, &VALUE, &result);
 
-    /* auto_complete=1: the record completes during the send. */
+    /* auto_complete=1: the record completes during the send, but its future
+     * only once the callback, queued, ran and reported, as Java completes it
+     * after `onCompletion` returned. */
+    TEST_ASSERT_FALSE(kafka_common_KafkaFuture_is_done(future));
+    TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &result.fired, 1));
     TEST_ASSERT_TRUE(kafka_common_KafkaFuture_is_done(future));
     const kafka_producer_RecordMetadata_t *metadata = get_metadata(future);
 
-    TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &result.fired, 1));
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&result.fired));
     TEST_ASSERT_TRUE(result.had_metadata);
     TEST_ASSERT_FALSE(result.had_error);
@@ -2149,10 +2164,10 @@ void test_send_with_callback_runs_on_pumping_thread(void) {
     kafka_common_KafkaFuture_t *future = send_with_callback(f.producer, "cb-thread-topic", -1, NULL, &VALUE, &result);
 
     /* Completed during the send (auto_complete=1), queued, announced... */
-    TEST_ASSERT_TRUE(kafka_common_KafkaFuture_is_done(future));
     TEST_ASSERT_TRUE(callback_pump_wait_notify(&f.pump));
-    /* ...and not fired. */
+    /* ...and not fired, so its future is not done either. */
     TEST_ASSERT_EQUAL_INT(0, atomic_load(&result.fired));
+    TEST_ASSERT_FALSE(kafka_common_KafkaFuture_is_done(future));
 
     pump_thread_t pumper = { f.producer, -1, pthread_self() };
     pthread_t thread;
@@ -2163,9 +2178,156 @@ void test_send_with_callback_runs_on_pumping_thread(void) {
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&result.fired));
     TEST_ASSERT_TRUE(pthread_equal(pumper.thread_id, result.thread_id));
     TEST_ASSERT_FALSE(pthread_equal(pthread_self(), result.thread_id));
+    TEST_ASSERT_TRUE(kafka_common_KafkaFuture_is_done(future));
 
     kafka_common_KafkaFuture_destroy(future);
     fixture_destroy(&f);
+}
+
+/* Reports `callback_id` to `producer` from a helper thread. */
+typedef struct {
+    const kafka_producer_Producer_t *producer;
+    int64_t callback_id;
+} report_thread_t;
+
+static void *report_thread(void *arg) {
+    report_thread_t *r = (report_thread_t *)arg;
+    kafka_producer_Producer__set_callback_result(r->producer, r->callback_id, NULL, NULL);
+    return NULL;
+}
+
+void test_send_with_callback_deferred_report_from_another_thread(void) {
+    /* A callback may report after it returned, from any thread: the future
+     * completes on that report, with the record's own outcome. */
+    fixture_t f;
+    fixture_init(&f, 0);
+
+    record_result_t result;
+    memset(&result, 0, sizeof(result));
+    result.defer = 1;
+    kafka_common_KafkaFuture_t *future = send_with_callback(f.producer, "deferred-topic", 2, NULL, &VALUE, &result);
+
+    TEST_ASSERT_TRUE(kafka_producer_MockProducer_complete_next(f.mock));
+    TEST_ASSERT_EQUAL_INT32(1, callback_pump_execute(&f.pump));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&result.fired));
+    /* Ran, but not reported yet. */
+    TEST_ASSERT_FALSE(kafka_common_KafkaFuture_is_done(future));
+
+    report_thread_t reporter = { f.producer, result.callback_id };
+    pthread_t thread;
+    TEST_ASSERT_EQUAL_INT(0, pthread_create(&thread, NULL, report_thread, &reporter));
+    TEST_ASSERT_EQUAL_INT(0, pthread_join(thread, NULL));
+
+    TEST_ASSERT_TRUE(kafka_common_KafkaFuture_is_done(future));
+    const kafka_producer_RecordMetadata_t *metadata = get_metadata(future);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_producer_RecordMetadata_partition(metadata));
+    TEST_ASSERT_EQUAL_STRING("deferred-topic", kafka_producer_RecordMetadata_topic(metadata));
+
+    kafka_common_KafkaFuture_destroy(future);
+    fixture_destroy(&f);
+}
+
+void test_flush_runs_the_delivery_callbacks_on_the_calling_thread(void) {
+    /* `flush` completes the mock's records, then waits for the reports of
+     * their callbacks, running the queued callbacks on its own thread
+     * meanwhile: a caller pumping on one thread does not wait for itself. */
+    fixture_t f;
+    fixture_init(&f, 0);
+
+    record_result_t result;
+    memset(&result, 0, sizeof(result));
+    kafka_common_KafkaFuture_t *future = send_with_callback(f.producer, "flush-topic", -1, NULL, &VALUE, &result);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&result.fired));
+
+    TEST_ASSERT_NULL(kafka_producer_Producer_flush(f.producer));
+
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&result.fired));
+    TEST_ASSERT_TRUE(pthread_equal(pthread_self(), result.thread_id));
+    TEST_ASSERT_TRUE(kafka_common_KafkaFuture_is_done(future));
+    /* Nothing left for the pump. */
+    TEST_ASSERT_EQUAL_INT32(0, callback_pump_execute(&f.pump));
+
+    kafka_common_KafkaFuture_destroy(future);
+    fixture_destroy(&f);
+}
+
+/* Runs a blocking `flush` on a helper thread and records when it returned. */
+typedef struct {
+    const kafka_producer_Producer_t *producer;
+    kafka_common_Error_t *err;
+    atomic_int returned;
+} flush_thread_t;
+
+static void *flush_thread(void *arg) {
+    flush_thread_t *t = (flush_thread_t *)arg;
+    t->err = kafka_producer_Producer_flush(t->producer);
+    atomic_store(&t->returned, 1);
+    return NULL;
+}
+
+void test_flush_returns_only_after_the_callbacks_reported(void) {
+    /* Java's `flush` returns after the callbacks of the records it flushed;
+     * here after their reports, however late they come. */
+    fixture_t f;
+    fixture_init(&f, 0);
+
+    record_result_t result;
+    memset(&result, 0, sizeof(result));
+    result.defer = 1;
+    kafka_common_KafkaFuture_t *future = send_with_callback(f.producer, "flush-wait-topic", -1, NULL, &VALUE,
+                                                            &result);
+
+    flush_thread_t flusher;
+    memset(&flusher, 0, sizeof(flusher));
+    flusher.producer = f.producer;
+    pthread_t thread;
+    TEST_ASSERT_EQUAL_INT(0, pthread_create(&thread, NULL, flush_thread, &flusher));
+
+    /* The flushing thread runs the callback itself... */
+    for (int i = 0; i < 5000 && atomic_load(&result.fired) == 0; i++) {
+        struct timespec ms = { 0, 1000000 };
+        nanosleep(&ms, NULL);
+    }
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&result.fired));
+    TEST_ASSERT_FALSE(pthread_equal(pthread_self(), result.thread_id));
+    /* ...and keeps waiting for its report. */
+    struct timespec settle = { 0, 100000000 };
+    nanosleep(&settle, NULL);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&flusher.returned));
+    TEST_ASSERT_FALSE(kafka_common_KafkaFuture_is_done(future));
+
+    kafka_producer_Producer__set_callback_result(f.producer, result.callback_id, NULL, NULL);
+    TEST_ASSERT_EQUAL_INT(0, pthread_join(thread, NULL));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&flusher.returned));
+    TEST_ASSERT_NULL(flusher.err);
+    TEST_ASSERT_TRUE(kafka_common_KafkaFuture_is_done(future));
+
+    kafka_common_KafkaFuture_destroy(future);
+    fixture_destroy(&f);
+}
+
+void test_destroy_completes_a_future_whose_callback_never_reported(void) {
+    /* `_destroy` completes the callbacks still unreported as if each had
+     * reported success, so their futures do not wait forever. */
+    fixture_t f;
+    fixture_init(&f, 0);
+
+    record_result_t result;
+    memset(&result, 0, sizeof(result));
+    result.defer = 1;
+    kafka_common_KafkaFuture_t *future = send_with_callback(f.producer, "unreported-topic", 3, NULL, &VALUE,
+                                                            &result);
+    TEST_ASSERT_TRUE(kafka_producer_MockProducer_complete_next(f.mock));
+    TEST_ASSERT_EQUAL_INT32(1, callback_pump_execute(&f.pump));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&result.fired));
+    TEST_ASSERT_FALSE(kafka_common_KafkaFuture_is_done(future));
+
+    fixture_destroy(&f);
+
+    TEST_ASSERT_TRUE(kafka_common_KafkaFuture_is_done(future));
+    const kafka_producer_RecordMetadata_t *metadata = get_metadata(future);
+    TEST_ASSERT_EQUAL_INT32(3, kafka_producer_RecordMetadata_partition(metadata));
+    kafka_common_KafkaFuture_destroy(future);
 }
 
 void test_send_with_callback_validation_error_no_callback(void) {
@@ -2312,6 +2474,10 @@ int main(void) {
     RUN_TEST(test_send_with_callback_fires_error_on_error_next);
     RUN_TEST(test_send_with_callback_future_and_callback_agree);
     RUN_TEST(test_send_with_callback_runs_on_pumping_thread);
+    RUN_TEST(test_send_with_callback_deferred_report_from_another_thread);
+    RUN_TEST(test_flush_runs_the_delivery_callbacks_on_the_calling_thread);
+    RUN_TEST(test_flush_returns_only_after_the_callbacks_reported);
+    RUN_TEST(test_destroy_completes_a_future_whose_callback_never_reported);
     RUN_TEST(test_send_with_callback_validation_error_no_callback);
 
     return UNITY_END();

@@ -20,18 +20,28 @@ Binding Conventions, Class family): the interface methods are ``async def``
 where :class:`AsyncProducer`'s are, and the Java mock's own methods are plain
 ``def``, as none of them waits. Sends complete, and their callbacks run, on the
 event loop that awaits ``send()``.
+
+As on ``AsyncKafkaProducer``, a ``send()`` callback may be an ``async def``
+(rule 3): run on the loop completing the record, it is awaited in a task before
+the record's future completes, a later callback of the mock waiting for it, and
+``flush()``, ``commit_transaction()``, ``abort_transaction()`` and ``close()``
+wait for the callbacks awaited when they are called. A completion outside a
+running loop (``complete_next()`` from plain code) cannot await one: its
+coroutine is closed and a ``TypeError`` logged, as on ``MockProducer``.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+import inspect
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, TypeVar, overload
 
 from confluent_kafka._args import UNSET, java_forms
 
 from ._mock_core import MockProducerCore
-from .async_producer import AsyncProducer
+from ._send import log_callback_error, run_callback
+from .async_producer import AsyncProducer, _AsyncCallback, _in_async_callback, _running_loop
 from .mock_producer import _FORMS
 from .record_metadata import RecordMetadata
 
@@ -42,7 +52,6 @@ if TYPE_CHECKING:
     from confluent_kafka.common.serialization import Serializer
     from confluent_kafka.consumer import ConsumerGroupMetadata, OffsetAndMetadata
 
-    from .callback import Callback
     from .partitioner import Partitioner
     from .producer_record import ProducerRecord
 
@@ -95,6 +104,58 @@ class AsyncMockProducer(MockProducerCore[K, V], AsyncProducer[K, V]):
             # MockProducer(): this(Cluster.empty(), false, null, null, null).
             auto_complete, partitioner, key_serializer, value_serializer = False, None, None, None
         self._init_mock(cluster, auto_complete, partitioner, key_serializer, value_serializer)
+        # The last callback task of the mock: a later completion runs after it.
+        self._mock_tail: asyncio.Task[None] | None = None
+
+    def _fire(self, callback: Callable[..., object] | None, metadata: RecordMetadata,
+              e: RuntimeError | None, future: Any, settle: Callable[[], None]) -> None:
+        """Run a completion's callback, then settle its future. On a running
+        loop, an ``async def`` callback is awaited in a task first, and while
+        one is awaited a later completion runs after it, in a task too."""
+        loop = _running_loop()
+        tail = self._mock_tail
+        if tail is not None and (tail.done() or tail.get_loop() is not loop):
+            tail = None
+        if loop is None or (tail is None and callback is None):
+            MockProducerCore._fire(self, callback, metadata, e, future, settle)
+            return
+        result: object = None
+        if tail is None:
+            assert callback is not None
+            try:
+                result = run_callback(self, callback, metadata, e)
+            except Exception as exc:  # noqa: BLE001 - logged as Java's batch does
+                log_callback_error(metadata, exc)
+            if not inspect.isawaitable(result):
+                settle()
+                return
+        awaited = result if inspect.isawaitable(result) else None
+        producer_id = id(self)
+
+        async def run() -> None:
+            if tail is not None:
+                await asyncio.wait((tail,))
+            _in_async_callback.set(_in_async_callback.get() | {producer_id})
+            try:
+                if awaited is not None:
+                    await awaited
+                elif callback is not None:
+                    pending = run_callback(self, callback, metadata, e)
+                    if inspect.isawaitable(pending):
+                        await pending
+            except BaseException as exc:  # noqa: BLE001 - logged, then the future settles
+                log_callback_error(metadata, exc)
+            settle()
+
+        self._mock_tail = loop.create_task(run())
+
+    async def _await_callbacks(self) -> None:
+        """Wait for the callbacks the mock awaits, unless called from one."""
+        tail = self._mock_tail
+        if (tail is None or tail.done() or id(self) in _in_async_callback.get()
+                or tail.get_loop() is not _running_loop()):
+            return
+        await asyncio.wait((tail,))
 
     async def init_transactions(self) -> None:
         self._init_transactions()
@@ -109,12 +170,14 @@ class AsyncMockProducer(MockProducerCore[K, V], AsyncProducer[K, V]):
 
     async def commit_transaction(self) -> None:
         self._commit_transaction()
+        await self._await_callbacks()
 
     async def abort_transaction(self) -> None:
         self._abort_transaction()
+        await self._await_callbacks()
 
     async def send(self, *, record: ProducerRecord[K, V],
-                   callback: Callback | None = UNSET) -> asyncio.Future[RecordMetadata]:
+                   callback: _AsyncCallback | None = UNSET) -> asyncio.Future[RecordMetadata]:
         """See ``MockProducer.send``; the returned ``asyncio.Future`` is complete
         when this returns if ``auto_complete``."""
         if callback is UNSET:
@@ -125,6 +188,7 @@ class AsyncMockProducer(MockProducerCore[K, V], AsyncProducer[K, V]):
 
     async def flush(self) -> None:
         self._flush()
+        await self._await_callbacks()
 
     async def partitions_for(self, *, topic: str) -> list[PartitionInfo]:
         return self._partitions_for(topic)
@@ -135,6 +199,7 @@ class AsyncMockProducer(MockProducerCore[K, V], AsyncProducer[K, V]):
     async def close(self, *, timeout: Duration | None = None) -> None:
         """Java's mock never reads the timeout, a negative one included."""
         self._close()
+        await self._await_callbacks()
 
     async def __aenter__(self) -> AsyncMockProducer[K, V]:
         return self

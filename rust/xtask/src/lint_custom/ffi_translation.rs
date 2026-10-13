@@ -100,8 +100,9 @@
 //!   - a client trait ([`CLIENT_TRAITS`]): `__execute_callbacks`,
 //!     `__set_callbacks_notify` with its `_callbacks_notify_fn_t`, and
 //!     `__set_callback_result(self, callback_id, result, error)` when it
-//!     accepts an interface with an async method (the double underscore on
-//!     all three: derived by convention, no Java counterpart);
+//!     accepts an interface with an async method or runs a reported C-only
+//!     closure interface ([`C_ONLY_CLOSURE_INTERFACES`]) (the double
+//!     underscore on all three: derived by convention, no Java counterpart);
 //!   - `impl Trait for Struct`, both with a handle:
 //!     `<struct prefix>__as_<Trait>` returning the borrowed interface view,
 //!     `*mut` on both sides when a trait method takes `&mut self`; a blanket
@@ -138,7 +139,9 @@
 //! ([`C_ONLY_CLOSURE_INTERFACES`]) has no Rust item, so its §4 rule 3
 //! interface — `_t`, `_new`, `_destroy`, one invoker and one `_fn_t` per
 //! method — is accepted as C-only, while the closure-taking Rust method stays
-//! `unmapped`.
+//! `unmapped`; a reported one (Java's `Callback`) adds the client's
+//! `__set_callback_result` to the expected surface and admits its invoker's
+//! `_cb` twin and `_cb_t`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -176,10 +179,38 @@ const C_ONLY_FREE_FUNCTIONS: &[&str] = &["kafka_string_destroy"];
 /// `<prefix>_<method>_fn_t`) that no Rust item stands behind: the closure
 /// parameter of the Rust method is `unmapped` by design, and these are the C
 /// items it takes instead.
-const C_ONLY_CLOSURE_INTERFACES: &[(&str, &[&str])] = &[
-    ("kafka_common_KafkaFuture_BaseFunction", &["apply"]),
-    ("kafka_producer_Callback", &["on_completion"]),
+///
+/// A closure the client runs on the caller's queue and waits for (Java's
+/// `Callback`, which `flush` and `close` wait for on the I/O thread) is
+/// *reported*: its `_fn_t` takes a trailing `callback_id`, its
+/// implementation reports through the client's
+/// `__set_callback_result(self, callback_id, result, error)` — expected with
+/// that shape, as for a client accepting an async interface — and its
+/// invoker has the CLAUDE.md §4 `_cb` twin with its `_cb_t`, since it waits
+/// for that report.
+const C_ONLY_CLOSURE_INTERFACES: &[ClosureInterface] = &[
+    ClosureInterface {
+        prefix: "kafka_common_KafkaFuture_BaseFunction",
+        methods: &["apply"],
+        reported_by: None,
+    },
+    ClosureInterface {
+        prefix: "kafka_producer_Callback",
+        methods: &["on_completion"],
+        reported_by: Some("Producer"),
+    },
 ];
+
+/// One entry of [`C_ONLY_CLOSURE_INTERFACES`].
+struct ClosureInterface {
+    /// The C prefix of the interface.
+    prefix: &'static str,
+    /// Its methods, snake_cased.
+    methods: &'static [&'static str],
+    /// The client trait ([`CLIENT_TRAITS`]) whose `__set_callback_result`
+    /// the implementation reports through, when it is reported.
+    reported_by: Option<&'static str>,
+}
 
 /// C items with no Rust item behind them that CLAUDE.md §4 presupposes: a C
 /// caller classifies an error "beyond its numeric code" through the
@@ -1660,7 +1691,10 @@ impl FfiTranslation {
                         .flatten()
                         .filter_map(|t| traits.get(t.as_str()))
                         .any(|t| t.methods.iter().any(|m| async_output(&m.sig).is_some()));
-                    if async_interface {
+                    let reported_closure = C_ONLY_CLOSURE_INTERFACES
+                        .iter()
+                        .any(|c| c.reported_by == Some(ty.name.as_str()));
+                    if async_interface || reported_closure {
                         out.add(
                             format!("{prefix}__set_callback_result"),
                             Shape::Fn(Sig {
@@ -2327,15 +2361,20 @@ fn compare(expected: &BTreeMap<String, Expected>, actual: &CSurface, findings: &
     let c_only = actual.c_only_prefixes();
     let closure_interfaces: BTreeSet<String> = C_ONLY_CLOSURE_INTERFACES
         .iter()
-        .flat_map(|(prefix, methods)| {
+        .flat_map(|c| {
+            let prefix = c.prefix;
             let mut items = vec![
                 format!("{prefix}_t"),
                 format!("{prefix}_new"),
                 format!("{prefix}_destroy"),
             ];
-            for m in methods.iter() {
+            for m in c.methods.iter() {
                 items.push(format!("{prefix}_{m}"));
                 items.push(format!("{prefix}_{m}_fn_t"));
+                if c.reported_by.is_some() {
+                    items.push(format!("{prefix}_{m}_cb"));
+                    items.push(format!("{prefix}_{m}_cb_t"));
+                }
             }
             items
         })
@@ -2942,6 +2981,7 @@ mod tests {
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer__execute_callbacks(this: *const kafka_producer_Producer_t) -> i32 { 0 }
             pub type kafka_producer_Producer_callbacks_notify_fn_t = unsafe extern "C" fn(opaque: *mut c_void);
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer__set_callbacks_notify(this: *const kafka_producer_Producer_t, notify: kafka_producer_Producer_callbacks_notify_fn_t, opaque: *mut c_void) {}
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer__set_callback_result(this: *const kafka_producer_Producer_t, callback_id: i64, result: *mut c_void, error: *mut kafka_common_Error_t) {}
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(bootstrap: *const c_char, out_producer: *mut *mut kafka_producer_Producer_t) -> *mut kafka_common_Error_t { std::ptr::null_mut() }
         "#;
         let findings = run("factory", rust, ffi);
@@ -3533,30 +3573,12 @@ mod tests {
     fn test_producer_callback_interface_is_accepted_as_c_only() {
         // `Producer::send_with_callback` takes Java's `Callback` as a closure:
         // the method is `unmapped`, and `kafka_producer_Callback` is the C-only
-        // interface standing in for it — admitted with its rule 3 items only.
-        let rust = r#"
-            pub mod producer {
-                #[doc(alias = "org.apache.kafka.clients.producer.Producer")]
-                pub trait Producer<K, V> {
-                    fn send_with_callback(&self, record: K, callback: Option<Box<dyn FnOnce(Option<&V>) + Send + Sync>>) -> i32;
-                }
-            }
-        "#;
-        let ffi = r#"
-            #[repr(C)] pub struct kafka_producer_Producer_t { _p: [u8; 0] }
-            #[repr(C)] pub struct kafka_producer_Callback_t { _p: [u8; 0] }
-            #[repr(C)] pub struct kafka_common_Error_t { _p: [u8; 0] }
-            pub type kafka_producer_Callback_on_completion_fn_t = unsafe extern "C" fn(self_: *mut c_void, metadata: *const c_void, error: *const kafka_common_Error_t);
-            #[unsafe(no_mangle)] pub extern "C" fn kafka_producer_Callback_new(self_: *mut c_void, on_completion: kafka_producer_Callback_on_completion_fn_t) -> *mut kafka_producer_Callback_t { std::ptr::null_mut() }
-            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Callback_on_completion(self_: *const kafka_producer_Callback_t, metadata: *const c_void, error: *const kafka_common_Error_t) {}
-            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Callback_destroy(self_: *mut kafka_producer_Callback_t) {}
-            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Callback_stray(self_: *mut kafka_producer_Callback_t) {}
-            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(self_: *const kafka_producer_Producer_t, record: *const c_void, callback: *const kafka_producer_Callback_t) -> i32 { 0 }
-        "#;
-        let findings = run("callback-interface", rust, ffi);
+        // interface standing in for it — admitted with its rule 3 items, and,
+        // being reported, the invoker's `_cb` twin, only.
+        let findings = run("callback-interface", PRODUCER_CALLBACK_RUST, PRODUCER_CALLBACK_FFI);
         let keys: Vec<&str> = keys(&findings)
             .into_iter()
-            .filter(|k| k.contains("Callback") || k.contains("send_with_callback"))
+            .filter(|k| k.contains("Callback") || k.contains("send_with_callback") || k.contains("callback_result"))
             .collect();
         assert_eq!(
             keys,
@@ -3566,6 +3588,90 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn test_reported_closure_interface_expects_the_client_set_callback_result() {
+        // The `Callback` implementation reports through the producer's
+        // `__set_callback_result`, so the client trait expects it although no
+        // interface it accepts has an async method.
+        let ffi = PRODUCER_CALLBACK_FFI
+            .lines()
+            .filter(|l| !l.contains("fn kafka_producer_Producer__set_callback_result("))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let findings = run("callback-report-missing", PRODUCER_CALLBACK_RUST, &ffi);
+        assert!(keys(&findings).contains(&"missing kafka_producer_Producer__set_callback_result"));
+        assert_eq!(
+            detail(&findings, "missing kafka_producer_Producer__set_callback_result"),
+            "expected `fn(self: *const kafka_producer_Producer_t, callback_id: i64, result: *mut c_void, \
+             error: *mut kafka_common_Error_t)`"
+        );
+    }
+
+    #[test]
+    fn test_reported_closure_interface_checks_the_set_callback_result_shape() {
+        // The three-parameter form of before the report carried its error is
+        // the wrong shape.
+        let ffi = PRODUCER_CALLBACK_FFI.replace(
+            "callback_id: i64, result: *mut c_void, error: *mut kafka_common_Error_t) {}",
+            "callback_id: i64, result: *mut c_void) {}",
+        );
+        let findings = run("callback-report-shape", PRODUCER_CALLBACK_RUST, &ffi);
+        assert!(keys(&findings).contains(&"shape kafka_producer_Producer__set_callback_result"));
+    }
+
+    #[test]
+    fn test_only_a_reported_closure_interface_admits_an_invoker_cb_twin() {
+        // `KafkaFuture.BaseFunction` is not reported: its invoker waits for
+        // nothing, so a `_cb` twin of it is unexpected.
+        let rust = r#"
+            pub mod common {
+                #[doc(alias = "org.apache.kafka.common.KafkaFuture")]
+                pub struct KafkaFuture<T>(T);
+            }
+        "#;
+        let ffi = r#"
+            #[repr(C)] pub struct kafka_common_KafkaFuture_t { _p: [u8; 0] }
+            #[repr(C)] pub struct kafka_common_Error_t { _p: [u8; 0] }
+            pub type kafka_common_KafkaFuture_BaseFunction_apply_cb_t = unsafe extern "C" fn(opaque: *mut c_void);
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_apply_cb(self_: *const c_void, cb: kafka_common_KafkaFuture_BaseFunction_apply_cb_t, opaque: *mut c_void) {}
+        "#;
+        let findings = run("closure-cb-twin", rust, ffi);
+        let keys: Vec<&str> = keys(&findings).into_iter().filter(|k| k.contains("BaseFunction")).collect();
+        assert_eq!(
+            keys,
+            [
+                "unexpected kafka_common_KafkaFuture_BaseFunction_apply_cb",
+                "unexpected kafka_common_KafkaFuture_BaseFunction_apply_cb_t",
+            ]
+        );
+    }
+
+    /// A `Producer` client trait taking Java's `Callback` as a closure.
+    const PRODUCER_CALLBACK_RUST: &str = r#"
+        pub mod producer {
+            #[doc(alias = "org.apache.kafka.clients.producer.Producer")]
+            pub trait Producer<K, V> {
+                fn send_with_callback(&self, record: K, callback: Option<Box<dyn FnOnce(Option<&V>) + Send + Sync>>) -> i32;
+            }
+        }
+    "#;
+
+    /// The C surface of [`PRODUCER_CALLBACK_RUST`], with a stray function.
+    const PRODUCER_CALLBACK_FFI: &str = r#"
+        #[repr(C)] pub struct kafka_producer_Producer_t { _p: [u8; 0] }
+        #[repr(C)] pub struct kafka_producer_Callback_t { _p: [u8; 0] }
+        #[repr(C)] pub struct kafka_common_Error_t { _p: [u8; 0] }
+        pub type kafka_producer_Callback_on_completion_fn_t = unsafe extern "C" fn(self_: *mut c_void, metadata: *const c_void, error: *const kafka_common_Error_t, callback_id: i64);
+        pub type kafka_producer_Callback_on_completion_cb_t = unsafe extern "C" fn(opaque: *mut c_void);
+        #[unsafe(no_mangle)] pub extern "C" fn kafka_producer_Callback_new(self_: *mut c_void, on_completion: kafka_producer_Callback_on_completion_fn_t) -> *mut kafka_producer_Callback_t { std::ptr::null_mut() }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Callback_on_completion(self_: *const kafka_producer_Callback_t, metadata: *const c_void, error: *const kafka_common_Error_t) {}
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Callback_on_completion_cb(self_: *const kafka_producer_Callback_t, metadata: *const c_void, error: *const kafka_common_Error_t, cb: kafka_producer_Callback_on_completion_cb_t, opaque: *mut c_void) {}
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Callback_destroy(self_: *mut kafka_producer_Callback_t) {}
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Callback_stray(self_: *mut kafka_producer_Callback_t) {}
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(self_: *const kafka_producer_Producer_t, record: *const c_void, callback: *const kafka_producer_Callback_t) -> i32 { 0 }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer__set_callback_result(self_: *const kafka_producer_Producer_t, callback_id: i64, result: *mut c_void, error: *mut kafka_common_Error_t) {}
+    "#;
 
     #[test]
     fn test_interface_lists_supertrait_methods() {

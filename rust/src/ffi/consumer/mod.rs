@@ -89,7 +89,7 @@ use std::ffi::{CString, c_char, c_void};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use tokio::task::JoinHandle;
@@ -97,7 +97,7 @@ use tokio::task::JoinHandle;
 use crate::common::{Error, TopicPartition};
 use crate::consumer::{Consumer, ConsumerHandle, MockConsumer};
 use crate::ffi::callback_queue::{CallbackJob, CallbackQueue, SendPtr};
-use crate::ffi::callback_result::CallbackResults;
+use crate::ffi::callback_result::{CallbackResults, INVOKER_RESULTS};
 use crate::ffi::common::metrics::box_metrics_map;
 use crate::ffi::common::partition_info::partition_info_list;
 use crate::ffi::common::topic_partition::{
@@ -531,19 +531,6 @@ pub(crate) fn ms(timeout: i64) -> Result<Duration, Error> {
 // ---------------------------------------------------------------------------
 // Callback results (CLAUDE.md §4 rule 3: async interface methods)
 // ---------------------------------------------------------------------------
-
-/// The pending calls of the standalone invokers
-/// (`kafka_consumer_ConsumerRebalanceListener_on_partitions_*` and their
-/// `_cb` forms, `kafka_consumer_OffsetCommitCallback_on_complete*`), which
-/// invoke a C implementation with no consumer of their own.
-///
-/// The one process-wide registry, against the rule that each client holds
-/// its own: the C implementation reports through
-/// [`kafka_consumer_Consumer__set_callback_result`] whatever consumer it was
-/// written for, or `NULL`, since it cannot tell an invoker's call from a
-/// consumer's. So this registry is tagged ([`CallbackResults::new_tagged`])
-/// and a report routes its id by the tag, never through `self_`.
-pub(crate) static INVOKER_RESULTS: LazyLock<CallbackResults> = LazyLock::new(CallbackResults::new_tagged);
 
 /// Reports the result of an async interface method (`ConsumerRebalanceListener`,
 /// `OffsetCommitCallback`) invoked with `callback_id` (CLAUDE.md §4): once the

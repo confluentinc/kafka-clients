@@ -338,6 +338,108 @@ void test_send_cb_unreachable_broker_fails_future_with_timeout(void) {
     callback_pump_destroy(&pump);
 }
 
+/* What a delivery callback that calls back into its producer saw: the error
+ * `flush` and `flush_cb` returned inside it, and how long a
+ * `close_with_timeout(60 s)` from inside it took. */
+typedef struct {
+    const kafka_producer_Producer_t *producer;
+    atomic_int fired;
+    atomic_int flush_cb_fired;
+    int had_record_error;
+    char flush_message[256];
+    char flush_cb_message[256];
+    int close_failed;
+    double close_seconds;
+} reentrant_result_t;
+
+static void on_flush_cb(kafka_common_Error_t *error, void *opaque) {
+    reentrant_result_t *r = (reentrant_result_t *)opaque;
+    if (error != NULL) {
+        strncpy(r->flush_cb_message, kafka_common_Error_message(error), sizeof(r->flush_cb_message) - 1);
+        kafka_common_Error_destroy(error);
+    }
+    atomic_fetch_add(&r->flush_cb_fired, 1);
+}
+
+static double now_seconds(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+static void on_reentrant_completion(void *self_, const kafka_producer_RecordMetadata_t *metadata,
+                                    const kafka_common_Error_t *error, int64_t callback_id) {
+    (void)metadata;
+    reentrant_result_t *r = (reentrant_result_t *)self_;
+    r->had_record_error = error != NULL;
+    kafka_common_Error_t *err = kafka_producer_Producer_flush(r->producer);
+    if (err != NULL) {
+        strncpy(r->flush_message, kafka_common_Error_message(err), sizeof(r->flush_message) - 1);
+        kafka_common_Error_destroy(err);
+    }
+    kafka_producer_Producer_flush_cb(r->producer, on_flush_cb, r);
+    double start = now_seconds();
+    err = kafka_producer_Producer_close_with_timeout(r->producer, 60000);
+    r->close_seconds = now_seconds() - start;
+    if (err != NULL) {
+        r->close_failed = 1;
+        kafka_common_Error_destroy(err);
+    }
+    atomic_fetch_add(&r->fired, 1);
+    kafka_producer_Producer__set_callback_result(r->producer, callback_id, NULL, NULL);
+}
+
+void test_delivery_callback_cannot_flush_and_closes_without_blocking(void) {
+    /* From inside a delivery callback, as from Java's I/O thread: `flush`
+     * fails with Java's message, and `close` with a positive timeout closes
+     * as for zero instead of waiting for itself. The record fails on the
+     * unreachable broker after `max.block.ms`, which fires its callback. */
+    const char *const pairs[] = {
+        "bootstrap.servers", "localhost:1",   /* unreachable on purpose */
+        "max.block.ms",      "100",
+        NULL
+    };
+    kafka_producer_KafkaProducer_t *producer = make_producer(pairs);
+    const kafka_producer_Producer_t *view = kafka_producer_KafkaProducer__as_Producer(producer);
+    callback_pump_t pump;
+    callback_pump_install(&pump, view);
+
+    static const uint8_t value_bytes[] = "v";
+    static const kafka_Bytes_t value = { value_bytes, 1 };
+    kafka_producer_ProducerRecord_t *record = kafka_producer_ProducerRecord_new("reentrant-topic", &value);
+    reentrant_result_t result;
+    memset(&result, 0, sizeof(result));
+    result.producer = view;
+    kafka_producer_Callback_t *callback = kafka_producer_Callback_new(&result, on_reentrant_completion);
+    kafka_common_KafkaFuture_t *future = NULL;
+    TEST_ASSERT_NULL(kafka_producer_Producer_send_with_callback(view, record, callback, &future));
+    kafka_producer_Callback_destroy(callback);
+    kafka_producer_ProducerRecord_destroy(record);
+
+    TEST_ASSERT_TRUE(callback_pump_until(&pump, &result.fired, 1));
+    TEST_ASSERT_TRUE(result.had_record_error);
+    TEST_ASSERT_EQUAL_STRING(
+        "KafkaProducer.flush() invocation inside a callback is not permitted because it may lead to deadlock.",
+        result.flush_message);
+    TEST_ASSERT_TRUE(callback_pump_until(&pump, &result.flush_cb_fired, 1));
+    TEST_ASSERT_EQUAL_STRING(
+        "KafkaProducer.flush() invocation inside a callback is not permitted because it may lead to deadlock.",
+        result.flush_cb_message);
+    TEST_ASSERT_FALSE(result.close_failed);
+    TEST_ASSERT_TRUE(result.close_seconds < 30.0);
+
+    /* The future has the record's own outcome. */
+    void *metadata = NULL;
+    kafka_common_Error_t *err = kafka_common_KafkaFuture_get(future, &metadata);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_timeout_error(err));
+    kafka_common_Error_destroy(err);
+    kafka_common_KafkaFuture_destroy(future);
+
+    close_and_destroy(producer);
+    callback_pump_destroy(&pump);
+}
+
 // ---------------------------------------------------------------------------
 // Transactions
 //
@@ -697,6 +799,7 @@ int main(void) {
 
     /* Send */
     RUN_TEST(test_send_cb_unreachable_broker_fails_future_with_timeout);
+    RUN_TEST(test_delivery_callback_cannot_flush_and_closes_without_blocking);
 
     /* Transactions */
     RUN_TEST(test_transaction_methods_on_non_transactional_producer);

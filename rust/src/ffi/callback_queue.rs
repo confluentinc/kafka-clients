@@ -231,6 +231,14 @@ impl CallbackQueue {
         i32::try_from(count).unwrap_or(i32::MAX)
     }
 
+    /// Whether the calling thread is inside [`execute`](Self::execute), that
+    /// is, running one of the queued callbacks: a call made from a callback
+    /// then cannot wait for another queued callback, since the nested
+    /// `execute` it would need returns 0.
+    pub(crate) fn is_executing_on_current_thread(&self) -> bool {
+        *lock(&self.owner) == Some(thread::current().id())
+    }
+
     /// Resolves once a job has been pushed since the last call (a permit is
     /// stored, so a push between a drain and this call is not lost).
     pub(crate) async fn pushed(&self) {
@@ -349,6 +357,24 @@ mod tests {
         assert_eq!(queue.execute(), 1);
         assert_eq!(nested.load(Ordering::SeqCst), 0, "the nested call neither runs nor deadlocks");
         assert_eq!(queue.execute(), 1, "the callback queued inside is left for the next drain");
+    }
+
+    #[test]
+    fn only_the_thread_running_a_callback_is_executing() {
+        let queue = Arc::new(CallbackQueue::new());
+        assert!(!queue.is_executing_on_current_thread());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (q, s) = (queue.clone(), seen.clone());
+        queue.push(Box::new(move || {
+            let elsewhere = {
+                let q = q.clone();
+                thread::spawn(move || q.is_executing_on_current_thread()).join().unwrap()
+            };
+            s.lock().unwrap().push((q.is_executing_on_current_thread(), elsewhere));
+        }));
+        assert_eq!(queue.execute(), 1);
+        assert_eq!(*seen.lock().unwrap(), [(true, false)]);
+        assert!(!queue.is_executing_on_current_thread(), "cleared once the drain returned");
     }
 
     #[test]

@@ -57,7 +57,7 @@
 
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::FutureExt;
 
@@ -213,6 +213,10 @@ pub(crate) struct FutureInner {
     runtime: Option<tokio::runtime::Handle>,
     /// The callbacks vector of that client, when any.
     queue: Option<Arc<CallbackQueue>>,
+    /// Whether the future waits for a callback in `queue` to report, so a
+    /// blocking `get` runs the queued callbacks on the calling thread while
+    /// it waits (see [`box_report_future`]).
+    drains_queue: bool,
 }
 
 impl FutureInner {
@@ -223,12 +227,51 @@ impl FutureInner {
         }
         match &self.runtime {
             Some(runtime) => {
-                let value = block_on(runtime, self.resolve_future(timeout))?;
+                let value = match &self.queue {
+                    // The producer was destroyed, its `_destroy` completing every
+                    // record still awaiting its report, so the value is there.
+                    Some(queue) if self.drains_queue && queue.is_closed() => return self.resolve_now(),
+                    Some(queue) if self.drains_queue => self.resolve_draining(runtime, queue, timeout)?,
+                    _ => block_on(runtime, self.resolve_future(timeout))?,
+                };
                 Ok(self.result.get_or_init(|| value).clone())
             },
             // Already complete (module docs): answered on this thread, with no
             // runtime, so the timeout, which needs a timer, is not armed.
             None => self.resolve_ready(NOT_COMPLETE_WITHOUT_CLIENT),
+        }
+    }
+
+    /// Resolves the future, blocking the calling thread, and runs the
+    /// callbacks queued on `queue` meanwhile, on this thread and outside the
+    /// runtime, so they may call blocking entry points themselves: the
+    /// future waits for one of them to report, which the thread pumping the
+    /// queue may be this one. From inside one of those callbacks the nested
+    /// drain runs nothing, so a `get` there waits for whatever reports from
+    /// elsewhere, and on its own record forever, as a Java `get` inside a
+    /// producer callback does.
+    fn resolve_draining(
+        &self,
+        runtime: &tokio::runtime::Handle,
+        queue: &CallbackQueue,
+        timeout: Option<Duration>,
+    ) -> Result<Arc<FfiValue>, Error> {
+        let deadline = timeout.map(|timeout| Instant::now() + timeout);
+        loop {
+            queue.execute();
+            let step = block_on(runtime, async {
+                let remaining = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+                // Both branches are cancellation-safe: `get` only waits for the shared completion,
+                // and a push that races `pushed` leaves its permit behind.
+                tokio::select! {
+                    biased;
+                    result = self.resolve_future(remaining) => Some(result),
+                    () = queue.pushed() => None,
+                }
+            });
+            if let Some(result) = step {
+                return result;
+            }
         }
     }
 
@@ -302,7 +345,36 @@ pub(crate) fn box_future(
     runtime: Option<tokio::runtime::Handle>,
     queue: Option<Arc<CallbackQueue>>,
 ) -> *mut kafka_common_KafkaFuture_t {
-    Arc::into_raw(Arc::new(FutureInner { future, result: OnceLock::new(), runtime, queue })) as *mut _
+    box_future_inner(future, runtime, queue, false)
+}
+
+/// [`box_future`] for a future of a client that completes only once a
+/// callback queued on `queue` reported (a producer record sent with a
+/// delivery callback): a blocking `get` on it runs the queued callbacks on
+/// the calling thread while it waits, so a caller that pumps the queue
+/// itself, on one thread, does not wait for its own pump. The futures
+/// derived from it (`then_apply`, `all_of`) do the same.
+pub(crate) fn box_report_future(
+    future: FfiFuture,
+    runtime: tokio::runtime::Handle,
+    queue: Arc<CallbackQueue>,
+) -> *mut kafka_common_KafkaFuture_t {
+    box_future_inner(future, Some(runtime), Some(queue), true)
+}
+
+fn box_future_inner(
+    future: FfiFuture,
+    runtime: Option<tokio::runtime::Handle>,
+    queue: Option<Arc<CallbackQueue>>,
+    drains_queue: bool,
+) -> *mut kafka_common_KafkaFuture_t {
+    Arc::into_raw(Arc::new(FutureInner {
+        future,
+        result: OnceLock::new(),
+        runtime,
+        queue,
+        drains_queue,
+    })) as *mut _
 }
 
 /// The future behind a handle.
@@ -678,10 +750,14 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_all_of(
         // runtime and queue outlive it.
         .map(|&f| unsafe { future_ref(f as *const _) })
         .collect();
-    let runtime = inners.iter().find_map(|i| i.runtime.clone());
-    let queue = inners.iter().find_map(|i| i.queue.clone());
+    // A future waiting for a report drains its own client's queue, so the result takes that
+    // client when one of the futures is such a future.
+    let owner = inners.iter().find(|i| i.drains_queue);
+    let runtime = owner.map_or_else(|| inners.iter().find_map(|i| i.runtime.clone()), |i| i.runtime.clone());
+    let queue = owner.map_or_else(|| inners.iter().find_map(|i| i.queue.clone()), |i| i.queue.clone());
+    let drains_queue = owner.is_some();
     let all = KafkaFuture::all_of(inners.iter().map(|i| i.future.clone()).collect());
-    box_future(map_void_future(&all), runtime, queue)
+    box_future_inner(map_void_future(&all), runtime, queue, drains_queue)
 }
 
 // ---------------------------------------------------------------------------
@@ -848,7 +924,7 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_then_apply(
         memo.get_or_insert_with(|| function.apply(source.ptr()).map(FfiValue::borrowed))
             .clone()
     });
-    box_future(derived, inner.runtime.clone(), inner.queue.clone())
+    box_future_inner(derived, inner.runtime.clone(), inner.queue.clone(), inner.drains_queue)
 }
 
 /// Frees the handle. The value `get` returned becomes invalid, unless a `_cb`
@@ -1056,6 +1132,68 @@ mod tests {
         unsafe {
             assert_eq!(*(get(f).unwrap() as *const i64), 11);
             completer.join().unwrap();
+            kafka_common_KafkaFuture_destroy(f);
+        }
+    }
+
+    /// A report-backed future's blocking `get` runs the queued callbacks on
+    /// the calling thread, one of which completes it, as a C caller pumping
+    /// its producer on one thread relies on; a timed `get` still times out
+    /// while it drains, and a future derived with `then_apply` drains too.
+    #[test]
+    fn a_report_future_runs_the_queued_callbacks_while_get_waits() {
+        let runtime = client_runtime();
+        let queue = Arc::new(CallbackQueue::new());
+        let pending = KafkaFutureImpl::<i64>::new();
+        let f = box_report_future(map_future(&pending.future()), runtime.handle().clone(), Arc::clone(&queue));
+        let plain = box_future(
+            map_future(&pending.future()),
+            Some(runtime.handle().clone()),
+            Some(Arc::clone(&queue)),
+        );
+        let doubler = Doubler { calls: AtomicUsize::new(0), output: Mutex::new(0) };
+        let function = kafka_common_KafkaFuture_BaseFunction_new(&doubler as *const _ as *mut c_void, double);
+        let mut out: *mut c_void = std::ptr::null_mut();
+        // SAFETY: Test code: `f` and `plain` are the fresh handles above and `function` a fresh
+        // function handle over `doubler`, a live local that outlives the derived future; each is
+        // destroyed once at the end. `out` is a live local; the error a timed-out get returns is
+        // destroyed once.
+        let derived = unsafe {
+            let err = kafka_common_KafkaFuture_get_with_timeout(f, 20, &mut out);
+            assert_eq!(kafka_common_Error_is_local_timeout_error(err), 1, "nothing queued completes it");
+            kafka_common_Error_destroy(err);
+            kafka_common_KafkaFuture_then_apply(f, function)
+        };
+        // SAFETY: Test code: `derived` and `plain` are live handles.
+        unsafe {
+            assert!(future_ref(derived).drains_queue, "then_apply inherits the drain");
+            assert!(!future_ref(plain).drains_queue, "box_future does not drain");
+        }
+        let caller = std::thread::current().id();
+        let ran_on = Arc::new(Mutex::new(None));
+        let pusher = {
+            let ran_on = Arc::clone(&ran_on);
+            let pending = pending.clone();
+            let queue = Arc::clone(&queue);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(20));
+                queue.push(Box::new(move || {
+                    *ran_on.lock().unwrap() = Some(std::thread::current().id());
+                    pending.complete(21);
+                }));
+            })
+        };
+        // SAFETY: Test code: `derived` is still live; the value read is the `i64` `double` wrote.
+        assert_eq!(unsafe { *(get(derived).unwrap() as *const i64) }, 42);
+        pusher.join().unwrap();
+        assert_eq!(*ran_on.lock().unwrap(), Some(caller), "the callback ran on the waiting thread");
+        // SAFETY: Test code: `f` is still live; the value read is the `i64` it caches. Each
+        // handle is then destroyed here, once.
+        unsafe {
+            assert_eq!(*(get(f).unwrap() as *const i64), 21);
+            kafka_common_KafkaFuture_destroy(derived);
+            kafka_common_KafkaFuture_BaseFunction_destroy(function);
+            kafka_common_KafkaFuture_destroy(plain);
             kafka_common_KafkaFuture_destroy(f);
         }
     }
@@ -1406,7 +1544,13 @@ mod tests {
         // Held so the resolved value outlives the job that delivers it.
         let mut held = Vec::new();
         for future in [map_future(&resolved), map_future(&pending.future())] {
-            let inner = Arc::new(FutureInner { future, result: OnceLock::new(), runtime: None, queue: None });
+            let inner = Arc::new(FutureInner {
+                future,
+                result: OnceLock::new(),
+                runtime: None,
+                queue: None,
+                drains_queue: false,
+            });
             held.push(Arc::clone(&inner));
             drop(PendingGet {
                 fn_name: "kafka_common_KafkaFuture_get_cb",

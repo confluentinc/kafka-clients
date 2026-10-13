@@ -617,7 +617,8 @@ def _hand_over(captured: dict[str, Any], rethrown: bool) -> None:
         return
     captured["resolve"](0)
     try:
-        captured["on_completion"](None, error)
+        # Callback id 0: the faked send registered no report with the core.
+        captured["on_completion"](None, error, 0)
     finally:
         _lib.KafkaError_destroy(error)
 
@@ -746,11 +747,12 @@ _LATE_OUTCOMES = {
 
 def _complete_late(captured: dict[str, Any], outcome: str) -> None:
     """The core fires the record's delivery callback (a BORROWED error handle,
-    freed after the call)."""
+    freed after the call; callback id 0, as the faked send registered no report
+    with the core)."""
     metadata, message = _LATE_OUTCOMES[outcome]
     error = 0 if message is None else _lib.KafkaError_new(KafkaError._ffi_id, message)
     try:
-        captured["on_completion"](metadata, error)
+        captured["on_completion"](metadata, error, 0)
     finally:
         if error:
             _lib.KafkaError_destroy(error)
@@ -1925,6 +1927,190 @@ async def test_async_send_callback_runs_on_the_loop_before_the_future() -> None:
     with pytest.raises(IllegalStateError) as err:
         await p.send(record=RECORD)
     assert str(err.value) == CLOSED
+
+
+CALLBACK_ERROR = "Error executing user-provided callback on message for topic-partition 'topic--1'"
+FLUSH_IN_CALLBACK = ("KafkaProducer.flush() invocation inside a callback is not permitted "
+                     "because it may lead to deadlock.")
+
+
+async def _until(condition: Any, timeout: float = 30) -> None:
+    deadline = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < deadline, "condition not reached"
+        await asyncio.sleep(0.01)
+
+
+async def test_async_send_awaits_an_async_def_callback_before_the_future() -> None:
+    # Java fires the callbacks before produceFuture.done()
+    # (ProducerBatch.completeFutureAndFireCallbacks): an `async def` callback
+    # is awaited on the loop, and the record's future completes, with the
+    # record's own outcome, only once it returned and reported.
+    release = asyncio.Event()
+    started = asyncio.Event()
+    seen: list[tuple[bool, Exception | None]] = []
+    holder: dict[str, Any] = {}
+
+    async def callback(md: RecordMetadata, e: Exception | None) -> None:
+        started.set()
+        await release.wait()
+        seen.append((holder["f"].done(), e))
+
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    try:
+        holder["f"] = f = await p.send(record=RECORD, callback=callback)
+        await asyncio.wait_for(started.wait(), 30)
+        await asyncio.sleep(0.2)
+        assert not f.done()
+        release.set()
+        with pytest.raises(KafkaTimeoutError):
+            await asyncio.wait_for(f, 30)
+        ((future_done, error),) = seen
+        assert not future_done and isinstance(error, KafkaTimeoutError)
+    finally:
+        await p.close()
+
+
+async def test_async_flush_waits_for_an_async_def_callback() -> None:
+    # flush() returns once the records sent before it completed, their
+    # callbacks run first: an awaited callback included.
+    release = asyncio.Event()
+    started = asyncio.Event()
+    finished: list[bool] = []
+
+    async def callback(md: RecordMetadata, e: Exception | None) -> None:
+        started.set()
+        await release.wait()
+        finished.append(True)
+
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    try:
+        f = await p.send(record=RECORD, callback=callback)
+        flush = asyncio.ensure_future(p.flush())
+        await asyncio.wait_for(started.wait(), 30)
+        await asyncio.sleep(0.3)
+        assert not flush.done() and finished == []
+        release.set()
+        await asyncio.wait_for(flush, 30)
+        assert finished == [True] and f.done()
+    finally:
+        await p.close()
+
+
+async def test_async_def_callbacks_run_one_at_a_time_in_completion_order() -> None:
+    # A producer's callbacks run one at a time in completion order (CLAUDE.md,
+    # Python Binding Conventions, Threads and callbacks): a later completion
+    # waits behind an awaited callback.
+    release = asyncio.Event()
+    order: list[str] = []
+
+    async def first(md: RecordMetadata, e: Exception | None) -> None:
+        order.append("first started")
+        await release.wait()
+        order.append("first done")
+
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    try:
+        f1 = await p.send(record=RECORD, callback=first)
+        f2 = await p.send(record=RECORD, callback=lambda md, e: order.append("second"))
+        await _until(lambda: order == ["first started"])
+        await asyncio.sleep(0.3)
+        assert order == ["first started"] and not f2.done()
+        release.set()
+        for f in (f1, f2):
+            with pytest.raises(KafkaTimeoutError):
+                await asyncio.wait_for(f, 30)
+        assert order == ["first started", "first done", "second"]
+    finally:
+        await p.close()
+
+
+async def test_a_raising_async_def_callback_is_logged_and_fails_nothing(
+        caplog: pytest.LogCaptureFixture) -> None:
+    # A throwing onCompletion is logged (ProducerBatch.completeFutureAndFireCallbacks)
+    # and reported to the core as the callback's error, which fails nothing:
+    # the future keeps the record's own outcome and the next callback runs.
+    caplog.set_level(logging.ERROR, logger="confluent_kafka.producer")
+    seen: list[str] = []
+
+    async def callback(md: RecordMetadata, e: Exception | None) -> None:
+        await asyncio.sleep(0)
+        raise RuntimeError("async callback blew up")
+
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    try:
+        f = await p.send(record=RECORD, callback=callback)
+        g = await p.send(record=RECORD, callback=lambda md, e: seen.append("next"))
+        for future in (f, g):
+            with pytest.raises(KafkaTimeoutError):
+                await asyncio.wait_for(future, 30)
+        await p.flush()
+        assert seen == ["next"]
+    finally:
+        await p.close()
+    records = [r for r in caplog.records if r.name == "confluent_kafka.producer"]
+    assert [r.getMessage() for r in records] == [CALLBACK_ERROR]
+    assert records[0].exc_info is not None
+    assert str(records[0].exc_info[1]) == "async callback blew up"
+
+
+async def test_flush_in_an_async_def_callback_raises_javas_error() -> None:
+    out: dict[str, Any] = {}
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+
+    async def callback(md: RecordMetadata, e: Exception | None) -> None:
+        try:
+            await p.flush()
+        except KafkaError as error:
+            out["flush"] = error
+
+    try:
+        f = await p.send(record=RECORD, callback=callback)
+        with pytest.raises(KafkaTimeoutError):
+            await asyncio.wait_for(f, 30)
+        assert str(out["flush"]) == FLUSH_IN_CALLBACK
+    finally:
+        await p.close()
+
+
+def test_a_coroutine_callback_on_the_sync_producer_is_closed_and_logged(
+        caplog: pytest.LogCaptureFixture) -> None:
+    # Only an asyncio producer awaits an `async def` callback: the sync one
+    # closes the coroutine and logs a TypeError, as for a raising callback.
+    ran: list[bool] = []
+
+    async def callback(md: RecordMetadata, e: Exception | None) -> None:
+        ran.append(True)
+
+    with caplog.at_level(logging.ERROR, logger="confluent_kafka.producer"):
+        with KafkaProducer(configs=UNREACHABLE) as p:
+            f = p.send(record=RECORD, callback=callback)  # type: ignore[arg-type]
+            assert isinstance(f.exception(timeout=30), KafkaTimeoutError)
+    records = [r for r in caplog.records if r.name == "confluent_kafka.producer"]
+    assert [r.getMessage() for r in records] == [CALLBACK_ERROR]
+    assert records[0].exc_info is not None
+    assert isinstance(records[0].exc_info[1], TypeError)
+    assert str(records[0].exc_info[1]) == "a coroutine send() callback requires an AsyncProducer"
+    assert ran == []
+
+
+async def test_async_mock_awaits_an_async_def_callback_and_flush_waits_for_it() -> None:
+    release = asyncio.Event()
+    finished: list[bool] = []
+
+    async def callback(md: RecordMetadata, e: Exception | None) -> None:
+        await release.wait()
+        finished.append(True)
+
+    p = AsyncMockProducer()
+    f = await p.send(record=RECORD, callback=callback)
+    flush = asyncio.ensure_future(p.flush())
+    await asyncio.sleep(0.2)
+    assert not flush.done() and not f.done()
+    release.set()
+    await asyncio.wait_for(flush, 30)
+    assert finished == [True] and (await f).offset() == 0
+    await p.close()
 
 
 def test_an_async_completion_after_its_loop_closed_is_dropped(

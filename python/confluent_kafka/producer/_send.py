@@ -17,15 +17,27 @@
 The C extension hands each record to the C API's queued send
 (``kafka_producer_Producer_send_with_callback_cb``) with a delivery callback,
 which the producer's callback pump (``kafka_producer_Producer__execute_callbacks``)
-runs as ``on_completion(metadata, error)``: the metadata's fields as a tuple
-(``None`` when there is none) and the BORROWED error handle as an int (0 for
-none). :func:`completion_to_python` turns them into the public objects once
-per completion; :func:`invoke_callback` runs the user's ``Callback`` (CLAUDE.md,
-Python Binding Conventions, Threads and callbacks).
+runs as ``on_completion(metadata, error, callback_id)``: the metadata's fields
+as a tuple (``None`` when there is none), the BORROWED error handle as an int
+(0 for none) and the id the callback reports under. :func:`completion_to_python`
+turns them into the public objects once per completion; :func:`invoke_callback`
+runs the user's ``Callback`` (CLAUDE.md, Python Binding Conventions, Threads and
+callbacks).
+
+The C API completes the record's future, and lets ``flush()``, the
+transaction-end calls and ``close()`` return, only once the callback reported
+(``kafka_producer_Producer__set_callback_result``), as Java fires the callbacks
+before ``produceFuture.done()``. ``on_completion`` reports by returning: ``None``
+for a callback that returned, or raising the exception it raised, which the C
+extension reports as the callback's error (the core logs it and fails nothing,
+as Java logs a throwing ``onCompletion``). It returns ``True`` when the report
+comes later, from ``_lib.Producer__set_callback_result``: the asyncio producer's
+callback that runs on another event loop, or is an ``async def``.
 """
 
 from __future__ import annotations
 
+import inspect
 import logging
 import threading
 from typing import TYPE_CHECKING, cast
@@ -36,11 +48,20 @@ from confluent_kafka.common.topic_partition import TopicPartition
 from .record_metadata import RecordMetadata
 
 if TYPE_CHECKING:
-    from .callback import Callback
+    from collections.abc import Callable
 
-__all__ = ["MetadataTuple", "completion_to_python", "failure_metadata", "in_callback", "invoke_callback"]
+__all__ = ["CALLBACK_ERROR_MESSAGE", "MetadataTuple", "completion_to_python", "failure_metadata",
+           "in_callback", "invoke_callback", "log_callback_error", "run_callback"]
 
 _LOG = logging.getLogger("confluent_kafka.producer")
+
+#: What Java's ``ProducerBatch.completeFutureAndFireCallbacks`` logs for a
+#: throwing callback, formatted with the record's topic-partition.
+CALLBACK_ERROR_MESSAGE = ("Error executing user-provided callback on message for "
+                          "topic-partition '%s'")
+
+# A coroutine callback given to the synchronous producer.
+_COROUTINE_CALLBACK_MESSAGE = "a coroutine send() callback requires an AsyncProducer"
 
 # The producer whose delivery callback runs on the current thread, if any: Java
 # tests ``Thread.currentThread() == this.ioThread`` in ``flush()`` and
@@ -89,28 +110,53 @@ def completion_to_python(metadata_tuple: MetadataTuple | None, error: int, topic
     return metadata, exception
 
 
-def invoke_callback(producer: object, callback: Callback | None,
-                    metadata: RecordMetadata, exception: Exception | None) -> None:
-    """Run the user's ``Callback`` for one completion.
-
-    An exception it raises is logged, not propagated, as Java's
-    ``ProducerBatch.completeFutureAndFireCallbacks`` logs it: the caller is the
-    producer's completion thread or the event loop, and the next callback must
-    still run. While it runs, :func:`in_callback` is true for ``producer`` on
-    this thread.
-    """
-    if callback is None:
-        return
+def run_callback(producer: object, callback: Callable[..., object],
+                 metadata: RecordMetadata, exception: Exception | None) -> object:
+    """Call the user's callback for one completion and return what it returned
+    (an awaitable for an ``async def`` callback), raising what it raised. While
+    it runs, :func:`in_callback` is true for ``producer`` on this thread."""
     previous = getattr(_callback_scope, "producer", None)
     _callback_scope.producer = producer
     try:
-        callback(metadata, exception)
-    except Exception:  # noqa: BLE001 - a user callback must not escape
-        _LOG.exception("Error executing user-provided callback on message for "
-                       "topic-partition '%s'",
-                       f"{metadata.topic()}-{metadata.partition()}")
+        return callback(metadata, exception)
     finally:
         _callback_scope.producer = previous
+
+
+def log_callback_error(metadata: RecordMetadata, error: BaseException) -> None:
+    """Log a callback's exception as Java's
+    ``ProducerBatch.completeFutureAndFireCallbacks`` does."""
+    _LOG.error(CALLBACK_ERROR_MESSAGE, f"{metadata.topic()}-{metadata.partition()}",
+               exc_info=error)
+
+
+def invoke_callback(producer: object, callback: Callable[..., object] | None,
+                    metadata: RecordMetadata, exception: Exception | None) -> Exception | None:
+    """Run the user's ``Callback`` for one completion, synchronously, and
+    return the exception it raised, if any.
+
+    The exception is logged as Java's ``ProducerBatch.completeFutureAndFireCallbacks``
+    logs it, and handed back rather than raised: the caller is the producer's
+    completion thread or the event loop, which reports it to the core (see the
+    module docstring), and the next callback must still run. A callback
+    returning an awaitable (an ``async def``) cannot be awaited here: the
+    awaitable is closed and a ``TypeError`` is logged and returned, as the
+    synchronous consumer does for a coroutine listener.
+    """
+    if callback is None:
+        return None
+    error: Exception | None = None
+    try:
+        result = run_callback(producer, callback, metadata, exception)
+        if inspect.isawaitable(result):
+            close = getattr(result, "close", None)
+            if callable(close):
+                close()
+            raise TypeError(_COROUTINE_CALLBACK_MESSAGE)
+    except Exception as exc:  # noqa: BLE001 - a user callback must not escape
+        error = exc
+        log_callback_error(metadata, exc)
+    return error
 
 
 def in_callback(producer: object) -> bool:

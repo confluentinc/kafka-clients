@@ -49,11 +49,42 @@
 //! thread-safe.
 //!
 //! The blocking forms drive the runtime from the calling thread with
-//! `block_on`; a C interface method (a serializer, the partitioner, a
-//! delivery callback) that is itself running on a runtime worker must not
-//! call a blocking entry point of the same producer, as a nested `block_on`
-//! on a worker is a programming error (it panics in Tokio). The `_cb` forms
-//! are always safe to call from there.
+//! `block_on`; a C interface method (a serializer, the partitioner) that is
+//! itself running on a runtime worker must not call a blocking entry point
+//! of the same producer, as a nested `block_on` on a worker is a programming
+//! error (it panics in Tokio). The `_cb` forms are always safe to call from
+//! there. A delivery callback runs on the thread pumping the queue, never on
+//! a worker, so it may call either form, within what Java allows from a
+//! callback (below).
+//!
+//! # Delivery callbacks report (`ffi::producer::callback`)
+//!
+//! Java runs `Callback.onCompletion` on the producer's I/O thread before the
+//! record's future completes, so `flush()`, `commitTransaction()`,
+//! `abortTransaction()` and `close()` return after the callbacks of the
+//! records they wait for. C's callback runs later, on the pumping thread, so
+//! it reports that it finished through
+//! [`kafka_producer_Producer__set_callback_result`], with the `callback_id`
+//! it was invoked with; the producer keeps one registry of those ids
+//! (`ffi::callback_result::CallbackResults`). With a callback, the future a
+//! `send_with_callback(_cb)` hands out completes only on that report, with
+//! the record's own outcome; `flush` and the commit and abort wait, once the
+//! Rust operation succeeded, for the reports of every callback queued before
+//! it ended, and `close` waits for them without a bound once the producer
+//! is closed, as Java's `close` joins its I/O thread after `forceClose()`.
+//! While a blocking form waits it runs the queued callbacks on the calling
+//! thread, as does `kafka_common_KafkaFuture_get` on a future a callback
+//! backs, so a caller pumping the queue on that one thread does not wait for
+//! itself; the `_cb` forms only wait.
+//!
+//! From inside a delivery callback, as from Java's I/O thread: a
+//! `KafkaProducer`'s `flush` fails (Java's "KafkaProducer.flush() invocation
+//! inside a callback is not permitted because it may lead to deadlock."),
+//! its `close` with a positive timeout closes as for zero, with Java's
+//! warning, and `close` does not wait for the reports, nor do the blocking
+//! commit and abort, since the callback running cannot report before it
+//! returns. A blocking `get` of the callback's own record's future waits
+//! forever, as Java's does.
 //!
 //! # Ordering between `send_cb` and the control operations
 //!
@@ -84,7 +115,12 @@
 //! then stops the submission task and waits for it, runs the still-pending callbacks so each
 //! fires exactly once (§4 rule 5), and drops the producer; the
 //! `kafka_common_KafkaFuture_get_cb` calls still waiting on its futures fire
-//! last, once each (see `ffi::kafka_future`). It does not
+//! last, once each (see `ffi::kafka_future`). The delivery callbacks it runs
+//! may report inline; once it ran them it completes the ones still
+//! unreported as if each had reported success, so no future and no
+//! `flush_cb` or `commit_transaction_cb` waits forever, and
+//! `kafka_producer_Producer__set_callback_result` must not be called for it
+//! from elsewhere once `_destroy` began. It does not
 //! `close` the producer: as in Rust, a `KafkaProducer` dropped without
 //! `close` is force-closed with a warning, so a caller that wants a graceful
 //! shutdown calls `close` first.
@@ -104,33 +140,37 @@ use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 
+use crate::common::internals::KafkaFutureImpl;
 use crate::common::{Error, TopicPartition};
 use crate::consumer::OffsetAndMetadata;
 use crate::ffi::callback_queue::{CallbackJob, CallbackQueue, SendPtr};
+use crate::ffi::callback_result::{CallbackResults, INVOKER_RESULTS, Mark};
 use crate::ffi::common::metrics::box_metrics_map;
 use crate::ffi::common::partition_info::{box_partition_info, kafka_common_PartitionInfo_destroy};
 use crate::ffi::common::topic_partition::topic_partition_ref;
 use crate::ffi::common::{
     box_error, catch_task_panic, deliver_panic, deliver_panic_value, init_default_logger, kafka_common_Error_t,
-    spawn_callback_task,
+    spawn_callback_task, take_error,
 };
 use crate::ffi::consumer::{
     group_metadata_ref, kafka_consumer_ConsumerGroupMetadata_t, kafka_consumer_OffsetAndMetadata_t,
     offset_and_metadata_ref,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::kafka_future::{block_on, box_future, kafka_common_KafkaFuture_t, map_future_handle};
+use crate::ffi::kafka_future::{
+    block_on, box_future, box_report_future, kafka_common_KafkaFuture_t, map_future_handle,
+};
 use crate::ffi::producer::callback::{callback_registration, kafka_producer_Callback_t};
 use crate::ffi::producer::producer_record::{GenericRecord, kafka_producer_ProducerRecord_t, producer_record_ref};
 use crate::ffi::producer::record_metadata::{box_record_metadata, kafka_producer_RecordMetadata_destroy};
 use crate::ffi::util::{GenericValue, box_list, c_str_to_string, kafka_List_t, kafka_Map_t, map_entries};
-use crate::producer::{Callback, DynProducer};
+use crate::producer::{Callback, DynProducer, RecordMetadata};
 
 /// The `Producer` every C handle drives: `void *` key and value.
 pub(crate) type DynProducerGv = dyn DynProducer<GenericValue, GenericValue>;
@@ -154,6 +194,8 @@ enum SubmitRequest {
     Send {
         record: GenericRecord,
         callback: Option<Callback>,
+        /// The future `callback`'s report completes (see [`delivery_callback`]).
+        completion: Option<KafkaFutureImpl<RecordMetadata>>,
         cb: kafka_producer_Producer_send_cb_t,
         opaque: SendPtr,
     },
@@ -169,9 +211,17 @@ enum SubmitRequest {
 /// `Arc` between the class handle and every task it spawned, so a task
 /// never outlives what it uses.
 pub(crate) struct Client {
-    producer: Arc<DynProducerGv>,
+    /// The class handle's producer. Weak, so `destroy` drops the producer
+    /// itself, before it stops the runtime, while this state, which the
+    /// `__set_callback_result` reports of the callbacks it runs still read,
+    /// lives on to the end (see [`ProducerHandle::destroy`]); it upgrades for
+    /// as long as the class handle is live.
+    producer: Weak<DynProducerGv>,
     runtime: tokio::runtime::Handle,
     queue: Arc<CallbackQueue>,
+    /// The delivery callbacks awaiting their `__set_callback_result` report
+    /// (see `ffi::producer::callback`).
+    results: Arc<CallbackResults>,
     /// `None` once `destroy` has asked the submission task to stop.
     submit_tx: Mutex<Option<UnboundedSender<SubmitRequest>>>,
     /// Sends queued by `send_cb` and not yet handed to the producer.
@@ -181,12 +231,13 @@ pub(crate) struct Client {
     txn_control_busy: AtomicBool,
     /// Tasks spawned by `_cb` calls, awaited by `destroy`.
     tasks: Mutex<Vec<JoinHandle<()>>>,
-    /// Whether `close(Duration)` rejects a negative timeout, as
-    /// `KafkaProducer.close` does (`KafkaProducer.java:1392`). Java's
-    /// `MockProducer.close(Duration)` never reads the timeout
-    /// (`MockProducer.java:436-442`), so the mock's view passes a negative one
-    /// on as zero.
-    rejects_negative_close_timeout: bool,
+    /// Whether `close(Duration)` checks its timeout as `KafkaProducer.close`
+    /// does: it rejects a negative one (`KafkaProducer.java:1392-1393`) and, called
+    /// from a delivery callback, overrides a positive one to zero
+    /// (`KafkaProducer.java:1399-1403`). Java's `MockProducer.close(Duration)`
+    /// never reads the timeout (`MockProducer.java:436-442`), so the mock's
+    /// view passes a negative one on as zero and never overrides it.
+    follows_kafka_producer_close: bool,
 }
 
 impl Client {
@@ -208,6 +259,89 @@ impl Client {
         tasks.retain(|task| !task.is_finished());
         tasks.reserve(1);
         tasks.push(spawn_callback_task(&self.runtime, future));
+    }
+
+    /// The producer, while the class handle is live, which every entry point
+    /// but `__set_callback_result` requires; after `destroy` dropped it, a
+    /// `LocalIllegalState` error.
+    fn producer(&self) -> Result<Arc<DynProducerGv>, Error> {
+        self.producer
+            .upgrade()
+            .ok_or_else(|| Error::local_illegal_state("Cannot perform operation after producer has been destroyed"))
+    }
+
+    /// Whether the calling thread is running one of this producer's queued
+    /// callbacks: Java's `Thread.currentThread() == this.ioThread`, the
+    /// thread Java's delivery callbacks run on (`KafkaProducer.java:1217`,
+    /// `:1398`).
+    fn in_callback(&self) -> bool {
+        self.queue.is_executing_on_current_thread()
+    }
+
+    /// Fails as `KafkaProducer.flush()` does when called from a delivery
+    /// callback (`KafkaProducer.java:1217-1220`), logging the message as Java
+    /// does; `MockProducer.flush()` makes no such check. A flush there would
+    /// wait for the report of the callback it runs in, which cannot come
+    /// before the callback returns.
+    fn check_flush_outside_callback(&self, in_callback: bool) -> Result<(), Error> {
+        const MESSAGE: &str =
+            "KafkaProducer.flush() invocation inside a callback is not permitted because it may lead to deadlock.";
+        if in_callback && self.follows_kafka_producer_close {
+            log::error!("{MESSAGE}");
+            return Err(Error::kafka_message(MESSAGE));
+        }
+        Ok(())
+    }
+
+    /// Waits, on the calling thread, until every delivery callback queued
+    /// before `mark` has reported, running the queued callbacks on this
+    /// thread meanwhile, outside the runtime, so a caller that pumps the
+    /// queue itself on one thread does not wait for its own pump.
+    fn wait_reported_blocking(&self, mark: Mark) {
+        loop {
+            self.queue.execute();
+            let reported = block_on(&self.runtime, async {
+                // Both branches are cancellation-safe: `wait_reported` leaves nothing behind, and a
+                // push that races `pushed` leaves its permit for the next round.
+                tokio::select! {
+                    biased;
+                    () = self.results.wait_reported(mark) => true,
+                    () = self.queue.pushed() => false,
+                }
+            });
+            if reported {
+                return;
+            }
+        }
+    }
+
+    /// Completes, after `result`, the wait `wait` asks for on the calling
+    /// thread (see [`ReportWait`]); from inside a delivery callback it does
+    /// not wait, since that callback cannot report before it returns.
+    fn wait_for_reports_blocking(
+        &self,
+        result: Result<(), Error>,
+        wait: ReportWait,
+        in_callback: bool,
+    ) -> Result<(), Error> {
+        if wait.applies(&result) && !in_callback {
+            self.wait_reported_blocking(self.results.mark());
+        }
+        result
+    }
+
+    /// The `_cb` form of [`Self::wait_for_reports_blocking`]: waits on the
+    /// task, without running the queued callbacks, which the caller pumps.
+    async fn wait_for_reports(
+        &self,
+        result: Result<(), Error>,
+        wait: ReportWait,
+        in_callback: bool,
+    ) -> Result<(), Error> {
+        if wait.applies(&result) && !in_callback {
+            self.results.wait_reported(self.results.mark()).await;
+        }
+        result
     }
 
     /// Waits until every `send_cb` that had returned before this call was
@@ -268,6 +402,35 @@ impl Client {
     }
 }
 
+/// Whether an operation, once done, waits for the reports of the delivery
+/// callbacks queued before it ended (see `ffi::producer::callback`): Java runs
+/// the callbacks on the I/O thread before a record's future completes, so
+/// `flush()` and `commitTransaction()` / `abortTransaction()` (which flush)
+/// return after them, and `close()` joins that thread.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReportWait {
+    /// No wait (`initTransactions`, `beginTransaction`,
+    /// `sendOffsetsToTransaction`).
+    No,
+    /// After a successful operation (`flush`, `commitTransaction`,
+    /// `abortTransaction`).
+    OnSuccess,
+    /// Whatever the operation's outcome, without a bound: Java's `close`
+    /// joins the I/O thread after `forceClose()` (`KafkaProducer.java:1426-1437`),
+    /// a failure being thrown after it.
+    Always,
+}
+
+impl ReportWait {
+    fn applies(self, result: &Result<(), Error>) -> bool {
+        match self {
+            ReportWait::No => false,
+            ReportWait::OnSuccess => result.is_ok(),
+            ReportWait::Always => true,
+        }
+    }
+}
+
 /// Releases the transaction-control flag on every exit path, a panic
 /// included.
 struct TxnControlGuard(Arc<Client>);
@@ -294,8 +457,10 @@ impl Drop for QueueDepthGuard<'_> {
 /// §13). Ends when the class handle is destroyed and drops the sender.
 async fn submission_loop(client: Arc<Client>, mut rx: UnboundedReceiver<SubmitRequest>) {
     while let Some(request) = rx.recv().await {
-        let (record, callback, cb, opaque) = match request {
-            SubmitRequest::Send { record, callback, cb, opaque } => (record, callback, cb, opaque),
+        let (record, callback, completion, cb, opaque) = match request {
+            SubmitRequest::Send { record, callback, completion, cb, opaque } => {
+                (record, callback, completion, cb, opaque)
+            },
             SubmitRequest::Barrier { ack } => {
                 let _ = ack.send(());
                 continue;
@@ -305,14 +470,16 @@ async fn submission_loop(client: Arc<Client>, mut rx: UnboundedReceiver<SubmitRe
         // counter means "queued or in flight": a barrier has to wait for an
         // in-flight handover too, not merely for the queue to empty.
         let _depth = QueueDepthGuard(&client);
-        let result = catch_task_panic(
-            "kafka_producer_Producer_send_with_callback_cb",
-            client.producer.send_with_callback(record, callback),
-        )
+        let result = catch_task_panic("kafka_producer_Producer_send_with_callback_cb", async {
+            client.producer()?.send_with_callback(record, callback).await
+        })
         .await;
-        deliver_send(&client, cb, opaque, result);
+        deliver_send(&client, cb, opaque, result.map(|future| (future, completion)));
     }
 }
+
+/// The record's future type the Rust producer returns.
+type RecordFuture = crate::common::KafkaFuture<RecordMetadata>;
 
 /// Queues the completion of a `send`: the future handle on success, the
 /// error otherwise. On `Err` the Rust producer owns the delivery-callback
@@ -322,17 +489,10 @@ fn deliver_send(
     client: &Arc<Client>,
     cb: kafka_producer_Producer_send_cb_t,
     opaque: SendPtr,
-    result: Result<crate::common::KafkaFuture<crate::producer::RecordMetadata>, Error>,
+    result: Result<(RecordFuture, Option<KafkaFutureImpl<RecordMetadata>>), Error>,
 ) {
     let (value, error) = match result {
-        Ok(future) => (
-            box_future(
-                metadata_future(&future),
-                Some(client.runtime.clone()),
-                Some(Arc::clone(&client.queue)),
-            ),
-            std::ptr::null_mut(),
-        ),
+        Ok((future, completion)) => (client.box_send_future(&future, completion), std::ptr::null_mut()),
         Err(error) => (std::ptr::null_mut(), box_error(error)),
     };
     let value = SendPtr(value as *mut c_void);
@@ -354,11 +514,34 @@ fn deliver_send(
     }));
 }
 
+impl Client {
+    /// The C future a `send` hands out: the producer's own future for a
+    /// record sent without a delivery callback, or, with one, the future its
+    /// report completes (`completion`, see [`delivery_callback`]), whose
+    /// blocking `get` runs the queued callbacks while it waits.
+    fn box_send_future(
+        &self,
+        future: &RecordFuture,
+        completion: Option<KafkaFutureImpl<RecordMetadata>>,
+    ) -> *mut kafka_common_KafkaFuture_t {
+        match completion {
+            None => box_future(
+                metadata_future(future),
+                Some(self.runtime.clone()),
+                Some(Arc::clone(&self.queue)),
+            ),
+            Some(completion) => box_report_future(
+                metadata_future(&completion.future()),
+                self.runtime.clone(),
+                Arc::clone(&self.queue),
+            ),
+        }
+    }
+}
+
 /// The C view of a `KafkaFuture<RecordMetadata>`: resolves to a
 /// `kafka_producer_RecordMetadata_t *` the future owns.
-fn metadata_future(
-    future: &crate::common::KafkaFuture<crate::producer::RecordMetadata>,
-) -> crate::ffi::kafka_future::FfiFuture {
+fn metadata_future(future: &RecordFuture) -> crate::ffi::kafka_future::FfiFuture {
     // SAFETY: `box_record_metadata` returns an owned record-metadata handle that
     // `destroy_record_metadata` frees exactly, and nothing else frees it. The handle is an
     // immutable Rust value behind a `Box` (`Send + Sync`), so it may be freed from any thread and
@@ -388,8 +571,11 @@ unsafe fn destroy_record_metadata(element: *mut c_void) {
 /// `kafka_producer_MockProducer_t`: the concrete producer, the shared client
 /// state and the runtime that drives both.
 pub(crate) struct ProducerHandle<P: ?Sized> {
+    /// The producer's one strong reference ([`Client::producer`] is weak).
     producer: Arc<P>,
-    /// The `kafka_producer_Producer_t` view is this field's address.
+    /// The `kafka_producer_Producer_t` view is the address of this field in
+    /// the boxed handle, which `destroy` keeps where it is until its very end,
+    /// so the callbacks it runs can still report through the view.
     client: Arc<Client>,
     runtime: tokio::runtime::Runtime,
     /// The submission task, awaited by `destroy` once the `_cb` tasks have
@@ -405,12 +591,14 @@ where
     /// multi-thread runtime (a `KafkaProducer` spawns its Sender task on
     /// construction), and wraps it with the runtime and the submission task.
     ///
-    /// `rejects_negative_close_timeout` is true for a `KafkaProducer`, whose
-    /// `close(Duration)` rejects a negative timeout, and false for the mock,
-    /// whose `close(Duration)` ignores it.
+    /// `follows_kafka_producer_close` is true for a `KafkaProducer`, whose
+    /// `close(Duration)` rejects a negative timeout and, from a delivery
+    /// callback, overrides a positive one to zero, and whose `flush()` fails
+    /// from a delivery callback; false for the mock, which does neither (see
+    /// [`Client::follows_kafka_producer_close`]).
     pub(crate) fn new(
         make: impl FnOnce() -> Result<P, Error>,
-        rejects_negative_close_timeout: bool,
+        follows_kafka_producer_close: bool,
     ) -> Result<Box<Self>, Error> {
         init_default_logger();
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -423,15 +611,17 @@ where
             Arc::new(make()?)
         };
         let (submit_tx, submit_rx) = tokio::sync::mpsc::unbounded_channel();
+        let dyn_producer: Arc<DynProducerGv> = Arc::clone(&producer) as Arc<DynProducerGv>;
         let client = Arc::new(Client {
-            producer: Arc::clone(&producer) as Arc<DynProducerGv>,
+            producer: Arc::downgrade(&dyn_producer),
             runtime: runtime.handle().clone(),
             queue: Arc::new(CallbackQueue::new()),
+            results: Arc::new(CallbackResults::new()),
             submit_tx: Mutex::new(Some(submit_tx)),
             queued_sends: AtomicUsize::new(0),
             txn_control_busy: AtomicBool::new(false),
             tasks: Mutex::new(Vec::new()),
-            rejects_negative_close_timeout,
+            follows_kafka_producer_close,
         });
         let submission = spawn_callback_task(runtime.handle(), submission_loop(Arc::clone(&client), submit_rx));
         Ok(Box::new(Self { producer, client, runtime, submission }))
@@ -460,22 +650,53 @@ where
     /// the untimed close, the record it waited for and so `destroy` itself
     /// waited out `max.block.ms`.
     ///
+    /// While it awaits the tasks it runs the queued callbacks, and completes
+    /// the delivery callbacks still unreported as if each had reported
+    /// success: a `flush_cb` or `commit_transaction_cb` task waits for those
+    /// reports, which nothing but `destroy` is left to give, since no report
+    /// may arrive from another thread once `destroy` began. The callbacks it
+    /// runs may report inline, through the view, which therefore stays valid
+    /// until the very end: the handle's client field it points at is dropped
+    /// last, with the handle's allocation, after the runtime stopped; the
+    /// producer itself is dropped before, through its one strong reference.
+    ///
     /// A panic caught earlier may have poisoned `submit_tx` or `tasks`; both
     /// are taken regardless, so the handle is still freed and every pending
     /// callback still fires exactly once.
-    pub(crate) fn destroy(self) {
-        let Self { producer, client, runtime, submission } = self;
+    // The box is load-bearing: the view points into it, and the callbacks
+    // `destroy` runs report through the view until it returns.
+    #[expect(clippy::boxed_local)]
+    pub(crate) fn destroy(self: Box<Self>) {
+        // Moved out of the box field by field, so `client`, which the view
+        // points at, stays in place until the box is freed at the end.
+        let producer = self.producer;
+        let runtime = self.runtime;
+        let submission = self.submission;
+        let client = &self.client;
         loop {
             let tasks: Vec<JoinHandle<()>> =
                 std::mem::take(&mut *client.tasks.lock().unwrap_or_else(PoisonError::into_inner));
             if tasks.is_empty() {
                 break;
             }
-            runtime.block_on(async {
-                for task in tasks {
-                    let _ = task.await;
+            for mut task in tasks {
+                loop {
+                    client.queue.execute();
+                    complete_unreported(&client.results);
+                    let finished = runtime.block_on(async {
+                        // Both branches are cancellation-safe: a `JoinHandle` is polled by `&mut`,
+                        // and a push that races `pushed` leaves its permit for the next round.
+                        tokio::select! {
+                            biased;
+                            _ = &mut task => true,
+                            () = client.queue.pushed() => false,
+                        }
+                    });
+                    if finished {
+                        break;
+                    }
                 }
-            });
+            }
         }
         // No `_cb` task is left, and none can start: the handle is gone.
         drop(client.submit_tx.lock().unwrap_or_else(PoisonError::into_inner).take());
@@ -484,21 +705,33 @@ where
         // The producer's `Drop` force-closes it (a `KafkaProducer` needs the
         // runtime context for that) and fires the delivery callbacks of the
         // records still in flight into the queue, which runs once more so
-        // each fires exactly once; the runtime is shut down last.
+        // each fires exactly once; the runtime is shut down after.
         {
             let _enter = runtime.enter();
             drop(producer);
         }
         client.queue.execute();
-        let queue = Arc::clone(&client.queue);
-        drop(client);
+        // A `KafkaFuture_get_cb` task waiting on a record's future gets its
+        // value before the runtime stops.
+        complete_unreported(&client.results);
         runtime.shutdown_timeout(Duration::from_secs(5));
         // Shutting the runtime down dropped the `KafkaFuture_get_cb` tasks
         // still waiting, each queuing its completion as it went (see
         // `ffi::kafka_future`): run them, closing the queue first so a later
         // `get_cb` on a future of this producer runs inline.
-        queue.close();
-        queue.execute();
+        client.queue.close();
+        client.queue.execute();
+        complete_unreported(&client.results);
+    }
+}
+
+/// Completes the delivery callbacks still awaiting their report as if each
+/// had reported success, for a producer being destroyed (see
+/// [`ProducerHandle::destroy`]): each record's future then completes with the
+/// record's outcome.
+fn complete_unreported(results: &CallbackResults) {
+    for sink in results.drain() {
+        sink(Ok(std::ptr::null_mut()));
     }
 }
 
@@ -511,9 +744,10 @@ where
 unsafe fn client_ref<'a>(producer: *const kafka_producer_Producer_t) -> &'a Arc<Client> {
     // SAFETY: Per this function's `# Safety`, `producer` is a live view from an `__as_Producer`
     // function, kept alive for `'a`. Both such functions return `ProducerHandle::as_producer`, the
-    // address of the class handle's `client` field, so the cast reads that `Arc<Client>`, which
-    // lives as long as the class handle. The class handle is only shared while it is live (its
-    // `_destroy` takes the box back by value), so the shared reference is sound.
+    // address of the `Arc<Client>` boxed in the class handle's `client` field, so the cast reads
+    // that `Arc<Client>`, which lives as long as the class handle and, while its `_destroy` runs,
+    // until that returns (`ProducerHandle::destroy` keeps the box to its end). It is only ever
+    // read, never written, so the shared reference is sound.
     unsafe { &*(producer as *const Arc<Client>) }
 }
 
@@ -535,8 +769,9 @@ fn error_slot(result: Result<(), Error>) -> *mut kafka_common_Error_t {
 }
 
 /// Runs a transaction-control operation on the calling thread: takes the
-/// flag, drains the submission queue, runs `op`.
-fn with_txn_control<F, Fut>(client: &Arc<Client>, op: F) -> *mut kafka_common_Error_t
+/// flag, drains the submission queue, runs `op`, then releases the flag and
+/// waits as `wait` asks (see [`Client::wait_for_reports_blocking`]).
+fn with_txn_control<F, Fut>(client: &Arc<Client>, wait: ReportWait, op: F) -> *mut kafka_common_Error_t
 where
     F: FnOnce(Arc<DynProducerGv>) -> Fut,
     Fut: Future<Output = Result<(), Error>>,
@@ -544,21 +779,28 @@ where
     if let Err(error) = client.acquire_txn_control() {
         return box_error(error);
     }
-    let _guard = TxnControlGuard(Arc::clone(client));
-    let producer = Arc::clone(&client.producer);
-    error_slot(block_on(&client.runtime, async {
-        client.drain_submitted_sends().await?;
-        op(producer).await
-    }))
+    let in_callback = client.in_callback();
+    let result = {
+        let _guard = TxnControlGuard(Arc::clone(client));
+        client.producer().and_then(|producer| {
+            block_on(&client.runtime, async {
+                client.drain_submitted_sends().await?;
+                op(producer).await
+            })
+        })
+    };
+    error_slot(client.wait_for_reports_blocking(result, wait, in_callback))
 }
 
-/// The `_cb` form of [`with_txn_control`]: the drain and `op` run on a
-/// spawned task and the result is queued; a panic on the task is queued as
-/// the [`panic_error`](crate::ffi::common::panic_error) of `fn_name`, the
-/// entry point.
+/// The `_cb` form of [`with_txn_control`]: the drain, `op` and the wait run
+/// on a spawned task and the result is queued; a panic on the task is queued
+/// as the [`panic_error`](crate::ffi::common::panic_error) of `fn_name`, the
+/// entry point. The wait does not run the queued callbacks (the caller pumps
+/// them) and so happens from a delivery callback too: it cannot block it.
 fn with_txn_control_cb<F, Fut>(
     fn_name: &'static str,
     client: &Arc<Client>,
+    wait: ReportWait,
     cb: kafka_producer_Producer_init_transactions_cb_t,
     opaque: *mut c_void,
     op: F,
@@ -576,12 +818,13 @@ fn with_txn_control_cb<F, Fut>(
     let guard = TxnControlGuard(Arc::clone(client));
     let task_client = Arc::clone(client);
     client.spawn(async move {
-        let _guard = guard;
         let result = catch_task_panic(fn_name, async {
+            let _guard = guard;
             task_client.drain_submitted_sends().await?;
-            op(Arc::clone(&task_client.producer)).await
+            op(task_client.producer()?).await
         })
         .await;
+        let result = task_client.wait_for_reports(result, wait, false).await;
         task_client.deliver(cb, opaque, result);
     });
 }
@@ -618,27 +861,40 @@ impl Client {
 }
 
 /// Runs a non-transactional `void` operation after draining the submission
-/// queue within `bound`, on the calling thread; `op` gets the time left of
-/// `bound`.
-fn with_drain<F, Fut>(client: &Arc<Client>, bound: DrainBound, op: F) -> *mut kafka_common_Error_t
+/// queue within `bound`, on the calling thread, then waits as `wait` asks
+/// (see [`Client::wait_for_reports_blocking`]); `op` gets the time left of
+/// `bound`. `in_callback` is [`Client::in_callback`], read by the caller.
+fn with_drain<F, Fut>(
+    client: &Arc<Client>,
+    bound: DrainBound,
+    wait: ReportWait,
+    in_callback: bool,
+    op: F,
+) -> *mut kafka_common_Error_t
 where
     F: FnOnce(Arc<DynProducerGv>, Duration) -> Fut,
     Fut: Future<Output = Result<(), Error>>,
 {
-    let producer = Arc::clone(&client.producer);
-    error_slot(block_on(&client.runtime, async {
-        let left = client.drain_within(bound).await?;
-        op(producer, left).await
-    }))
+    let result = client.producer().and_then(|producer| {
+        block_on(&client.runtime, async {
+            let left = client.drain_within(bound).await?;
+            op(producer, left).await
+        })
+    });
+    error_slot(client.wait_for_reports_blocking(result, wait, in_callback))
 }
 
-/// The `_cb` form of [`with_drain`]; a panic on the task is queued as the
+/// The `_cb` form of [`with_drain`], whose wait runs on the task without
+/// running the queued callbacks; a panic on the task is queued as the
 /// [`panic_error`](crate::ffi::common::panic_error) of `fn_name`, the entry
 /// point.
+#[expect(clippy::too_many_arguments)]
 fn with_drain_cb<F, Fut>(
     fn_name: &'static str,
     client: &Arc<Client>,
     bound: DrainBound,
+    wait: ReportWait,
+    in_callback: bool,
     cb: kafka_producer_Producer_init_transactions_cb_t,
     opaque: *mut c_void,
     op: F,
@@ -653,9 +909,10 @@ fn with_drain_cb<F, Fut>(
     client.spawn(async move {
         let result = catch_task_panic(fn_name, async {
             let left = task_client.drain_within(bound).await?;
-            op(Arc::clone(&task_client.producer), left).await
+            op(task_client.producer()?, left).await
         })
         .await;
+        let result = task_client.wait_for_reports(result, wait, in_callback).await;
         task_client.deliver(cb, opaque, result);
     });
 }
@@ -761,7 +1018,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_init_transactions(
 ) -> *mut kafka_common_Error_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires; the
     // reference does not outlive the call.
-    with_txn_control(unsafe { client_ref(self_) }, |p| async move { p.init_transactions().await })
+    with_txn_control(unsafe { client_ref(self_) }, ReportWait::No, |p| async move {
+        p.init_transactions().await
+    })
 }
 
 /// `Producer.initTransactions()`, completion queued.
@@ -789,6 +1048,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_init_transactions_cb(
         // `with_txn_control_cb` uses the reference only before it returns, cloning the `Arc` for
         // the task it spawns.
         unsafe { client_ref(self_) },
+        ReportWait::No,
         cb,
         opaque,
         |p| async move { p.init_transactions().await },
@@ -808,7 +1068,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_begin_transaction(
 ) -> *mut kafka_common_Error_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires; the
     // reference does not outlive the call.
-    with_txn_control(unsafe { client_ref(self_) }, |p| async move { p.begin_transaction() })
+    with_txn_control(unsafe { client_ref(self_) }, ReportWait::No, |p| async move {
+        p.begin_transaction()
+    })
 }
 
 /// `Producer.beginTransaction()`, completion queued: ordered after the queued
@@ -837,6 +1099,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_begin_transaction_cb(
         // `with_txn_control_cb` uses the reference only before it returns, cloning the `Arc` for
         // the task it spawns.
         unsafe { client_ref(self_) },
+        ReportWait::No,
         cb,
         opaque,
         |p| async move { p.begin_transaction() },
@@ -870,7 +1133,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_offsets_to_transaction(
     let group_metadata = Arc::clone(unsafe { group_metadata_ref(group_metadata) });
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires; the
     // reference does not outlive the call.
-    with_txn_control(unsafe { client_ref(self_) }, |p| async move {
+    with_txn_control(unsafe { client_ref(self_) }, ReportWait::No, |p| async move {
         p.send_offsets_to_transaction(offsets, &*group_metadata).await
     })
 }
@@ -913,6 +1176,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_offsets_to_transaction_cb(
         // `with_txn_control_cb` uses the reference only before it returns, cloning the `Arc` for
         // the task it spawns.
         unsafe { client_ref(self_) },
+        ReportWait::No,
         cb,
         opaque,
         |p| async move { p.send_offsets_to_transaction(offsets, &*group_metadata).await },
@@ -920,6 +1184,14 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_offsets_to_transaction_cb(
 }
 
 /// `Producer.commitTransaction()`, blocking.
+///
+/// Once the commit succeeded it waits for the delivery callbacks queued
+/// before it ended to report through
+/// [`kafka_producer_Producer__set_callback_result`], running the queued
+/// callbacks on the calling thread meanwhile, as Java's `commitTransaction` returns
+/// after the callbacks of the records it flushes; called from inside a
+/// delivery callback it does not wait for them (see "Delivery callbacks
+/// report" in the module docs).
 ///
 /// # Safety
 ///
@@ -931,10 +1203,16 @@ pub unsafe extern "C" fn kafka_producer_Producer_commit_transaction(
 ) -> *mut kafka_common_Error_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires; the
     // reference does not outlive the call.
-    with_txn_control(unsafe { client_ref(self_) }, |p| async move { p.commit_transaction().await })
+    with_txn_control(unsafe { client_ref(self_) }, ReportWait::OnSuccess, |p| async move {
+        p.commit_transaction().await
+    })
 }
 
 /// `Producer.commitTransaction()`, completion queued.
+///
+/// Once the commit succeeded the completion waits for the reports of the
+/// delivery callbacks queued before it ended (see "Delivery callbacks
+/// report" in the module docs); it does not run them.
 ///
 /// # Safety
 ///
@@ -959,6 +1237,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_commit_transaction_cb(
         // `with_txn_control_cb` uses the reference only before it returns, cloning the `Arc` for
         // the task it spawns.
         unsafe { client_ref(self_) },
+        ReportWait::OnSuccess,
         cb,
         opaque,
         |p| async move { p.commit_transaction().await },
@@ -966,6 +1245,14 @@ pub unsafe extern "C" fn kafka_producer_Producer_commit_transaction_cb(
 }
 
 /// `Producer.abortTransaction()`, blocking.
+///
+/// Once the abort succeeded it waits for the delivery callbacks queued
+/// before it ended to report through
+/// [`kafka_producer_Producer__set_callback_result`], running the queued
+/// callbacks on the calling thread meanwhile, as Java's `abortTransaction` returns
+/// after the callbacks of the records it aborts; called from inside a
+/// delivery callback it does not wait for them (see "Delivery callbacks
+/// report" in the module docs).
 ///
 /// # Safety
 ///
@@ -977,10 +1264,16 @@ pub unsafe extern "C" fn kafka_producer_Producer_abort_transaction(
 ) -> *mut kafka_common_Error_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires; the
     // reference does not outlive the call.
-    with_txn_control(unsafe { client_ref(self_) }, |p| async move { p.abort_transaction().await })
+    with_txn_control(unsafe { client_ref(self_) }, ReportWait::OnSuccess, |p| async move {
+        p.abort_transaction().await
+    })
 }
 
 /// `Producer.abortTransaction()`, completion queued.
+///
+/// Once the abort succeeded the completion waits for the reports of the
+/// delivery callbacks queued before it ended (see "Delivery callbacks
+/// report" in the module docs); it does not run them.
 ///
 /// # Safety
 ///
@@ -1005,6 +1298,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_abort_transaction_cb(
         // `with_txn_control_cb` uses the reference only before it returns, cloning the `Arc` for
         // the task it spawns.
         unsafe { client_ref(self_) },
+        ReportWait::OnSuccess,
         cb,
         opaque,
         |p| async move { p.abort_transaction().await },
@@ -1068,9 +1362,19 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_cb(
 /// `Producer.send(ProducerRecord, Callback)`, blocking as
 /// [`kafka_producer_Producer_send`]; `callback` (`NULL` for none) is a
 /// `kafka_producer_Callback_t` whose `on_completion` is queued on the
-/// callback vector when the record is acknowledged or fails, exactly once.
-/// The callback's `self` must stay alive until then; the registration
-/// handle itself is read during the call.
+/// callback vector when the record is acknowledged or fails, exactly once,
+/// with a `callback_id` it reports through
+/// [`kafka_producer_Producer__set_callback_result`] once it finished. The
+/// callback's `self` must stay alive until then; the registration handle
+/// itself is read during the call.
+///
+/// With a callback, the delivered future completes with the record's
+/// outcome only once the callback reported, as Java completes the future
+/// after `onCompletion` returned; an error the callback reports is logged
+/// and leaves that outcome unchanged. A `kafka_common_KafkaFuture_get` on it
+/// runs the queued callbacks on the calling thread while it waits; from
+/// inside the record's own callback it waits forever, as Java's `get` does
+/// on the I/O thread.
 ///
 /// When this call returns an error, the callback may still fire later,
 /// exactly once, if the record had reached the accumulator: as in Java's
@@ -1100,23 +1404,19 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
     let record = unsafe { producer_record_ref(record) }.clone();
     // SAFETY: Per this function's `# Safety`, `callback` is null or a live handle, as
     // `delivery_callback` requires.
-    let callback = unsafe { delivery_callback(client, callback) };
-    let producer = Arc::clone(&client.producer);
-    match block_on(
-        &client.runtime,
-        async move { producer.send_with_callback(record, callback).await },
-    ) {
+    let (callback, completion) = unsafe { delivery_callback(client, callback) }.unzip();
+    let sent = client.producer().and_then(|producer| {
+        block_on(
+            &client.runtime,
+            async move { producer.send_with_callback(record, callback).await },
+        )
+    });
+    match sent {
         Ok(future) => {
             // SAFETY: Per this function's `# Safety`, `out_send_with_callback` is a valid slot, so
-            // the write is sound; the handle written is the fresh `box_future` the caller owns,
-            // freed with `kafka_common_KafkaFuture_destroy`.
-            unsafe {
-                *out_send_with_callback = box_future(
-                    metadata_future(&future),
-                    Some(client.runtime.clone()),
-                    Some(Arc::clone(&client.queue)),
-                );
-            }
+            // the write is sound; the handle written is the fresh `box_send_future` the caller
+            // owns, freed with `kafka_common_KafkaFuture_destroy`.
+            unsafe { *out_send_with_callback = client.box_send_future(&future, completion) };
             std::ptr::null_mut()
         },
         Err(error) => box_error(error),
@@ -1129,7 +1429,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
 /// When `cb` receives an error, `callback` may still fire later, exactly
 /// once, if the record had reached the accumulator, as for
 /// [`kafka_producer_Producer_send_with_callback`]; so after an error the
-/// callback's `self` must stay alive until `_destroy`.
+/// callback's `self` must stay alive until `_destroy`. With a callback, the
+/// future `cb` receives completes once the callback reported, as for
+/// [`kafka_producer_Producer_send_with_callback`].
 ///
 /// # Safety
 ///
@@ -1159,7 +1461,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback_cb(
     let record = unsafe { producer_record_ref(record) }.clone();
     // SAFETY: Per this function's `# Safety`, `callback` is null or a live handle, as
     // `delivery_callback` requires.
-    let callback = unsafe { delivery_callback(client, callback) };
+    let (callback, completion) = unsafe { delivery_callback(client, callback) }.unzip();
     let opaque = SendPtr(opaque);
     #[cfg(test)]
     crate::ffi::common::fail_point::hit();
@@ -1167,7 +1469,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback_cb(
     // A poisoned lock still holds a valid sender (see `drain_submitted_sends`);
     // panicking here would leave `queued_sends` incremented.
     let sent = match &*client.submit_tx.lock().unwrap_or_else(PoisonError::into_inner) {
-        Some(tx) => tx.send(SubmitRequest::Send { record, callback, cb, opaque }).is_ok(),
+        Some(tx) => tx
+            .send(SubmitRequest::Send { record, callback, completion, cb, opaque })
+            .is_ok(),
         None => false,
     };
     if !sent {
@@ -1183,16 +1487,29 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback_cb(
     }
 }
 
-/// The Rust delivery callback queuing a C `on_completion`, or `None`.
+/// The Rust delivery callback queuing a C `on_completion`, with the
+/// completion its report resolves, which backs the record's C future (see
+/// `ffi::producer::callback`); `None` without a callback.
 ///
 /// # Safety
 ///
 /// `callback` must be null or a live handle.
-unsafe fn delivery_callback(client: &Arc<Client>, callback: *const kafka_producer_Callback_t) -> Option<Callback> {
-    // SAFETY: Per this function's `# Safety`, `callback` is a live handle when it is not null, and
-    // the closure runs only then, as `callback_registration` requires; the registration is read
-    // only within this expression.
-    (!callback.is_null()).then(|| unsafe { callback_registration(callback) }.into_callback(Arc::clone(&client.queue)))
+unsafe fn delivery_callback(
+    client: &Arc<Client>,
+    callback: *const kafka_producer_Callback_t,
+) -> Option<(Callback, KafkaFutureImpl<RecordMetadata>)> {
+    if callback.is_null() {
+        return None;
+    }
+    let completion = KafkaFutureImpl::new();
+    // SAFETY: Per this function's `# Safety`, `callback` is a live handle, since it is not null, as
+    // `callback_registration` requires; the registration is read only within this statement.
+    let callback = unsafe { callback_registration(callback) }.into_callback(
+        Arc::clone(&client.queue),
+        Arc::clone(&client.results),
+        completion.clone(),
+    );
+    Some((callback, completion))
 }
 
 // ---------------------------------------------------------------------------
@@ -1200,6 +1517,20 @@ unsafe fn delivery_callback(client: &Arc<Client>, callback: *const kafka_produce
 // ---------------------------------------------------------------------------
 
 /// `Producer.flush()`, blocking; ordered after the queued `send_cb`s.
+///
+/// Returns once every record sent before it completed and every delivery
+/// callback of those records reported through
+/// [`kafka_producer_Producer__set_callback_result`], as Java's `flush()`
+/// returns after the callbacks ran on the I/O thread. While it waits it runs
+/// the queued callbacks on the calling thread, as
+/// [`kafka_producer_Producer__execute_callbacks`] does, so a caller pumping
+/// the callbacks on this one thread is not left waiting for itself.
+///
+/// From inside a delivery callback of a `KafkaProducer` it fails with
+/// `kafka_common_Error_KAFKA` ("KafkaProducer.flush() invocation inside a
+/// callback is not permitted because it may lead to deadlock."), as in
+/// Java; a `MockProducer`, whose Java `flush()` makes no such check,
+/// completes its records and returns without waiting for the reports.
 ///
 /// # Safety
 ///
@@ -1211,12 +1542,26 @@ pub unsafe extern "C" fn kafka_producer_Producer_flush(
 ) -> *mut kafka_common_Error_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires; the
     // reference does not outlive the call.
-    with_drain(unsafe { client_ref(self_) }, DrainBound::Unbounded, |p, _| async move {
-        p.flush().await
-    })
+    let client = unsafe { client_ref(self_) };
+    let in_callback = client.in_callback();
+    if let Err(error) = client.check_flush_outside_callback(in_callback) {
+        return box_error(error);
+    }
+    with_drain(
+        client,
+        DrainBound::Unbounded,
+        ReportWait::OnSuccess,
+        in_callback,
+        |p, _| async move { p.flush().await },
+    )
 }
 
-/// `Producer.flush()`, completion queued.
+/// `Producer.flush()`, completion queued: `cb` fires once every record sent
+/// before it completed and every delivery callback of those records
+/// reported, as for [`kafka_producer_Producer_flush`]. The wait does not run
+/// the queued callbacks: the caller pumps them. Called from inside a
+/// delivery callback of a `KafkaProducer`, `cb` receives the error the
+/// blocking form returns there.
 ///
 /// # Safety
 ///
@@ -1224,8 +1569,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_flush(
 #[ffi_guard(on_panic = |err| {
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `completion_sink`
     // requires. The guard runs this only when the body did not return. The body hands `cb` over
-    // only as the last step of `with_drain_cb`, to the task `Client::spawn` registers, after which
-    // nothing can panic. So `cb` has not fired for this `opaque`, as `deliver_panic` requires.
+    // only as its last step: to `Client::deliver` before its early return, or as the last step of
+    // `with_drain_cb`, to the task `Client::spawn` registers, after which nothing can panic. So `cb`
+    // has not fired for this `opaque`, as `deliver_panic` requires.
     unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
 })]
 #[unsafe(no_mangle)]
@@ -1234,13 +1580,20 @@ pub unsafe extern "C" fn kafka_producer_Producer_flush_cb(
     cb: kafka_producer_Producer_flush_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
+    // `with_drain_cb` uses the reference only before it returns, cloning the `Arc` for the task it
+    // spawns.
+    let client = unsafe { client_ref(self_) };
+    if let Err(error) = client.check_flush_outside_callback(client.in_callback()) {
+        client.deliver(cb, SendPtr(opaque), Err(error));
+        return;
+    }
     with_drain_cb(
         "kafka_producer_Producer_flush_cb",
-        // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
-        // `with_drain_cb` uses the reference only before it returns, cloning the `Arc` for the task
-        // it spawns.
-        unsafe { client_ref(self_) },
+        client,
         DrainBound::Unbounded,
+        ReportWait::OnSuccess,
+        false,
         cb,
         opaque,
         |p, _| async move { p.flush().await },
@@ -1267,8 +1620,10 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for(
     // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
     // `c_str_to_string` requires.
     let topic = unsafe { c_str_to_string(topic) };
-    let producer = Arc::clone(&client.producer);
-    match block_on(&client.runtime, async move { producer.partitions_for(&topic).await }) {
+    let infos = client
+        .producer()
+        .and_then(|producer| block_on(&client.runtime, async move { producer.partitions_for(&topic).await }));
+    match infos {
         Ok(infos) => {
             // SAFETY: Per this function's `# Safety`, `out_partitions_for` is a valid slot, so the
             // write is sound; the list written is the fresh `box_list` the caller owns, freed with
@@ -1311,10 +1666,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for_cb(
     #[cfg(test)]
     crate::ffi::common::fail_point::hit();
     client.spawn(async move {
-        let result = catch_task_panic(
-            "kafka_producer_Producer_partitions_for_cb",
-            task_client.producer.partitions_for(&topic),
-        )
+        let result = catch_task_panic("kafka_producer_Producer_partitions_for_cb", async {
+            task_client.producer()?.partitions_for(&topic).await
+        })
         .await;
         let (value, error) = match result {
             Ok(infos) => (partition_info_list(infos), std::ptr::null_mut()),
@@ -1367,12 +1721,22 @@ pub unsafe extern "C" fn kafka_producer_Producer_metrics(self_: *const kafka_pro
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
     // `client` is used only during the call.
     let client = unsafe { client_ref(self_) };
-    box_metrics_map(client.producer.metrics())
+    // After `_destroy` began, the producer's metrics are gone with it.
+    box_metrics_map(client.producer().map(|producer| producer.metrics()).unwrap_or_default())
 }
 
 /// `Producer.close()`, blocking: `close(Duration.ofMillis(Long.MAX_VALUE))`,
 /// ordered after the queued `send_cb`s. The handle stays valid, to be
 /// destroyed afterwards.
+///
+/// Once the producer is closed it waits, without a bound, until every
+/// delivery callback queued by then reported through
+/// [`kafka_producer_Producer__set_callback_result`], as Java's `close`
+/// joins the I/O thread its callbacks run on, running the queued callbacks
+/// on the calling thread meanwhile, as [`kafka_producer_Producer_flush`]
+/// does. From inside a delivery callback it does not wait, and a
+/// `KafkaProducer` closes as for a zero timeout, as Java does there (see
+/// [`kafka_producer_Producer_close_with_timeout`]).
 ///
 /// # Safety
 ///
@@ -1382,14 +1746,34 @@ pub unsafe extern "C" fn kafka_producer_Producer_metrics(self_: *const kafka_pro
 pub unsafe extern "C" fn kafka_producer_Producer_close(
     self_: *const kafka_producer_Producer_t,
 ) -> *mut kafka_common_Error_t {
-    // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires; the
-    // reference does not outlive the call.
-    with_drain(unsafe { client_ref(self_) }, DrainBound::Unbounded, |p, _| async move {
-        p.close().await
-    })
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
+    // `client` is used only during the call.
+    let client = unsafe { client_ref(self_) };
+    let in_callback = client.in_callback();
+    match untimed_close_override(client, in_callback) {
+        None => with_drain(
+            client,
+            DrainBound::Unbounded,
+            ReportWait::Always,
+            in_callback,
+            |p, _| async move { p.close().await },
+        ),
+        Some(timeout) => with_drain(
+            client,
+            DrainBound::Within(timeout),
+            ReportWait::Always,
+            in_callback,
+            |p, left| async move { p.close_with_timeout(left).await },
+        ),
+    }
 }
 
-/// `Producer.close()`, completion queued.
+/// `Producer.close()`, completion queued: `cb` fires once the producer is
+/// closed and every delivery callback queued by then reported, as for
+/// [`kafka_producer_Producer_close`]; that wait does not run the queued
+/// callbacks, which the caller pumps. Called from inside a delivery
+/// callback, `cb` does not wait for the reports, and a `KafkaProducer`
+/// closes as for a zero timeout.
 ///
 /// # Safety
 ///
@@ -1407,30 +1791,55 @@ pub unsafe extern "C" fn kafka_producer_Producer_close_cb(
     cb: kafka_producer_Producer_close_cb_t,
     opaque: *mut c_void,
 ) {
-    with_drain_cb(
-        "kafka_producer_Producer_close_cb",
-        // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
-        // `with_drain_cb` uses the reference only before it returns, cloning the `Arc` for the task
-        // it spawns.
-        unsafe { client_ref(self_) },
-        DrainBound::Unbounded,
-        cb,
-        opaque,
-        |p, _| async move { p.close().await },
-    );
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
+    // `with_drain_cb` uses the reference only before it returns, cloning the `Arc` for the task it
+    // spawns.
+    let client = unsafe { client_ref(self_) };
+    let in_callback = client.in_callback();
+    match untimed_close_override(client, in_callback) {
+        None => with_drain_cb(
+            "kafka_producer_Producer_close_cb",
+            client,
+            DrainBound::Unbounded,
+            ReportWait::Always,
+            in_callback,
+            cb,
+            opaque,
+            |p, _| async move { p.close().await },
+        ),
+        Some(timeout) => with_drain_cb(
+            "kafka_producer_Producer_close_cb",
+            client,
+            DrainBound::Within(timeout),
+            ReportWait::Always,
+            in_callback,
+            cb,
+            opaque,
+            |p, left| async move { p.close_with_timeout(left).await },
+        ),
+    }
 }
 
 /// `Producer.close(Duration timeout)`, blocking; `timeout` in milliseconds.
 ///
-/// The timeout bounds the whole call, as in Java: the queued `send_cb`s are
-/// drained for at most `timeout`, and the producer is closed with the time
-/// left. A record the drain did not reach fails through its `send_cb`
-/// completion, as a Java `send` after `close` does.
+/// The timeout bounds the close itself, as in Java: the queued `send_cb`s
+/// are drained for at most `timeout`, and the producer is closed with the
+/// time left, then force-closed. A record the drain did not reach fails
+/// through its `send_cb` completion, as a Java `send` after `close` does.
+/// Then, as Java's `close` joins its I/O thread after `forceClose()` without
+/// a bound, it waits until every delivery callback queued by then reported
+/// through [`kafka_producer_Producer__set_callback_result`], running the
+/// queued callbacks on the calling thread meanwhile.
 ///
 /// A negative `timeout` is rejected with
 /// `kafka_common_Error_LOCAL_ILLEGAL_ARGUMENT` ("The timeout cannot be
 /// negative.") on a `KafkaProducer`, as in Java; a `MockProducer`, whose Java
 /// `close(Duration)` never reads the timeout, closes as for zero.
+///
+/// From inside a delivery callback it does not wait for the reports, and a
+/// `KafkaProducer` closes with a positive `timeout` overridden to zero,
+/// logging Java's warning ("Overriding close timeout {} ms to 0 ms in order
+/// to prevent useless blocking due to self-join. ...").
 ///
 /// # Safety
 ///
@@ -1444,19 +1853,25 @@ pub unsafe extern "C" fn kafka_producer_Producer_close_with_timeout(
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
     // `client` is used only during the call.
     let client = unsafe { client_ref(self_) };
-    let timeout = match close_timeout(client, timeout) {
+    let in_callback = client.in_callback();
+    let timeout = match close_timeout(client, timeout, in_callback) {
         Ok(timeout) => timeout,
         Err(error) => return box_error(error),
     };
-    with_drain(client, DrainBound::Within(timeout), |p, left| async move {
-        p.close_with_timeout(left).await
-    })
+    with_drain(
+        client,
+        DrainBound::Within(timeout),
+        ReportWait::Always,
+        in_callback,
+        |p, left| async move { p.close_with_timeout(left).await },
+    )
 }
 
-/// `Producer.close(Duration timeout)`, completion queued; the bounded drain
-/// and a negative `timeout` are handled as by
-/// [`kafka_producer_Producer_close_with_timeout`], a rejected timeout
-/// delivered through `cb`.
+/// `Producer.close(Duration timeout)`, completion queued; the bounded drain,
+/// a negative `timeout` and a call from inside a delivery callback are
+/// handled as by [`kafka_producer_Producer_close_with_timeout`], a rejected
+/// timeout delivered through `cb`. The wait for the reports does not run the
+/// queued callbacks: the caller pumps them.
 ///
 /// # Safety
 ///
@@ -1480,12 +1895,15 @@ pub unsafe extern "C" fn kafka_producer_Producer_close_with_timeout_cb(
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
     // `client` is used only during the call.
     let client = unsafe { client_ref(self_) };
-    match close_timeout(client, timeout) {
+    let in_callback = client.in_callback();
+    match close_timeout(client, timeout, in_callback) {
         Ok(timeout) => {
             with_drain_cb(
                 "kafka_producer_Producer_close_with_timeout_cb",
                 client,
                 DrainBound::Within(timeout),
+                ReportWait::Always,
+                in_callback,
                 cb,
                 opaque,
                 |p, left| async move { p.close_with_timeout(left).await },
@@ -1495,17 +1913,44 @@ pub unsafe extern "C" fn kafka_producer_Producer_close_with_timeout_cb(
     }
 }
 
-/// The `Duration` for a `close(Duration)` timeout in milliseconds: a negative
-/// one is an error for a `KafkaProducer` and zero for the mock (see
-/// [`Client::rejects_negative_close_timeout`]).
-fn close_timeout(client: &Client, timeout: i64) -> Result<Duration, Error> {
+/// The `Duration` for a `close(Duration)` timeout in milliseconds, as
+/// `KafkaProducer.close(Duration, boolean)` reads it
+/// (`KafkaProducer.java:1390-1404`): a negative one is an error, and a
+/// positive one from inside a delivery callback is overridden to zero, with
+/// Java's warning. The mock passes a negative one on as zero and never
+/// overrides (see [`Client::follows_kafka_producer_close`]).
+fn close_timeout(client: &Client, timeout: i64, in_callback: bool) -> Result<Duration, Error> {
     match u64::try_from(timeout) {
+        Ok(millis) if millis > 0 && in_callback && client.follows_kafka_producer_close => {
+            warn_close_timeout_override(timeout);
+            Ok(Duration::ZERO)
+        },
         Ok(millis) => Ok(Duration::from_millis(millis)),
-        Err(_) if client.rejects_negative_close_timeout => {
+        Err(_) if client.follows_kafka_producer_close => {
             Err(Error::local_illegal_argument("The timeout cannot be negative."))
         },
         Err(_) => Ok(Duration::ZERO),
     }
+}
+
+/// The timeout an untimed `close()` closes with instead, if any: Java's
+/// `close()` is `close(Duration.ofMillis(Long.MAX_VALUE))`
+/// (`KafkaProducer.java:1362-1364`), so from inside a delivery callback of a
+/// `KafkaProducer` it is overridden to zero like any positive timeout.
+fn untimed_close_override(client: &Client, in_callback: bool) -> Option<Duration> {
+    (in_callback && client.follows_kafka_producer_close).then(|| {
+        warn_close_timeout_override(i64::MAX);
+        Duration::ZERO
+    })
+}
+
+/// Java's warning when a delivery callback closes its producer with a
+/// positive timeout (`KafkaProducer.java:1399-1403`).
+fn warn_close_timeout_override(timeout_ms: i64) {
+    log::warn!(
+        "Overriding close timeout {timeout_ms} ms to 0 ms in order to prevent useless blocking due to self-join. \
+         This means you have incorrectly invoked close with a non-zero timeout from the producer call-back."
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1545,6 +1990,65 @@ pub unsafe extern "C" fn kafka_producer_Producer__set_callbacks_notify(
     // `opaque` stays valid while the hook is installed, which is what the hook call in
     // `CallbackQueue::notify_if` relies on: `notify` and `opaque` are stored together.
     unsafe { client_ref(self_) }.queue.set_notify(Some(notify), opaque);
+}
+
+/// Reports the result of a delivery callback invoked with `callback_id`
+/// (CLAUDE.md §4): the `kafka_producer_Callback_on_completion_fn_t` of a
+/// `send_with_callback` / `send_with_callback_cb`. The double underscore
+/// marks a function derived by convention, with no Java counterpart.
+///
+/// `error` is `NULL` when the callback returned normally; otherwise it is an
+/// owned `kafka_common_Error_t *` that Rust takes over: the error the
+/// callback raised, Java's `onCompletion` throwing, which is logged
+/// ("Error executing user-provided callback on message for topic-partition
+/// '<topic>-<partition>'") and freed, and fails nothing, as in Java's
+/// `ProducerBatch.completeFutureAndFireCallbacks`. `Callback.onCompletion`
+/// is `void`, so `result` is ignored: pass `NULL`.
+///
+/// The report completes the record's C future (with the record's own
+/// outcome, whatever the report) and releases the waits of `flush`,
+/// `commit_transaction`, `abort_transaction` and `close` for this callback.
+///
+/// `self_` is the producer that invoked the callback: each producer keeps
+/// its own ids. A callback invoked through `kafka_producer_Callback_on_completion*`,
+/// which has no producer, is reported the same way; its id says so and
+/// `self_` is then not read, so it may be any producer or `NULL`.
+///
+/// Callable from inside the callback or later, from any thread, including
+/// while `kafka_producer_KafkaProducer_destroy` or
+/// `kafka_producer_MockProducer_destroy` runs the producer's pending
+/// callbacks, but never once it began otherwise: `_destroy` completes the
+/// callbacks still unreported as if each had reported success. A second
+/// report for the same id, or one for an id the producer did not issue, is
+/// ignored: its error is freed.
+///
+/// # Safety
+///
+/// `self_` must be a live view of the producer that issued `callback_id`
+/// (unless an invoker issued it, see above), and `error` null or a valid
+/// owned error not used afterwards.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_Producer__set_callback_result(
+    self_: *const kafka_producer_Producer_t,
+    callback_id: i64,
+    result: *mut c_void,
+    error: *mut kafka_common_Error_t,
+) {
+    // SAFETY: Per this function's `# Safety`, `error` is null or a valid owned error not used
+    // afterwards, i.e. a `box_error` handle the C side hands over here, as `take_error` requires.
+    let error = unsafe { take_error(error) };
+    // `result` is only passed on: a delivery callback's sink ignores it (`void_sink`).
+    if CallbackResults::is_tagged(callback_id) {
+        INVOKER_RESULTS.complete(callback_id, result, error);
+    } else {
+        // SAFETY: Per this function's `# Safety`, `self_` is a live view of the producer that
+        // issued the untagged `callback_id`, as `client_ref` requires, possibly while its destroy
+        // runs, which keeps the view valid to its end (`ProducerHandle::destroy`). The reference is
+        // used only to clone the registry's `Arc`, before the report is delivered.
+        let results = Arc::clone(&unsafe { client_ref(self_) }.results);
+        results.complete(callback_id, result, error);
+    }
 }
 
 #[cfg(test)]

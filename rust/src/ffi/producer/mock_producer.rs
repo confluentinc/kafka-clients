@@ -241,7 +241,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_destroy(self_: *mut kafka_p
         // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, a handle
         // not yet destroyed, i.e. the `Box::into_raw` of `box_mock`, so `Box::from_raw` reclaims it
         // exactly once; its `__as_Producer` views, addresses inside it, go with it.
-        unsafe { *Box::from_raw(self_ as *mut Handle) }.destroy();
+        unsafe { Box::from_raw(self_ as *mut Handle) }.destroy();
     }
 }
 
@@ -1046,12 +1046,14 @@ pub unsafe extern "C" fn kafka_producer_MockProducerOptions_destroy(self_: *mut 
 #[cfg(test)]
 mod tests {
     use std::ffi::CString;
-    use std::sync::atomic::{AtomicI32, Ordering};
+    use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
+    use std::time::Duration;
 
     use super::*;
     use crate::ffi::common::{kafka_common_Error_destroy, kafka_common_Error_message};
     use crate::ffi::kafka_future::{
-        kafka_common_KafkaFuture_destroy, kafka_common_KafkaFuture_get, kafka_common_KafkaFuture_t,
+        kafka_common_KafkaFuture_destroy, kafka_common_KafkaFuture_get, kafka_common_KafkaFuture_is_done,
+        kafka_common_KafkaFuture_t,
     };
     use crate::ffi::producer::callback::{kafka_producer_Callback_destroy, kafka_producer_Callback_new};
     use crate::ffi::producer::producer_record::{
@@ -1061,10 +1063,11 @@ mod tests {
         kafka_producer_RecordMetadata_offset, kafka_producer_RecordMetadata_t,
     };
     use crate::ffi::producer::{
-        kafka_producer_Producer__execute_callbacks, kafka_producer_Producer_begin_transaction,
-        kafka_producer_Producer_begin_transaction_cb, kafka_producer_Producer_commit_transaction,
-        kafka_producer_Producer_flush, kafka_producer_Producer_init_transactions, kafka_producer_Producer_send,
-        kafka_producer_Producer_send_cb, kafka_producer_Producer_send_with_callback,
+        kafka_producer_Producer__execute_callbacks, kafka_producer_Producer__set_callback_result,
+        kafka_producer_Producer_begin_transaction, kafka_producer_Producer_begin_transaction_cb,
+        kafka_producer_Producer_commit_transaction, kafka_producer_Producer_flush,
+        kafka_producer_Producer_init_transactions, kafka_producer_Producer_send, kafka_producer_Producer_send_cb,
+        kafka_producer_Producer_send_with_callback,
     };
     use crate::ffi::util::{kafka_List_destroy, kafka_List_get, kafka_List_size, kafka_string_destroy};
 
@@ -1072,12 +1075,27 @@ mod tests {
         completions: AtomicI32,
         sends: AtomicI32,
         last_offset: AtomicI32,
+        /// The id of the last delivery callback, which the test reports.
+        last_id: AtomicI64,
     }
 
+    impl Seen {
+        fn new() -> Self {
+            Seen {
+                completions: AtomicI32::new(0),
+                sends: AtomicI32::new(0),
+                last_offset: AtomicI32::new(-1),
+                last_id: AtomicI64::new(-1),
+            }
+        }
+    }
+
+    /// Records the delivery and leaves the report to the test.
     unsafe extern "C" fn on_completion(
         self_: *mut c_void,
         metadata: *const kafka_producer_RecordMetadata_t,
         error: *const kafka_common_Error_t,
+        callback_id: i64,
     ) {
         // SAFETY: Test code: `self_` is the `Seen` the test registered with
         // `kafka_producer_Callback_new`, alive until the callbacks ran.
@@ -1089,6 +1107,7 @@ mod tests {
             unsafe { kafka_producer_RecordMetadata_offset(metadata) } as i32,
             Ordering::SeqCst,
         );
+        seen.last_id.store(callback_id, Ordering::SeqCst);
         seen.completions.fetch_add(1, Ordering::SeqCst);
     }
 
@@ -1110,11 +1129,7 @@ mod tests {
 
     #[test]
     fn blocking_send_records_history_and_queues_the_delivery_callback() {
-        let seen = Seen {
-            completions: AtomicI32::new(0),
-            sends: AtomicI32::new(0),
-            last_offset: AtomicI32::new(-1),
-        };
+        let seen = Seen::new();
         let topic = CString::new("topic").unwrap();
         let value = 42i32;
         // SAFETY: Test code: `mock`, `record` and `callback` are live from their constructor to
@@ -1145,6 +1160,17 @@ mod tests {
             assert_eq!(seen.last_offset.load(Ordering::SeqCst), 0);
             assert_eq!(kafka_producer_MockProducer_complete_next(mock), 0);
 
+            // The record's future completes only once its callback reported, as Java's
+            // completes after `onCompletion` returned.
+            assert_eq!(kafka_common_KafkaFuture_is_done(future), 0);
+            kafka_producer_Producer__set_callback_result(
+                view,
+                seen.last_id.load(Ordering::SeqCst),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+            assert_eq!(kafka_common_KafkaFuture_is_done(future), 1);
+
             let mut metadata = std::ptr::null_mut();
             assert!(kafka_common_KafkaFuture_get(future, &raw mut metadata).is_null());
             assert_eq!(kafka_producer_RecordMetadata_offset(metadata as *const _), 0);
@@ -1169,11 +1195,7 @@ mod tests {
 
     #[test]
     fn send_cb_is_drained_by_flush_and_the_control_operations() {
-        let seen = Seen {
-            completions: AtomicI32::new(0),
-            sends: AtomicI32::new(0),
-            last_offset: AtomicI32::new(-1),
-        };
+        let seen = Seen::new();
         let topic = CString::new("topic").unwrap();
         // SAFETY: Test code: `mock` and `record` are live from their constructor to their single
         // destroy below, `view` is used only before the mock is destroyed, each list is destroyed
@@ -1200,7 +1222,9 @@ mod tests {
 
             assert!(kafka_producer_Producer_flush(view).is_null());
             assert_eq!(kafka_producer_MockProducer_flushed(mock), 1);
-            assert_eq!(kafka_producer_Producer__execute_callbacks(view), 3);
+            // The blocking commit, waiting for the delivery callbacks to report, ran the queued
+            // completions on this thread.
+            assert_eq!(kafka_producer_Producer__execute_callbacks(view), 0);
             assert_eq!(seen.sends.load(Ordering::SeqCst), 3);
             assert_eq!(kafka_producer_MockProducer_commit_count(mock), 1);
 
@@ -1223,11 +1247,7 @@ mod tests {
         // other four control operations (`producer-transactions.md` §13): the sends that had
         // returned before it reach the producer outside the transaction, so they are in the sent
         // history, not staged in the transaction, once the begin completes.
-        let seen = Seen {
-            completions: AtomicI32::new(0),
-            sends: AtomicI32::new(0),
-            last_offset: AtomicI32::new(-1),
-        };
+        let seen = Seen::new();
         let topic = CString::new("topic").unwrap();
         // SAFETY: Test code: `mock` and `record` are live from their constructor to their single
         // destroy below, `view` is used only before the mock is destroyed, each list is destroyed
@@ -1258,6 +1278,167 @@ mod tests {
             kafka_producer_Producer__execute_callbacks(view);
             assert_eq!(seen.sends.load(Ordering::SeqCst), 3);
 
+            kafka_producer_ProducerRecord_destroy(record);
+            kafka_producer_MockProducer_destroy(mock);
+        }
+    }
+
+    /// A raw handle moved to a helper thread; the test keeps it alive.
+    #[derive(Clone, Copy)]
+    struct Shared(usize);
+
+    /// Waits until `done` holds, failing after ten seconds.
+    fn wait_until(what: &str, done: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(std::time::Instant::now() < deadline, "{what}");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn flush_waits_for_the_reports_of_the_callbacks_queued_before_it() {
+        let seen = Seen::new();
+        let topic = CString::new("topic").unwrap();
+        // SAFETY: Test code: `mock`, `record` and `callback` are live from their constructor to
+        // their single destroy below, which comes after the helper thread is joined; `view` is
+        // used only before the mock is destroyed, each future is destroyed once after its last
+        // use, and `seen` and `topic` outlive every use.
+        unsafe {
+            let mock = kafka_producer_MockProducer_with_auto_complete(0);
+            let view = kafka_producer_MockProducer__as_Producer(mock);
+            let record = kafka_producer_ProducerRecord_new(topic.as_ptr(), std::ptr::null());
+            let callback = kafka_producer_Callback_new(&seen as *const Seen as *mut c_void, on_completion);
+            let mut first = std::ptr::null_mut();
+            assert!(kafka_producer_Producer_send_with_callback(view, record, callback, &raw mut first).is_null());
+
+            // `MockProducer.flush()` completes the record; the flush then runs its callback on its
+            // own thread and waits for the report.
+            let shared = Shared(view as usize);
+            let flushed = std::sync::atomic::AtomicBool::new(false);
+            std::thread::scope(|scope| {
+                let flusher = scope.spawn(|| {
+                    let view = shared.0 as *const kafka_producer_Producer_t;
+                    // SAFETY: Test code: the view outlives this thread, which the scope joins
+                    // before the mock is destroyed.
+                    let error = kafka_producer_Producer_flush(view);
+                    assert!(error.is_null());
+                    flushed.store(true, Ordering::SeqCst);
+                });
+                wait_until("the flush never ran the callback", || {
+                    seen.completions.load(Ordering::SeqCst) == 1
+                });
+                let first_id = seen.last_id.load(Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(50));
+                assert!(!flushed.load(Ordering::SeqCst), "flush returned before the report");
+
+                // A record completing after the flush began registers after its mark: the flush
+                // runs its callback too, but does not wait for its report.
+                let mut second = std::ptr::null_mut();
+                assert!(kafka_producer_Producer_send_with_callback(view, record, callback, &raw mut second).is_null());
+                assert_eq!(kafka_producer_MockProducer_complete_next(mock), 1);
+                wait_until("the flush never ran the second callback", || {
+                    seen.completions.load(Ordering::SeqCst) == 2
+                });
+                let second_id = seen.last_id.load(Ordering::SeqCst);
+                assert_ne!(first_id, second_id);
+
+                kafka_producer_Producer__set_callback_result(
+                    view,
+                    first_id,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                );
+                flusher.join().unwrap();
+                assert!(flushed.load(Ordering::SeqCst));
+                assert_eq!(kafka_common_KafkaFuture_is_done(first), 1);
+                assert_eq!(kafka_common_KafkaFuture_is_done(second), 0, "its callback has not reported");
+                // A reported error is only logged: the record's future keeps its metadata.
+                kafka_producer_Producer__set_callback_result(
+                    view,
+                    second_id,
+                    std::ptr::null_mut(),
+                    box_error(crate::common::Error::local_illegal_state("thrown by the callback")),
+                );
+                let mut metadata = std::ptr::null_mut();
+                assert!(kafka_common_KafkaFuture_get(second, &raw mut metadata).is_null());
+                assert_eq!(kafka_producer_RecordMetadata_offset(metadata as *const _), 1);
+                kafka_common_KafkaFuture_destroy(second);
+            });
+            kafka_common_KafkaFuture_destroy(first);
+            kafka_producer_Callback_destroy(callback);
+            kafka_producer_ProducerRecord_destroy(record);
+            kafka_producer_MockProducer_destroy(mock);
+        }
+    }
+
+    #[test]
+    fn destroy_completes_a_future_whose_callback_never_reported() {
+        let seen = Seen::new();
+        let topic = CString::new("topic").unwrap();
+        // SAFETY: Test code: `mock`, `record` and `callback` are live from their constructor to
+        // their single destroy below, `view` is used only before the mock is destroyed, `future`
+        // and the metadata borrowed from it are used only before it is destroyed, once, after the
+        // mock, and `seen` and `topic` outlive every use.
+        unsafe {
+            let mock = kafka_producer_MockProducer_with_auto_complete(1);
+            let view = kafka_producer_MockProducer__as_Producer(mock);
+            let record = kafka_producer_ProducerRecord_new(topic.as_ptr(), std::ptr::null());
+            let callback = kafka_producer_Callback_new(&seen as *const Seen as *mut c_void, on_completion);
+            let mut future = std::ptr::null_mut();
+            assert!(kafka_producer_Producer_send_with_callback(view, record, callback, &raw mut future).is_null());
+            assert_eq!(kafka_producer_Producer__execute_callbacks(view), 1);
+            assert_eq!(kafka_common_KafkaFuture_is_done(future), 0);
+            kafka_producer_Callback_destroy(callback);
+            kafka_producer_ProducerRecord_destroy(record);
+
+            // Destroy completes the callback as if it had reported, so no future is left waiting.
+            kafka_producer_MockProducer_destroy(mock);
+            assert_eq!(kafka_common_KafkaFuture_is_done(future), 1);
+            let mut metadata = std::ptr::null_mut();
+            assert!(kafka_common_KafkaFuture_get(future, &raw mut metadata).is_null());
+            assert_eq!(kafka_producer_RecordMetadata_offset(metadata as *const _), 0);
+            kafka_common_KafkaFuture_destroy(future);
+        }
+    }
+
+    /// A delivery callback that flushes and closes its own `MockProducer`:
+    /// Java's mock checks neither, so both complete; neither waits for the
+    /// report of the callback it runs in.
+    unsafe extern "C" fn flush_and_close_from_the_callback(
+        self_: *mut c_void,
+        _metadata: *const kafka_producer_RecordMetadata_t,
+        _error: *const kafka_common_Error_t,
+        callback_id: i64,
+    ) {
+        let view = self_ as *const kafka_producer_Producer_t;
+        // SAFETY: Test code: `self_` is the view the test registered, alive until the mock is
+        // destroyed after the callbacks ran.
+        unsafe {
+            assert!(kafka_producer_Producer_flush(view).is_null());
+            assert!(crate::ffi::producer::kafka_producer_Producer_close(view).is_null());
+            kafka_producer_Producer__set_callback_result(view, callback_id, std::ptr::null_mut(), std::ptr::null_mut());
+        }
+    }
+
+    #[test]
+    fn a_mock_flushes_and_closes_from_inside_a_delivery_callback() {
+        let topic = CString::new("topic").unwrap();
+        // SAFETY: Test code: `mock`, `record` and `callback` are live from their constructor to
+        // their single destroy below, `view` is used only before the mock is destroyed, and the
+        // future is destroyed once after its last use.
+        unsafe {
+            let mock = kafka_producer_MockProducer_with_auto_complete(1);
+            let view = kafka_producer_MockProducer__as_Producer(mock);
+            let record = kafka_producer_ProducerRecord_new(topic.as_ptr(), std::ptr::null());
+            let callback = kafka_producer_Callback_new(view as *mut c_void, flush_and_close_from_the_callback);
+            let mut future = std::ptr::null_mut();
+            assert!(kafka_producer_Producer_send_with_callback(view, record, callback, &raw mut future).is_null());
+            assert_eq!(kafka_producer_Producer__execute_callbacks(view), 1);
+            assert_eq!(kafka_common_KafkaFuture_is_done(future), 1, "the callback reported");
+            assert_eq!(kafka_producer_MockProducer_closed(mock), 1);
+            kafka_common_KafkaFuture_destroy(future);
+            kafka_producer_Callback_destroy(callback);
             kafka_producer_ProducerRecord_destroy(record);
             kafka_producer_MockProducer_destroy(mock);
         }

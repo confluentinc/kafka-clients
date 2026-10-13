@@ -36,12 +36,12 @@ use async_trait::async_trait;
 use crate::common::{Error, TopicPartition};
 use crate::consumer::{OffsetAndMetadata, OffsetCommitCallback};
 use crate::ffi::callback_queue::SendPtr;
-use crate::ffi::callback_result::{CallbackResults, void_sink};
+use crate::ffi::callback_result::{CallbackResults, INVOKER_RESULTS, void_sink};
 use crate::ffi::common::{
     box_error, deliver_panic_opaque, error_ref, kafka_common_Error_destroy, kafka_common_Error_t, run_inline,
 };
+use crate::ffi::consumer::Delivery;
 use crate::ffi::consumer::offset_and_metadata::{map_offset_and_metadata, offset_and_metadata_map};
-use crate::ffi::consumer::{Delivery, INVOKER_RESULTS};
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{kafka_Map_destroy, kafka_Map_t};
 

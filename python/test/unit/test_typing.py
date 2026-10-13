@@ -402,6 +402,20 @@ def _producer_family_types(p: object = None) -> None:
         assert_type(await (await ap.send(record=ProducerRecord(topic="t", value="v"))),
                     RecordMetadata)
 
+        async def async_callback(metadata: RecordMetadata,
+                                 exception: Exception | None) -> None:
+            del metadata, exception
+        # Only the asyncio producers await an `async def` send callback; the
+        # sync producers take the plain Callback alias.
+        assert_type(await ap.send(record=ProducerRecord(topic="t", value="v"),
+                                  callback=async_callback),
+                    "asyncio.Future[RecordMetadata]")
+        await ap.send(record=ProducerRecord(topic="t", value="v"), callback=callback)
+        amp = AsyncMockProducer(auto_complete=True, partitioner=None)
+        await amp.send(record=ProducerRecord(topic="t", value=b"v"), callback=async_callback)
+        kp.send(record=ProducerRecord(topic="t", value="v"),
+                callback=async_callback)  # type: ignore[arg-type]
+
     del _async, Future, asyncio
 
 
