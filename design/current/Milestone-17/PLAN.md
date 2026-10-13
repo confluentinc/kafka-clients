@@ -2931,10 +2931,14 @@ On branch `milestone-16-pre-push-fixes` (off `6a2f348b`), plain commits, merged 
 merge of master `95f67984`. Details in `COMMENTS.DONE.115.md`.
 
 - **D2 (user decision: keep).** `AdminClient.unregister_controller` (sync and asyncio) and
-  `MockAdminClient.set_using_raft_controller` stay in the paused `python/admin.py`: they are additive,
-  Java 4.4 adds the RPC, and `rust/tests/integration/admin_controllers_test.rs` drives them through the
-  Python gRPC arms. `.claude/rules/admin-client.md` §11 now allows exactly that kind of additive method
-  and names these two (S3).
+  `MockAdminClient.set_using_raft_controller` stay in the paused `python/admin.py`: both are additive.
+  Java 4.4 adds the RPC, and `rust/tests/integration/admin_controllers_test.rs` drives
+  `unregister_controller` through the Python gRPC arms. `set_using_raft_controller` is not Java-new
+  (`MockAdminClient.Builder.usingRaftController` dates from 3.0.0); it seeds the mock answer 4.4's
+  `unregisterController` reads, and only `python/test/unit/test_admin.py` (and, for C,
+  `c/tests/test_mock_admin.c`) exercises it. `.claude/rules/admin-client.md` §11 now allows an additive
+  method for a Java-new RPC the multilanguage suite exercises, plus the mock helper that seeds it, and
+  names these two (S3; wording corrected for Critic 117 R3).
 
 ## 7. Completeness audit (Phase 13, agent 103)
 
