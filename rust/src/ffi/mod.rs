@@ -21,24 +21,25 @@
 //! Every scalar crossing the boundary is a fixed-width signed integer or a
 //! `double` (CLAUDE.md §4): `i8` for Java `byte` and `boolean`, `i16`, `i32`,
 //! `i64`; no `bool`, `usize` or unsigned type appears in a signature, and the
-//! only `u8` is the `data` pointer inside [`util::kafka_Bytes_t`]. Lengths and
-//! counts use `i32`, and negative values (-1) signal "not set" for optional
+//! only `u8` is the `data` pointer inside `kafka_Bytes_t`. Lengths and counts
+//! use `i32`, and negative values (-1) signal "not set" for optional
 //! **scalar** fields and for out-of-range element accessors.
 //!
 //! A fallible function returns `*mut kafka_common_Error_t` (null on success)
 //! and delivers its value through a trailing `out_<name>` parameter. Owned
-//! strings are freed with [`util::kafka_string_destroy`]; collections cross as
-//! the package-less [`util::kafka_List_t`] and [`util::kafka_Map_t`] of
-//! `void *`, byte buffers as [`util::kafka_Bytes_t`]. A Java `KafkaFuture<T>`
-//! is [`kafka_future::kafka_common_KafkaFuture_t`]; the callbacks a client
-//! queues for its `__execute_callbacks` live in [`callback_queue`].
+//! strings are freed with `kafka_string_destroy`; collections cross as the
+//! package-less `kafka_List_t` and `kafka_Map_t` of `void *`, byte buffers as
+//! `kafka_Bytes_t`. A Java `KafkaFuture<T>` is `kafka_common_KafkaFuture_t`;
+//! the callbacks a client queues for its `__execute_callbacks` live in the
+//! crate-private `callback_queue` module. The C types and functions are
+//! documented in the generated header rather than here.
 //!
 //! A nullable Java collection crosses as a null `kafka_List_t *` /
 //! `kafka_Map_t *` (distinct from an empty one); `kafka_List_size` and
 //! `kafka_Map_size` are never negative, since a size feeds straight into
 //! `malloc(size * n)` and `for (int32_t i = 0; i < size; i++)` on the C side.
 //! The first client created from C initializes the default `RUST_LOG` logger
-//! ([`common::init_default_logger`]).
+//! (`init_default_logger`).
 //!
 //! # Panics never cross the C boundary
 //!
