@@ -169,23 +169,22 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
     }
 
     [Fact]
-    public void GroupMetadata_RealConsumer_WithGroupInstanceId_IsNullPreJoin()
+    public void GroupMetadata_RealConsumer_WithGroupInstanceId_IsTheConfiguredValuePreJoin()
     {
-        // SOURCE-VERIFIED broker-free behavior (M2/P1 D5 precedent): the pre-join stub
-        // is ConsumerGroupMetadata::new(group_id) (async_kafka_consumer.rs:1639), which
-        // sets group_instance_id = None regardless of the configured group.instance.id
-        // — the configured value only surfaces POST-JOIN via the state notifier (against
-        // a broker). So broker-free, GroupInstanceId is null even when configured. Only
-        // GroupId is reachable pre-join; the other three carry documented defaults. This
-        // asserts the reachable truth (a flaky "reads back instance-7" would need a
-        // broker) and proves the group_instance_id accessor's null → null mapping.
+        // SOURCE-VERIFIED broker-free behavior (M2/P1 D5 precedent): a consumer with a
+        // group.id seeds its group metadata at construction with the configured
+        // group.instance.id (initialize_group_metadata, async_kafka_consumer.rs:1483;
+        // Java AsyncKafkaConsumer.initializeGroupMetadata), so it reads back before any
+        // join, against no broker. Before master #197 the pre-join value was a stub with
+        // group_instance_id = None; this test asserted that null until then. The generation
+        // and member id keep their pre-join defaults until the first heartbeat.
         using NativeConsumer consumer = NativeConsumer.Create(
             RealConsumerConfig("static-group", groupInstanceId: "instance-7"));
 
         ConsumerGroupMetadata meta = consumer.GroupMetadata();
 
         Assert.Equal("static-group", meta.GroupId);
-        Assert.Null(meta.GroupInstanceId);
+        Assert.Equal("instance-7", meta.GroupInstanceId);
     }
 
     [Fact]

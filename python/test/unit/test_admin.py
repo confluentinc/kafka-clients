@@ -48,7 +48,7 @@ from admin import (
     _to_acl_binding, _to_acl_binding_filter, _to_client_quota_entity,
     _drain_delete_acls_filter_results, _to_describe_acls, _to_describe_client_quotas,
     _to_classic_group_description, _to_consumer_group_description,
-    _to_elect_leaders, _to_full_config_entry, _to_keyed_errors,
+    _to_elect_leaders, _to_error, _to_full_config_entry, _to_keyed_errors,
     _to_group_offsets, _to_list_groups,
     _to_list_partition_reassignments, _to_log_dir_description,
     _to_member_description, _to_cluster_description, _to_description,
@@ -2176,6 +2176,42 @@ def test_to_keyed_errors_maps_none_to_success():
     converted = _to_keyed_errors({("t", 0): None, "g": (69, "nope", False, False)})
     assert converted[("t", 0)] is None
     assert converted["g"].code == 69
+
+
+def test_to_error_derives_txn_requires_abort_from_code():
+    """A per-key admin error is built via `KafkaError._from_parts` from a copied
+    `(code, message, is_retriable, is_fatal)` tuple -- the borrowed error handle
+    is already destroyed, so the flag cannot come from the Rust predicate and is
+    derived from the code instead. `txn_requires_abort` must be a bool (not raise
+    AttributeError), True only for TRANSACTION_ABORTABLE (120).
+
+    The live-handle `_from_c` path reads the flag from the Rust predicate
+    (`KafkaError_txn_requires_abort`) instead.
+    """
+    abortable = _to_error((120, "aborted", 0, 0))
+    assert abortable.txn_requires_abort is True
+    assert abortable.code == 120
+    assert abortable.message == "aborted"
+
+    not_abortable = _to_error((69, "nope", 0, 0))
+    assert not_abortable.txn_requires_abort is False
+    assert not_abortable.code == 69
+    assert not_abortable.message == "nope"
+
+
+def test_describe_missing_topic_per_key_error_has_txn_requires_abort():
+    """End-to-end through the real C copy-out (`borrowed_error_to_py` ->
+    `_to_error` -> `_from_parts`): a per-key `KafkaError` for a missing topic
+    must expose `txn_requires_abort` as a bool rather than raising
+    AttributeError. UNKNOWN_TOPIC_OR_PARTITION is not abortable, so it is
+    False."""
+    with MockAdminClient(3) as admin:
+        _created(admin, "described", 2, 2)
+        futures = admin.describe_topics(["described", "missing"])
+        missing = futures["missing"].exception(timeout=5.0)
+        assert isinstance(missing, KafkaError)
+        assert missing.code == UNKNOWN_TOPIC_OR_PARTITION
+        assert missing.txn_requires_abort is False
 
 
 # ---------------------------------------------------------------------------
