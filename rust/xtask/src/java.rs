@@ -57,6 +57,12 @@ pub const JAVA_MAIN_ROOT: &str = "../kafka/clients/src/main/java/org/apache/kafk
 /// Where the Java client's tests live.
 pub const JAVA_TEST_ROOT: &str = "../kafka/clients/src/test/java/org/apache/kafka";
 
+/// Where the Java client's test fixtures live: the test utilities other modules
+/// share (`MockTime`, `MockAdminClient`, ..), which Kafka 4.4 moved out of the
+/// test tree into the `testFixtures` source set (KAFKA commit 3b6c8385ca).
+/// Indexed as test classes, like [`JAVA_TEST_ROOT`].
+pub const JAVA_TEST_FIXTURES_ROOT: &str = "../kafka/clients/src/testFixtures/java/org/apache/kafka";
+
 /// The Kafka versions whose `@Deprecated`s count (CLAUDE.md §3: deprecated API
 /// is not translated): the source reference and the next release.
 pub const DEPRECATION_REFS: &[&str] = &["4.3.1", "4.4.0-rc3"];
@@ -372,11 +378,13 @@ pub struct JavaIndex {
 }
 
 impl JavaIndex {
-    /// Loads both trees; empty when the `kafka` submodule is not checked out.
+    /// Loads the main, test and test-fixtures trees; empty when the `kafka`
+    /// submodule is not checked out.
     pub fn load() -> Self {
         let mut classes = Vec::new();
         collect(Path::new(JAVA_MAIN_ROOT), &mut Vec::new(), false, &mut classes);
         collect(Path::new(JAVA_TEST_ROOT), &mut Vec::new(), true, &mut classes);
+        collect(Path::new(JAVA_TEST_FIXTURES_ROOT), &mut Vec::new(), true, &mut classes);
         JavaIndex { classes }
     }
 

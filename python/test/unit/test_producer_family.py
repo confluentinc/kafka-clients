@@ -377,7 +377,7 @@ def test_serializer_argument_wins_over_its_config_key() -> None:
     # Critic 74 F1 (Actor 74): the argument wins and the config key is ignored,
     # not even parsed: Java's ProducerConfig.appendSerializerToConfig replaces
     # the key with the argument's class before ConfigDef parses it
-    # (ProducerConfig.java:666).
+    # (ProducerConfig.java:718).
     class NotAClass:
         pass
 
@@ -554,7 +554,7 @@ def test_a_transactional_send_waits_for_its_handover_and_keeps_api_errors_in_the
     # with the Rust producer, so it can raise what Java's doSend rethrows (the
     # broker tests in test/integration). The metadata wait's TimeoutError is an
     # ApiException: Java gives it to the callback and returns a failed future
-    # (KafkaProducer.java:1056-1068), after send() waited max.block.ms.
+    # (KafkaProducer.java:1137-1149), after send() waited max.block.ms.
     configs = {**UNREACHABLE, "max.block.ms": 300, "transactional.id": "txn"}
     seen: list[Exception | None] = []
 
@@ -784,7 +784,7 @@ def test_flush_in_a_callback_raises_and_close_in_a_callback_does_not_deadlock(
 def test_flush_in_a_callback_of_a_closed_producer_reports_the_closed_state() -> None:
     # Order (CLAUDE.md, Python Binding Conventions, Implementation over the
     # FFI): the closed check comes first on an FFI-backed class, then Java's
-    # in-callback check (KafkaProducer.java:1217-1219).
+    # in-callback check (KafkaProducer.java:1298-1300).
     p = KafkaProducer(configs=UNREACHABLE)
     out: dict[str, Any] = {}
     done = threading.Event()
@@ -1114,7 +1114,7 @@ def test_a_cancelled_async_close_is_forced_and_raises_promptly() -> None:
     # Critic 75 F1, the async analog of KafkaProducerTest's
     # shouldCloseProperlyAndThrowIfInterrupted (see test_kafka_producer.py):
     # cancelling the task awaiting close() force-closes the producer
-    # (KafkaProducer.java:1419-1437) and re-raises CancelledError, instead of
+    # (KafkaProducer.java:1506-1524) and re-raises CancelledError, instead of
     # waiting for the pending record's max.block.ms.
     async def main() -> None:
         p = AsyncKafkaProducer(configs={**UNREACHABLE, "max.block.ms": 60000})
@@ -1424,8 +1424,8 @@ CLOSED_CASES: list[dict[str, Any]] = [{}, {"enable.idempotence": False}]
 @pytest.mark.parametrize("extra", CLOSED_CASES)
 def test_a_closed_producer_reports_the_closed_state(operation: str, extra: dict[str, Any]) -> None:
     # Java's transactional methods call throwIfNoTransactionManager() before
-    # throwIfProducerClosed() (KafkaProducer.java:661-662, 687-688, 746-747,
-    # 791-792, 825-826); here the core makes that check, which a closed producer
+    # throwIfProducerClosed() (KafkaProducer.java:709-710, 735-736, 797-798,
+    # 871-872, 905-906); here the core makes that check, which a closed producer
     # can no longer reach (CLAUDE.md, Implementation over the FFI, exception 3).
     p = KafkaProducer(configs={**UNREACHABLE, **extra})
     p.close(timeout=0)

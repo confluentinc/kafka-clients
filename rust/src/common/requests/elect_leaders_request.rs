@@ -19,6 +19,8 @@
 use std::collections::HashSet;
 use std::io;
 
+use crate::common::internals::UnsupportedProtocolFieldErrorOptionsBuilder;
+
 use crate::ElectLeadersRequestData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::common::{ElectionType, Error, TopicPartition};
@@ -169,13 +171,16 @@ impl Builder {
     /// # Errors
     ///
     /// Returns an error if a non-`PREFERRED` election type is requested at
-    /// version 0, mirroring Java's `UnsupportedVersionException`.
+    /// version 0, mirroring Java's `UnsupportedProtocolFieldException`.
     #[doc(alias = "org.apache.kafka.common.requests.ElectLeadersRequest$Builder#toRequestData")]
     fn to_request_data(&self, version: i16) -> Result<ElectLeadersRequestData, Error> {
         if self.election_type != ElectionType::Preferred && version == 0 {
-            return Err(Error::unsupported_version(
-                "API Version 0 only supports PREFERRED election type",
-            ));
+            return Err(UnsupportedProtocolFieldErrorOptionsBuilder::new()
+                .set_field_or_value(self.election_type.name())
+                .set_api_key_name(&ApiKeys::ELECT_LEADERS.to_string())
+                .set_api_version(version)
+                .set_lowest_supported_version(1)
+                .into_error());
         }
 
         let mut data = ElectLeadersRequestData::new();
@@ -221,9 +226,11 @@ impl RequestBuilder for Builder {
     }
 
     fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
-        let data = self
-            .to_request_data(version)
-            .map_err(|e| io::Error::new(io::ErrorKind::Unsupported, e.message().to_string()))?;
+        let data = self.to_request_data(version).map_err(|e| match e {
+            // Carry the error object, so `NetworkClient` sees the subclass Java throws.
+            Error::UnsupportedVersion(e) => e.into_io_error(),
+            other => io::Error::new(io::ErrorKind::Unsupported, other.message().to_string()),
+        })?;
         Ok(AbstractRequest::ElectLeaders(ElectLeadersRequest::new(data, version)))
     }
 }
@@ -258,7 +265,10 @@ mod tests {
     fn builder_v0_rejects_non_preferred() {
         let mut builder = Builder::new(ElectionType::Unclean, Some(vec![TopicPartition::new("t", 0)]), 100);
         let err = builder.build_version(0).unwrap_err();
-        assert!(err.to_string().contains("API Version 0 only supports PREFERRED election type"));
+        crate::common::internals::assert_unsupported_protocol_field(
+            &err,
+            "The cluster does not support [UNCLEAN] in ELECT_LEADERS API version 0. Upgrade the cluster to ELECT_LEADERS API version >= 1 to enable [UNCLEAN].",
+        );
     }
 
     #[test]

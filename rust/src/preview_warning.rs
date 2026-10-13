@@ -18,7 +18,7 @@
 //! (`KafkaProducer`, `AsyncKafkaConsumer`, `KafkaAdminClient`) logs the same
 //! text from one place while the crate is below 1.0.
 
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::LogContext;
 use crate::kafka_warn;
 
 /// The warning logged once by every client on startup.

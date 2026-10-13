@@ -12,13 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``KafkaProducerTest.java`` (Apache Kafka 4.3.1): the tests that run without a
+"""``KafkaProducerTest.java`` (as of Apache Kafka 4.4.0): the tests that run without a
 broker, in Java order, asserting Java's messages.
 
 Where Java drives a ``MockClient`` only to make an operation fail, the test uses
 an unreachable bootstrap address and a short ``max.block.ms`` instead, and says
 so; ``test/integration/test_kafka_producer_broker.py`` covers what needs a
-broker. Of Java's 82 tests, 21 are translated here; the other 61, each named,
+broker. Of Java's 87 tests, 24 are translated here; the other 63, each named,
 are not, with the reason:
 
 - a ``MockClient``, a mocked ``ProducerMetadata`` or ``MockTime`` scripts the
@@ -49,7 +49,12 @@ are not, with the reason:
   ``testCloseIsForcedOnPendingInitProducerId``,
   ``testCloseIsForcedOnPendingAddOffsetRequest`` and
   ``testPartitionAddedToTransaction`` (the two ``TransactionV2`` tests also
-  assert the requests a ``MockClient`` saw);
+  assert the requests a ``MockClient`` saw); and KIP-1319's
+  ``testSendOffsetsToTransactionNegotiatesV6WhenMetadataKnowsTopicId`` and
+  ``testSendOffsetsToTransactionTriggersMetadataRefreshThenNegotiatesV6``, whose
+  ``MockClient`` seeds the topic id and the ``transaction.version`` feature and
+  asserts the ``TxnOffsetCommit`` request's version and topic id (both are
+  translated against a ``MockClient`` in ``rust/src/producer/kafka_producer.rs``);
 - metrics reporters, JMX and client telemetry: the core loads no metric
   reporter, and ``clientInstanceId`` and the metric subscription methods are not
   generated (their FFI entry points are missing):
@@ -100,11 +105,12 @@ from typing import Any
 import pytest
 
 from confluent_kafka import IllegalArgumentError, IllegalStateError, NullPointerError
-from confluent_kafka.common import KafkaError
+from confluent_kafka.common import KafkaError, TopicPartition
 from confluent_kafka.common.config import ConfigError
+from confluent_kafka.common.errors import BootstrapResolutionError
 from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
 from confluent_kafka.common.serialization import bytes_serializer, string_serializer
-from confluent_kafka.consumer import ConsumerGroupMetadata
+from confluent_kafka.consumer import ConsumerGroupMetadata, KafkaConsumer, OffsetAndMetadata
 from confluent_kafka.producer import KafkaProducer, ProducerRecord, RecordMetadata
 
 INIT_TXN_TIMEOUT_MSG = ("InitTransactions timed out - did not complete coordinator discovery or "
@@ -458,3 +464,72 @@ def test_delivery_timeout_and_linger_ms_config() -> None:
 
     KafkaProducer(configs=configs, key_serializer=string_serializer(),
                   value_serializer=string_serializer()).close()
+
+
+# Java's BootstrapResolutionException message (KIP-909), for a 3000 ms budget.
+BOOTSTRAP_RESOLUTION_FAILED = ("Failed to resolve bootstrap servers after 3000ms. Please check "
+                               "your bootstrap.servers configuration and DNS settings.")
+# An RFC 6761 reserved .invalid name: DNS resolution fails.
+UNRESOLVABLE_HOST = "unresolvable.invalid:9092"
+
+
+def test_producer_bootstrap_resolution_error_propagated() -> None:
+    # testProducerBootstrapResolutionExceptionPropagated (KIP-909).
+    configs = {"bootstrap.servers": UNRESOLVABLE_HOST, "bootstrap.resolve.timeout.ms": "3000"}
+    with KafkaProducer(configs=configs, key_serializer=string_serializer(),
+                       value_serializer=string_serializer()) as producer:
+        start = time.monotonic()
+        max_wait = 15.0
+        with pytest.raises(BootstrapResolutionError) as err:
+            while time.monotonic() - start < max_wait:
+                producer.partitions_for(topic="test-topic")
+            pytest.fail(f"Expected BootstrapResolutionError to be thrown within {max_wait * 1000:.0f}ms")
+        assert str(err.value) == BOOTSTRAP_RESOLUTION_FAILED
+
+        # After the first failure, any further API call must also raise. This
+        # guards against accidentally clearing the bootstrap error from the
+        # metadata layer.
+        with pytest.raises(BootstrapResolutionError) as again:
+            producer.partitions_for(topic="test-topic")
+        assert str(again.value) == BOOTSTRAP_RESOLUTION_FAILED
+
+
+def test_producer_send_offsets_to_transaction_bootstrap_resolution_error_propagated() -> None:
+    # testProducerSendOffsetsToTransactionBootstrapResolutionExceptionPropagated.
+    # sendOffsetsToTransaction became metadata-aware in KIP-1319, so it can also
+    # block on bootstrap and must surface BootstrapResolutionError.
+    configs = {"bootstrap.servers": UNRESOLVABLE_HOST, "bootstrap.resolve.timeout.ms": "3000",
+               "transactional.id": "test-tx-id"}
+    offsets = {TopicPartition(topic="test-topic", partition=0): OffsetAndMetadata(offset=0)}
+    # Java mocks a ConsumerGroupMetadata whose groupId() is "test-group"; the
+    # binding takes a consumer's, which needs no broker before it joins.
+    with KafkaConsumer(configs={"bootstrap.servers": "localhost:1", "group.protocol": "consumer",
+                                "group.id": "test-group"}) as consumer:
+        group_metadata = consumer.group_metadata()
+        with KafkaProducer(configs=configs, key_serializer=string_serializer(),
+                           value_serializer=string_serializer()) as producer:
+            with pytest.raises(BootstrapResolutionError) as err:
+                producer.send_offsets_to_transaction(offsets=offsets,
+                                                     group_metadata=group_metadata)
+            assert str(err.value) == BOOTSTRAP_RESOLUTION_FAILED
+
+            # After the first failure, any further API call must also raise.
+            with pytest.raises(BootstrapResolutionError) as again:
+                producer.send_offsets_to_transaction(offsets=offsets,
+                                                     group_metadata=group_metadata)
+            assert str(again.value) == BOOTSTRAP_RESOLUTION_FAILED
+
+
+def test_producer_constructor_fails_with_config_error_on_unresolvable_bootstrap_when_timeout_zero(
+) -> None:
+    # testProducerConstructorFailsWithConfigExceptionOnUnresolvableBootstrapWhenTimeoutZero.
+    # Default bootstrap.resolve.timeout.ms=0 resolves DNS synchronously in the
+    # constructor; any failure surfaces as ConfigError (wrapped in KafkaError by
+    # the constructor), so no producer instance is created.
+    with pytest.raises(KafkaError) as err:
+        KafkaProducer(configs={"bootstrap.servers": UNRESOLVABLE_HOST},
+                      key_serializer=string_serializer(), value_serializer=string_serializer())
+    assert type(err.value) is KafkaError
+    assert str(err.value) == "Failed to construct kafka producer"
+    assert type(err.value.__cause__) is ConfigError
+    assert str(err.value.__cause__) == "No resolvable bootstrap urls given in bootstrap.servers"

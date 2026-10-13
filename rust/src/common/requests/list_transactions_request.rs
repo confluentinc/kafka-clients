@@ -18,6 +18,8 @@
 
 use std::io;
 
+use crate::common::internals::UnsupportedProtocolFieldErrorOptionsBuilder;
+
 use crate::ListTransactionsRequestData;
 use crate::ListTransactionsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
@@ -123,6 +125,23 @@ impl RequestBuilder for Builder {
     }
 
     fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        // Mirrors `ListTransactionsRequest.Builder.build(short version)`.
+        if self.data.duration_filter >= 0 && version < 1 {
+            return Err(UnsupportedProtocolFieldErrorOptionsBuilder::new()
+                .set_field_or_value("DurationFilter")
+                .set_api_key_name(&ApiKeys::LIST_TRANSACTIONS.to_string())
+                .set_api_version(version)
+                .set_lowest_supported_version(1)
+                .into_io_error());
+        }
+        if self.data.transactional_id_pattern.is_some() && version < 2 {
+            return Err(UnsupportedProtocolFieldErrorOptionsBuilder::new()
+                .set_field_or_value("TransactionalIdPattern")
+                .set_api_key_name(&ApiKeys::LIST_TRANSACTIONS.to_string())
+                .set_api_version(version)
+                .set_lowest_supported_version(2)
+                .into_io_error());
+        }
         Ok(AbstractRequest::ListTransactions(ListTransactionsRequest::new(
             self.data.clone(),
             version,
@@ -133,6 +152,32 @@ impl RequestBuilder for Builder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Java's `Builder.build` rejects a duration filter below v1 and a
+    /// transactional-id pattern below v2 with `UnsupportedProtocolFieldException`.
+    #[test]
+    fn build_rejects_filters_the_version_cannot_carry() {
+        let mut data = ListTransactionsRequestData::new();
+        data.set_duration_filter(1000);
+        let err = Builder::new(data.clone()).build_version(0).unwrap_err();
+        crate::common::internals::assert_unsupported_protocol_field(
+            &err,
+            "The cluster does not support [DurationFilter] in LIST_TRANSACTIONS API version 0. Upgrade the cluster to LIST_TRANSACTIONS API version >= 1 to enable [DurationFilter].",
+        );
+        assert!(Builder::new(data).build_version(1).is_ok());
+
+        let mut data = ListTransactionsRequestData::new();
+        data.set_transactional_id_pattern(Some("txn-.*".to_string()));
+        let err = Builder::new(data.clone()).build_version(1).unwrap_err();
+        crate::common::internals::assert_unsupported_protocol_field(
+            &err,
+            "The cluster does not support [TransactionalIdPattern] in LIST_TRANSACTIONS API version 1. Upgrade the cluster to LIST_TRANSACTIONS API version >= 2 to enable [TransactionalIdPattern].",
+        );
+        assert!(Builder::new(data).build_version(2).is_ok());
+
+        // The defaults (duration -1, no pattern) build at every version.
+        assert!(Builder::new(ListTransactionsRequestData::new()).build_version(0).is_ok());
+    }
 
     #[test]
     fn get_error_response_carries_top_level_error() {

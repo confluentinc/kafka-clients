@@ -12,8 +12,8 @@
 
 # --- Java classes outside `@InterfaceAudience.Public` that are public anyway ---
 
-crate::admin::MockAdminClient  # Java ships it in the clients test jar for users to test against, as MockProducer / MockConsumer are public
-org.apache.kafka.clients.admin.MockAdminClient  # the C binding of the test-jar MockAdminClient above
+crate::admin::MockAdminClient  # Java ships it in the clients test fixtures (clients/src/testFixtures since 4.4) for users to test against, as MockProducer / MockConsumer are public
+org.apache.kafka.clients.admin.MockAdminClient  # the C binding of the test-fixtures MockAdminClient above
 crate::common::header::internals::RecordHeader  # the only `Header` implementation; users build one to attach headers to a ProducerRecord, as Java users do despite the internals package
 crate::common::header::internals::RecordHeaders  # the only `Headers` implementation, returned by ConsumerRecord / ProducerRecord `headers()`
 crate::consumer::*ConsumerHandle  # Rust-only: a listener reenters the consumer through it (consumer-threading.md §31, §41), as a Java listener captures the consumer

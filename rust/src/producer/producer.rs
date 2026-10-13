@@ -68,7 +68,7 @@ pub trait Producer<K, V>: Send + Sync {
     /// See [`KafkaProducer::begin_transaction`](super::KafkaProducer::begin_transaction).
     ///
     /// Stays synchronous because Java's `beginTransaction`
-    /// (`KafkaProducer.java:674-681`) is a pure state transition and never
+    /// (`KafkaProducer.java:734-740`) is a pure state transition and never
     /// blocks.
     ///
     /// # Errors
@@ -152,6 +152,8 @@ pub trait Producer<K, V>: Send + Sync {
     /// Returns `Err` if:
     /// - The producer has already been closed ([`LocalIllegalState`](Error::LocalIllegalState))
     /// - The key or value cannot be serialized ([`Serialization`](Error::Serialization))
+    /// - DNS resolution of the bootstrap servers fails within
+    ///   `bootstrap.resolve.timeout.ms` ([`BootstrapResolution`](Error::BootstrapResolution), KIP-909)
     /// - A Kafka-related error occurs
     #[doc(alias = "org.apache.kafka.clients.producer.Producer#send")]
     fn send_with_callback(
@@ -177,6 +179,8 @@ pub trait Producer<K, V>: Send + Sync {
     ///
     /// Returns `Err` if:
     /// - The topic cannot be found within `max.block.ms` ([`Timeout`](Error::Timeout))
+    /// - DNS resolution of the bootstrap servers fails within
+    ///   `bootstrap.resolve.timeout.ms` ([`BootstrapResolution`](Error::BootstrapResolution), KIP-909)
     /// - The producer has been closed
     #[doc(alias = "org.apache.kafka.clients.producer.Producer#partitionsFor")]
     fn partitions_for(&self, topic: &str) -> impl Future<Output = Result<Vec<PartitionInfo>, Error>> + Send;
@@ -190,7 +194,12 @@ pub trait Producer<K, V>: Send + Sync {
     ///
     /// The returned `HashMap` is a snapshot clone of `Arc<KafkaMetric>`
     /// handles; mutating it does not affect the registry (Java's
-    /// `Collections.unmodifiableMap` analog).
+    /// `Collections.unmodifiableMap` analog). Metrics registered or removed
+    /// afterwards are not reflected in it, but each [`KafkaMetric`] is the
+    /// registry's own shared entry, so reading its value returns the current
+    /// value. (Java's javadoc, KAFKA-20341, documents its map as an
+    /// unmodifiable *live* view of the metrics; the snapshot of the key set is
+    /// the one difference.)
     #[doc(alias = "org.apache.kafka.clients.producer.Producer#metrics")]
     fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>>;
 

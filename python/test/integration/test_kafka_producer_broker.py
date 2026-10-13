@@ -14,10 +14,10 @@
 
 """The producer against a broker, where Java's ``KafkaProducerTest`` scripts a
 ``MockClient`` the binding cannot inject: the errors ``KafkaProducer.doSend``
-rethrows out of ``send()`` (``KafkaProducer.java:1069-1081``) rather than
+rethrows out of ``send()`` (``KafkaProducer.java:1150-1162``) rather than
 giving to the callback and the future, which need the topic's metadata first;
 the record size check, which runs after the metadata wait too
-(``KafkaProducer.java:1022-1024``); and an open transaction, which
+(``KafkaProducer.java:1103-1105``); and an open transaction, which
 ``begin_transaction()`` without a drain needs. Skips without Docker
 (``kafka_broker``)."""
 
@@ -54,7 +54,7 @@ def _configs(broker: Any) -> dict[str, Any]:
 
 def test_send_before_init_transactions_raises(kafka_broker: Any) -> None:
     # TransactionManager.maybeAddPartition's IllegalStateException
-    # (TransactionManager.java:443), rethrown by doSend's catch (Exception e):
+    # (TransactionManager.java:469), rethrown by doSend's catch (Exception e):
     # send() raises it, the callback does not run.
     topic = _topic(kafka_broker)
     calls: list[Exception | None] = []
@@ -76,7 +76,7 @@ def test_send_before_init_transactions_raises(kafka_broker: Any) -> None:
 
 def test_send_outside_a_transaction_raises(kafka_broker: Any) -> None:
     # After initTransactions and before beginTransaction the transaction
-    # manager is READY (TransactionManager.java:446, with Java's double space).
+    # manager is READY (TransactionManager.java:472, with Java's double space).
     topic = _topic(kafka_broker)
     calls: list[Exception | None] = []
     producer = KafkaProducer(configs=_configs(kafka_broker), key_serializer=string_serializer(),
@@ -155,7 +155,7 @@ def _size_upper_bound(value_size: int) -> int:
     return 61 + 21 + 1 + varint + value_size + 1
 
 
-# Java's KafkaProducer.ensureValidRecordSize (KafkaProducer.java:1162-1171):
+# Java's KafkaProducer.ensureValidRecordSize (KafkaProducer.java:1243-1252):
 # each limit, the producer configs that make the record exceed it, and its
 # message.
 RECORD_TOO_LARGE = [
@@ -172,7 +172,7 @@ RECORD_TOO_LARGE = [
 
 def _assert_record_too_large(topic: str, calls: list[tuple[RecordMetadata, Exception | None]],
                              error: BaseException, message: str) -> None:
-    # doSend's catch (ApiException e) (KafkaProducer.java:1056-1068) gives the
+    # doSend's catch (ApiException e) (KafkaProducer.java:1137-1149) gives the
     # same exception to the callback, with metadata of no offset for the
     # record's topic-partition (-1, the record naming none), and to the failed
     # future.
@@ -323,7 +323,7 @@ def _consumed_headers(broker: Any, topic: str) -> list[tuple[str, bytes | None]]
 def test_send_delivers_the_record_headers(kafka_broker: Any) -> None:
     # Critic 75 R2-B2: the core's borrowed send, which send_batch calls for
     # every record of the C engine, appended no headers; Java's doSend appends
-    # record.headers().toArray() (KafkaProducer.java:1020, 1029-1030).
+    # record.headers().toArray() (KafkaProducer.java:1101, 1110-1111).
     topic = _topic(kafka_broker)
     producer = KafkaProducer(configs={"bootstrap.servers": kafka_broker.external_bootstrap})
     try:

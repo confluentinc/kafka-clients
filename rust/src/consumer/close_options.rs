@@ -18,16 +18,22 @@
 
 use std::time::Duration;
 
-/// The group membership operation to apply when the consumer closes.
+/// Enum to specify the group membership operation upon leaving a group.
 ///
 /// Corresponds to Java's `CloseOptions.GroupMembershipOperation`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.clients.consumer.CloseOptions$GroupMembershipOperation")]
 pub enum GroupMembershipOperation {
-    /// The consumer will leave the group.
+    /// The consumer will leave the group. This is the default for dynamic
+    /// members, and can be used by static members when they want to
+    /// permanently leave the group and trigger a rebalance.
     LeaveGroup,
-    /// The consumer will remain in the group.
+    /// The consumer will remain in the group. This is the default for static
+    /// members, allowing them to rejoin quickly without triggering a
+    /// rebalance. When used by dynamic members, no leave heartbeat will be
+    /// sent and the member will be removed by the coordinator after the
+    /// session timeout expires.
     RemainInGroup,
     /// Apply the default behavior:
     /// - static members remain in the group;
@@ -35,7 +41,10 @@ pub enum GroupMembershipOperation {
     Default,
 }
 
-/// Options for closing a consumer.
+/// Options for controlling the consumer close behavior.
+///
+/// This type allows customization of the close timeout and group membership
+/// operation when a consumer is being shut down.
 ///
 /// Corresponds to Java's `org.apache.kafka.clients.consumer.CloseOptions`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,15 +116,15 @@ impl CloseOptions {
         self
     }
 
-    /// The group membership operation to apply upon shutdown.
+    /// Returns the group membership operation configured for this close.
     #[doc(alias = "org.apache.kafka.clients.consumer.CloseOptions#groupMembershipOperation")]
     pub fn group_membership_operation(&self) -> GroupMembershipOperation {
         self.operation
     }
 
-    /// The maximum time to wait for the close process to complete.
-    ///
-    /// `None` means the default timeout will be used.
+    /// Returns the timeout configured for this close: the maximum time to wait
+    /// for the close process to complete, or `None` if using the default
+    /// timeout.
     #[doc(alias = "org.apache.kafka.clients.consumer.CloseOptions#timeout")]
     pub fn timeout(&self) -> Option<Duration> {
         self.timeout
