@@ -321,7 +321,7 @@ that file has been removed — see the document inventory note at the end.)
 - `generator/test-messages/`: 3 test JSON specs → `OUT_DIR/test_generated/` (included via `tests/common/mod.rs`)
 - Generated code includes: structs, Message impl, ApiMessage impl, Eq/Hash/Display, builder setters
 - `cargo xtask format`: Formats source code (generated files are already formatted by the generator)
-- `cargo xtask check-generated`: Validates generated code formatting
+- `cargo xtask check-generated`: Validates that `generator/messages/` matches the `kafka` submodule's specs, generated code formatting, and the error-code tables
 - `cargo xtask lint` / `cargo xtask lint-fix`: Clippy with warnings as errors
 
 ## Key Java Source Reference
