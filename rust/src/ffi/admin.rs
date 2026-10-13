@@ -1148,8 +1148,18 @@ impl<F> LazyOutcome<F> {
     }
 
     /// Java's `isDone()`. Never blocks.
+    ///
+    /// Also true once the admin client has been destroyed: a future still
+    /// pending then can never resolve, and the next read fails at once with
+    /// [`admin_thread_exited`] — as in Java, where the exiting admin thread
+    /// completes every pending future, so `isDone()` becomes true for all of
+    /// them.
     fn is_done(&self) -> bool {
-        self.cell.get().is_some() || self.pending.as_ref().is_some_and(|p| (p.is_done)())
+        self.cell.get().is_some()
+            || self
+                .pending
+                .as_ref()
+                .is_some_and(|p| (p.is_done)() || p.waiter.destroyed.is_cancelled())
     }
 }
 
@@ -3857,6 +3867,10 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_get_error(
 /// `values().get(topic).isDone()`. False if `index` is out of range. Never
 /// blocks.
 ///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
 /// # Safety
 ///
 /// `result` must be a valid `create_topics` result handle.
@@ -4035,6 +4049,10 @@ pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_get_error(
 /// `isDone()` on that topic's future. False if `index` is out of range. Never
 /// blocks.
 ///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
 /// # Safety
 ///
 /// `result` must be a valid `delete_topics` result handle.
@@ -4169,6 +4187,10 @@ pub unsafe extern "C" fn kafka_admin_ListTopicsResult_names_to_listings(
 
 /// Returns whether the listing future has resolved — Java's
 /// `namesToListings().isDone()`. Never blocks.
+///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
 ///
 /// # Safety
 ///
@@ -4416,6 +4438,10 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_get_error(
 /// `isDone()` on that topic's future. False if `index` is out of range. Never
 /// blocks.
 ///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
 /// # Safety
 ///
 /// `result` must be a valid `describe_topics_with_topics` result handle.
@@ -4594,6 +4620,10 @@ pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_get_error(
 /// Returns whether the future of the topic at `index` has resolved — Java's
 /// `isDone()` on that topic's future. False if `index` is out of range. Never
 /// blocks.
+///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
 ///
 /// # Safety
 ///
@@ -4905,6 +4935,10 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_get_error(
 /// Returns whether the future of the partition at `index` has resolved —
 /// Java's `isDone()` on that partition's future. False if `index` is out of
 /// range. Never blocks.
+///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
 ///
 /// # Safety
 ///
@@ -7894,6 +7928,10 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_cluster_id_error(
 /// Returns whether the cluster-id future has resolved — Java's
 /// `clusterId().isDone()`. Never blocks.
 ///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
 /// # Safety
 ///
 /// `result` must be a valid `describe_cluster` result handle.
@@ -7984,6 +8022,10 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_nodes_error(
 /// Returns whether the nodes future has resolved — Java's `nodes().isDone()`.
 /// Never blocks.
 ///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
 /// # Safety
 ///
 /// `result` must be a valid `describe_cluster` result handle.
@@ -8048,6 +8090,10 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_controller_error(
 
 /// Returns whether the controller future has resolved — Java's
 /// `controller().isDone()`. Never blocks.
+///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
 ///
 /// # Safety
 ///
@@ -8162,6 +8208,10 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_authorized_operations
 
 /// Returns whether the authorized-operations future has resolved — Java's
 /// `authorizedOperations().isDone()`. Never blocks.
+///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
 ///
 /// # Safety
 ///
@@ -8561,6 +8611,10 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_get_error(
 /// Returns whether the future of the resource at `index` has resolved — Java's
 /// `values().get(resource).isDone()`. False if `index` is out of range. Never
 /// blocks.
+///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
 ///
 /// # Safety
 ///
@@ -9042,6 +9096,10 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_get_error(
 /// `values().get(resource).isDone()`. False if `index` is out of range. Never
 /// blocks.
 ///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
 /// # Safety
 ///
 /// `result` must be a valid `incremental_alter_configs` result handle.
@@ -9472,6 +9530,10 @@ pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_all(
 /// Returns whether the resource listing has resolved — Java's
 /// `all().isDone()`. Never blocks.
 ///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
 /// # Safety
 ///
 /// `result` must be a valid `list_config_resources` result handle.
@@ -9887,6 +9949,10 @@ pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_get_error(
 /// Returns whether the future of the broker at `index` has resolved — Java's
 /// `isDone()` on that broker's future. False if `index` is out of range. Never
 /// blocks.
+///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
 ///
 /// # Safety
 ///
@@ -10362,6 +10428,10 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_error(
 /// Returns whether the future of the replica at `index` has resolved — Java's
 /// `isDone()` on that replica's future. False if `index` is out of range. Never
 /// blocks.
+///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
 ///
 /// # Safety
 ///
@@ -10939,6 +11009,10 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_error(
 /// Returns whether the future of the replica at `index` has resolved — Java's
 /// `isDone()` on that replica's future. False if `index` is out of range. Never
 /// blocks.
+///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
 ///
 /// # Safety
 ///
@@ -12045,6 +12119,10 @@ pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_partitions(
 /// Returns whether the election future has resolved — Java's
 /// `partitions().isDone()`. Never blocks.
 ///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
 /// # Safety
 ///
 /// `result` must be a valid `elect_leaders` result handle.
@@ -12366,6 +12444,10 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_get_error
 /// Java's `isDone()` on that partition's future. False if `index` is out of
 /// range. Never blocks.
 ///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
 /// # Safety
 ///
 /// `result` must be a valid `alter_partition_reassignments` result handle.
@@ -12533,6 +12615,10 @@ pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_reassignme
 
 /// Returns whether the listing future has resolved — Java's
 /// `reassignments().isDone()`. Never blocks.
+///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
 ///
 /// # Safety
 ///
@@ -12865,6 +12951,10 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_error(
 /// Returns whether the future of the partition at `index` has resolved —
 /// Java's `partitionResult(tp).isDone()`. False if `index` is out of range.
 /// Never blocks.
+///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
 ///
 /// # Safety
 ///
@@ -16401,6 +16491,10 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_all(
 /// Returns whether the listing has resolved — Java's `isDone()` on `all()`,
 /// `valid()` and `errors()`, which complete together. Never blocks.
 ///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
 /// # Safety
 ///
 /// `result` must be a valid `list_groups` result handle.
@@ -16699,6 +16793,10 @@ pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_get_error(
 /// `describedGroups().get(groupId).isDone()`. False if `index` is out of range.
 /// Never blocks.
 ///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
 /// # Safety
 ///
 /// `result` must be a valid `describe_consumer_groups` result handle.
@@ -16915,6 +17013,10 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_get_error(
 /// Returns whether the future of the group at `index` has resolved — Java's
 /// `describedGroups().get(groupId).isDone()`. False if `index` is out of range.
 /// Never blocks.
+///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
 ///
 /// # Safety
 ///
@@ -17137,6 +17239,10 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_get_error(
 /// Returns whether the future of the group at `index` has resolved — Java's
 /// `partitionsToOffsetAndMetadata(groupId).isDone()`. False if `index` is out
 /// of range. Never blocks.
+///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
 ///
 /// # Safety
 ///
@@ -17478,6 +17584,10 @@ pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_all(
 /// `all().isDone()`, and equally `partitionResult(tp).isDone()` for every
 /// partition, since they are all derived from that one future. Never blocks.
 ///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
 /// # Safety
 ///
 /// `result` must be a valid `alter_consumer_group_offsets` result handle.
@@ -17789,6 +17899,10 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_all(
 /// requested partition, since they are all derived from that one future. Never
 /// blocks.
 ///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
 /// # Safety
 ///
 /// `result` must be a valid `delete_consumer_group_offsets` result handle.
@@ -18046,6 +18160,10 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_get_error(
 /// Returns whether the future of the group at `index` has resolved — Java's
 /// `deletedGroups().get(groupId).isDone()`. False if `index` is out of range.
 /// Never blocks.
+///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
 ///
 /// # Safety
 ///
@@ -18320,6 +18438,10 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_all(
 /// `all().isDone()`, and equally `memberResult(member).isDone()` for every
 /// requested member, since they are all derived from that one future. Never
 /// blocks.
+///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
 ///
 /// # Safety
 ///
@@ -22056,6 +22178,10 @@ pub unsafe extern "C" fn kafka_admin_CreateAclsResult_get_error(
 /// `values().get(binding).isDone()`. False if `index` is out of range. Never
 /// blocks.
 ///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
 /// # Safety
 ///
 /// `result` must be a valid `create_acls` result handle.
@@ -22180,6 +22306,10 @@ pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_values(
 
 /// Returns whether the bindings future has resolved — Java's
 /// `values().isDone()`. Never blocks.
+///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
 ///
 /// # Safety
 ///
@@ -22566,6 +22696,10 @@ unsafe fn delete_acls_filter_result_at(
 /// `values().get(filter).isDone()`. False if `index` is out of range. Never
 /// blocks.
 ///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
 /// # Safety
 ///
 /// `result` must be a valid `delete_acls` result handle.
@@ -22898,6 +23032,10 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_entities(
 /// Returns whether the quotas future has resolved — Java's
 /// `entities().isDone()`. Never blocks.
 ///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
 /// # Safety
 ///
 /// `result` must be a valid `describe_client_quotas` result handle.
@@ -23204,6 +23342,10 @@ pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_get_error(
 /// Returns whether the future of the entity at `index` has resolved — Java's
 /// `values().get(entity).isDone()`. False if `index` is out of range. Never
 /// blocks.
+///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
 ///
 /// # Safety
 ///
@@ -28219,6 +28361,10 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_all_erro
 /// `all()` view: returns whether Java's `all()` future has resolved —
 /// `all().isDone()`. Never blocks.
 ///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
 /// # Safety
 ///
 /// `result` must be a valid `describe_user_scram_credentials` result handle.
@@ -28344,6 +28490,10 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_users_er
 
 /// `users()` view: returns whether Java's `users()` future has resolved —
 /// `users().isDone()`. Never blocks.
+///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
 ///
 /// # Safety
 ///
@@ -28621,6 +28771,10 @@ pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_get_error(
 /// `values().get(user).isDone()`. False if `index` is out of range. Never
 /// blocks.
 ///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
 /// # Safety
 ///
 /// `result` must be a valid `alter_user_scram_credentials` result handle.
@@ -28750,6 +28904,10 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenResult_delegation_toke
 
 /// Returns whether the token future has resolved — Java's
 /// `delegationToken().isDone()`. Never blocks.
+///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
 ///
 /// # Safety
 ///
@@ -28903,6 +29061,10 @@ pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenResult_expiry_timestamp
 /// Returns whether the expiry-timestamp future has resolved — Java's
 /// `expiryTimestamp().isDone()`. Never blocks.
 ///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
 /// # Safety
 ///
 /// `result` must be a valid `renew_delegation_token` result handle.
@@ -29026,6 +29188,10 @@ pub unsafe extern "C" fn kafka_admin_ExpireDelegationTokenResult_expiry_timestam
 /// Returns whether the expiry-timestamp future has resolved — Java's
 /// `expiryTimestamp().isDone()`. Never blocks.
 ///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
 /// # Safety
 ///
 /// `result` must be a valid `expire_delegation_token` result handle.
@@ -29138,6 +29304,10 @@ pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_delegation_to
 
 /// Returns whether the token-list future has resolved — Java's
 /// `delegationTokens().isDone()`. Never blocks.
+///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
 ///
 /// # Safety
 ///
@@ -29349,6 +29519,10 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_feature_metadata(
 
 /// Returns whether the metadata future has resolved — Java's
 /// `featureMetadata().isDone()`. Never blocks.
+///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
 ///
 /// # Safety
 ///
@@ -29742,6 +29916,10 @@ pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_get_error(
 /// Returns whether the future of the feature at `index` has resolved — Java's
 /// `isDone()` on that feature's future. False if `index` is out of range.
 /// Never blocks.
+///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
 ///
 /// # Safety
 ///
@@ -30349,6 +30527,10 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_error(
 /// `partitionResult(tp).isDone()`. False if `index` is out of range. Never
 /// blocks.
 ///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
 /// # Safety
 ///
 /// `result` must be a valid `describe_producers` result handle.
@@ -30817,6 +30999,10 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_error(
 /// — Java's `description(id).isDone()`. False if `index` is out of range. Never
 /// blocks.
 ///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
 /// # Safety
 ///
 /// `result` must be a valid `describe_transactions` result handle.
@@ -31186,6 +31372,10 @@ pub unsafe extern "C" fn kafka_admin_AbortTransactionResult_all(
 /// Returns whether the abort's future has resolved — Java's `all().isDone()`.
 /// Never blocks.
 ///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
 /// # Safety
 ///
 /// `result` must be a valid `abort_transaction` result handle.
@@ -31271,6 +31461,10 @@ pub unsafe extern "C" fn kafka_admin_TerminateTransactionResult_result(
 
 /// Returns whether the termination's future has resolved — Java's
 /// `result().isDone()`. Never blocks.
+///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
 ///
 /// # Safety
 ///
@@ -31451,6 +31645,10 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_get_error(
 /// Returns whether the future of the transactional id at `index` has resolved
 /// — Java's `fencedProducers().get(id).isDone()`. False if `index` is out of
 /// range. Never blocks.
+///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
 ///
 /// # Safety
 ///
@@ -31723,6 +31921,10 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_by_broker_id(
 /// Returns whether broker discovery has resolved — Java's
 /// `byBrokerId().isDone()`. Never blocks.
 ///
+/// Also true once the admin client has been destroyed while the future was
+/// still pending: it can then never resolve, and reading it fails at once
+/// (see [`kafka_admin_AdminClient_destroy`]).
+///
 /// # Safety
 ///
 /// `result` must be a valid `list_transactions` result handle.
@@ -31867,6 +32069,12 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_error(
 /// Java's `byBrokerId().get().get(brokerId).isDone()`. False if broker
 /// discovery has not resolved yet (or failed), or `index` is out of range.
 /// Never blocks.
+///
+/// Also true once the admin client has been destroyed while that broker's
+/// listing was still pending: it can then never resolve, and reading it fails
+/// at once (see [`kafka_admin_AdminClient_destroy`]). If broker discovery itself
+/// was still pending at destroy, discovery has failed, so this is false and
+/// [`kafka_admin_ListTransactionsResult_by_broker_id_is_done`] is true.
 ///
 /// # Safety
 ///
@@ -46732,6 +46940,8 @@ mod tests {
         ];
         resolved.complete(3);
 
+        assert!(!keyed_is_done_at(&entries, 1));
+        assert!(!keyed_is_done_at(&entries, 2));
         let token = waiter.destroyed.clone();
         let destroyer = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(50));
@@ -46753,6 +46963,38 @@ mod tests {
         // The cached outcome sticks even if the future completes afterwards.
         waiting.complete(9);
         assert_eq!(keyed_value_at(&entries, 1), None);
+    }
+
+    /// `isDone()` agrees with what the next read reports: once the admin client
+    /// is destroyed a still-pending future reports done before any read (Java's
+    /// exiting admin thread completes every pending future), so a C caller
+    /// polling `_is_done` does not spin forever. Its read then fails at once.
+    #[test]
+    fn a_pending_future_reports_done_once_the_admin_client_is_destroyed() {
+        let (_runtime, waiter) = lazy_test_waiter();
+        let pending = crate::common::internals::KafkaFutureImpl::<i64>::new();
+        let entries = vec![lazy_keyed(&waiter, pending.future(), |v| v)];
+        let single_future = crate::common::internals::KafkaFutureImpl::<i64>::new();
+        let single = lazy_single(&waiter, single_future.future(), |v| v);
+        assert!(!keyed_is_done_at(&entries, 0));
+        assert!(!single.is_done());
+
+        waiter.destroyed.cancel();
+        // Before any read: the destroy alone makes both report done.
+        assert!(keyed_is_done_at(&entries, 0));
+        assert!(single.is_done());
+        // Out-of-range indices stay not-done.
+        assert!(!keyed_is_done_at(&entries, 1));
+
+        let started = std::time::Instant::now();
+        assert_eq!(
+            borrowed_message(keyed_error_at(&entries, 0)),
+            "The AdminClient thread has exited."
+        );
+        assert_eq!(consume_message(single_error(&single)), "The AdminClient thread has exited.");
+        assert!(started.elapsed() < Duration::from_secs(1), "reads after destroy must not wait");
+        assert!(keyed_is_done_at(&entries, 0));
+        assert!(single.is_done());
     }
 
     /// A single-future result (Java's `listTopics`) reads its data and its
@@ -46870,6 +47112,8 @@ mod tests {
         unsafe {
             assert!(!kafka_admin_ListTopicsResult_is_done(result));
             kafka_admin_AdminClient_destroy(admin);
+            // Done before any read, so a caller polling `_is_done` does not spin.
+            assert!(kafka_admin_ListTopicsResult_is_done(result));
             let started = std::time::Instant::now();
             assert_eq!(
                 consume_message(kafka_admin_ListTopicsResult_names_to_listings(result)),
@@ -46879,6 +47123,46 @@ mod tests {
             assert_eq!(kafka_admin_ListTopicsResult_count(result), 0);
             assert!(kafka_admin_ListTopicsResult_get_value(result, 0).is_null());
             kafka_admin_ListTopicsResult_destroy(result);
+        }
+    }
+
+    /// The per-key form of the destroy-while-pending case: a topic whose
+    /// creation is still pending at destroy reports done before any read, its
+    /// error is the admin-thread-exited timeout, and `all()` returns it at once.
+    #[test]
+    fn create_topics_pending_at_destroy_reports_done_and_the_admin_thread_exited() {
+        let admin = unreachable_admin_client();
+        let name = CString::new("pending-topic").unwrap();
+        // SAFETY: Test code: `name` is a valid C string.
+        let topic = unsafe { kafka_admin_NewTopic_new(name.as_ptr(), 1, 1) };
+        assert!(!topic.is_null());
+        let topics = [topic as *const kafka_admin_NewTopic_t];
+        let mut result: *mut kafka_admin_CreateTopicsResult_t = std::ptr::null_mut();
+        // SAFETY: Test code: `admin` is live; `topics` holds one live `NewTopic`; `result` is a
+        // writable slot.
+        let error = unsafe {
+            kafka_admin_AdminClient_create_topics(admin, topics.as_ptr(), 1, 60_000, false, false, &mut result)
+        };
+        assert!(error.is_null(), "submission must not fail");
+        // SAFETY: Test code: `result` is the live handle written above and `admin` the live
+        // client, destroyed exactly once; borrowed pointers are read before the result handle
+        // is destroyed last.
+        unsafe {
+            assert!(!kafka_admin_CreateTopicsResult_is_done(result, 0));
+            kafka_admin_NewTopic_destroy(topic);
+            kafka_admin_AdminClient_destroy(admin);
+            assert!(kafka_admin_CreateTopicsResult_is_done(result, 0));
+            assert!(!kafka_admin_CreateTopicsResult_is_done(result, 1));
+            let started = std::time::Instant::now();
+            let all = kafka_admin_CreateTopicsResult_all(result);
+            assert_eq!(common::kafka_common_Error_code(all) as i32, Errors::RequestTimedOut as i32);
+            assert_eq!(consume_message(all), "The AdminClient thread has exited.");
+            assert_eq!(
+                borrowed_message(kafka_admin_CreateTopicsResult_get_error(result, 0)),
+                "The AdminClient thread has exited."
+            );
+            assert!(started.elapsed() < Duration::from_secs(5));
+            kafka_admin_CreateTopicsResult_destroy(result);
         }
     }
 }
