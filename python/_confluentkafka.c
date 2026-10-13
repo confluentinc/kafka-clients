@@ -2521,7 +2521,8 @@ static PyObject* py_Consumer_subscribe_with_listener_async(PyObject* self, PyObj
 // callable, kept alive by a strong ref released in the destroy trampoline.
 static void pending_notify_trampoline(void* user_data) {
     PyObject* notify = (PyObject*)user_data;
-    PyGILState_STATE g = PyGILState_Ensure();
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) return;
     // Nullary call — PyObject_CallNoArgs is statically arity-checkable (the
     // check-bindings scanner rejects PyObject_CallFunction(cb, NULL) because its
     // format argument is not a string literal).
@@ -2532,7 +2533,8 @@ static void pending_notify_trampoline(void* user_data) {
 
 static void pending_notify_destroy_trampoline(void* user_data) {
     PyObject* notify = (PyObject*)user_data;
-    PyGILState_STATE g = PyGILState_Ensure();
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) return;
     Py_DECREF(notify);
     PyGILState_Release(g);
 }
