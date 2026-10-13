@@ -1,4 +1,4 @@
-# Milestone-16 — Claude rules Java file:line citation errata (4.3.1 → 4.4.0-rc4)
+# Milestone-17 — Claude rules Java file:line citation errata (4.3.1 → 4.4.0-rc4)
 
 ## Scope
 
@@ -475,7 +475,7 @@ Drafted amendment (PLAN §2.3). For a human to apply; `.claude/rules/` is not ed
 - **Related, `admin-client.md` §2:** if restated, note that not every enqueue goes through `CallSender::call`:
   `HandleResult::NewCall` follow-ups are pushed by the I/O task directly (Critic 102 Issue 1).
 
-### Process and tooling conventions adopted during Milestone 16 (Phase 13, agent 103)
+### Process and tooling conventions adopted during Milestone 17 (Phase 13, agent 103)
 
 These were decided by the Manager or proposed by a Critic during the milestone, and applied by every
 later phase. None is in a rules file yet. For a human to decide whether they belong in

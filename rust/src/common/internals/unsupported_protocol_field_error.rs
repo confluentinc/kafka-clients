@@ -27,7 +27,7 @@ use crate::common::errors::{UnsupportedVersionError, UnsupportedVersionKind};
 /// field from a wholly unsupported API version.
 ///
 /// Java's class is in `common.internals`, so it is crate-private, and the public
-/// `Error` has no variant for it (Milestone-16 PLAN D4): each constructor returns
+/// `Error` has no variant for it (Milestone-17 PLAN D4): each constructor returns
 /// an [`Error::UnsupportedVersion`] whose payload is marked
 /// [`UnsupportedVersionKind::UnsupportedProtocolField`]. Java's
 /// `instanceof UnsupportedProtocolFieldException` is

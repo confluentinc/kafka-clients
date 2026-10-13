@@ -4192,7 +4192,7 @@ class AdminServiceImpl final : public AdminService::Service {
     return grpc::Status::OK;
   }
 
-  // -- Controller registration (Milestone 16, KAFKA-20395) ---------------------
+  // -- Controller registration (Milestone 17, KAFKA-20395) ---------------------
   //
   // unregister_controller has no result handle either: UnregisterControllerResult
   // exposes only all(), so success is a null return onto the shared StatusResponse.

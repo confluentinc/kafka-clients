@@ -48,7 +48,7 @@ kafka_error_type! {
 /// No Java counterpart (DoD #7): Rust's flat `Error` cannot name a crate-private
 /// subclass as a variant of its own without making it public, so the subclass is
 /// recorded here instead and tested where Java writes `instanceof`
-/// (Milestone-16 PLAN D4).
+/// (Milestone-17 PLAN D4).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum UnsupportedVersionKind {
     /// Java's `UnsupportedVersionException` itself.

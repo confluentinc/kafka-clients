@@ -311,7 +311,7 @@ service AdminService {
   rpc FenceProducers(FenceProducersRequest) returns (FenceProducersResponse);
 
   // -------------------------------------------------------------------------
-  // Controller registration (Milestone 16, KAFKA-20395 / Kafka 4.4)
+  // Controller registration (Milestone 17, KAFKA-20395 / Kafka 4.4)
   //
   // `unregisterController` is **whole-value degenerated to void**, the shared
   // [StatusResponse]: `UnregisterControllerResult` exposes only

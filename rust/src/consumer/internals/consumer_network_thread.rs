@@ -623,7 +623,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         // the auto-commit on time (and, KAFKA-20970 / KAFKA-21010, it returns
         // the retry backoff rather than an expired timer's 0 while no
         // coordinator is known). The coordinator manager keeps the trait
-        // default, `i64::MAX`, as in Java. (Before Milestone 16 Phase 3 the
+        // default, `i64::MAX`, as in Java. (Before Milestone 17 Phase 3 the
         // commit manager was never consulted.)
         let mut max_time_to_wait_ms: i64 = i64::MAX;
         {
@@ -2555,7 +2555,7 @@ mod tests {
         );
     }
 
-    // ─── Milestone 16 Phase 3: no busy loop while bootstrapping (KIP-909) ───
+    // ─── Milestone 17 Phase 3: no busy loop while bootstrapping (KIP-909) ───
 
     /// The background loop's two waits, asserted by value, for a group
     /// consumer whose bootstrap resolution has not completed (KIP-909,
@@ -2579,7 +2579,7 @@ mod tests {
     ///     auto-commit timer) and the fetch manager (KAFKA-20854: nothing in
     ///     flight) each give exactly that value.
     ///
-    /// Before Milestone 16 Phase 3 both values were 0 here, so the background
+    /// Before Milestone 17 Phase 3 both values were 0 here, so the background
     /// task and the application task each spun for the whole resolution
     /// window.
     #[tokio::test]
