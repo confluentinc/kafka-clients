@@ -62,6 +62,14 @@ pub enum Backend {
     /// C FFI, run inside the C++ multilanguage gRPC server
     /// (`multilanguage-tests` feature required).
     C,
+    /// Sync .NET binding (`KafkaProducer`/`KafkaConsumer`), run inside the .NET
+    /// gRPC server with `CONSUMER_FLAVOR=sync` (`multilanguage-tests` feature
+    /// required).
+    Dotnet,
+    /// Async .NET binding (`AsyncKafkaProducer`/`AsyncKafkaConsumer`), run inside
+    /// the .NET gRPC server with `CONSUMER_FLAVOR=async` — the async
+    /// client-flavor variant.
+    DotnetAsync,
 }
 
 impl Backend {
@@ -71,6 +79,8 @@ impl Backend {
             "python" => Some(Backend::Python),
             "python-async" => Some(Backend::PythonAsync),
             "c" => Some(Backend::C),
+            "dotnet" => Some(Backend::Dotnet),
+            "dotnet-async" => Some(Backend::DotnetAsync),
             _ => None,
         }
     }
@@ -81,6 +91,8 @@ impl Backend {
             Backend::Python => "python",
             Backend::PythonAsync => "python-async",
             Backend::C => "c",
+            Backend::Dotnet => "dotnet",
+            Backend::DotnetAsync => "dotnet-async",
         }
     }
 
@@ -357,6 +369,8 @@ async fn build_grpc_workload(
         Backend::Python => BackendKind::Python,
         Backend::PythonAsync => BackendKind::PythonAsync,
         Backend::C => BackendKind::C,
+        Backend::Dotnet => BackendKind::Dotnet,
+        Backend::DotnetAsync => BackendKind::DotnetAsync,
         Backend::Rust => unreachable!("rust handled by build_workload"),
     };
     let handle = get_or_start(kind, broker_network).await;
@@ -1409,5 +1423,24 @@ mod tests {
         ids.lock().unwrap().insert("t1".to_string(), b2);
         assert_eq!(ctx.topic_id_for("t0"), a, "recreating t1 must not change t0's id");
         assert_eq!(ctx.topic_id_for("t1"), b2);
+    }
+
+    /// Every backend's label parses back to that backend, and every backend
+    /// but `rust` runs inside a gRPC server.
+    #[test]
+    fn backend_labels_round_trip_through_parse() {
+        for backend in [
+            Backend::Rust,
+            Backend::Python,
+            Backend::PythonAsync,
+            Backend::C,
+            Backend::Dotnet,
+            Backend::DotnetAsync,
+        ] {
+            assert_eq!(Backend::parse(backend.label()), Some(backend), "{backend:?}");
+            assert_eq!(backend.is_grpc(), backend != Backend::Rust, "{backend:?}");
+        }
+        assert_eq!(Backend::Dotnet.label(), "dotnet");
+        assert_eq!(Backend::DotnetAsync.label(), "dotnet-async");
     }
 }
