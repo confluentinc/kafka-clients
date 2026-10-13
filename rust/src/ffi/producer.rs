@@ -188,9 +188,10 @@ enum ProducerKind {
     /// 1. The sender background task (spawned by `with_config`) has a runtime to run on.
     /// 2. Async trait methods (`send`, `flush`, `close`) are driven via `runtime.block_on()`.
     ///
-    /// Drop order is left-to-right: the producer is dropped first (its `Drop`
-    /// impl calls `force_close()`), then the runtime is dropped (blocking until
-    /// the sender task exits).
+    /// Dropping a `Runtime` cancels its tasks instead of waiting for them, and the
+    /// producer's `Drop` only signals its sender task to stop. So the sender task must
+    /// have finished before this value is dropped: `kafka_producer_Producer_destroy`
+    /// closes the producer first, which waits for it.
     Kafka(Box<KafkaProducer<Vec<u8>, Vec<u8>>>, tokio::runtime::Runtime),
 }
 
@@ -1553,12 +1554,25 @@ pub unsafe extern "C" fn kafka_producer_Producer_destroy(producer: *mut kafka_pr
     } = *handle;
     let kind = kind.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
 
-    // 2. Drop the producer and its runtime. The producer's `Drop` force-closes;
-    //    dropping the runtime waits for any other remaining tasks. Any
-    //    in-flight record callbacks fire here and enqueue jobs onto the
-    //    still-open completion channel (the clones live inside those callbacks).
+    // 2. Close a `KafkaProducer` the caller did not close, as Java's `close(Duration.ZERO)`
+    //    does: force-close the sender task and wait for it to finish. The task fails every
+    //    record still buffered with "Producer is closed forcefully.", which completes the
+    //    record's future and enqueues its callback onto the still-open completion channel.
+    //    The producer's `Drop` cannot do this: it only signals the task, and dropping the
+    //    runtime cancels the task instead of waiting for it, so those records would never
+    //    complete. A producer the caller already closed is not closed again, which would
+    //    close its partitioner a second time. A `MockProducer` is left as it is: Java's
+    //    `MockProducer.close` also leaves its incomplete sends pending.
+    if let ProducerKind::Kafka(producer, runtime) = &kind
+        && producer.is_running()
+    {
+        let _ = runtime.block_on(producer.close_with_timeout(std::time::Duration::ZERO));
+    }
+
+    // 3. Drop the producer and its runtime. No task is left that still owes a record its
+    //    completion: the FFI tasks were joined in step 1 and the sender task in step 2.
     drop(kind);
-    // 3. Close the completion channel; the dispatcher drains remaining jobs
+    // 4. Close the completion channel; the dispatcher drains remaining jobs
     //    (firing their callbacks) and then exits. Join it.
     //
     // NOTE: every live future handle (`FfiFuture`) and in-flight callback holds
@@ -7731,6 +7745,218 @@ mod tests {
             wait_for_count(invocations, SENDS),
             "every send queued before destroy must report through its callback"
         );
+    }
+
+    /// The single topic `start_buffering_broker` serves, the one `queue_async_sends` uses.
+    const BUFFERING_BROKER_TOPIC: &str = "topic";
+
+    /// Starts a broker stand-in on a free local port and returns its `host:port`.
+    ///
+    /// It answers `ApiVersions`, and `Metadata` with one partition of
+    /// [`BUFFERING_BROKER_TOPIC`] led by itself, and leaves every other request
+    /// unanswered. A producer pointed at it therefore accepts records into its
+    /// accumulator but never completes them. Each connection is served on its own
+    /// thread until the client disconnects.
+    fn start_buffering_broker() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { return };
+                std::thread::spawn(move || serve_buffering_broker_connection(stream, port));
+            }
+        });
+        format!("127.0.0.1:{port}")
+    }
+
+    /// Serves one client connection of `start_buffering_broker`, whose listener is on
+    /// `port`, until the client disconnects.
+    fn serve_buffering_broker_connection(mut stream: std::net::TcpStream, port: u16) {
+        use crate::api_message_type::ListenerType;
+        use crate::common::Node;
+        use crate::common::protocol::{ApiKeys, ByteBufferAccessor};
+        use crate::common::requests::{
+            ApiVersionsResponse, ConcreteResponse, PartitionMetadata, RequestHeader, RequestTestUtils, TopicMetadata,
+        };
+        use std::io::{Read, Write};
+
+        loop {
+            let mut size = [0u8; 4];
+            if stream.read_exact(&mut size).is_err() {
+                return;
+            }
+            let mut request = vec![0u8; i32::from_be_bytes(size) as usize];
+            if stream.read_exact(&mut request).is_err() {
+                return;
+            }
+            let header = RequestHeader::parse(&mut ByteBufferAccessor::new(request)).unwrap();
+            let version = header.api_version();
+            let mut response = if *header.api_key() == ApiKeys::API_VERSIONS {
+                ConcreteResponse::ApiVersions(ApiVersionsResponse::default_api_versions_response(ListenerType::Broker))
+            } else if *header.api_key() == ApiKeys::METADATA {
+                let partition = PartitionMetadata {
+                    error: Errors::None,
+                    topic_partition: TopicPartition::new(BUFFERING_BROKER_TOPIC.to_string(), 0),
+                    leader_id: Some(0),
+                    leader_epoch: Some(0),
+                    replica_ids: vec![0],
+                    in_sync_replica_ids: vec![0],
+                    offline_replica_ids: Vec::new(),
+                };
+                let topic =
+                    TopicMetadata::new(Errors::None, BUFFERING_BROKER_TOPIC.to_string(), false, vec![partition]);
+                ConcreteResponse::Metadata(RequestTestUtils::metadata_response_with_version(
+                    &[Node::new(0, "127.0.0.1".to_string(), i32::from(port))],
+                    Some("buffering-broker"),
+                    0,
+                    vec![topic],
+                    version,
+                ))
+            } else {
+                continue;
+            };
+            let body = response
+                .serialize_with_header(&header.to_response_header(), version)
+                .unwrap()
+                .into_buffer();
+            let written = stream
+                .write_all(&(body.len() as i32).to_be_bytes())
+                .and_then(|()| stream.write_all(&body));
+            if written.is_err() {
+                return;
+            }
+        }
+    }
+
+    /// Calls `kafka_common_KafkaFuture_RecordMetadata_get` on `future` from another thread
+    /// and returns its error handle, or `None` if `get` has not returned within ten seconds.
+    /// The thread of a `get` that never returns is left running.
+    fn get_error_within_ten_seconds(
+        future: *mut kafka_common_KafkaFuture_RecordMetadata_t,
+    ) -> Option<*mut kafka_common_Error_t> {
+        // Raw pointers are not `Send`; the addresses are passed as integers instead.
+        let future = future as usize;
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut error: *mut kafka_common_Error_t = std::ptr::null_mut();
+            // SAFETY: `future` is the address of a live future handle the caller owns and
+            // destroys only after this returns, and `&mut error` is a writable local.
+            let metadata = unsafe {
+                kafka_common_KafkaFuture_RecordMetadata_get(
+                    future as *mut kafka_common_KafkaFuture_RecordMetadata_t,
+                    &mut error,
+                )
+            };
+            assert!(metadata.is_null(), "a record no broker acknowledged must not succeed");
+            let _ = result_tx.send(error as usize);
+        });
+        result_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .ok()
+            .map(|error| error as *mut kafka_common_Error_t)
+    }
+
+    /// `destroy` on a `KafkaProducer` the caller did not close fails every record still
+    /// buffered in the accumulator, as Java's `close(Duration.ZERO)` does: each future
+    /// completes with Java's "Producer is closed forcefully." error and each callback fires.
+    ///
+    /// Regression test: `destroy` used to drop the producer, whose `Drop` only signals the
+    /// sender task, and then the runtime, which cancels that task. Whether the task failed
+    /// the buffered batches first was a race; when it lost, no callback fired and `get`
+    /// waited forever. It lost about one round in five, so the test runs twenty rounds.
+    #[test]
+    fn test_destroy_without_close_fails_every_buffered_record() {
+        const ROUNDS: usize = 20;
+        let bootstrap = start_buffering_broker();
+        for round in 0..ROUNDS {
+            destroy_unclosed_producer_with_buffered_records(&bootstrap, round);
+        }
+    }
+
+    /// One round of `test_destroy_without_close_fails_every_buffered_record` against the
+    /// `start_buffering_broker` at `bootstrap`.
+    fn destroy_unclosed_producer_with_buffered_records(bootstrap: &str, round: usize) {
+        const SENDS: usize = 20;
+        let invocations: &'static std::sync::atomic::AtomicUsize =
+            Box::leak(Box::new(std::sync::atomic::AtomicUsize::new(0)));
+        // A long `linger.ms` keeps every record in the accumulator until `destroy`.
+        let keys_and_values = [
+            CString::new("bootstrap.servers").unwrap(),
+            CString::new(bootstrap).unwrap(),
+            CString::new("linger.ms").unwrap(),
+            CString::new("60000").unwrap(),
+        ];
+        let mut configs: Vec<*const c_char> = keys_and_values.iter().map(|c| c.as_ptr()).collect();
+        configs.push(std::ptr::null());
+        // SAFETY: `kafka_producer_ProducerProperties_from_configs` requires null or a
+        // NULL-terminated array of valid C strings: `configs` points at the owned `CString`s
+        // in `keys_and_values`, alive for the call, and ends in null.
+        let props = unsafe { kafka_producer_ProducerProperties_from_configs(configs.as_ptr()) };
+        let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+        // SAFETY: `props` is the non-null handle `from_configs` returned for two well-formed
+        // pairs and `&mut err` a writable local; `assert_success` consumes `err`, `props` is
+        // destroyed once (the producer does not retain it), and the producer is destroyed
+        // once below.
+        let producer = unsafe {
+            let producer = kafka_producer_KafkaProducer_new(props, &mut err);
+            assert_success(err);
+            kafka_producer_ProducerProperties_destroy(props);
+            producer
+        };
+        assert!(!producer.is_null());
+
+        let topic = CString::new(BUFFERING_BROKER_TOPIC).unwrap();
+        let value = b"value";
+        let futures: Vec<_> = (0..SENDS)
+            .map(|_| {
+                let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+                // SAFETY: `producer` is the live handle created above, `topic` an owned
+                // `CString` and `value` a local array, both alive for the call (the
+                // synchronous send copies them into the batch before returning), and
+                // `&mut err` a writable local that `assert_success` consumes.
+                unsafe {
+                    let future = kafka_producer_Producer_send(
+                        producer,
+                        topic.as_ptr(),
+                        -1,
+                        -1,
+                        std::ptr::null(),
+                        -1,
+                        value.as_ptr(),
+                        value.len() as i32,
+                        &mut err,
+                    );
+                    assert_success(err);
+                    future
+                }
+            })
+            .collect();
+        queue_async_sends(producer, SENDS, invocations);
+
+        // SAFETY: `producer` is the live handle created above, never closed and with
+        // records still buffered (the case under test); this single destroy is the final
+        // use of the pointer.
+        unsafe { kafka_producer_Producer_destroy(producer) };
+
+        assert_eq!(
+            SENDS,
+            wait_for_count(invocations, SENDS),
+            "round {round}: every record buffered at destroy must report through its callback"
+        );
+        for future in futures {
+            let error = get_error_within_ten_seconds(future)
+                .unwrap_or_else(|| panic!("round {round}: get on a buffered record must return, not wait forever"));
+            assert!(!error.is_null(), "round {round}: a record buffered at destroy must fail");
+            // SAFETY: `error` is the non-null, owned error handle `get` returned; the message
+            // is copied out before its single destroy. `future` is the live handle the send
+            // returned, destroyed once after `get` has returned.
+            unsafe {
+                let message = CStr::from_ptr(kafka_common_Error_message(error)).to_string_lossy().into_owned();
+                kafka_common_Error_destroy(error);
+                kafka_common_KafkaFuture_RecordMetadata_destroy(future);
+                assert_eq!("Producer is closed forcefully.", message, "round {round}");
+            }
+        }
     }
 
     /// `send_with_callback` keeps the plain guard (§6 note 8), because its docs say
