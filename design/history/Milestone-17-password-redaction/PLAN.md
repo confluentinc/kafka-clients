@@ -7,14 +7,15 @@ Actor/Critic 85: Commit A `5e28201b`, Commit B `11348821`, fixup `868ea49d` afte
 answered (§12) 2026-10-02** (merge `091f6f9d`, fixup `21be3984`, Actor 85; the branch is pushed and
 its pull request is open). **Critic 85's round-4 blocker fixed (§12.4) 2026-10-02:** `Password` is
 crate-private (fixup `3d11391f`). **Round 6, the pull-request review, answered (§13) 2026-10-12**
-(Actor 85), after the user's merge of `master` (`384b9c2a`).
+(Actor 85), after the user's merge of `master` (`384b9c2a`). **Round 7 (§14) 2026-10-13:** two
+`python/admin.py` reprs stop printing secrets (`8ea56b4a`, Actor 85).
 **Renumbered 2026-10-12:** this milestone was renumbered from 15 to 17, because `master`'s #206 took
 the number 15 (and #187 took 16). `M15` in this branch's commit subjects means this milestone
 (§13.2, item 8).
 **Origin:** security code-review finding (severity Low): secret-bearing structs derive `Debug`.
 **Baseline:** `master` at `b76de2e1`. Java reference: Apache Kafka 4.3.1 — the `kafka/` submodule
 is pinned at `26b251a451ce941d3d7a55e6487bcb7f16b5ad48` but is **not checked out in this clone** (§10.4).
-**Scope:** Rust only. No C FFI / Python / gRPC change is needed (§3.4).
+**Scope:** Rust, plus two reprs in `python/admin.py` from round 7 (§14). No C FFI or gRPC change (§3.4).
 **Agent numbers:** 85 (Actor 85 / Critic 85). Highest number used anywhere in history is 84.
 **Branch:** `fix/password-type-redaction` off `master`. The Actor commits there; nobody pushes
 or opens a PR until the user says so.
@@ -133,11 +134,15 @@ wrappers the existing `Display` is the faithful `toString()` translation, so `De
 by **delegating to `Display`** (`fmt::Display::fmt(self, f)`). No second redaction logic to keep in
 sync. `Clone` (and `PartialEq, Eq, Hash` on `DelegationToken`) stay derived.
 
-### 3.4 Bindings are unaffected
+### 3.4 Bindings are unaffected by the Rust change
 
 The C FFI (`src/ffi/*.rs`) and Python bindings build configs from property maps and never touch
 these fields (verified by grep). `cargo xtask check-bindings` is a CPython format-arity checker,
 unrelated to Rust type changes. No header, `.py`, or gRPC change. `make verify` covers what matters.
+
+Round 7 (§14) did change one `.py` file. This section checked only whether the Rust change reaches
+the bindings, and it does not. It did not read the bindings' own reprs, and two of them in
+`python/admin.py` printed secrets that Java's `toString()` masks.
 
 ### 3.5 Explicitly out of scope
 
@@ -911,3 +916,36 @@ verified.
   commit changes only this plan and `COMMENTS.DONE.85.md`, which no build, lint or test reads. With the
   user's OK (2026-10-13) it skipped the hook: it passed `git diff --cached --check`, and the Manager
   committed it with `--no-verify`.
+
+## 14. Round 7: two `admin.py` reprs (2026-10-13, Actor 85)
+
+On 2026-10-12, pranavrth noted in a pull-request comment that `python/admin.py`'s
+`DelegationToken.__repr__` printed the base64 HMAC. With the token id, which the nested
+`TokenInformation` repr prints, that is a complete delegation-token login, so a `print(token)` or a log
+line leaked it. Java's `DelegationToken.toString()` prints `hmac=[*******]`, and so does the Rust type
+since this milestone.
+
+- **The fix** is `8ea56b4a`, a plain `fix(python):` commit, because the two reprs came from `master`.
+  - `DelegationToken.__repr__` prints `hmac=[*******]`. The token id stays: Java's
+    `TokenInformation.toString()` prints it, and without the HMAC it is not a credential.
+  - `ConfigEntry.__repr__` prints `value=Redacted` whenever `is_sensitive` is set, a `None` value
+    included, as Java's `ConfigEntry.toString()` does. The Manager found this one while sizing the fix.
+  - Only the two `__repr__` bodies change. `admin.py` is paused (`.claude/rules/admin-client.md` §11),
+    and its constructors, attributes and `__slots__` stay as they are.
+  - Two tests in `python/test/unit/test_admin.py` assert the exact reprs, the `None` value included.
+- **No other repr leaks.** Critic 85 built each secret-bearing `admin.py` type with marker secrets and
+  ran its repr. On the parent commit only the two fixed reprs leaked, and on `8ea56b4a` none does.
+  `NewTopic` and `ConfigSynonym` print less than Java, which prints topic configs and synonym values.
+- **Why §2 and §3.4 missed it.** Both checked that the Rust change does not reach the bindings, which
+  holds. Neither read the bindings' own reprs for the classes Java masks. Critic 85's memory records
+  this as a lesson.
+- **Verification.**
+  - The commit skipped the hook with the user's OK (2026-10-13), since the hook runs no Python check.
+  - The local Python extension predated the 2026-10-12 merge, which changed `python/_confluentkafka.c`,
+    so 261 unit tests failed with and without the change. After `make build-python`,
+    `python/test/unit` passed 1092 tests (188 of them in `test_admin.py`), and `python/test/static`
+    passed 25.
+  - Critic 85 found no issues. It ran five mutants of the fix against the new tests, and the tests
+    caught all five.
+  - This record, the scope lines it corrects (line 17 and §3.4) and Critic 85's two lessons are one
+    docs commit. With the user's OK it skipped the hook, after `git diff --cached --check` passed.

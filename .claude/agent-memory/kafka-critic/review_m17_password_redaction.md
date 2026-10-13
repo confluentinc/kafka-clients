@@ -1,6 +1,6 @@
 ---
 name: review-m17-password-redaction
-description: M17 Password/secret-redaction review (Critic 85): P1 CLOSED r2, P2 CLOSED r3, r4 (master merge) found 1 blocker — Password pub in an unsupported package fails check-public-audience (Public list alone is not enough); r5 CLOSED clean (pub(crate) mod fix); raw-map Debug = key set only; {:?} log sinks; Rust-only holder must mask like the Java class it feeds; +/- parity diff for merges; compiler-mutant proof for "no public signature names X"
+description: M17 Password/secret-redaction review (Critic 85): P1 CLOSED r2, P2 CLOSED r3, r4 (master merge) found 1 blocker — Password pub in an unsupported package fails check-public-audience (Public list alone is not enough); r5 CLOSED clean (pub(crate) mod fix); raw-map Debug = key set only; {:?} log sinks; Rust-only holder must mask like the Java class it feeds; +/- parity diff for merges; compiler-mutant proof for "no public signature names X"; r7 (admin.py reprs) clean — read the bindings' own __repr__ for the classes Java masks
 metadata:
   type: project
 ---
@@ -144,5 +144,16 @@ crate-private items too, so a +N there after privatising is expected; `check-no-
   stat adding exactly those paths.
 - The CLAUDE.md in the system context can be stale: §2's three visibility conditions (on-disk `CLAUDE.md:29-31`) were
   missing from it. Cite rules from the on-disk file.
+
+**Lesson 15, false negative (rounds 1–3): a Rust-only redaction must still read the bindings' own reprs.**
+- PLAN §2's "Python bindings' `__repr__`s all checked" checked only that no Python repr reaches a Rust `Debug`.
+- On 2026-10-12, pranavrth found that `python/admin.py`'s `DelegationToken.__repr__` printed the HMAC, which Java
+  masks. `8ea56b4a` fixed it, and the same leak in `ConfigEntry.__repr__` (PLAN §14).
+- **How to apply:** for each class whose Java `toString()` masks something, read the bindings' `__repr__` and
+  `__str__` too. `__repr__` is Python's `toString`, and `str()` falls back to it.
+
+**Lesson 16, technique: test Python value types without the C extension.** Pull the class and function definitions
+out of a `git show` copy with `ast`, and run them under `python3 -I`. That works while the extension rebuilds, against
+the parent commit, and for mutants.
 
 - Related: [[review-expectations]], [[review-fix-commit-rereview]], [[review-lint-java-rules-repro]].
