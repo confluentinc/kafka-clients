@@ -329,24 +329,28 @@ static void test_kafka_admin_empty_batches_need_no_broker(void) {
 #define RESOURCE_TYPE_BROKER (4)
 #define OP_TYPE_SET (0)
 
-/* describeCluster resolves four futures rather than a per-key map, so with no
- * broker the whole call fails; with one it succeeds. Either is accepted — what
- * matters is that it returns promptly and honours the ownership contract. */
+/* describeCluster resolves four futures rather than a per-key map. Like Java,
+ * the call returns the DescribeClusterResult at once; each attribute's get()
+ * then waits for its future. With no broker they fail (typically a timeout);
+ * with one they succeed. Either is accepted — what matters is that the call
+ * submits, the wait returns promptly, and the ownership contract holds. */
 static void test_kafka_admin_describe_cluster_returns_without_hanging(void) {
     kafka_admin_AdminClient_t *admin = create_admin();
 
     kafka_admin_DescribeClusterResult_t *result = NULL;
-    kafka_common_Error_t *err = kafka_admin_AdminClient_describe_cluster(
-        admin, RPC_TIMEOUT_MS, false, false, &result);
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_cluster(admin, RPC_TIMEOUT_MS, false, false,
+                                                              &result));
+    TEST_ASSERT_NOT_NULL(result);
+    kafka_common_Error_t *err = kafka_admin_DescribeClusterResult_cluster_id_error(result);
+    TEST_ASSERT_TRUE(kafka_admin_DescribeClusterResult_cluster_id_is_done(result));
     if (err != NULL) {
-        TEST_ASSERT_NULL(result);
         TEST_ASSERT_NOT_NULL(kafka_common_Error_message(err));
+        TEST_ASSERT_NULL(kafka_admin_DescribeClusterResult_cluster_id(result));
         kafka_common_Error_destroy(err);
     } else {
-        TEST_ASSERT_NOT_NULL(result);
         TEST_ASSERT_NOT_NULL(kafka_admin_DescribeClusterResult_cluster_id(result));
-        kafka_admin_DescribeClusterResult_destroy(result);
     }
+    kafka_admin_DescribeClusterResult_destroy(result);
 
     kafka_admin_AdminClient_close(admin, RPC_TIMEOUT_MS);
     kafka_admin_AdminClient_destroy(admin);
@@ -389,20 +393,23 @@ static void test_kafka_admin_describe_cluster_async_fires_once(void) {
 }
 
 /* listConfigResources has a single future in Java, so it behaves like
- * listTopics: one outcome, promptly. */
+ * listTopics: the call returns the result at once, and all().get() yields one
+ * outcome, promptly. */
 static void test_kafka_admin_list_config_resources_returns_without_hanging(void) {
     kafka_admin_AdminClient_t *admin = create_admin();
 
     kafka_admin_ListConfigResourcesResult_t *result = NULL;
-    kafka_common_Error_t *err =
-        kafka_admin_AdminClient_list_config_resources(admin, NULL, 0, RPC_TIMEOUT_MS, &result);
+    TEST_ASSERT_NULL(
+        kafka_admin_AdminClient_list_config_resources(admin, NULL, 0, RPC_TIMEOUT_MS, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    kafka_common_Error_t *err = kafka_admin_ListConfigResourcesResult_all(result);
+    TEST_ASSERT_TRUE(kafka_admin_ListConfigResourcesResult_is_done(result));
     if (err != NULL) {
-        TEST_ASSERT_NULL(result);
+        TEST_ASSERT_NOT_NULL(kafka_common_Error_message(err));
+        TEST_ASSERT_EQUAL_INT32(0, kafka_admin_ListConfigResourcesResult_count(result));
         kafka_common_Error_destroy(err);
-    } else {
-        TEST_ASSERT_NOT_NULL(result);
-        kafka_admin_ListConfigResourcesResult_destroy(result);
     }
+    kafka_admin_ListConfigResourcesResult_destroy(result);
 
     kafka_admin_AdminClient_close(admin, RPC_TIMEOUT_MS);
     kafka_admin_AdminClient_destroy(admin);
@@ -503,13 +510,18 @@ static void test_kafka_admin_b3_empty_batches_need_no_broker(void) {
     kafka_admin_ListOffsetsResult_destroy(offsets);
 
     /* Needs the controller, so this one really does go to the network and comes
-     * back with an error inside the explicit timeout. */
+     * back with an error inside the explicit timeout. Like Java, the call itself
+     * returns the result at once; the timeout is read with
+     * reassignments().get(). */
     kafka_admin_ListPartitionReassignmentsResult_t *listed = NULL;
-    kafka_common_Error_t *err = kafka_admin_AdminClient_list_partition_reassignments(
-        admin, true, NULL, NULL, 0, RPC_TIMEOUT_MS, &listed);
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_list_partition_reassignments(
+        admin, true, NULL, NULL, 0, RPC_TIMEOUT_MS, &listed));
+    TEST_ASSERT_NOT_NULL(listed);
+    kafka_common_Error_t *err = kafka_admin_ListPartitionReassignmentsResult_reassignments(listed);
     TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_NULL(listed);
     kafka_common_Error_destroy(err);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_ListPartitionReassignmentsResult_count(listed));
+    kafka_admin_ListPartitionReassignmentsResult_destroy(listed);
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -767,31 +779,37 @@ static void test_kafka_admin_b5b_empty_password_is_a_per_user_error(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
-/* B6 argument validation and the empty batches, all before any network I/O.
- * `abortTransaction` and `forceTerminateTransaction` have no result handle at
- * all -- Java's AbortTransactionResult exposes only all() and
- * TerminateTransactionResult only result() -- so their marshaling failures are
- * the plain error return. */
+/* B6 argument validation, all before any network I/O. Like every other
+ * entry point, `abortTransaction` and `forceTerminateTransaction` return their
+ * *Result at once and report request failures through it; only input that
+ * cannot be marshalled is the call's own error, and then no handle is
+ * written. */
 static void test_kafka_admin_b6_rejects_bad_arguments(void) {
     kafka_admin_AdminClient_t *admin = create_admin();
 
-    kafka_common_Error_t *err =
-        kafka_admin_AdminClient_abort_transaction(admin, NULL, 0, 1, 1, 1, RPC_TIMEOUT_MS);
+    kafka_admin_AbortTransactionResult_t *aborted = NULL;
+    kafka_common_Error_t *err = kafka_admin_AdminClient_abort_transaction(
+        admin, NULL, 0, 1, 1, 1, RPC_TIMEOUT_MS, &aborted);
     TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(aborted);
     TEST_ASSERT_EQUAL_STRING("abort transaction topic must not be null",
                              kafka_common_Error_message(err));
     kafka_common_Error_destroy(err);
 
     /* 65537 truncates to 1 under a bare cast, which is a legal epoch. */
     err = kafka_admin_AdminClient_abort_transaction(admin, "txn-topic", 0, 1, 65537, 1,
-                                                    RPC_TIMEOUT_MS);
+                                                    RPC_TIMEOUT_MS, &aborted);
     TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(aborted);
     TEST_ASSERT_EQUAL_STRING("producer epoch 65537 does not fit in a 16-bit epoch",
                              kafka_common_Error_message(err));
     kafka_common_Error_destroy(err);
 
-    err = kafka_admin_AdminClient_force_terminate_transaction(admin, NULL, RPC_TIMEOUT_MS);
+    kafka_admin_TerminateTransactionResult_t *terminated = NULL;
+    err = kafka_admin_AdminClient_force_terminate_transaction(admin, NULL, RPC_TIMEOUT_MS,
+                                                              &terminated);
     TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(terminated);
     TEST_ASSERT_EQUAL_STRING("transactional id must not be null",
                              kafka_common_Error_message(err));
     kafka_common_Error_destroy(err);
@@ -829,22 +847,23 @@ static void test_kafka_admin_b6_empty_batches_need_no_broker(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
-/* `listTransactions` against an unreachable broker: it must return rather than
- * hang, and either outcome (a timeout error, or a real listing if something is
- * listening on localhost:9092) is accepted and freed. */
+/* `listTransactions` against an unreachable broker: like Java, the call
+ * returns the result at once, and waiting on it must return rather than hang.
+ * Either outcome (a timeout error, or a real listing if something is listening
+ * on localhost:9092) is accepted and freed. */
 static void test_kafka_admin_list_transactions_returns_without_hanging(void) {
     kafka_admin_AdminClient_t *admin = create_admin();
 
     kafka_admin_ListTransactionsResult_t *result = NULL;
-    kafka_common_Error_t *err = kafka_admin_AdminClient_list_transactions(
-        admin, NULL, 0, NULL, 0, -1, NULL, RPC_TIMEOUT_MS, &result);
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_list_transactions(admin, NULL, 0, NULL, 0, -1, NULL,
+                                                               RPC_TIMEOUT_MS, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    kafka_common_Error_t *err = kafka_admin_ListTransactionsResult_all(result);
     if (err != NULL) {
-        TEST_ASSERT_NULL(result);
+        TEST_ASSERT_NOT_NULL(kafka_common_Error_message(err));
         kafka_common_Error_destroy(err);
-    } else {
-        TEST_ASSERT_NOT_NULL(result);
-        kafka_admin_ListTransactionsResult_destroy(result);
     }
+    kafka_admin_ListTransactionsResult_destroy(result);
 
     kafka_admin_AdminClient_destroy(admin);
 }

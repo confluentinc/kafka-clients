@@ -1492,22 +1492,48 @@ static void test_mock_admin_describe_cluster_sync(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
-/* All four attribute futures fail together, so the call fails. The next call
- * succeeds: timeoutNextRequest only affects the requests it counted. */
-static void test_mock_admin_describe_cluster_call_error(void) {
+/* All four attribute futures fail together. Like Java's describeCluster, the
+ * call still returns the DescribeClusterResult at once; each failure is read
+ * with that attribute's get(). The next call succeeds: timeoutNextRequest only
+ * affects the requests it counted. */
+static void test_mock_admin_describe_cluster_attribute_futures_fail_together(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
     TEST_ASSERT_NULL(kafka_admin_MockAdminClient_timeout_next_request(admin, 1));
 
     kafka_admin_DescribeClusterResult_t *result = NULL;
     kafka_common_Error_t *err =
         kafka_admin_AdminClient_describe_cluster(admin, -1, false, false, &result);
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(result);
+    kafka_common_Error_t *nodes_err = kafka_admin_DescribeClusterResult_nodes_error(result);
+    TEST_ASSERT_NOT_NULL(nodes_err);
+    const int32_t code = (int32_t)kafka_common_Error_code(nodes_err);
+    kafka_common_Error_destroy(nodes_err);
+    TEST_ASSERT_TRUE(kafka_admin_DescribeClusterResult_nodes_is_done(result));
+    err = kafka_admin_DescribeClusterResult_controller_error(result);
     TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_NULL(result);
+    TEST_ASSERT_EQUAL_INT32(code, (int32_t)kafka_common_Error_code(err));
     kafka_common_Error_destroy(err);
+    err = kafka_admin_DescribeClusterResult_cluster_id_error(result);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_INT32(code, (int32_t)kafka_common_Error_code(err));
+    kafka_common_Error_destroy(err);
+    err = kafka_admin_DescribeClusterResult_authorized_operations_error(result);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_INT32(code, (int32_t)kafka_common_Error_code(err));
+    kafka_common_Error_destroy(err);
+    /* A failed attribute reads as absent. */
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_DescribeClusterResult_node_count(result));
+    TEST_ASSERT_NULL(kafka_admin_DescribeClusterResult_controller(result));
+    TEST_ASSERT_NULL(kafka_admin_DescribeClusterResult_cluster_id(result));
+    kafka_admin_DescribeClusterResult_destroy(result);
 
+    result = NULL;
     err = kafka_admin_AdminClient_describe_cluster(admin, -1, false, false, &result);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(result);
+    err = kafka_admin_DescribeClusterResult_nodes_error(result);
+    TEST_ASSERT_NULL(err);
     kafka_admin_DescribeClusterResult_destroy(result);
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -2863,8 +2889,9 @@ static void reassign_one(kafka_admin_AdminClient_t *admin, const char *topic, in
 
 /* `MockAdminClient.electLeaders` throws UnsupportedOperationException("Not
  * implemented yet") (MockAdminClient.java:792-798). Java exposes one future for
- * the whole election, so that failure is a *call* failure here, not a per-
- * partition error — the return value is non-null and no result is written. */
+ * the whole election, so that failure is the request's error, not a per-
+ * partition error. Like Java, the call still returns the ElectLeadersResult at
+ * once; the failure is read with partitions().get() / all().get(). */
 static void test_mock_admin_elect_leaders_reports_unsupported(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(3);
     create_one(admin, "el-topic", 2, 1);
@@ -2875,20 +2902,35 @@ static void test_mock_admin_elect_leaders_reports_unsupported(void) {
     kafka_admin_ElectLeadersResult_t *result = NULL;
     kafka_common_Error_t *err = kafka_admin_AdminClient_elect_leaders(
         admin, ELECTION_TYPE_PREFERRED, false, topics, partitions, 2, -1, &result);
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(result);
+    err = kafka_admin_ElectLeadersResult_partitions(result);
     TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_NULL(result);
     TEST_ASSERT_EQUAL_INT32(UNSUPPORTED_VERSION_CODE, kafka_common_Error_code(err));
     TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_Error_message(err));
     kafka_common_Error_destroy(err);
+    TEST_ASSERT_TRUE(kafka_admin_ElectLeadersResult_is_done(result));
+    err = kafka_admin_ElectLeadersResult_all(result);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_INT32(UNSUPPORTED_VERSION_CODE, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
+    /* No partition was attempted. */
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_ElectLeadersResult_count(result));
+    kafka_admin_ElectLeadersResult_destroy(result);
 
     /* `all_partitions = true` is Java's null Set: the arrays are not read, so
      * passing NULL for them is fine and the mock still refuses. */
     result = NULL;
     err = kafka_admin_AdminClient_elect_leaders(admin, ELECTION_TYPE_UNCLEAN, true, NULL, NULL, 0, -1,
                                                 &result);
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(result);
+    err = kafka_admin_ElectLeadersResult_partitions(result);
     TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_NULL(result);
+    TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_Error_message(err));
     kafka_common_Error_destroy(err);
+    kafka_admin_ElectLeadersResult_destroy(result);
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -3153,18 +3195,23 @@ static void test_mock_admin_list_partition_reassignments_after_delete_returns_er
     kafka_admin_DeleteTopicsResult_destroy(deleted);
 
     /* `listPartitionReassignments` holds a single future for the whole map
-     * (ListPartitionReassignmentsResult.java:31), so the failure surfaces as
-     * the call's error and no result handle is produced. */
+     * (ListPartitionReassignmentsResult.java:31). Like Java, the call returns
+     * the result at once and the failure is read with reassignments().get(). */
     kafka_admin_ListPartitionReassignmentsResult_t *listed = NULL;
     kafka_common_Error_t *err = kafka_admin_AdminClient_list_partition_reassignments(
         admin, true, NULL, NULL, 0, -1, &listed);
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(listed);
+    err = kafka_admin_ListPartitionReassignmentsResult_reassignments(listed);
     TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_NULL(listed);
     TEST_ASSERT_EQUAL_STRING(
         "Internal MockAdminClient logic error: found reassignment for lr-gone-0, but no "
         "TopicMetadata",
         kafka_common_Error_message(err));
     kafka_common_Error_destroy(err);
+    TEST_ASSERT_TRUE(kafka_admin_ListPartitionReassignmentsResult_is_done(listed));
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_ListPartitionReassignmentsResult_count(listed));
+    kafka_admin_ListPartitionReassignmentsResult_destroy(listed);
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -3672,12 +3719,12 @@ static void test_mock_admin_b3_null_out_result(void) {
     const bool is_timestamp[1] = {false};
     const int64_t specs[1] = {OFFSET_SPEC_LATEST};
 
-    /* electLeaders is unsupported by the mock, so it returns its error either
-     * way; the other three succeed and must simply drop the result. */
-    kafka_common_Error_t *err = kafka_admin_AdminClient_elect_leaders(
-        admin, ELECTION_TYPE_PREFERRED, false, topics, partitions, 1, -1, NULL);
-    TEST_ASSERT_NOT_NULL(err);
-    kafka_common_Error_destroy(err);
+    /* electLeaders is unsupported by the mock, but like Java the call returns
+     * before that failure is known: the failure lives on the (dropped) result
+     * handle, so the call itself succeeds. All four must simply drop the
+     * result. */
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_elect_leaders(
+        admin, ELECTION_TYPE_PREFERRED, false, topics, partitions, 1, -1, NULL));
 
     TEST_ASSERT_NULL(kafka_admin_AdminClient_alter_partition_reassignments(
         admin, topics, partitions, cancel, replica_ptrs, replica_counts, 1, -1, true, NULL));
@@ -4452,18 +4499,23 @@ static void test_mock_admin_alter_consumer_group_offsets_rejects_bad_input(void)
     kafka_admin_AdminClient_destroy(admin);
 }
 
-static void test_mock_admin_alter_consumer_group_offsets_with_no_partitions_fails_the_call(void) {
+static void test_mock_admin_alter_consumer_group_offsets_with_no_partitions_fails_all(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
     /* With no requested partition there is no per-key slot for the outcome, so
-     * the whole-request error is returned instead — Java's `all()` is then the
-     * only observable too. */
+     * Java's `all()` is the only observable. Like Java, the call returns the
+     * result at once and the failure is read with all().get(). */
     kafka_admin_AlterConsumerGroupOffsetsResult_t *result = NULL;
     kafka_common_Error_t *err = kafka_admin_AdminClient_alter_consumer_group_offsets(
         admin, "acg", NULL, NULL, NULL, NULL, NULL, NULL, 0, -1, &result);
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(result);
+    err = kafka_admin_AlterConsumerGroupOffsetsResult_all(result);
     TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_NULL(result);
     TEST_ASSERT_EQUAL_STRING("Not implement yet", kafka_common_Error_message(err));
     kafka_common_Error_destroy(err);
+    TEST_ASSERT_TRUE(kafka_admin_AlterConsumerGroupOffsetsResult_is_done(result));
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_AlterConsumerGroupOffsetsResult_count(result));
+    kafka_admin_AlterConsumerGroupOffsetsResult_destroy(result);
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -4794,16 +4846,23 @@ static void test_mock_admin_remove_all_members_has_no_per_member_outcome(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
     /* `remove_all` is Java's no-argument constructor, where `memberResult` is
      * "not applicable in 'removeAll' mode" and `all()` is the only observable.
-     * The member array is deliberately non-empty: the flag must win. */
+     * The member array is deliberately non-empty: the flag must win. Like Java,
+     * the call returns the result at once; the failure is read with
+     * all().get(). */
     const char *members[1] = {"ignored"};
 
     kafka_admin_RemoveMembersFromConsumerGroupResult_t *result = NULL;
     kafka_common_Error_t *err = kafka_admin_AdminClient_remove_members_from_consumer_group(
         admin, "rm-group", true, members, 1, NULL, -1, &result);
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(result);
+    err = kafka_admin_RemoveMembersFromConsumerGroupResult_all(result);
     TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_NULL(result);
     TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_Error_message(err));
     kafka_common_Error_destroy(err);
+    TEST_ASSERT_TRUE(kafka_admin_RemoveMembersFromConsumerGroupResult_is_done(result));
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_RemoveMembersFromConsumerGroupResult_count(result));
+    kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(result);
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -5302,21 +5361,26 @@ static void record_async_error(acl_async_result_t *r, kafka_common_Error_t *erro
 
 // ---- describeAcls -----------------------------------------------------------
 
-static void test_mock_admin_describe_acls_fails_the_whole_call(void) {
+static void test_mock_admin_describe_acls_fails_the_values_future(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
     /* DescribeAclsResult holds one future for the whole call, so there is no
-     * per-key slot: the failure comes back from the function itself and
-     * `out_result` is left untouched. This is the shape difference from
-     * createAcls above, and it follows from the Java result type. */
+     * per-key slot: the failure is read with values().get(). This is the shape
+     * difference from createAcls above, and it follows from the Java result
+     * type. Like Java, the call itself returns the result at once. */
     kafka_admin_DescribeAclsResult_t *result = NULL;
     kafka_common_Error_t *error =
         kafka_admin_AdminClient_describe_acls(admin, ACL_RESOURCE_TYPE_TOPIC, "t",
                                               ACL_PATTERN_TYPE_LITERAL, "User:a", "*",
                                               ACL_OPERATION_READ, ACL_PERMISSION_ALLOW, -1, &result);
+    TEST_ASSERT_NULL(error);
+    TEST_ASSERT_NOT_NULL(result);
+    error = kafka_admin_DescribeAclsResult_values(result);
     TEST_ASSERT_NOT_NULL(error);
-    TEST_ASSERT_NULL(result);
     TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_Error_message(error));
     kafka_common_Error_destroy(error);
+    TEST_ASSERT_TRUE(kafka_admin_DescribeAclsResult_is_done(result));
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_DescribeAclsResult_count(result));
+    kafka_admin_DescribeAclsResult_destroy(result);
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -5332,17 +5396,26 @@ static void test_mock_admin_describe_acls_accepts_any_match_and_nulls(void) {
     kafka_common_Error_t *error = kafka_admin_AdminClient_describe_acls(
         admin, ACL_RESOURCE_TYPE_ANY, NULL, ACL_PATTERN_TYPE_ANY, NULL, NULL, ACL_OPERATION_ANY,
         ACL_PERMISSION_ANY, -1, &result);
+    TEST_ASSERT_NULL(error);
+    TEST_ASSERT_NOT_NULL(result);
+    error = kafka_admin_DescribeAclsResult_values(result);
     TEST_ASSERT_NOT_NULL(error);
     TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_Error_message(error));
     kafka_common_Error_destroy(error);
+    kafka_admin_DescribeAclsResult_destroy(result);
 
+    result = NULL;
     error = kafka_admin_AdminClient_describe_acls(admin, ACL_RESOURCE_TYPE_TOPIC, "prefix",
                                                   ACL_PATTERN_TYPE_MATCH, NULL, NULL,
                                                   ACL_OPERATION_DESCRIBE, ACL_PERMISSION_DENY, -1,
                                                   &result);
+    TEST_ASSERT_NULL(error);
+    TEST_ASSERT_NOT_NULL(result);
+    error = kafka_admin_DescribeAclsResult_values(result);
     TEST_ASSERT_NOT_NULL(error);
     TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_Error_message(error));
     kafka_common_Error_destroy(error);
+    kafka_admin_DescribeAclsResult_destroy(result);
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -5576,30 +5649,41 @@ static void test_mock_admin_delete_acls_async_null_handle_with_filters(void) {
 
 // ---- describeClientQuotas ---------------------------------------------------
 
-static void test_mock_admin_describe_client_quotas_fails_the_whole_call(void) {
+static void test_mock_admin_describe_client_quotas_fails_the_entities_future(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
     const char *entity_types[3] = {"user", "client-id", "ip"};
     const int32_t match_types[3] = {QUOTA_MATCH_EXACT, QUOTA_MATCH_DEFAULT, QUOTA_MATCH_SPECIFIED};
     const char *match_names[3] = {"alice", NULL, NULL};
 
     /* Like describeAcls, one future for the whole call: no per-key slot, so the
-     * mock's failure is the call's error. Note Java's own typo in the message,
-     * "Not implement yet", which the ACL RPCs do not share. */
+     * mock's failure is read with entities().get(). Like Java, the call itself
+     * returns the result at once. Note Java's own typo in the message, "Not
+     * implement yet", which the ACL RPCs do not share. */
     kafka_admin_DescribeClientQuotasResult_t *result = NULL;
     kafka_common_Error_t *error = kafka_admin_AdminClient_describe_client_quotas(
         admin, entity_types, match_types, match_names, 3, false, -1, &result);
+    TEST_ASSERT_NULL(error);
+    TEST_ASSERT_NOT_NULL(result);
+    error = kafka_admin_DescribeClientQuotasResult_entities(result);
     TEST_ASSERT_NOT_NULL(error);
-    TEST_ASSERT_NULL(result);
     TEST_ASSERT_EQUAL_STRING("Not implement yet", kafka_common_Error_message(error));
     kafka_common_Error_destroy(error);
+    TEST_ASSERT_TRUE(kafka_admin_DescribeClientQuotasResult_is_done(result));
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_DescribeClientQuotasResult_count(result));
+    kafka_admin_DescribeClientQuotasResult_destroy(result);
 
     /* No components at all is Java's ClientQuotaFilter.all(); still reaches the
      * mock rather than being rejected. */
+    result = NULL;
     error = kafka_admin_AdminClient_describe_client_quotas(admin, NULL, NULL, NULL, 0, false, -1,
                                                            &result);
+    TEST_ASSERT_NULL(error);
+    TEST_ASSERT_NOT_NULL(result);
+    error = kafka_admin_DescribeClientQuotasResult_entities(result);
     TEST_ASSERT_NOT_NULL(error);
     TEST_ASSERT_EQUAL_STRING("Not implement yet", kafka_common_Error_message(error));
     kafka_common_Error_destroy(error);
+    kafka_admin_DescribeClientQuotasResult_destroy(result);
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -5929,18 +6013,15 @@ static void test_mock_admin_b5a_null_out_result(void) {
         admin, entity_types, entity_names, entity_counts, NULL, NULL, NULL, NULL, 1, -1, false,
         NULL));
 
-    /* The two single-future RPCs return the mock's error whether or not the
-     * caller wants the result, so they are checked for a non-null error
-     * instead. Passing NULL must still not build a handle. */
-    kafka_common_Error_t *error = kafka_admin_AdminClient_describe_acls(
+    /* The two single-future RPCs fail in the mock, but like Java the call
+     * returns before that failure is known: it lives on the (dropped) result
+     * handle, so with a NULL `out_result` it is not observable and the call
+     * itself succeeds. Passing NULL must still not build a handle. */
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_acls(
         admin, ACL_RESOURCE_TYPE_ANY, NULL, ACL_PATTERN_TYPE_ANY, NULL, NULL, ACL_OPERATION_ANY,
-        ACL_PERMISSION_ANY, -1, NULL);
-    TEST_ASSERT_NOT_NULL(error);
-    kafka_common_Error_destroy(error);
-    error = kafka_admin_AdminClient_describe_client_quotas(admin, NULL, NULL, NULL, 0, false, -1,
-                                                           NULL);
-    TEST_ASSERT_NOT_NULL(error);
-    kafka_common_Error_destroy(error);
+        ACL_PERMISSION_ANY, -1, NULL));
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_client_quotas(admin, NULL, NULL, NULL, 0,
+                                                                    false, -1, NULL));
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -5970,25 +6051,47 @@ static void test_mock_admin_b5a_null_out_result(void) {
 #define UPGRADE_TYPE_SAFE_DOWNGRADE 2
 #define UPGRADE_TYPE_UNSAFE_DOWNGRADE 3
 
-static void test_mock_admin_describe_user_scram_credentials_fails_the_whole_call(void) {
+static void test_mock_admin_describe_user_scram_credentials_fails_every_view(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
     const char *users[2] = {"alice", "bob"};
 
-    /* One future for the whole response, so the mock's refusal is the call's
-     * error rather than a per-user one. */
+    /* One future for the whole response, so the mock's refusal is the
+     * request's error rather than a per-user one. Like Java, the call returns
+     * the result at once; all(), users() and description(user) all fail with
+     * that refusal when read. */
     kafka_admin_DescribeUserScramCredentialsResult_t *result = NULL;
     kafka_common_Error_t *error =
         kafka_admin_AdminClient_describe_user_scram_credentials(admin, users, 2, -1, &result);
+    TEST_ASSERT_NULL(error);
+    TEST_ASSERT_NOT_NULL(result);
+    error = kafka_admin_DescribeUserScramCredentialsResult_all_error(result);
     TEST_ASSERT_NOT_NULL(error);
-    TEST_ASSERT_NULL(result);
     TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_Error_message(error));
     kafka_common_Error_destroy(error);
+    TEST_ASSERT_TRUE(kafka_admin_DescribeUserScramCredentialsResult_all_is_done(result));
+    error = kafka_admin_DescribeUserScramCredentialsResult_users_error(result);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_Error_message(error));
+    kafka_common_Error_destroy(error);
+    kafka_admin_UserScramCredentialsDescription_t *description = NULL;
+    error = kafka_admin_DescribeUserScramCredentialsResult_description(result, "alice",
+                                                                       &description);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_NULL(description);
+    TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_Error_message(error));
+    kafka_common_Error_destroy(error);
+    kafka_admin_DescribeUserScramCredentialsResult_destroy(result);
 
     /* An empty user list means "every user" and reaches the same refusal. */
+    result = NULL;
     error = kafka_admin_AdminClient_describe_user_scram_credentials(admin, NULL, 0, -1, &result);
+    TEST_ASSERT_NULL(error);
+    TEST_ASSERT_NOT_NULL(result);
+    error = kafka_admin_DescribeUserScramCredentialsResult_all_error(result);
     TEST_ASSERT_NOT_NULL(error);
     TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_Error_message(error));
     kafka_common_Error_destroy(error);
+    kafka_admin_DescribeUserScramCredentialsResult_destroy(result);
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -6285,12 +6388,21 @@ static void test_mock_admin_delegation_token_lifecycle(void) {
     TEST_ASSERT_EQUAL_INT64(4242, kafka_admin_RenewDelegationTokenResult_expiry_timestamp(renewed));
     kafka_admin_RenewDelegationTokenResult_destroy(renewed);
 
-    /* A wrong HMAC is DELEGATION_TOKEN_NOT_FOUND, not a silent no-op. */
+    /* A wrong HMAC is DELEGATION_TOKEN_NOT_FOUND, not a silent no-op. Like
+     * Java, the call returns the result at once and the failure is read with
+     * expiryTimestamp().get(). */
     const uint8_t bogus[3] = {0x01, 0x02, 0x03};
+    renewed = NULL;
     kafka_common_Error_t *error =
         kafka_admin_AdminClient_renew_delegation_token(admin, bogus, 3, 1, -1, &renewed);
+    TEST_ASSERT_NULL(error);
+    TEST_ASSERT_NOT_NULL(renewed);
+    error = kafka_admin_RenewDelegationTokenResult_expiry_timestamp_error(renewed);
     TEST_ASSERT_NOT_NULL(error);
     kafka_common_Error_destroy(error);
+    TEST_ASSERT_TRUE(kafka_admin_RenewDelegationTokenResult_is_done(renewed));
+    TEST_ASSERT_EQUAL_INT64(-1, kafka_admin_RenewDelegationTokenResult_expiry_timestamp(renewed));
+    kafka_admin_RenewDelegationTokenResult_destroy(renewed);
 
     /* Expiring with the -1 sentinel removes it immediately. */
     kafka_admin_ExpireDelegationTokenResult_t *expired = NULL;
@@ -6370,13 +6482,21 @@ static void test_mock_admin_create_delegation_token_rejects_bad_input(void) {
                              kafka_common_Error_message(error));
     kafka_common_Error_destroy(error);
 
-    /* A non-User renewer reaches the mock, which refuses it. */
+    /* A non-User renewer reaches the mock, which refuses it. That refusal is
+     * the request's failure, so like Java it is read with
+     * delegationToken().get() on the result the call returned at once. */
     const char *group_types[1] = {"Group"};
     const char *group_names[1] = {"admins"};
     error = kafka_admin_AdminClient_create_delegation_token(admin, group_types, group_names, 1, NULL,
                                                             NULL, -1, -1, &result);
+    TEST_ASSERT_NULL(error);
+    TEST_ASSERT_NOT_NULL(result);
+    error = kafka_admin_CreateDelegationTokenResult_delegation_token(result);
     TEST_ASSERT_NOT_NULL(error);
     kafka_common_Error_destroy(error);
+    TEST_ASSERT_TRUE(kafka_admin_CreateDelegationTokenResult_is_done(result));
+    TEST_ASSERT_NULL(kafka_admin_CreateDelegationTokenResult_get_token(result));
+    kafka_admin_CreateDelegationTokenResult_destroy(result);
 
     /* No renewer at all: MockAdminClient makes `options.renewers().get(0)` the
      * owner (MockAdminClient.java:652), so Java throws a catchable
@@ -6388,12 +6508,15 @@ static void test_mock_admin_create_delegation_token_rejects_bad_input(void) {
     result = NULL;
     error = kafka_admin_AdminClient_create_delegation_token(admin, NULL, NULL, 0, NULL, NULL, -1, -1,
                                                             &result);
+    TEST_ASSERT_NULL(error);
+    TEST_ASSERT_NOT_NULL(result);
+    error = kafka_admin_CreateDelegationTokenResult_delegation_token(result);
     TEST_ASSERT_NOT_NULL(error);
-    TEST_ASSERT_NULL(result);
     TEST_ASSERT_EQUAL_STRING("createDelegationToken requires at least one renewer: MockAdminClient "
                              "makes the first renewer the owner",
                              kafka_common_Error_message(error));
     kafka_common_Error_destroy(error);
+    kafka_admin_CreateDelegationTokenResult_destroy(result);
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -6810,20 +6933,17 @@ static void test_mock_admin_b5b_null_out_result(void) {
         kafka_admin_AdminClient_describe_delegation_token(admin, false, NULL, NULL, 0, -1, NULL));
     TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_features(admin, false, 0, -1, NULL));
 
-    /* The refused single-future RPC still returns its error. */
-    kafka_common_Error_t *error =
-        kafka_admin_AdminClient_describe_user_scram_credentials(admin, users, 1, -1, NULL);
-    TEST_ASSERT_NOT_NULL(error);
-    kafka_common_Error_destroy(error);
+    /* The refused single-future RPC fails on its result handle, not on the
+     * call -- like Java, the call returns before the refusal is known -- so
+     * with a NULL out_result the call succeeds and the failure is not
+     * observable. */
+    TEST_ASSERT_NULL(
+        kafka_admin_AdminClient_describe_user_scram_credentials(admin, users, 1, -1, NULL));
 
     /* Renew/expire against a token that does not exist likewise. */
     const uint8_t bogus[1] = {0x01};
-    error = kafka_admin_AdminClient_renew_delegation_token(admin, bogus, 1, -1, -1, NULL);
-    TEST_ASSERT_NOT_NULL(error);
-    kafka_common_Error_destroy(error);
-    error = kafka_admin_AdminClient_expire_delegation_token(admin, bogus, 1, -1, -1, NULL);
-    TEST_ASSERT_NOT_NULL(error);
-    kafka_common_Error_destroy(error);
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_renew_delegation_token(admin, bogus, 1, -1, -1, NULL));
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_expire_delegation_token(admin, bogus, 1, -1, -1, NULL));
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -7000,27 +7120,44 @@ static void test_mock_admin_fence_producers_reports_unsupported_per_id(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
-static void test_mock_admin_list_transactions_fails_the_whole_call(void) {
+static void test_mock_admin_list_transactions_fails_broker_discovery(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
 
-    /* Java's mock fails the top-level broker-discovery future, and that is the
-     * one listTransactions failure mode that is the *call's* error rather than a
-     * per-broker row. */
+    /* Java's mock fails the top-level broker-discovery future. Like Java's
+     * listTransactions, the call still returns the *Result at once; the failure
+     * is read with byBrokerId().get(), and all() / allByBrokerId() fail with it
+     * too. */
     const char *states[2] = {"Ongoing", "PrepareAbort"};
     const int64_t producer_ids[3] = {11, 22, 33};
     kafka_admin_ListTransactionsResult_t *result = NULL;
-    kafka_common_Error_t *error = kafka_admin_AdminClient_list_transactions(
-        admin, states, 2, producer_ids, 3, 60000, "txn-.*", -1, &result);
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_list_transactions(
+        admin, states, 2, producer_ids, 3, 60000, "txn-.*", -1, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    kafka_common_Error_t *error = kafka_admin_ListTransactionsResult_by_broker_id(result);
     TEST_ASSERT_NOT_NULL(error);
-    TEST_ASSERT_NULL(result);
     TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_Error_message(error));
     kafka_common_Error_destroy(error);
+    TEST_ASSERT_TRUE(kafka_admin_ListTransactionsResult_by_broker_id_is_done(result));
+    error = kafka_admin_ListTransactionsResult_all(result);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_Error_message(error));
+    kafka_common_Error_destroy(error);
+    error = kafka_admin_ListTransactionsResult_all_by_broker_id(result);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_Error_message(error));
+    kafka_common_Error_destroy(error);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_ListTransactionsResult_count(result));
+    kafka_admin_ListTransactionsResult_destroy(result);
 
     /* Same with every filter left unset -- a NULL pattern must not be read. */
-    error = kafka_admin_AdminClient_list_transactions(admin, NULL, 0, NULL, 0, -1, NULL, -1, &result);
+    result = NULL;
+    TEST_ASSERT_NULL(
+        kafka_admin_AdminClient_list_transactions(admin, NULL, 0, NULL, 0, -1, NULL, -1, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    error = kafka_admin_ListTransactionsResult_by_broker_id(result);
     TEST_ASSERT_NOT_NULL(error);
-    TEST_ASSERT_NULL(result);
     kafka_common_Error_destroy(error);
+    kafka_admin_ListTransactionsResult_destroy(result);
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -7028,37 +7165,57 @@ static void test_mock_admin_list_transactions_fails_the_whole_call(void) {
 static void test_mock_admin_abort_and_terminate_transaction_report_unsupported(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
 
-    /* Neither RPC has a result handle: Java's AbortTransactionResult exposes
-     * only all(), and TerminateTransactionResult only result(), so success is a
-     * null return and there is nothing to free. */
-    kafka_common_Error_t *error =
-        kafka_admin_AdminClient_abort_transaction(admin, "txn-topic", 3, 91234, 7, 42, -1);
+    /* Java's abortTransaction returns its AbortTransactionResult at once; the
+     * mock's UnsupportedOperationException is read with all().get(). */
+    kafka_admin_AbortTransactionResult_t *abort_result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_abort_transaction(admin, "txn-topic", 3, 91234, 7, 42,
+                                                               -1, &abort_result));
+    TEST_ASSERT_NOT_NULL(abort_result);
+    kafka_common_Error_t *error = kafka_admin_AbortTransactionResult_all(abort_result);
     TEST_ASSERT_NOT_NULL(error);
     TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_Error_message(error));
     kafka_common_Error_destroy(error);
+    TEST_ASSERT_TRUE(kafka_admin_AbortTransactionResult_is_done(abort_result));
+    kafka_admin_AbortTransactionResult_destroy(abort_result);
 
-    /* A NULL topic is a marshaling failure, before any submit. */
-    error = kafka_admin_AdminClient_abort_transaction(admin, NULL, 0, 1, 1, 1, -1);
+    /* A NULL topic is a marshaling failure, before any submit: it is the call's
+     * error and no handle is written. */
+    abort_result = NULL;
+    error = kafka_admin_AdminClient_abort_transaction(admin, NULL, 0, 1, 1, 1, -1, &abort_result);
     TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_NULL(abort_result);
     TEST_ASSERT_EQUAL_STRING("abort transaction topic must not be null",
                              kafka_common_Error_message(error));
     kafka_common_Error_destroy(error);
 
     /* 65537 truncates to 1 under a bare cast, which is a legal epoch, so an
      * out-of-range producer epoch must be rejected rather than narrowed. */
-    error = kafka_admin_AdminClient_abort_transaction(admin, "txn-topic", 0, 1, 65537, 1, -1);
+    error =
+        kafka_admin_AdminClient_abort_transaction(admin, "txn-topic", 0, 1, 65537, 1, -1, &abort_result);
     TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_NULL(abort_result);
     TEST_ASSERT_EQUAL_STRING("producer epoch 65537 does not fit in a 16-bit epoch",
                              kafka_common_Error_message(error));
     kafka_common_Error_destroy(error);
 
-    error = kafka_admin_AdminClient_force_terminate_transaction(admin, "txn-a", -1);
+    /* Java's forceTerminateTransaction likewise returns its
+     * TerminateTransactionResult at once; the failure is read with
+     * result().get(). */
+    kafka_admin_TerminateTransactionResult_t *terminate_result = NULL;
+    TEST_ASSERT_NULL(
+        kafka_admin_AdminClient_force_terminate_transaction(admin, "txn-a", -1, &terminate_result));
+    TEST_ASSERT_NOT_NULL(terminate_result);
+    error = kafka_admin_TerminateTransactionResult_result(terminate_result);
     TEST_ASSERT_NOT_NULL(error);
     TEST_ASSERT_EQUAL_STRING("Not implemented yet", kafka_common_Error_message(error));
     kafka_common_Error_destroy(error);
+    TEST_ASSERT_TRUE(kafka_admin_TerminateTransactionResult_is_done(terminate_result));
+    kafka_admin_TerminateTransactionResult_destroy(terminate_result);
 
-    error = kafka_admin_AdminClient_force_terminate_transaction(admin, NULL, -1);
+    terminate_result = NULL;
+    error = kafka_admin_AdminClient_force_terminate_transaction(admin, NULL, -1, &terminate_result);
     TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_NULL(terminate_result);
     TEST_ASSERT_EQUAL_STRING("transactional id must not be null",
                              kafka_common_Error_message(error));
     kafka_common_Error_destroy(error);
@@ -7369,11 +7526,15 @@ static void test_mock_admin_b6_null_out_result(void) {
     TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_transactions(admin, ids, 1, -1, NULL));
     TEST_ASSERT_NULL(kafka_admin_AdminClient_fence_producers(admin, ids, 1, -1, NULL));
 
-    /* listTransactions fails the whole call, so it still returns its error. */
-    kafka_common_Error_t *error =
-        kafka_admin_AdminClient_list_transactions(admin, NULL, 0, NULL, 0, -1, NULL, -1, NULL);
-    TEST_ASSERT_NOT_NULL(error);
-    kafka_common_Error_destroy(error);
+    /* listTransactions fails broker discovery in the mock, but like Java the
+     * call returns before that is known: the failure lives on the (dropped)
+     * result handle, so the call itself succeeds. The same holds for
+     * abortTransaction / forceTerminateTransaction. */
+    TEST_ASSERT_NULL(
+        kafka_admin_AdminClient_list_transactions(admin, NULL, 0, NULL, 0, -1, NULL, -1, NULL));
+    TEST_ASSERT_NULL(
+        kafka_admin_AdminClient_abort_transaction(admin, "alpha", 0, 1, 1, 1, -1, NULL));
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_force_terminate_transaction(admin, "txn-a", -1, NULL));
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -7419,7 +7580,7 @@ int main(void) {
     RUN_TEST(test_mock_admin_delete_records_async_null_handle);
     RUN_TEST(test_mock_admin_null_out_result);
     RUN_TEST(test_mock_admin_describe_cluster_sync);
-    RUN_TEST(test_mock_admin_describe_cluster_call_error);
+    RUN_TEST(test_mock_admin_describe_cluster_attribute_futures_fail_together);
     RUN_TEST(test_mock_admin_describe_cluster_async);
     RUN_TEST(test_mock_admin_describe_cluster_async_null_handle);
     RUN_TEST(test_mock_admin_describe_configs_partial_failure);
@@ -7497,7 +7658,7 @@ int main(void) {
     RUN_TEST(test_mock_admin_list_consumer_group_offsets_async_null_group_id);
     RUN_TEST(test_mock_admin_alter_consumer_group_offsets_reports_unsupported_per_partition);
     RUN_TEST(test_mock_admin_alter_consumer_group_offsets_rejects_bad_input);
-    RUN_TEST(test_mock_admin_alter_consumer_group_offsets_with_no_partitions_fails_the_call);
+    RUN_TEST(test_mock_admin_alter_consumer_group_offsets_with_no_partitions_fails_all);
     RUN_TEST(test_mock_admin_alter_consumer_group_offsets_async);
     RUN_TEST(test_mock_admin_alter_consumer_group_offsets_result_accessors);
     RUN_TEST(test_mock_admin_delete_consumer_group_offsets_reports_unsupported_per_partition);
@@ -7521,7 +7682,7 @@ int main(void) {
     RUN_TEST(test_mock_admin_create_acls_async_reports_marshaling_failure);
     RUN_TEST(test_mock_admin_create_acls_async_null_handle);
     RUN_TEST(test_mock_admin_create_acls_async_null_handle_with_bindings);
-    RUN_TEST(test_mock_admin_describe_acls_fails_the_whole_call);
+    RUN_TEST(test_mock_admin_describe_acls_fails_the_values_future);
     RUN_TEST(test_mock_admin_describe_acls_accepts_any_match_and_nulls);
     RUN_TEST(test_mock_admin_describe_acls_async);
     RUN_TEST(test_mock_admin_describe_acls_async_null_handle);
@@ -7530,7 +7691,7 @@ int main(void) {
     RUN_TEST(test_mock_admin_delete_acls_async_dedups_duplicate_filter);
     RUN_TEST(test_mock_admin_delete_acls_async_null_handle);
     RUN_TEST(test_mock_admin_delete_acls_async_null_handle_with_filters);
-    RUN_TEST(test_mock_admin_describe_client_quotas_fails_the_whole_call);
+    RUN_TEST(test_mock_admin_describe_client_quotas_fails_the_entities_future);
     RUN_TEST(test_mock_admin_describe_client_quotas_rejects_bad_components);
     RUN_TEST(test_mock_admin_describe_client_quotas_async);
     RUN_TEST(test_mock_admin_describe_client_quotas_async_null_handle);
@@ -7540,7 +7701,7 @@ int main(void) {
     RUN_TEST(test_mock_admin_alter_client_quotas_async_null_handle);
     RUN_TEST(test_mock_admin_alter_client_quotas_async_null_handle_with_entities);
     RUN_TEST(test_mock_admin_b5a_null_out_result);
-    RUN_TEST(test_mock_admin_describe_user_scram_credentials_fails_the_whole_call);
+    RUN_TEST(test_mock_admin_describe_user_scram_credentials_fails_every_view);
     RUN_TEST(test_mock_admin_alter_user_scram_credentials_reports_unsupported_per_user);
     RUN_TEST(test_mock_admin_alter_user_scram_credentials_rejects_bad_rows);
     RUN_TEST(test_mock_admin_scram_async);
@@ -7559,7 +7720,7 @@ int main(void) {
     RUN_TEST(test_mock_admin_describe_producers_reports_unsupported_per_partition);
     RUN_TEST(test_mock_admin_describe_transactions_reports_unsupported_per_id);
     RUN_TEST(test_mock_admin_fence_producers_reports_unsupported_per_id);
-    RUN_TEST(test_mock_admin_list_transactions_fails_the_whole_call);
+    RUN_TEST(test_mock_admin_list_transactions_fails_broker_discovery);
     RUN_TEST(test_mock_admin_abort_and_terminate_transaction_report_unsupported);
     RUN_TEST(test_mock_admin_b6_async_fires_per_key);
     RUN_TEST(test_mock_admin_b6_describe_producers_async_dedups_a_repeated_partition);
