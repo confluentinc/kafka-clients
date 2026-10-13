@@ -2,7 +2,7 @@
 
 The `confluent_kafka` crate: a high-fidelity, architecture-preserving Rust
 translation of the Apache Kafka Java client (client only), translated from
-`org.apache.kafka.clients` and related Java packages (Apache Kafka 4.3.1, whose
+`org.apache.kafka.clients` and related Java packages (Apache Kafka 4.4.0, whose
 sources are the `kafka/` submodule at the repository root).
 
 - **Architecture:** Mirrors the Java client structure, namespaces, and logic, adapted to Rust module and naming conventions

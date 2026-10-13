@@ -1851,7 +1851,7 @@ unsafe fn error_from_code_and_message(code: i32, message: *const c_char) -> Erro
 /// Injects an error to be returned by the next `poll` on a mock consumer, or
 /// clears a pending one (mock only). Mirrors Java's
 /// `setPollException(KafkaException)`, whose `null` argument clears the field
-/// (`MockConsumer.java:344-346`).
+/// (`MockConsumer.java:385-387`).
 ///
 /// With `clear` set, `code` and `message` are ignored and a pending error is
 /// cleared. Otherwise the error is built from `code` + `message` exactly as
@@ -1905,7 +1905,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_poll_error(
 /// Injects an error to be returned by the next `beginning_offsets` /
 /// `end_offsets` on a mock consumer, or clears a pending one (mock only).
 /// Mirrors Java's `setOffsetsException(KafkaException)`, whose `null` argument
-/// clears the field (`MockConsumer.java:348-350`).
+/// clears the field (`MockConsumer.java:394-396`).
 ///
 /// `clear`, `code` and `message` work as in
 /// [`kafka_consumer_MockConsumer_set_poll_error`].
@@ -2187,7 +2187,8 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_last_poll_timeout(
 /// (`on_partitions_revoked` with the removed partitions if any were removed, then
 /// `on_partitions_assigned` with the *added* partitions — which fires even when
 /// nothing was added), and the assignment is replaced. `on_partitions_lost` is
-/// never fired by the mock, matching Java.
+/// never fired by a rebalance, matching Java; see
+/// [`kafka_consumer_MockConsumer_lose_partitions`] for that.
 ///
 /// The consumer must have a topic subscription (Java throws
 /// `IllegalArgumentException` when a manual assignment is in use). Buffered
@@ -2240,6 +2241,81 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance(
     // The core `rebalance` is `async fn` (the listener methods are async),
     // unlike the other mock driver methods, so it needs the runtime.
     match h.runtime.block_on(mock.rebalance(&tps)) {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => box_error(e),
+    }
+}
+
+/// Simulates a partition loss on a mock consumer (mock only), mirroring Java's
+/// `MockConsumer.losePartitions(Collection<TopicPartition>)` (KAFKA-20575).
+///
+/// `topics` and `partitions` are parallel arrays of length `count` naming the
+/// partitions to lose; all must be currently assigned. The registered
+/// [`kafka_consumer_ConsumerRebalanceListener_t`]'s `on_partitions_lost` is
+/// invoked with them (deduplicated, in the order given; with a NULL
+/// `on_partitions_lost` the listener falls back to `on_partitions_revoked`,
+/// Java's default method), and then they are removed from the assignment.
+/// Their buffered records are cleared before the callback runs, as in Java.
+/// Unlike [`kafka_consumer_MockConsumer_rebalance`], which fires
+/// `on_partitions_revoked`, this models losing partitions without a graceful
+/// revoke. Only the buffered records of the lost partitions are cleared.
+///
+/// This call does not return until the listener callback has returned, and an
+/// error returned by the callback is propagated as this function's return value
+/// (the assignment is then left unchanged, but the lost partitions' records are
+/// already cleared, as in Java). With a caller-thread listener
+/// (registered through
+/// [`kafka_consumer_Consumer_subscribe_caller_thread_listener_async`]) use
+/// [`kafka_consumer_MockConsumer_lose_partitions_async`] instead: this blocking
+/// form would hold the calling thread while `on_partitions_lost` waits to be
+/// drained on that same thread.
+///
+/// Returns null on success, or a non-null error handle on failure:
+/// `illegal_state` with "Cannot lose partitions that are not currently
+/// assigned: [...]" when a partition is not assigned (nothing changes), or
+/// `illegal_state` ("operation is only supported on a MockConsumer") when
+/// `consumer` wraps an async consumer.
+///
+/// # Safety
+///
+/// `topics` must point to `count` valid C strings and `partitions` to `count`
+/// `i32` values; `consumer` must be a valid handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_MockConsumer_lose_partitions(
+    consumer: *const kafka_consumer_Consumer_t,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    count: i32,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `handle_ref` requires a non-null handle from a consumer constructor, which
+    // this function's `# Safety` requires of `consumer` ("`consumer` must be a valid
+    // handle"; no null check here). The reference is used only within this synchronous
+    // call, during which the C caller keeps the handle alive.
+    let h = unsafe { handle_ref(consumer) };
+    if let Err(e) = acquire(h) {
+        return box_error(e);
+    }
+    let _g = ReleaseGuard(h);
+    // SAFETY: `read_topic_partitions` requires `topics` to point to `count` valid C strings
+    // and `partitions` to `count` `i32` values, and tolerates a non-positive `count` (empty
+    // result); this function's `# Safety` promises exactly those two arrays for the
+    // duration of the call. NULL entries are not tolerated by either contract and are not
+    // checked.
+    let tps = unsafe { read_topic_partitions(topics, partitions, count) };
+    // SAFETY: `mock_mut` requires the access guard: `acquire(h)` succeeded (an `Err`
+    // returned early) and `_g: ReleaseGuard` holds it until this function returns, covering
+    // the `block_on(mock.lose_partitions(..))` window as well. The `on_partitions_lost`
+    // callback that `lose_partitions` invokes runs inline on this thread while the guard is
+    // held, and any re-entrant call on the same handle is rejected by the non-reentrant
+    // guard with `LocalConcurrentModification` rather than aliasing this `&mut`, per the
+    // `acquire` invariant documented on `FfiConsumerHandle`'s `unsafe impl Send/Sync`.
+    let mock = match unsafe { mock_mut(h) } {
+        Ok(m) => m,
+        Err(e) => return box_error(e),
+    };
+    // Async in the core (the listener methods are async), like `rebalance`.
+    match h.runtime.block_on(mock.lose_partitions(&tps)) {
         Ok(()) => std::ptr::null_mut(),
         Err(e) => box_error(e),
     }
@@ -2313,6 +2389,105 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance_async(
         // SAFETY: the guard is held for the whole submit->callback window.
         let result = match unsafe { mock_mut(hs) } {
             Ok(mock) => mock.rebalance(&tps).await,
+            Err(e) => Err(e),
+        };
+        let error = match result {
+            Ok(()) => std::ptr::null_mut(),
+            Err(e) => box_error(e),
+        };
+        let op = OperationCompletion { callback: target.callback, user_data: target.user_data, error };
+        let release_handle = hs;
+        let job: CompletionJob = Box::new(move || {
+            release(release_handle);
+            // SAFETY: `OperationCompletion::fire` requires exactly one call on the dispatcher
+            // thread: `op` is moved into this `FnOnce` job, which `enqueue_or_run_inline` runs
+            // exactly once (on the dispatcher thread, or inline once it has exited), after
+            // `release` has given back the access guard. `error` is null or a fresh `box_error`
+            // handle the callback owns.
+            unsafe { op.fire() };
+        });
+        enqueue_or_run_inline(&tx, job);
+    });
+}
+
+/// Simulates a partition loss on a mock consumer (async), mirroring Java's
+/// `MockConsumer.losePartitions(Collection<TopicPartition>)` (KAFKA-20575).
+///
+/// Unlike [`kafka_consumer_MockConsumer_lose_partitions`], the loss runs on the
+/// consumer runtime and its completion is delivered through `callback`, so the
+/// embedder's thread stays free to drain a caller-thread `on_partitions_lost`
+/// callback (a [`CallerThreadRebalanceListener`]) while the loss is parked on
+/// its ack — the same shape as [`kafka_consumer_MockConsumer_rebalance_async`].
+/// The semantics are those of the blocking form: the partitions (deduplicated,
+/// in the order given) must all be currently assigned; their buffered records
+/// are cleared, `on_partitions_lost` runs with them, and only then are they
+/// removed from the assignment. A listener error is delivered to `callback` and
+/// leaves the assignment unchanged (the records are already cleared, as in
+/// Java). A partition that is not assigned delivers `illegal_state` with
+/// "Cannot lose partitions that are not currently assigned: [...]" and changes
+/// nothing. An async-consumer handle delivers `illegal_state` ("operation is
+/// only supported on a MockConsumer").
+///
+/// The completion `callback` runs on the consumer's callback dispatcher thread.
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle; `topics`/`partitions` `count` valid
+/// entries; `callback` a valid function pointer.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(box_error(err), user_data) }
+})]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_MockConsumer_lose_partitions_async(
+    consumer: *const kafka_consumer_Consumer_t,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    count: i32,
+    callback: kafka_consumer_Consumer_op_callback_t,
+    user_data: *mut c_void,
+) {
+    // SAFETY: `read_topic_partitions` requires `topics` to point to `count` valid C strings
+    // and `partitions` to `count` `i32` values, and tolerates a non-positive `count`; this
+    // function's `# Safety` promises `count` valid entries in both arrays. Everything is
+    // copied into an owned `Vec` before anything else runs.
+    let tps = unsafe { read_topic_partitions(topics, partitions, count) };
+    // SAFETY: `handle_ref` requires a non-null handle created by a consumer constructor,
+    // which this function's `# Safety` requires of `consumer` (no null check here). `h` is
+    // used only on the submitting thread within this call, for `acquire`, cloning
+    // `completion_tx` and spawning on `runtime_handle`.
+    let h = unsafe { handle_ref(consumer) };
+    let target = OperationCallbackTarget { callback, user_data };
+    if let Err(e) = acquire(h) {
+        // SAFETY: `callback` was supplied by the C caller along with `user_data` (this
+        // function's `# Safety` requires a valid function pointer); this is the inline
+        // rejection path, fired exactly once on the calling thread with a fresh `box_error(e)`
+        // handle the callback owns. The guard was not taken, so no release is owed, and the
+        // function returns without spawning, so the completion path cannot fire a second time.
+        unsafe { (target.callback)(box_error(e), target.user_data) };
+        return;
+    }
+    let tx = h.completion_tx.clone();
+    // SAFETY: `handle_ref`'s precondition holds exactly as for `h`: per this function's `#
+    // Safety`, `consumer` is a valid handle from a consumer constructor, leaked by
+    // `build_consumer_handle` and freed only by `kafka_consumer_Consumer_destroy`, so the
+    // `&'static` is sound while the handle lives. `hs` escapes into the spawned task and
+    // the completion job (as `release_handle`), where it is last touched by
+    // `release(release_handle)` before `op.fire()`. Its keep-alive is not mechanical
+    // (`destroy` registers no task to join and `shutdown_background` does not wait): it is
+    // the documented `destroy` precondition that the caller must not destroy the consumer
+    // while an operation is in flight, i.e. before its completion callback has fired.
+    let hs: &'static FfiConsumerHandle = unsafe { handle_ref(consumer) };
+    spawn_callback_task(&h.runtime_handle, async move {
+        let target = target;
+        // SAFETY: the guard is held for the whole submit->callback window.
+        let result = match unsafe { mock_mut(hs) } {
+            Ok(mock) => mock.lose_partitions(&tps).await,
             Err(e) => Err(e),
         };
         let error = match result {

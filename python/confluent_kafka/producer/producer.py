@@ -286,7 +286,7 @@ class Producer(Generic[K, V], _ProducerState):
 
         # A transactional producer's send with no transaction started waits
         # for the handover (below) and raises the error the Rust send() returns:
-        # Java's doSend rethrows those (KafkaProducer.java:1069-1081), where an
+        # Java's doSend rethrows those (KafkaProducer.java:1150-1162), where an
         # ApiException reaches the callback and the future (:1056-1068). Inside
         # a started transaction the record is not waited for (see
         # _ProducerState._in_transaction). `waiting` is read and cleared under

@@ -99,6 +99,7 @@ mod topic_listing;
 mod transaction_description;
 mod transaction_listing;
 mod transaction_state;
+mod unregister_controller_result;
 mod update_features_result;
 mod user_scram_credential_alteration;
 mod user_scram_credential_deletion;
@@ -191,7 +192,7 @@ pub use options::{
     ExpireDelegationTokenOptions, FenceProducersOptions, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions,
     ListGroupsOptions, ListOffsetsOptions, ListPartitionReassignmentsOptions, ListTopicsOptions,
     ListTransactionsOptions, RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions,
-    TerminateTransactionOptions, UpdateFeaturesOptions,
+    TerminateTransactionOptions, UnregisterControllerOptions, UpdateFeaturesOptions,
 };
 pub use partition_reassignment::PartitionReassignment;
 pub use producer_state::ProducerState;
@@ -208,6 +209,7 @@ pub use topic_listing::TopicListing;
 pub use transaction_description::TransactionDescription;
 pub use transaction_listing::TransactionListing;
 pub use transaction_state::TransactionState;
+pub use unregister_controller_result::UnregisterControllerResult;
 pub use update_features_result::UpdateFeaturesResult;
 pub use user_scram_credential_alteration::UserScramCredentialAlteration;
 pub use user_scram_credential_deletion::UserScramCredentialDeletion;
@@ -368,6 +370,43 @@ pub trait Admin: Send + Sync {
         records_to_delete: &HashMap<TopicPartition, RecordsToDelete>,
         options: DeleteRecordsOptions,
     ) -> DeleteRecordsResult;
+
+    /// Unregister a controller.
+    ///
+    /// This is a convenience method for
+    /// [`unregister_controller_with_options`](Admin::unregister_controller_with_options).
+    ///
+    /// Corresponds to `Admin.unregisterController(int)` (KAFKA-20395,
+    /// `@InterfaceStability.Unstable`).
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#unregisterController")]
+    fn unregister_controller(&self, controller_id: i32) -> UnregisterControllerResult {
+        self.unregister_controller_with_options(controller_id, UnregisterControllerOptions::default())
+    }
+
+    /// Unregister a controller.
+    ///
+    /// The following errors can be anticipated when awaiting the future from the
+    /// returned [`UnregisterControllerResult`]:
+    ///
+    /// - [`Error::Timeout`]: if the request timed out before the unregister
+    ///   operation could finish.
+    /// - an `UNSUPPORTED_VERSION` error: if the software is too old to support
+    ///   the unregistration API.
+    /// - [`Error::ControllerIdNotRegistered`]: if the requested controller id is
+    ///   not currently registered.
+    /// - a `NOT_CONTROLLER` error: if the request does not arrive at the active
+    ///   controller.
+    /// - an `INVALID_REQUEST` error: if the request tries to unregister the
+    ///   current active controller id.
+    ///
+    /// Corresponds to `Admin.unregisterController(int, UnregisterControllerOptions)`
+    /// (KAFKA-20395, `@InterfaceStability.Unstable`).
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#unregisterController")]
+    fn unregister_controller_with_options(
+        &self,
+        controller_id: i32,
+        options: UnregisterControllerOptions,
+    ) -> UnregisterControllerResult;
 
     /// Describe the active producers for a set of topic partitions.
     ///

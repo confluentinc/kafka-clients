@@ -36,7 +36,7 @@ use crate::common::protocol::{ApiKeys, Errors};
 use crate::common::requests::{
     ConcreteResponse, ListOffsetsResponse, MetadataResponse, RequestBuilder, metadata_request,
 };
-use crate::common::utils::{ExponentialBackoff, LogContext};
+use crate::common::utils::internals::{ExponentialBackoff, LogContext};
 use crate::common::{Error, KafkaFuture, Node, TopicPartition};
 use crate::list_offsets_response_data::{ListOffsetsPartitionResponse, ListOffsetsTopicResponse};
 use crate::metadata_response_data::{MetadataResponsePartition, MetadataResponseTopic};

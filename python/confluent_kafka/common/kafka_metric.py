@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import threading
 import time as _time
+import types
 from typing import TYPE_CHECKING, Any, overload
 
 from confluent_kafka.illegal_state_error import IllegalStateError
@@ -113,6 +114,26 @@ class KafkaMetric:
         # Java: "Not a measurable: " + this.metricValueProvider.getClass()
         raise IllegalStateError(
             message=f"Not a measurable: class {cls.__module__}.{cls.__qualname__}")
+
+    def __str__(self) -> str:
+        """Java's ``toString()``: a human-readable representation of this metric.
+
+        The value provider is represented by its class name rather than its own
+        ``str``, to avoid dumping internal stat state (e.g. a sampled stat's
+        samples) into logs, which could be verbose and is rarely useful for
+        identifying which metric changed. Java omits it for a lambda or an
+        anonymous class; here that is an inline ``types.SimpleNamespace`` of
+        functions (Python's lambda provider) or a class with an empty name
+        (``type("", ...)``, Python's anonymous class). Java's
+        ``Class.getName()`` becomes ``module.qualname``, as in
+        ``measurable()``'s message.
+        """
+        cls = type(self._metric_value_provider)
+        if cls is types.SimpleNamespace or not cls.__name__:
+            return "KafkaMetric [metricName=" + str(self._metric_name) + "]"
+        return ("KafkaMetric [metricName=" + str(self._metric_name)
+                + ", metricValueProvider=" + cls.__module__ + "." + cls.__qualname__
+                + "]")
 
     def _locked(self) -> Any:
         lock = self._lock
