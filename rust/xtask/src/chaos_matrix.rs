@@ -1697,7 +1697,9 @@ fn describe_environment(options: &Options) -> String {
     // than restate it here, so the record cannot drift from what ran.
     let kafka_tag = broker_tag(
         std::env::var("INTEGRATION_TEST_BROKER_TAG").ok().as_deref(),
-        fs::read_to_string(package_root().join("tests/common/kafka_cluster.rs")).ok().as_deref(),
+        fs::read_to_string(package_root().join("tests/common/kafka_cluster.rs"))
+            .ok()
+            .as_deref(),
     );
     let kafka_image = format!("apache/kafka:{kafka_tag}");
     format!(
