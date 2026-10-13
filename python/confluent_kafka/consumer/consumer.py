@@ -242,6 +242,11 @@ class Consumer(Generic[K, V], _ConsumerState):
         ``ConsumerRebalanceListener`` callback, on this thread, while it waits
         for the offsets to commit (``consumer-threading.md`` §31); a listener
         error it raised is then raised here.
+
+        The ``callback`` is a plain function here: an ``async def`` one is
+        rejected when it is delivered, its coroutine closed, not awaited, and an
+        error logged (``MockConsumer`` raises ``TypeError``). Only
+        ``AsyncConsumer`` awaits one.
         """
         self._c_commit_nowait(offsets, callback)
 

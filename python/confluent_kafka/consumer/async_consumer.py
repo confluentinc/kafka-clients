@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, overload
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
@@ -140,17 +140,38 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         await self._a_commit(offsets)
 
     @overload
-    def commit_nowait(self, *, callback: OffsetCommitCallback | None = None) -> None: ...
+    def commit_nowait(self, *, callback: OffsetCommitCallback
+                      | Callable[[dict[TopicPartition, OffsetAndMetadata] | None,
+                                  Exception | None], Awaitable[None]]
+                      | None = None) -> None: ...
     @overload
     def commit_nowait(self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata],
-                      callback: OffsetCommitCallback | None) -> None: ...
+                      callback: OffsetCommitCallback
+                      | Callable[[dict[TopicPartition, OffsetAndMetadata] | None,
+                                  Exception | None], Awaitable[None]]
+                      | None) -> None: ...
 
     @java_forms(*COMMIT_NOWAIT_FORMS)
     def commit_nowait(self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata] | None = None,
-                      callback: OffsetCommitCallback | None = UNSET) -> None:
+                      callback: OffsetCommitCallback
+                      | Callable[[dict[TopicPartition, OffsetAndMetadata] | None,
+                                  Exception | None], Awaitable[None]]
+                      | None = UNSET) -> None:
         """See :meth:`Consumer.commit_nowait` (Java's ``commitAsync``, which
         does not wait: a plain ``def``). The callback runs on the event loop,
         inside a later call on this consumer.
+
+        The callback may be ``async def``: it is awaited on the event loop,
+        inside the call that delivers it (``poll()``, ``commit()``,
+        ``close()``, …), which returns only after it ended. Callbacks still
+        start one at a time in the order the commits complete, each after the
+        previous one ended. An exception it raises, ``CancelledError``
+        included, is logged ("Error in OffsetCommitCallback"), not raised, as
+        for a plain callback. On the synchronous ``Consumer`` an ``async def``
+        callback is rejected: its coroutine is closed, not awaited, and an
+        error is logged. ``AsyncMockConsumer`` awaits it after this call
+        returns (Java's mock runs the callback inside ``commitAsync``), before
+        its next awaited call goes on.
 
         While the commit waits for its offsets, the core may deliver a queued
         listener callback (``consumer-threading.md`` §31). A plain method runs
@@ -417,15 +438,20 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         if deferred is not None:
             raise deferred
 
-    # ---- coroutine listener methods ----------------------------------------
-    def _defer_listener(self, awaitable: Awaitable[object], callback_id: int) -> bool:
-        """Await a coroutine listener method in a task on the running loop, then
-        report its result to the core
-        (``kafka_consumer_Consumer__set_callback_result``); the call delivering
-        it waits for the task before going on (``_wait_on_loop``), so the
-        listener still runs inside that call and the rebalance does not advance
-        before it returns (``consumer-threading.md`` §31). The task is created
-        inside the callback window, so a consumer operation the listener issues
+    # ---- coroutine callbacks (listener methods, commit callbacks) -----------
+    def _defer_callback(self, awaitable: Awaitable[object], callback_id: int,
+                        failed: Callable[[BaseException], None] | None = None) -> bool:
+        """Await a coroutine callback -- a listener method, or an
+        ``OffsetCommitCallback`` -- in a task on the running loop, then report
+        its result to the core (``kafka_consumer_Consumer__set_callback_result``),
+        having passed the exception it raised to ``failed``, ``CancelledError``
+        included. The call delivering it waits for the task before going on
+        (``_wait_on_loop``, or ``_commit_nowait_on_loop``'s hand-off), and the
+        core waits for the report before it delivers the next callback, so the
+        callback still runs inside that call, callbacks start in the order the
+        core delivers them, and the rebalance does not advance before a
+        listener returns (``consumer-threading.md`` §31). The task is created
+        inside the callback window, so a consumer operation the callback issues
         goes through the ConsumerHandle."""
         try:
             loop = asyncio.get_running_loop()
@@ -438,6 +464,8 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
                 await awaitable
             except BaseException as exc:  # noqa: BLE001 - reported to the core
                 error = exc
+            if error is not None and failed is not None:
+                failed(error)
             # Under the lifecycle lock: close() clears the handle under it
             # before it frees the handle, so a live handle is not freed meanwhile.
             with self._lifecycle:
@@ -450,7 +478,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         return True
 
     # ---- commit_nowait (Java's commitAsync) on the event loop ----------------
-    def _c_commit_nowait(self, offsets: Any, callback: OffsetCommitCallback | None) -> None:
+    def _c_commit_nowait(self, offsets: Any, callback: Callable[..., object] | None) -> None:
         """``commit_nowait()`` on the loop's thread (see ``commit_nowait``).
 
         Inside a callback, it is ``Consumer``'s. Otherwise it submits the
@@ -474,8 +502,8 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
     def _commit_nowait_on_loop(self, spec: Any, adapter: Any) -> None:
         """Wait on this thread for the commit's completion, running the queued
         callbacks, in 100 ms slices so a ``KeyboardInterrupt`` is delivered; a
-        coroutine listener method they deliver (a task ``_defer_listener``
-        created) hands the rest to a task on the loop
+        coroutine listener method or commit callback they deliver (a task
+        ``_defer_callback`` created) hands the rest to a task on the loop
         (``_continue_commit_nowait``), which then holds the use."""
         submit, resolve, free = self._commit_nowait_spec(spec, adapter)
         box: list[tuple[Any, ...]] = []

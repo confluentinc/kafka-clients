@@ -269,6 +269,16 @@ def _consumer_family_types(c: object = None) -> None:
     kc.commit_nowait(callback=callback)
     kc.commit_nowait(offsets={tp: OffsetAndMetadata(offset=5)}, callback=callback)
     kc.commit_nowait(offsets={tp: OffsetAndMetadata(offset=5)}, callback=None)
+
+    async def async_callback(offsets: dict[TopicPartition, OffsetAndMetadata] | None,
+                             exception: Exception | None) -> None:
+        pass
+
+    # Only an async consumer awaits an `async def` commit callback; the sync
+    # client rejects one (strict mode's warn_unused_ignores checks the ignores).
+    kc.commit_nowait(callback=async_callback)  # type: ignore[arg-type]
+    kc.commit_nowait(offsets={tp: OffsetAndMetadata(offset=5)},
+                     callback=async_callback)  # type: ignore[arg-type]
     kc.commit()
     kc.commit(offsets={tp: OffsetAndMetadata(offset=5)})
     kc.close()
@@ -294,6 +304,8 @@ def _consumer_family_types(c: object = None) -> None:
         assert_type(ac.assignment(), "set[TopicPartition]")
         assert_type(ac.current_lag(topic_partition=tp), "int | None")
         ac.commit_nowait(callback=callback)
+        ac.commit_nowait(callback=async_callback)
+        ac.commit_nowait(offsets={tp: OffsetAndMetadata(offset=5)}, callback=async_callback)
         await ac.commit()
         await ac.seek(partition=tp, offset=5)
         await ac.close(option=CloseOptions.timeout(1.0))
@@ -301,6 +313,9 @@ def _consumer_family_types(c: object = None) -> None:
         assert_type(await abase.poll(timeout=0), "ConsumerRecords[str, bytes]")
         am: AsyncMockConsumer[int, int] = AsyncMockConsumer(offset_reset_strategy="latest")
         await am.rebalance(new_assignment=[tp])
+        am.commit_nowait(callback=async_callback)
+        am.commit_nowait(offsets={tp: OffsetAndMetadata(offset=5)}, callback=async_callback)
+        abase.commit_nowait(callback=async_callback)
         assert_type(await am.poll(timeout=0), "ConsumerRecords[int, int]")
 
     del _async

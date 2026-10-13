@@ -176,6 +176,12 @@ def raise_if_error(error: int) -> None:
         raise from_ffi_error(error)
 
 
+def _log_commit_callback_error(error: BaseException) -> None:
+    """Log the exception an ``OffsetCommitCallback`` raised, which cannot
+    propagate out of the call that delivered it."""
+    _LOG.error("Error in OffsetCommitCallback", exc_info=error)
+
+
 class _ListenerAdapter:
     """What the C listener trampolines call: ``_on_revoked`` / ``_on_assigned``
     / ``_on_lost(partitions, callback_id)``, the partitions as
@@ -570,7 +576,7 @@ class _ConsumerState:
             else:
                 result = listener.on_partitions_lost(partitions)  # type: ignore[func-returns-value]
             if inspect.isawaitable(result):
-                if self._defer_listener(cast("Awaitable[object]", result), callback_id):
+                if self._defer_callback(cast("Awaitable[object]", result), callback_id):
                     return True
                 close = getattr(result, "close", None)
                 if callable(close):
@@ -580,9 +586,13 @@ class _ConsumerState:
             self._exit_callback(token)
         return None
 
-    def _defer_listener(self, awaitable: Awaitable[object], callback_id: int) -> bool:
-        """Await a coroutine listener method's result later; whether it was
-        deferred. The synchronous consumer cannot (``AsyncConsumer`` can)."""
+    def _defer_callback(self, awaitable: Awaitable[object], callback_id: int,
+                        failed: Callable[[BaseException], None] | None = None) -> bool:
+        """Await the awaitable a coroutine callback (a listener method or an
+        ``OffsetCommitCallback``) returned later, then report it to the core
+        under ``callback_id``, calling ``failed`` first with the exception it
+        raised; whether it was deferred. The synchronous consumer cannot
+        (``AsyncConsumer`` can)."""
         return False
 
     def _raise_error(self, error: int) -> NoReturn:
@@ -606,11 +616,12 @@ class _ConsumerState:
             raise original
         raise typed from original
 
-    def _wrap_commit_callback(self, callback: OffsetCommitCallback | None, *,
+    def _wrap_commit_callback(self, callback: Callable[..., object] | None, *,
                               empty_offsets: bool = False
-                              ) -> Callable[[dict[Any, Any], int], None] | None:
+                              ) -> Callable[[dict[Any, Any], int, int], bool | None] | None:
         """Adapt ``callback(offsets, exception)`` to the C commit trampoline,
-        which calls it with the committed offsets and a BORROWED error handle.
+        which calls it with the committed offsets, a BORROWED error handle and
+        the invocation's callback id.
 
         ``offsets`` is ``None`` where Java passes ``null``: when the commit
         failed (``whenComplete`` on an exceptionally completed future), and for
@@ -620,34 +631,47 @@ class _ConsumerState:
 
         It runs on the caller's thread, inside the waiting call that drains it,
         with the callback window open, so a consumer operation it issues goes
-        through the ConsumerHandle. Java lets an exception from ``onComplete``
-        propagate out of the delivering call; across the FFI it cannot, so it is
-        logged. A commit callback is a plain function: an awaitable it returns
-        is closed and reported."""
+        through the ConsumerHandle. It returns ``None`` once the callback
+        returned, and the trampoline reports the invocation; ``True`` when the
+        consumer deferred the awaitable an ``async def`` callback returned
+        (``AsyncConsumer``, see ``_defer_callback``), which reports it once
+        awaited. Java lets an exception from ``onComplete`` propagate out of the
+        delivering call; across the FFI it cannot, so it is logged, then raised
+        to the trampoline, which reports it (the core ignores a commit
+        callback's error). On the synchronous consumer an awaitable is closed
+        and reported, not awaited."""
         if callback is None:
             return None
         if not callable(callback):
             raise TypeError("callback must be callable")
 
-        def adapter(raw_offsets: dict[Any, Any], error_handle: int) -> None:
-            offsets: dict[TopicPartition, OffsetAndMetadata] | None = None
-            if not error_handle and not empty_offsets:
-                offsets = {tp: oam for tp, oam in to_offset_map(raw_offsets).items()
-                           if oam is not None}
-            exception = from_ffi_error(error_handle, owned=False) if error_handle else None
-            token = self._enter_callback()
+        def adapter(raw_offsets: dict[Any, Any], error_handle: int,
+                    callback_id: int) -> bool | None:
             try:
-                result = callback(offsets, cast(Exception, exception))
-                if inspect.isawaitable(result):
-                    close = getattr(result, "close", None)
-                    if callable(close):
-                        close()
-                    _LOG.error("An OffsetCommitCallback returned an awaitable; commit "
-                               "callbacks are plain functions and it was not awaited")
-            except Exception:  # noqa: BLE001 - it cannot cross the FFI
+                offsets: dict[TopicPartition, OffsetAndMetadata] | None = None
+                if not error_handle and not empty_offsets:
+                    offsets = {tp: oam for tp, oam in to_offset_map(raw_offsets).items()
+                               if oam is not None}
+                exception = from_ffi_error(error_handle, owned=False) if error_handle else None
+                token = self._enter_callback()
+                try:
+                    result: object = callback(offsets, cast(Exception, exception))
+                    if inspect.isawaitable(result):
+                        if self._defer_callback(cast("Awaitable[object]", result), callback_id,
+                                                _log_commit_callback_error):
+                            return True
+                        close = getattr(result, "close", None)
+                        if callable(close):
+                            close()
+                        _LOG.error("An OffsetCommitCallback returned an awaitable; only an "
+                                   "AsyncConsumer on its event loop awaits it, and it was not "
+                                   "awaited")
+                finally:
+                    self._exit_callback(token)
+            except BaseException:
                 _LOG.exception("Error in OffsetCommitCallback")
-            finally:
-                self._exit_callback(token)
+                raise
+            return None
 
         return adapter
 
@@ -988,7 +1012,7 @@ class _ConsumerState:
             native=native)
 
 
-    def _c_commit_nowait(self, offsets: Any, callback: OffsetCommitCallback | None) -> None:
+    def _c_commit_nowait(self, offsets: Any, callback: Callable[..., object] | None) -> None:
         """Java's ``commitAsync()`` / ``commitAsync(callback)`` /
         ``commitAsync(offsets, callback)``: returns once the commit is sent; the
         callback runs inside a later call on this consumer, on its thread.

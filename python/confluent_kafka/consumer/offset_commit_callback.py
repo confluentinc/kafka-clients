@@ -27,6 +27,15 @@ successfully.
 The callback runs on the caller's thread, inside the call that delivers it
 (``poll()``, ``commit()``, ``commit_nowait()``, ``close()``, …), as Java runs it
 on the thread calling ``poll()`` (Threads and callbacks).
+
+On ``AsyncKafkaConsumer`` and ``AsyncMockConsumer`` the callback passed to
+``commit_nowait()`` may also be ``async def`` (rule 3, as for a listener
+method): it is awaited on the event loop, inside the call that delivers it,
+callbacks still starting one at a time in the order the commits complete. The
+synchronous consumers reject one: ``KafkaConsumer`` closes its coroutine and
+logs an error, ``MockConsumer`` raises ``TypeError``. This alias stays Java's
+plain callback; ``AsyncConsumer.commit_nowait`` spells out the coroutine form
+beside it.
 """
 
 from __future__ import annotations

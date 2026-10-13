@@ -3170,28 +3170,48 @@ static int listener_build(Consumer* c, PyObject* adapter, ListenerCtx** out_ctx,
     return 0;
 }
 
-// ---- commit-callback trampoline --------------------------------------------
+// ---- commit-callback trampoline ---------------------------------------------
 //
 // Java's OffsetCommitCallback.onComplete returns void, so the report carries
-// no result: it is made right after the Python callable returned (an exception
-// is only printed), and the context is released -- unless orphaned, see above.
+// no result. The adapter (consumer/_base.py's _wrap_commit_callback) receives
+// the committed offsets, the BORROWED error handle and the callback id, and
+// follows listener_fire's split:
+//   * None  -> the callback returned: report success now;
+//   * True  -> the consumer deferred the awaitable an `async def` callback
+//              returned (AsyncConsumer) and reports through
+//              Consumer__set_callback_result once it is awaited;
+//   * raise -> the adapter logged it; report it as a foreign callback error
+//              owning a reference to the exception (the core ignores a commit
+//              callback's error, as Java's onComplete is void).
+// The core waits for the report before it delivers the next commit callback.
+// The context is released after the call -- unless orphaned, see above; a
+// deferred report goes through the consumer's handle, not the context.
 static void commit_on_complete(void* self_, const kafka_Map_t* offsets,
                                const kafka_common_Error_t* error, int64_t callback_id) {
     CommitCbCtx* ctx = (CommitCbCtx*)self_;
     PyGILState_STATE g = PyGILState_Ensure();
+    kafka_common_Error_t* err = NULL;
+    int deferred = 0;
     if (ctx->adapter != NULL) {
         PyObject* py_offsets = offset_map_to_py_borrowed(offsets);
         PyObject* py_err = error_handle_to_py(error);  // borrowed: converted, never destroyed
-        if (py_offsets != NULL && py_err != NULL) {
-            PyObject* r = PyObject_CallFunctionObjArgs(ctx->adapter, py_offsets, py_err, NULL);
-            if (r == NULL) PyErr_WriteUnraisable(ctx->adapter); else Py_DECREF(r);
+        PyObject* py_id = PyLong_FromLongLong((long long)callback_id);
+        if (py_offsets != NULL && py_err != NULL && py_id != NULL) {
+            PyObject* r = PyObject_CallFunctionObjArgs(ctx->adapter, py_offsets, py_err, py_id, NULL);
+            if (r == NULL) {
+                err = callback_error_from_py_exception();
+            } else {
+                deferred = (r == Py_True);
+                Py_DECREF(r);
+            }
         } else {
             PyErr_WriteUnraisable(ctx->adapter);
         }
         Py_XDECREF(py_offsets);
         Py_XDECREF(py_err);
+        Py_XDECREF(py_id);
     }
-    kafka_consumer_Consumer__set_callback_result(ctx->consumer, callback_id, NULL, NULL);
+    if (!deferred) kafka_consumer_Consumer__set_callback_result(ctx->consumer, callback_id, NULL, err);
     if (!ctx->orphaned) commit_ctx_free(ctx);
     PyGILState_Release(g);
 }
@@ -3242,10 +3262,11 @@ static PyObject* py_Consumer__execute_callbacks(PyObject* self, PyObject* args) 
 }
 
 // Consumer__set_callback_result(handle, callback_id, error): the deferred
-// report of a listener invocation. None = success; an exception object = the
-// exception the listener raised, reported as a foreign callback error owning a
-// reference to it; a str = a message, reported as a
-// KafkaException. The listener methods are void, so the C `result` is NULL.
+// report of a listener or commit-callback invocation. None = success; an
+// exception object = the exception the callback raised, reported as a foreign
+// callback error owning a reference to it; a str = a message, reported as a
+// KafkaException. The listener methods and onComplete are void, so the C
+// `result` is NULL.
 static PyObject* py_Consumer__set_callback_result(PyObject* self, PyObject* args) {
     unsigned long long h; long long callback_id; PyObject* error;
     if (!PyArg_ParseTuple(args, "KLO", &h, &callback_id, &error)) return NULL;
