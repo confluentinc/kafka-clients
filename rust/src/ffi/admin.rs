@@ -20650,15 +20650,6 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_destroy(
 // a legitimate absent value otherwise and Java's constructor would reject it.
 // ---------------------------------------------------------------------------
 
-/// Per-binding outcomes of `createAcls`.
-type CreateAclsOutcomes = HashMap<AclBinding, Result<(), Error>>;
-
-/// Per-filter outcomes of `deleteAcls`.
-type DeleteAclsOutcomes = HashMap<AclBindingFilter, Result<FilterResults, Error>>;
-
-/// Per-entity outcomes of `alterClientQuotas`.
-type AlterClientQuotasOutcomes = HashMap<ClientQuotaEntity, Result<(), Error>>;
-
 /// The whole-map outcome of `describeClientQuotas`.
 type DescribeClientQuotasOutcome = HashMap<ClientQuotaEntity, HashMap<String, f64>>;
 
@@ -21453,26 +21444,25 @@ unsafe fn read_client_quota_entity_keys(
         .collect()
 }
 
-/// Submits `createAcls` and returns the collect-all future over its per-binding
-/// futures.
-fn submit_create_acls(
+/// Submits `createAcls`, unjoined, keeping each binding with its future (Java's
+/// `values()`), for the synchronous entry point's result handle.
+fn submit_create_acls_bindings(
     admin: &dyn Admin,
     acls: &[AclBinding],
     options: CreateAclsOptions,
-) -> KafkaFuture<CreateAclsOutcomes> {
+) -> Vec<(AclBinding, KafkaFuture<()>)> {
     let result = admin.create_acls_with_options(acls, options);
     // Driven from the result's own map (Java's `values()`), which is the
     // authority on which bindings got a future.
-    let entries: Vec<(AclBinding, KafkaFuture<()>)> =
-        result.values().iter().map(|(b, f)| (b.clone(), f.clone())).collect();
-    KafkaFuture::join_map_results(entries)
+    result.values().iter().map(|(b, f)| (b.clone(), f.clone())).collect()
 }
 
 /// Submits `createAcls`, unjoined, for [`admin_async_per_key_op`]'s
-/// independent-per-key delivery. Same `Admin` call as [`submit_create_acls`];
-/// see the "RPC submission helpers — per-key (unjoined) variants" note above.
-/// Keyed by [`AclBindingKey`] rather than `AclBinding` directly, converted via
-/// [`acl_binding_key`], so it matches [`read_acl_binding_keys`]'s output type.
+/// independent-per-key delivery. Same `Admin` call as
+/// [`submit_create_acls_bindings`]; see the "RPC submission helpers — per-key
+/// (unjoined) variants" note above. Keyed by [`AclBindingKey`] rather than
+/// `AclBinding` directly, converted via [`acl_binding_key`], so it matches
+/// [`read_acl_binding_keys`]'s output type.
 fn submit_create_acls_entries(
     admin: &dyn Admin,
     acls: &[AclBinding],
@@ -21491,23 +21481,10 @@ fn submit_describe_acls(
     admin.describe_acls_with_options(filter, options).values().clone()
 }
 
-/// Submits `deleteAcls` and returns the collect-all future over its per-filter
-/// futures.
-fn submit_delete_acls(
-    admin: &dyn Admin,
-    filters: &[AclBindingFilter],
-    options: DeleteAclsOptions,
-) -> KafkaFuture<DeleteAclsOutcomes> {
-    let result = admin.delete_acls_with_options(filters, options);
-    let entries: Vec<(AclBindingFilter, KafkaFuture<FilterResults>)> =
-        result.values().iter().map(|(f, fut)| (f.clone(), fut.clone())).collect();
-    KafkaFuture::join_map_results(entries)
-}
-
-/// Submits `deleteAcls`, unjoined, for [`admin_async_per_key_op`]'s
-/// independent-per-key delivery. Same `Admin` call as [`submit_delete_acls`];
-/// see the "RPC submission helpers — per-key (unjoined) variants" note above.
-/// Unlike `createAcls`'s key, `AclBindingFilter` is infallible to construct
+/// Submits `deleteAcls`, unjoined: for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery, and for the synchronous entry point's result
+/// handle. See the "RPC submission helpers — per-key (unjoined) variants" note
+/// above. Unlike `createAcls`'s key, `AclBindingFilter` is infallible to construct
 /// (see [`build_acl_binding_filter`]), so `filters` itself already serves as
 /// the identity for [`admin_async_per_key_op`]'s fan-out — no raw-tuple key
 /// type is needed here.
@@ -21529,23 +21506,10 @@ fn submit_describe_client_quotas(
     admin.describe_client_quotas_with_options(filter, options).entities().clone()
 }
 
-/// Submits `alterClientQuotas` and returns the collect-all future over its
-/// per-entity futures.
-fn submit_alter_client_quotas(
-    admin: &dyn Admin,
-    entries: &[ClientQuotaAlteration],
-    options: AlterClientQuotasOptions,
-) -> KafkaFuture<AlterClientQuotasOutcomes> {
-    let result = admin.alter_client_quotas_with_options(entries, options);
-    let futures: Vec<(ClientQuotaEntity, KafkaFuture<()>)> =
-        result.values().iter().map(|(e, f)| (e.clone(), f.clone())).collect();
-    KafkaFuture::join_map_results(futures)
-}
-
-/// Submits `alterClientQuotas`, unjoined, for [`admin_async_per_key_op`]'s
-/// independent-per-key delivery. Same `Admin` call as
-/// [`submit_alter_client_quotas`]; see the "RPC submission helpers — per-key
-/// (unjoined) variants" note above. `ClientQuotaEntity::new` does not
+/// Submits `alterClientQuotas`, unjoined: for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery, and for the synchronous entry point's result
+/// handle. See the "RPC submission helpers — per-key (unjoined) variants" note
+/// above. `ClientQuotaEntity::new` does not
 /// validate, so `entries`' own entities (via [`read_client_quota_entity_keys`]
 /// for the `keys` argument) already serve as a real identity — no raw-tuple
 /// key type is needed here, unlike `createAcls`'s [`AclBindingKey`].
@@ -21564,53 +21528,65 @@ fn submit_alter_client_quotas_entries(
 // Accessors follow each Java `*Result`'s future shape (`PLAN-bindings.md` D2 as
 // amended after B4), not a fixed template:
 //
-//   - `Map<K, KafkaFuture<Void>>`   -> `_get_error(i)` only, no value
-//     (`createAcls`, `alterClientQuotas`)
+//   - `Map<K, KafkaFuture<Void>>`   -> `_get_error(i)` only, no value, plus
+//     `_is_done(i)` and `_all` (`createAcls`, `alterClientQuotas`)
 //   - one `KafkaFuture<Collection<V>>` / `KafkaFuture<Map<K, V>>` for the whole
 //     call                          -> `_count` plus value accessors, and **no**
-//     `_get_error`: a failure is the call's error
-//     (`describeAcls`, `describeClientQuotas`)
+//     `_get_error`: the future's failure is read with the Java-named getter
+//     (`describeAcls().values()`, `describeClientQuotas().entities()`)
 //   - `Map<K, KafkaFuture<V>>` where `V` is itself a collection
 //                                   -> `_get_error(i)` for the key's future
-//     plus a second index level over `V`
+//     plus a second index level over `V`, `_is_done(i)` and `_all`
 //     (`deleteAcls`, whose `FilterResults` holds one `FilterResult` per matched
 //      ACL, each carrying *either* a binding *or* its own exception)
+//
+// A handle from a synchronous entry point holds the request's futures
+// unresolved: the keys are known at once, and every other accessor waits for
+// the future it reads, as Java's `get()` does. A handle from an `_async`
+// callback is always resolved.
 // ---------------------------------------------------------------------------
 
 // [`sorted_entries`] cannot order these results: it needs `K: Ord`, which
 // `AclBinding`, `AclBindingFilter` and `ClientQuotaEntity` are not — they are
 // `Hash + Eq` in Java too, and inventing an `Ord` for a Java type that has none
-// would be a fabricated contract. Each `box_*` below instead sorts the
+// would be a fabricated contract. Each result builder below instead sorts the
 // already-flattened rows by their C-visible field tuple (`sort_key`), which
 // gives the same reproducible index addressing. The comparison closure is
 // written out at each site rather than shared, because a `Fn(&I) -> K` helper
 // cannot express that `K` borrows from `I`.
 
-/// Opaque handle to a flattened `CreateAclsResult`.
+/// Opaque handle to a `CreateAclsResult`, keyed by ACL binding: one future per
+/// requested binding (Java's `values()`), read by the accessors below.
 #[repr(C)]
 pub struct kafka_admin_CreateAclsResult_t {
     _private: [u8; 0],
 }
 
-/// Backing state for [`kafka_admin_CreateAclsResult_t`].
+/// Backing state for [`kafka_admin_CreateAclsResult_t`]: the bindings (known at
+/// submission, as Java's `values().keySet()` is) and each binding's future,
+/// resolved on first read.
 ///
 /// `CreateAclsResult.values()` is `Map<AclBinding, KafkaFuture<Void>>`: a
 /// per-binding future that carries no value, so the handle exposes the binding
 /// and its error and nothing else.
 struct CreateAclsResultInner {
     bindings: Vec<AclBindingInner>,
-    errors: Vec<Option<ErrorInner>>,
+    entries: Vec<LazyKeyed<()>>,
 }
 
-/// Flattens the per-binding `createAcls` outcomes into the C handle.
-fn box_create_acls_result(outcomes: CreateAclsOutcomes) -> *mut kafka_admin_CreateAclsResult_t {
-    let mut rows: Vec<(AclBindingInner, Option<ErrorInner>)> = outcomes
+/// Wraps `createAcls`' per-binding futures, unresolved, as the C handle's
+/// backing state, sorted by the binding's fields.
+fn create_acls_result_inner(
+    waiter: &FutureWaiter,
+    futures: Vec<(AclBinding, KafkaFuture<()>)>,
+) -> CreateAclsResultInner {
+    let mut rows: Vec<(AclBindingInner, LazyKeyed<()>)> = futures
         .into_iter()
-        .map(|(binding, outcome)| (AclBindingInner::new(&binding), outcome.err().map(error_inner)))
+        .map(|(binding, future)| (AclBindingInner::new(&binding), lazy_keyed(waiter, future, |()| ())))
         .collect();
     rows.sort_by(|a, b| a.0.sort_key().cmp(&b.0.sort_key()));
-    let (bindings, errors) = rows.into_iter().unzip();
-    Box::into_raw(Box::new(CreateAclsResultInner { bindings, errors })) as *mut kafka_admin_CreateAclsResult_t
+    let (bindings, entries) = rows.into_iter().unzip();
+    CreateAclsResultInner { bindings, entries }
 }
 
 /// Casts a `*const kafka_admin_CreateAclsResult_t` to a reference.
@@ -21619,17 +21595,17 @@ fn box_create_acls_result(outcomes: CreateAclsOutcomes) -> *mut kafka_admin_Crea
 ///
 /// `result` must be a non-null handle from a `create_acls` call.
 unsafe fn create_acls_result_ref(result: *const kafka_admin_CreateAclsResult_t) -> &'static CreateAclsResultInner {
-    // SAFETY: `result` is, per this helper's `# Safety`, a non-null handle from a
-    // `create_acls` call; such handles are produced only by `box_create_acls_result` via
-    // `Box::into_raw(Box::new(CreateAclsResultInner { .. }))`, so casting back to `*const
-    // CreateAclsResultInner` names that same live allocation. The `&'static` is used only
-    // for the duration of the calling getter, during which the C caller keeps the handle
-    // alive by not yet having called `kafka_admin_CreateAclsResult_destroy`, the only path
-    // that frees it.
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
+    // `create_acls` call, i.e. the `Box<CreateAclsResultInner>` leaked by `into_handle` in
+    // `kafka_admin_AdminClient_create_acls` and freed only by
+    // `kafka_admin_CreateAclsResult_destroy`, so it is aligned and live; callers use the
+    // reference only within their own synchronous getter call, during which the C caller
+    // keeps the handle alive.
     unsafe { &*(result as *const CreateAclsResultInner) }
 }
 
-/// Returns the number of ACL bindings in the result.
+/// Returns the number of ACL bindings in the result. Never blocks: the bindings
+/// are known when the request is submitted.
 ///
 /// # Safety
 ///
@@ -21637,19 +21613,17 @@ unsafe fn create_acls_result_ref(result: *const kafka_admin_CreateAclsResult_t) 
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateAclsResult_count(result: *const kafka_admin_CreateAclsResult_t) -> i32 {
-    // SAFETY: `create_acls_result_ref` requires a non-null handle from a `create_acls`
-    // call, which this function's `# Safety` promises (`result` must be a valid
-    // `create_acls` result handle; only `kafka_admin_CreateAclsResult_destroy` admits null,
-    // so a valid handle is non-null). The reference is used only for the duration of this
-    // synchronous call, during which the C caller keeps the handle alive by not yet having
-    // called `kafka_admin_CreateAclsResult_destroy`.
+    // SAFETY: `create_acls_result_ref` requires a non-null `create_acls` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the
+    // C caller's contract is the sole source); the reference is used only for this `len()`
+    // within the call, during which the C caller keeps the handle alive.
     unsafe { create_acls_result_ref(result) }.bindings.len() as i32
 }
 
 /// Returns the binding at `index` (borrowed), or null if out of range. Do not
 /// free it; it dies with the result handle. Entries are sorted by resource
 /// type, resource name, pattern type, principal, host, operation and permission
-/// type.
+/// type. Never blocks.
 ///
 /// # Safety
 ///
@@ -21663,14 +21637,11 @@ pub unsafe extern "C" fn kafka_admin_CreateAclsResult_get_binding(
     if index < 0 {
         return std::ptr::null();
     }
-    // SAFETY: `create_acls_result_ref` requires a non-null handle from a `create_acls`
-    // call, which this function's `# Safety` promises (`result` must be a valid
-    // `create_acls` result handle; only `kafka_admin_CreateAclsResult_destroy` admits null,
-    // so a valid handle is non-null). The reference is used only for the duration of this
-    // synchronous call, during which the C caller keeps the handle alive by not yet having
-    // called `kafka_admin_CreateAclsResult_destroy`. The pointer this getter returns is an
-    // interior pointer into the same allocation and is documented as borrowed, valid until
-    // that `_destroy`.
+    // SAFETY: `create_acls_result_ref` requires a non-null `create_acls` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the
+    // C caller's contract is the sole source); the reference is used only for the duration
+    // of this call, and the returned pointer borrows an `AclBindingInner` owned by the
+    // handle, valid until `kafka_admin_CreateAclsResult_destroy`.
     match unsafe { create_acls_result_ref(result) }.bindings.get(index as usize) {
         Some(binding) => binding.as_ptr(),
         None => std::ptr::null(),
@@ -21679,6 +21650,15 @@ pub unsafe extern "C" fn kafka_admin_CreateAclsResult_get_binding(
 
 /// Returns the error for the binding at `index` (borrowed), or null if it was
 /// created successfully or `index` is out of range. Do not destroy it.
+///
+/// **Blocks** until that binding's future has resolved — Java's
+/// `values().get(binding).get()` — but not on any other binding. Never blocks
+/// for an out-of-range index. A failure of the whole request (a timeout, say) is
+/// reported here for every binding, as Java completes every binding's future
+/// with it.
+///
+/// There is no `_get_value`: Java's per-binding future is `KafkaFuture<Void>`,
+/// so a null error *is* the success value.
 ///
 /// # Safety
 ///
@@ -21689,18 +21669,56 @@ pub unsafe extern "C" fn kafka_admin_CreateAclsResult_get_error(
     result: *const kafka_admin_CreateAclsResult_t,
     index: i32,
 ) -> *const kafka_common_Error_t {
-    // SAFETY: `create_acls_result_ref` requires a non-null handle from a `create_acls`
-    // call, which this function's `# Safety` promises (`result` must be a valid
-    // `create_acls` result handle; only `kafka_admin_CreateAclsResult_destroy` admits null,
-    // so a valid handle is non-null). The reference is used only for the duration of this
-    // synchronous call, during which the C caller keeps the handle alive by not yet having
-    // called `kafka_admin_CreateAclsResult_destroy`. The pointer this getter returns is an
-    // interior pointer into the same allocation and is documented as borrowed, valid until
-    // that `_destroy`.
-    optional_error_at(&unsafe { create_acls_result_ref(result) }.errors, index)
+    // SAFETY: `create_acls_result_ref` requires a non-null `create_acls` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the
+    // C caller's contract is the sole source); the reference is used only for the duration
+    // of this call, and the returned error pointer borrows an `ErrorInner` cached in the
+    // handle (not to be destroyed), valid until `kafka_admin_CreateAclsResult_destroy`.
+    keyed_error_at(&unsafe { create_acls_result_ref(result) }.entries, index)
 }
 
-/// Destroys a `create_acls` result handle. Safe with null (no-op).
+/// Returns whether the future of the binding at `index` has resolved — Java's
+/// `values().get(binding).isDone()`. False if `index` is out of range. Never
+/// blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `create_acls` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_CreateAclsResult_is_done(
+    result: *const kafka_admin_CreateAclsResult_t,
+    index: i32,
+) -> bool {
+    // SAFETY: `create_acls_result_ref` requires a non-null `create_acls` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the
+    // C caller's contract is the sole source); the reference is used only for this check
+    // within the call, during which the C caller keeps the handle alive.
+    keyed_is_done_at(&unsafe { create_acls_result_ref(result) }.entries, index)
+}
+
+/// Java's `all().get()`: **blocks** until every binding's future has resolved,
+/// then returns null if every binding was created, or an **owned** error — free
+/// it with `kafka_common_Error_destroy` — of a failed binding (the first in
+/// index order; Java leaves which one unspecified).
+///
+/// # Safety
+///
+/// `result` must be a valid `create_acls` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_CreateAclsResult_all(
+    result: *const kafka_admin_CreateAclsResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `create_acls_result_ref` requires a non-null `create_acls` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the
+    // C caller's contract is the sole source); the reference is used only for the duration
+    // of this call, and the returned error is a fresh copy owned by the caller.
+    keyed_all(&unsafe { create_acls_result_ref(result) }.entries)
+}
+
+/// Destroys a `create_acls` result handle, invalidating every borrowed
+/// sub-handle obtained from it. Safe with null (no-op).
 ///
 /// # Safety
 ///
@@ -21710,17 +21728,15 @@ pub unsafe extern "C" fn kafka_admin_CreateAclsResult_get_error(
 pub unsafe extern "C" fn kafka_admin_CreateAclsResult_destroy(result: *mut kafka_admin_CreateAclsResult_t) {
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
-        // a valid `create_acls` result handle, i.e. the pointer `box_create_acls_result`
-        // produced with `Box::into_raw(Box::new(CreateAclsResultInner { .. }))`.
-        // Reconstituting and dropping the `Box` here is the single, final use: the result
-        // documentation tells the caller to free the handle exactly once with
-        // `kafka_admin_CreateAclsResult_destroy`, after which it and every pointer borrowed
-        // from it are invalid.
+        // a valid `create_acls` result handle, i.e. the `Box<CreateAclsResultInner>` leaked
+        // by `into_handle` in `kafka_admin_AdminClient_create_acls`. This is the single,
+        // final use: the contract states the handle and every borrowed sub-handle are
+        // invalid afterwards, and no other function frees it.
         unsafe { drop(Box::from_raw(result as *mut CreateAclsResultInner)) };
     }
 }
 
-/// Opaque handle to a flattened `DescribeAclsResult`.
+/// Opaque handle to a `DescribeAclsResult`.
 #[repr(C)]
 pub struct kafka_admin_DescribeAclsResult_t {
     _private: [u8; 0],
@@ -21729,17 +21745,24 @@ pub struct kafka_admin_DescribeAclsResult_t {
 /// Backing state for [`kafka_admin_DescribeAclsResult_t`].
 ///
 /// `DescribeAclsResult` holds a single `KafkaFuture<Collection<AclBinding>>`
-/// and has no `all()` and no per-key future at all, so there is nothing for a
-/// `_get_error(i)` to report: any failure is the call's error.
+/// (Java's `values()`) and has no `all()` and no per-key future at all, so
+/// there is nothing for a `_get_error(i)` to report: the future's failure is
+/// read with [`kafka_admin_DescribeAclsResult_values`]. On a handle from the
+/// synchronous entry point that future may still be unresolved, and every
+/// accessor waits for it; a handle from the `_async` callback is always
+/// resolved.
 struct DescribeAclsResultInner {
-    bindings: Vec<AclBindingInner>,
+    bindings: LazySingle<Vec<AclBindingInner>>,
 }
 
-/// Flattens the described bindings into the C handle.
+/// Flattens the described bindings, keeping the broker's order.
+fn describe_acls_data(bindings: Vec<AclBinding>) -> Vec<AclBindingInner> {
+    bindings.iter().map(AclBindingInner::new).collect()
+}
+
+/// Moves already-resolved bindings (the `_async` path) into the C handle.
 fn box_describe_acls_result(bindings: Vec<AclBinding>) -> *mut kafka_admin_DescribeAclsResult_t {
-    Box::into_raw(Box::new(DescribeAclsResultInner {
-        bindings: bindings.iter().map(AclBindingInner::new).collect(),
-    })) as *mut kafka_admin_DescribeAclsResult_t
+    into_handle(DescribeAclsResultInner { bindings: LazyOutcome::resolved(Ok(describe_acls_data(bindings))) })
 }
 
 /// Casts a `*const kafka_admin_DescribeAclsResult_t` to a reference.
@@ -21750,17 +21773,56 @@ fn box_describe_acls_result(bindings: Vec<AclBinding>) -> *mut kafka_admin_Descr
 unsafe fn describe_acls_result_ref(
     result: *const kafka_admin_DescribeAclsResult_t,
 ) -> &'static DescribeAclsResultInner {
-    // SAFETY: `result` is, per this helper's `# Safety`, a non-null handle from a
-    // `describe_acls` call; such handles are produced only by `box_describe_acls_result`
-    // via `Box::into_raw(Box::new(DescribeAclsResultInner { .. }))`, so casting back to
-    // `*const DescribeAclsResultInner` names that same live allocation. The `&'static` is
-    // used only for the duration of the calling getter, during which the C caller keeps the
-    // handle alive by not yet having called `kafka_admin_DescribeAclsResult_destroy`, the
-    // only path that frees it.
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
+    // `describe_acls` call, i.e. the `Box<DescribeAclsResultInner>` leaked by `into_handle`
+    // in `kafka_admin_AdminClient_describe_acls` or `box_describe_acls_result` and freed
+    // only by `kafka_admin_DescribeAclsResult_destroy`, so it is aligned and live; callers
+    // use the reference only within their own synchronous getter call, during which the C
+    // caller keeps the handle alive.
     unsafe { &*(result as *const DescribeAclsResultInner) }
 }
 
-/// Returns the number of matching ACL bindings.
+/// Java's `values().get()`: **blocks** until the bindings have resolved, then
+/// returns null on success, or an **owned** error — free it with
+/// `kafka_common_Error_destroy` — if the request failed. The bindings are read
+/// with [`kafka_admin_DescribeAclsResult_count`] /
+/// [`kafka_admin_DescribeAclsResult_get_binding`].
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_acls` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_values(
+    result: *const kafka_admin_DescribeAclsResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `describe_acls_result_ref` requires a non-null `describe_acls` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the
+    // C caller's contract is the sole source); the reference is used only for the duration
+    // of this call, and the returned error is a fresh copy owned by the caller.
+    single_error(&unsafe { describe_acls_result_ref(result) }.bindings)
+}
+
+/// Returns whether the bindings future has resolved — Java's
+/// `values().isDone()`. Never blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_acls` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_is_done(
+    result: *const kafka_admin_DescribeAclsResult_t,
+) -> bool {
+    // SAFETY: `describe_acls_result_ref` requires a non-null `describe_acls` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the
+    // C caller's contract is the sole source); the reference is used only for this check.
+    unsafe { describe_acls_result_ref(result) }.bindings.is_done()
+}
+
+/// Returns the number of matching ACL bindings, or 0 if the request failed (see
+/// [`kafka_admin_DescribeAclsResult_values`]). **Blocks** until the bindings
+/// have resolved.
 ///
 /// # Safety
 ///
@@ -21768,18 +21830,17 @@ unsafe fn describe_acls_result_ref(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_count(result: *const kafka_admin_DescribeAclsResult_t) -> i32 {
-    // SAFETY: `describe_acls_result_ref` requires a non-null handle from a `describe_acls`
-    // call, which this function's `# Safety` promises (`result` must be a valid
-    // `describe_acls` result handle; only `kafka_admin_DescribeAclsResult_destroy` admits
-    // null, so a valid handle is non-null). The reference is used only for the duration of
-    // this synchronous call, during which the C caller keeps the handle alive by not yet
-    // having called `kafka_admin_DescribeAclsResult_destroy`.
-    unsafe { describe_acls_result_ref(result) }.bindings.len() as i32
+    // SAFETY: `describe_acls_result_ref` requires a non-null `describe_acls` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the
+    // C caller's contract is the sole source); the reference is used only for this `len()`
+    // within the call, during which the C caller keeps the handle alive.
+    single_data(&unsafe { describe_acls_result_ref(result) }.bindings).map_or(0, |d| d.len() as i32)
 }
 
-/// Returns the binding at `index` (borrowed), or null if out of range. Do not
-/// free it. Bindings keep the order the broker reported them in, as Java's
-/// `values()` collection does.
+/// Returns the binding at `index` (borrowed), or null if out of range or the
+/// request failed. Do not free it. Bindings keep the order the broker reported
+/// them in, as Java's `values()` collection does. **Blocks** until the bindings
+/// have resolved.
 ///
 /// # Safety
 ///
@@ -21793,15 +21854,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_get_binding(
     if index < 0 {
         return std::ptr::null();
     }
-    // SAFETY: `describe_acls_result_ref` requires a non-null handle from a `describe_acls`
-    // call, which this function's `# Safety` promises (`result` must be a valid
-    // `describe_acls` result handle; only `kafka_admin_DescribeAclsResult_destroy` admits
-    // null, so a valid handle is non-null). The reference is used only for the duration of
-    // this synchronous call, during which the C caller keeps the handle alive by not yet
-    // having called `kafka_admin_DescribeAclsResult_destroy`. The pointer this getter
-    // returns is an interior pointer into the same allocation and is documented as
-    // borrowed, valid until that `_destroy`.
-    match unsafe { describe_acls_result_ref(result) }.bindings.get(index as usize) {
+    // SAFETY: `describe_acls_result_ref` requires a non-null `describe_acls` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the
+    // C caller's contract is the sole source); the reference is used only for the duration
+    // of this call, and the returned pointer borrows an `AclBindingInner` cached in the
+    // handle, valid until `kafka_admin_DescribeAclsResult_destroy`.
+    match single_data(&unsafe { describe_acls_result_ref(result) }.bindings).and_then(|d| d.get(index as usize)) {
         Some(binding) => binding.as_ptr(),
         None => std::ptr::null(),
     }
@@ -21817,18 +21875,17 @@ pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_get_binding(
 pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_destroy(result: *mut kafka_admin_DescribeAclsResult_t) {
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
-        // a valid `describe_acls` result handle, i.e. the pointer
-        // `box_describe_acls_result` produced with
-        // `Box::into_raw(Box::new(DescribeAclsResultInner { .. }))`. Reconstituting and
-        // dropping the `Box` here is the single, final use: the result documentation tells
-        // the caller to free the handle exactly once with
-        // `kafka_admin_DescribeAclsResult_destroy`, after which it and every pointer
-        // borrowed from it are invalid.
+        // a valid `describe_acls` result handle, i.e. the `Box<DescribeAclsResultInner>`
+        // leaked by `into_handle` in `kafka_admin_AdminClient_describe_acls` or
+        // `box_describe_acls_result`. This is the single, final use: the contract states the
+        // handle and every borrowed sub-handle are invalid afterwards, and no other function
+        // frees it.
         unsafe { drop(Box::from_raw(result as *mut DescribeAclsResultInner)) };
     }
 }
 
-/// Opaque handle to a flattened `DeleteAclsResult`.
+/// Opaque handle to a `DeleteAclsResult`, keyed by filter: one future per
+/// requested filter (Java's `values()`), read by the accessors below.
 #[repr(C)]
 pub struct kafka_admin_DeleteAclsResult_t {
     _private: [u8; 0],
@@ -21845,53 +21902,74 @@ struct DeleteAclsFilterResultInner {
     error: Option<ErrorInner>,
 }
 
-/// Backing state for [`kafka_admin_DeleteAclsResult_t`].
+/// Flattens one filter's `FilterResults` into its per-ACL rows, in Java's
+/// `FilterResults.values()` order.
+fn delete_acls_filter_result_rows(results: &FilterResults) -> Vec<DeleteAclsFilterResultInner> {
+    results
+        .values()
+        .iter()
+        .map(|r| DeleteAclsFilterResultInner {
+            binding: r.binding().map(AclBindingInner::new),
+            error: r.error().cloned().map(error_inner),
+        })
+        .collect()
+}
+
+/// Backing state for [`kafka_admin_DeleteAclsResult_t`]: the filters (known at
+/// submission, as Java's `values().keySet()` is) and each filter's future,
+/// resolved on first read.
 ///
 /// `DeleteAclsResult.values()` is `Map<AclBindingFilter,
 /// KafkaFuture<FilterResults>>`, so there are two index levels: the filter, and
-/// within it the ACLs that filter matched. `errors[i]` is the *filter's* future
-/// failing (nothing was deleted for it); a per-ACL failure lives inside
-/// `results[i][j]` instead, which is Java's `FilterResult.error()`.
+/// within it the ACLs that filter matched. A failed `entries[i]` is the
+/// *filter's* future failing (nothing was deleted for it); a per-ACL failure
+/// lives inside its resolved rows instead, which is Java's
+/// `FilterResult.exception()`.
 struct DeleteAclsResultInner {
     filters: Vec<AclBindingFilterInner>,
-    errors: Vec<Option<ErrorInner>>,
-    results: Vec<Vec<DeleteAclsFilterResultInner>>,
+    entries: Vec<LazyKeyed<Vec<DeleteAclsFilterResultInner>>>,
 }
 
-/// Flattens the per-filter `deleteAcls` outcomes into the C handle.
-fn box_delete_acls_result(outcomes: DeleteAclsOutcomes) -> *mut kafka_admin_DeleteAclsResult_t {
-    type Row = (AclBindingFilterInner, (Option<ErrorInner>, Vec<DeleteAclsFilterResultInner>));
-    let mut rows: Vec<Row> = outcomes
+/// Wraps `deleteAcls`' per-filter futures, unresolved, as the C handle's
+/// backing state, sorted by the filter's fields.
+fn delete_acls_result_inner(
+    waiter: &FutureWaiter,
+    futures: Vec<(AclBindingFilter, KafkaFuture<FilterResults>)>,
+) -> DeleteAclsResultInner {
+    let mut rows: Vec<(AclBindingFilterInner, LazyKeyed<Vec<DeleteAclsFilterResultInner>>)> = futures
         .into_iter()
-        .map(|(filter, outcome)| {
-            let flattened = match outcome {
-                Ok(results) => (
-                    None,
-                    results
-                        .values()
-                        .iter()
-                        .map(|r| DeleteAclsFilterResultInner {
-                            binding: r.binding().map(AclBindingInner::new),
-                            error: r.error().cloned().map(error_inner),
-                        })
-                        .collect(),
-                ),
-                Err(e) => (Some(error_inner(e)), Vec::new()),
-            };
-            (AclBindingFilterInner::new(&filter), flattened)
+        .map(|(filter, future)| {
+            let entry = lazy_keyed(waiter, future, |results: FilterResults| {
+                delete_acls_filter_result_rows(&results)
+            });
+            (AclBindingFilterInner::new(&filter), entry)
         })
         .collect();
     rows.sort_by(|a, b| a.0.sort_key().cmp(&b.0.sort_key()));
+    let (filters, entries) = rows.into_iter().unzip();
+    DeleteAclsResultInner { filters, entries }
+}
 
-    let mut filters = Vec::with_capacity(rows.len());
-    let mut errors = Vec::with_capacity(rows.len());
-    let mut results = Vec::with_capacity(rows.len());
-    for (filter, (error, filter_results)) in rows {
-        filters.push(filter);
-        errors.push(error);
-        results.push(filter_results);
+/// Java's `DeleteAclsResult.all().get()` over the handle's per-filter futures:
+/// `allOf(values())` then `getAclBindings`, which also throws the first
+/// matched ACL's own exception. So this waits for **every** filter, then
+/// returns an owned copy of the first failed filter's error in index order, or
+/// failing that the first per-ACL error in (filter, entry) index order, or null
+/// when everything was deleted. Java leaves which failure wins unspecified.
+fn delete_acls_all(entries: &[LazyKeyed<Vec<DeleteAclsFilterResultInner>>]) -> *mut kafka_common_Error_t {
+    let filter_failure = keyed_all(entries);
+    if !filter_failure.is_null() {
+        return filter_failure;
     }
-    Box::into_raw(Box::new(DeleteAclsResultInner { filters, errors, results })) as *mut kafka_admin_DeleteAclsResult_t
+    let first_acl_error = entries
+        .iter()
+        .filter_map(|entry| entry.get().as_ref().ok())
+        .flatten()
+        .find_map(|row| row.error.as_ref());
+    match first_acl_error {
+        Some(e) => box_error(e.error.clone()),
+        None => std::ptr::null_mut(),
+    }
 }
 
 /// Casts a `*const kafka_admin_DeleteAclsResult_t` to a reference.
@@ -21900,17 +21978,17 @@ fn box_delete_acls_result(outcomes: DeleteAclsOutcomes) -> *mut kafka_admin_Dele
 ///
 /// `result` must be a non-null handle from a `delete_acls` call.
 unsafe fn delete_acls_result_ref(result: *const kafka_admin_DeleteAclsResult_t) -> &'static DeleteAclsResultInner {
-    // SAFETY: `result` is, per this helper's `# Safety`, a non-null handle from a
-    // `delete_acls` call; such handles are produced only by `box_delete_acls_result` via
-    // `Box::into_raw(Box::new(DeleteAclsResultInner { .. }))`, so casting back to `*const
-    // DeleteAclsResultInner` names that same live allocation. The `&'static` is used only
-    // for the duration of the calling getter, during which the C caller keeps the handle
-    // alive by not yet having called `kafka_admin_DeleteAclsResult_destroy`, the only path
-    // that frees it.
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
+    // `delete_acls` call, i.e. the `Box<DeleteAclsResultInner>` leaked by `into_handle` in
+    // `kafka_admin_AdminClient_delete_acls` and freed only by
+    // `kafka_admin_DeleteAclsResult_destroy`, so it is aligned and live; callers use the
+    // reference only within their own synchronous getter call, during which the C caller
+    // keeps the handle alive.
     unsafe { &*(result as *const DeleteAclsResultInner) }
 }
 
-/// Returns the number of filters in the result.
+/// Returns the number of filters in the result. Never blocks: the filters are
+/// known when the request is submitted.
 ///
 /// # Safety
 ///
@@ -21918,17 +21996,15 @@ unsafe fn delete_acls_result_ref(result: *const kafka_admin_DeleteAclsResult_t) 
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_count(result: *const kafka_admin_DeleteAclsResult_t) -> i32 {
-    // SAFETY: `delete_acls_result_ref` requires a non-null handle from a `delete_acls`
-    // call, which this function's `# Safety` promises (`result` must be a valid
-    // `delete_acls` result handle; only `kafka_admin_DeleteAclsResult_destroy` admits null,
-    // so a valid handle is non-null). The reference is used only for the duration of this
-    // synchronous call, during which the C caller keeps the handle alive by not yet having
-    // called `kafka_admin_DeleteAclsResult_destroy`.
+    // SAFETY: `delete_acls_result_ref` requires a non-null `delete_acls` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the
+    // C caller's contract is the sole source); the reference is used only for this `len()`
+    // within the call, during which the C caller keeps the handle alive.
     unsafe { delete_acls_result_ref(result) }.filters.len() as i32
 }
 
 /// Returns the filter at `index` (borrowed), or null if out of range. Do not
-/// free it. Entries are sorted by the filter's fields.
+/// free it. Entries are sorted by the filter's fields. Never blocks.
 ///
 /// # Safety
 ///
@@ -21942,14 +22018,11 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_filter(
     if index < 0 {
         return std::ptr::null();
     }
-    // SAFETY: `delete_acls_result_ref` requires a non-null handle from a `delete_acls`
-    // call, which this function's `# Safety` promises (`result` must be a valid
-    // `delete_acls` result handle; only `kafka_admin_DeleteAclsResult_destroy` admits null,
-    // so a valid handle is non-null). The reference is used only for the duration of this
-    // synchronous call, during which the C caller keeps the handle alive by not yet having
-    // called `kafka_admin_DeleteAclsResult_destroy`. The pointer this getter returns is an
-    // interior pointer into the same allocation and is documented as borrowed, valid until
-    // that `_destroy`.
+    // SAFETY: `delete_acls_result_ref` requires a non-null `delete_acls` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the
+    // C caller's contract is the sole source); the reference is used only for the duration
+    // of this call, and the returned pointer borrows an `AclBindingFilterInner` owned by the
+    // handle, valid until `kafka_admin_DeleteAclsResult_destroy`.
     match unsafe { delete_acls_result_ref(result) }.filters.get(index as usize) {
         Some(filter) => filter as *const AclBindingFilterInner as *const kafka_common_acl_AclBindingFilter_t,
         None => std::ptr::null(),
@@ -21958,6 +22031,12 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_filter(
 
 /// Returns the error for the filter at `index` (borrowed), or null if the
 /// filter was applied successfully or `index` is out of range. Do not destroy
+/// it.
+///
+/// **Blocks** until that filter's future has resolved — Java's
+/// `values().get(filter).get()` — but not on any other filter. Never blocks for
+/// an out-of-range index. A failure of the whole request (a timeout, say) is
+/// reported here for every filter, as Java completes every filter's future with
 /// it.
 ///
 /// This is the *filter's* future failing, meaning nothing was deleted for it.
@@ -21974,20 +22053,20 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_error(
     result: *const kafka_admin_DeleteAclsResult_t,
     index: i32,
 ) -> *const kafka_common_Error_t {
-    // SAFETY: `delete_acls_result_ref` requires a non-null handle from a `delete_acls`
-    // call, which this function's `# Safety` promises (`result` must be a valid
-    // `delete_acls` result handle; only `kafka_admin_DeleteAclsResult_destroy` admits null,
-    // so a valid handle is non-null). The reference is used only for the duration of this
-    // synchronous call, during which the C caller keeps the handle alive by not yet having
-    // called `kafka_admin_DeleteAclsResult_destroy`. The pointer this getter returns is an
-    // interior pointer into the same allocation and is documented as borrowed, valid until
-    // that `_destroy`.
-    optional_error_at(&unsafe { delete_acls_result_ref(result) }.errors, index)
+    // SAFETY: `delete_acls_result_ref` requires a non-null `delete_acls` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the
+    // C caller's contract is the sole source); the reference is used only for the duration
+    // of this call, and the returned error pointer borrows an `ErrorInner` cached in the
+    // handle (not to be destroyed), valid until `kafka_admin_DeleteAclsResult_destroy`.
+    keyed_error_at(&unsafe { delete_acls_result_ref(result) }.entries, index)
 }
 
 /// Returns how many ACLs the filter at `index` matched (the size of Java's
 /// `FilterResults.values()`), or 0 if the filter failed or `index` is out of
 /// range.
+///
+/// **Blocks** until that filter's future has resolved, but not on any other
+/// filter. Never blocks for an out-of-range index.
 ///
 /// # Safety
 ///
@@ -21998,24 +22077,19 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_result_count(
     result: *const kafka_admin_DeleteAclsResult_t,
     index: i32,
 ) -> i32 {
-    if index < 0 {
-        return 0;
-    }
-    // SAFETY: `delete_acls_result_ref` requires a non-null handle from a `delete_acls`
-    // call, which this function's `# Safety` promises (`result` must be a valid
-    // `delete_acls` result handle; only `kafka_admin_DeleteAclsResult_destroy` admits null,
-    // so a valid handle is non-null). The reference is used only for the duration of this
-    // synchronous call, during which the C caller keeps the handle alive by not yet having
-    // called `kafka_admin_DeleteAclsResult_destroy`.
-    match unsafe { delete_acls_result_ref(result) }.results.get(index as usize) {
-        Some(results) => results.len() as i32,
-        None => 0,
-    }
+    // SAFETY: `delete_acls_result_ref` requires a non-null `delete_acls` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the
+    // C caller's contract is the sole source); the reference is used only for this `len()`
+    // within the call, during which the C caller keeps the handle alive.
+    keyed_value_at(&unsafe { delete_acls_result_ref(result) }.entries, index).map_or(0, |rows| rows.len() as i32)
 }
 
 /// Returns the ACL binding the filter at `index` matched, entry `result_index`
-/// (borrowed), or null when either index is out of range (or the broker's
-/// binding could not be decoded). Do not free it.
+/// (borrowed), or null when either index is out of range, the filter failed
+/// (or the broker's binding could not be decoded). Do not free it.
+///
+/// **Blocks** until that filter's future has resolved, but not on any other
+/// filter. Never blocks for an out-of-range filter index.
 ///
 /// As in Java's `FilterResult`, the binding and
 /// [`kafka_admin_DeleteAclsResult_get_result_error`] are **not** exclusive:
@@ -22036,12 +22110,12 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_binding(
     // result handle, which this function's `# Safety` promises (`result` must be a valid
     // `delete_acls` result handle, non-null since only
     // `kafka_admin_DeleteAclsResult_destroy` admits null); it range-checks `index` and
-    // `result_index` itself and returns `None` when either is out of range. The
-    // `DeleteAclsFilterResultInner` reference it yields is used only for the duration of
-    // this synchronous call, during which the C caller keeps the handle alive by not yet
-    // having called `kafka_admin_DeleteAclsResult_destroy`; the binding pointer returned is
-    // an interior pointer into the same allocation, documented as valid until that
-    // `_destroy`.
+    // `result_index` itself and returns `None` when either is out of range or the filter
+    // failed. The `DeleteAclsFilterResultInner` reference it yields is used only for the
+    // duration of this synchronous call, during which the C caller keeps the handle alive by
+    // not yet having called `kafka_admin_DeleteAclsResult_destroy`; the binding pointer
+    // returned is an interior pointer into the handle's cached rows, documented as valid
+    // until that `_destroy`.
     match unsafe { delete_acls_filter_result_at(result, index, result_index) } {
         Some(entry) => match &entry.binding {
             Some(binding) => binding.as_ptr(),
@@ -22052,10 +22126,13 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_binding(
 }
 
 /// Returns the exception for the filter at `index`, entry `result_index`
-/// (borrowed), or null when deleting that entry's binding succeeded, or when
-/// either index is out of range. Do not destroy it.
+/// (borrowed), or null when deleting that entry's binding succeeded, the filter
+/// failed, or either index is out of range. Do not destroy it.
 ///
-/// This is Java's `FilterResult.error()`: the filter matched this ACL but
+/// **Blocks** until that filter's future has resolved, but not on any other
+/// filter. Never blocks for an out-of-range filter index.
+///
+/// This is Java's `FilterResult.exception()`: the filter matched this ACL but
 /// deleting it failed. It is independent of
 /// [`kafka_admin_DeleteAclsResult_get_error`], which reports the whole filter
 /// failing.
@@ -22074,19 +22151,20 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_result_error(
     // result handle, which this function's `# Safety` promises (`result` must be a valid
     // `delete_acls` result handle, non-null since only
     // `kafka_admin_DeleteAclsResult_destroy` admits null); it range-checks `index` and
-    // `result_index` itself and returns `None` when either is out of range. The
-    // `DeleteAclsFilterResultInner` reference it yields is used only for the duration of
-    // this synchronous call, during which the C caller keeps the handle alive by not yet
-    // having called `kafka_admin_DeleteAclsResult_destroy`; the error pointer returned is
-    // an interior pointer into the same allocation, documented as borrowed.
+    // `result_index` itself and returns `None` when either is out of range or the filter
+    // failed. The `DeleteAclsFilterResultInner` reference it yields is used only for the
+    // duration of this synchronous call, during which the C caller keeps the handle alive by
+    // not yet having called `kafka_admin_DeleteAclsResult_destroy`; the error pointer
+    // returned is an interior pointer into the handle's cached rows, documented as borrowed.
     match unsafe { delete_acls_filter_result_at(result, index, result_index) } {
         Some(entry) => error_ptr(entry.error.as_ref()),
         None => std::ptr::null(),
     }
 }
 
-/// Looks up one `FilterResult` by its two indices, or `None` if either is out
-/// of range.
+/// Looks up one `FilterResult` by its two indices, waiting for filter `index`'s
+/// future only, or `None` if either index is out of range or that filter
+/// failed.
 ///
 /// # Safety
 ///
@@ -22096,7 +22174,7 @@ unsafe fn delete_acls_filter_result_at(
     index: i32,
     result_index: i32,
 ) -> Option<&'static DeleteAclsFilterResultInner> {
-    if index < 0 || result_index < 0 {
+    if result_index < 0 {
         return None;
     }
     // SAFETY: `delete_acls_result_ref` requires a non-null handle from a `delete_acls`
@@ -22104,15 +22182,57 @@ unsafe fn delete_acls_filter_result_at(
     // `delete_acls` result handle) and which its callers
     // `kafka_admin_DeleteAclsResult_get_binding` / `_get_result_error` promise in turn; the
     // negative-index early return above does not weaken that. The reference is used only to
-    // index `results` for the duration of the calling getter, while the C caller keeps the
-    // handle alive by not yet having called `kafka_admin_DeleteAclsResult_destroy`.
-    unsafe { delete_acls_result_ref(result) }
-        .results
-        .get(index as usize)?
-        .get(result_index as usize)
+    // index the cached rows for the duration of the calling getter, while the C caller keeps
+    // the handle alive by not yet having called `kafka_admin_DeleteAclsResult_destroy`.
+    keyed_value_at(&unsafe { delete_acls_result_ref(result) }.entries, index)?.get(result_index as usize)
 }
 
-/// Destroys a `delete_acls` result handle. Safe with null (no-op).
+/// Returns whether the future of the filter at `index` has resolved — Java's
+/// `values().get(filter).isDone()`. False if `index` is out of range. Never
+/// blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_acls` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_is_done(
+    result: *const kafka_admin_DeleteAclsResult_t,
+    index: i32,
+) -> bool {
+    // SAFETY: `delete_acls_result_ref` requires a non-null `delete_acls` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the
+    // C caller's contract is the sole source); the reference is used only for this check
+    // within the call, during which the C caller keeps the handle alive.
+    keyed_is_done_at(&unsafe { delete_acls_result_ref(result) }.entries, index)
+}
+
+/// Java's `all().get()`: **blocks** until every filter's future has resolved,
+/// then returns null if every matched ACL was deleted, or an **owned** error —
+/// free it with `kafka_common_Error_destroy`. As Java's `all()` (`allOf`
+/// followed by `getAclBindings`), that is a failed filter's error if any filter
+/// failed (the first in index order), and otherwise the first matched ACL's own
+/// exception ([`kafka_admin_DeleteAclsResult_get_result_error`]) in index
+/// order; Java leaves which one unspecified. A filter that matched nothing is
+/// not a failure. The deleted bindings are read with the per-filter accessors.
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_acls` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_all(
+    result: *const kafka_admin_DeleteAclsResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `delete_acls_result_ref` requires a non-null `delete_acls` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the
+    // C caller's contract is the sole source); the reference is used only for the duration
+    // of this call, and the returned error is a fresh copy owned by the caller.
+    delete_acls_all(&unsafe { delete_acls_result_ref(result) }.entries)
+}
+
+/// Destroys a `delete_acls` result handle, invalidating every borrowed
+/// sub-handle obtained from it. Safe with null (no-op).
 ///
 /// # Safety
 ///
@@ -22122,12 +22242,10 @@ unsafe fn delete_acls_filter_result_at(
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_destroy(result: *mut kafka_admin_DeleteAclsResult_t) {
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
-        // a valid `delete_acls` result handle, i.e. the pointer `box_delete_acls_result`
-        // produced with `Box::into_raw(Box::new(DeleteAclsResultInner { .. }))`.
-        // Reconstituting and dropping the `Box` here is the single, final use: the result
-        // documentation tells the caller to free the handle exactly once with
-        // `kafka_admin_DeleteAclsResult_destroy`, after which it and every pointer borrowed
-        // from it are invalid.
+        // a valid `delete_acls` result handle, i.e. the `Box<DeleteAclsResultInner>` leaked
+        // by `into_handle` in `kafka_admin_AdminClient_delete_acls`. This is the single,
+        // final use: the contract states the handle and every borrowed sub-handle are
+        // invalid afterwards, and no other function frees it.
         unsafe { drop(Box::from_raw(result as *mut DeleteAclsResultInner)) };
     }
 }
@@ -22150,9 +22268,8 @@ pub struct kafka_admin_FilterResults_t {
 }
 
 /// Backing state for [`kafka_admin_FilterResults_t`]: reuses
-/// [`DeleteAclsFilterResultInner`] — the same per-entry type the synchronous
-/// flattened result's `results: Vec<Vec<DeleteAclsFilterResultInner>>` field
-/// already holds — for one filter's row.
+/// [`DeleteAclsFilterResultInner`] — the same per-entry type each resolved
+/// filter of the synchronous result's `entries` holds — for one filter's row.
 struct DeleteAclsFilterResultsInner {
     entries: Vec<DeleteAclsFilterResultInner>,
 }
@@ -22161,14 +22278,7 @@ struct DeleteAclsFilterResultsInner {
 /// [`kafka_admin_FilterResults_t`], for
 /// [`kafka_admin_AdminClient_delete_acls_async`]'s per-key callback.
 fn box_delete_acls_filter_results(results: FilterResults) -> *mut kafka_admin_FilterResults_t {
-    let entries = results
-        .values()
-        .iter()
-        .map(|r| DeleteAclsFilterResultInner {
-            binding: r.binding().map(AclBindingInner::new),
-            error: r.error().cloned().map(error_inner),
-        })
-        .collect();
+    let entries = delete_acls_filter_result_rows(&results);
     Box::into_raw(Box::new(DeleteAclsFilterResultsInner { entries })) as *mut kafka_admin_FilterResults_t
 }
 
@@ -22292,7 +22402,7 @@ pub unsafe extern "C" fn kafka_admin_FilterResults_destroy(results: *mut kafka_a
     }
 }
 
-/// Opaque handle to a flattened `DescribeClientQuotasResult`.
+/// Opaque handle to a `DescribeClientQuotasResult`.
 #[repr(C)]
 pub struct kafka_admin_DescribeClientQuotasResult_t {
     _private: [u8; 0],
@@ -22301,21 +22411,29 @@ pub struct kafka_admin_DescribeClientQuotasResult_t {
 /// Backing state for [`kafka_admin_DescribeClientQuotasResult_t`].
 ///
 /// `DescribeClientQuotasResult` holds a single
-/// `KafkaFuture<Map<ClientQuotaEntity, Map<String, Double>>>` for the whole
-/// call, so there is no per-entity error to expose: a failure is the call's
-/// error. The inner quota map is flattened into parallel key/value vectors —
-/// it is a plain `Map<String, Double>`, not a Java class, so it gets indexed
-/// accessors on the parent rather than a handle (the B2 `ReplicaInfo` rule).
+/// `KafkaFuture<Map<ClientQuotaEntity, Map<String, Double>>>` (Java's
+/// `entities()`) for the whole call, so there is no per-entity error to expose:
+/// the future's failure is read with
+/// [`kafka_admin_DescribeClientQuotasResult_entities`]. On a handle from the
+/// synchronous entry point that future may still be unresolved, and every
+/// accessor waits for it; a handle from the `_async` callback is always
+/// resolved.
 struct DescribeClientQuotasResultInner {
+    entities: LazySingle<DescribeClientQuotasData>,
+}
+
+/// The resolved quotas, sorted by entity. The inner quota map is flattened into
+/// parallel key/value vectors — it is a plain `Map<String, Double>`, not a Java
+/// class, so it gets indexed accessors on the parent rather than a handle (the
+/// B2 `ReplicaInfo` rule).
+struct DescribeClientQuotasData {
     entities: Vec<ClientQuotaEntityInner>,
     quota_keys: Vec<Vec<CString>>,
     quota_values: Vec<Vec<f64>>,
 }
 
-/// Flattens the described quotas into the C handle.
-fn box_describe_client_quotas_result(
-    outcome: DescribeClientQuotasOutcome,
-) -> *mut kafka_admin_DescribeClientQuotasResult_t {
+/// Flattens the described quotas, sorted by entity and then by quota key.
+fn describe_client_quotas_data(outcome: DescribeClientQuotasOutcome) -> DescribeClientQuotasData {
     let mut rows: Vec<(ClientQuotaEntityInner, HashMap<String, f64>)> = outcome
         .into_iter()
         .map(|(entity, quotas)| (ClientQuotaEntityInner::new(&entity), quotas))
@@ -22332,8 +22450,16 @@ fn box_describe_client_quotas_result(
         quota_keys.push(sorted.iter().map(|(k, _)| to_cstring(k)).collect());
         quota_values.push(sorted.iter().map(|(_, v)| *v).collect());
     }
-    Box::into_raw(Box::new(DescribeClientQuotasResultInner { entities, quota_keys, quota_values }))
-        as *mut kafka_admin_DescribeClientQuotasResult_t
+    DescribeClientQuotasData { entities, quota_keys, quota_values }
+}
+
+/// Moves already-resolved quotas (the `_async` path) into the C handle.
+fn box_describe_client_quotas_result(
+    outcome: DescribeClientQuotasOutcome,
+) -> *mut kafka_admin_DescribeClientQuotasResult_t {
+    into_handle(DescribeClientQuotasResultInner {
+        entities: LazyOutcome::resolved(Ok(describe_client_quotas_data(outcome))),
+    })
 }
 
 /// Casts a `*const kafka_admin_DescribeClientQuotasResult_t` to a reference.
@@ -22344,18 +22470,77 @@ fn box_describe_client_quotas_result(
 unsafe fn describe_client_quotas_result_ref(
     result: *const kafka_admin_DescribeClientQuotasResult_t,
 ) -> &'static DescribeClientQuotasResultInner {
-    // SAFETY: `result` is, per this helper's `# Safety`, a non-null handle from a
-    // `describe_client_quotas` call; such handles are produced only by
-    // `box_describe_client_quotas_result` via
-    // `Box::into_raw(Box::new(DescribeClientQuotasResultInner { .. }))`, so casting back to
-    // `*const DescribeClientQuotasResultInner` names that same live allocation. The
-    // `&'static` is used only for the duration of the calling getter, during which the C
-    // caller keeps the handle alive by not yet having called
-    // `kafka_admin_DescribeClientQuotasResult_destroy`, the only path that frees it.
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
+    // `describe_client_quotas` call, i.e. the `Box<DescribeClientQuotasResultInner>` leaked
+    // by `into_handle` in `kafka_admin_AdminClient_describe_client_quotas` or
+    // `box_describe_client_quotas_result` and freed only by
+    // `kafka_admin_DescribeClientQuotasResult_destroy`, so it is aligned and live; callers
+    // use the reference only within their own synchronous getter call, during which the C
+    // caller keeps the handle alive.
     unsafe { &*(result as *const DescribeClientQuotasResultInner) }
 }
 
-/// Returns the number of entities that matched the filter.
+/// The resolved quotas of `result`, waiting for them first; `None` if the
+/// request failed.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_client_quotas` result handle.
+unsafe fn describe_client_quotas_data_of(
+    result: *const kafka_admin_DescribeClientQuotasResult_t,
+) -> Option<&'static DescribeClientQuotasData> {
+    // SAFETY: `describe_client_quotas_result_ref` requires a non-null
+    // `describe_client_quotas` result handle, which this helper's `# Safety` requires of
+    // `result` and its callers promise in turn; the data reference it yields is cached in the
+    // handle and used only for the duration of the calling getter, while the C caller keeps
+    // the handle alive by not yet having called
+    // `kafka_admin_DescribeClientQuotasResult_destroy`.
+    single_data(&unsafe { describe_client_quotas_result_ref(result) }.entities)
+}
+
+/// Java's `entities().get()`: **blocks** until the quotas have resolved, then
+/// returns null on success, or an **owned** error — free it with
+/// `kafka_common_Error_destroy` — if the request failed. The quotas are read
+/// with [`kafka_admin_DescribeClientQuotasResult_count`] and the other indexed
+/// accessors.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_client_quotas` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_entities(
+    result: *const kafka_admin_DescribeClientQuotasResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `describe_client_quotas_result_ref` requires a non-null
+    // `describe_client_quotas` result handle, which this function's `# Safety` requires of
+    // `result` (no in-body null check, so the C caller's contract is the sole source); the
+    // reference is used only for the duration of this call, and the returned error is a
+    // fresh copy owned by the caller.
+    single_error(&unsafe { describe_client_quotas_result_ref(result) }.entities)
+}
+
+/// Returns whether the quotas future has resolved — Java's
+/// `entities().isDone()`. Never blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_client_quotas` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_is_done(
+    result: *const kafka_admin_DescribeClientQuotasResult_t,
+) -> bool {
+    // SAFETY: `describe_client_quotas_result_ref` requires a non-null
+    // `describe_client_quotas` result handle, which this function's `# Safety` requires of
+    // `result` (no in-body null check, so the C caller's contract is the sole source); the
+    // reference is used only for this check.
+    unsafe { describe_client_quotas_result_ref(result) }.entities.is_done()
+}
+
+/// Returns the number of entities that matched the filter, or 0 if the request
+/// failed (see [`kafka_admin_DescribeClientQuotasResult_entities`]). **Blocks**
+/// until the quotas have resolved.
 ///
 /// # Safety
 ///
@@ -22365,18 +22550,16 @@ unsafe fn describe_client_quotas_result_ref(
 pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_count(
     result: *const kafka_admin_DescribeClientQuotasResult_t,
 ) -> i32 {
-    // SAFETY: `describe_client_quotas_result_ref` requires a non-null handle from a
-    // `describe_client_quotas` call, which this function's `# Safety` promises (`result`
-    // must be a valid `describe_client_quotas` result handle; only
-    // `kafka_admin_DescribeClientQuotasResult_destroy` admits null, so a valid handle is
-    // non-null). The reference is used only for the duration of this synchronous call,
-    // during which the C caller keeps the handle alive by not yet having called
-    // `kafka_admin_DescribeClientQuotasResult_destroy`.
-    unsafe { describe_client_quotas_result_ref(result) }.entities.len() as i32
+    // SAFETY: `describe_client_quotas_data_of` requires a valid `describe_client_quotas`
+    // result handle, which this function's `# Safety` requires of `result`; the data
+    // reference is used only for this `len()` within the call.
+    unsafe { describe_client_quotas_data_of(result) }.map_or(0, |d| d.entities.len() as i32)
 }
 
-/// Returns the entity at `index` (borrowed), or null if out of range. Do not
-/// free it. Entities are sorted by their `(entity type, entity name)` pairs.
+/// Returns the entity at `index` (borrowed), or null if out of range or the
+/// request failed. Do not free it. Entities are sorted by their
+/// `(entity type, entity name)` pairs. **Blocks** until the quotas have
+/// resolved.
 ///
 /// # Safety
 ///
@@ -22390,26 +22573,20 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_entity(
     if index < 0 {
         return std::ptr::null();
     }
-    // SAFETY: `describe_client_quotas_result_ref` requires a non-null handle from a
-    // `describe_client_quotas` call, which this function's `# Safety` promises (`result`
-    // must be a valid `describe_client_quotas` result handle; only
-    // `kafka_admin_DescribeClientQuotasResult_destroy` admits null, so a valid handle is
-    // non-null). The reference is used only for the duration of this synchronous call,
-    // during which the C caller keeps the handle alive by not yet having called
-    // `kafka_admin_DescribeClientQuotasResult_destroy`. The pointer this getter returns is
-    // an interior pointer into the same allocation and is documented as borrowed, valid
-    // until that `_destroy`.
-    match unsafe { describe_client_quotas_result_ref(result) }
-        .entities
-        .get(index as usize)
-    {
+    // SAFETY: `describe_client_quotas_data_of` requires a valid `describe_client_quotas`
+    // result handle, which this function's `# Safety` requires of `result`; the data
+    // reference is used only for the duration of this call, and the returned pointer borrows
+    // a `ClientQuotaEntityInner` cached in the handle, valid until
+    // `kafka_admin_DescribeClientQuotasResult_destroy`.
+    match unsafe { describe_client_quotas_data_of(result) }.and_then(|d| d.entities.get(index as usize)) {
         Some(entity) => entity.as_ptr(),
         None => std::ptr::null(),
     }
 }
 
 /// Returns how many quota values the entity at `index` has, or 0 if out of
-/// range. A quota type the entity has no value for is simply absent.
+/// range or the request failed. A quota type the entity has no value for is
+/// simply absent. **Blocks** until the quotas have resolved.
 ///
 /// # Safety
 ///
@@ -22423,17 +22600,10 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_quota_count(
     if index < 0 {
         return 0;
     }
-    // SAFETY: `describe_client_quotas_result_ref` requires a non-null handle from a
-    // `describe_client_quotas` call, which this function's `# Safety` promises (`result`
-    // must be a valid `describe_client_quotas` result handle; only
-    // `kafka_admin_DescribeClientQuotasResult_destroy` admits null, so a valid handle is
-    // non-null). The reference is used only for the duration of this synchronous call,
-    // during which the C caller keeps the handle alive by not yet having called
-    // `kafka_admin_DescribeClientQuotasResult_destroy`.
-    match unsafe { describe_client_quotas_result_ref(result) }
-        .quota_keys
-        .get(index as usize)
-    {
+    // SAFETY: `describe_client_quotas_data_of` requires a valid `describe_client_quotas`
+    // result handle, which this function's `# Safety` requires of `result`; the data
+    // reference is used only for this `len()` within the call.
+    match unsafe { describe_client_quotas_data_of(result) }.and_then(|d| d.quota_keys.get(index as usize)) {
         Some(keys) => keys.len() as i32,
         None => 0,
     }
@@ -22441,8 +22611,9 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_quota_count(
 
 /// Returns the quota key at `(index, quota_index)` (borrowed) — e.g.
 /// `"producer_byte_rate"`, `"consumer_byte_rate"`, `"request_percentage"`,
-/// `"controller_mutation_rate"` — or null if either index is out of range.
-/// Keys are sorted.
+/// `"controller_mutation_rate"` — or null if either index is out of range or
+/// the request failed. Keys are sorted. **Blocks** until the quotas have
+/// resolved.
 ///
 /// Quota keys are opaque broker-defined strings in Java too; there is no enum.
 ///
@@ -22459,26 +22630,20 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_quota_key(
     if index < 0 {
         return std::ptr::null();
     }
-    // SAFETY: `describe_client_quotas_result_ref` requires a non-null handle from a
-    // `describe_client_quotas` call, which this function's `# Safety` promises (`result`
-    // must be a valid `describe_client_quotas` result handle; only
-    // `kafka_admin_DescribeClientQuotasResult_destroy` admits null, so a valid handle is
-    // non-null). The reference is used only for the duration of this synchronous call,
-    // during which the C caller keeps the handle alive by not yet having called
-    // `kafka_admin_DescribeClientQuotasResult_destroy`. The pointer this getter returns is
-    // an interior pointer into the same allocation and is documented as borrowed, valid
-    // until that `_destroy`.
-    match unsafe { describe_client_quotas_result_ref(result) }
-        .quota_keys
-        .get(index as usize)
-    {
+    // SAFETY: `describe_client_quotas_data_of` requires a valid `describe_client_quotas`
+    // result handle, which this function's `# Safety` requires of `result`; the data
+    // reference is used only for the duration of this call, and the returned string pointer
+    // borrows a `CString` cached in the handle, valid until
+    // `kafka_admin_DescribeClientQuotasResult_destroy`.
+    match unsafe { describe_client_quotas_data_of(result) }.and_then(|d| d.quota_keys.get(index as usize)) {
         Some(keys) => cstring_at(keys, quota_index),
         None => std::ptr::null(),
     }
 }
 
 /// Writes the quota value at `(index, quota_index)` to `out`, returning whether
-/// both indices were in range.
+/// both indices were in range (false, too, if the request failed). **Blocks**
+/// until the quotas have resolved.
 ///
 /// Unlike the other index accessors this cannot signal "out of range" with a
 /// sentinel: every `double`, including every negative one and 0, is a legal
@@ -22501,16 +22666,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_quota_value(
     if index < 0 || quota_index < 0 {
         return false;
     }
-    // SAFETY: `describe_client_quotas_result_ref` requires a non-null handle from a
-    // `describe_client_quotas` call, which this function's `# Safety` promises (`result`
-    // must be a valid `describe_client_quotas` result handle; only
-    // `kafka_admin_DescribeClientQuotasResult_destroy` admits null, so a valid handle is
-    // non-null). The reference is used only for the duration of this synchronous call,
-    // during which the C caller keeps the handle alive by not yet having called
-    // `kafka_admin_DescribeClientQuotasResult_destroy`.
-    let value = unsafe { describe_client_quotas_result_ref(result) }
-        .quota_values
-        .get(index as usize)
+    // SAFETY: `describe_client_quotas_data_of` requires a valid `describe_client_quotas`
+    // result handle, which this function's `# Safety` requires of `result`; the data
+    // reference is used only to copy one `f64` out within the call.
+    let value = unsafe { describe_client_quotas_data_of(result) }
+        .and_then(|d| d.quota_values.get(index as usize))
         .and_then(|values| values.get(quota_index as usize))
         .copied();
     // SAFETY: `write_optional` requires `out` to be null or writable, which this function's
@@ -22531,24 +22691,26 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_destroy(
 ) {
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
-        // a valid `describe_client_quotas` result handle, i.e. the pointer
-        // `box_describe_client_quotas_result` produced with
-        // `Box::into_raw(Box::new(DescribeClientQuotasResultInner { .. }))`. Reconstituting
-        // and dropping the `Box` here is the single, final use: the result documentation
-        // tells the caller to free the handle exactly once with
-        // `kafka_admin_DescribeClientQuotasResult_destroy`, after which it and every
-        // pointer borrowed from it are invalid.
+        // a valid `describe_client_quotas` result handle, i.e. the
+        // `Box<DescribeClientQuotasResultInner>` leaked by `into_handle` in
+        // `kafka_admin_AdminClient_describe_client_quotas` or
+        // `box_describe_client_quotas_result`. This is the single, final use: the contract
+        // states the handle and every borrowed sub-handle are invalid afterwards, and no
+        // other function frees it.
         unsafe { drop(Box::from_raw(result as *mut DescribeClientQuotasResultInner)) };
     }
 }
 
-/// Opaque handle to a flattened `AlterClientQuotasResult`.
+/// Opaque handle to an `AlterClientQuotasResult`, keyed by quota entity: one
+/// future per altered entity (Java's `values()`), read by the accessors below.
 #[repr(C)]
 pub struct kafka_admin_AlterClientQuotasResult_t {
     _private: [u8; 0],
 }
 
-/// Backing state for [`kafka_admin_AlterClientQuotasResult_t`].
+/// Backing state for [`kafka_admin_AlterClientQuotasResult_t`]: the entities
+/// (known at submission, as Java's `values().keySet()` is) and each entity's
+/// future, resolved on first read.
 ///
 /// `AlterClientQuotasResult.values()` is `Map<ClientQuotaEntity,
 /// KafkaFuture<Void>>` — the mirror image of `describeClientQuotas`, which has
@@ -22556,19 +22718,22 @@ pub struct kafka_admin_AlterClientQuotasResult_t {
 /// no value.
 struct AlterClientQuotasResultInner {
     entities: Vec<ClientQuotaEntityInner>,
-    errors: Vec<Option<ErrorInner>>,
+    entries: Vec<LazyKeyed<()>>,
 }
 
-/// Flattens the per-entity `alterClientQuotas` outcomes into the C handle.
-fn box_alter_client_quotas_result(outcomes: AlterClientQuotasOutcomes) -> *mut kafka_admin_AlterClientQuotasResult_t {
-    let mut rows: Vec<(ClientQuotaEntityInner, Option<ErrorInner>)> = outcomes
+/// Wraps `alterClientQuotas`' per-entity futures, unresolved, as the C handle's
+/// backing state, sorted by entity.
+fn alter_client_quotas_result_inner(
+    waiter: &FutureWaiter,
+    futures: Vec<(ClientQuotaEntity, KafkaFuture<()>)>,
+) -> AlterClientQuotasResultInner {
+    let mut rows: Vec<(ClientQuotaEntityInner, LazyKeyed<()>)> = futures
         .into_iter()
-        .map(|(entity, outcome)| (ClientQuotaEntityInner::new(&entity), outcome.err().map(error_inner)))
+        .map(|(entity, future)| (ClientQuotaEntityInner::new(&entity), lazy_keyed(waiter, future, |()| ())))
         .collect();
     rows.sort_by(|a, b| a.0.sort_key().cmp(&b.0.sort_key()));
-    let (entities, errors) = rows.into_iter().unzip();
-    Box::into_raw(Box::new(AlterClientQuotasResultInner { entities, errors }))
-        as *mut kafka_admin_AlterClientQuotasResult_t
+    let (entities, entries) = rows.into_iter().unzip();
+    AlterClientQuotasResultInner { entities, entries }
 }
 
 /// Casts a `*const kafka_admin_AlterClientQuotasResult_t` to a reference.
@@ -22579,18 +22744,17 @@ fn box_alter_client_quotas_result(outcomes: AlterClientQuotasOutcomes) -> *mut k
 unsafe fn alter_client_quotas_result_ref(
     result: *const kafka_admin_AlterClientQuotasResult_t,
 ) -> &'static AlterClientQuotasResultInner {
-    // SAFETY: `result` is, per this helper's `# Safety`, a non-null handle from a
-    // `alter_client_quotas` call; such handles are produced only by
-    // `box_alter_client_quotas_result` via
-    // `Box::into_raw(Box::new(AlterClientQuotasResultInner { .. }))`, so casting back to
-    // `*const AlterClientQuotasResultInner` names that same live allocation. The `&'static`
-    // is used only for the duration of the calling getter, during which the C caller keeps
-    // the handle alive by not yet having called
-    // `kafka_admin_AlterClientQuotasResult_destroy`, the only path that frees it.
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from an
+    // `alter_client_quotas` call, i.e. the `Box<AlterClientQuotasResultInner>` leaked by
+    // `into_handle` in `kafka_admin_AdminClient_alter_client_quotas` and freed only by
+    // `kafka_admin_AlterClientQuotasResult_destroy`, so it is aligned and live; callers use
+    // the reference only within their own synchronous getter call, during which the C caller
+    // keeps the handle alive.
     unsafe { &*(result as *const AlterClientQuotasResultInner) }
 }
 
-/// Returns the number of entities whose quotas were altered.
+/// Returns the number of entities whose quotas were altered. Never blocks: the
+/// entities are known when the request is submitted.
 ///
 /// # Safety
 ///
@@ -22600,18 +22764,16 @@ unsafe fn alter_client_quotas_result_ref(
 pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_count(
     result: *const kafka_admin_AlterClientQuotasResult_t,
 ) -> i32 {
-    // SAFETY: `alter_client_quotas_result_ref` requires a non-null handle from a
-    // `alter_client_quotas` call, which this function's `# Safety` promises (`result` must
-    // be a valid `alter_client_quotas` result handle; only
-    // `kafka_admin_AlterClientQuotasResult_destroy` admits null, so a valid handle is
-    // non-null). The reference is used only for the duration of this synchronous call,
-    // during which the C caller keeps the handle alive by not yet having called
-    // `kafka_admin_AlterClientQuotasResult_destroy`.
+    // SAFETY: `alter_client_quotas_result_ref` requires a non-null `alter_client_quotas`
+    // result handle, which this function's `# Safety` requires of `result` (no in-body null
+    // check, so the C caller's contract is the sole source); the reference is used only for
+    // this `len()` within the call, during which the C caller keeps the handle alive.
     unsafe { alter_client_quotas_result_ref(result) }.entities.len() as i32
 }
 
 /// Returns the entity at `index` (borrowed), or null if out of range. Do not
 /// free it. Entities are sorted by their `(entity type, entity name)` pairs.
+/// Never blocks.
 ///
 /// # Safety
 ///
@@ -22625,15 +22787,11 @@ pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_get_entity(
     if index < 0 {
         return std::ptr::null();
     }
-    // SAFETY: `alter_client_quotas_result_ref` requires a non-null handle from a
-    // `alter_client_quotas` call, which this function's `# Safety` promises (`result` must
-    // be a valid `alter_client_quotas` result handle; only
-    // `kafka_admin_AlterClientQuotasResult_destroy` admits null, so a valid handle is
-    // non-null). The reference is used only for the duration of this synchronous call,
-    // during which the C caller keeps the handle alive by not yet having called
-    // `kafka_admin_AlterClientQuotasResult_destroy`. The pointer this getter returns is an
-    // interior pointer into the same allocation and is documented as borrowed, valid until
-    // that `_destroy`.
+    // SAFETY: `alter_client_quotas_result_ref` requires a non-null `alter_client_quotas`
+    // result handle, which this function's `# Safety` requires of `result` (no in-body null
+    // check, so the C caller's contract is the sole source); the reference is used only for
+    // the duration of this call, and the returned pointer borrows a `ClientQuotaEntityInner`
+    // owned by the handle, valid until `kafka_admin_AlterClientQuotasResult_destroy`.
     match unsafe { alter_client_quotas_result_ref(result) }.entities.get(index as usize) {
         Some(entity) => entity.as_ptr(),
         None => std::ptr::null(),
@@ -22642,6 +22800,12 @@ pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_get_entity(
 
 /// Returns the error for the entity at `index` (borrowed), or null if its
 /// quotas were altered successfully or `index` is out of range. Do not destroy
+/// it.
+///
+/// **Blocks** until that entity's future has resolved — Java's
+/// `values().get(entity).get()` — but not on any other entity. Never blocks for
+/// an out-of-range index. A failure of the whole request (a timeout, say) is
+/// reported here for every entity, as Java completes every entity's future with
 /// it.
 ///
 /// # Safety
@@ -22653,19 +22817,57 @@ pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_get_error(
     result: *const kafka_admin_AlterClientQuotasResult_t,
     index: i32,
 ) -> *const kafka_common_Error_t {
-    // SAFETY: `alter_client_quotas_result_ref` requires a non-null handle from a
-    // `alter_client_quotas` call, which this function's `# Safety` promises (`result` must
-    // be a valid `alter_client_quotas` result handle; only
-    // `kafka_admin_AlterClientQuotasResult_destroy` admits null, so a valid handle is
-    // non-null). The reference is used only for the duration of this synchronous call,
-    // during which the C caller keeps the handle alive by not yet having called
-    // `kafka_admin_AlterClientQuotasResult_destroy`. The pointer this getter returns is an
-    // interior pointer into the same allocation and is documented as borrowed, valid until
-    // that `_destroy`.
-    optional_error_at(&unsafe { alter_client_quotas_result_ref(result) }.errors, index)
+    // SAFETY: `alter_client_quotas_result_ref` requires a non-null `alter_client_quotas`
+    // result handle, which this function's `# Safety` requires of `result` (no in-body null
+    // check, so the C caller's contract is the sole source); the reference is used only for
+    // the duration of this call, and the returned error pointer borrows an `ErrorInner`
+    // cached in the handle (not to be destroyed), valid until
+    // `kafka_admin_AlterClientQuotasResult_destroy`.
+    keyed_error_at(&unsafe { alter_client_quotas_result_ref(result) }.entries, index)
 }
 
-/// Destroys an `alter_client_quotas` result handle. Safe with null (no-op).
+/// Returns whether the future of the entity at `index` has resolved — Java's
+/// `values().get(entity).isDone()`. False if `index` is out of range. Never
+/// blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_client_quotas` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_is_done(
+    result: *const kafka_admin_AlterClientQuotasResult_t,
+    index: i32,
+) -> bool {
+    // SAFETY: `alter_client_quotas_result_ref` requires a non-null `alter_client_quotas`
+    // result handle, which this function's `# Safety` requires of `result` (no in-body null
+    // check, so the C caller's contract is the sole source); the reference is used only for
+    // this check within the call, during which the C caller keeps the handle alive.
+    keyed_is_done_at(&unsafe { alter_client_quotas_result_ref(result) }.entries, index)
+}
+
+/// Java's `all().get()`: **blocks** until every entity's future has resolved,
+/// then returns null if every entity's quotas were altered, or an **owned**
+/// error — free it with `kafka_common_Error_destroy` — of a failed entity (the
+/// first in index order; Java leaves which one unspecified).
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_client_quotas` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_all(
+    result: *const kafka_admin_AlterClientQuotasResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `alter_client_quotas_result_ref` requires a non-null `alter_client_quotas`
+    // result handle, which this function's `# Safety` requires of `result` (no in-body null
+    // check, so the C caller's contract is the sole source); the reference is used only for
+    // the duration of this call, and the returned error is a fresh copy owned by the caller.
+    keyed_all(&unsafe { alter_client_quotas_result_ref(result) }.entries)
+}
+
+/// Destroys an `alter_client_quotas` result handle, invalidating every borrowed
+/// sub-handle obtained from it. Safe with null (no-op).
 ///
 /// # Safety
 ///
@@ -22677,13 +22879,11 @@ pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_destroy(
 ) {
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
-        // a valid `alter_client_quotas` result handle, i.e. the pointer
-        // `box_alter_client_quotas_result` produced with
-        // `Box::into_raw(Box::new(AlterClientQuotasResultInner { .. }))`. Reconstituting
-        // and dropping the `Box` here is the single, final use: the result documentation
-        // tells the caller to free the handle exactly once with
-        // `kafka_admin_AlterClientQuotasResult_destroy`, after which it and every pointer
-        // borrowed from it are invalid.
+        // a valid `alter_client_quotas` result handle, i.e. the
+        // `Box<AlterClientQuotasResultInner>` leaked by `into_handle` in
+        // `kafka_admin_AdminClient_alter_client_quotas`. This is the single, final use: the
+        // contract states the handle and every borrowed sub-handle are invalid afterwards,
+        // and no other function frees it.
         unsafe { drop(Box::from_raw(result as *mut AlterClientQuotasResultInner)) };
     }
 }
@@ -22717,20 +22917,25 @@ fn create_acls_options(timeout_ms: i32) -> CreateAclsOptions {
 pub type kafka_admin_AdminClient_create_acls_callback_t =
     unsafe extern "C" fn(*mut kafka_common_acl_AclBinding_t, *mut kafka_common_Error_t, *mut c_void);
 
-/// Creates ACL bindings, blocking until every per-binding future has resolved
-/// (synchronous).
+/// Creates ACL bindings — Java's
+/// `createAcls(Collection<AclBinding>, CreateAclsOptions)`. Like Java, this
+/// **does not wait**: it submits the request and returns at once.
 ///
-/// This is `createAcls(Collection<AclBinding>, CreateAclsOptions)`. The
-/// bindings cross as seven parallel arrays rather than as handles, following
+/// The bindings cross as seven parallel arrays rather than as handles, following
 /// `alterPartitionReassignments` and `alterConsumerGroupOffsets`; row `i` of
 /// each array describes one `AclBinding`.
 ///
 /// On success writes a [`kafka_admin_CreateAclsResult_t`] to `*out_result`
 /// (free it with [`kafka_admin_CreateAclsResult_destroy`]) and returns null.
-/// **A per-binding failure is not a call failure**: it is reported by
-/// [`kafka_admin_CreateAclsResult_get_error`] for that binding. A non-null
-/// return means the request could not be submitted at all, and `*out_result` is
-/// left untouched.
+/// The handle holds one future per binding, as Java's `values()` does. Its
+/// bindings are readable at once; [`kafka_admin_CreateAclsResult_get_error`]
+/// waits for that binding's future only, and
+/// [`kafka_admin_CreateAclsResult_all`] waits for every binding (Java's
+/// `get()`). **Every failure of the request — per binding, or of the request as
+/// a whole, such as a timeout — is read from the handle**, as in Java. A
+/// non-null return means the request could not be submitted at all (a NULL
+/// `admin`, or a row the marshaling below rejects), and `*out_result` is left
+/// untouched.
 ///
 /// # Parameters
 ///
@@ -22799,22 +23004,21 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls(
         )
     };
     let options = create_acls_options(timeout_ms);
-    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
-    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
-    // a valid handle); the helper itself returns an error for a NULL `admin` before
-    // dereferencing it. The `&dyn Admin` it derives through `handle_ref` is used only
-    // inside the `submit` closure (`submit_create_acls`) and the following `block_on`, both
-    // on the calling thread during this synchronous call, while the C caller keeps the
-    // handle alive (it has not called `kafka_admin_AdminClient_destroy`); the awaited
-    // future owns its result and borrows nothing from the handle, so nothing derived from
-    // it outlives the call.
-    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_create_acls(a, &acls?, options))) };
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires of the C caller (the
+    // helper additionally turns a NULL `admin` into an illegal-argument error). The
+    // `submit` closure runs on the calling thread inside the helper, borrowing the marshaled
+    // `acls` only there; the handle it builds holds only owned futures and the waiter.
+    let outcome = unsafe {
+        admin_sync_submit(admin, move |a, w| {
+            Ok(create_acls_result_inner(w, submit_create_acls_bindings(a, &acls?, options)))
+        })
+    };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
-    // which this function's `# Safety` promises (`out_result` must be null or writable);
-    // the helper null-checks `out_result` and on success writes exactly one element, the
-    // `kafka_admin_CreateAclsResult_t` freshly boxed by `box_create_acls_result`, leaving
-    // it untouched on error.
-    unsafe { finish_sync(outcome, out_result, box_create_acls_result) }
+    // which is exactly what this function's `# Safety` promises (`out_result` must be null
+    // or writable); it null-checks before writing exactly one freshly boxed
+    // `CreateAclsResult` handle, whose ownership passes to the C caller.
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// The body of [`kafka_admin_AdminClient_create_acls_async`], shared with its `#[ffi_guard]`'s `on_panic`.
@@ -23037,17 +23241,20 @@ fn describe_acls_options(timeout_ms: i32) -> DescribeAclsOptions {
 pub type kafka_admin_AdminClient_describe_acls_callback_t =
     unsafe extern "C" fn(*mut kafka_admin_DescribeAclsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
-/// Describes the ACL bindings matching one filter, blocking until the result
-/// arrives (synchronous).
+/// Describes the ACL bindings matching one filter — Java's
+/// `describeAcls(AclBindingFilter, DescribeAclsOptions)`. Like Java, this
+/// **does not wait**: it submits the request and returns at once.
 ///
-/// This is `describeAcls(AclBindingFilter, DescribeAclsOptions)`. Java takes a
-/// single filter, not a collection, so the seven fields cross as scalars.
+/// Java takes a single filter, not a collection, so the seven fields cross as
+/// scalars.
 ///
 /// On success writes a [`kafka_admin_DescribeAclsResult_t`] to `*out_result`
 /// (free it with [`kafka_admin_DescribeAclsResult_destroy`]) and returns null.
-/// Unlike the keyed RPCs there is no per-key error here: `DescribeAclsResult`
-/// holds one future for the whole call, so any failure is returned from this
-/// function and `*out_result` is left untouched.
+/// The handle holds Java's single `values()` future; every accessor waits for
+/// it, and **every failure of the request, such as a timeout, is read from the
+/// handle** with [`kafka_admin_DescribeAclsResult_values`] (Java's `get()`).
+/// There is no per-key error. A non-null return means the request could not be
+/// submitted at all (a NULL `admin`), and `*out_result` is left untouched.
 ///
 /// # Parameters
 ///
@@ -23100,22 +23307,22 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_acls(
         )
     };
     let options = describe_acls_options(timeout_ms);
-    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
-    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
-    // a valid handle); the helper itself returns an error for a NULL `admin` before
-    // dereferencing it. The `&dyn Admin` it derives through `handle_ref` is used only
-    // inside the `submit` closure (`submit_describe_acls`) and the following `block_on`,
-    // both on the calling thread during this synchronous call, while the C caller keeps the
-    // handle alive (it has not called `kafka_admin_AdminClient_destroy`); the awaited
-    // future owns its result and borrows nothing from the handle, so nothing derived from
-    // it outlives the call.
-    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_describe_acls(a, &filter, options))) };
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires of the C caller (the
+    // helper additionally turns a NULL `admin` into an illegal-argument error). The `submit`
+    // closure runs on the calling thread inside the helper, borrowing the owned `filter`
+    // only there; the handle it builds holds only the future and the waiter.
+    let outcome = unsafe {
+        admin_sync_submit(admin, move |a, w| {
+            let future = submit_describe_acls(a, &filter, options);
+            Ok(DescribeAclsResultInner { bindings: lazy_single(w, future, describe_acls_data) })
+        })
+    };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
-    // which this function's `# Safety` promises (`out_result` must be null or writable);
-    // the helper null-checks `out_result` and on success writes exactly one element, the
-    // `kafka_admin_DescribeAclsResult_t` freshly boxed by `box_describe_acls_result`,
-    // leaving it untouched on error.
-    unsafe { finish_sync(outcome, out_result, box_describe_acls_result) }
+    // which is exactly what this function's `# Safety` promises (`out_result` must be null
+    // or writable); it null-checks before writing exactly one freshly boxed
+    // `DescribeAclsResult` handle, whose ownership passes to the C caller.
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// Describes ACL bindings asynchronously. See
@@ -23246,21 +23453,26 @@ pub type kafka_admin_AdminClient_delete_acls_callback_t = unsafe extern "C" fn(
     *mut c_void,
 );
 
-/// Deletes the ACL bindings matching each filter, blocking until every
-/// per-filter future has resolved (synchronous).
+/// Deletes the ACL bindings matching each filter — Java's
+/// `deleteAcls(Collection<AclBindingFilter>, DeleteAclsOptions)`. Like Java,
+/// this **does not wait**: it submits the request and returns at once.
 ///
-/// This is `deleteAcls(Collection<AclBindingFilter>, DeleteAclsOptions)`. The
-/// filters cross as seven parallel arrays; row `i` describes one
+/// The filters cross as seven parallel arrays; row `i` describes one
 /// `AclBindingFilter`. As with
 /// [`kafka_admin_AdminClient_describe_acls`], a NULL string entry means "match
 /// any" and no enum combination is rejected.
 ///
 /// On success writes a [`kafka_admin_DeleteAclsResult_t`] to `*out_result`
 /// (free it with [`kafka_admin_DeleteAclsResult_destroy`]) and returns null.
-/// **Neither a per-filter nor a per-ACL failure is a call failure**: the first
-/// is reported by [`kafka_admin_DeleteAclsResult_get_error`], the second by
-/// [`kafka_admin_DeleteAclsResult_get_result_error`]. A non-null return means
-/// the request could not be submitted at all.
+/// The handle holds one future per filter, as Java's `values()` does. Its
+/// filters are readable at once; the per-filter accessors wait for that
+/// filter's future only, and [`kafka_admin_DeleteAclsResult_all`] waits for
+/// every filter (Java's `get()`). **Every failure of the request is read from
+/// the handle**, as in Java: a filter's failure, or a failure of the request as
+/// a whole such as a timeout, by [`kafka_admin_DeleteAclsResult_get_error`],
+/// and a per-ACL failure by [`kafka_admin_DeleteAclsResult_get_result_error`].
+/// A non-null return means the request could not be submitted at all (a NULL
+/// `admin`).
 ///
 /// # Safety
 ///
@@ -23301,22 +23513,21 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls(
         )
     };
     let options = delete_acls_options(timeout_ms);
-    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
-    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
-    // a valid handle); the helper itself returns an error for a NULL `admin` before
-    // dereferencing it. The `&dyn Admin` it derives through `handle_ref` is used only
-    // inside the `submit` closure (`submit_delete_acls`) and the following `block_on`, both
-    // on the calling thread during this synchronous call, while the C caller keeps the
-    // handle alive (it has not called `kafka_admin_AdminClient_destroy`); the awaited
-    // future owns its result and borrows nothing from the handle, so nothing derived from
-    // it outlives the call.
-    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_delete_acls(a, &filters, options))) };
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires of the C caller (the
+    // helper additionally turns a NULL `admin` into an illegal-argument error). The
+    // `submit` closure runs on the calling thread inside the helper, borrowing the owned
+    // `filters` only there; the handle it builds holds only owned futures and the waiter.
+    let outcome = unsafe {
+        admin_sync_submit(admin, move |a, w| {
+            Ok(delete_acls_result_inner(w, submit_delete_acls_entries(a, &filters, options)))
+        })
+    };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
-    // which this function's `# Safety` promises (`out_result` must be null or writable);
-    // the helper null-checks `out_result` and on success writes exactly one element, the
-    // `kafka_admin_DeleteAclsResult_t` freshly boxed by `box_delete_acls_result`, leaving
-    // it untouched on error.
-    unsafe { finish_sync(outcome, out_result, box_delete_acls_result) }
+    // which is exactly what this function's `# Safety` promises (`out_result` must be null
+    // or writable); it null-checks before writing exactly one freshly boxed
+    // `DeleteAclsResult` handle, whose ownership passes to the C caller.
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// The body of [`kafka_admin_AdminClient_delete_acls_async`], shared with its `#[ffi_guard]`'s `on_panic`.
@@ -23514,17 +23725,19 @@ fn describe_client_quotas_options(timeout_ms: i32) -> DescribeClientQuotasOption
 pub type kafka_admin_AdminClient_describe_client_quotas_callback_t =
     unsafe extern "C" fn(*mut kafka_admin_DescribeClientQuotasResult_t, *mut kafka_common_Error_t, *mut c_void);
 
-/// Describes the client quotas matching a filter, blocking until the result
-/// arrives (synchronous).
-///
-/// This is `describeClientQuotas(ClientQuotaFilter,
-/// DescribeClientQuotasOptions)`.
+/// Describes the client quotas matching a filter — Java's
+/// `describeClientQuotas(ClientQuotaFilter, DescribeClientQuotasOptions)`. Like
+/// Java, this **does not wait**: it submits the request and returns at once.
 ///
 /// On success writes a [`kafka_admin_DescribeClientQuotasResult_t`] to
 /// `*out_result` (free it with
-/// [`kafka_admin_DescribeClientQuotasResult_destroy`]) and returns null.
-/// `DescribeClientQuotasResult` holds one future for the whole call, so any
-/// failure is returned from this function and `*out_result` is left untouched.
+/// [`kafka_admin_DescribeClientQuotasResult_destroy`]) and returns null. The
+/// handle holds Java's single `entities()` future; every accessor waits for it,
+/// and **every failure of the request, such as a timeout, is read from the
+/// handle** with [`kafka_admin_DescribeClientQuotasResult_entities`] (Java's
+/// `get()`). A non-null return means the request could not be submitted at all
+/// (a NULL `admin`, or a filter the marshaling below rejects), and
+/// `*out_result` is left untouched.
 ///
 /// # Parameters
 ///
@@ -23567,23 +23780,22 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_client_quotas(
     // negative `count` to zero and diagnoses a NULL entity-type entry with an error.
     let filter = unsafe { read_client_quota_filter(entity_types, match_types, match_names, count, strict) };
     let options = describe_client_quotas_options(timeout_ms);
-    let outcome =
-        // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
-        // admin-client constructor, which this function's `# Safety` promises (`admin` must
-        // be a valid handle); the helper itself returns an error for a NULL `admin` before
-        // dereferencing it. The `&dyn Admin` it derives through `handle_ref` is used only
-        // inside the `submit` closure (`submit_describe_client_quotas`) and the following
-        // `block_on`, both on the calling thread during this synchronous call, while the C
-        // caller keeps the handle alive (it has not called
-        // `kafka_admin_AdminClient_destroy`); the awaited future owns its result and
-        // borrows nothing from the handle, so nothing derived from it outlives the call.
-        unsafe { admin_sync_value_op(admin, move |a| Ok(submit_describe_client_quotas(a, &filter?, options))) };
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires of the C caller (the
+    // helper additionally turns a NULL `admin` into an illegal-argument error). The `submit`
+    // closure runs on the calling thread inside the helper, borrowing the marshaled `filter`
+    // only there; the handle it builds holds only the future and the waiter.
+    let outcome = unsafe {
+        admin_sync_submit(admin, move |a, w| {
+            let future = submit_describe_client_quotas(a, &filter?, options);
+            Ok(DescribeClientQuotasResultInner { entities: lazy_single(w, future, describe_client_quotas_data) })
+        })
+    };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
-    // which this function's `# Safety` promises (`out_result` must be null or writable);
-    // the helper null-checks `out_result` and on success writes exactly one element, the
-    // `kafka_admin_DescribeClientQuotasResult_t` freshly boxed by
-    // `box_describe_client_quotas_result`, leaving it untouched on error.
-    unsafe { finish_sync(outcome, out_result, box_describe_client_quotas_result) }
+    // which is exactly what this function's `# Safety` promises (`out_result` must be null
+    // or writable); it null-checks before writing exactly one freshly boxed
+    // `DescribeClientQuotasResult` handle, whose ownership passes to the C caller.
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// Describes client quotas asynchronously. See
@@ -23698,20 +23910,26 @@ fn alter_client_quotas_options(timeout_ms: i32, validate_only: bool) -> AlterCli
 pub type kafka_admin_AdminClient_alter_client_quotas_callback_t =
     unsafe extern "C" fn(*mut kafka_common_quota_ClientQuotaEntity_t, *mut kafka_common_Error_t, *mut c_void);
 
-/// Alters client quotas, blocking until every per-entity future has resolved
-/// (synchronous).
+/// Alters client quotas — Java's
+/// `alterClientQuotas(Collection<ClientQuotaAlteration>, AlterClientQuotasOptions)`.
+/// Like Java, this **does not wait**: it submits the request and returns at
+/// once.
 ///
-/// This is `alterClientQuotas(Collection<ClientQuotaAlteration>,
-/// AlterClientQuotasOptions)`. Each alteration is a quota entity plus a list of
-/// operations, so both levels cross as arrays of arrays with per-row counts,
-/// following `listConsumerGroupOffsets`.
+/// Each alteration is a quota entity plus a list of operations, so both levels
+/// cross as arrays of arrays with per-row counts, following
+/// `listConsumerGroupOffsets`.
 ///
 /// On success writes a [`kafka_admin_AlterClientQuotasResult_t`] to
 /// `*out_result` (free it with
-/// [`kafka_admin_AlterClientQuotasResult_destroy`]) and returns null. **A
-/// per-entity failure is not a call failure**: it is reported by
-/// [`kafka_admin_AlterClientQuotasResult_get_error`]. A non-null return means
-/// the request could not be submitted at all.
+/// [`kafka_admin_AlterClientQuotasResult_destroy`]) and returns null. The
+/// handle holds one future per entity, as Java's `values()` does. Its entities
+/// are readable at once; [`kafka_admin_AlterClientQuotasResult_get_error`]
+/// waits for that entity's future only, and
+/// [`kafka_admin_AlterClientQuotasResult_all`] waits for every entity (Java's
+/// `get()`). **Every failure of the request — per entity, or of the request as
+/// a whole, such as a timeout — is read from the handle**, as in Java. A
+/// non-null return means the request could not be submitted at all (a NULL
+/// `admin`, or an alteration the marshaling below rejects).
 ///
 /// # Parameters
 ///
@@ -23777,22 +23995,24 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas(
         )
     };
     let options = alter_client_quotas_options(timeout_ms, validate_only);
-    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
-    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
-    // a valid handle); the helper itself returns an error for a NULL `admin` before
-    // dereferencing it. The `&dyn Admin` it derives through `handle_ref` is used only
-    // inside the `submit` closure (`submit_alter_client_quotas`) and the following
-    // `block_on`, both on the calling thread during this synchronous call, while the C
-    // caller keeps the handle alive (it has not called `kafka_admin_AdminClient_destroy`);
-    // the awaited future owns its result and borrows nothing from the handle, so nothing
-    // derived from it outlives the call.
-    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_alter_client_quotas(a, &entries?, options))) };
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires of the C caller (the
+    // helper additionally turns a NULL `admin` into an illegal-argument error). The
+    // `submit` closure runs on the calling thread inside the helper, borrowing the marshaled
+    // `entries` only there; the handle it builds holds only owned futures and the waiter.
+    let outcome = unsafe {
+        admin_sync_submit(admin, move |a, w| {
+            Ok(alter_client_quotas_result_inner(
+                w,
+                submit_alter_client_quotas_entries(a, &entries?, options),
+            ))
+        })
+    };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
-    // which this function's `# Safety` promises (`out_result` must be null or writable);
-    // the helper null-checks `out_result` and on success writes exactly one element, the
-    // `kafka_admin_AlterClientQuotasResult_t` freshly boxed by
-    // `box_alter_client_quotas_result`, leaving it untouched on error.
-    unsafe { finish_sync(outcome, out_result, box_alter_client_quotas_result) }
+    // which is exactly what this function's `# Safety` promises (`out_result` must be null
+    // or writable); it null-checks before writing exactly one freshly boxed
+    // `AlterClientQuotasResult` handle, whose ownership passes to the C caller.
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// The body of [`kafka_admin_AdminClient_alter_client_quotas_async`], shared with its `#[ffi_guard]`'s `on_panic`.
@@ -25161,9 +25381,6 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_
 //     generating constructor.)
 // ---------------------------------------------------------------------------
 
-/// Per-user outcomes of `alterUserScramCredentials`.
-type AlterScramOutcomes = HashMap<String, Result<(), Error>>;
-
 /// Reads `len` bytes into an owned buffer, or an empty one when the pointer is
 /// NULL or the length is not positive.
 ///
@@ -25440,7 +25657,8 @@ unsafe fn read_feature_updates(
 }
 
 /// Submits `describeUserScramCredentials` and returns the core result once its
-/// shared data future has resolved.
+/// shared data future has resolved, for the `_async` entry point (the
+/// synchronous one keeps the core result's futures unresolved instead).
 ///
 /// Java's `DescribeUserScramCredentialsResult` exposes three distinct views over
 /// one response future — `all()`
@@ -25451,7 +25669,7 @@ unsafe fn read_feature_updates(
 /// result object rather than flattening it into one lossy per-user shape.
 ///
 /// A top-level failure of the data future (auth/timeout) surfaces here and
-/// becomes the call's error: awaiting `users()` both drives the shared future to
+/// becomes the callback's error: awaiting `users()` both drives the shared future to
 /// completion and propagates such a failure. `users()`
 /// (`DescribeUserScramCredentialsResult.java:92-104`) completes exceptionally
 /// **only** when the data future itself did (its `whenComplete`'s
@@ -25466,26 +25684,11 @@ fn submit_describe_user_scram_credentials(
     let result = admin.describe_user_scram_credentials_with_users_options(users, options);
     async move {
         // Drive the shared data future to completion and surface a top-level
-        // failure as the call's error, mirroring Java's `whenComplete` completing
+        // failure as the callback's error, mirroring Java's `whenComplete` completing
         // every view exceptionally when `throwable != null`.
         result.users().get().await?;
         Ok(result)
     }
-}
-
-/// Submits `alterUserScramCredentials` and returns the collect-all future over
-/// its per-user futures.
-fn submit_alter_user_scram_credentials(
-    admin: &dyn Admin,
-    alterations: &[UserScramCredentialAlteration],
-    options: AlterUserScramCredentialsOptions,
-) -> KafkaFuture<AlterScramOutcomes> {
-    let result = admin.alter_user_scram_credentials_with_options(alterations, options);
-    // Driven from the result's own map (Java's `values()`), which is the
-    // authority on which users got a future.
-    let entries: Vec<(String, KafkaFuture<()>)> =
-        result.values().iter().map(|(user, f)| (user.clone(), f.clone())).collect();
-    KafkaFuture::join_map_results(entries)
 }
 
 /// Reads `count` scram alteration user names, tolerant of a NULL entry (kept
@@ -25509,16 +25712,18 @@ unsafe fn read_scram_user_keys(users: *const *const c_char, count: i32) -> Vec<S
         .collect()
 }
 
-/// Submits `alterUserScramCredentials`, unjoined, for
-/// [`admin_async_per_key_op`]'s independent-per-key delivery. Same `Admin`
-/// call as [`submit_alter_user_scram_credentials`]; see the "RPC submission
-/// helpers — per-key (unjoined) variants" note above.
+/// Submits `alterUserScramCredentials`, unjoined: for
+/// [`admin_async_per_key_op`]'s independent-per-key delivery, and for the
+/// synchronous entry point's result handle. See the "RPC submission helpers —
+/// per-key (unjoined) variants" note above.
 fn submit_alter_user_scram_credentials_entries(
     admin: &dyn Admin,
     alterations: &[UserScramCredentialAlteration],
     options: AlterUserScramCredentialsOptions,
 ) -> Vec<(String, KafkaFuture<()>)> {
     let result = admin.alter_user_scram_credentials_with_options(alterations, options);
+    // Driven from the result's own map (Java's `values()`), which is the
+    // authority on which users got a future.
     result.values().iter().map(|(user, f)| (user.clone(), f.clone())).collect()
 }
 
@@ -25623,24 +25828,27 @@ fn describe_user_scram_credentials_options(timeout_ms: i32) -> DescribeUserScram
 pub type kafka_admin_AdminClient_describe_user_scram_credentials_callback_t =
     unsafe extern "C" fn(*mut kafka_admin_DescribeUserScramCredentialsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
-/// Describes SASL/SCRAM credentials, blocking until the response has resolved
-/// (synchronous).
-///
-/// This is
+/// Describes SASL/SCRAM credentials — Java's
 /// `describeUserScramCredentials(List<String>, DescribeUserScramCredentialsOptions)`.
+/// Like Java, this **does not wait**: it submits the request and returns at
+/// once.
 ///
 /// On success writes a
 /// [`kafka_admin_DescribeUserScramCredentialsResult_t`] to `*out_result` (free
 /// it with [`kafka_admin_DescribeUserScramCredentialsResult_destroy`]) and
-/// returns null. The handle backs Java's three views:
+/// returns null. The handle backs Java's three views, each waiting for the
+/// response when first read (Java's `get()`):
 /// [`kafka_admin_DescribeUserScramCredentialsResult_all_error`] /
 /// `..._all_count` / `..._all_get_user` / `..._all_get_description`,
+/// [`kafka_admin_DescribeUserScramCredentialsResult_users_error`] /
 /// `..._users_count` / `..._users_get`, and
-/// [`kafka_admin_DescribeUserScramCredentialsResult_description`]. **A user-level
-/// failure is not a call failure**: it is reported through the `description(user)`
-/// view (which faults on RESOURCE_NOT_FOUND, Java-faithfully). A non-null return
-/// means the request could not be submitted or the whole response failed
-/// (auth/timeout), and `*out_result` is left untouched.
+/// [`kafka_admin_DescribeUserScramCredentialsResult_description`]. **Every
+/// failure of the request is read from the handle**, as in Java: a failure of
+/// the whole response (auth, a timeout) faults every view, and a user-level
+/// failure is reported through the `all()` and `description(user)` views (the
+/// latter faulting on RESOURCE_NOT_FOUND, Java-faithfully). A non-null return
+/// means the request could not be submitted at all (a NULL `admin`), and
+/// `*out_result` is left untouched.
 ///
 /// # Parameters
 ///
@@ -25667,25 +25875,22 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_user_scram_credentials
     // zero and copies each string on the calling thread during this call.
     let users = unsafe { read_strings(users, count) };
     let options = describe_user_scram_credentials_options(timeout_ms);
-    let outcome =
-        // SAFETY: `admin_sync_future_op` requires `admin` to be a valid handle from an
-        // admin-client constructor, which this function's `# Safety` promises (`admin` must
-        // be a valid handle); the helper itself returns an error for a NULL `admin` before
-        // dereferencing it. The `&dyn Admin` it derives through `handle_ref` is used only
-        // inside the `submit` closure (`submit_describe_user_scram_credentials`) and the
-        // following `block_on`, both on the calling thread during this synchronous call,
-        // while the C caller keeps the handle alive (it has not called
-        // `kafka_admin_AdminClient_destroy`); the awaited future owns its result and
-        // borrows nothing from the handle, so nothing derived from it outlives the call.
-        // The `impl Future + Send + use<>` that `submit_describe_user_scram_credentials`
-        // returns captures no borrow of the handle.
-        unsafe { admin_sync_future_op(admin, move |a| Ok(submit_describe_user_scram_credentials(a, &users, options))) };
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires of the C caller (the
+    // helper additionally turns a NULL `admin` into an illegal-argument error). The `submit`
+    // closure runs on the calling thread inside the helper, borrowing the owned `users` only
+    // there; the handle it builds holds only the core result's futures and the waiter.
+    let outcome = unsafe {
+        admin_sync_submit(admin, move |a, w| {
+            let core = a.describe_user_scram_credentials_with_users_options(&users, options);
+            Ok(describe_user_scram_credentials_result_inner(w, core))
+        })
+    };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
-    // which this function's `# Safety` promises (`out_result` must be null or writable);
-    // the helper null-checks `out_result` and on success writes exactly one element, the
-    // `kafka_admin_DescribeUserScramCredentialsResult_t` freshly boxed by
-    // `box_describe_user_scram_credentials_result`, leaving it untouched on error.
-    unsafe { finish_sync(outcome, out_result, box_describe_user_scram_credentials_result) }
+    // which is exactly what this function's `# Safety` promises (`out_result` must be null
+    // or writable); it null-checks before writing exactly one freshly boxed
+    // `DescribeUserScramCredentialsResult` handle, whose ownership passes to the C caller.
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// Describes SASL/SCRAM credentials asynchronously. See
@@ -25790,21 +25995,25 @@ fn alter_user_scram_credentials_options(timeout_ms: i32) -> AlterUserScramCreden
 pub type kafka_admin_AdminClient_alter_user_scram_credentials_callback_t =
     unsafe extern "C" fn(*const c_char, *mut kafka_common_Error_t, *mut c_void);
 
-/// Upserts and deletes SASL/SCRAM credentials, blocking until every per-user
-/// future has resolved (synchronous).
-///
-/// This is
+/// Upserts and deletes SASL/SCRAM credentials — Java's
 /// `alterUserScramCredentials(List<UserScramCredentialAlteration>, AlterUserScramCredentialsOptions)`.
+/// Like Java, this **does not wait**: it submits the request and returns at
+/// once.
+///
 /// The alterations cross as parallel arrays; row `i` of each describes one
 /// alteration.
 ///
 /// On success writes a [`kafka_admin_AlterUserScramCredentialsResult_t`] to
 /// `*out_result` (free it with
 /// [`kafka_admin_AlterUserScramCredentialsResult_destroy`]) and returns null.
-/// **A per-user failure is not a call failure**: it is reported by
-/// [`kafka_admin_AlterUserScramCredentialsResult_get_error`] for that user. A
-/// non-null return means the request could not be submitted at all, and
-/// `*out_result` is left untouched.
+/// The handle holds one future per user, as Java's `values()` does. Its users
+/// are readable at once; [`kafka_admin_AlterUserScramCredentialsResult_get_error`]
+/// waits for that user's future only, and
+/// [`kafka_admin_AlterUserScramCredentialsResult_all`] waits for every user
+/// (Java's `get()`). **Every failure of the request — per user, or of the
+/// request as a whole, such as a timeout — is read from the handle**, as in
+/// Java. A non-null return means the request could not be submitted at all (a
+/// NULL `admin` or a NULL user entry), and `*out_result` is left untouched.
 ///
 /// # Parameters
 ///
@@ -25893,26 +26102,22 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials(
         )
     };
     let options = alter_user_scram_credentials_options(timeout_ms);
-    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
-    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
-    // a valid handle); the helper itself returns an error for a NULL `admin` before
-    // dereferencing it. The `&dyn Admin` it derives through `handle_ref` is used only
-    // inside the `submit` closure (`submit_alter_user_scram_credentials`) and the following
-    // `block_on`, both on the calling thread during this synchronous call, while the C
-    // caller keeps the handle alive (it has not called `kafka_admin_AdminClient_destroy`);
-    // the awaited future owns its result and borrows nothing from the handle, so nothing
-    // derived from it outlives the call.
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires of the C caller (the
+    // helper additionally turns a NULL `admin` into an illegal-argument error). The
+    // `submit` closure runs on the calling thread inside the helper, borrowing the marshaled
+    // `alterations` only there; the handle it builds holds only owned futures and the waiter.
     let outcome = unsafe {
-        admin_sync_value_op(admin, move |a| {
-            Ok(submit_alter_user_scram_credentials(a, &alterations?, options))
+        admin_sync_submit(admin, move |a, w| {
+            let futures = submit_alter_user_scram_credentials_entries(a, &alterations?, options);
+            Ok(alter_user_scram_credentials_result_inner(w, futures))
         })
     };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
-    // which this function's `# Safety` promises (`out_result` must be null or writable);
-    // the helper null-checks `out_result` and on success writes exactly one element, the
-    // `kafka_admin_AlterUserScramCredentialsResult_t` freshly boxed by
-    // `box_alter_user_scram_credentials_result`, leaving it untouched on error.
-    unsafe { finish_sync(outcome, out_result, box_alter_user_scram_credentials_result) }
+    // which is exactly what this function's `# Safety` promises (`out_result` must be null
+    // or writable); it null-checks before writing exactly one freshly boxed
+    // `AlterUserScramCredentialsResult` handle, whose ownership passes to the C caller.
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// The body of [`kafka_admin_AdminClient_alter_user_scram_credentials_async`], shared with its `#[ffi_guard]`'s `on_panic`.
@@ -27266,13 +27471,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_update_features_async(
 /// Drives an already-resolvable future to completion synchronously, off any
 /// async runtime.
 ///
-/// The SCRAM result handle stores the core `DescribeUserScramCredentialsResult`,
-/// whose shared data future is already resolved by the time the handle is built
-/// (`submit_describe_user_scram_credentials` awaited it). Its `all()` / `users()`
-/// / `description()` views are `then_apply` refinements over that resolved
-/// future, so each is ready on the **first** poll; this parks only defensively
-/// and never actually blocks, and needs no Tokio runtime context (a C accessor
-/// may call it from any thread).
+/// A SCRAM result handle from the `_async` callback stores the core
+/// `DescribeUserScramCredentialsResult`, whose shared data future is already
+/// resolved by the time the handle is built
+/// (`submit_describe_user_scram_credentials` awaited it). Its `all()` /
+/// `users()` / `description()` views are `then_apply` refinements over that
+/// resolved future, so each is ready on the **first** poll; this parks only
+/// defensively and never actually blocks, and needs no Tokio runtime context (a
+/// C accessor may call it from any thread). A handle from the synchronous entry
+/// point waits through its [`FutureWaiter`] instead.
 fn block_on_ready<F: std::future::Future>(future: F) -> F::Output {
     use std::sync::Arc;
     use std::task::{Context, Poll, Wake, Waker};
@@ -27511,65 +27718,81 @@ struct ScramAllRow {
 
 /// Backing state for [`kafka_admin_DescribeUserScramCredentialsResult_t`].
 ///
-/// The three views are computed **once** at handle construction from the
-/// resolved core result (`box_describe_user_scram_credentials_result`), mirroring
-/// `DescribeUserScramCredentialsResult`'s three methods:
+/// Each of Java's views is its own future over the one response
+/// (`DescribeUserScramCredentialsResult`'s three methods), and each accessor
+/// waits only for the view it reads:
 ///
 ///   - `all_view` — Java `all()`
 ///     (`DescribeUserScramCredentialsResult.java:54-80`): `Ok` rows key every
 ///     described user (RESOURCE_NOT_FOUND users **included**, with empty
-///     credentials — a successful description); `Err` is the first user-level
-///     error whose code is neither NONE nor RESOURCE_NOT_FOUND, which faults the
-///     whole view.
+///     credentials — a successful description); `Err` is a top-level failure, or
+///     the first user-level error whose code is neither NONE nor
+///     RESOURCE_NOT_FOUND, which faults the whole view.
 ///   - `users_view` — Java `users()` (`:92-104`): every response row whose error
 ///     is not RESOURCE_NOT_FOUND, as the row's user, in response order and not
 ///     de-duplicated (Java filters the rows into a `List`), so RNF users are
 ///     **excluded** and users with a credential that could not be described
-///     (another error) are **included**.
+///     (another error) are **included**. `Err` only for a top-level failure.
 ///   - `description(user)` is served on demand from `core` (Java `:114-138`): it
 ///     **faults** with RESOURCE_NOT_FOUND for an RNF user (":128 RESOURCE_NOT_FOUND
 ///     is included here") and for a user not present ("No such user: <user>").
-///     The core's data future is already resolved, so each `description()` view is
-///     ready on the first poll.
+///
+/// On a handle from the synchronous entry point these futures may still be
+/// unresolved; `waiter` is then `Some`, and `description(user)` waits through
+/// it. A handle from the `_async` callback is built from a resolved core result,
+/// so every view is resolved and `waiter` is `None`.
 struct DescribeUserScramCredentialsResultInner {
-    all_view: Result<Vec<ScramAllRow>, ErrorInner>,
-    users_view: Vec<CString>,
+    all_view: LazySingle<Vec<ScramAllRow>>,
+    users_view: LazySingle<Vec<CString>>,
     core: DescribeUserScramCredentialsResult,
+    waiter: Option<FutureWaiter>,
 }
 
-/// Builds the C handle from the resolved core result, precomputing the `all()`
-/// and `users()` views and retaining the core for on-demand `description(user)`.
+/// Flattens Java's `all()` map into rows sorted by user name (`all()` is an
+/// unordered `Map` in Java; sorting gives deterministic C-side indexing).
+fn scram_all_rows(map: HashMap<String, UserScramCredentialsDescription>) -> Vec<ScramAllRow> {
+    let mut rows: Vec<ScramAllRow> = map
+        .into_iter()
+        .map(|(user, description)| ScramAllRow {
+            user_c: to_cstring(&user),
+            description: UserScramCredentialsDescriptionInner::from_description(&description),
+        })
+        .collect();
+    rows.sort_by(|a, b| a.user_c.cmp(&b.user_c));
+    rows
+}
+
+/// Java's `users()` list as C strings, in response order (Java returns a
+/// `List`).
+fn scram_users(users: Vec<String>) -> Vec<CString> {
+    users.iter().map(|u| to_cstring(u)).collect()
+}
+
+/// Wraps the core result's `all()` and `users()` futures, unresolved, as the C
+/// handle's backing state, keeping the core for on-demand `description(user)`.
+fn describe_user_scram_credentials_result_inner(
+    waiter: &FutureWaiter,
+    core: DescribeUserScramCredentialsResult,
+) -> DescribeUserScramCredentialsResultInner {
+    DescribeUserScramCredentialsResultInner {
+        all_view: lazy_single(waiter, core.all(), scram_all_rows),
+        users_view: lazy_single(waiter, core.users(), scram_users),
+        core,
+        waiter: Some(waiter.clone()),
+    }
+}
+
+/// Builds the C handle from the resolved core result (the `_async` path),
+/// precomputing the `all()` and `users()` views and retaining the core for
+/// on-demand `description(user)`.
 fn box_describe_user_scram_credentials_result(
     core: DescribeUserScramCredentialsResult,
 ) -> *mut kafka_admin_DescribeUserScramCredentialsResult_t {
     // The shared data future is resolved (the submit awaited `users()`), so both
     // views below are ready on the first poll.
-    let all_view = match block_on_ready(core.all().get()) {
-        Ok(map) => {
-            let mut rows: Vec<ScramAllRow> = map
-                .into_iter()
-                .map(|(user, description)| ScramAllRow {
-                    user_c: to_cstring(&user),
-                    description: UserScramCredentialsDescriptionInner::from_description(&description),
-                })
-                .collect();
-            // `all()` is a Map in Java (unordered); sort for deterministic C-side
-            // indexing.
-            rows.sort_by(|a, b| a.user_c.cmp(&b.user_c));
-            Ok(rows)
-        },
-        Err(e) => Err(error_inner(e)),
-    };
-    // `users()` cannot fault now (the data future resolved); the `unwrap_or_default`
-    // is only for the impossible top-level-error case. Response order is preserved
-    // (Java returns a `List`).
-    let users_view: Vec<CString> = block_on_ready(core.users().get())
-        .unwrap_or_default()
-        .iter()
-        .map(|u| to_cstring(u))
-        .collect();
-    Box::into_raw(Box::new(DescribeUserScramCredentialsResultInner { all_view, users_view, core }))
-        as *mut kafka_admin_DescribeUserScramCredentialsResult_t
+    let all_view = LazyOutcome::resolved(block_on_ready(core.all().get()).map(scram_all_rows).map_err(error_inner));
+    let users_view = LazyOutcome::resolved(block_on_ready(core.users().get()).map(scram_users).map_err(error_inner));
+    into_handle(DescribeUserScramCredentialsResultInner { all_view, users_view, core, waiter: None })
 }
 
 /// Casts a `*const kafka_admin_DescribeUserScramCredentialsResult_t` to a
@@ -27582,25 +27805,25 @@ fn box_describe_user_scram_credentials_result(
 unsafe fn describe_user_scram_credentials_result_ref(
     result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
 ) -> &'static DescribeUserScramCredentialsResultInner {
-    // SAFETY: `result` is, per this helper's `# Safety`, a non-null handle from a
-    // `describe_user_scram_credentials` call; such handles are produced only by
-    // `box_describe_user_scram_credentials_result` via
-    // `Box::into_raw(Box::new(DescribeUserScramCredentialsResultInner { .. }))`, so casting
-    // back to `*const DescribeUserScramCredentialsResultInner` names that same live
-    // allocation. The `&'static` is used only for the duration of the calling getter,
-    // during which the C caller keeps the handle alive by not yet having called
-    // `kafka_admin_DescribeUserScramCredentialsResult_destroy`, the only path that frees
-    // it.
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
+    // `describe_user_scram_credentials` call, i.e. the
+    // `Box<DescribeUserScramCredentialsResultInner>` leaked by `into_handle` in
+    // `kafka_admin_AdminClient_describe_user_scram_credentials` or
+    // `box_describe_user_scram_credentials_result` and freed only by
+    // `kafka_admin_DescribeUserScramCredentialsResult_destroy`, so it is aligned and live;
+    // callers use the reference only within their own synchronous getter call, during which
+    // the C caller keeps the handle alive.
     unsafe { &*(result as *const DescribeUserScramCredentialsResultInner) }
 }
 
-/// `all()` view: returns a newly allocated error handle iff `all()` faults
+/// `all()` view: Java's `all().get()`. **Blocks** until the response has
+/// resolved, then returns a newly allocated error handle iff `all()` faults
 /// (caller frees it with `kafka_common_Error_destroy`), or null on success.
 ///
 /// Mirrors `DescribeUserScramCredentialsResult.all()`
 /// (`DescribeUserScramCredentialsResult.java:54-80`), which completes
-/// exceptionally with the first user-level error whose code is neither NONE nor
-/// RESOURCE_NOT_FOUND.
+/// exceptionally when the whole request failed (a timeout, say) and with the
+/// first user-level error whose code is neither NONE nor RESOURCE_NOT_FOUND.
 ///
 /// # Safety
 ///
@@ -27610,21 +27833,35 @@ unsafe fn describe_user_scram_credentials_result_ref(
 pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_all_error(
     result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
 ) -> *mut kafka_common_Error_t {
-    // SAFETY: `describe_user_scram_credentials_result_ref` requires `result` to be a non-null
-    // handle of the kind its `# Safety` names, which this function's `# Safety` requires of
-    // `result` (no in-body null check, so the C caller's contract is the sole source). The
-    // reference is used only for the duration of this call, during which the C caller keeps the
-    // handle alive; any pointer returned borrows from the same allocation and is documented as
-    // valid until that handle is destroyed.
-    match &unsafe { describe_user_scram_credentials_result_ref(result) }.all_view {
-        Ok(_) => std::ptr::null_mut(),
-        Err(inner) => box_error(inner.error.clone()),
-    }
+    // SAFETY: `describe_user_scram_credentials_result_ref` requires a non-null
+    // `describe_user_scram_credentials` result handle, which this function's `# Safety`
+    // requires of `result` (no in-body null check, so the C caller's contract is the sole
+    // source); the reference is used only for the duration of this call, and the returned
+    // error is a fresh copy owned by the caller.
+    single_error(&unsafe { describe_user_scram_credentials_result_ref(result) }.all_view)
+}
+
+/// `all()` view: returns whether Java's `all()` future has resolved —
+/// `all().isDone()`. Never blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_user_scram_credentials` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_all_is_done(
+    result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
+) -> bool {
+    // SAFETY: `describe_user_scram_credentials_result_ref` requires a non-null
+    // `describe_user_scram_credentials` result handle, which this function's `# Safety`
+    // requires of `result` (no in-body null check, so the C caller's contract is the sole
+    // source); the reference is used only for this check.
+    unsafe { describe_user_scram_credentials_result_ref(result) }.all_view.is_done()
 }
 
 /// `all()` view: number of described users, or 0 when `all()` faults (i.e. when
 /// [`kafka_admin_DescribeUserScramCredentialsResult_all_error`] is non-null).
-/// Users are sorted by name.
+/// Users are sorted by name. **Blocks** until the `all()` view has resolved.
 ///
 /// # Safety
 ///
@@ -27634,21 +27871,18 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_all_erro
 pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_all_count(
     result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
 ) -> i32 {
-    // SAFETY: `describe_user_scram_credentials_result_ref` requires a non-null handle from
-    // a `describe_user_scram_credentials` call, which this function's `# Safety` promises
-    // (`result` must be a valid `describe_user_scram_credentials` result handle; only
-    // `kafka_admin_DescribeUserScramCredentialsResult_destroy` admits null, so a valid
-    // handle is non-null). The reference is used only for the duration of this synchronous
-    // call, during which the C caller keeps the handle alive by not yet having called
-    // `kafka_admin_DescribeUserScramCredentialsResult_destroy`.
-    match &unsafe { describe_user_scram_credentials_result_ref(result) }.all_view {
-        Ok(rows) => rows.len() as i32,
-        Err(_) => 0,
-    }
+    // SAFETY: `describe_user_scram_credentials_result_ref` requires a non-null
+    // `describe_user_scram_credentials` result handle, which this function's `# Safety`
+    // requires of `result` (no in-body null check, so the C caller's contract is the sole
+    // source); the reference is used only for this `len()` within the call, during which the
+    // C caller keeps the handle alive.
+    single_data(&unsafe { describe_user_scram_credentials_result_ref(result) }.all_view)
+        .map_or(0, |rows| rows.len() as i32)
 }
 
 /// `all()` view: the user name at `index` (borrowed), or null if out of range or
-/// `all()` faulted. Do not free it.
+/// `all()` faulted. Do not free it. **Blocks** until the `all()` view has
+/// resolved.
 ///
 /// # Safety
 ///
@@ -27662,18 +27896,17 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_all_get_
     if index < 0 {
         return std::ptr::null();
     }
-    // SAFETY: `describe_user_scram_credentials_result_ref` requires a non-null handle from
-    // a `describe_user_scram_credentials` call, which this function's `# Safety` promises
-    // (`result` must be a valid `describe_user_scram_credentials` result handle; only
-    // `kafka_admin_DescribeUserScramCredentialsResult_destroy` admits null, so a valid
-    // handle is non-null). The reference is used only for the duration of this synchronous
-    // call, during which the C caller keeps the handle alive by not yet having called
+    // SAFETY: `describe_user_scram_credentials_result_ref` requires a non-null
+    // `describe_user_scram_credentials` result handle, which this function's `# Safety`
+    // requires of `result` (no in-body null check, so the C caller's contract is the sole
+    // source); the reference is used only for the duration of this call, and the returned
+    // string pointer borrows a `CString` cached in the handle, valid until
     // `kafka_admin_DescribeUserScramCredentialsResult_destroy`.
-    // The pointer this getter returns is an interior pointer into the same allocation and
-    // is documented as borrowed, valid until that `_destroy`.
-    match &unsafe { describe_user_scram_credentials_result_ref(result) }.all_view {
-        Ok(rows) => rows.get(index as usize).map_or(std::ptr::null(), |row| row.user_c.as_ptr()),
-        Err(_) => std::ptr::null(),
+    match single_data(&unsafe { describe_user_scram_credentials_result_ref(result) }.all_view)
+        .and_then(|rows| rows.get(index as usize))
+    {
+        Some(row) => row.user_c.as_ptr(),
+        None => std::ptr::null(),
     }
 }
 
@@ -27681,6 +27914,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_all_get_
 /// until the result is destroyed), or null if out of range or `all()` faulted.
 /// Do NOT pass it to
 /// [`kafka_admin_UserScramCredentialsDescription_destroy`] — the result owns it.
+/// **Blocks** until the `all()` view has resolved.
 ///
 /// # Safety
 ///
@@ -27694,29 +27928,72 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_all_get_
     if index < 0 {
         return std::ptr::null();
     }
-    // SAFETY: `describe_user_scram_credentials_result_ref` requires a non-null handle from
-    // a `describe_user_scram_credentials` call, which this function's `# Safety` promises
-    // (`result` must be a valid `describe_user_scram_credentials` result handle; only
-    // `kafka_admin_DescribeUserScramCredentialsResult_destroy` admits null, so a valid
-    // handle is non-null). The reference is used only for the duration of this synchronous
-    // call, during which the C caller keeps the handle alive by not yet having called
-    // `kafka_admin_DescribeUserScramCredentialsResult_destroy`.
-    // The pointer this getter returns is an interior pointer into the same allocation and
-    // is documented as borrowed, valid until that `_destroy`.
-    match &unsafe { describe_user_scram_credentials_result_ref(result) }.all_view {
-        Ok(rows) => rows.get(index as usize).map_or(std::ptr::null(), |row| {
+    // SAFETY: `describe_user_scram_credentials_result_ref` requires a non-null
+    // `describe_user_scram_credentials` result handle, which this function's `# Safety`
+    // requires of `result` (no in-body null check, so the C caller's contract is the sole
+    // source); the reference is used only for the duration of this call, and the returned
+    // pointer borrows a `UserScramCredentialsDescriptionInner` cached in the handle, valid
+    // until `kafka_admin_DescribeUserScramCredentialsResult_destroy`.
+    match single_data(&unsafe { describe_user_scram_credentials_result_ref(result) }.all_view)
+        .and_then(|rows| rows.get(index as usize))
+    {
+        Some(row) => {
             &row.description as *const UserScramCredentialsDescriptionInner
                 as *const kafka_admin_UserScramCredentialsDescription_t
-        }),
-        Err(_) => std::ptr::null(),
+        },
+        None => std::ptr::null(),
     }
+}
+
+/// `users()` view: Java's `users().get()`. **Blocks** until the response has
+/// resolved, then returns a newly allocated error handle iff `users()` faults —
+/// only when the whole request failed (a timeout, say), never for a user-level
+/// error — or null on success. The caller frees it with
+/// `kafka_common_Error_destroy`.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_user_scram_credentials` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_users_error(
+    result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `describe_user_scram_credentials_result_ref` requires a non-null
+    // `describe_user_scram_credentials` result handle, which this function's `# Safety`
+    // requires of `result` (no in-body null check, so the C caller's contract is the sole
+    // source); the reference is used only for the duration of this call, and the returned
+    // error is a fresh copy owned by the caller.
+    single_error(&unsafe { describe_user_scram_credentials_result_ref(result) }.users_view)
+}
+
+/// `users()` view: returns whether Java's `users()` future has resolved —
+/// `users().isDone()`. Never blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_user_scram_credentials` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_users_is_done(
+    result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
+) -> bool {
+    // SAFETY: `describe_user_scram_credentials_result_ref` requires a non-null
+    // `describe_user_scram_credentials` result handle, which this function's `# Safety`
+    // requires of `result` (no in-body null check, so the C caller's contract is the sole
+    // source); the reference is used only for this check.
+    unsafe { describe_user_scram_credentials_result_ref(result) }
+        .users_view
+        .is_done()
 }
 
 /// `users()` view: the number of users Java's `users()` lists — every response
 /// row whose error is not RESOURCE_NOT_FOUND, in response order and not
 /// de-duplicated. Users that do not exist or have no credential are excluded;
 /// users that have a credential but could not be described (any other error)
-/// are included, as Java's javadoc states.
+/// are included, as Java's javadoc states. 0 when `users()` faults (see
+/// [`kafka_admin_DescribeUserScramCredentialsResult_users_error`]). **Blocks**
+/// until the `users()` view has resolved.
 ///
 /// # Safety
 ///
@@ -27726,17 +28003,18 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_all_get_
 pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_users_count(
     result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
 ) -> i32 {
-    // SAFETY: `describe_user_scram_credentials_result_ref` requires `result` to be a non-null
-    // handle of the kind its `# Safety` names, which this function's `# Safety` requires of
-    // `result` (no in-body null check, so the C caller's contract is the sole source). The
-    // reference is used only for the duration of this call, during which the C caller keeps the
-    // handle alive; any pointer returned borrows from the same allocation and is documented as
-    // valid until that handle is destroyed.
-    unsafe { describe_user_scram_credentials_result_ref(result) }.users_view.len() as i32
+    // SAFETY: `describe_user_scram_credentials_result_ref` requires a non-null
+    // `describe_user_scram_credentials` result handle, which this function's `# Safety`
+    // requires of `result` (no in-body null check, so the C caller's contract is the sole
+    // source); the reference is used only for this `len()` within the call, during which the
+    // C caller keeps the handle alive.
+    single_data(&unsafe { describe_user_scram_credentials_result_ref(result) }.users_view)
+        .map_or(0, |users| users.len() as i32)
 }
 
-/// `users()` view: the user name at `index` (borrowed), or null if out of range.
-/// Do not free it.
+/// `users()` view: the user name at `index` (borrowed), or null if out of range
+/// or `users()` faulted. Do not free it. **Blocks** until the `users()` view
+/// has resolved.
 ///
 /// # Safety
 ///
@@ -27747,31 +28025,33 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_users_ge
     result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
     index: i32,
 ) -> *const c_char {
-    // SAFETY: `describe_user_scram_credentials_result_ref` requires a non-null handle from
-    // a `describe_user_scram_credentials` call, which this function's `# Safety` promises
-    // (`result` must be a valid `describe_user_scram_credentials` result handle; only
-    // `kafka_admin_DescribeUserScramCredentialsResult_destroy` admits null, so a valid
-    // handle is non-null). The reference is used only for the duration of this synchronous
-    // call, during which the C caller keeps the handle alive by not yet having called
+    // SAFETY: `describe_user_scram_credentials_result_ref` requires a non-null
+    // `describe_user_scram_credentials` result handle, which this function's `# Safety`
+    // requires of `result` (no in-body null check, so the C caller's contract is the sole
+    // source); the reference is used only for the duration of this call, and the returned
+    // string pointer borrows a `CString` cached in the handle, valid until
     // `kafka_admin_DescribeUserScramCredentialsResult_destroy`.
-    // The pointer this getter returns is an interior pointer into the same allocation and
-    // is documented as borrowed, valid until that `_destroy`.
-    cstring_at(&unsafe { describe_user_scram_credentials_result_ref(result) }.users_view, index)
+    match single_data(&unsafe { describe_user_scram_credentials_result_ref(result) }.users_view) {
+        Some(users) => cstring_at(users, index),
+        None => std::ptr::null(),
+    }
 }
 
-/// `description(user)` view: on success returns null and writes an **owned**
+/// `description(user)` view: Java's `description(user).get()`. **Blocks** until
+/// the response has resolved. On success returns null and writes an **owned**
 /// [`kafka_admin_UserScramCredentialsDescription_t`] to `*out_description` (free
 /// it with [`kafka_admin_UserScramCredentialsDescription_destroy`]); on fault
 /// returns a newly allocated error handle (caller frees it) and leaves
 /// `*out_description` untouched.
 ///
 /// Mirrors `DescribeUserScramCredentialsResult.description(String)`
-/// (`DescribeUserScramCredentialsResult.java:114-138`): it **faults** with
-/// RESOURCE_NOT_FOUND for an RNF user (":128 RESOURCE_NOT_FOUND is included
-/// here") — carrying the broker's own error message — and for a user absent from
-/// the response ("No such user: <user>"). This is the capability the old
-/// flattened handle could not express: an RNF user was reported there as a
-/// successful empty-credential row.
+/// (`DescribeUserScramCredentialsResult.java:114-138`): it **faults** when the
+/// whole request failed (a timeout, say), with RESOURCE_NOT_FOUND for an RNF
+/// user (":128 RESOURCE_NOT_FOUND is included here") — carrying the broker's
+/// own error message — and for a user absent from the response ("No such user:
+/// <user>"). This is the capability the old flattened handle could not
+/// express: an RNF user was reported there as a successful empty-credential
+/// row.
 ///
 /// # Safety
 ///
@@ -27784,20 +28064,23 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_descript
     user: *const c_char,
     out_description: *mut *mut kafka_admin_UserScramCredentialsDescription_t,
 ) -> *mut kafka_common_Error_t {
-    // SAFETY: `describe_user_scram_credentials_result_ref` requires `result` to be a non-null
-    // handle of the kind its `# Safety` names, which this function's `# Safety` requires of
-    // `result` (no in-body null check, so the C caller's contract is the sole source). The
-    // reference is used only for the duration of this call, during which the C caller keeps the
-    // handle alive; any pointer returned borrows from the same allocation and is documented as
-    // valid until that handle is destroyed.
+    // SAFETY: `describe_user_scram_credentials_result_ref` requires a non-null
+    // `describe_user_scram_credentials` result handle, which this function's `# Safety`
+    // requires of `result` (no in-body null check, so the C caller's contract is the sole
+    // source); the reference is used only for the duration of this call.
     let inner = unsafe { describe_user_scram_credentials_result_ref(result) };
     // SAFETY: Per this function's `# Safety`, `user` is a valid C string (a required parameter,
     // so it is not null-checked); it is borrowed only for the `to_string_lossy` copy made in
     // this call.
     let user = unsafe { CStr::from_ptr(user) }.to_string_lossy().to_string();
-    // The core's data future is resolved, so `description(user)` is ready on the
-    // first poll (no runtime needed).
-    match block_on_ready(inner.core.description(&user).get()) {
+    let future = inner.core.description(&user);
+    // A handle from the `_async` callback has no waiter: its core's data future is
+    // resolved, so `description(user)` is ready on the first poll (no runtime needed).
+    let outcome = match &inner.waiter {
+        Some(waiter) => waiter.get(&future),
+        None => block_on_ready(future.get()),
+    };
+    match outcome {
         Ok(description) => {
             if !out_description.is_null() {
                 // SAFETY: `out_description` is non-null (checked above) and, per this function's `#
@@ -27814,8 +28097,8 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_descript
     }
 }
 
-/// Destroys a `describe_user_scram_credentials` result handle. Safe with null
-/// (no-op).
+/// Destroys a `describe_user_scram_credentials` result handle, invalidating
+/// every borrowed sub-handle obtained from it. Safe with null (no-op).
 ///
 /// # Safety
 ///
@@ -27828,41 +28111,49 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_destroy(
 ) {
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
-        // a valid `describe_user_scram_credentials` result handle, i.e. the pointer
-        // `box_describe_user_scram_credentials_result` produced with
-        // `Box::into_raw(Box::new(DescribeUserScramCredentialsResultInner { .. }))`.
-        // Reconstituting and dropping the `Box` here is the single, final use: the result
-        // documentation tells the caller to free the handle exactly once with
-        // `kafka_admin_DescribeUserScramCredentialsResult_destroy`, after which it and
-        // every pointer borrowed from it are invalid.
+        // a valid `describe_user_scram_credentials` result handle, i.e. the
+        // `Box<DescribeUserScramCredentialsResultInner>` leaked by `into_handle` in
+        // `kafka_admin_AdminClient_describe_user_scram_credentials` or
+        // `box_describe_user_scram_credentials_result`. This is the single, final use: the
+        // contract states the handle and every borrowed sub-handle are invalid afterwards,
+        // and no other function frees it.
         unsafe { drop(Box::from_raw(result as *mut DescribeUserScramCredentialsResultInner)) };
     }
 }
 
-/// Opaque handle to a flattened `AlterUserScramCredentialsResult`.
+/// Opaque handle to an `AlterUserScramCredentialsResult`, keyed by user: one
+/// future per altered user (Java's `values()`), read by the accessors below.
 #[repr(C)]
 pub struct kafka_admin_AlterUserScramCredentialsResult_t {
     _private: [u8; 0],
 }
 
-/// Backing state for [`kafka_admin_AlterUserScramCredentialsResult_t`].
+/// Backing state for [`kafka_admin_AlterUserScramCredentialsResult_t`]: the
+/// users (known at submission, as Java's `values().keySet()` is) and each
+/// user's future, resolved on first read.
 ///
 /// `AlterUserScramCredentialsResult.values()` is
 /// `Map<String, KafkaFuture<Void>>`: a per-user future carrying no value, so
 /// the handle exposes the user and its error and nothing else.
 struct AlterUserScramCredentialsResultInner {
     users: Vec<CString>,
-    errors: Vec<Option<ErrorInner>>,
+    entries: Vec<LazyKeyed<()>>,
 }
 
-/// Flattens the per-user `alterUserScramCredentials` outcomes into the C
-/// handle.
-fn box_alter_user_scram_credentials_result(
-    outcomes: AlterScramOutcomes,
-) -> *mut kafka_admin_AlterUserScramCredentialsResult_t {
-    let (users, errors) = flatten_keyed_void_outcomes(outcomes);
-    Box::into_raw(Box::new(AlterUserScramCredentialsResultInner { users, errors }))
-        as *mut kafka_admin_AlterUserScramCredentialsResult_t
+/// Wraps `alterUserScramCredentials`' per-user futures, unresolved, as the C
+/// handle's backing state, sorted by user name.
+fn alter_user_scram_credentials_result_inner(
+    waiter: &FutureWaiter,
+    futures: Vec<(String, KafkaFuture<()>)>,
+) -> AlterUserScramCredentialsResultInner {
+    let mut futures = futures;
+    futures.sort_by(|a, b| a.0.cmp(&b.0));
+    let users = futures.iter().map(|(user, _)| to_cstring(user)).collect();
+    let entries = futures
+        .into_iter()
+        .map(|(_, future)| lazy_keyed(waiter, future, |()| ()))
+        .collect();
+    AlterUserScramCredentialsResultInner { users, entries }
 }
 
 /// Casts a `*const kafka_admin_AlterUserScramCredentialsResult_t` to a
@@ -27875,18 +28166,18 @@ fn box_alter_user_scram_credentials_result(
 unsafe fn alter_user_scram_credentials_result_ref(
     result: *const kafka_admin_AlterUserScramCredentialsResult_t,
 ) -> &'static AlterUserScramCredentialsResultInner {
-    // SAFETY: `result` is, per this helper's `# Safety`, a non-null handle from a
-    // `alter_user_scram_credentials` call; such handles are produced only by
-    // `box_alter_user_scram_credentials_result` via
-    // `Box::into_raw(Box::new(AlterUserScramCredentialsResultInner { .. }))`, so casting
-    // back to `*const AlterUserScramCredentialsResultInner` names that same live
-    // allocation. The `&'static` is used only for the duration of the calling getter,
-    // during which the C caller keeps the handle alive by not yet having called
-    // `kafka_admin_AlterUserScramCredentialsResult_destroy`, the only path that frees it.
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from an
+    // `alter_user_scram_credentials` call, i.e. the
+    // `Box<AlterUserScramCredentialsResultInner>` leaked by `into_handle` in
+    // `kafka_admin_AdminClient_alter_user_scram_credentials` and freed only by
+    // `kafka_admin_AlterUserScramCredentialsResult_destroy`, so it is aligned and live;
+    // callers use the reference only within their own synchronous getter call, during which
+    // the C caller keeps the handle alive.
     unsafe { &*(result as *const AlterUserScramCredentialsResultInner) }
 }
 
-/// Returns the number of altered users. Users are sorted by name.
+/// Returns the number of altered users. Users are sorted by name. Never
+/// blocks: the users are known when the request is submitted.
 ///
 /// # Safety
 ///
@@ -27896,18 +28187,16 @@ unsafe fn alter_user_scram_credentials_result_ref(
 pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_count(
     result: *const kafka_admin_AlterUserScramCredentialsResult_t,
 ) -> i32 {
-    // SAFETY: `alter_user_scram_credentials_result_ref` requires a non-null handle from a
-    // `alter_user_scram_credentials` call, which this function's `# Safety` promises
-    // (`result` must be a valid `alter_user_scram_credentials` result handle; only
-    // `kafka_admin_AlterUserScramCredentialsResult_destroy` admits null, so a valid handle
-    // is non-null). The reference is used only for the duration of this synchronous call,
-    // during which the C caller keeps the handle alive by not yet having called
-    // `kafka_admin_AlterUserScramCredentialsResult_destroy`.
+    // SAFETY: `alter_user_scram_credentials_result_ref` requires a non-null
+    // `alter_user_scram_credentials` result handle, which this function's `# Safety`
+    // requires of `result` (no in-body null check, so the C caller's contract is the sole
+    // source); the reference is used only for this `len()` within the call, during which the
+    // C caller keeps the handle alive.
     unsafe { alter_user_scram_credentials_result_ref(result) }.users.len() as i32
 }
 
 /// Returns the user name at `index` (borrowed), or null if out of range. Do not
-/// free it.
+/// free it. Never blocks.
 ///
 /// # Safety
 ///
@@ -27918,20 +28207,22 @@ pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_get_user(
     result: *const kafka_admin_AlterUserScramCredentialsResult_t,
     index: i32,
 ) -> *const c_char {
-    // SAFETY: `alter_user_scram_credentials_result_ref` requires a non-null handle from a
-    // `alter_user_scram_credentials` call, which this function's `# Safety` promises
-    // (`result` must be a valid `alter_user_scram_credentials` result handle; only
-    // `kafka_admin_AlterUserScramCredentialsResult_destroy` admits null, so a valid handle
-    // is non-null). The reference is used only for the duration of this synchronous call,
-    // during which the C caller keeps the handle alive by not yet having called
-    // `kafka_admin_AlterUserScramCredentialsResult_destroy`. The pointer this getter
-    // returns is an interior pointer into the same allocation and is documented as
-    // borrowed, valid until that `_destroy`.
+    // SAFETY: `alter_user_scram_credentials_result_ref` requires a non-null
+    // `alter_user_scram_credentials` result handle, which this function's `# Safety`
+    // requires of `result` (no in-body null check, so the C caller's contract is the sole
+    // source); the reference is used only for the duration of this call, and the returned
+    // string pointer borrows a user `CString` owned by the handle, valid until
+    // `kafka_admin_AlterUserScramCredentialsResult_destroy`.
     cstring_at(&unsafe { alter_user_scram_credentials_result_ref(result) }.users, index)
 }
 
 /// Returns the error for the user at `index` (borrowed), or null if the
 /// alteration succeeded or `index` is out of range. Do not destroy it.
+///
+/// **Blocks** until that user's future has resolved — Java's
+/// `values().get(user).get()` — but not on any other user. Never blocks for an
+/// out-of-range index. A failure of the whole request (a timeout, say) is
+/// reported here for every user, as Java completes every user's future with it.
 ///
 /// # Safety
 ///
@@ -27942,20 +28233,59 @@ pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_get_error(
     result: *const kafka_admin_AlterUserScramCredentialsResult_t,
     index: i32,
 ) -> *const kafka_common_Error_t {
-    // SAFETY: `alter_user_scram_credentials_result_ref` requires a non-null handle from a
-    // `alter_user_scram_credentials` call, which this function's `# Safety` promises
-    // (`result` must be a valid `alter_user_scram_credentials` result handle; only
-    // `kafka_admin_AlterUserScramCredentialsResult_destroy` admits null, so a valid handle
-    // is non-null). The reference is used only for the duration of this synchronous call,
-    // during which the C caller keeps the handle alive by not yet having called
-    // `kafka_admin_AlterUserScramCredentialsResult_destroy`. The pointer this getter
-    // returns is an interior pointer into the same allocation and is documented as
-    // borrowed, valid until that `_destroy`.
-    optional_error_at(&unsafe { alter_user_scram_credentials_result_ref(result) }.errors, index)
+    // SAFETY: `alter_user_scram_credentials_result_ref` requires a non-null
+    // `alter_user_scram_credentials` result handle, which this function's `# Safety`
+    // requires of `result` (no in-body null check, so the C caller's contract is the sole
+    // source); the reference is used only for the duration of this call, and the returned
+    // error pointer borrows an `ErrorInner` cached in the handle (not to be destroyed), valid
+    // until `kafka_admin_AlterUserScramCredentialsResult_destroy`.
+    keyed_error_at(&unsafe { alter_user_scram_credentials_result_ref(result) }.entries, index)
 }
 
-/// Destroys an `alter_user_scram_credentials` result handle. Safe with null
-/// (no-op).
+/// Returns whether the future of the user at `index` has resolved — Java's
+/// `values().get(user).isDone()`. False if `index` is out of range. Never
+/// blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_user_scram_credentials` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_is_done(
+    result: *const kafka_admin_AlterUserScramCredentialsResult_t,
+    index: i32,
+) -> bool {
+    // SAFETY: `alter_user_scram_credentials_result_ref` requires a non-null
+    // `alter_user_scram_credentials` result handle, which this function's `# Safety`
+    // requires of `result` (no in-body null check, so the C caller's contract is the sole
+    // source); the reference is used only for this check within the call, during which the
+    // C caller keeps the handle alive.
+    keyed_is_done_at(&unsafe { alter_user_scram_credentials_result_ref(result) }.entries, index)
+}
+
+/// Java's `all().get()`: **blocks** until every user's future has resolved,
+/// then returns null if every alteration succeeded, or an **owned** error —
+/// free it with `kafka_common_Error_destroy` — of a failed user (the first in
+/// index order; Java leaves which one unspecified).
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_user_scram_credentials` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_all(
+    result: *const kafka_admin_AlterUserScramCredentialsResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `alter_user_scram_credentials_result_ref` requires a non-null
+    // `alter_user_scram_credentials` result handle, which this function's `# Safety`
+    // requires of `result` (no in-body null check, so the C caller's contract is the sole
+    // source); the reference is used only for the duration of this call, and the returned
+    // error is a fresh copy owned by the caller.
+    keyed_all(&unsafe { alter_user_scram_credentials_result_ref(result) }.entries)
+}
+
+/// Destroys an `alter_user_scram_credentials` result handle, invalidating every
+/// borrowed sub-handle obtained from it. Safe with null (no-op).
 ///
 /// # Safety
 ///
@@ -27968,13 +28298,11 @@ pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_destroy(
 ) {
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
-        // a valid `alter_user_scram_credentials` result handle, i.e. the pointer
-        // `box_alter_user_scram_credentials_result` produced with
-        // `Box::into_raw(Box::new(AlterUserScramCredentialsResultInner { .. }))`.
-        // Reconstituting and dropping the `Box` here is the single, final use: the result
-        // documentation tells the caller to free the handle exactly once with
-        // `kafka_admin_AlterUserScramCredentialsResult_destroy`, after which it and every
-        // pointer borrowed from it are invalid.
+        // a valid `alter_user_scram_credentials` result handle, i.e. the
+        // `Box<AlterUserScramCredentialsResultInner>` leaked by `into_handle` in
+        // `kafka_admin_AdminClient_alter_user_scram_credentials`. This is the single, final
+        // use: the contract states the handle and every borrowed sub-handle are invalid
+        // afterwards, and no other function frees it.
         unsafe { drop(Box::from_raw(result as *mut AlterUserScramCredentialsResultInner)) };
     }
 }
@@ -36098,12 +36426,18 @@ mod tests {
     fn create_acls_result_reports_success_as_a_null_error_and_sorts_by_binding() {
         let ok = acl_binding("a-topic", "User:alice");
         let failed = acl_binding("z-topic", "User:zoe");
-        let outcomes: CreateAclsOutcomes = HashMap::from([
-            (ok.clone(), Ok(())),
-            (failed.clone(), Err(Error::new(Errors::SecurityDisabled))),
-        ]);
-        let result = box_create_acls_result(outcomes);
-        // SAFETY: Test code: `result` was built just above by `box_create_acls_result`, so
+        let (_runtime, waiter) = lazy_test_waiter();
+        let result: *mut kafka_admin_CreateAclsResult_t = into_handle(create_acls_result_inner(
+            &waiter,
+            vec![
+                (
+                    failed.clone(),
+                    KafkaFuture::completed(Err(Error::new(Errors::SecurityDisabled))),
+                ),
+                (ok.clone(), KafkaFuture::completed(Ok(()))),
+            ],
+        ));
+        // SAFETY: Test code: `result` was built just above by `create_acls_result_inner`, so
         // it is a valid handle for every `kafka_admin_CreateAclsResult_*` getter; `first`
         // and `second` are borrowed `AclBinding` handles and the error pointer is likewise
         // borrowed, all read while `result` lives, out-of-range indices exercise the
@@ -36183,22 +36517,26 @@ mod tests {
                 AccessControlEntryFilter::any(),
             )
         }
-        let outcomes: DeleteAclsOutcomes = HashMap::from([
+        let (_runtime, waiter) = lazy_test_waiter();
+        let futures = vec![
+            (
+                filter("z-filter"),
+                KafkaFuture::completed(Err(Error::new(Errors::ClusterAuthorizationFailed))),
+            ),
             (
                 filter("a-filter"),
-                Ok(FilterResults::new(vec![
+                KafkaFuture::completed(Ok(FilterResults::new(vec![
                     FilterResult::new(Some(deleted.clone()), None),
                     FilterResult::new(None, Some(Error::new(Errors::SecurityDisabled))),
-                ])),
+                ]))),
             ),
             (
                 filter("m-filter"),
-                Ok(FilterResults::new(vec![FilterResult::new(Some(matched_but_failed), None)])),
+                KafkaFuture::completed(Ok(FilterResults::new(vec![FilterResult::new(Some(matched_but_failed), None)]))),
             ),
-            (filter("z-filter"), Err(Error::new(Errors::ClusterAuthorizationFailed))),
-        ]);
-        let result = box_delete_acls_result(outcomes);
-        // SAFETY: Test code: `result` was built just above by `box_delete_acls_result`, so
+        ];
+        let result: *mut kafka_admin_DeleteAclsResult_t = into_handle(delete_acls_result_inner(&waiter, futures));
+        // SAFETY: Test code: `result` was built just above by `delete_acls_result_inner`, so
         // it is a valid handle for every `kafka_admin_DeleteAclsResult_*` getter; `f0`,
         // `f2` and the binding and error pointers are borrowed from it and read only while
         // it lives, out-of-range indices on both levels exercise the documented null / 0
@@ -36251,6 +36589,305 @@ mod tests {
             assert!(kafka_admin_DeleteAclsResult_get_binding(result, 0, -1).is_null());
             assert!(kafka_admin_DeleteAclsResult_get_result_error(result, 5, 0).is_null());
             kafka_admin_DeleteAclsResult_destroy(result);
+        }
+    }
+
+    /// Java's `createAcls().values().get(binding).get()` waits for that binding
+    /// only: the bindings are readable at once, a resolved binding's error is
+    /// read while another is pending, and `all()` waits for every binding.
+    #[test]
+    fn create_acls_result_waits_for_each_binding_only_and_all_waits_for_every_one() {
+        let (_runtime, waiter) = lazy_test_waiter();
+        let fast = crate::common::internals::KafkaFutureImpl::<()>::new();
+        let slow = crate::common::internals::KafkaFutureImpl::<()>::new();
+        let result: *mut kafka_admin_CreateAclsResult_t = into_handle(create_acls_result_inner(
+            &waiter,
+            vec![
+                (acl_binding("z-topic", "User:zoe"), slow.future()),
+                (acl_binding("a-topic", "User:alice"), fast.future()),
+            ],
+        ));
+        // SAFETY: Test code: `result` was built just above by `create_acls_result_inner`, so
+        // it is a valid handle for every `kafka_admin_CreateAclsResult_*` getter; borrowed
+        // pointers are read while it lives, the owned `all()` error is destroyed by
+        // `consume_message`, and `kafka_admin_CreateAclsResult_destroy(result)` is the single
+        // destroy.
+        unsafe {
+            // The bindings are known at submission: neither future has resolved.
+            assert_eq!(kafka_admin_CreateAclsResult_count(result), 2);
+            assert_eq!(
+                CStr::from_ptr(kafka_common_acl_AclBinding_resource_name(
+                    kafka_admin_CreateAclsResult_get_binding(result, 1)
+                ))
+                .to_str(),
+                Ok("z-topic")
+            );
+            assert!(!kafka_admin_CreateAclsResult_is_done(result, 0));
+            assert!(!kafka_admin_CreateAclsResult_is_done(result, 1));
+            assert!(!kafka_admin_CreateAclsResult_is_done(result, 2));
+
+            fast.complete(());
+            assert!(kafka_admin_CreateAclsResult_is_done(result, 0));
+            // "z-topic" is still pending, so reading "a-topic" must not wait on it.
+            assert!(kafka_admin_CreateAclsResult_get_error(result, 0).is_null());
+            assert!(!kafka_admin_CreateAclsResult_is_done(result, 1));
+
+            let completer = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                slow.complete_with_error(Error::with_message(Errors::SecurityDisabled, "no authorizer"));
+            });
+            assert_eq!(consume_message(kafka_admin_CreateAclsResult_all(result)), "no authorizer");
+            completer.join().expect("completer thread");
+            assert!(kafka_admin_CreateAclsResult_is_done(result, 1));
+            assert_eq!(
+                borrowed_message(kafka_admin_CreateAclsResult_get_error(result, 1)),
+                "no authorizer"
+            );
+            kafka_admin_CreateAclsResult_destroy(result);
+        }
+    }
+
+    /// Java's `describeAcls().values().get()`: every accessor, `_count`
+    /// included, waits for the one future, and its failure is read with
+    /// `values()` rather than returned by the call.
+    #[test]
+    fn describe_acls_result_accessors_wait_for_the_bindings_future() {
+        let (_runtime, waiter) = lazy_test_waiter();
+        let bindings = crate::common::internals::KafkaFutureImpl::<Vec<AclBinding>>::new();
+        let result: *mut kafka_admin_DescribeAclsResult_t = into_handle(DescribeAclsResultInner {
+            bindings: lazy_single(&waiter, bindings.future(), describe_acls_data),
+        });
+        // SAFETY: Test code: `result` was built just above, so it is a valid handle for every
+        // `kafka_admin_DescribeAclsResult_*` getter; borrowed pointers are read while it lives,
+        // and `kafka_admin_DescribeAclsResult_destroy(result)` is the single destroy.
+        unsafe {
+            assert!(!kafka_admin_DescribeAclsResult_is_done(result));
+            let completer = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                bindings.complete(vec![acl_binding("z-topic", "User:zoe"), acl_binding("a-topic", "User:alice")]);
+            });
+            assert_eq!(kafka_admin_DescribeAclsResult_count(result), 2);
+            completer.join().expect("completer thread");
+            assert!(kafka_admin_DescribeAclsResult_is_done(result));
+            assert!(kafka_admin_DescribeAclsResult_values(result).is_null());
+            assert_eq!(
+                CStr::from_ptr(kafka_common_acl_AclBinding_resource_name(
+                    kafka_admin_DescribeAclsResult_get_binding(result, 0)
+                ))
+                .to_str(),
+                Ok("z-topic")
+            );
+            kafka_admin_DescribeAclsResult_destroy(result);
+        }
+
+        let failing = crate::common::internals::KafkaFutureImpl::<Vec<AclBinding>>::new();
+        let result: *mut kafka_admin_DescribeAclsResult_t = into_handle(DescribeAclsResultInner {
+            bindings: lazy_single(&waiter, failing.future(), describe_acls_data),
+        });
+        failing.complete_with_error(Error::timeout("describeAcls timed out"));
+        // SAFETY: Test code: `result` is the live handle just built; the owned `values()` error
+        // is destroyed by `consume_message`, and the handle is destroyed exactly once.
+        unsafe {
+            assert_eq!(
+                consume_message(kafka_admin_DescribeAclsResult_values(result)),
+                "describeAcls timed out"
+            );
+            assert_eq!(kafka_admin_DescribeAclsResult_count(result), 0);
+            assert!(kafka_admin_DescribeAclsResult_get_binding(result, 0).is_null());
+            kafka_admin_DescribeAclsResult_destroy(result);
+        }
+    }
+
+    /// Java's `deleteAcls().values().get(filter).get()` waits for that filter
+    /// only, and `all()` — `allOf` followed by `getAclBindings` — reports a
+    /// failed filter first and otherwise the first matched ACL's own exception.
+    #[test]
+    fn delete_acls_result_waits_for_each_filter_only_and_all_reports_a_per_acl_error() {
+        fn filter(name: &str) -> AclBindingFilter {
+            AclBindingFilter::new(
+                ResourcePatternFilter::new(ResourceType::Topic, Some(name.to_string()), PatternType::Literal),
+                AccessControlEntryFilter::any(),
+            )
+        }
+        let (_runtime, waiter) = lazy_test_waiter();
+        let pending = crate::common::internals::KafkaFutureImpl::<FilterResults>::new();
+        let matched = KafkaFuture::completed(Ok(FilterResults::new(vec![
+            FilterResult::new(Some(acl_binding("kept-topic", "User:bob")), None),
+            FilterResult::new(
+                Some(acl_binding("stuck-topic", "User:bob")),
+                Some(Error::with_message(Errors::SecurityDisabled, "cannot delete stuck-topic")),
+            ),
+        ])));
+        let result: *mut kafka_admin_DeleteAclsResult_t = into_handle(delete_acls_result_inner(
+            &waiter,
+            vec![(filter("z-filter"), matched), (filter("a-filter"), pending.future())],
+        ));
+        // SAFETY: Test code: `result` was built just above by `delete_acls_result_inner`, so
+        // it is a valid handle for every `kafka_admin_DeleteAclsResult_*` getter; borrowed
+        // pointers are read while it lives, the owned `all()` error is destroyed by
+        // `consume_message`, and `kafka_admin_DeleteAclsResult_destroy(result)` is the single
+        // destroy.
+        unsafe {
+            assert_eq!(kafka_admin_DeleteAclsResult_count(result), 2);
+            assert!(!kafka_admin_DeleteAclsResult_is_done(result, 0));
+            assert!(kafka_admin_DeleteAclsResult_is_done(result, 1));
+            // "a-filter" (index 0) is still pending, so reading "z-filter" must not wait on it.
+            assert!(kafka_admin_DeleteAclsResult_get_error(result, 1).is_null());
+            assert_eq!(kafka_admin_DeleteAclsResult_get_result_count(result, 1), 2);
+            assert_eq!(
+                borrowed_message(kafka_admin_DeleteAclsResult_get_result_error(result, 1, 1)),
+                "cannot delete stuck-topic"
+            );
+            assert!(!kafka_admin_DeleteAclsResult_is_done(result, 0));
+
+            let completer = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                pending.complete(FilterResults::new(vec![]));
+            });
+            // Both filters succeeded, so `all()` throws the matched ACL's own exception.
+            assert_eq!(
+                consume_message(kafka_admin_DeleteAclsResult_all(result)),
+                "cannot delete stuck-topic"
+            );
+            completer.join().expect("completer thread");
+            // A filter that matched nothing is not a failure.
+            assert!(kafka_admin_DeleteAclsResult_get_error(result, 0).is_null());
+            assert_eq!(kafka_admin_DeleteAclsResult_get_result_count(result, 0), 0);
+            kafka_admin_DeleteAclsResult_destroy(result);
+        }
+
+        // A failed filter wins over another filter's per-ACL exception.
+        let failed = KafkaFuture::completed(Err(Error::timeout("deleteAcls timed out")));
+        let matched = KafkaFuture::completed(Ok(FilterResults::new(vec![FilterResult::new(
+            Some(acl_binding("stuck-topic", "User:bob")),
+            Some(Error::with_message(Errors::SecurityDisabled, "cannot delete stuck-topic")),
+        )])));
+        let result: *mut kafka_admin_DeleteAclsResult_t = into_handle(delete_acls_result_inner(
+            &waiter,
+            vec![(filter("a-filter"), matched), (filter("z-filter"), failed)],
+        ));
+        // SAFETY: Test code: `result` is the live handle just built; the owned `all()` error is
+        // destroyed by `consume_message`, and the handle is destroyed exactly once.
+        unsafe {
+            assert_eq!(
+                consume_message(kafka_admin_DeleteAclsResult_all(result)),
+                "deleteAcls timed out"
+            );
+            assert_eq!(kafka_admin_DeleteAclsResult_get_result_count(result, 1), 0);
+            assert!(kafka_admin_DeleteAclsResult_get_binding(result, 1, 0).is_null());
+            kafka_admin_DeleteAclsResult_destroy(result);
+        }
+    }
+
+    /// End to end, against the production client: `create_acls` returns before
+    /// its request resolves (Java's `createAcls` does not block), the binding is
+    /// readable at once, and the request's timeout is read from the handle —
+    /// per binding and through `all()` — rather than returned by the call.
+    #[test]
+    fn create_acls_returns_before_the_request_resolves_and_reports_its_timeout_from_the_handle() {
+        let admin = unreachable_admin_client();
+        let (_names, name_ptrs) = c_array(&["lazy-topic"]);
+        let (_principals, principal_ptrs) = c_array(&["User:alice"]);
+        let (_hosts, host_ptrs) = c_array(&["*"]);
+        let resource_types = [ResourceType::Topic.code() as i32];
+        let pattern_types = [PatternType::Literal.code() as i32];
+        let operations = [AclOperation::Read.code() as i32];
+        let permission_types = [AclPermissionType::Allow.code() as i32];
+        let mut result: *mut kafka_admin_CreateAclsResult_t = std::ptr::null_mut();
+
+        let started = std::time::Instant::now();
+        // SAFETY: Test code: `admin` is live; every array has one entry, the string arrays
+        // point into `CString`s that outlive the call, and `result` is a writable slot.
+        let error = unsafe {
+            kafka_admin_AdminClient_create_acls(
+                admin,
+                resource_types.as_ptr(),
+                name_ptrs.as_ptr(),
+                pattern_types.as_ptr(),
+                principal_ptrs.as_ptr(),
+                host_ptrs.as_ptr(),
+                operations.as_ptr(),
+                permission_types.as_ptr(),
+                1,
+                1_000,
+                &mut result,
+            )
+        };
+        assert!(error.is_null(), "submission must not fail");
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "create_acls waited for the request"
+        );
+
+        // SAFETY: Test code: `result` is the live handle written above; borrowed pointers are
+        // read before it is destroyed, and `admin` is destroyed exactly once.
+        unsafe {
+            assert_eq!(kafka_admin_CreateAclsResult_count(result), 1);
+            assert_eq!(
+                CStr::from_ptr(kafka_common_acl_AclBinding_resource_name(
+                    kafka_admin_CreateAclsResult_get_binding(result, 0)
+                ))
+                .to_str(),
+                Ok("lazy-topic")
+            );
+            assert!(!kafka_admin_CreateAclsResult_is_done(result, 0));
+
+            let all = kafka_admin_CreateAclsResult_all(result);
+            assert!(!all.is_null(), "an unreachable cluster must time the request out");
+            assert_eq!(common::kafka_common_Error_code(all) as i32, Errors::RequestTimedOut as i32);
+            common::kafka_common_Error_destroy(all);
+            assert!(kafka_admin_CreateAclsResult_is_done(result, 0));
+            let per_binding = kafka_admin_CreateAclsResult_get_error(result, 0);
+            assert_eq!(
+                common::kafka_common_Error_code(per_binding) as i32,
+                Errors::RequestTimedOut as i32
+            );
+
+            kafka_admin_AdminClient_destroy(admin);
+            kafka_admin_CreateAclsResult_destroy(result);
+        }
+    }
+
+    /// End to end, against the production client: `describe_acls` returns at
+    /// once, and the request's timeout is read through Java's `values()`.
+    #[test]
+    fn describe_acls_returns_before_the_request_resolves_and_reports_its_timeout_from_the_handle() {
+        let admin = unreachable_admin_client();
+        let any = AclOperation::Any.code() as i32;
+        let mut result: *mut kafka_admin_DescribeAclsResult_t = std::ptr::null_mut();
+        let started = std::time::Instant::now();
+        // SAFETY: Test code: `admin` is live, the three NULL strings mean "match any", and
+        // `result` is a writable slot.
+        let error = unsafe {
+            kafka_admin_AdminClient_describe_acls(
+                admin,
+                ResourceType::Any.code() as i32,
+                std::ptr::null(),
+                PatternType::Any.code() as i32,
+                std::ptr::null(),
+                std::ptr::null(),
+                any,
+                AclPermissionType::Any.code() as i32,
+                1_000,
+                &mut result,
+            )
+        };
+        assert!(error.is_null(), "submission must not fail");
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "describe_acls waited for the request"
+        );
+        // SAFETY: Test code: `result` is the live handle written above and `admin` the live
+        // client; each is destroyed exactly once.
+        unsafe {
+            assert!(!kafka_admin_DescribeAclsResult_is_done(result));
+            let values = kafka_admin_DescribeAclsResult_values(result);
+            assert!(!values.is_null(), "an unreachable cluster must time the request out");
+            assert_eq!(common::kafka_common_Error_code(values) as i32, Errors::RequestTimedOut as i32);
+            common::kafka_common_Error_destroy(values);
+            assert_eq!(kafka_admin_DescribeAclsResult_count(result), 0);
+            kafka_admin_AdminClient_destroy(admin);
+            kafka_admin_DescribeAclsResult_destroy(result);
         }
     }
 
@@ -36605,13 +37242,19 @@ mod tests {
 
     #[test]
     fn alter_client_quotas_result_reports_success_as_a_null_error() {
-        let outcomes: AlterClientQuotasOutcomes = HashMap::from([
-            (quota_entity(&[("user", Some("alice"))]), Ok(())),
-            (quota_entity(&[("user", Some("bob"))]), Err(Error::new(Errors::InvalidRequest))),
-        ]);
-        let result = box_alter_client_quotas_result(outcomes);
+        let (_runtime, waiter) = lazy_test_waiter();
+        let result: *mut kafka_admin_AlterClientQuotasResult_t = into_handle(alter_client_quotas_result_inner(
+            &waiter,
+            vec![
+                (
+                    quota_entity(&[("user", Some("bob"))]),
+                    KafkaFuture::completed(Err(Error::new(Errors::InvalidRequest))),
+                ),
+                (quota_entity(&[("user", Some("alice"))]), KafkaFuture::completed(Ok(()))),
+            ],
+        ));
         // SAFETY: Test code: `result` was built just above by
-        // `box_alter_client_quotas_result`, so it is a valid handle for every
+        // `alter_client_quotas_result_inner`, so it is a valid handle for every
         // `kafka_admin_AlterClientQuotasResult_*` getter; `alice` and the error pointers
         // are borrowed from it and read while it lives, out-of-range indices exercise the
         // documented null paths, and `kafka_admin_AlterClientQuotasResult_destroy(result)`
@@ -36631,6 +37274,115 @@ mod tests {
             assert!(kafka_admin_AlterClientQuotasResult_get_entity(result, 2).is_null());
             assert!(kafka_admin_AlterClientQuotasResult_get_entity(result, -1).is_null());
             assert!(kafka_admin_AlterClientQuotasResult_get_error(result, -1).is_null());
+            kafka_admin_AlterClientQuotasResult_destroy(result);
+        }
+    }
+
+    /// Java's `describeClientQuotas().entities().get()`: every accessor waits
+    /// for the one future, and its failure is read with `entities()`.
+    #[test]
+    fn describe_client_quotas_result_accessors_wait_for_the_entities_future() {
+        let (_runtime, waiter) = lazy_test_waiter();
+        let entities = crate::common::internals::KafkaFutureImpl::<DescribeClientQuotasOutcome>::new();
+        let result: *mut kafka_admin_DescribeClientQuotasResult_t = into_handle(DescribeClientQuotasResultInner {
+            entities: lazy_single(&waiter, entities.future(), describe_client_quotas_data),
+        });
+        // SAFETY: Test code: `result` was built just above, so it is a valid handle for every
+        // `kafka_admin_DescribeClientQuotasResult_*` getter; `value` is a writable local,
+        // borrowed pointers are read while the handle lives, and it is destroyed exactly once.
+        unsafe {
+            assert!(!kafka_admin_DescribeClientQuotasResult_is_done(result));
+            let completer = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                entities.complete(HashMap::from([(
+                    quota_entity(&[("user", Some("alice"))]),
+                    HashMap::from([("producer_byte_rate".to_string(), 1024.0)]),
+                )]));
+            });
+            assert_eq!(kafka_admin_DescribeClientQuotasResult_count(result), 1);
+            completer.join().expect("completer thread");
+            assert!(kafka_admin_DescribeClientQuotasResult_is_done(result));
+            assert!(kafka_admin_DescribeClientQuotasResult_entities(result).is_null());
+            let mut value = 0.0f64;
+            assert!(kafka_admin_DescribeClientQuotasResult_get_quota_value(result, 0, 0, &mut value));
+            assert_eq!(value, 1024.0);
+            kafka_admin_DescribeClientQuotasResult_destroy(result);
+        }
+
+        let failing = crate::common::internals::KafkaFutureImpl::<DescribeClientQuotasOutcome>::new();
+        let result: *mut kafka_admin_DescribeClientQuotasResult_t = into_handle(DescribeClientQuotasResultInner {
+            entities: lazy_single(&waiter, failing.future(), describe_client_quotas_data),
+        });
+        failing.complete_with_error(Error::timeout("describeClientQuotas timed out"));
+        // SAFETY: Test code: `result` is the live handle just built; `value` is a writable
+        // local, the owned `entities()` error is destroyed by `consume_message`, and the handle
+        // is destroyed exactly once.
+        unsafe {
+            assert_eq!(
+                consume_message(kafka_admin_DescribeClientQuotasResult_entities(result)),
+                "describeClientQuotas timed out"
+            );
+            assert_eq!(kafka_admin_DescribeClientQuotasResult_count(result), 0);
+            assert!(kafka_admin_DescribeClientQuotasResult_get_entity(result, 0).is_null());
+            assert_eq!(kafka_admin_DescribeClientQuotasResult_get_quota_count(result, 0), 0);
+            assert!(kafka_admin_DescribeClientQuotasResult_get_quota_key(result, 0, 0).is_null());
+            let mut value = -1.5f64;
+            assert!(!kafka_admin_DescribeClientQuotasResult_get_quota_value(
+                result, 0, 0, &mut value
+            ));
+            assert_eq!(value, -1.5);
+            kafka_admin_DescribeClientQuotasResult_destroy(result);
+        }
+    }
+
+    /// Java's `alterClientQuotas().values().get(entity).get()` waits for that
+    /// entity only, and `all()` waits for every entity.
+    #[test]
+    fn alter_client_quotas_result_waits_for_each_entity_only_and_all_waits_for_every_one() {
+        let (_runtime, waiter) = lazy_test_waiter();
+        let fast = crate::common::internals::KafkaFutureImpl::<()>::new();
+        let slow = crate::common::internals::KafkaFutureImpl::<()>::new();
+        let result: *mut kafka_admin_AlterClientQuotasResult_t = into_handle(alter_client_quotas_result_inner(
+            &waiter,
+            vec![
+                (quota_entity(&[("user", Some("bob"))]), slow.future()),
+                (quota_entity(&[("user", Some("alice"))]), fast.future()),
+            ],
+        ));
+        // SAFETY: Test code: `result` was built just above by
+        // `alter_client_quotas_result_inner`, so it is a valid handle for every
+        // `kafka_admin_AlterClientQuotasResult_*` getter; borrowed pointers are read while it
+        // lives, the owned `all()` error is destroyed by `consume_message`, and the handle is
+        // destroyed exactly once.
+        unsafe {
+            assert_eq!(kafka_admin_AlterClientQuotasResult_count(result), 2);
+            let alice = kafka_admin_AlterClientQuotasResult_get_entity(result, 0);
+            assert_eq!(
+                CStr::from_ptr(kafka_common_quota_ClientQuotaEntity_get_entry_name(alice, 0)).to_str(),
+                Ok("alice")
+            );
+            assert!(!kafka_admin_AlterClientQuotasResult_is_done(result, 0));
+            fast.complete(());
+            assert!(kafka_admin_AlterClientQuotasResult_is_done(result, 0));
+            // "bob" is still pending, so reading "alice" must not wait on it.
+            assert!(kafka_admin_AlterClientQuotasResult_get_error(result, 0).is_null());
+            assert!(!kafka_admin_AlterClientQuotasResult_is_done(result, 1));
+            assert!(!kafka_admin_AlterClientQuotasResult_is_done(result, 2));
+
+            let completer = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                slow.complete_with_error(Error::with_message(Errors::InvalidRequest, "bad quota for bob"));
+            });
+            assert_eq!(
+                consume_message(kafka_admin_AlterClientQuotasResult_all(result)),
+                "bad quota for bob"
+            );
+            completer.join().expect("completer thread");
+            assert!(kafka_admin_AlterClientQuotasResult_is_done(result, 1));
+            assert_eq!(
+                borrowed_message(kafka_admin_AlterClientQuotasResult_get_error(result, 1)),
+                "bad quota for bob"
+            );
             kafka_admin_AlterClientQuotasResult_destroy(result);
         }
     }
@@ -37351,8 +38103,15 @@ mod tests {
     /// core's own tests do — the C handle is then built from this via
     /// `box_describe_user_scram_credentials_result`.
     fn seed_scram_result(rows: Vec<SeedRow<'_>>) -> *mut kafka_admin_DescribeUserScramCredentialsResult_t {
-        use crate::DescribeUserScramCredentialsResponseData;
         use crate::common::KafkaFuture;
+        let core = DescribeUserScramCredentialsResult::new(KafkaFuture::completed(Ok(scram_response_data(rows))));
+        box_describe_user_scram_credentials_result(core)
+    }
+
+    /// A successful wire response from per-user rows
+    /// `(user, wire error code, [(mechanism type, iterations)])`.
+    fn scram_response_data(rows: Vec<SeedRow<'_>>) -> crate::DescribeUserScramCredentialsResponseData {
+        use crate::DescribeUserScramCredentialsResponseData;
         use crate::describe_user_scram_credentials_response_data::{
             CredentialInfo, DescribeUserScramCredentialsResult as WireUserResult,
         };
@@ -37377,8 +38136,7 @@ mod tests {
             .collect();
         let mut data = DescribeUserScramCredentialsResponseData::new();
         data.set_error_code(Errors::None.code()).set_results(results);
-        let core = DescribeUserScramCredentialsResult::new(KafkaFuture::completed(Ok(data)));
-        box_describe_user_scram_credentials_result(core)
+        data
     }
 
     /// Resolves the `description(user)` view of a C handle to an owned handle or
@@ -37579,6 +38337,170 @@ mod tests {
         }
     }
 
+    /// Java's three SCRAM views each wait for the response when first read:
+    /// `isDone()` never blocks, and a view read before the response arrives
+    /// waits for it. A failure of the whole response faults every view.
+    #[test]
+    fn describe_user_scram_credentials_views_wait_for_the_response() {
+        let (_runtime, waiter) = lazy_test_waiter();
+        let data = crate::common::internals::KafkaFutureImpl::<crate::DescribeUserScramCredentialsResponseData>::new();
+        let core = DescribeUserScramCredentialsResult::new(data.future());
+        let result: *mut kafka_admin_DescribeUserScramCredentialsResult_t =
+            into_handle(describe_user_scram_credentials_result_inner(&waiter, core));
+        let sha256 = ScramMechanism::ScramSha256;
+        let response = scram_response_data(vec![
+            ("alice", Errors::None.code(), vec![(sha256.r#type(), 4_096)]),
+            ("carol", Errors::ResourceNotFound.code(), vec![]),
+        ]);
+        // SAFETY: Test code: `result` was built just above, so it is a valid handle for every
+        // `kafka_admin_DescribeUserScramCredentialsResult_*` getter; borrowed pointers are read
+        // while it lives, the owned description is destroyed exactly once, and the handle is
+        // destroyed exactly once.
+        unsafe {
+            assert!(!kafka_admin_DescribeUserScramCredentialsResult_all_is_done(result));
+            assert!(!kafka_admin_DescribeUserScramCredentialsResult_users_is_done(result));
+            let completer = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                data.complete(response);
+            });
+            // Read before the response arrives: waits for it.
+            assert_eq!(kafka_admin_DescribeUserScramCredentialsResult_users_count(result), 1);
+            completer.join().expect("completer thread");
+            assert!(kafka_admin_DescribeUserScramCredentialsResult_users_is_done(result));
+            assert!(kafka_admin_DescribeUserScramCredentialsResult_all_is_done(result));
+            assert!(kafka_admin_DescribeUserScramCredentialsResult_users_error(result).is_null());
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_DescribeUserScramCredentialsResult_users_get(result, 0)).to_str(),
+                Ok("alice")
+            );
+            assert!(kafka_admin_DescribeUserScramCredentialsResult_all_error(result).is_null());
+            assert_eq!(kafka_admin_DescribeUserScramCredentialsResult_all_count(result), 2);
+            let (alice, alice_err) = describe_scram_user(result, "alice");
+            assert!(alice_err.is_null());
+            assert_eq!(
+                kafka_admin_UserScramCredentialsDescription_credential_iterations(alice, 0),
+                4_096
+            );
+            kafka_admin_UserScramCredentialsDescription_destroy(alice);
+            kafka_admin_DescribeUserScramCredentialsResult_destroy(result);
+        }
+
+        let failing =
+            crate::common::internals::KafkaFutureImpl::<crate::DescribeUserScramCredentialsResponseData>::new();
+        let result: *mut kafka_admin_DescribeUserScramCredentialsResult_t =
+            into_handle(describe_user_scram_credentials_result_inner(
+                &waiter,
+                DescribeUserScramCredentialsResult::new(failing.future()),
+            ));
+        failing.complete_with_error(Error::timeout("describeUserScramCredentials timed out"));
+        // SAFETY: Test code: `result` is the live handle just built; every owned error is
+        // destroyed by `consume_message`, and the handle is destroyed exactly once.
+        unsafe {
+            assert_eq!(
+                consume_message(kafka_admin_DescribeUserScramCredentialsResult_all_error(result)),
+                "describeUserScramCredentials timed out"
+            );
+            assert_eq!(
+                consume_message(kafka_admin_DescribeUserScramCredentialsResult_users_error(result)),
+                "describeUserScramCredentials timed out"
+            );
+            let (description, error) = describe_scram_user(result, "alice");
+            assert!(description.is_null());
+            assert_eq!(consume_message(error), "describeUserScramCredentials timed out");
+            assert_eq!(kafka_admin_DescribeUserScramCredentialsResult_all_count(result), 0);
+            assert_eq!(kafka_admin_DescribeUserScramCredentialsResult_users_count(result), 0);
+            assert!(kafka_admin_DescribeUserScramCredentialsResult_users_get(result, 0).is_null());
+            assert!(kafka_admin_DescribeUserScramCredentialsResult_all_get_user(result, 0).is_null());
+            kafka_admin_DescribeUserScramCredentialsResult_destroy(result);
+        }
+    }
+
+    /// Java's `alterUserScramCredentials().values().get(user).get()` waits for
+    /// that user only, and `all()` waits for every user.
+    #[test]
+    fn alter_user_scram_credentials_result_waits_for_each_user_only_and_all_waits_for_every_one() {
+        let (_runtime, waiter) = lazy_test_waiter();
+        let fast = crate::common::internals::KafkaFutureImpl::<()>::new();
+        let slow = crate::common::internals::KafkaFutureImpl::<()>::new();
+        let result: *mut kafka_admin_AlterUserScramCredentialsResult_t =
+            into_handle(alter_user_scram_credentials_result_inner(
+                &waiter,
+                vec![("bob".to_string(), slow.future()), ("alice".to_string(), fast.future())],
+            ));
+        // SAFETY: Test code: `result` was built just above by
+        // `alter_user_scram_credentials_result_inner`, so it is a valid handle for every
+        // `kafka_admin_AlterUserScramCredentialsResult_*` getter; borrowed pointers are read
+        // while it lives, the owned `all()` error is destroyed by `consume_message`, and the
+        // handle is destroyed exactly once.
+        unsafe {
+            assert_eq!(kafka_admin_AlterUserScramCredentialsResult_count(result), 2);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_AlterUserScramCredentialsResult_get_user(result, 1)).to_str(),
+                Ok("bob")
+            );
+            assert!(!kafka_admin_AlterUserScramCredentialsResult_is_done(result, 0));
+            fast.complete(());
+            assert!(kafka_admin_AlterUserScramCredentialsResult_is_done(result, 0));
+            // "bob" is still pending, so reading "alice" must not wait on it.
+            assert!(kafka_admin_AlterUserScramCredentialsResult_get_error(result, 0).is_null());
+            assert!(!kafka_admin_AlterUserScramCredentialsResult_is_done(result, 1));
+
+            let completer = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                slow.complete_with_error(Error::with_message(
+                    Errors::UnacceptableCredential,
+                    "Password must not be empty",
+                ));
+            });
+            assert_eq!(
+                consume_message(kafka_admin_AlterUserScramCredentialsResult_all(result)),
+                "Password must not be empty"
+            );
+            completer.join().expect("completer thread");
+            assert!(kafka_admin_AlterUserScramCredentialsResult_is_done(result, 1));
+            assert_eq!(
+                borrowed_message(kafka_admin_AlterUserScramCredentialsResult_get_error(result, 1)),
+                "Password must not be empty"
+            );
+            kafka_admin_AlterUserScramCredentialsResult_destroy(result);
+        }
+    }
+
+    /// End to end, against the production client:
+    /// `describe_user_scram_credentials` returns at once, and the request's
+    /// timeout faults every view instead of being returned by the call.
+    #[test]
+    fn describe_user_scram_credentials_returns_before_the_request_resolves_and_reports_its_timeout_from_the_handle() {
+        let admin = unreachable_admin_client();
+        let (_users, user_ptrs) = c_array(&["alice"]);
+        let mut result: *mut kafka_admin_DescribeUserScramCredentialsResult_t = std::ptr::null_mut();
+        let started = std::time::Instant::now();
+        // SAFETY: Test code: `admin` is live, `user_ptrs` holds one valid C string that
+        // outlives the call, and `result` is a writable slot.
+        let error = unsafe {
+            kafka_admin_AdminClient_describe_user_scram_credentials(admin, user_ptrs.as_ptr(), 1, 1_000, &mut result)
+        };
+        assert!(error.is_null(), "submission must not fail");
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "describe_user_scram_credentials waited for the request"
+        );
+        // SAFETY: Test code: `result` is the live handle written above and `admin` the live
+        // client; each is destroyed exactly once.
+        unsafe {
+            assert!(!kafka_admin_DescribeUserScramCredentialsResult_all_is_done(result));
+            let all = kafka_admin_DescribeUserScramCredentialsResult_all_error(result);
+            assert!(!all.is_null(), "an unreachable cluster must time the request out");
+            assert_eq!(common::kafka_common_Error_code(all) as i32, Errors::RequestTimedOut as i32);
+            common::kafka_common_Error_destroy(all);
+            let users = kafka_admin_DescribeUserScramCredentialsResult_users_error(result);
+            assert_eq!(common::kafka_common_Error_code(users) as i32, Errors::RequestTimedOut as i32);
+            common::kafka_common_Error_destroy(users);
+            kafka_admin_AdminClient_destroy(admin);
+            kafka_admin_DescribeUserScramCredentialsResult_destroy(result);
+        }
+    }
+
     #[test]
     fn delegation_token_handles_expose_the_whole_java_chain() {
         // The three principals are distinct, and the renewer list has two
@@ -37671,12 +38593,18 @@ mod tests {
     fn keyed_void_results_expose_their_key_and_error_and_nothing_else() {
         // `alterUserScramCredentials` and `updateFeatures` are both
         // `Map<K, KafkaFuture<Void>>`, so both are key + error only.
-        let mut scram: AlterScramOutcomes = HashMap::new();
-        scram.insert("alice".to_string(), Ok(()));
-        scram.insert("bob".to_string(), Err(Error::unsupported_version("Not implemented yet")));
-        let result = box_alter_user_scram_credentials_result(scram);
+        let (_runtime, waiter) = lazy_test_waiter();
+        let scram = vec![
+            (
+                "bob".to_string(),
+                KafkaFuture::completed(Err(Error::unsupported_version("Not implemented yet"))),
+            ),
+            ("alice".to_string(), KafkaFuture::completed(Ok(()))),
+        ];
+        let result: *mut kafka_admin_AlterUserScramCredentialsResult_t =
+            into_handle(alter_user_scram_credentials_result_inner(&waiter, scram));
         // SAFETY: Test code: `result` was built just above by
-        // `box_alter_user_scram_credentials_result`, so it is a valid handle for every
+        // `alter_user_scram_credentials_result_inner`, so it is a valid handle for every
         // `kafka_admin_AlterUserScramCredentialsResult_*` getter; the user strings and
         // `error` are borrowed from it and read while it lives, the out-of-range index
         // exercises the documented null path, and
