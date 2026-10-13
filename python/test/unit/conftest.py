@@ -12,16 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Fixtures shared by the unit test modules."""
+"""Fixtures and helpers shared by the unit test modules."""
 
 import asyncio
 import sys
 import threading
+import time
 from collections.abc import Callable, Coroutine, Iterator
 from typing import Any
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 import pytest
+
+from confluent_kafka import IllegalStateError
+from confluent_kafka.common import KafkaError
+from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
+from confluent_kafka.producer import AsyncKafkaProducer, KafkaProducer, ProducerRecord
+from confluent_kafka.producer._base import await_payload, raise_if_error
 
 # How long a held completion waits for its release.
 _HOLD_TIMEOUT = 10.0
@@ -175,3 +182,128 @@ def stopped_loop() -> Iterator[StoppedLoop]:
     loop = StoppedLoop()
     yield loop
     loop.abandon()
+
+
+# ===========================================================================
+# The real producer without a broker: constants and fakes of the send path,
+# shared by test_producer_family.py and test_producer_send_path.py
+# ===========================================================================
+
+TOPIC = "topic"
+RECORD = ProducerRecord(topic=TOPIC, key=b"k", value=b"v")
+# Sends fail on the metadata wait after max.block.ms.
+UNREACHABLE: dict[str, Any] = {"bootstrap.servers": "127.0.0.1:59999", "max.block.ms": 100}
+# Java's KafkaProducer.throwIfProducerClosed() message.
+CLOSED = "Cannot perform operation after producer has been closed"
+# What a send() still waiting inside the producer raises once close() ends its
+# wait: the FFI's refusal of the waiting record, or the core's closed check.
+CLOSED_PRODUCER_REFUSALS = ("Producer closed while send in progress", CLOSED)
+# Java's message for a record sent with no transaction started
+# (TransactionManager.java:465, with Java's double space).
+NOT_IN_A_TRANSACTION = "Cannot add partition topic-0 to transaction while in state  READY"
+
+
+def is_closed_producer_refusal(error: object) -> bool:
+    return (isinstance(error, (KafkaError, IllegalStateError))
+            and str(error) in CLOSED_PRODUCER_REFUSALS)
+
+
+def refusal() -> int:
+    """An owned handle of the error Java's doSend rethrows for a record sent
+    with no transaction started, as the core reports a refusal."""
+    handle: int = _lib.KafkaError_new(IllegalStateError._ffi_id, NOT_IN_A_TRANSACTION)
+    return handle
+
+
+def failed_delivery() -> int:
+    """An owned handle of a record's failure, as a delivery report carries it."""
+    handle: int = _lib.KafkaError_new(KafkaTimeoutError._ffi_id, "boom")
+    return handle
+
+
+def wait_until(predicate: Callable[[], bool], timeout: float = 30.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < deadline, "condition not reached in time"
+        time.sleep(0.005)
+
+
+async def await_until(predicate: Callable[[], bool], timeout: float = 30.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < deadline, "condition not reached in time"
+        await asyncio.sleep(0.005)
+
+
+def spy_on(monkeypatch: pytest.MonkeyPatch, name: str) -> list[Any]:
+    """The return values of ``_lib.<name>`` during the test, in order (each
+    call still goes through). For ``Producer_send``: True for a record taken
+    at once, None for one queued, an error handle for one refused."""
+    calls: list[Any] = []
+    real = getattr(_lib, name)
+
+    def wrapper(*args: Any) -> Any:
+        result = real(*args)
+        calls.append(result)
+        return result
+
+    monkeypatch.setattr(_lib, name, wrapper)
+    return calls
+
+
+def fake_queued_send(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Fakes a Producer_send whose record the producer could not take at once:
+    queued (None), the answer still to come. The callback send() passed is
+    kept, for the test to answer with: ``cb(None, 0)`` for an accepted record,
+    ``cb(None, handle)`` for a refused one, ``cb(metadata, error)`` for a
+    delivery report."""
+    captured: dict[str, Any] = {}
+
+    def producer_send(c_producer: int, native: Any, cb: Any) -> None:
+        captured["cb"] = cb
+
+    monkeypatch.setattr(_lib, "Producer_send", producer_send)
+    return captured
+
+
+def fake_taken_send(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Fakes a Producer_send that takes every record at once (True), keeping
+    the callbacks, so the test completes the records itself."""
+    cbs: list[Any] = []
+
+    def producer_send(c_producer: int, native: Any, cb: Any) -> bool:
+        cbs.append(cb)
+        return True
+
+    monkeypatch.setattr(_lib, "Producer_send", producer_send)
+    return cbs
+
+
+def send_on_a_thread(p: KafkaProducer[Any, Any],
+                     record: ProducerRecord[Any, Any] = RECORD) -> tuple[threading.Thread, list[Any]]:
+    """Run ``p.send(record=record)`` on a thread, where it blocks for the
+    producer's answer; its outcome (the future, or the error it raised) lands
+    in the returned list."""
+    outcome: list[Any] = []
+
+    def run() -> None:
+        try:
+            outcome.append(p.send(record=record))
+        except Exception as error:  # noqa: BLE001 - the test reads which one
+            outcome.append(error)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    return thread, outcome
+
+
+def close_the_rust_producer_behind_the_wrapper(
+        p: KafkaProducer[Any, Any] | AsyncKafkaProducer[Any, Any]) -> None:
+    """Close the Rust producer while the Python wrapper still believes it is
+    open, so the next send reaches the producer and is refused there, on the
+    calling thread, with Java's "Cannot perform operation after producer has
+    been closed": a stand-in for every refusal Java's send() throws (a
+    transaction state, a fatal error), which the broker tests in
+    test/integration drive for real."""
+    (error,) = await_payload(lambda cb: _lib.Producer_close_async(p._c_producer, cb))  # noqa: SLF001
+    raise_if_error(error)
