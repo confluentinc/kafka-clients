@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <confluent_kafka.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdint.h>
 #include <inttypes.h>
@@ -934,12 +935,18 @@ static void test_mock_consumer_caller_thread_rebalance(void) {
 typedef struct {
     atomic_int fired;
     int32_t error_code;
+    char error_message[256];
 } counted_op_result_t;
 
 static void counted_op_cb(kafka_common_Error_t *error, void *user_data) {
     counted_op_result_t *r = (counted_op_result_t *)user_data;
     r->error_code = error ? kafka_common_Error_code(error) : 0;
-    if (error) kafka_common_Error_destroy(error);
+    r->error_message[0] = '\0';
+    if (error) {
+        const char *m = kafka_common_Error_message(error);
+        if (m) snprintf(r->error_message, sizeof r->error_message, "%s", m);
+        kafka_common_Error_destroy(error);
+    }
     atomic_fetch_add(&r->fired, 1);
 }
 
@@ -1013,6 +1020,11 @@ static void test_mock_consumer_caller_thread_lose_partitions(void) {
     int32_t lparts[2] = {0, 0};
     kafka_consumer_MockConsumer_lose_partitions_async(
         c, ltopics, lparts, 2, counted_op_cb, &lose_res);
+    // The loss does not complete before its on_partitions_lost is acked (§31):
+    // nothing has drained the pending queue yet.
+    struct timespec before_ack = {0, 50000000};  // 50ms
+    nanosleep(&before_ack, NULL);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&lose_res.fired));
     for (int i = 0; i < 2000 && atomic_load(&lose_res.fired) == 0; i++) {
         drain_pending_recording_lost(c, &d);
         struct timespec ts = {0, 1000000};
@@ -1047,7 +1059,9 @@ static void test_mock_consumer_caller_thread_lose_partitions(void) {
         nanosleep(&ts, NULL);
     }
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&bad_res.fired));
-    TEST_ASSERT_TRUE(bad_res.error_code != 0);
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE, bad_res.error_code);
+    TEST_ASSERT_EQUAL_STRING("Cannot lose partitions that are not currently assigned: [test-0]",
+                             bad_res.error_message);
     TEST_ASSERT_EQUAL_INT(1, d.lost_seen);
 
     kafka_consumer_Consumer_destroy(c);

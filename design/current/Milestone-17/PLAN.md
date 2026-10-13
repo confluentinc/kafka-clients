@@ -2972,13 +2972,34 @@ bootstrap-window spin.)
 ### Pre-push fixes (agent 117, Critic 115's open items)
 
 On branch `milestone-16-pre-push-fixes` (off `6a2f348b`), plain commits, merged back after agent 116's
-merge of master `95f67984`. Details in `COMMENTS.DONE.115.md`.
+merge of master `95f67984` (first as `04bb4664`). The record, since `COMMENTS.DONE.*` is gitignored:
+
+- **R3** `6ad7366f`: new public C export `kafka_consumer_MockConsumer_lose_partitions_async` (mirrors
+  `rebalance_async`) and C test `test_mock_consumer_caller_thread_lose_partitions`; docs fixed in
+  `0ce633ab` and the test's error/ack assertions strengthened in `aae466c9` (Critic 117 R1, R2).
+- **R5** `26b2f983`: Python `test_kafka_consumer.py` / `test_kafka_producer.py` accounted against Java
+  4.4.0 (KafkaConsumerTest 135 = 35 + 14 broker + 86 named; KafkaProducerTest 87 = 24 + 63 named); 8 new
+  tests, among them the 5 KIP-909 ones.
+- **R6** `5826e097`: Python `KafkaMetric.__str__` from Java 4.4 `toString()`, with Java's 3 new
+  `KafkaMetricTest` cases.
+- **D1** `35406897`: the AK 4.4 milestone renumbered 16 → 17 (`design/current/Milestone-17/`, see header).
+- **D2**: below.
+- **S1** `aa5ce62c`: CLAUDE.md, `AsyncMock*` also has `lose_partitions`.
+- **S2** `0e98cd8d`: `rust/Makefile` `test-all-features` (so `make verify`, CI `verify-rust` and the
+  SSL / SASL_SSL jobs, which call it) also runs `cargo test -p xtask -p generator`.
+- **S3** `0cefd7f1`, corrected in `91b300cc`: `admin-client.md` §11's additive-method exception.
+- **S4** `d1de7022`, `08c78f54`: §5.2's bump checklist and class-diff table.
+- `b23b3608`: rustfmt of R4's `chaos_matrix.rs` fix.
 
 - **D2 (user decision: keep).** `AdminClient.unregister_controller` (sync and asyncio) and
-  `MockAdminClient.set_using_raft_controller` stay in the paused `python/admin.py`: they are additive,
-  Java 4.4 adds the RPC, and `rust/tests/integration/admin_controllers_test.rs` drives them through the
-  Python gRPC arms. `.claude/rules/admin-client.md` §11 now allows exactly that kind of additive method
-  and names these two (S3).
+  `MockAdminClient.set_using_raft_controller` stay in the paused `python/admin.py`: both are additive.
+  Java 4.4 adds the RPC, and `rust/tests/integration/admin_controllers_test.rs` drives
+  `unregister_controller` through the Python gRPC arms. `set_using_raft_controller` is not Java-new
+  (`MockAdminClient.Builder.usingRaftController` dates from 3.0.0); it seeds the mock answer 4.4's
+  `unregisterController` reads, and only `python/test/unit/test_admin.py` (and, for C,
+  `c/tests/test_mock_admin.c`) exercises it. `.claude/rules/admin-client.md` §11 now allows an additive
+  method for a Java-new RPC the multilanguage suite exercises, plus the mock helper that seeds it, and
+  names these two (S3; wording corrected for Critic 117 R3).
 
 ## 7. Completeness audit (Phase 13, agent 103)
 

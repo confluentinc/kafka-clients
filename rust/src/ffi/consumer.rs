@@ -2255,13 +2255,15 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance(
 /// invoked with them (deduplicated, in the order given; with a NULL
 /// `on_partitions_lost` the listener falls back to `on_partitions_revoked`,
 /// Java's default method), and then they are removed from the assignment.
+/// Their buffered records are cleared before the callback runs, as in Java.
 /// Unlike [`kafka_consumer_MockConsumer_rebalance`], which fires
 /// `on_partitions_revoked`, this models losing partitions without a graceful
 /// revoke. Only the buffered records of the lost partitions are cleared.
 ///
 /// This call does not return until the listener callback has returned, and an
 /// error returned by the callback is propagated as this function's return value
-/// (the assignment is then left unchanged). With a caller-thread listener
+/// (the assignment is then left unchanged, but the lost partitions' records are
+/// already cleared, as in Java). With a caller-thread listener
 /// (registered through
 /// [`kafka_consumer_Consumer_subscribe_caller_thread_listener_async`]) use
 /// [`kafka_consumer_MockConsumer_lose_partitions_async`] instead: this blocking
@@ -2270,7 +2272,8 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance(
 ///
 /// Returns null on success, or a non-null error handle on failure:
 /// `illegal_state` with "Cannot lose partitions that are not currently
-/// assigned: [...]" when a partition is not assigned (nothing changes), or when
+/// assigned: [...]" when a partition is not assigned (nothing changes), or
+/// `illegal_state` ("operation is only supported on a MockConsumer") when
 /// `consumer` wraps an async consumer.
 ///
 /// # Safety
@@ -2416,12 +2419,14 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance_async(
 /// callback (a [`CallerThreadRebalanceListener`]) while the loss is parked on
 /// its ack — the same shape as [`kafka_consumer_MockConsumer_rebalance_async`].
 /// The semantics are those of the blocking form: the partitions (deduplicated,
-/// in the order given) must all be currently assigned, `on_partitions_lost`
-/// runs with them, and only then are they removed from the assignment and their
-/// buffered records cleared. A listener error is delivered to `callback` and
-/// leaves the assignment unchanged; a partition that is not assigned delivers
-/// `illegal_state` with "Cannot lose partitions that are not currently
-/// assigned: [...]", as does an async-consumer handle.
+/// in the order given) must all be currently assigned; their buffered records
+/// are cleared, `on_partitions_lost` runs with them, and only then are they
+/// removed from the assignment. A listener error is delivered to `callback` and
+/// leaves the assignment unchanged (the records are already cleared, as in
+/// Java). A partition that is not assigned delivers `illegal_state` with
+/// "Cannot lose partitions that are not currently assigned: [...]" and changes
+/// nothing. An async-consumer handle delivers `illegal_state` ("operation is
+/// only supported on a MockConsumer").
 ///
 /// The completion `callback` runs on the consumer's callback dispatcher thread.
 ///
