@@ -133,7 +133,7 @@ impl DefaultRecordBatch {
     }
 
     /// A decompression failure, in the message the batch reader has always used.
-    fn decompression_error(e: io::Error) -> InvalidRecordError {
+    pub(crate) fn decompression_error(e: &io::Error) -> InvalidRecordError {
         InvalidRecordError::new(format!("Failed to decompress record stream: {e}"))
     }
 
@@ -476,19 +476,6 @@ impl DefaultRecordBatch {
         self.as_ref().records_section()
     }
 
-    /// Decompress this batch's records section into a fresh owned buffer.
-    ///
-    /// Only valid for compressed batches. The returned `Vec<u8>` is the
-    /// decompressed record bytes, suitable for borrowing per-record refs via
-    /// [`DefaultRecord::read_ref_from_buffer`]. Per `consumer-threading.md`
-    /// §27, this allocation happens once per compressed batch — never per
-    /// record.
-    ///
-    /// Returns an error if the batch is corrupt or decompression fails.
-    pub fn decompress_records(&self) -> Result<Vec<u8>, InvalidRecordError> {
-        self.as_ref().decompress_records()
-    }
-
     /// Iterate over the records in this batch.
     ///
     /// For uncompressed batches, reads records directly from the buffer.
@@ -556,7 +543,7 @@ impl DefaultRecordBatch {
             let compression = Compression::of(self.compression_type()).build();
             let mut reader = compression
                 .wrap_for_input(records_data, self.magic())
-                .map_err(DefaultRecordBatch::decompression_error)?;
+                .map_err(|e| DefaultRecordBatch::decompression_error(&e))?;
 
             let mut records = Vec::with_capacity(capacity_hint);
             for _ in 0..num_records {
@@ -1064,26 +1051,6 @@ impl<'a> DefaultRecordBatchRef<'a> {
     /// slice ends where the batch does.
     pub fn records_section(&self) -> &'a [u8] {
         &self.buffer[RecordBatch::RECORDS_OFFSET..]
-    }
-
-    /// Decompress this batch's records section into a fresh owned buffer.
-    ///
-    /// Only valid for compressed batches. The returned `Vec<u8>` is the
-    /// decompressed record bytes, suitable for borrowing per-record refs via
-    /// [`DefaultRecord::read_ref_from_buffer`]. Per `consumer-threading.md`
-    /// §27, this allocation happens once per compressed batch — never per
-    /// record.
-    ///
-    /// Returns an error if the batch is corrupt or decompression fails.
-    pub fn decompress_records(&self) -> Result<Vec<u8>, InvalidRecordError> {
-        let records_data = self.records_section();
-        let compression = Compression::of(self.compression_type()).build();
-        let mut reader = compression
-            .wrap_for_input(records_data, self.magic())
-            .map_err(DefaultRecordBatch::decompression_error)?;
-        let mut decompressed = Vec::new();
-        io::Read::read_to_end(&mut reader, &mut decompressed).map_err(DefaultRecordBatch::decompression_error)?;
-        Ok(decompressed)
     }
 }
 
