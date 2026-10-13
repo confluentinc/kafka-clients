@@ -37,15 +37,17 @@
 //!       so it would duplicate the `1000` arm. This keeps exactly Java's two
 //!       arms wherever the broker has the config.
 //!
-//!   **Deviation (the `1000` arm's assignment bound):** Java waits 10 s for a
-//!   valid group assignment (`validateGroupAssignment`, line 579); the `1000`
-//!   arm waits 20 s. Under KIP-848 with batching, a target assignment is
-//!   recomputed only on a heartbeat that arrives after the interval, so the
-//!   four members joining just after the first get the stale (empty) target
-//!   and need two `group.consumer.heartbeat.interval.ms` rounds (5 s each) to
-//!   converge: measured at about 10.1–10.5 s for the Java KIP-848 client and
-//!   for this one alike, on a 4.4 broker (Critic 99, Phase 9 notes). Java's 10 s
-//!   holds only because its test runs classic (next paragraph).
+//!   **Deviation (the assignment bound):** Java waits 10 s for a valid group
+//!   assignment (`validateGroupAssignment`, line 579); every arm here waits 20 s
+//!   ([`ASSIGNMENT_TIMEOUT_MS`]). Under KIP-848 a target assignment reaches a
+//!   member only on its heartbeat, so convergence can take two
+//!   `group.consumer.heartbeat.interval.ms` rounds (5 s each): without batching
+//!   an owner learns it must revoke on its next heartbeat and the newcomer gets
+//!   the freed partition on its own, which sits right at 10 s and failed on CI;
+//!   with the `1000` interval the members joining just after the first get the
+//!   stale (empty) target, measured at about 10.1–10.5 s for the Java KIP-848
+//!   client and for this one alike, on a 4.4 broker (Critic 99, Phase 9 notes).
+//!   Java's 10 s holds only because its test runs classic (next paragraph).
 //!
 //!   **Upstream quirk:** Java's "async" test never sets `group.protocol`.
 //!   `testConsumerReceivesFatalExceptionWhenGroupPassesMaxSize(GroupProtocol)`
@@ -265,18 +267,23 @@ fn is_partition_assignment_valid(
     partitions.iter().all(|tp| all_assigned_partitions.contains(tp))
 }
 
-/// Java's `validateGroupAssignment` default bound (line 579).
-const DEFAULT_ASSIGNMENT_TIMEOUT_MS: u64 = 10_000;
-/// The bound of the `group.consumer.assignment.interval.ms=1000` arm: two
-/// broker heartbeat rounds plus reconcile slack (deviation, see the module docs).
-const BATCHED_ASSIGNMENT_TIMEOUT_MS: u64 = 20_000;
+/// How long [`validate_group_assignment`] waits for a valid assignment.
+///
+/// **Deviation:** Java waits 10 s, which holds only because its "async" test
+/// never sets `group.protocol` and so runs classic (see the module docs). Under
+/// KIP-848 a target assignment reaches a member only on its heartbeat, so every
+/// arm (with or without `group.consumer.assignment.interval.ms` batching) can
+/// need two `group.consumer.heartbeat.interval.ms` rounds (5 s each) plus
+/// reconciliation, which sits right at 10 s and failed on CI. 20 s covers two
+/// rounds with slack.
+const ASSIGNMENT_TIMEOUT_MS: u64 = 20_000;
 
 /// Java's two-argument `validateGroupAssignment` (line 579): wait up to
-/// `timeout_ms` (Java: 10 s) for a valid assignment across `consumer_pollers`.
+/// [`ASSIGNMENT_TIMEOUT_MS`] (Java: 10 s) for a valid assignment across
+/// `consumer_pollers`.
 async fn validate_group_assignment(
     consumer_pollers: &[ConsumerAssignmentPoller],
     subscriptions: &HashSet<TopicPartition>,
-    timeout_ms: u64,
 ) {
     test_utils::wait_until_true_with_timeout(
         || {
@@ -293,7 +300,7 @@ async fn validate_group_assignment(
             async move { valid }
         },
         &format!("Did not get valid assignment for partitions {subscriptions:?}"),
-        timeout_ms,
+        ASSIGNMENT_TIMEOUT_MS,
         100,
     )
     .await;
@@ -301,7 +308,6 @@ async fn validate_group_assignment(
 
 /// Java's `addConsumersToGroupAndWaitForGroupAssignment` (line 486), with the
 /// assignment bound passed through to [`validate_group_assignment`].
-#[expect(clippy::too_many_arguments)]
 async fn add_consumers_to_group_and_wait_for_group_assignment(
     ctx: &TestContext,
     consumer_pollers: &mut Vec<ConsumerAssignmentPoller>,
@@ -310,7 +316,6 @@ async fn add_consumers_to_group_and_wait_for_group_assignment(
     subscriptions: &HashSet<TopicPartition>,
     group: &str,
     consumer_config: &HashMap<String, String>,
-    assignment_timeout_ms: u64,
 ) {
     // Validation: number of consumers should not exceed number of partitions
     assert!(
@@ -326,16 +331,12 @@ async fn add_consumers_to_group_and_wait_for_group_assignment(
         consumer_config,
     )
     .await;
-    validate_group_assignment(consumer_pollers, subscriptions, assignment_timeout_ms).await;
+    validate_group_assignment(consumer_pollers, subscriptions).await;
 }
 
 /// Java's `testConsumerReceivesFatalExceptionWhenGroupPassesMaxSize(CONSUMER)`
-/// (line 418), run against `config`, waiting up to `assignment_timeout_ms` for
-/// the group's assignment.
-async fn test_consumer_receives_fatal_exception_when_group_passes_max_size(
-    config: ClusterConfig,
-    assignment_timeout_ms: u64,
-) {
+/// (line 418), run against `config`.
+async fn test_consumer_receives_fatal_exception_when_group_passes_max_size(config: ClusterConfig) {
     let mut ctx = TestContext::new(config).await;
     let group = ctx.group_id("fatal-exception-test");
     let topic = ctx.topic("fatal-exception-test");
@@ -362,7 +363,6 @@ async fn test_consumer_receives_fatal_exception_when_group_passes_max_size(
         &partitions,
         &group,
         &consumer_config,
-        assignment_timeout_ms,
     )
     .await;
 
@@ -460,8 +460,7 @@ async fn test_async_consumer_receives_fatal_exception_when_group_passes_max_size
         );
         return;
     }
-    test_consumer_receives_fatal_exception_when_group_passes_max_size(cluster_config(), DEFAULT_ASSIGNMENT_TIMEOUT_MS)
-        .await;
+    test_consumer_receives_fatal_exception_when_group_passes_max_size(cluster_config()).await;
 }
 
 /// The `group.consumer.assignment.interval.ms=0` arm of
@@ -477,17 +476,13 @@ async fn test_async_consumer_receives_fatal_exception_when_group_passes_max_size
         );
         return;
     }
-    test_consumer_receives_fatal_exception_when_group_passes_max_size(
-        cluster_config_with_assignment_interval("0"),
-        DEFAULT_ASSIGNMENT_TIMEOUT_MS,
-    )
-    .await;
+    test_consumer_receives_fatal_exception_when_group_passes_max_size(cluster_config_with_assignment_interval("0"))
+        .await;
 }
 
 /// The `group.consumer.assignment.interval.ms=1000` arm of
 /// `testAsyncConsumerReceivesFatalExceptionWhenGroupPassesMaxSize`
-/// (`ConsumerBounceTest.java:410-412`), with the 20 s assignment bound
-/// (deviation, see the module docs). Skips itself on a broker older than 4.3,
+/// (`ConsumerBounceTest.java:410-412`). Skips itself on a broker older than 4.3,
 /// which ignores the config.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_receives_fatal_exception_when_group_passes_max_size_assignment_interval_1000() {
@@ -498,11 +493,8 @@ async fn test_async_consumer_receives_fatal_exception_when_group_passes_max_size
         );
         return;
     }
-    test_consumer_receives_fatal_exception_when_group_passes_max_size(
-        cluster_config_with_assignment_interval("1000"),
-        BATCHED_ASSIGNMENT_TIMEOUT_MS,
-    )
-    .await;
+    test_consumer_receives_fatal_exception_when_group_passes_max_size(cluster_config_with_assignment_interval("1000"))
+        .await;
 }
 
 // ── Broker bounces (Phase 17) ──────────────────────────────────────────
