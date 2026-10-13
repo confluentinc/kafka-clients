@@ -1564,8 +1564,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_offsets_cb(
 /// operation that drains them (a later handle commit included, as Java's
 /// `commit()` runs `executeCallbacks()` first), or queued for
 /// `kafka_consumer_Consumer__execute_callbacks` by a `_cb` one. On a
-/// `MockConsumer` handle this commit fails as the handle's other no-offset
-/// commits do.
+/// `MockConsumer` handle the mock's consumed positions are committed and
+/// `onComplete` runs before this call returns, on the calling thread, as
+/// Java's `MockConsumer.commitAsync(callback)` invokes it inline.
 ///
 /// Blocking; callable from inside a listener or an `onComplete`. Fails with
 /// `LocalIllegalState` once the consumer is destroyed.

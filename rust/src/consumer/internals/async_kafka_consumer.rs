@@ -239,24 +239,29 @@ enum ConsumerHandleInner {
     /// shared `Arc` state.
     Async(AsyncConsumerHandleState),
     /// `MockConsumer`: `wakeup()` sets the shared wakeup flag observed by the
-    /// next `poll()`, and the commits with explicit offsets commit into the
+    /// next `poll()`, the sync getters read the mock's shared
+    /// `SubscriptionState` and paused set, and every commit commits into the
     /// mock's shared committed offsets as Java's `MockConsumer.commitAsync` /
-    /// `commitSync` do inside a callback. The mock has no bg task / event
-    /// pipeline, so the other async ops are not wired (they return an
-    /// `unsupported_version` error — the mock test surface drives the
-    /// concrete `MockConsumer` directly); neither are the commits without
-    /// offsets, which Java's mock resolves from its `SubscriptionState`
-    /// (`commitSync(subscriptions.allConsumed())`), owned by the mock alone.
-    /// `closed`, `should_rebalance` and `last_poll_timeout` are the mock's
-    /// own, read by the C binding while an operation borrows the mock.
+    /// `commitSync` do inside a callback — the ones without offsets commit
+    /// the mock's consumed positions (`commitSync(subscriptions.allConsumed())`).
+    /// The mock has no bg task / event pipeline, so the other async ops are
+    /// not wired (they return an `unsupported_version` error — the mock test
+    /// surface drives the concrete `MockConsumer` directly). `closed`,
+    /// `should_rebalance` and `last_poll_timeout` are the mock's own, read by
+    /// the C binding while an operation borrows the mock.
     Mock {
         flag: Arc<AtomicBool>,
         closed: Arc<AtomicBool>,
         should_rebalance: Arc<AtomicBool>,
         last_poll_timeout: Arc<Mutex<Option<Duration>>>,
-        /// The mock's committed offsets, which the handle's commits with
-        /// explicit offsets merge into as the mock's own do.
+        /// The mock's committed offsets, which the handle's commits merge
+        /// into as the mock's own do.
         committed: Arc<Mutex<HashMap<TopicPartition, OffsetAndMetadata>>>,
+        /// The mock's `SubscriptionState`, locked only for a read and never
+        /// across an `.await` (`consumer-threading.md` §16).
+        subscriptions: Arc<Mutex<SubscriptionState>>,
+        /// The mock's paused partitions (Java's `MockConsumer.paused`).
+        paused: Arc<Mutex<HashSet<TopicPartition>>>,
     },
 }
 
@@ -282,7 +287,7 @@ impl ConsumerHandle {
     pub fn assignment(&self) -> HashSet<TopicPartition> {
         match &self.inner {
             ConsumerHandleInner::Async(state) => state.subscriptions.lock().unwrap().assigned_partitions(),
-            ConsumerHandleInner::Mock { .. } => HashSet::new(),
+            ConsumerHandleInner::Mock { subscriptions, .. } => lock_mock(subscriptions).assigned_partitions(),
         }
     }
 
@@ -290,7 +295,7 @@ impl ConsumerHandle {
     pub fn subscription(&self) -> HashSet<String> {
         match &self.inner {
             ConsumerHandleInner::Async(state) => state.subscriptions.lock().unwrap().subscription(),
-            ConsumerHandleInner::Mock { .. } => HashSet::new(),
+            ConsumerHandleInner::Mock { subscriptions, .. } => lock_mock(subscriptions).subscription(),
         }
     }
 
@@ -298,7 +303,8 @@ impl ConsumerHandle {
     pub fn paused(&self) -> HashSet<TopicPartition> {
         match &self.inner {
             ConsumerHandleInner::Async(state) => state.subscriptions.lock().unwrap().paused_partitions(),
-            ConsumerHandleInner::Mock { .. } => HashSet::new(),
+            // Java's `MockConsumer.paused()` returns its own `paused` set.
+            ConsumerHandleInner::Mock { paused, .. } => lock_mock(paused).clone(),
         }
     }
 
@@ -451,10 +457,19 @@ impl ConsumerHandle {
     /// [`Consumer::commit_sync`](crate::consumer::Consumer::commit_sync). Commits the offsets the bg
     /// task has consumed (Java `commitSync()` with no offsets — commit
     /// `allConsumed`).
+    ///
+    /// On a `MockConsumer` handle, commits the mock's consumed positions
+    /// into its committed offsets (Java's `MockConsumer.commitSync()`).
     pub async fn commit_sync(&self) -> Result<(), Error> {
-        let state = self.async_state()?;
-        let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
-        state.commit_sync(None, timeout).await
+        match &self.inner {
+            ConsumerHandleInner::Async(state) => {
+                let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
+                state.commit_sync(None, timeout).await
+            },
+            ConsumerHandleInner::Mock { closed, committed, subscriptions, .. } => {
+                crate::consumer::mock_consumer::mock_commit_all_consumed(closed, committed, subscriptions, None).await
+            },
+        }
     }
 
     /// [`Consumer::commit_sync_with_offsets`](crate::consumer::Consumer::commit_sync_with_offsets).
@@ -478,19 +493,42 @@ impl ConsumerHandle {
     /// [`Consumer::commit_async`](crate::consumer::Consumer::commit_async): commits the offsets the bg
     /// task has consumed without waiting for the result. A later
     /// `commit_sync` or `close` waits for it.
+    ///
+    /// On a `MockConsumer` handle, commits the mock's consumed positions
+    /// into its committed offsets (Java's `MockConsumer.commitAsync()`).
     pub async fn commit_async(&self) -> Result<(), Error> {
-        self.async_state()?.commit_async(None, None).await
+        match &self.inner {
+            ConsumerHandleInner::Async(state) => state.commit_async(None, None).await,
+            ConsumerHandleInner::Mock { closed, committed, subscriptions, .. } => {
+                crate::consumer::mock_consumer::mock_commit_all_consumed(closed, committed, subscriptions, None).await
+            },
+        }
     }
 
     /// [`Consumer::commit_async_with_callback`](crate::consumer::Consumer::commit_async_with_callback):
     /// as [`commit_async`](Self::commit_async), then `callback` runs on the
     /// consumer's caller task, in commit order with the consumer's other
     /// commit callbacks.
+    ///
+    /// On a `MockConsumer` handle, commits the mock's consumed positions
+    /// and invokes `callback` inline before returning (Java's
+    /// `MockConsumer.commitAsync(OffsetCommitCallback)`).
     pub async fn commit_async_with_callback(
         &self,
         callback: Arc<dyn crate::consumer::OffsetCommitCallback>,
     ) -> Result<(), Error> {
-        self.async_state()?.commit_async(None, Some(callback)).await
+        match &self.inner {
+            ConsumerHandleInner::Async(state) => state.commit_async(None, Some(callback)).await,
+            ConsumerHandleInner::Mock { closed, committed, subscriptions, .. } => {
+                crate::consumer::mock_consumer::mock_commit_all_consumed(
+                    closed,
+                    committed,
+                    subscriptions,
+                    Some(callback),
+                )
+                .await
+            },
+        }
     }
 
     /// `AsyncKafkaConsumer::commit_async_offsets`: commits `offsets` without
@@ -545,19 +583,35 @@ impl ConsumerHandle {
     }
 
     /// Builds a mock-consumer handle from its shared wakeup flag and the
-    /// mock's shared `closed`, `should_rebalance`, `last_poll_timeout` and
-    /// committed offsets.
+    /// mock's shared `closed`, `should_rebalance`, `last_poll_timeout`,
+    /// committed offsets, `SubscriptionState` and paused set.
     pub(crate) fn for_mock(
         flag: Arc<AtomicBool>,
         closed: Arc<AtomicBool>,
         should_rebalance: Arc<AtomicBool>,
         last_poll_timeout: Arc<Mutex<Option<Duration>>>,
         committed: Arc<Mutex<HashMap<TopicPartition, OffsetAndMetadata>>>,
+        subscriptions: Arc<Mutex<SubscriptionState>>,
+        paused: Arc<Mutex<HashSet<TopicPartition>>>,
     ) -> Self {
         Self {
-            inner: ConsumerHandleInner::Mock { flag, closed, should_rebalance, last_poll_timeout, committed },
+            inner: ConsumerHandleInner::Mock {
+                flag,
+                closed,
+                should_rebalance,
+                last_poll_timeout,
+                committed,
+                subscriptions,
+                paused,
+            },
         }
     }
+}
+
+/// Locks a `MockConsumer`'s shared state as the mock itself does, recovering
+/// a poisoned guard.
+fn lock_mock<T>(state: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl AsyncConsumerHandleState {

@@ -190,7 +190,7 @@ typedef struct {
     int sequence;                   /* the global sequence number of the last call */
     /* What a reentrant call from inside the listener observed. */
     int handle_assignment_size;
-    int handle_commit_unsupported;
+    int handle_commit_succeeded;
     int consumer_call_concurrent_modification;
 } listener_probe_t;
 
@@ -236,7 +236,7 @@ static void probe_on_assigned(void *self_, const kafka_List_t *partitions, int64
         p->handle_assignment_size = asg == NULL ? -1 : kafka_List_size(asg);
         kafka_List_destroy(asg);
         kafka_common_Error_t *err = kafka_consumer_ConsumerHandle_commit_sync(p->handle);
-        p->handle_commit_unsupported = err != NULL && kafka_common_Error_is_unsupported_version_error(err);
+        p->handle_commit_succeeded = err == NULL;
         kafka_common_Error_destroy(err);
         /* The consumer itself is busy with the operation that invoked us. */
         err = kafka_consumer_Consumer_commit_sync(p->consumer);
@@ -543,8 +543,9 @@ static void test_consumer_handle_new_destroy(void) {
     fixture_destroy(&f);
 }
 
-// On a mock the handle has no SubscriptionState to read: empty sets.
-static void test_consumer_handle_sync_getters_empty_on_mock(void) {
+// On a mock the handle reads the mock's own state, as a Java callback
+// calling `consumer.assignment()` / `subscription()` / `paused()` does.
+static void test_consumer_handle_sync_getters_read_the_mock(void) {
     fixture_t f;
     fixture_init(&f);
     TEST_ASSERT_NULL(assign_one(f.consumer, "test", 0));
@@ -552,9 +553,12 @@ static void test_consumer_handle_sync_getters_empty_on_mock(void) {
 
     kafka_List_t *l = kafka_consumer_ConsumerHandle_assignment(h);
     TEST_ASSERT_NOT_NULL(l);
-    TEST_ASSERT_EQUAL_INT32(0, kafka_List_size(l));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_List_size(l));
+    const kafka_common_TopicPartition_t *tp = (const kafka_common_TopicPartition_t *)kafka_List_get(l, 0);
+    TEST_ASSERT_EQUAL_STRING("test", kafka_common_TopicPartition_topic(tp));
+    TEST_ASSERT_EQUAL_INT32(0, kafka_common_TopicPartition_partition(tp));
     kafka_List_destroy(l);
-    l = kafka_consumer_ConsumerHandle_subscription(h);
+    l = kafka_consumer_ConsumerHandle_subscription(h); /* assigned, not subscribed */
     TEST_ASSERT_NOT_NULL(l);
     TEST_ASSERT_EQUAL_INT32(0, kafka_List_size(l));
     kafka_List_destroy(l);
@@ -562,6 +566,13 @@ static void test_consumer_handle_sync_getters_empty_on_mock(void) {
     TEST_ASSERT_NOT_NULL(l);
     TEST_ASSERT_EQUAL_INT32(0, kafka_List_size(l));
     kafka_List_destroy(l);
+
+    kafka_List_t *list = tp_list("test", 1);
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_pause(f.consumer, list));
+    l = kafka_consumer_ConsumerHandle_paused(h);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_List_size(l));
+    kafka_List_destroy(l);
+    tp_list_destroy(list);
 
     kafka_consumer_ConsumerHandle_destroy(h);
     fixture_destroy(&f);
@@ -576,9 +587,9 @@ static void assert_mock_handle_unsupported(kafka_common_Error_t *err) {
     kafka_common_Error_destroy(err);
 }
 
-// Every async handle operation but the commits naming their offsets fails on
-// a mock handle with UnsupportedVersion and leaves its out-parameter untouched; the empty-assign rejection comes
-// first and is an IllegalArgument.
+// Every async handle operation but the commits fails on a mock handle with
+// UnsupportedVersion and leaves its out-parameter untouched, even an empty
+// assign.
 static void test_consumer_handle_async_ops_unsupported_on_mock(void) {
     fixture_t f;
     fixture_init(&f);
@@ -589,8 +600,6 @@ static void test_consumer_handle_async_ops_unsupported_on_mock(void) {
     assert_mock_handle_unsupported(kafka_consumer_ConsumerHandle_assign(h, list));
     assert_mock_handle_unsupported(kafka_consumer_ConsumerHandle_seek_with_offset(h, tp, 5));
     assert_mock_handle_unsupported(kafka_consumer_ConsumerHandle_seek_to_beginning(h, list));
-    assert_mock_handle_unsupported(kafka_consumer_ConsumerHandle_commit_sync(h));
-    assert_mock_handle_unsupported(kafka_consumer_ConsumerHandle_commit_async(h));
 
     int64_t position = -42;
     assert_mock_handle_unsupported(kafka_consumer_ConsumerHandle_position(h, tp, &position));
@@ -606,25 +615,18 @@ static void test_consumer_handle_async_ops_unsupported_on_mock(void) {
     TEST_ASSERT_NULL(kafka_consumer_OffsetAndMetadata_new(3, &oam));
     kafka_Map_t *offsets = kafka_Map_new();
     kafka_Map_put(offsets, (void *)tp, oam);
-    /* The commits naming their offsets work on a mock handle, as Java's
-     * MockConsumer commits inside a callback; the ones committing the
-     * consumed positions need the mock's subscriptions and stay unsupported. */
+    /* The commits work on a mock handle, as Java's MockConsumer commits
+     * inside a callback (see test_mock_handle_commits_commit_into_the_mock). */
     TEST_ASSERT_NULL(kafka_consumer_ConsumerHandle_commit_sync_with_offsets(h, offsets));
     TEST_ASSERT_NULL(kafka_consumer_ConsumerHandle_commit_async_offsets(h, offsets));
     kafka_Map_destroy(offsets);
     kafka_consumer_OffsetAndMetadata_destroy(oam);
-    commit_probe_t probe;
-    commit_probe_init(&probe, f.consumer, 1);
-    kafka_consumer_OffsetCommitCallback_t *cb = commit_probe_callback(&probe);
-    assert_mock_handle_unsupported(kafka_consumer_ConsumerHandle_commit_async_with_callback(h, cb));
-    kafka_consumer_OffsetCommitCallback_destroy(cb);
-    TEST_ASSERT_EQUAL_INT(0, atomic_load(&probe.calls));
 
     /* The `_cb` twin delivers the same rejection through its completion,
      * queued on the owning consumer's callbacks vector. */
     completion_t completion;
     completion_init(&completion);
-    kafka_consumer_ConsumerHandle_commit_sync_cb(h, on_void_op, &completion);
+    kafka_consumer_ConsumerHandle_seek_to_beginning_cb(h, list, on_void_op, &completion);
     TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &completion.fired, 1));
     TEST_ASSERT_TRUE(pthread_equal(pthread_self(), completion.thread));
     assert_mock_handle_unsupported(completion.error);
@@ -637,6 +639,56 @@ static void test_consumer_handle_async_ops_unsupported_on_mock(void) {
     kafka_List_destroy(empty);
 
     tp_list_destroy(list);
+    kafka_consumer_ConsumerHandle_destroy(h);
+    fixture_destroy(&f);
+}
+
+/* The mock's committed offset of `topic`-0, or -1 when there is none. */
+static int64_t mock_committed_offset(fixture_t *f, const char *topic) {
+    kafka_List_t *list = tp_list(topic, 1);
+    kafka_Map_t *committed = NULL;
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_committed(f->consumer, list, &committed));
+    int64_t offset = kafka_Map_size(committed) == 0
+                         ? -1
+                         : kafka_consumer_OffsetAndMetadata_offset(
+                               (const kafka_consumer_OffsetAndMetadata_t *)kafka_Map_value(committed, 0));
+    kafka_Map_destroy(committed);
+    tp_list_destroy(list);
+    return offset;
+}
+
+// The handle's commits naming no offsets commit the mock's consumed positions
+// (Java's `MockConsumer.commitSync()` / `commitAsync()` /
+// `commitAsync(callback)`, all `subscriptions.allConsumed()`), the callback
+// running inline.
+static void test_mock_handle_commits_commit_into_the_mock(void) {
+    fixture_t f;
+    make_consumed_mock(&f, "test"); /* consumed position 1 */
+    kafka_consumer_ConsumerHandle_t *h = kafka_consumer_Consumer_handle(f.consumer);
+
+    TEST_ASSERT_EQUAL_INT64(-1, mock_committed_offset(&f, "test"));
+    TEST_ASSERT_NULL(kafka_consumer_ConsumerHandle_commit_sync(h));
+    TEST_ASSERT_EQUAL_INT64(1, mock_committed_offset(&f, "test"));
+
+    kafka_common_TopicPartition_t *tp = kafka_common_TopicPartition_new("test", 0);
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_seek_with_offset(f.consumer, tp, 7));
+    TEST_ASSERT_NULL(kafka_consumer_ConsumerHandle_commit_async(h));
+    TEST_ASSERT_EQUAL_INT64(7, mock_committed_offset(&f, "test"));
+
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_seek_with_offset(f.consumer, tp, 8));
+    commit_probe_t probe;
+    commit_probe_init(&probe, f.consumer, 1);
+    kafka_consumer_OffsetCommitCallback_t *cb = commit_probe_callback(&probe);
+    TEST_ASSERT_NULL(kafka_consumer_ConsumerHandle_commit_async_with_callback(h, cb));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&probe.calls));
+    TEST_ASSERT_TRUE(probe.error_was_null);
+    TEST_ASSERT_EQUAL_INT64(8, probe.first_offset);
+    TEST_ASSERT_TRUE(pthread_equal(pthread_self(), probe.thread));
+    TEST_ASSERT_EQUAL_INT64(8, mock_committed_offset(&f, "test"));
+
+
+    kafka_consumer_OffsetCommitCallback_destroy(cb);
+    kafka_common_TopicPartition_destroy(tp);
     kafka_consumer_ConsumerHandle_destroy(h);
     fixture_destroy(&f);
 }
@@ -688,7 +740,8 @@ static void test_consumer_handle_usable_while_op_in_flight(void) {
     kafka_List_t *asg = kafka_consumer_ConsumerHandle_assignment(h);
     TEST_ASSERT_NOT_NULL(asg);
     kafka_List_destroy(asg);
-    assert_mock_handle_unsupported(kafka_consumer_ConsumerHandle_commit_sync(h)); /* not a CM rejection */
+    /* Not a CM rejection: the handle commits into the mock. */
+    TEST_ASSERT_NULL(kafka_consumer_ConsumerHandle_commit_sync(h));
     kafka_consumer_ConsumerHandle_destroy(h);
 
     TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &probe.assigned, 1));
@@ -1012,8 +1065,10 @@ static void test_listener_calls_consumer_handle_no_deadlock(void) {
 
     TEST_ASSERT_NULL(rebalance_to(&f, "t", 1));
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&probe.assigned));
-    TEST_ASSERT_EQUAL_INT(0, probe.handle_assignment_size); /* a mock handle reads nothing */
-    TEST_ASSERT_TRUE(probe.handle_commit_unsupported);
+    /* Java's MockConsumer replaces the assignment before onPartitionsAssigned,
+     * and the mock handle reads and commits the mock's own state. */
+    TEST_ASSERT_EQUAL_INT(1, probe.handle_assignment_size);
+    TEST_ASSERT_TRUE(probe.handle_commit_succeeded);
     TEST_ASSERT_TRUE(probe.consumer_call_concurrent_modification);
     kafka_consumer_ConsumerHandle_destroy(probe.handle);
 
@@ -1417,7 +1472,8 @@ int main(void) {
     RUN_TEST(test_commit_returns_only_after_callback_reports);
     RUN_TEST(test_offset_commit_callback_standalone_invoker);
     RUN_TEST(test_consumer_handle_new_destroy);
-    RUN_TEST(test_consumer_handle_sync_getters_empty_on_mock);
+    RUN_TEST(test_consumer_handle_sync_getters_read_the_mock);
+    RUN_TEST(test_mock_handle_commits_commit_into_the_mock);
     RUN_TEST(test_consumer_handle_async_ops_unsupported_on_mock);
     RUN_TEST(test_handle_commit_with_callback_inside_callback_nests);
     RUN_TEST(test_handle_commit_with_callback_cb_inside_callback_queues);

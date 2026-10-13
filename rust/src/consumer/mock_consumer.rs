@@ -83,12 +83,12 @@ pub type PollTask<K, V> = Box<dyn FnOnce(&mut MockConsumer<K, V>) + Send>;
 #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer")]
 pub struct MockConsumer<K, V> {
     partitions: HashMap<String, Vec<PartitionInfo>>,
-    /// Held directly (NOT `Arc<Mutex<...>>`). Per `consumer-threading.md` §16
-    /// the mutex wrap is only required when state crosses task boundaries;
-    /// `MockConsumer`'s [`Consumer`] trait API is
-    /// `&mut self`, so the Rust borrow checker enforces single-writer access
-    /// without runtime locking.
-    subscriptions: SubscriptionState,
+    /// Shared (`consumer-threading.md` §16: a `std::sync::Mutex`, never held
+    /// across an `.await` or a listener call) so a [`Consumer::handle`]
+    /// obtained from this mock reads the assignment and commits the consumed
+    /// positions as a Java callback calling back into the mock does
+    /// (`commitSync()` is `commitSync(subscriptions.allConsumed())`).
+    subscriptions: Arc<Mutex<SubscriptionState>>,
     beginning_offsets: HashMap<TopicPartition, i64>,
     end_offsets: HashMap<TopicPartition, i64>,
     duration_reset_offsets: HashMap<TopicPartition, i64>,
@@ -101,7 +101,9 @@ pub struct MockConsumer<K, V> {
     /// MockConsumer<K, V>` explicitly. Tests write
     /// `consumer.schedule_poll_task(Box::new(|c| c.add_record(...).unwrap()));`.
     poll_tasks: VecDeque<PollTask<K, V>>,
-    paused: HashSet<TopicPartition>,
+    /// Shared for the same reason as `subscriptions`: the handle's `paused()`
+    /// is the mock's `paused()`.
+    paused: Arc<Mutex<HashSet<TopicPartition>>>,
     /// Atomic so [`Consumer::wakeup`] can
     /// take `&self` (callable from any task / signal handler). `SeqCst`
     /// because wakeup is rare and reorder reasoning is not worth the win.
@@ -143,13 +145,13 @@ impl<K, V> MockConsumer<K, V> {
     pub(crate) fn with_auto_offset_reset_strategy(offset_reset_strategy: AutoOffsetResetStrategy) -> Self {
         Self {
             partitions: HashMap::new(),
-            subscriptions: SubscriptionState::new(offset_reset_strategy),
+            subscriptions: Arc::new(Mutex::new(SubscriptionState::new(offset_reset_strategy))),
             beginning_offsets: HashMap::new(),
             end_offsets: HashMap::new(),
             duration_reset_offsets: HashMap::new(),
             committed: Arc::new(Mutex::new(HashMap::new())),
             poll_tasks: VecDeque::new(),
-            paused: HashSet::new(),
+            paused: Arc::new(Mutex::new(HashSet::new())),
             wakeup: Arc::new(AtomicBool::new(false)),
             records: HashMap::new(),
             poll_error: None,
@@ -175,7 +177,7 @@ impl<K, V> MockConsumer<K, V> {
     pub fn add_record(&mut self, record: ConsumerRecord<K, V>) -> Result<(), Error> {
         self.ensure_not_closed()?;
         let tp = TopicPartition::new(record.topic().to_string(), record.partition());
-        if !self.subscriptions.assigned_partitions().contains(&tp) {
+        if !self.subs().assigned_partitions().contains(&tp) {
             return Err(Error::local_illegal_state(
                 "Cannot add records for a partition that is not assigned to the consumer",
             ));
@@ -273,7 +275,7 @@ impl<K, V> MockConsumer<K, V> {
     /// are sync.
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#rebalance")]
     pub async fn rebalance(&mut self, new_assignment: &[TopicPartition]) -> Result<(), Error> {
-        let old_assignment_set = self.subscriptions.assigned_partitions();
+        let old_assignment_set = self.subs().assigned_partitions();
         let new_assignment_set: HashSet<TopicPartition> = new_assignment.iter().cloned().collect();
 
         let added: Vec<TopicPartition> = new_assignment
@@ -292,19 +294,21 @@ impl<K, V> MockConsumer<K, V> {
 
         // Invoke onPartitionsRevoked first (Java line 138-140). Per
         // consumer-threading.md §16, clone the Arc out before awaiting.
+        let listener = self.subs().rebalance_listener();
         if !removed.is_empty()
-            && let Some(listener) = self.subscriptions.rebalance_listener()
+            && let Some(listener) = listener
         {
             listener.on_partitions_revoked(&removed).await?;
         }
 
         // Replace assignment (Java line 141:
         // `subscriptions.assignFromSubscribed(newAssignment)`).
-        self.subscriptions.assign_from_subscribed(new_assignment)?;
+        self.subs().assign_from_subscribed(new_assignment)?;
 
         // Invoke onPartitionsAssigned (Java line 142). Java passes only the
         // *added* partitions, not the full new assignment.
-        if let Some(listener) = self.subscriptions.rebalance_listener() {
+        let listener = self.subs().rebalance_listener();
+        if let Some(listener) = listener {
             listener.on_partitions_assigned(&added).await?;
         }
 
@@ -384,6 +388,14 @@ impl<K, V> MockConsumer<K, V> {
         self.committed.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Locks the shared `SubscriptionState`. Each caller drops the guard
+    /// before awaiting or invoking a listener (`consumer-threading.md` §16),
+    /// and never locks it twice in one expression: the mutex is not
+    /// reentrant.
+    fn subs(&self) -> std::sync::MutexGuard<'_, SubscriptionState> {
+        self.subscriptions.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Mirrors Java's private
     /// `subscribe(Collection<String>, Optional<ConsumerRebalanceListener>)`
     /// (`MockConsumer.java:196-200`).
@@ -394,8 +406,7 @@ impl<K, V> MockConsumer<K, V> {
     ) -> Result<(), Error> {
         self.ensure_not_closed()?;
         self.lock_committed().clear();
-        self.subscriptions
-            .subscribe_with_topics(topics.into_iter().collect(), listener)?;
+        self.subs().subscribe_with_topics(topics.into_iter().collect(), listener)?;
         Ok(())
     }
 
@@ -422,7 +433,7 @@ impl<K, V> MockConsumer<K, V> {
         }
         self.ensure_not_closed()?;
         self.lock_committed().clear();
-        self.subscriptions.subscribe_with_pattern(pattern, listener)?;
+        self.subs().subscribe_with_pattern(pattern, listener)?;
         Ok(())
     }
 
@@ -430,16 +441,16 @@ impl<K, V> MockConsumer<K, V> {
     /// (`MockConsumer.java:622-631`).
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#updateFetchPosition")]
     fn update_fetch_position(&mut self, tp: &TopicPartition) -> Result<(), Error> {
-        if self.subscriptions.is_offset_reset_needed(tp)? {
+        if self.subs().is_offset_reset_needed(tp)? {
             self.reset_offset_position(tp)
         } else {
             let committed_offset = self.lock_committed().get(tp).map(OffsetAndMetadata::offset);
             match committed_offset {
                 None => {
-                    self.subscriptions.request_offset_reset_default(tp)?;
+                    self.subs().request_offset_reset_default(tp)?;
                     self.reset_offset_position(tp)
                 },
-                Some(offset) => self.subscriptions.seek(tp, offset),
+                Some(offset) => self.subs().seek(tp, offset),
             }
         }
     }
@@ -453,7 +464,7 @@ impl<K, V> MockConsumer<K, V> {
     /// (Java's `NoOffsetForPartitionException`) when the strategy is `None`.
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#resetOffsetPosition")]
     fn reset_offset_position(&mut self, tp: &TopicPartition) -> Result<(), Error> {
-        let strategy = self.subscriptions.reset_strategy(tp)?.unwrap_or(AutoOffsetResetStrategy::NONE);
+        let strategy = self.subs().reset_strategy(tp)?.unwrap_or(AutoOffsetResetStrategy::NONE);
 
         if strategy == AutoOffsetResetStrategy::EARLIEST {
             let offset = self.beginning_offsets.get(tp).copied().ok_or_else(|| {
@@ -461,19 +472,19 @@ impl<K, V> MockConsumer<K, V> {
                     "MockConsumer didn't have beginning offset specified, but tried to seek to beginning",
                 )
             })?;
-            self.subscriptions.seek(tp, offset)
+            self.subs().seek(tp, offset)
         } else if strategy == AutoOffsetResetStrategy::LATEST {
             let offset = self.end_offsets.get(tp).copied().ok_or_else(|| {
                 Error::local_illegal_state("MockConsumer didn't have end offset specified, but tried to seek to end")
             })?;
-            self.subscriptions.seek(tp, offset)
+            self.subs().seek(tp, offset)
         } else if strategy.type_() == StrategyType::ByDuration {
             let offset = self.duration_reset_offsets.get(tp).copied().ok_or_else(|| {
                 Error::local_illegal_state(
                     "MockConsumer didn't have duration offset specified, but tried to seek to timestamp",
                 )
             })?;
-            self.subscriptions.seek(tp, offset)
+            self.subs().seek(tp, offset)
         } else {
             // strategy == NONE
             Err(crate::consumer::Error::ConsumerNoOffsetForPartition(
@@ -494,16 +505,16 @@ where
     // ── Sync accessors ─────────────────────────────────────────────────
 
     fn assignment(&self) -> HashSet<TopicPartition> {
-        self.subscriptions.assigned_partitions()
+        self.subs().assigned_partitions()
     }
 
     fn subscription(&self) -> HashSet<String> {
-        self.subscriptions.subscription()
+        self.subs().subscription()
     }
 
     fn paused(&self) -> HashSet<TopicPartition> {
         // Java line 613-615: returns a copy of `paused`.
-        self.paused.clone()
+        self.paused.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
     fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata> {
@@ -558,7 +569,7 @@ where
     /// pre-check `assignment().contains(tp)` themselves.
     fn current_lag(&self, topic_partition: &TopicPartition) -> Option<i64> {
         // Unassigned → None (diverges from Java, which throws). See rustdoc.
-        if !self.subscriptions.is_assigned(topic_partition) {
+        if !self.subs().is_assigned(topic_partition) {
             return None;
         }
         match self.end_offsets.get(topic_partition).copied() {
@@ -569,8 +580,9 @@ where
                 // (which requires &mut self and is not available here).
                 // If the partition has no valid position yet, fall back to
                 // the caught-up model.
-                match self.subscriptions.position_or_null(topic_partition) {
-                    Some(p) => Some(end - p.offset),
+                let position = self.subs().position_or_null(topic_partition).map(|p| p.offset);
+                match position {
+                    Some(p) => Some(end - p),
                     None => Some(0),
                 }
             },
@@ -607,7 +619,7 @@ where
         // Java line 235-239.
         self.ensure_not_closed()?;
         self.lock_committed().clear();
-        self.subscriptions.assign_from_user(partitions.into_iter().collect())?;
+        self.subs().assign_from_user(partitions.into_iter().collect())?;
         Ok(())
     }
 
@@ -615,7 +627,7 @@ where
         // Java line 242-246.
         self.ensure_not_closed()?;
         self.lock_committed().clear();
-        self.subscriptions.unsubscribe();
+        self.subs().unsubscribe();
         Ok(())
     }
 
@@ -652,9 +664,9 @@ where
 
         // Step 6: update fetch positions for newly-assigned partitions that
         // do not yet have a valid position (Java line 274-276).
-        let assigned: Vec<TopicPartition> = self.subscriptions.assigned_partitions().into_iter().collect();
+        let assigned: Vec<TopicPartition> = self.subs().assigned_partitions().into_iter().collect();
         for tp in &assigned {
-            if !self.subscriptions.has_valid_position(tp) {
+            if !self.subs().has_valid_position(tp) {
                 self.update_fetch_position(tp)?;
             }
         }
@@ -679,7 +691,11 @@ where
             // assigned. Java moved the `isAssigned` check up to the partition
             // level (`!subscriptions.isPaused(tp) && subscriptions.isAssigned(tp)`)
             // and dropped the per-record `assignment().contains(tp)` check.
-            if self.subscriptions.is_paused(&tp) || !self.subscriptions.is_assigned(&tp) {
+            let skip = {
+                let subs = self.subs();
+                subs.is_paused(&tp) || !subs.is_assigned(&tp)
+            };
+            if skip {
                 continue;
             }
 
@@ -699,7 +715,7 @@ where
 
                 // Read the current position. position_or_null returns the
                 // FetchPosition; we need its offset.
-                let position_opt = self.subscriptions.position_or_null(&tp).map(|p| p.offset);
+                let position_opt = self.subs().position_or_null(&tp).map(|p| p.offset);
                 let Some(position) = position_opt else {
                     // No valid position — preserve Java's behavior:
                     // `subscriptions.position(...).offset` would NPE in Java
@@ -745,7 +761,7 @@ where
                     // (not `seek`), which requires a valid current position.
                     let leader_and_epoch = LeaderAndEpoch::new(None, leader_epoch);
                     let new_position = FetchPosition::with_leader(next_offset, leader_epoch, leader_and_epoch);
-                    self.subscriptions.set_position(&tp, new_position)?;
+                    self.subs().set_position(&tp, new_position)?;
 
                     // Build the next-offsets entry (Java line 307).
                     let oam = OffsetAndMetadata::with_leader_epoch_metadata(next_offset, leader_epoch, String::new())?;
@@ -782,7 +798,7 @@ where
         // consumer is closed) but Rust skips the wasted subscription-map
         // traversal.
         self.ensure_not_closed()?;
-        let offsets = self.subscriptions.all_consumed();
+        let offsets = self.subs().all_consumed();
         self.commit_async_impl(offsets, None).await
     }
 
@@ -813,7 +829,7 @@ where
         // reading `allConsumed()`. Mirror that ordering so a closed consumer
         // errors out without traversing the subscription map.
         self.ensure_not_closed()?;
-        let offsets = self.subscriptions.all_consumed();
+        let offsets = self.subs().all_consumed();
         self.commit_async_impl(offsets, None).await
     }
 
@@ -826,7 +842,7 @@ where
         // `commit_async`, which deliberately pre-check to skip that traversal,
         // this path is left as-is because all `*_offsets` / callback variants
         // funnel into `commit_async_impl` for the single closed check.)
-        let offsets = self.subscriptions.all_consumed();
+        let offsets = self.subs().all_consumed();
         self.commit_async_impl(offsets, Some(callback)).await
     }
 
@@ -844,7 +860,7 @@ where
     async fn seek_with_offset(&mut self, partition: TopicPartition, offset: i64) -> Result<(), Error> {
         // Java line 393-396.
         self.ensure_not_closed()?;
-        self.subscriptions.seek(&partition, offset)?;
+        self.subs().seek(&partition, offset)?;
         Ok(())
     }
 
@@ -855,14 +871,14 @@ where
     ) -> Result<(), Error> {
         // Java line 398-402.
         self.ensure_not_closed()?;
-        self.subscriptions.seek(&partition, offset_and_metadata.offset())?;
+        self.subs().seek(&partition, offset_and_metadata.offset())?;
         Ok(())
     }
 
     async fn seek_to_beginning(&mut self, partitions: &[TopicPartition]) -> Result<(), Error> {
         // Java line 438-441.
         self.ensure_not_closed()?;
-        self.subscriptions
+        self.subs()
             .request_offset_reset_all(partitions, AutoOffsetResetStrategy::EARLIEST)?;
         Ok(())
     }
@@ -870,7 +886,7 @@ where
     async fn seek_to_end(&mut self, partitions: &[TopicPartition]) -> Result<(), Error> {
         // Java line 448-451.
         self.ensure_not_closed()?;
-        self.subscriptions
+        self.subs()
             .request_offset_reset_all(partitions, AutoOffsetResetStrategy::LATEST)?;
         Ok(())
     }
@@ -880,26 +896,22 @@ where
     async fn position(&mut self, partition: &TopicPartition) -> Result<i64, Error> {
         // Java line 420-430.
         self.ensure_not_closed()?;
-        if !self.subscriptions.is_assigned(partition) {
+        if !self.subs().is_assigned(partition) {
             return Err(Error::local_illegal_argument(
                 "You can only check the position for partitions assigned to this consumer.",
             ));
         }
         // First read; if absent, refresh via update_fetch_position and re-read.
-        let pos = self.subscriptions.position_or_null(partition).map(|p| p.offset);
+        let pos = self.subs().position_or_null(partition).map(|p| p.offset);
         if let Some(off) = pos {
             return Ok(off);
         }
         self.update_fetch_position(partition)?;
-        let pos = self
-            .subscriptions
-            .position_or_null(partition)
-            .map(|p| p.offset)
-            .ok_or_else(|| {
-                Error::local_illegal_state(format!(
-                    "Position for partition {partition} is still unset after update_fetch_position",
-                ))
-            })?;
+        let pos = self.subs().position_or_null(partition).map(|p| p.offset).ok_or_else(|| {
+            Error::local_illegal_state(format!(
+                "Position for partition {partition} is still unset after update_fetch_position",
+            ))
+        })?;
         Ok(pos)
     }
 
@@ -916,10 +928,11 @@ where
         self.ensure_not_closed()?;
         let mut result = HashMap::new();
         let committed = self.lock_committed();
+        let subs = self.subs();
         for tp in partitions {
             if let Some(om) = committed.get(tp) {
                 // Java: `subscriptions.isAssigned(tp) ? committed.get(tp) : new OffsetAndMetadata(0)`.
-                let value = if self.subscriptions.is_assigned(tp) {
+                let value = if subs.is_assigned(tp) {
                     om.clone()
                 } else {
                     // `OffsetAndMetadata::new(0)` is infallible for offset=0.
@@ -1050,8 +1063,8 @@ where
     async fn pause(&mut self, partitions: &[TopicPartition]) -> Result<(), Error> {
         // Java line 519-524.
         for tp in partitions {
-            self.subscriptions.pause(tp)?;
-            self.paused.insert(tp.clone());
+            self.subs().pause(tp)?;
+            self.paused.lock().unwrap_or_else(PoisonError::into_inner).insert(tp.clone());
         }
         Ok(())
     }
@@ -1059,8 +1072,8 @@ where
     async fn resume(&mut self, partitions: &[TopicPartition]) -> Result<(), Error> {
         // Java line 527-532.
         for tp in partitions {
-            self.subscriptions.resume(tp)?;
-            self.paused.remove(tp);
+            self.subs().resume(tp)?;
+            self.paused.lock().unwrap_or_else(PoisonError::into_inner).remove(tp);
         }
         Ok(())
     }
@@ -1108,6 +1121,8 @@ where
             Arc::clone(&self.should_rebalance),
             Arc::clone(&self.last_poll_timeout),
             Arc::clone(&self.committed),
+            Arc::clone(&self.subscriptions),
+            Arc::clone(&self.paused),
         )
     }
 }
@@ -1159,6 +1174,23 @@ pub(crate) async fn mock_commit_async(
         },
     }
     Ok(())
+}
+
+/// The commits of a [`MockConsumer`] handle that name no offsets: Java's
+/// `MockConsumer.commitAsync(callback)` (`ensureNotClosed()`, then
+/// `commitAsync(subscriptions.allConsumed(), callback)`), which its
+/// `commitSync()` and `commitAsync()` reach too. The `SubscriptionState`
+/// guard is dropped before the commit awaits the callback
+/// (`consumer-threading.md` §16).
+pub(crate) async fn mock_commit_all_consumed(
+    closed: &AtomicBool,
+    committed: &Mutex<HashMap<TopicPartition, OffsetAndMetadata>>,
+    subscriptions: &Mutex<SubscriptionState>,
+    callback: Option<Arc<dyn OffsetCommitCallback>>,
+) -> Result<(), Error> {
+    ensure_mock_not_closed(closed)?;
+    let offsets = subscriptions.lock().unwrap_or_else(PoisonError::into_inner).all_consumed();
+    mock_commit_async(closed, committed, offsets, callback).await
 }
 
 #[cfg(test)]
@@ -1414,31 +1446,115 @@ mod tests {
         );
     }
 
-    /// The handle's no-offset commits need the mock's consumed positions
-    /// (Java's `subscriptions.allConsumed()`), which the mock's handle does
-    /// not reach; they fail with the handle's unsupported error.
+    /// Assigns `tp`, seeds its beginning offset and polls `count` records
+    /// from offset `from`, so the mock's consumed position is `from + count`.
+    async fn consume(c: &mut MockConsumer<String, String>, tp: &TopicPartition, from: i64, count: i64) {
+        for offset in from..from + count {
+            c.add_record(ConsumerRecord::new(tp.topic().to_string(), tp.partition(), offset, None, None))
+                .expect("add record");
+        }
+        assert_eq!(c.poll(Duration::ZERO).await.expect("poll").count() as i64, count);
+    }
+
+    /// Java's `MockConsumer.commitSync()`, `commitAsync()` and
+    /// `commitAsync(callback)` commit `subscriptions.allConsumed()`; through a
+    /// handle they commit the same mock's consumed positions, the callback
+    /// running inline with them.
     #[tokio::test]
-    async fn handle_commit_without_offsets_is_unsupported() {
-        let c: MockConsumer<String, String> =
+    async fn handle_commit_without_offsets_commits_consumed_positions() {
+        let mut c: MockConsumer<String, String> =
+            MockConsumer::with_auto_offset_reset_strategy(AutoOffsetResetStrategy::EARLIEST);
+        let tp = tp_of("test");
+        c.assign(vec![tp.clone()]).await.expect("assign");
+        c.update_beginning_offsets(HashMap::from([(tp.clone(), 0)]));
+        let handle = c.handle();
+
+        consume(&mut c, &tp, 0, 1).await;
+        handle.commit_sync().await.expect("commit sync");
+        assert_eq!(
+            c.committed(std::slice::from_ref(&tp)).await.expect("committed"),
+            offsets(&tp, 1)
+        );
+
+        consume(&mut c, &tp, 1, 2).await;
+        handle.commit_async().await.expect("commit async");
+        assert_eq!(
+            c.committed(std::slice::from_ref(&tp)).await.expect("committed"),
+            offsets(&tp, 3)
+        );
+
+        consume(&mut c, &tp, 3, 1).await;
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        handle
+            .commit_async_with_callback(Arc::new(RecordingCallback {
+                label: "cb",
+                seen: Arc::clone(&seen),
+                nested: None,
+            }))
+            .await
+            .expect("commit async with callback");
+        assert_eq!(*seen.lock().unwrap(), vec![("cb", offsets(&tp, 4))]);
+        assert_eq!(
+            c.committed(std::slice::from_ref(&tp)).await.expect("committed"),
+            offsets(&tp, 4)
+        );
+    }
+
+    /// The handle's getters read the mock's own state, as a Java callback
+    /// calling `consumer.assignment()` / `subscription()` / `paused()` does.
+    #[tokio::test]
+    async fn handle_getters_read_the_mock_state() {
+        let mut c: MockConsumer<String, String> =
             MockConsumer::with_auto_offset_reset_strategy(AutoOffsetResetStrategy::EARLIEST);
         let handle = c.handle();
-        let expected = "ConsumerHandle async operations are not supported on a MockConsumer handle; drive the \
-                        MockConsumer directly.";
-        for err in [
-            handle.commit_sync().await.expect_err("unsupported"),
-            handle.commit_async().await.expect_err("unsupported"),
-            handle
-                .commit_async_with_callback(Arc::new(RecordingCallback {
-                    label: "x",
-                    seen: Arc::new(Mutex::new(Vec::new())),
-                    nested: None,
-                }))
-                .await
-                .expect_err("unsupported"),
-        ] {
-            assert!(err.is_unsupported_version_error(), "unexpected error: {err:?}");
-            assert_eq!(err.message(), expected);
+        c.subscribe_with_topics(vec!["test".to_string()]).await.expect("subscribe");
+        assert_eq!(handle.subscription(), HashSet::from(["test".to_string()]));
+        let tp = tp_of("test");
+        c.rebalance(std::slice::from_ref(&tp)).await.expect("rebalance");
+        assert_eq!(handle.assignment(), HashSet::from([tp.clone()]));
+        c.pause(std::slice::from_ref(&tp)).await.expect("pause");
+        assert_eq!(handle.paused(), HashSet::from([tp.clone()]));
+        c.resume(std::slice::from_ref(&tp)).await.expect("resume");
+        assert!(handle.paused().is_empty());
+    }
+
+    /// Commits from inside `onPartitionsRevoked` through the handle, the
+    /// canonical listener pattern: the mock holds no `SubscriptionState` lock
+    /// while the listener runs, so the commit reads the consumed positions
+    /// and records them before the rebalance replaces the assignment.
+    #[tokio::test]
+    async fn handle_commit_sync_inside_rebalance_listener() {
+        struct CommitOnRevoke(ConsumerHandle, Arc<Mutex<Vec<HashSet<TopicPartition>>>>);
+        #[async_trait]
+        impl ConsumerRebalanceListener for CommitOnRevoke {
+            async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+                self.1.lock().unwrap().push(self.0.assignment());
+                self.0.commit_sync().await
+            }
+            async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
         }
+
+        let mut c: MockConsumer<String, String> =
+            MockConsumer::with_auto_offset_reset_strategy(AutoOffsetResetStrategy::EARLIEST);
+        let tp = tp_of("test");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        c.subscribe_with_topics_listener(
+            vec!["test".to_string()],
+            Arc::new(CommitOnRevoke(c.handle(), Arc::clone(&seen))),
+        )
+        .await
+        .expect("subscribe");
+        c.rebalance(std::slice::from_ref(&tp)).await.expect("assign");
+        c.update_beginning_offsets(HashMap::from([(tp.clone(), 0)]));
+        consume(&mut c, &tp, 0, 2).await;
+
+        c.rebalance(&[]).await.expect("revoke");
+        assert_eq!(*seen.lock().unwrap(), vec![HashSet::from([tp.clone()])]);
+        // The commit recorded the consumed position (read directly: the
+        // mock's `committed()` answers 0 for a partition no longer assigned).
+        assert_eq!(*c.lock_committed(), offsets(&tp, 2));
     }
 
     /// Java's `commitAsync` starts with `ensureNotClosed()`, so a handle
@@ -1460,5 +1576,20 @@ mod tests {
             .await
             .expect_err("closed");
         assert_eq!(err.message(), "This consumer has already been closed.");
+        for err in [
+            handle.commit_sync().await.expect_err("closed"),
+            handle.commit_async().await.expect_err("closed"),
+            handle
+                .commit_async_with_callback(Arc::new(RecordingCallback {
+                    label: "x",
+                    seen: Arc::new(Mutex::new(Vec::new())),
+                    nested: None,
+                }))
+                .await
+                .expect_err("closed"),
+        ] {
+            assert!(err.is_local_illegal_state_error(), "unexpected error: {err:?}");
+            assert_eq!(err.message(), "This consumer has already been closed.");
+        }
     }
 }
