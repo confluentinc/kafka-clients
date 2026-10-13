@@ -34,7 +34,7 @@ class DuplicateSequenceError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 46  # kafka_common_ErrorCode_DUPLICATE_SEQUENCE_NUMBER
+    _ffi_id: ClassVar[int] = 46  # kafka_common_Error_DUPLICATE_SEQUENCE_NUMBER
 
     def __init__(
         self,

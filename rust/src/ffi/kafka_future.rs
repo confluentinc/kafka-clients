@@ -47,7 +47,7 @@
 //! A future may outlive its client. The client's `_destroy` fires the callback
 //! of every `get_cb` still waiting, exactly once, before it returns: with the
 //! value when the future has resolved, else with a
-//! `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE` error, "The client was
+//! `kafka_common_Error_LOCAL_ILLEGAL_STATE` error, "The client was
 //! destroyed before the future completed". A `get_cb` after that invokes the
 //! callback inline, the same way, as for a future with no client.
 

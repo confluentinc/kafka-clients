@@ -36,7 +36,7 @@ class DelegationTokenOwnerMismatchError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 63  # kafka_common_ErrorCode_DELEGATION_TOKEN_OWNER_MISMATCH
+    _ffi_id: ClassVar[int] = 63  # kafka_common_Error_DELEGATION_TOKEN_OWNER_MISMATCH
 
     def __init__(
         self,

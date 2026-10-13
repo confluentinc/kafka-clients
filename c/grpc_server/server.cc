@@ -338,7 +338,7 @@ namespace {
 // class Java would throw.
 KafkaError make_synthetic_error(
     const std::string& message,
-    kafka_common_ErrorCode_e code = kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE) {
+    kafka_common_Error_e code = kafka_common_Error_LOCAL_ILLEGAL_STATE) {
   KafkaError err;
   err.set_code(code);
   err.set_message("c server: " + message);
@@ -348,7 +348,7 @@ KafkaError make_synthetic_error(
 // Build a proto KafkaError from a C FFI error handle. Takes ownership
 // of the handle (destroys it on the way out).
 //
-// `kafka_common_Error_code` identifies the error's class on its own -- the
+// `kafka_common_Error__enum` identifies the error's class on its own -- the
 // codes are injective -- so nothing else has to be inferred here. This is what
 // retired `guess_variant_from_message`, which substring-matched the message
 // text to recover a class the code could not carry, on the two producer paths
@@ -364,7 +364,7 @@ void fill_proto_error(KafkaError* dst, kafka_common_Error_t* err) {
     return;
   }
   const char* msg = kafka_common_Error_message(err);
-  dst->set_code(kafka_common_Error_code(err));
+  dst->set_code(kafka_common_Error__enum(err));
   dst->set_message(msg ? std::string(msg) : std::string());
   kafka_common_Error_destroy(err);
 }
@@ -2372,7 +2372,7 @@ void copy_proto_error(KafkaError* dst, const kafka_common_Error_t* err) {
     *dst = make_synthetic_error("null error handle");
     return;
   }
-  dst->set_code(kafka_common_Error_code(err));
+  dst->set_code(kafka_common_Error__enum(err));
   dst->set_message(cstr(kafka_common_Error_message(err)));
 }
 
@@ -3251,7 +3251,7 @@ class AdminServiceImpl final : public AdminService::Service {
         if (type == nullptr) {
           *resp->mutable_error() =
               make_synthetic_error("unknown AlterConfigOp.OpType id " + std::to_string(op.op_type()),
-                                   kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT);
+                                   kafka_common_Error_LOCAL_ILLEGAL_ARGUMENT);
           return grpc::Status::OK;
         }
         kafka_admin_ConfigEntry_t* entry = entries.add(
@@ -3579,7 +3579,7 @@ class AdminServiceImpl final : public AdminService::Service {
             "OffsetSpec for " + spec.partition().topic() + "-" +
                 std::to_string(spec.partition().partition()) + " has no usable kind (" +
                 std::to_string(spec.spec().kind()) + ")",
-            kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT);
+            kafka_common_Error_LOCAL_ILLEGAL_ARGUMENT);
         return grpc::Status::OK;
       }
       specs.put(tps.add(kafka_common_TopicPartition_new(spec.partition().topic().c_str(),
@@ -4089,7 +4089,7 @@ class AdminServiceImpl final : public AdminService::Service {
           if (!c.has_match_name()) {
             *resp->mutable_error() = make_synthetic_error(
                 "ClientQuotaFilterComponent with MATCH_KIND_EXACT carries no match_name",
-                kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT);
+                kafka_common_Error_LOCAL_ILLEGAL_ARGUMENT);
             return grpc::Status::OK;
           }
           component = kafka_common_quota_ClientQuotaFilterComponent_of_entity(
@@ -4107,7 +4107,7 @@ class AdminServiceImpl final : public AdminService::Service {
           *resp->mutable_error() = make_synthetic_error(
               "ClientQuotaFilterComponent has no match_kind (got " +
                   std::to_string(static_cast<int>(c.match_kind())) + ")",
-              kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT);
+              kafka_common_Error_LOCAL_ILLEGAL_ARGUMENT);
           return grpc::Status::OK;
       }
       component_list.add(components.add(component));
@@ -5870,7 +5870,7 @@ class ChaosWorkloadServiceImpl final : public ChaosWorkloadService::Service {
       WorkloadEventBatch batch;
       *batch.add_events() = chaos_failed(make_synthetic_error(
           "workload_id '" + workload_id + "' is already running",
-          kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT));
+          kafka_common_Error_LOCAL_ILLEGAL_ARGUMENT));
       writer->Write(batch);
       return grpc::Status::OK;
     }

@@ -34,7 +34,7 @@ class FetchSessionTopicIdError(RetriableError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 106  # kafka_common_ErrorCode_FETCH_SESSION_TOPIC_ID_ERROR
+    _ffi_id: ClassVar[int] = 106  # kafka_common_Error_FETCH_SESSION_TOPIC_ID_ERROR
 
     def __init__(
         self,

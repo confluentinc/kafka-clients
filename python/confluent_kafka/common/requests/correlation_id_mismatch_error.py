@@ -38,7 +38,7 @@ class CorrelationIdMismatchError(IllegalStateError):
 
     __module__ = "confluent_kafka.common.requests"
 
-    _ffi_id: ClassVar[int] = -24  # kafka_common_ErrorCode_CORRELATION_ID_MISMATCH
+    _ffi_id: ClassVar[int] = -24  # kafka_common_Error_CORRELATION_ID_MISMATCH
 
     def __init__(
         self,

@@ -153,7 +153,7 @@ In practice:
   constructs it and returns it as `Box<dyn Consumer<K, V>>`.
 - `Errors` (the wire enum) is `pub(crate)`, so `Error` has no public
   `error()` / `code()`. Callers classify by variant and `is_*_error()`, and C
-  callers use `kafka_common_ErrorCode_e`.
+  callers use `kafka_common_Error_e`.
 - Exceptions are tagged in the code, each under a `//` comment giving the
   reason: `#[doc(alias = "rust-only")]` for an item translating no Java API
   (Rust-only types, JDK translations such as `TimeUnit`, C helper handles,
@@ -349,7 +349,7 @@ pipeline over a single owned buffer — read them in that order.*
 ```
 rust/src/ffi/           # feature-gated: --features ffi; 265 files, 2299 exported symbols
 ├── mod.rs              # module docs: the C conventions as implemented
-├── common.rs           # kafka_common_Error_t, kafka_common_ErrorCode_e, init_default_logger
+├── common.rs           # kafka_common_Error_t, kafka_common_Error_e, init_default_logger
 ├── error_predicates.rs # generated: 167 kafka_common_Error_is_*_error predicates
 ├── util.rs             # kafka_List_t, kafka_Map_t, kafka_Bytes_t, kafka_string_destroy (14)
 ├── kafka_future.rs     # kafka_common_KafkaFuture_t (13)

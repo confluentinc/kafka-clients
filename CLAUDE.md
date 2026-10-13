@@ -317,7 +317,7 @@ The Python client, package `confluent_kafka` in `python/`, is built only on the 
   | `Partitioner`, `Cluster`, `MetricConfig`, `Measurable` | placeholder aliases of `object` of the same name in their module *(deviation)*; a mock uses them as Java's mock does (Implementation over the FFI) |
 
 - **Errors**
-  - One class per Java exception class the FFI enum `kafka_common_ErrorCode_t` names, plus Java's abstract bases and the Java built-in exceptions of Types, with Java's `extends` chain; the base is `KafkaError(RuntimeError)` (`KafkaException`).
+  - One class per Java exception class the FFI enum `kafka_common_Error_e` names, plus Java's abstract bases and the Java built-in exceptions of Types, with Java's `extends` chain; the base is `KafkaError(RuntimeError)` (`KafkaException`).
   - `cargo xtask generate-error-codes` emits them as `.py` plus `.pyi` from the Java exception sources, cross-checked against the FFI enum: a Kafka class without an id, an id without a class or a different `extends` chain fails the build (a Java built-in exception has an id only where the enum has one: `NoSuchElementError` and `NullPointerError` have none); `check-generated` fails on stale output.
   - A Java `abstract` exception is a catch-only base: constructing it raises `TypeError`; it has no FFI id.
   - Constructors collapse Java's by Signatures, with these changes:

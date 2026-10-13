@@ -34,7 +34,7 @@ class InvalidRequiredAcksError(InvalidConfigurationError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 21  # kafka_common_ErrorCode_INVALID_REQUIRED_ACKS
+    _ffi_id: ClassVar[int] = 21  # kafka_common_Error_INVALID_REQUIRED_ACKS
 
     def __init__(
         self,

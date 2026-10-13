@@ -34,7 +34,7 @@ class GroupIdNotFoundError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 69  # kafka_common_ErrorCode_GROUP_ID_NOT_FOUND
+    _ffi_id: ClassVar[int] = 69  # kafka_common_Error_GROUP_ID_NOT_FOUND
 
     def __init__(
         self,

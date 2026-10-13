@@ -1022,7 +1022,7 @@ plus the package-less helpers:
 | File / directory | Exported symbols | What it holds |
 |------------------|-----------------:|---------------|
 | `common.rs`, `common/` (104 files) | 835 | `kafka_common_Error_t` (factories, accessors, payload views), `TopicPartition`, `Node`, `Uuid`, `Cluster`, ACL / quota / resource / config types, metrics, serialization, enum singletons |
-| `error_predicates.rs` (generated) | 167 | `kafka_common_Error_is_<class>_error`, `kafka_common_ErrorCode_e` |
+| `error_predicates.rs` (generated) | 167 | `kafka_common_Error_is_<class>_error`, `kafka_common_Error_e` |
 | `util.rs` | 14 | `kafka_List_t`, `kafka_Map_t`, `kafka_Bytes_t`, `kafka_string_destroy` |
 | `kafka_future.rs` | 13 | the one generic `kafka_common_KafkaFuture_t` (`get`, `get_cb`, `is_done`, `all_of`, `then_apply` through a `BaseFunction_t` interface, `completed_future`) |
 | `callback_queue.rs` | 0 | `CallbackQueue`: the per-client callbacks vector behind `__execute_callbacks` / `__set_callbacks_notify` |

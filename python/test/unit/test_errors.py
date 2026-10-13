@@ -160,7 +160,7 @@ def _bridge() -> dict[str, str]:
 
 
 def _ffi_enum() -> dict[str, int]:
-    """The FFI enum ``kafka_common_ErrorCode_e`` (``rust/src/ffi/common.rs``),
+    """The FFI enum ``kafka_common_Error_e`` (``rust/src/ffi/common.rs``),
     from its generated Rust mirror, which ``cargo xtask check-generated``
     keeps in step with it."""
     text = (_REPO_ROOT / "rust/tests/common/error_code.rs").read_text()

@@ -1428,7 +1428,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_close_cb(
 /// completion, as a Java `send` after `close` does.
 ///
 /// A negative `timeout` is rejected with
-/// `kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT` ("The timeout cannot be
+/// `kafka_common_Error_LOCAL_ILLEGAL_ARGUMENT` ("The timeout cannot be
 /// negative.") on a `KafkaProducer`, as in Java; a `MockProducer`, whose Java
 /// `close(Duration)` never reads the timeout, closes as for zero.
 ///

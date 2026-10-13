@@ -34,7 +34,7 @@ class MemberIdRequiredError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 79  # kafka_common_ErrorCode_MEMBER_ID_REQUIRED
+    _ffi_id: ClassVar[int] = 79  # kafka_common_Error_MEMBER_ID_REQUIRED
 
     def __init__(
         self,

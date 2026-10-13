@@ -36,7 +36,7 @@ class OffsetMovedToTieredStorageError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 109  # kafka_common_ErrorCode_OFFSET_MOVED_TO_TIERED_STORAGE
+    _ffi_id: ClassVar[int] = 109  # kafka_common_Error_OFFSET_MOVED_TO_TIERED_STORAGE
 
     def __init__(
         self,

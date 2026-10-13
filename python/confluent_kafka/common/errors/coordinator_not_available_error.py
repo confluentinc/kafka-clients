@@ -45,7 +45,7 @@ class CoordinatorNotAvailableError(RefreshRetriableError):
 
     INSTANCE: ClassVar[CoordinatorNotAvailableError]
 
-    _ffi_id: ClassVar[int] = 15  # kafka_common_ErrorCode_COORDINATOR_NOT_AVAILABLE
+    _ffi_id: ClassVar[int] = 15  # kafka_common_Error_COORDINATOR_NOT_AVAILABLE
 
     def __init__(
         self,

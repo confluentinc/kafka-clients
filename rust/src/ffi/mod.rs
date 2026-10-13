@@ -48,7 +48,7 @@
 //! function returns the panic as its `kafka_common_Error_t *` and leaves its
 //! `out_<name>` parameters unwritten, as for any other failure: read them only
 //! after a NULL return. The error's code is
-//! `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE` and its message begins
+//! `kafka_common_Error_LOCAL_ILLEGAL_STATE` and its message begins
 //! `Rust panic caught at the FFI boundary in <function>`. Any other function
 //! returns the failure value of its return type:
 //!
@@ -72,8 +72,8 @@
 //!   holds any `int` Java's constructor was given);
 //! - a `double`: NaN;
 //! - a `kafka_Bytes_t`: a NULL one (Java's `null` array);
-//! - `kafka_common_ErrorCode_e` (`kafka_common_Error_code`):
-//!   `kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR`; another C enum: the
+//! - `kafka_common_Error_e` (`kafka_common_Error__enum`):
+//!   `kafka_common_Error_UNKNOWN_SERVER_ERROR`; another C enum: the
 //!   enumerator its documentation names, its `UNKNOWN` one when it has one;
 //! - a borrowed `const kafka_common_Error_t *` (`kafka_common_Error_source`):
 //!   NULL, as for no error.

@@ -1059,7 +1059,7 @@ static void test_listener_local_callback_error_keeps_its_opaque(void) {
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_callback_error(err));
     TEST_ASSERT_FALSE(kafka_common_Error_is_kafka_error(err));
-    TEST_ASSERT_EQUAL_INT(kafka_common_ErrorCode_LOCAL_CALLBACK, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT(kafka_common_Error_LOCAL_CALLBACK, kafka_common_Error__enum(err));
     TEST_ASSERT_EQUAL_STRING("ValueError: bad", kafka_common_Error_message(err));
     const kafka_common_LocalCallbackError_t *view = kafka_common_Error_local_callback_error(err);
     TEST_ASSERT_NOT_NULL(view);

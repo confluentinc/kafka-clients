@@ -149,7 +149,7 @@ _GROUP_OP_CODE = {
     CloseOptions.GroupMembershipOperation.REMAIN_IN_GROUP: 2,
 }
 
-# kafka_common_ErrorCode_LOCAL_CALLBACK: a foreign callback error the client
+# kafka_common_Error_LOCAL_CALLBACK: a foreign callback error the client
 # reported as it is, without wrapping it.
 _LOCAL_CALLBACK = -29
 

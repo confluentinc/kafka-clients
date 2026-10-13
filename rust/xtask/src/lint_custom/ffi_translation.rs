@@ -181,10 +181,10 @@ const C_ONLY_CLOSURE_INTERFACES: &[(&str, &[&str])] = &[
 
 /// C items with no Rust item behind them that CLAUDE.md §4 presupposes: a C
 /// caller classifies an error "beyond its numeric code" through the
-/// predicates, so the numeric code itself — `kafka_common_Error_code` and the
-/// `kafka_common_ErrorCode_e` enum naming every class — is part of the
+/// predicates, so the numeric code itself — `kafka_common_Error__enum` and the
+/// `kafka_common_Error_e` enum naming every class — is part of the
 /// contract. Rust needs neither: it matches the `Error` variant.
-const C_ONLY_ERROR_CODE: &[&str] = &["kafka_common_ErrorCode_e", "kafka_common_Error_code"];
+const C_ONLY_ERROR_CODE: &[&str] = &["kafka_common_Error_e", "kafka_common_Error__enum"];
 
 /// Queued `_cb` twins (and their `_cb_t` typedefs) of methods that are sync in
 /// Rust and Java but whose C form waits: `beginTransaction` does not block in
@@ -2527,7 +2527,7 @@ fn is_constant_case(key: &str) -> bool {
 
 /// Reports every enumerator of a C enum `<prefix>_e` not spelled
 /// `<prefix>_<VALUE>` with the key in constant case (CLAUDE.md §4 "Enums") —
-/// including the enums with no Rust counterpart (`kafka_common_ErrorCode_e`),
+/// including the enums with no Rust counterpart (`kafka_common_Error_e`),
 /// which the per-type comparison does not see — and a per-enum
 /// `cbindgen:prefix-with-name=true` annotation, which would make cbindgen
 /// prepend the `_e` export name to every enumerator.
@@ -4094,14 +4094,17 @@ mod tests {
     fn test_the_numeric_error_code_is_accepted_without_a_rust_item() {
         let ffi = r#"
             #[repr(C)] pub struct kafka_common_Error_t { _private: [u8; 0] }
-            #[repr(C)] pub enum kafka_common_ErrorCode_e { kafka_common_ErrorCode_NONE = 0 }
-            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Error_code(error: *const kafka_common_Error_t) -> kafka_common_ErrorCode_e { kafka_common_ErrorCode_e::kafka_common_ErrorCode_NONE }
-            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Error_codes(error: *const kafka_common_Error_t) -> i32 { 0 }
+            #[repr(C)] pub enum kafka_common_Error_e { kafka_common_Error_NONE = 0 }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Error__enum(error: *const kafka_common_Error_t) -> kafka_common_Error_e { kafka_common_Error_e::kafka_common_Error_NONE }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Error__enums(error: *const kafka_common_Error_t) -> i32 { 0 }
         "#;
         let findings = run("error-code", "", ffi);
         assert_eq!(
             keys(&findings),
-            ["unexpected kafka_common_Error_codes", "unexpected kafka_common_Error_t"]
+            [
+                "unexpected kafka_common_Error__enums",
+                "unexpected kafka_common_Error_t"
+            ]
         );
     }
 
@@ -4172,7 +4175,7 @@ mod tests {
         }
     }
 
-    /// A C-only enum (`kafka_common_ErrorCode_e`, no Rust counterpart, so no
+    /// A C-only enum (`kafka_common_Error_e`, no Rust counterpart, so no
     /// per-type comparison) is still held to the enumerator rule, and a
     /// `cbindgen:prefix-with-name=true` annotation on any `_e` enum is
     /// reported.
@@ -4181,22 +4184,22 @@ mod tests {
         let ffi = r#"
             #[repr(C)] pub struct kafka_common_Error_t { _private: [u8; 0] }
             /// cbindgen:prefix-with-name=true
-            #[repr(C)] pub enum kafka_common_ErrorCode_e { NONE = 0, kafka_common_ErrorCode_e_UNKNOWN = -1, kafka_common_ErrorCode_offset_out_of_range = 1, kafka_common_ErrorCode_CORRUPT_MESSAGE = 2 }
-            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Error_code(error: *const kafka_common_Error_t) -> kafka_common_ErrorCode_e { kafka_common_ErrorCode_e::NONE }
+            #[repr(C)] pub enum kafka_common_Error_e { NONE = 0, kafka_common_Error_e_UNKNOWN = -1, kafka_common_Error_offset_out_of_range = 1, kafka_common_Error_CORRUPT_MESSAGE = 2 }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Error__enum(error: *const kafka_common_Error_t) -> kafka_common_Error_e { kafka_common_Error_e::NONE }
         "#;
         let findings = run("c-only-enumerators", "", ffi);
         assert_eq!(
             keys(&findings),
             [
                 "enumerator NONE",
-                "enumerator kafka_common_ErrorCode_e",
-                "enumerator kafka_common_ErrorCode_e_UNKNOWN",
-                "enumerator kafka_common_ErrorCode_offset_out_of_range",
+                "enumerator kafka_common_Error_e",
+                "enumerator kafka_common_Error_e_UNKNOWN",
+                "enumerator kafka_common_Error_offset_out_of_range",
                 "unexpected kafka_common_Error_t",
             ]
         );
         assert_eq!(
-            detail(&findings, "enumerator kafka_common_ErrorCode_e"),
+            detail(&findings, "enumerator kafka_common_Error_e"),
             "`cbindgen:prefix-with-name=true` would prefix every enumerator with the `_e` export name; \
              spell the enumerators `<prefix>_<VALUE>` in full instead"
         );

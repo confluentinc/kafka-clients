@@ -34,7 +34,7 @@ class UnsupportedAssignorError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 112  # kafka_common_ErrorCode_UNSUPPORTED_ASSIGNOR
+    _ffi_id: ClassVar[int] = 112  # kafka_common_Error_UNSUPPORTED_ASSIGNOR
 
     def __init__(
         self,

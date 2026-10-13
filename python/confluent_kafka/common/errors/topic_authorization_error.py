@@ -37,7 +37,7 @@ class TopicAuthorizationError(AuthorizationError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 29  # kafka_common_ErrorCode_TOPIC_AUTHORIZATION_FAILED
+    _ffi_id: ClassVar[int] = 29  # kafka_common_Error_TOPIC_AUTHORIZATION_FAILED
 
     @java_forms(
         Form("message", "unauthorized_topics", defaults={"unauthorized_topics": ()}),

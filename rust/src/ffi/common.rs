@@ -21,7 +21,7 @@
 //!   constructors, one per `Error` static factory
 //!   (`kafka_common_Error_kafka_message`, `kafka_common_Error_timeout`, ...),
 //!   its accessors (`code`, `message`, `source`, `throttle_time_ms`), the
-//!   [`kafka_common_ErrorCode_e`] enum a C caller switches on, and the
+//!   [`kafka_common_Error_e`] enum a C caller switches on, and the
 //!   per-class payload views (`kafka_common_Error_resource_not_found` ->
 //!   `kafka_common_ResourceNotFoundError_t`). The hierarchy predicates are
 //!   generated into `error_predicates.rs`. `kafka_common_*` is shared verbatim
@@ -87,9 +87,9 @@ use crate::ffi::callback_queue::{CallbackJob, SendPtr};
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, kafka_List_t, list_strings};
 // The 163 enumerators are spelled out in full (see
-// [`kafka_common_ErrorCode_e`]), so this glob keeps the match arms in
+// [`kafka_common_Error_e`]), so this glob keeps the match arms in
 // `error_code_of` readable without repeating the type name on each one.
-use kafka_common_ErrorCode_e::*;
+use kafka_common_Error_e::*;
 
 /// Initializes the default stderr log backend, honouring `RUST_LOG`, the first
 /// time a client is created from C. Idempotent: `try_init` succeeds once and
@@ -1225,7 +1225,7 @@ pub(crate) unsafe fn take_error(error: *mut kafka_common_Error_t) -> Option<Erro
 }
 
 // ---------------------------------------------------------------------------
-// Error code enum
+// Error enum
 // ---------------------------------------------------------------------------
 
 /// The class of an error, as a named constant a C caller can switch on.
@@ -1292,8 +1292,21 @@ pub(crate) unsafe fn take_error(error: *mut kafka_common_Error_t) -> Option<Erro
 // prefix_with_name = false` in `cbindgen.toml` turns prefixing off for every
 // C enum and each enumerator is written out in full in Rust: the Rust
 // identifier is the C name, which is also what `check-ffi-translation` checks.
-// As a bonus, one `grep kafka_common_ErrorCode_WAKEUP` finds this definition
+// As a bonus, one `grep kafka_common_Error_WAKEUP` finds this definition
 // and every C use of it.
+//
+// **Why the keys are Java's `Errors` names, not the `Error` variants.** This
+// is `Error`'s C enum, so §4 names it `kafka_common_Error_e`, with
+// `kafka_common_Error__enum` returning it, as every other C enum is named. §4
+// would also take the enumerator keys from the enum's own keys, the `Error`
+// variants in constant case. That does not fit here, so the faithful half
+// keeps Java's `Errors` constants (`CLUSTER_AUTHORIZATION_FAILED`, not
+// `CLUSTER_AUTHORIZATION`; `STALE_CONTROLLER_EPOCH`, not `CONTROLLER_MOVED`):
+// the variants do not map one to one onto the classes, because
+// `Error::KafkaError` stores an `Errors` and reports the class that owns it,
+// and the `Errors` names are the ones a C caller knows from Java and
+// librdkafka. The client-only classes have no `Errors` constant and take their
+// variant's name (`LOCAL_TIMEOUT`, `PRODUCER_BUFFER_EXHAUSTED`).
 //
 // `#[repr(C)]` rather than `#[repr(i32)]` so the C typedef names the enum
 // itself rather than an integer alias beside it: given an explicit integer repr
@@ -1307,198 +1320,198 @@ pub(crate) unsafe fn take_error(error: *mut kafka_common_Error_t) -> Option<Erro
 // exhaustiveness warning.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum kafka_common_ErrorCode_e {
+pub enum kafka_common_Error_e {
     // Java's `Errors`, at Java's own values. Names come from
     // `Errors::enum_name()`, so each equals Java's constant.
-    kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR = -1,
-    kafka_common_ErrorCode_NONE = 0,
-    kafka_common_ErrorCode_OFFSET_OUT_OF_RANGE = 1,
-    kafka_common_ErrorCode_CORRUPT_MESSAGE = 2,
-    kafka_common_ErrorCode_UNKNOWN_TOPIC_OR_PARTITION = 3,
-    kafka_common_ErrorCode_INVALID_FETCH_SIZE = 4,
-    kafka_common_ErrorCode_LEADER_NOT_AVAILABLE = 5,
-    kafka_common_ErrorCode_NOT_LEADER_OR_FOLLOWER = 6,
-    kafka_common_ErrorCode_REQUEST_TIMED_OUT = 7,
-    kafka_common_ErrorCode_BROKER_NOT_AVAILABLE = 8,
-    kafka_common_ErrorCode_REPLICA_NOT_AVAILABLE = 9,
-    kafka_common_ErrorCode_MESSAGE_TOO_LARGE = 10,
-    kafka_common_ErrorCode_STALE_CONTROLLER_EPOCH = 11,
-    kafka_common_ErrorCode_OFFSET_METADATA_TOO_LARGE = 12,
-    kafka_common_ErrorCode_NETWORK_ERROR = 13,
-    kafka_common_ErrorCode_COORDINATOR_LOAD_IN_PROGRESS = 14,
-    kafka_common_ErrorCode_COORDINATOR_NOT_AVAILABLE = 15,
-    kafka_common_ErrorCode_NOT_COORDINATOR = 16,
-    kafka_common_ErrorCode_INVALID_TOPIC_ERROR = 17,
-    kafka_common_ErrorCode_RECORD_LIST_TOO_LARGE = 18,
-    kafka_common_ErrorCode_NOT_ENOUGH_REPLICAS = 19,
-    kafka_common_ErrorCode_NOT_ENOUGH_REPLICAS_AFTER_APPEND = 20,
-    kafka_common_ErrorCode_INVALID_REQUIRED_ACKS = 21,
-    kafka_common_ErrorCode_ILLEGAL_GENERATION = 22,
-    kafka_common_ErrorCode_INCONSISTENT_GROUP_PROTOCOL = 23,
-    kafka_common_ErrorCode_INVALID_GROUP_ID = 24,
-    kafka_common_ErrorCode_UNKNOWN_MEMBER_ID = 25,
-    kafka_common_ErrorCode_INVALID_SESSION_TIMEOUT = 26,
-    kafka_common_ErrorCode_REBALANCE_IN_PROGRESS = 27,
-    kafka_common_ErrorCode_INVALID_COMMIT_OFFSET_SIZE = 28,
-    kafka_common_ErrorCode_TOPIC_AUTHORIZATION_FAILED = 29,
-    kafka_common_ErrorCode_GROUP_AUTHORIZATION_FAILED = 30,
-    kafka_common_ErrorCode_CLUSTER_AUTHORIZATION_FAILED = 31,
-    kafka_common_ErrorCode_INVALID_TIMESTAMP = 32,
-    kafka_common_ErrorCode_UNSUPPORTED_SASL_MECHANISM = 33,
-    kafka_common_ErrorCode_ILLEGAL_SASL_STATE = 34,
-    kafka_common_ErrorCode_UNSUPPORTED_VERSION = 35,
-    kafka_common_ErrorCode_TOPIC_ALREADY_EXISTS = 36,
-    kafka_common_ErrorCode_INVALID_PARTITIONS = 37,
-    kafka_common_ErrorCode_INVALID_REPLICATION_FACTOR = 38,
-    kafka_common_ErrorCode_INVALID_REPLICA_ASSIGNMENT = 39,
-    kafka_common_ErrorCode_INVALID_CONFIG = 40,
-    kafka_common_ErrorCode_NOT_CONTROLLER = 41,
-    kafka_common_ErrorCode_INVALID_REQUEST = 42,
-    kafka_common_ErrorCode_UNSUPPORTED_FOR_MESSAGE_FORMAT = 43,
-    kafka_common_ErrorCode_POLICY_VIOLATION = 44,
-    kafka_common_ErrorCode_OUT_OF_ORDER_SEQUENCE_NUMBER = 45,
-    kafka_common_ErrorCode_DUPLICATE_SEQUENCE_NUMBER = 46,
-    kafka_common_ErrorCode_INVALID_PRODUCER_EPOCH = 47,
-    kafka_common_ErrorCode_INVALID_TXN_STATE = 48,
-    kafka_common_ErrorCode_INVALID_PRODUCER_ID_MAPPING = 49,
-    kafka_common_ErrorCode_INVALID_TRANSACTION_TIMEOUT = 50,
-    kafka_common_ErrorCode_CONCURRENT_TRANSACTIONS = 51,
-    kafka_common_ErrorCode_TRANSACTION_COORDINATOR_FENCED = 52,
-    kafka_common_ErrorCode_TRANSACTIONAL_ID_AUTHORIZATION_FAILED = 53,
-    kafka_common_ErrorCode_SECURITY_DISABLED = 54,
-    kafka_common_ErrorCode_OPERATION_NOT_ATTEMPTED = 55,
-    kafka_common_ErrorCode_KAFKA_STORAGE_ERROR = 56,
-    kafka_common_ErrorCode_LOG_DIR_NOT_FOUND = 57,
-    kafka_common_ErrorCode_SASL_AUTHENTICATION_FAILED = 58,
-    kafka_common_ErrorCode_UNKNOWN_PRODUCER_ID = 59,
-    kafka_common_ErrorCode_REASSIGNMENT_IN_PROGRESS = 60,
-    kafka_common_ErrorCode_DELEGATION_TOKEN_AUTH_DISABLED = 61,
-    kafka_common_ErrorCode_DELEGATION_TOKEN_NOT_FOUND = 62,
-    kafka_common_ErrorCode_DELEGATION_TOKEN_OWNER_MISMATCH = 63,
-    kafka_common_ErrorCode_DELEGATION_TOKEN_REQUEST_NOT_ALLOWED = 64,
-    kafka_common_ErrorCode_DELEGATION_TOKEN_AUTHORIZATION_FAILED = 65,
-    kafka_common_ErrorCode_DELEGATION_TOKEN_EXPIRED = 66,
-    kafka_common_ErrorCode_INVALID_PRINCIPAL_TYPE = 67,
-    kafka_common_ErrorCode_NON_EMPTY_GROUP = 68,
-    kafka_common_ErrorCode_GROUP_ID_NOT_FOUND = 69,
-    kafka_common_ErrorCode_FETCH_SESSION_ID_NOT_FOUND = 70,
-    kafka_common_ErrorCode_INVALID_FETCH_SESSION_EPOCH = 71,
-    kafka_common_ErrorCode_LISTENER_NOT_FOUND = 72,
-    kafka_common_ErrorCode_TOPIC_DELETION_DISABLED = 73,
-    kafka_common_ErrorCode_FENCED_LEADER_EPOCH = 74,
-    kafka_common_ErrorCode_UNKNOWN_LEADER_EPOCH = 75,
-    kafka_common_ErrorCode_UNSUPPORTED_COMPRESSION_TYPE = 76,
-    kafka_common_ErrorCode_STALE_BROKER_EPOCH = 77,
-    kafka_common_ErrorCode_OFFSET_NOT_AVAILABLE = 78,
-    kafka_common_ErrorCode_MEMBER_ID_REQUIRED = 79,
-    kafka_common_ErrorCode_PREFERRED_LEADER_NOT_AVAILABLE = 80,
-    kafka_common_ErrorCode_GROUP_MAX_SIZE_REACHED = 81,
-    kafka_common_ErrorCode_FENCED_INSTANCE_ID = 82,
-    kafka_common_ErrorCode_ELIGIBLE_LEADERS_NOT_AVAILABLE = 83,
-    kafka_common_ErrorCode_ELECTION_NOT_NEEDED = 84,
-    kafka_common_ErrorCode_NO_REASSIGNMENT_IN_PROGRESS = 85,
-    kafka_common_ErrorCode_GROUP_SUBSCRIBED_TO_TOPIC = 86,
-    kafka_common_ErrorCode_INVALID_RECORD = 87,
-    kafka_common_ErrorCode_UNSTABLE_OFFSET_COMMIT = 88,
-    kafka_common_ErrorCode_THROTTLING_QUOTA_EXCEEDED = 89,
-    kafka_common_ErrorCode_PRODUCER_FENCED = 90,
-    kafka_common_ErrorCode_RESOURCE_NOT_FOUND = 91,
-    kafka_common_ErrorCode_DUPLICATE_RESOURCE = 92,
-    kafka_common_ErrorCode_UNACCEPTABLE_CREDENTIAL = 93,
-    kafka_common_ErrorCode_INCONSISTENT_VOTER_SET = 94,
-    kafka_common_ErrorCode_INVALID_UPDATE_VERSION = 95,
-    kafka_common_ErrorCode_FEATURE_UPDATE_FAILED = 96,
-    kafka_common_ErrorCode_PRINCIPAL_DESERIALIZATION_FAILURE = 97,
-    kafka_common_ErrorCode_SNAPSHOT_NOT_FOUND = 98,
-    kafka_common_ErrorCode_POSITION_OUT_OF_RANGE = 99,
-    kafka_common_ErrorCode_UNKNOWN_TOPIC_ID = 100,
-    kafka_common_ErrorCode_DUPLICATE_BROKER_REGISTRATION = 101,
-    kafka_common_ErrorCode_BROKER_ID_NOT_REGISTERED = 102,
-    kafka_common_ErrorCode_INCONSISTENT_TOPIC_ID = 103,
-    kafka_common_ErrorCode_INCONSISTENT_CLUSTER_ID = 104,
-    kafka_common_ErrorCode_TRANSACTIONAL_ID_NOT_FOUND = 105,
-    kafka_common_ErrorCode_FETCH_SESSION_TOPIC_ID_ERROR = 106,
-    kafka_common_ErrorCode_INELIGIBLE_REPLICA = 107,
-    kafka_common_ErrorCode_NEW_LEADER_ELECTED = 108,
-    kafka_common_ErrorCode_OFFSET_MOVED_TO_TIERED_STORAGE = 109,
-    kafka_common_ErrorCode_FENCED_MEMBER_EPOCH = 110,
-    kafka_common_ErrorCode_UNRELEASED_INSTANCE_ID = 111,
-    kafka_common_ErrorCode_UNSUPPORTED_ASSIGNOR = 112,
-    kafka_common_ErrorCode_STALE_MEMBER_EPOCH = 113,
-    kafka_common_ErrorCode_MISMATCHED_ENDPOINT_TYPE = 114,
-    kafka_common_ErrorCode_UNSUPPORTED_ENDPOINT_TYPE = 115,
-    kafka_common_ErrorCode_UNKNOWN_CONTROLLER_ID = 116,
-    kafka_common_ErrorCode_UNKNOWN_SUBSCRIPTION_ID = 117,
-    kafka_common_ErrorCode_TELEMETRY_TOO_LARGE = 118,
-    kafka_common_ErrorCode_INVALID_REGISTRATION = 119,
-    kafka_common_ErrorCode_TRANSACTION_ABORTABLE = 120,
-    kafka_common_ErrorCode_INVALID_RECORD_STATE = 121,
-    kafka_common_ErrorCode_SHARE_SESSION_NOT_FOUND = 122,
-    kafka_common_ErrorCode_INVALID_SHARE_SESSION_EPOCH = 123,
-    kafka_common_ErrorCode_FENCED_STATE_EPOCH = 124,
-    kafka_common_ErrorCode_INVALID_VOTER_KEY = 125,
-    kafka_common_ErrorCode_DUPLICATE_VOTER = 126,
-    kafka_common_ErrorCode_VOTER_NOT_FOUND = 127,
-    kafka_common_ErrorCode_INVALID_REGULAR_EXPRESSION = 128,
-    kafka_common_ErrorCode_REBOOTSTRAP_REQUIRED = 129,
-    kafka_common_ErrorCode_STREAMS_INVALID_TOPOLOGY = 130,
-    kafka_common_ErrorCode_STREAMS_INVALID_TOPOLOGY_EPOCH = 131,
-    kafka_common_ErrorCode_STREAMS_TOPOLOGY_FENCED = 132,
-    kafka_common_ErrorCode_SHARE_SESSION_LIMIT_REACHED = 133,
+    kafka_common_Error_UNKNOWN_SERVER_ERROR = -1,
+    kafka_common_Error_NONE = 0,
+    kafka_common_Error_OFFSET_OUT_OF_RANGE = 1,
+    kafka_common_Error_CORRUPT_MESSAGE = 2,
+    kafka_common_Error_UNKNOWN_TOPIC_OR_PARTITION = 3,
+    kafka_common_Error_INVALID_FETCH_SIZE = 4,
+    kafka_common_Error_LEADER_NOT_AVAILABLE = 5,
+    kafka_common_Error_NOT_LEADER_OR_FOLLOWER = 6,
+    kafka_common_Error_REQUEST_TIMED_OUT = 7,
+    kafka_common_Error_BROKER_NOT_AVAILABLE = 8,
+    kafka_common_Error_REPLICA_NOT_AVAILABLE = 9,
+    kafka_common_Error_MESSAGE_TOO_LARGE = 10,
+    kafka_common_Error_STALE_CONTROLLER_EPOCH = 11,
+    kafka_common_Error_OFFSET_METADATA_TOO_LARGE = 12,
+    kafka_common_Error_NETWORK_ERROR = 13,
+    kafka_common_Error_COORDINATOR_LOAD_IN_PROGRESS = 14,
+    kafka_common_Error_COORDINATOR_NOT_AVAILABLE = 15,
+    kafka_common_Error_NOT_COORDINATOR = 16,
+    kafka_common_Error_INVALID_TOPIC_ERROR = 17,
+    kafka_common_Error_RECORD_LIST_TOO_LARGE = 18,
+    kafka_common_Error_NOT_ENOUGH_REPLICAS = 19,
+    kafka_common_Error_NOT_ENOUGH_REPLICAS_AFTER_APPEND = 20,
+    kafka_common_Error_INVALID_REQUIRED_ACKS = 21,
+    kafka_common_Error_ILLEGAL_GENERATION = 22,
+    kafka_common_Error_INCONSISTENT_GROUP_PROTOCOL = 23,
+    kafka_common_Error_INVALID_GROUP_ID = 24,
+    kafka_common_Error_UNKNOWN_MEMBER_ID = 25,
+    kafka_common_Error_INVALID_SESSION_TIMEOUT = 26,
+    kafka_common_Error_REBALANCE_IN_PROGRESS = 27,
+    kafka_common_Error_INVALID_COMMIT_OFFSET_SIZE = 28,
+    kafka_common_Error_TOPIC_AUTHORIZATION_FAILED = 29,
+    kafka_common_Error_GROUP_AUTHORIZATION_FAILED = 30,
+    kafka_common_Error_CLUSTER_AUTHORIZATION_FAILED = 31,
+    kafka_common_Error_INVALID_TIMESTAMP = 32,
+    kafka_common_Error_UNSUPPORTED_SASL_MECHANISM = 33,
+    kafka_common_Error_ILLEGAL_SASL_STATE = 34,
+    kafka_common_Error_UNSUPPORTED_VERSION = 35,
+    kafka_common_Error_TOPIC_ALREADY_EXISTS = 36,
+    kafka_common_Error_INVALID_PARTITIONS = 37,
+    kafka_common_Error_INVALID_REPLICATION_FACTOR = 38,
+    kafka_common_Error_INVALID_REPLICA_ASSIGNMENT = 39,
+    kafka_common_Error_INVALID_CONFIG = 40,
+    kafka_common_Error_NOT_CONTROLLER = 41,
+    kafka_common_Error_INVALID_REQUEST = 42,
+    kafka_common_Error_UNSUPPORTED_FOR_MESSAGE_FORMAT = 43,
+    kafka_common_Error_POLICY_VIOLATION = 44,
+    kafka_common_Error_OUT_OF_ORDER_SEQUENCE_NUMBER = 45,
+    kafka_common_Error_DUPLICATE_SEQUENCE_NUMBER = 46,
+    kafka_common_Error_INVALID_PRODUCER_EPOCH = 47,
+    kafka_common_Error_INVALID_TXN_STATE = 48,
+    kafka_common_Error_INVALID_PRODUCER_ID_MAPPING = 49,
+    kafka_common_Error_INVALID_TRANSACTION_TIMEOUT = 50,
+    kafka_common_Error_CONCURRENT_TRANSACTIONS = 51,
+    kafka_common_Error_TRANSACTION_COORDINATOR_FENCED = 52,
+    kafka_common_Error_TRANSACTIONAL_ID_AUTHORIZATION_FAILED = 53,
+    kafka_common_Error_SECURITY_DISABLED = 54,
+    kafka_common_Error_OPERATION_NOT_ATTEMPTED = 55,
+    kafka_common_Error_KAFKA_STORAGE_ERROR = 56,
+    kafka_common_Error_LOG_DIR_NOT_FOUND = 57,
+    kafka_common_Error_SASL_AUTHENTICATION_FAILED = 58,
+    kafka_common_Error_UNKNOWN_PRODUCER_ID = 59,
+    kafka_common_Error_REASSIGNMENT_IN_PROGRESS = 60,
+    kafka_common_Error_DELEGATION_TOKEN_AUTH_DISABLED = 61,
+    kafka_common_Error_DELEGATION_TOKEN_NOT_FOUND = 62,
+    kafka_common_Error_DELEGATION_TOKEN_OWNER_MISMATCH = 63,
+    kafka_common_Error_DELEGATION_TOKEN_REQUEST_NOT_ALLOWED = 64,
+    kafka_common_Error_DELEGATION_TOKEN_AUTHORIZATION_FAILED = 65,
+    kafka_common_Error_DELEGATION_TOKEN_EXPIRED = 66,
+    kafka_common_Error_INVALID_PRINCIPAL_TYPE = 67,
+    kafka_common_Error_NON_EMPTY_GROUP = 68,
+    kafka_common_Error_GROUP_ID_NOT_FOUND = 69,
+    kafka_common_Error_FETCH_SESSION_ID_NOT_FOUND = 70,
+    kafka_common_Error_INVALID_FETCH_SESSION_EPOCH = 71,
+    kafka_common_Error_LISTENER_NOT_FOUND = 72,
+    kafka_common_Error_TOPIC_DELETION_DISABLED = 73,
+    kafka_common_Error_FENCED_LEADER_EPOCH = 74,
+    kafka_common_Error_UNKNOWN_LEADER_EPOCH = 75,
+    kafka_common_Error_UNSUPPORTED_COMPRESSION_TYPE = 76,
+    kafka_common_Error_STALE_BROKER_EPOCH = 77,
+    kafka_common_Error_OFFSET_NOT_AVAILABLE = 78,
+    kafka_common_Error_MEMBER_ID_REQUIRED = 79,
+    kafka_common_Error_PREFERRED_LEADER_NOT_AVAILABLE = 80,
+    kafka_common_Error_GROUP_MAX_SIZE_REACHED = 81,
+    kafka_common_Error_FENCED_INSTANCE_ID = 82,
+    kafka_common_Error_ELIGIBLE_LEADERS_NOT_AVAILABLE = 83,
+    kafka_common_Error_ELECTION_NOT_NEEDED = 84,
+    kafka_common_Error_NO_REASSIGNMENT_IN_PROGRESS = 85,
+    kafka_common_Error_GROUP_SUBSCRIBED_TO_TOPIC = 86,
+    kafka_common_Error_INVALID_RECORD = 87,
+    kafka_common_Error_UNSTABLE_OFFSET_COMMIT = 88,
+    kafka_common_Error_THROTTLING_QUOTA_EXCEEDED = 89,
+    kafka_common_Error_PRODUCER_FENCED = 90,
+    kafka_common_Error_RESOURCE_NOT_FOUND = 91,
+    kafka_common_Error_DUPLICATE_RESOURCE = 92,
+    kafka_common_Error_UNACCEPTABLE_CREDENTIAL = 93,
+    kafka_common_Error_INCONSISTENT_VOTER_SET = 94,
+    kafka_common_Error_INVALID_UPDATE_VERSION = 95,
+    kafka_common_Error_FEATURE_UPDATE_FAILED = 96,
+    kafka_common_Error_PRINCIPAL_DESERIALIZATION_FAILURE = 97,
+    kafka_common_Error_SNAPSHOT_NOT_FOUND = 98,
+    kafka_common_Error_POSITION_OUT_OF_RANGE = 99,
+    kafka_common_Error_UNKNOWN_TOPIC_ID = 100,
+    kafka_common_Error_DUPLICATE_BROKER_REGISTRATION = 101,
+    kafka_common_Error_BROKER_ID_NOT_REGISTERED = 102,
+    kafka_common_Error_INCONSISTENT_TOPIC_ID = 103,
+    kafka_common_Error_INCONSISTENT_CLUSTER_ID = 104,
+    kafka_common_Error_TRANSACTIONAL_ID_NOT_FOUND = 105,
+    kafka_common_Error_FETCH_SESSION_TOPIC_ID_ERROR = 106,
+    kafka_common_Error_INELIGIBLE_REPLICA = 107,
+    kafka_common_Error_NEW_LEADER_ELECTED = 108,
+    kafka_common_Error_OFFSET_MOVED_TO_TIERED_STORAGE = 109,
+    kafka_common_Error_FENCED_MEMBER_EPOCH = 110,
+    kafka_common_Error_UNRELEASED_INSTANCE_ID = 111,
+    kafka_common_Error_UNSUPPORTED_ASSIGNOR = 112,
+    kafka_common_Error_STALE_MEMBER_EPOCH = 113,
+    kafka_common_Error_MISMATCHED_ENDPOINT_TYPE = 114,
+    kafka_common_Error_UNSUPPORTED_ENDPOINT_TYPE = 115,
+    kafka_common_Error_UNKNOWN_CONTROLLER_ID = 116,
+    kafka_common_Error_UNKNOWN_SUBSCRIPTION_ID = 117,
+    kafka_common_Error_TELEMETRY_TOO_LARGE = 118,
+    kafka_common_Error_INVALID_REGISTRATION = 119,
+    kafka_common_Error_TRANSACTION_ABORTABLE = 120,
+    kafka_common_Error_INVALID_RECORD_STATE = 121,
+    kafka_common_Error_SHARE_SESSION_NOT_FOUND = 122,
+    kafka_common_Error_INVALID_SHARE_SESSION_EPOCH = 123,
+    kafka_common_Error_FENCED_STATE_EPOCH = 124,
+    kafka_common_Error_INVALID_VOTER_KEY = 125,
+    kafka_common_Error_DUPLICATE_VOTER = 126,
+    kafka_common_Error_VOTER_NOT_FOUND = 127,
+    kafka_common_Error_INVALID_REGULAR_EXPRESSION = 128,
+    kafka_common_Error_REBOOTSTRAP_REQUIRED = 129,
+    kafka_common_Error_STREAMS_INVALID_TOPOLOGY = 130,
+    kafka_common_Error_STREAMS_INVALID_TOPOLOGY_EPOCH = 131,
+    kafka_common_Error_STREAMS_TOPOLOGY_FENCED = 132,
+    kafka_common_Error_SHARE_SESSION_LIMIT_REACHED = 133,
 
     // Classes Java gives no code of their own: Rust-local negatives,
     // grouped by origin. These are ABI — new classes append at the
     // most-negative end, never in the middle.
     // JDK-derived (`Local*`).
-    kafka_common_ErrorCode_LOCAL_CONCURRENT_MODIFICATION = -2,
-    kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT = -3,
-    kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE = -4,
-    kafka_common_ErrorCode_LOCAL_TIMEOUT = -5,
+    kafka_common_Error_LOCAL_CONCURRENT_MODIFICATION = -2,
+    kafka_common_Error_LOCAL_ILLEGAL_ARGUMENT = -3,
+    kafka_common_Error_LOCAL_ILLEGAL_STATE = -4,
+    kafka_common_Error_LOCAL_TIMEOUT = -5,
     // `common` client-side classes.
-    kafka_common_ErrorCode_API = -6,
-    kafka_common_ErrorCode_AUTHENTICATION = -7,
-    kafka_common_ErrorCode_AUTHORIZER_NOT_READY = -8,
-    kafka_common_ErrorCode_AUTHORIZATION = -9,
-    kafka_common_ErrorCode_CONFIG = -10,
-    kafka_common_ErrorCode_DISCONNECT = -11,
-    kafka_common_ErrorCode_INTERRUPT = -12,
-    kafka_common_ErrorCode_INVALID_OFFSET = -13,
-    kafka_common_ErrorCode_SCHEMA = -14,
-    kafka_common_ErrorCode_SERIALIZATION = -15,
-    kafka_common_ErrorCode_SSL_AUTHENTICATION = -16,
-    kafka_common_ErrorCode_TRANSACTION_ABORTED = -17,
-    kafka_common_ErrorCode_WAKEUP = -18,
+    kafka_common_Error_API = -6,
+    kafka_common_Error_AUTHENTICATION = -7,
+    kafka_common_Error_AUTHORIZER_NOT_READY = -8,
+    kafka_common_Error_AUTHORIZATION = -9,
+    kafka_common_Error_CONFIG = -10,
+    kafka_common_Error_DISCONNECT = -11,
+    kafka_common_Error_INTERRUPT = -12,
+    kafka_common_Error_INVALID_OFFSET = -13,
+    kafka_common_Error_SCHEMA = -14,
+    kafka_common_Error_SERIALIZATION = -15,
+    kafka_common_Error_SSL_AUTHENTICATION = -16,
+    kafka_common_Error_TRANSACTION_ABORTED = -17,
+    kafka_common_Error_WAKEUP = -18,
     // Hand-written / consumer classes.
-    kafka_common_ErrorCode_CONSUMER_COMMIT_FAILED = -19,
-    kafka_common_ErrorCode_CONSUMER_LOG_TRUNCATION = -20,
-    kafka_common_ErrorCode_CONSUMER_NO_OFFSET_FOR_PARTITION = -21,
-    kafka_common_ErrorCode_CONSUMER_OFFSET_OUT_OF_RANGE = -22,
-    kafka_common_ErrorCode_CONSUMER_RETRIABLE_COMMIT_FAILED = -23,
-    kafka_common_ErrorCode_CORRELATION_ID_MISMATCH = -24,
-    kafka_common_ErrorCode_INVALID_RECEIVE = -25,
-    kafka_common_ErrorCode_QUOTA_VIOLATION = -26,
-    kafka_common_ErrorCode_RECORD_DESERIALIZATION = -27,
+    kafka_common_Error_CONSUMER_COMMIT_FAILED = -19,
+    kafka_common_Error_CONSUMER_LOG_TRUNCATION = -20,
+    kafka_common_Error_CONSUMER_NO_OFFSET_FOR_PARTITION = -21,
+    kafka_common_Error_CONSUMER_OFFSET_OUT_OF_RANGE = -22,
+    kafka_common_Error_CONSUMER_RETRIABLE_COMMIT_FAILED = -23,
+    kafka_common_Error_CORRELATION_ID_MISMATCH = -24,
+    kafka_common_Error_INVALID_RECEIVE = -25,
+    kafka_common_Error_QUOTA_VIOLATION = -26,
+    kafka_common_Error_RECORD_DESERIALIZATION = -27,
     // Code owned by a superclass (`BufferExhaustedException extends TimeoutException`).
-    kafka_common_ErrorCode_PRODUCER_BUFFER_EXHAUSTED = -28,
+    kafka_common_Error_PRODUCER_BUFFER_EXHAUSTED = -28,
     // A binding's foreign callback error (no Java class).
-    kafka_common_ErrorCode_LOCAL_CALLBACK = -29,
+    kafka_common_Error_LOCAL_CALLBACK = -29,
 }
 
-/// The [`kafka_common_ErrorCode_e`] of the class that owns a protocol code.
+/// The [`kafka_common_Error_e`] of the class that owns a protocol code.
 ///
 /// This resolves the code through
 /// [`Errors::error`] — the very
-/// ownership relation [`kafka_common_ErrorCode_e`] is defined by — so the two
+/// ownership relation [`kafka_common_Error_e`] is defined by — so the two
 /// halves stay consistent by construction rather than by a second hand-written
 /// table.
 ///
 /// It exists for [`Error::KafkaError`], the one variant whose code is not a
 /// constant: it stores an `Errors` rather than standing for a single class.
-fn code_owned_by(error: Errors) -> kafka_common_ErrorCode_e {
+fn code_owned_by(error: Errors) -> kafka_common_Error_e {
     match error.error() {
         // `Errors::None` is the one code no class owns — Java declares it
         // `NONE(0, null, message -> null)`.
-        None => kafka_common_ErrorCode_NONE,
+        None => kafka_common_Error_NONE,
         // No code is owned by the bare `KafkaException`, so this arm is
         // unreachable. Spelling it out rather than letting it fall into the
         // recursive arm below is what makes that recursion provably one level
@@ -1506,12 +1519,12 @@ fn code_owned_by(error: Errors) -> kafka_common_ErrorCode_e {
         // ownership test instead of failing it. `UNKNOWN_SERVER_ERROR` is the
         // answer a bare `KafkaException` gives anyway (`Error::kafka` builds it
         // with `Errors::UnknownServerError`).
-        Some(Error::KafkaError(_)) => kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR,
+        Some(Error::KafkaError(_)) => kafka_common_Error_UNKNOWN_SERVER_ERROR,
         Some(owner) => error_code_of(&owner),
     }
 }
 
-/// The [`kafka_common_ErrorCode_e`] for an error, identifying its class.
+/// The [`kafka_common_Error_e`] for an error, identifying its class.
 ///
 /// This is **not** the same question as
 /// [`Error::error`](crate::common::Error::error), and the two deliberately
@@ -1522,7 +1535,7 @@ fn code_owned_by(error: Errors) -> kafka_common_ErrorCode_e {
 /// callers that cannot see enum variants, so its value is unique per class.
 ///
 /// They agree for every class that owns its code, and disagree for exactly the
-/// four inheritance cases named on [`kafka_common_ErrorCode_e`]:
+/// four inheritance cases named on [`kafka_common_Error_e`]:
 /// [`Error::ProducerBufferExhausted`] (Java: 7), [`Error::Authentication`],
 /// [`Error::Authorization`] and [`Error::SslAuthentication`] (Java: 40).
 ///
@@ -1530,181 +1543,182 @@ fn code_owned_by(error: Errors) -> kafka_common_ErrorCode_e {
 /// that is what makes adding an [`Error`] variant fail to compile until this
 /// enum learns about it. A `_ =>` fallback is precisely how the two would
 /// drift.
-pub(crate) fn error_code_of(error: &Error) -> kafka_common_ErrorCode_e {
+pub(crate) fn error_code_of(error: &Error) -> kafka_common_Error_e {
     match error {
         // The only non-constant arm: `Error::KafkaError` *stores* an `Errors`,
         // so it reports whatever code that value owns.
         Error::KafkaError(k) => code_owned_by(k.error()),
-        Error::LocalIllegalArgument(_) => kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT,
-        Error::LocalIllegalState(_) => kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE,
-        Error::LocalConcurrentModification(_) => kafka_common_ErrorCode_LOCAL_CONCURRENT_MODIFICATION,
-        Error::LocalTimeout(_) => kafka_common_ErrorCode_LOCAL_TIMEOUT,
-        Error::LocalCallback(_) => kafka_common_ErrorCode_LOCAL_CALLBACK,
-        Error::Api(_) => kafka_common_ErrorCode_API,
-        Error::Authentication(_) => kafka_common_ErrorCode_AUTHENTICATION,
-        Error::Authorization(_) => kafka_common_ErrorCode_AUTHORIZATION,
-        Error::AuthorizerNotReady(_) => kafka_common_ErrorCode_AUTHORIZER_NOT_READY,
-        Error::BrokerIdNotRegistered(_) => kafka_common_ErrorCode_BROKER_ID_NOT_REGISTERED,
-        Error::BrokerNotAvailable(_) => kafka_common_ErrorCode_BROKER_NOT_AVAILABLE,
-        Error::ProducerBufferExhausted(_) => kafka_common_ErrorCode_PRODUCER_BUFFER_EXHAUSTED,
-        Error::ClusterAuthorization(_) => kafka_common_ErrorCode_CLUSTER_AUTHORIZATION_FAILED,
-        Error::ConcurrentTransactions(_) => kafka_common_ErrorCode_CONCURRENT_TRANSACTIONS,
-        Error::ControllerMoved(_) => kafka_common_ErrorCode_STALE_CONTROLLER_EPOCH,
-        Error::CoordinatorLoadInProgress(_) => kafka_common_ErrorCode_COORDINATOR_LOAD_IN_PROGRESS,
-        Error::CoordinatorNotAvailable(_) => kafka_common_ErrorCode_COORDINATOR_NOT_AVAILABLE,
-        Error::CorrelationIdMismatch(_) => kafka_common_ErrorCode_CORRELATION_ID_MISMATCH,
-        Error::CorruptRecord(_) => kafka_common_ErrorCode_CORRUPT_MESSAGE,
-        Error::DelegationTokenAuthorization(_) => kafka_common_ErrorCode_DELEGATION_TOKEN_AUTHORIZATION_FAILED,
-        Error::DelegationTokenDisabled(_) => kafka_common_ErrorCode_DELEGATION_TOKEN_AUTH_DISABLED,
-        Error::DelegationTokenExpired(_) => kafka_common_ErrorCode_DELEGATION_TOKEN_EXPIRED,
-        Error::DelegationTokenNotFound(_) => kafka_common_ErrorCode_DELEGATION_TOKEN_NOT_FOUND,
-        Error::DelegationTokenOwnerMismatch(_) => kafka_common_ErrorCode_DELEGATION_TOKEN_OWNER_MISMATCH,
-        Error::Disconnect(_) => kafka_common_ErrorCode_DISCONNECT,
-        Error::DuplicateBrokerRegistration(_) => kafka_common_ErrorCode_DUPLICATE_BROKER_REGISTRATION,
-        Error::DuplicateResource(_) => kafka_common_ErrorCode_DUPLICATE_RESOURCE,
-        Error::DuplicateSequence(_) => kafka_common_ErrorCode_DUPLICATE_SEQUENCE_NUMBER,
-        Error::DuplicateVoter(_) => kafka_common_ErrorCode_DUPLICATE_VOTER,
-        Error::ElectionNotNeeded(_) => kafka_common_ErrorCode_ELECTION_NOT_NEEDED,
-        Error::EligibleLeadersNotAvailable(_) => kafka_common_ErrorCode_ELIGIBLE_LEADERS_NOT_AVAILABLE,
-        Error::FeatureUpdateFailed(_) => kafka_common_ErrorCode_FEATURE_UPDATE_FAILED,
-        Error::FencedInstanceId(_) => kafka_common_ErrorCode_FENCED_INSTANCE_ID,
-        Error::FencedLeaderEpoch(_) => kafka_common_ErrorCode_FENCED_LEADER_EPOCH,
-        Error::FencedMemberEpoch(_) => kafka_common_ErrorCode_FENCED_MEMBER_EPOCH,
-        Error::FencedStateEpoch(_) => kafka_common_ErrorCode_FENCED_STATE_EPOCH,
-        Error::FetchSessionIdNotFound(_) => kafka_common_ErrorCode_FETCH_SESSION_ID_NOT_FOUND,
-        Error::FetchSessionTopicId(_) => kafka_common_ErrorCode_FETCH_SESSION_TOPIC_ID_ERROR,
-        Error::GroupAuthorization(_) => kafka_common_ErrorCode_GROUP_AUTHORIZATION_FAILED,
-        Error::GroupIdNotFound(_) => kafka_common_ErrorCode_GROUP_ID_NOT_FOUND,
-        Error::GroupMaxSizeReached(_) => kafka_common_ErrorCode_GROUP_MAX_SIZE_REACHED,
-        Error::GroupNotEmpty(_) => kafka_common_ErrorCode_NON_EMPTY_GROUP,
-        Error::GroupSubscribedToTopic(_) => kafka_common_ErrorCode_GROUP_SUBSCRIBED_TO_TOPIC,
-        Error::IllegalGeneration(_) => kafka_common_ErrorCode_ILLEGAL_GENERATION,
-        Error::IllegalSaslState(_) => kafka_common_ErrorCode_ILLEGAL_SASL_STATE,
-        Error::InconsistentClusterId(_) => kafka_common_ErrorCode_INCONSISTENT_CLUSTER_ID,
-        Error::InconsistentGroupProtocol(_) => kafka_common_ErrorCode_INCONSISTENT_GROUP_PROTOCOL,
-        Error::InconsistentTopicId(_) => kafka_common_ErrorCode_INCONSISTENT_TOPIC_ID,
-        Error::InconsistentVoterSet(_) => kafka_common_ErrorCode_INCONSISTENT_VOTER_SET,
-        Error::IneligibleReplica(_) => kafka_common_ErrorCode_INELIGIBLE_REPLICA,
-        Error::Interrupt(_) => kafka_common_ErrorCode_INTERRUPT,
-        Error::InvalidCommitOffsetSize(_) => kafka_common_ErrorCode_INVALID_COMMIT_OFFSET_SIZE,
-        Error::InvalidConfiguration(_) => kafka_common_ErrorCode_INVALID_CONFIG,
-        Error::InvalidFetchSessionEpoch(_) => kafka_common_ErrorCode_INVALID_FETCH_SESSION_EPOCH,
-        Error::InvalidFetchSize(_) => kafka_common_ErrorCode_INVALID_FETCH_SIZE,
-        Error::InvalidGroupId(_) => kafka_common_ErrorCode_INVALID_GROUP_ID,
-        Error::InvalidOffset(_) => kafka_common_ErrorCode_INVALID_OFFSET,
-        Error::InvalidPartitions(_) => kafka_common_ErrorCode_INVALID_PARTITIONS,
-        Error::InvalidPidMapping(_) => kafka_common_ErrorCode_INVALID_PRODUCER_ID_MAPPING,
-        Error::InvalidPrincipalType(_) => kafka_common_ErrorCode_INVALID_PRINCIPAL_TYPE,
-        Error::InvalidProducerEpoch(_) => kafka_common_ErrorCode_INVALID_PRODUCER_EPOCH,
-        Error::InvalidRecord(_) => kafka_common_ErrorCode_INVALID_RECORD,
-        Error::InvalidRecordState(_) => kafka_common_ErrorCode_INVALID_RECORD_STATE,
-        Error::InvalidRegistration(_) => kafka_common_ErrorCode_INVALID_REGISTRATION,
-        Error::InvalidRegularExpression(_) => kafka_common_ErrorCode_INVALID_REGULAR_EXPRESSION,
-        Error::InvalidReplicaAssignment(_) => kafka_common_ErrorCode_INVALID_REPLICA_ASSIGNMENT,
-        Error::InvalidReplicationFactor(_) => kafka_common_ErrorCode_INVALID_REPLICATION_FACTOR,
-        Error::InvalidRequest(_) => kafka_common_ErrorCode_INVALID_REQUEST,
-        Error::InvalidRequiredAcks(_) => kafka_common_ErrorCode_INVALID_REQUIRED_ACKS,
-        Error::InvalidSessionTimeout(_) => kafka_common_ErrorCode_INVALID_SESSION_TIMEOUT,
-        Error::InvalidShareSessionEpoch(_) => kafka_common_ErrorCode_INVALID_SHARE_SESSION_EPOCH,
-        Error::InvalidTimestamp(_) => kafka_common_ErrorCode_INVALID_TIMESTAMP,
-        Error::InvalidTopic(_) => kafka_common_ErrorCode_INVALID_TOPIC_ERROR,
-        Error::InvalidTxnState(_) => kafka_common_ErrorCode_INVALID_TXN_STATE,
-        Error::InvalidTxnTimeout(_) => kafka_common_ErrorCode_INVALID_TRANSACTION_TIMEOUT,
-        Error::InvalidUpdateVersion(_) => kafka_common_ErrorCode_INVALID_UPDATE_VERSION,
-        Error::InvalidVoterKey(_) => kafka_common_ErrorCode_INVALID_VOTER_KEY,
-        Error::KafkaStorage(_) => kafka_common_ErrorCode_KAFKA_STORAGE_ERROR,
-        Error::LeaderNotAvailable(_) => kafka_common_ErrorCode_LEADER_NOT_AVAILABLE,
-        Error::ListenerNotFound(_) => kafka_common_ErrorCode_LISTENER_NOT_FOUND,
-        Error::LogDirNotFound(_) => kafka_common_ErrorCode_LOG_DIR_NOT_FOUND,
-        Error::MemberIdRequired(_) => kafka_common_ErrorCode_MEMBER_ID_REQUIRED,
-        Error::MismatchedEndpointType(_) => kafka_common_ErrorCode_MISMATCHED_ENDPOINT_TYPE,
-        Error::Network(_) => kafka_common_ErrorCode_NETWORK_ERROR,
-        Error::NewLeaderElected(_) => kafka_common_ErrorCode_NEW_LEADER_ELECTED,
-        Error::NoReassignmentInProgress(_) => kafka_common_ErrorCode_NO_REASSIGNMENT_IN_PROGRESS,
-        Error::NotController(_) => kafka_common_ErrorCode_NOT_CONTROLLER,
-        Error::NotCoordinator(_) => kafka_common_ErrorCode_NOT_COORDINATOR,
-        Error::NotEnoughReplicas(_) => kafka_common_ErrorCode_NOT_ENOUGH_REPLICAS,
-        Error::NotEnoughReplicasAfterAppend(_) => kafka_common_ErrorCode_NOT_ENOUGH_REPLICAS_AFTER_APPEND,
-        Error::NotLeaderOrFollower(_) => kafka_common_ErrorCode_NOT_LEADER_OR_FOLLOWER,
-        Error::OffsetMetadataTooLarge(_) => kafka_common_ErrorCode_OFFSET_METADATA_TOO_LARGE,
-        Error::OffsetMovedToTieredStorage(_) => kafka_common_ErrorCode_OFFSET_MOVED_TO_TIERED_STORAGE,
-        Error::OffsetNotAvailable(_) => kafka_common_ErrorCode_OFFSET_NOT_AVAILABLE,
-        Error::OffsetOutOfRange(_) => kafka_common_ErrorCode_OFFSET_OUT_OF_RANGE,
-        Error::OperationNotAttempted(_) => kafka_common_ErrorCode_OPERATION_NOT_ATTEMPTED,
-        Error::OutOfOrderSequence(_) => kafka_common_ErrorCode_OUT_OF_ORDER_SEQUENCE_NUMBER,
-        Error::PolicyViolation(_) => kafka_common_ErrorCode_POLICY_VIOLATION,
-        Error::PositionOutOfRange(_) => kafka_common_ErrorCode_POSITION_OUT_OF_RANGE,
-        Error::PreferredLeaderNotAvailable(_) => kafka_common_ErrorCode_PREFERRED_LEADER_NOT_AVAILABLE,
-        Error::PrincipalDeserialization(_) => kafka_common_ErrorCode_PRINCIPAL_DESERIALIZATION_FAILURE,
-        Error::ProducerFenced(_) => kafka_common_ErrorCode_PRODUCER_FENCED,
-        Error::QuotaViolation(_) => kafka_common_ErrorCode_QUOTA_VIOLATION,
-        Error::ReassignmentInProgress(_) => kafka_common_ErrorCode_REASSIGNMENT_IN_PROGRESS,
-        Error::RebalanceInProgress(_) => kafka_common_ErrorCode_REBALANCE_IN_PROGRESS,
-        Error::RebootstrapRequired(_) => kafka_common_ErrorCode_REBOOTSTRAP_REQUIRED,
-        Error::RecordBatchTooLarge(_) => kafka_common_ErrorCode_RECORD_LIST_TOO_LARGE,
-        Error::RecordDeserialization(_) => kafka_common_ErrorCode_RECORD_DESERIALIZATION,
-        Error::RecordTooLarge(_) => kafka_common_ErrorCode_MESSAGE_TOO_LARGE,
-        Error::InvalidReceive(_) => kafka_common_ErrorCode_INVALID_RECEIVE,
-        Error::Config(_) => kafka_common_ErrorCode_CONFIG,
-        Error::ConsumerRetriableCommitFailed(_) => kafka_common_ErrorCode_CONSUMER_RETRIABLE_COMMIT_FAILED,
-        Error::ConsumerCommitFailed(_) => kafka_common_ErrorCode_CONSUMER_COMMIT_FAILED,
-        Error::ConsumerNoOffsetForPartition(_) => kafka_common_ErrorCode_CONSUMER_NO_OFFSET_FOR_PARTITION,
-        Error::ConsumerOffsetOutOfRange(_) => kafka_common_ErrorCode_CONSUMER_OFFSET_OUT_OF_RANGE,
-        Error::ConsumerLogTruncation(_) => kafka_common_ErrorCode_CONSUMER_LOG_TRUNCATION,
-        Error::ReplicaNotAvailable(_) => kafka_common_ErrorCode_REPLICA_NOT_AVAILABLE,
-        Error::ResourceNotFound(_) => kafka_common_ErrorCode_RESOURCE_NOT_FOUND,
-        Error::SaslAuthentication(_) => kafka_common_ErrorCode_SASL_AUTHENTICATION_FAILED,
-        Error::Schema(_) => kafka_common_ErrorCode_SCHEMA,
-        Error::SecurityDisabled(_) => kafka_common_ErrorCode_SECURITY_DISABLED,
-        Error::Serialization(_) => kafka_common_ErrorCode_SERIALIZATION,
-        Error::ShareSessionLimitReached(_) => kafka_common_ErrorCode_SHARE_SESSION_LIMIT_REACHED,
-        Error::ShareSessionNotFound(_) => kafka_common_ErrorCode_SHARE_SESSION_NOT_FOUND,
-        Error::SnapshotNotFound(_) => kafka_common_ErrorCode_SNAPSHOT_NOT_FOUND,
-        Error::SslAuthentication(_) => kafka_common_ErrorCode_SSL_AUTHENTICATION,
-        Error::StaleBrokerEpoch(_) => kafka_common_ErrorCode_STALE_BROKER_EPOCH,
-        Error::StaleMemberEpoch(_) => kafka_common_ErrorCode_STALE_MEMBER_EPOCH,
-        Error::StreamsInvalidTopology(_) => kafka_common_ErrorCode_STREAMS_INVALID_TOPOLOGY,
-        Error::StreamsInvalidTopologyEpoch(_) => kafka_common_ErrorCode_STREAMS_INVALID_TOPOLOGY_EPOCH,
-        Error::StreamsTopologyFenced(_) => kafka_common_ErrorCode_STREAMS_TOPOLOGY_FENCED,
-        Error::TelemetryTooLarge(_) => kafka_common_ErrorCode_TELEMETRY_TOO_LARGE,
-        Error::ThrottlingQuotaExceeded(_) => kafka_common_ErrorCode_THROTTLING_QUOTA_EXCEEDED,
-        Error::Timeout(_) => kafka_common_ErrorCode_REQUEST_TIMED_OUT,
-        Error::TopicAuthorization(_) => kafka_common_ErrorCode_TOPIC_AUTHORIZATION_FAILED,
-        Error::TopicDeletionDisabled(_) => kafka_common_ErrorCode_TOPIC_DELETION_DISABLED,
-        Error::TopicExists(_) => kafka_common_ErrorCode_TOPIC_ALREADY_EXISTS,
-        Error::TransactionAbortable(_) => kafka_common_ErrorCode_TRANSACTION_ABORTABLE,
-        Error::TransactionAborted(_) => kafka_common_ErrorCode_TRANSACTION_ABORTED,
-        Error::TransactionCoordinatorFenced(_) => kafka_common_ErrorCode_TRANSACTION_COORDINATOR_FENCED,
-        Error::TransactionalIdAuthorization(_) => kafka_common_ErrorCode_TRANSACTIONAL_ID_AUTHORIZATION_FAILED,
-        Error::TransactionalIdNotFound(_) => kafka_common_ErrorCode_TRANSACTIONAL_ID_NOT_FOUND,
-        Error::UnacceptableCredential(_) => kafka_common_ErrorCode_UNACCEPTABLE_CREDENTIAL,
-        Error::UnknownControllerId(_) => kafka_common_ErrorCode_UNKNOWN_CONTROLLER_ID,
-        Error::UnknownLeaderEpoch(_) => kafka_common_ErrorCode_UNKNOWN_LEADER_EPOCH,
-        Error::UnknownMemberId(_) => kafka_common_ErrorCode_UNKNOWN_MEMBER_ID,
-        Error::UnknownProducerId(_) => kafka_common_ErrorCode_UNKNOWN_PRODUCER_ID,
-        Error::UnknownServer(_) => kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR,
-        Error::UnknownSubscriptionId(_) => kafka_common_ErrorCode_UNKNOWN_SUBSCRIPTION_ID,
-        Error::UnknownTopicId(_) => kafka_common_ErrorCode_UNKNOWN_TOPIC_ID,
-        Error::UnknownTopicOrPartition(_) => kafka_common_ErrorCode_UNKNOWN_TOPIC_OR_PARTITION,
-        Error::UnreleasedInstanceId(_) => kafka_common_ErrorCode_UNRELEASED_INSTANCE_ID,
-        Error::UnstableOffsetCommit(_) => kafka_common_ErrorCode_UNSTABLE_OFFSET_COMMIT,
-        Error::UnsupportedAssignor(_) => kafka_common_ErrorCode_UNSUPPORTED_ASSIGNOR,
-        Error::UnsupportedByAuthentication(_) => kafka_common_ErrorCode_DELEGATION_TOKEN_REQUEST_NOT_ALLOWED,
-        Error::UnsupportedCompressionType(_) => kafka_common_ErrorCode_UNSUPPORTED_COMPRESSION_TYPE,
-        Error::UnsupportedEndpointType(_) => kafka_common_ErrorCode_UNSUPPORTED_ENDPOINT_TYPE,
-        Error::UnsupportedForMessageFormat(_) => kafka_common_ErrorCode_UNSUPPORTED_FOR_MESSAGE_FORMAT,
-        Error::UnsupportedSaslMechanism(_) => kafka_common_ErrorCode_UNSUPPORTED_SASL_MECHANISM,
-        Error::UnsupportedVersion(_) => kafka_common_ErrorCode_UNSUPPORTED_VERSION,
-        Error::VoterNotFound(_) => kafka_common_ErrorCode_VOTER_NOT_FOUND,
-        Error::Wakeup(_) => kafka_common_ErrorCode_WAKEUP,
+        Error::LocalIllegalArgument(_) => kafka_common_Error_LOCAL_ILLEGAL_ARGUMENT,
+        Error::LocalIllegalState(_) => kafka_common_Error_LOCAL_ILLEGAL_STATE,
+        Error::LocalConcurrentModification(_) => kafka_common_Error_LOCAL_CONCURRENT_MODIFICATION,
+        Error::LocalTimeout(_) => kafka_common_Error_LOCAL_TIMEOUT,
+        Error::LocalCallback(_) => kafka_common_Error_LOCAL_CALLBACK,
+        Error::Api(_) => kafka_common_Error_API,
+        Error::Authentication(_) => kafka_common_Error_AUTHENTICATION,
+        Error::Authorization(_) => kafka_common_Error_AUTHORIZATION,
+        Error::AuthorizerNotReady(_) => kafka_common_Error_AUTHORIZER_NOT_READY,
+        Error::BrokerIdNotRegistered(_) => kafka_common_Error_BROKER_ID_NOT_REGISTERED,
+        Error::BrokerNotAvailable(_) => kafka_common_Error_BROKER_NOT_AVAILABLE,
+        Error::ProducerBufferExhausted(_) => kafka_common_Error_PRODUCER_BUFFER_EXHAUSTED,
+        Error::ClusterAuthorization(_) => kafka_common_Error_CLUSTER_AUTHORIZATION_FAILED,
+        Error::ConcurrentTransactions(_) => kafka_common_Error_CONCURRENT_TRANSACTIONS,
+        Error::ControllerMoved(_) => kafka_common_Error_STALE_CONTROLLER_EPOCH,
+        Error::CoordinatorLoadInProgress(_) => kafka_common_Error_COORDINATOR_LOAD_IN_PROGRESS,
+        Error::CoordinatorNotAvailable(_) => kafka_common_Error_COORDINATOR_NOT_AVAILABLE,
+        Error::CorrelationIdMismatch(_) => kafka_common_Error_CORRELATION_ID_MISMATCH,
+        Error::CorruptRecord(_) => kafka_common_Error_CORRUPT_MESSAGE,
+        Error::DelegationTokenAuthorization(_) => kafka_common_Error_DELEGATION_TOKEN_AUTHORIZATION_FAILED,
+        Error::DelegationTokenDisabled(_) => kafka_common_Error_DELEGATION_TOKEN_AUTH_DISABLED,
+        Error::DelegationTokenExpired(_) => kafka_common_Error_DELEGATION_TOKEN_EXPIRED,
+        Error::DelegationTokenNotFound(_) => kafka_common_Error_DELEGATION_TOKEN_NOT_FOUND,
+        Error::DelegationTokenOwnerMismatch(_) => kafka_common_Error_DELEGATION_TOKEN_OWNER_MISMATCH,
+        Error::Disconnect(_) => kafka_common_Error_DISCONNECT,
+        Error::DuplicateBrokerRegistration(_) => kafka_common_Error_DUPLICATE_BROKER_REGISTRATION,
+        Error::DuplicateResource(_) => kafka_common_Error_DUPLICATE_RESOURCE,
+        Error::DuplicateSequence(_) => kafka_common_Error_DUPLICATE_SEQUENCE_NUMBER,
+        Error::DuplicateVoter(_) => kafka_common_Error_DUPLICATE_VOTER,
+        Error::ElectionNotNeeded(_) => kafka_common_Error_ELECTION_NOT_NEEDED,
+        Error::EligibleLeadersNotAvailable(_) => kafka_common_Error_ELIGIBLE_LEADERS_NOT_AVAILABLE,
+        Error::FeatureUpdateFailed(_) => kafka_common_Error_FEATURE_UPDATE_FAILED,
+        Error::FencedInstanceId(_) => kafka_common_Error_FENCED_INSTANCE_ID,
+        Error::FencedLeaderEpoch(_) => kafka_common_Error_FENCED_LEADER_EPOCH,
+        Error::FencedMemberEpoch(_) => kafka_common_Error_FENCED_MEMBER_EPOCH,
+        Error::FencedStateEpoch(_) => kafka_common_Error_FENCED_STATE_EPOCH,
+        Error::FetchSessionIdNotFound(_) => kafka_common_Error_FETCH_SESSION_ID_NOT_FOUND,
+        Error::FetchSessionTopicId(_) => kafka_common_Error_FETCH_SESSION_TOPIC_ID_ERROR,
+        Error::GroupAuthorization(_) => kafka_common_Error_GROUP_AUTHORIZATION_FAILED,
+        Error::GroupIdNotFound(_) => kafka_common_Error_GROUP_ID_NOT_FOUND,
+        Error::GroupMaxSizeReached(_) => kafka_common_Error_GROUP_MAX_SIZE_REACHED,
+        Error::GroupNotEmpty(_) => kafka_common_Error_NON_EMPTY_GROUP,
+        Error::GroupSubscribedToTopic(_) => kafka_common_Error_GROUP_SUBSCRIBED_TO_TOPIC,
+        Error::IllegalGeneration(_) => kafka_common_Error_ILLEGAL_GENERATION,
+        Error::IllegalSaslState(_) => kafka_common_Error_ILLEGAL_SASL_STATE,
+        Error::InconsistentClusterId(_) => kafka_common_Error_INCONSISTENT_CLUSTER_ID,
+        Error::InconsistentGroupProtocol(_) => kafka_common_Error_INCONSISTENT_GROUP_PROTOCOL,
+        Error::InconsistentTopicId(_) => kafka_common_Error_INCONSISTENT_TOPIC_ID,
+        Error::InconsistentVoterSet(_) => kafka_common_Error_INCONSISTENT_VOTER_SET,
+        Error::IneligibleReplica(_) => kafka_common_Error_INELIGIBLE_REPLICA,
+        Error::Interrupt(_) => kafka_common_Error_INTERRUPT,
+        Error::InvalidCommitOffsetSize(_) => kafka_common_Error_INVALID_COMMIT_OFFSET_SIZE,
+        Error::InvalidConfiguration(_) => kafka_common_Error_INVALID_CONFIG,
+        Error::InvalidFetchSessionEpoch(_) => kafka_common_Error_INVALID_FETCH_SESSION_EPOCH,
+        Error::InvalidFetchSize(_) => kafka_common_Error_INVALID_FETCH_SIZE,
+        Error::InvalidGroupId(_) => kafka_common_Error_INVALID_GROUP_ID,
+        Error::InvalidOffset(_) => kafka_common_Error_INVALID_OFFSET,
+        Error::InvalidPartitions(_) => kafka_common_Error_INVALID_PARTITIONS,
+        Error::InvalidPidMapping(_) => kafka_common_Error_INVALID_PRODUCER_ID_MAPPING,
+        Error::InvalidPrincipalType(_) => kafka_common_Error_INVALID_PRINCIPAL_TYPE,
+        Error::InvalidProducerEpoch(_) => kafka_common_Error_INVALID_PRODUCER_EPOCH,
+        Error::InvalidRecord(_) => kafka_common_Error_INVALID_RECORD,
+        Error::InvalidRecordState(_) => kafka_common_Error_INVALID_RECORD_STATE,
+        Error::InvalidRegistration(_) => kafka_common_Error_INVALID_REGISTRATION,
+        Error::InvalidRegularExpression(_) => kafka_common_Error_INVALID_REGULAR_EXPRESSION,
+        Error::InvalidReplicaAssignment(_) => kafka_common_Error_INVALID_REPLICA_ASSIGNMENT,
+        Error::InvalidReplicationFactor(_) => kafka_common_Error_INVALID_REPLICATION_FACTOR,
+        Error::InvalidRequest(_) => kafka_common_Error_INVALID_REQUEST,
+        Error::InvalidRequiredAcks(_) => kafka_common_Error_INVALID_REQUIRED_ACKS,
+        Error::InvalidSessionTimeout(_) => kafka_common_Error_INVALID_SESSION_TIMEOUT,
+        Error::InvalidShareSessionEpoch(_) => kafka_common_Error_INVALID_SHARE_SESSION_EPOCH,
+        Error::InvalidTimestamp(_) => kafka_common_Error_INVALID_TIMESTAMP,
+        Error::InvalidTopic(_) => kafka_common_Error_INVALID_TOPIC_ERROR,
+        Error::InvalidTxnState(_) => kafka_common_Error_INVALID_TXN_STATE,
+        Error::InvalidTxnTimeout(_) => kafka_common_Error_INVALID_TRANSACTION_TIMEOUT,
+        Error::InvalidUpdateVersion(_) => kafka_common_Error_INVALID_UPDATE_VERSION,
+        Error::InvalidVoterKey(_) => kafka_common_Error_INVALID_VOTER_KEY,
+        Error::KafkaStorage(_) => kafka_common_Error_KAFKA_STORAGE_ERROR,
+        Error::LeaderNotAvailable(_) => kafka_common_Error_LEADER_NOT_AVAILABLE,
+        Error::ListenerNotFound(_) => kafka_common_Error_LISTENER_NOT_FOUND,
+        Error::LogDirNotFound(_) => kafka_common_Error_LOG_DIR_NOT_FOUND,
+        Error::MemberIdRequired(_) => kafka_common_Error_MEMBER_ID_REQUIRED,
+        Error::MismatchedEndpointType(_) => kafka_common_Error_MISMATCHED_ENDPOINT_TYPE,
+        Error::Network(_) => kafka_common_Error_NETWORK_ERROR,
+        Error::NewLeaderElected(_) => kafka_common_Error_NEW_LEADER_ELECTED,
+        Error::NoReassignmentInProgress(_) => kafka_common_Error_NO_REASSIGNMENT_IN_PROGRESS,
+        Error::NotController(_) => kafka_common_Error_NOT_CONTROLLER,
+        Error::NotCoordinator(_) => kafka_common_Error_NOT_COORDINATOR,
+        Error::NotEnoughReplicas(_) => kafka_common_Error_NOT_ENOUGH_REPLICAS,
+        Error::NotEnoughReplicasAfterAppend(_) => kafka_common_Error_NOT_ENOUGH_REPLICAS_AFTER_APPEND,
+        Error::NotLeaderOrFollower(_) => kafka_common_Error_NOT_LEADER_OR_FOLLOWER,
+        Error::OffsetMetadataTooLarge(_) => kafka_common_Error_OFFSET_METADATA_TOO_LARGE,
+        Error::OffsetMovedToTieredStorage(_) => kafka_common_Error_OFFSET_MOVED_TO_TIERED_STORAGE,
+        Error::OffsetNotAvailable(_) => kafka_common_Error_OFFSET_NOT_AVAILABLE,
+        Error::OffsetOutOfRange(_) => kafka_common_Error_OFFSET_OUT_OF_RANGE,
+        Error::OperationNotAttempted(_) => kafka_common_Error_OPERATION_NOT_ATTEMPTED,
+        Error::OutOfOrderSequence(_) => kafka_common_Error_OUT_OF_ORDER_SEQUENCE_NUMBER,
+        Error::PolicyViolation(_) => kafka_common_Error_POLICY_VIOLATION,
+        Error::PositionOutOfRange(_) => kafka_common_Error_POSITION_OUT_OF_RANGE,
+        Error::PreferredLeaderNotAvailable(_) => kafka_common_Error_PREFERRED_LEADER_NOT_AVAILABLE,
+        Error::PrincipalDeserialization(_) => kafka_common_Error_PRINCIPAL_DESERIALIZATION_FAILURE,
+        Error::ProducerFenced(_) => kafka_common_Error_PRODUCER_FENCED,
+        Error::QuotaViolation(_) => kafka_common_Error_QUOTA_VIOLATION,
+        Error::ReassignmentInProgress(_) => kafka_common_Error_REASSIGNMENT_IN_PROGRESS,
+        Error::RebalanceInProgress(_) => kafka_common_Error_REBALANCE_IN_PROGRESS,
+        Error::RebootstrapRequired(_) => kafka_common_Error_REBOOTSTRAP_REQUIRED,
+        Error::RecordBatchTooLarge(_) => kafka_common_Error_RECORD_LIST_TOO_LARGE,
+        Error::RecordDeserialization(_) => kafka_common_Error_RECORD_DESERIALIZATION,
+        Error::RecordTooLarge(_) => kafka_common_Error_MESSAGE_TOO_LARGE,
+        Error::InvalidReceive(_) => kafka_common_Error_INVALID_RECEIVE,
+        Error::Config(_) => kafka_common_Error_CONFIG,
+        Error::ConsumerRetriableCommitFailed(_) => kafka_common_Error_CONSUMER_RETRIABLE_COMMIT_FAILED,
+        Error::ConsumerCommitFailed(_) => kafka_common_Error_CONSUMER_COMMIT_FAILED,
+        Error::ConsumerNoOffsetForPartition(_) => kafka_common_Error_CONSUMER_NO_OFFSET_FOR_PARTITION,
+        Error::ConsumerOffsetOutOfRange(_) => kafka_common_Error_CONSUMER_OFFSET_OUT_OF_RANGE,
+        Error::ConsumerLogTruncation(_) => kafka_common_Error_CONSUMER_LOG_TRUNCATION,
+        Error::ReplicaNotAvailable(_) => kafka_common_Error_REPLICA_NOT_AVAILABLE,
+        Error::ResourceNotFound(_) => kafka_common_Error_RESOURCE_NOT_FOUND,
+        Error::SaslAuthentication(_) => kafka_common_Error_SASL_AUTHENTICATION_FAILED,
+        Error::Schema(_) => kafka_common_Error_SCHEMA,
+        Error::SecurityDisabled(_) => kafka_common_Error_SECURITY_DISABLED,
+        Error::Serialization(_) => kafka_common_Error_SERIALIZATION,
+        Error::ShareSessionLimitReached(_) => kafka_common_Error_SHARE_SESSION_LIMIT_REACHED,
+        Error::ShareSessionNotFound(_) => kafka_common_Error_SHARE_SESSION_NOT_FOUND,
+        Error::SnapshotNotFound(_) => kafka_common_Error_SNAPSHOT_NOT_FOUND,
+        Error::SslAuthentication(_) => kafka_common_Error_SSL_AUTHENTICATION,
+        Error::StaleBrokerEpoch(_) => kafka_common_Error_STALE_BROKER_EPOCH,
+        Error::StaleMemberEpoch(_) => kafka_common_Error_STALE_MEMBER_EPOCH,
+        Error::StreamsInvalidTopology(_) => kafka_common_Error_STREAMS_INVALID_TOPOLOGY,
+        Error::StreamsInvalidTopologyEpoch(_) => kafka_common_Error_STREAMS_INVALID_TOPOLOGY_EPOCH,
+        Error::StreamsTopologyFenced(_) => kafka_common_Error_STREAMS_TOPOLOGY_FENCED,
+        Error::TelemetryTooLarge(_) => kafka_common_Error_TELEMETRY_TOO_LARGE,
+        Error::ThrottlingQuotaExceeded(_) => kafka_common_Error_THROTTLING_QUOTA_EXCEEDED,
+        Error::Timeout(_) => kafka_common_Error_REQUEST_TIMED_OUT,
+        Error::TopicAuthorization(_) => kafka_common_Error_TOPIC_AUTHORIZATION_FAILED,
+        Error::TopicDeletionDisabled(_) => kafka_common_Error_TOPIC_DELETION_DISABLED,
+        Error::TopicExists(_) => kafka_common_Error_TOPIC_ALREADY_EXISTS,
+        Error::TransactionAbortable(_) => kafka_common_Error_TRANSACTION_ABORTABLE,
+        Error::TransactionAborted(_) => kafka_common_Error_TRANSACTION_ABORTED,
+        Error::TransactionCoordinatorFenced(_) => kafka_common_Error_TRANSACTION_COORDINATOR_FENCED,
+        Error::TransactionalIdAuthorization(_) => kafka_common_Error_TRANSACTIONAL_ID_AUTHORIZATION_FAILED,
+        Error::TransactionalIdNotFound(_) => kafka_common_Error_TRANSACTIONAL_ID_NOT_FOUND,
+        Error::UnacceptableCredential(_) => kafka_common_Error_UNACCEPTABLE_CREDENTIAL,
+        Error::UnknownControllerId(_) => kafka_common_Error_UNKNOWN_CONTROLLER_ID,
+        Error::UnknownLeaderEpoch(_) => kafka_common_Error_UNKNOWN_LEADER_EPOCH,
+        Error::UnknownMemberId(_) => kafka_common_Error_UNKNOWN_MEMBER_ID,
+        Error::UnknownProducerId(_) => kafka_common_Error_UNKNOWN_PRODUCER_ID,
+        Error::UnknownServer(_) => kafka_common_Error_UNKNOWN_SERVER_ERROR,
+        Error::UnknownSubscriptionId(_) => kafka_common_Error_UNKNOWN_SUBSCRIPTION_ID,
+        Error::UnknownTopicId(_) => kafka_common_Error_UNKNOWN_TOPIC_ID,
+        Error::UnknownTopicOrPartition(_) => kafka_common_Error_UNKNOWN_TOPIC_OR_PARTITION,
+        Error::UnreleasedInstanceId(_) => kafka_common_Error_UNRELEASED_INSTANCE_ID,
+        Error::UnstableOffsetCommit(_) => kafka_common_Error_UNSTABLE_OFFSET_COMMIT,
+        Error::UnsupportedAssignor(_) => kafka_common_Error_UNSUPPORTED_ASSIGNOR,
+        Error::UnsupportedByAuthentication(_) => kafka_common_Error_DELEGATION_TOKEN_REQUEST_NOT_ALLOWED,
+        Error::UnsupportedCompressionType(_) => kafka_common_Error_UNSUPPORTED_COMPRESSION_TYPE,
+        Error::UnsupportedEndpointType(_) => kafka_common_Error_UNSUPPORTED_ENDPOINT_TYPE,
+        Error::UnsupportedForMessageFormat(_) => kafka_common_Error_UNSUPPORTED_FOR_MESSAGE_FORMAT,
+        Error::UnsupportedSaslMechanism(_) => kafka_common_Error_UNSUPPORTED_SASL_MECHANISM,
+        Error::UnsupportedVersion(_) => kafka_common_Error_UNSUPPORTED_VERSION,
+        Error::VoterNotFound(_) => kafka_common_Error_VOTER_NOT_FOUND,
+        Error::Wakeup(_) => kafka_common_Error_WAKEUP,
     }
 }
 
-/// Returns the error code from a [`kafka_common_Error_t`] handle.
+/// Returns the [`kafka_common_Error_e`] enumerator of a [`kafka_common_Error_t`]
+/// handle, as `__enum` does for every C enum (CLAUDE.md §4 "Enums").
 ///
 /// The value identifies the error's **class**, not merely its protocol code:
-/// the codes are pairwise distinct, so a `switch` on this value is enough to
-/// tell any two errors apart. See [`kafka_common_ErrorCode_e`] for the
+/// the values are pairwise distinct, so a `switch` on this value is enough to
+/// tell any two errors apart. See [`kafka_common_Error_e`] for the
 /// assignment rule and for the four classes whose value deliberately differs
 /// from the code Java's `Errors.forException` would report.
 ///
@@ -1714,8 +1728,8 @@ pub(crate) fn error_code_of(error: &Error) -> kafka_common_ErrorCode_e {
 ///
 /// # Returns
 ///
-/// The error's [`kafka_common_ErrorCode_e`], or
-/// `kafka_common_ErrorCode_NONE` (`0`) if the error handle is null. The
+/// The error's [`kafka_common_Error_e`], or
+/// `kafka_common_Error_NONE` (`0`) if the error handle is null. The
 /// enumerators have explicit values that fit an `int`, so a C caller that was
 /// comparing the previous `int32_t` return against integers keeps compiling
 /// and keeps getting the same answers for every broker-reported code.
@@ -1725,9 +1739,9 @@ pub(crate) fn error_code_of(error: &Error) -> kafka_common_ErrorCode_e {
 /// `error` must be a valid handle from a function that returned an error, or null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_code(error: *const kafka_common_Error_t) -> kafka_common_ErrorCode_e {
+pub unsafe extern "C" fn kafka_common_Error__enum(error: *const kafka_common_Error_t) -> kafka_common_Error_e {
     if error.is_null() {
-        return kafka_common_ErrorCode_NONE;
+        return kafka_common_Error_NONE;
     }
     // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
     // valid error handle: an owned one from `box_error`, not yet destroyed, or a borrowed one
@@ -1889,102 +1903,94 @@ mod tests {
     ///
     /// Both halves matter. The instance checks that `error_code_of`'s arm points
     /// at the right constant; the literal checks that the constant still has the
-    /// value it was published with. See [`kafka_common_ErrorCode_e`] — the
+    /// value it was published with. See [`kafka_common_Error_e`] — the
     /// negatives are ABI, so a renumbering must fail here rather than silently
     /// reach a C caller.
-    fn client_side_classes() -> Vec<(Error, kafka_common_ErrorCode_e, i32)> {
+    fn client_side_classes() -> Vec<(Error, kafka_common_Error_e, i32)> {
         vec![
             // -2 ..= -5: JDK-derived (`Local*`).
             (
                 Error::local_concurrent_modification("m"),
-                kafka_common_ErrorCode_LOCAL_CONCURRENT_MODIFICATION,
+                kafka_common_Error_LOCAL_CONCURRENT_MODIFICATION,
                 -2,
             ),
             (
                 Error::local_illegal_argument("m"),
-                kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT,
+                kafka_common_Error_LOCAL_ILLEGAL_ARGUMENT,
                 -3,
             ),
-            (Error::local_illegal_state("m"), kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE, -4),
-            (Error::local_timeout("m"), kafka_common_ErrorCode_LOCAL_TIMEOUT, -5),
+            (Error::local_illegal_state("m"), kafka_common_Error_LOCAL_ILLEGAL_STATE, -4),
+            (Error::local_timeout("m"), kafka_common_Error_LOCAL_TIMEOUT, -5),
             // -6 ..= -18: `common` client-side classes.
-            (Error::Api(ApiError::new("m")), kafka_common_ErrorCode_API, -6),
+            (Error::Api(ApiError::new("m")), kafka_common_Error_API, -6),
             (
                 Error::Authentication(AuthenticationError::new("m")),
-                kafka_common_ErrorCode_AUTHENTICATION,
+                kafka_common_Error_AUTHENTICATION,
                 -7,
             ),
             (
                 Error::AuthorizerNotReady(AuthorizerNotReadyError::new("m")),
-                kafka_common_ErrorCode_AUTHORIZER_NOT_READY,
+                kafka_common_Error_AUTHORIZER_NOT_READY,
                 -8,
             ),
             (
                 Error::Authorization(AuthorizationError::new("m")),
-                kafka_common_ErrorCode_AUTHORIZATION,
+                kafka_common_Error_AUTHORIZATION,
                 -9,
             ),
-            (Error::config_message("m"), kafka_common_ErrorCode_CONFIG, -10),
-            (
-                Error::Disconnect(DisconnectError::new("m")),
-                kafka_common_ErrorCode_DISCONNECT,
-                -11,
-            ),
-            (
-                Error::Interrupt(InterruptError::new("m")),
-                kafka_common_ErrorCode_INTERRUPT,
-                -12,
-            ),
+            (Error::config_message("m"), kafka_common_Error_CONFIG, -10),
+            (Error::Disconnect(DisconnectError::new("m")), kafka_common_Error_DISCONNECT, -11),
+            (Error::Interrupt(InterruptError::new("m")), kafka_common_Error_INTERRUPT, -12),
             (
                 Error::InvalidOffset(InvalidOffsetError::new("m")),
-                kafka_common_ErrorCode_INVALID_OFFSET,
+                kafka_common_Error_INVALID_OFFSET,
                 -13,
             ),
-            (Error::schema("m"), kafka_common_ErrorCode_SCHEMA, -14),
-            (Error::serialization("m"), kafka_common_ErrorCode_SERIALIZATION, -15),
+            (Error::schema("m"), kafka_common_Error_SCHEMA, -14),
+            (Error::serialization("m"), kafka_common_Error_SERIALIZATION, -15),
             (
                 Error::SslAuthentication(SslAuthenticationError::new("m")),
-                kafka_common_ErrorCode_SSL_AUTHENTICATION,
+                kafka_common_Error_SSL_AUTHENTICATION,
                 -16,
             ),
-            (Error::transaction_aborted(), kafka_common_ErrorCode_TRANSACTION_ABORTED, -17),
-            (Error::wakeup("m"), kafka_common_ErrorCode_WAKEUP, -18),
+            (Error::transaction_aborted(), kafka_common_Error_TRANSACTION_ABORTED, -17),
+            (Error::wakeup("m"), kafka_common_Error_WAKEUP, -18),
             // -19 ..= -27: hand-written / consumer classes.
             (
                 Error::ConsumerCommitFailed(ConsumerCommitFailedError::with_default_message()),
-                kafka_common_ErrorCode_CONSUMER_COMMIT_FAILED,
+                kafka_common_Error_CONSUMER_COMMIT_FAILED,
                 -19,
             ),
             (
                 Error::ConsumerLogTruncation(Box::new(ConsumerLogTruncationError::new(HashMap::new(), HashMap::new()))),
-                kafka_common_ErrorCode_CONSUMER_LOG_TRUNCATION,
+                kafka_common_Error_CONSUMER_LOG_TRUNCATION,
                 -20,
             ),
             (
                 Error::ConsumerNoOffsetForPartition(ConsumerNoOffsetForPartitionError::new(TopicPartition::new(
                     "t", 0,
                 ))),
-                kafka_common_ErrorCode_CONSUMER_NO_OFFSET_FOR_PARTITION,
+                kafka_common_Error_CONSUMER_NO_OFFSET_FOR_PARTITION,
                 -21,
             ),
             (
                 Error::ConsumerOffsetOutOfRange(ConsumerOffsetOutOfRangeError::new(HashMap::new())),
-                kafka_common_ErrorCode_CONSUMER_OFFSET_OUT_OF_RANGE,
+                kafka_common_Error_CONSUMER_OFFSET_OUT_OF_RANGE,
                 -22,
             ),
             (
                 Error::ConsumerRetriableCommitFailed(ConsumerRetriableCommitFailedError::with_default_message()),
-                kafka_common_ErrorCode_CONSUMER_RETRIABLE_COMMIT_FAILED,
+                kafka_common_Error_CONSUMER_RETRIABLE_COMMIT_FAILED,
                 -23,
             ),
             (
                 Error::correlation_id_mismatch("m", 1, 2),
-                kafka_common_ErrorCode_CORRELATION_ID_MISMATCH,
+                kafka_common_Error_CORRELATION_ID_MISMATCH,
                 -24,
             ),
             (
                 Error::InvalidReceive(InvalidReceiveError::new("m")),
-                kafka_common_ErrorCode_INVALID_RECEIVE,
+                kafka_common_Error_INVALID_RECEIVE,
                 -25,
             ),
             (
@@ -1993,24 +1999,20 @@ mod tests {
                     1.0,
                     0.5,
                 ))),
-                kafka_common_ErrorCode_QUOTA_VIOLATION,
+                kafka_common_Error_QUOTA_VIOLATION,
                 -26,
             ),
             (
                 Error::RecordDeserialization(Box::new(record_deserialization_error())),
-                kafka_common_ErrorCode_RECORD_DESERIALIZATION,
+                kafka_common_Error_RECORD_DESERIALIZATION,
                 -27,
             ),
             // -28: code owned by a superclass.
-            (
-                Error::buffer_exhausted("m"),
-                kafka_common_ErrorCode_PRODUCER_BUFFER_EXHAUSTED,
-                -28,
-            ),
+            (Error::buffer_exhausted("m"), kafka_common_Error_PRODUCER_BUFFER_EXHAUSTED, -28),
             // -29: a binding's foreign callback error.
             (
                 Error::local_callback("m", std::ptr::null_mut()),
-                kafka_common_ErrorCode_LOCAL_CALLBACK,
+                kafka_common_Error_LOCAL_CALLBACK,
                 -29,
             ),
         ]
@@ -2059,7 +2061,7 @@ mod tests {
     /// Every code whose `Errors::error()` names a class reports that class's own
     /// value, and the value equals `Errors::code()`.
     ///
-    /// This machine-checks the faithful half of [`kafka_common_ErrorCode_e`]
+    /// This machine-checks the faithful half of [`kafka_common_Error_e`]
     /// against `Errors` itself, so the two cannot drift: a code renamed, renumbered
     /// or re-pointed at a different class in `Errors` fails here.
     #[test]
@@ -2074,7 +2076,7 @@ mod tests {
                 // one code no class owns.
                 None => {
                     assert_eq!(code, 0, "only NONE may map to no class, but {code} does");
-                    assert_eq!(kafka_common_ErrorCode_NONE as i32, 0);
+                    assert_eq!(kafka_common_Error_NONE as i32, 0);
                 },
                 Some(owner) => {
                     owned += 1;
@@ -2093,17 +2095,17 @@ mod tests {
         // stores an `Errors`, so it reports whatever that value owns.
         assert_eq!(
             error_code_of(&Error::KafkaError(KafkaError::new(Errors::CorruptMessage))),
-            kafka_common_ErrorCode_CORRUPT_MESSAGE
+            kafka_common_Error_CORRUPT_MESSAGE
         );
         assert_eq!(
             error_code_of(&Error::KafkaError(KafkaError::new(Errors::None))),
-            kafka_common_ErrorCode_NONE
+            kafka_common_Error_NONE
         );
         // A bare `KafkaException` reports -1, which is what Java's
         // `Errors.forException` answers for it.
         assert_eq!(
             error_code_of(&Error::kafka_message("m")),
-            kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR
+            kafka_common_Error_UNKNOWN_SERVER_ERROR
         );
     }
 
@@ -2116,7 +2118,7 @@ mod tests {
         let mut seen: HashMap<i32, String> = HashMap::new();
 
         // `NONE` belongs to no class but occupies 0 in the space.
-        seen.insert(kafka_common_ErrorCode_NONE as i32, "NONE".to_string());
+        seen.insert(kafka_common_Error_NONE as i32, "NONE".to_string());
 
         for code in FIRST_CODE..=LAST_CODE {
             let error = Errors::for_code(code);
@@ -2262,7 +2264,7 @@ mod tests {
     /// The 28 Rust-local negatives keep the values they were published with, and
     /// each client-side class maps to the enumerator named after it.
     ///
-    /// These values are ABI (see [`kafka_common_ErrorCode_e`]): a new class
+    /// These values are ABI (see [`kafka_common_Error_e`]): a new class
     /// appends at the most-negative end, so inserting one mid-list — which would
     /// renumber everything after it — must fail here.
     #[test]
@@ -2314,7 +2316,7 @@ mod tests {
     ///
     /// `error` must be a live error handle returned by an FFI call (null fails the
     /// assertion); it is freed here and must not be used afterwards.
-    unsafe fn take_error(error: *mut kafka_common_Error_t) -> (String, kafka_common_ErrorCode_e) {
+    unsafe fn take_error(error: *mut kafka_common_Error_t) -> (String, kafka_common_Error_e) {
         assert!(!error.is_null(), "expected an error handle");
         // SAFETY: Test helper: `error` is non-null (asserted above) and every caller passes
         // a handle freshly produced by `#[ffi_guard]`'s panic path
@@ -2329,8 +2331,8 @@ mod tests {
             .to_owned();
         // SAFETY: Test helper: `error` is non-null (asserted above) and a fresh, not yet
         // destroyed `box_error` handle from `#[ffi_guard]`'s panic path, which satisfies
-        // `kafka_common_Error_code`'s `# Safety`; the call only copies out the code.
-        let code = unsafe { kafka_common_Error_code(error) };
+        // `kafka_common_Error__enum`'s `# Safety`; the call only copies out the code.
+        let code = unsafe { kafka_common_Error__enum(error) };
         // SAFETY: Test helper: `error` is non-null (asserted above) and a fresh `box_error`
         // handle from `#[ffi_guard]`'s panic path that no other code frees (callers pass it
         // here exactly once), so this `kafka_common_Error_destroy` is the single, final
@@ -2348,7 +2350,7 @@ mod tests {
         /// Set by `guarded_unit` just before it panics.
         static UNIT_BODY_RAN: RefCell<bool> = const { RefCell::new(false) };
         /// What `guarded_on_panic`'s closure received.
-        static ON_PANIC_SAW: RefCell<Option<(String, kafka_common_ErrorCode_e)>> = const { RefCell::new(None) };
+        static ON_PANIC_SAW: RefCell<Option<(String, kafka_common_Error_e)>> = const { RefCell::new(None) };
     }
 
     /// # Safety
@@ -2450,11 +2452,11 @@ mod tests {
     /// `unsafe` only because `#[ffi_guard]` requires the `unsafe extern "C"` entry-point
     /// shape; the function takes no pointer, so the caller has nothing to uphold.
     #[ffi_guard]
-    unsafe extern "C" fn guarded_error_code(panic: bool) -> kafka_common_ErrorCode_e {
+    unsafe extern "C" fn guarded_error_code(panic: bool) -> kafka_common_Error_e {
         if panic {
             panic!("code boom");
         }
-        kafka_common_ErrorCode_NONE
+        kafka_common_Error_NONE
     }
 
     /// # Safety
@@ -2727,7 +2729,7 @@ mod tests {
         let code = unsafe { guarded_error_code(true) };
         // The enumerator `error_code_of` produces for `Errors::UnknownServerError`.
         assert_eq!(code, code_owned_by(Errors::UnknownServerError));
-        assert_eq!(code, kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR);
+        assert_eq!(code, kafka_common_Error_UNKNOWN_SERVER_ERROR);
     }
 
     #[test]
@@ -2739,7 +2741,7 @@ mod tests {
         // non-null and frees it exactly once.
         let (message, code) = unsafe { take_error(guarded_error_return(true)) };
         assert_eq!(message, panic_message("guarded_error_return", "error boom"));
-        assert_eq!(code, kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE);
+        assert_eq!(code, kafka_common_Error_LOCAL_ILLEGAL_STATE);
     }
 
     #[test]
@@ -2756,7 +2758,7 @@ mod tests {
         // (which asserts non-null) is the single, final use, as the comment above records.
         let (message, code) = unsafe { take_error(error as *mut kafka_common_Error_t) };
         assert_eq!(message, panic_message("guarded_borrowed_error", "borrowed boom"));
-        assert_eq!(code, kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE);
+        assert_eq!(code, kafka_common_Error_LOCAL_ILLEGAL_STATE);
     }
 
     #[test]
@@ -2826,7 +2828,7 @@ mod tests {
         // exactly once.
         let (message, code) = unsafe { take_error(error) };
         assert_eq!(message, panic_message("guarded_new", "constructor boom"));
-        assert_eq!(code, kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE);
+        assert_eq!(code, kafka_common_Error_LOCAL_ILLEGAL_STATE);
     }
 
     #[test]
@@ -2843,7 +2845,7 @@ mod tests {
         assert_eq!(unsafe { guarded_on_panic() }, 7);
         let (message, code) = ON_PANIC_SAW.with(|saw| saw.borrow_mut().take()).expect("the closure ran");
         assert_eq!(message, panic_message("guarded_on_panic", "custom path"));
-        assert_eq!(code, kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE);
+        assert_eq!(code, kafka_common_Error_LOCAL_ILLEGAL_STATE);
     }
 
     #[test]
@@ -2951,7 +2953,7 @@ mod tests {
         let payload: Box<dyn Any + Send> = Box::new(42_u32);
         let error = panic_error("f", &*payload);
         assert_eq!(error.message(), panic_message("f", "non-string panic payload"));
-        assert_eq!(error_code_of(&error), kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE);
+        assert_eq!(error_code_of(&error), kafka_common_Error_LOCAL_ILLEGAL_STATE);
         // SAFETY: Test code: `guarded_non_string_payload` is a parameterless `extern "C"`
         // test function under `#[ffi_guard]`; the call is `unsafe` solely because it is
         // declared `unsafe extern "C"`, with no pointer arguments or preconditions to
@@ -2988,7 +2990,7 @@ mod tests {
             assert_eq!(guarded_topics_count(false), 3);
             assert_eq!(guarded_offsets_count(false), 3);
             assert_eq!(guarded_f64(false), 1.5);
-            assert_eq!(guarded_error_code(false), kafka_common_ErrorCode_NONE);
+            assert_eq!(guarded_error_code(false), kafka_common_Error_NONE);
             assert!(guarded_error_return(false).is_null());
             assert!(guarded_borrowed_error(false).is_null());
             assert!(!guarded_mut_pointer(false).is_null());

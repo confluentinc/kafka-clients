@@ -45,7 +45,7 @@
 //!
 //! The error is reported through the return value only. A fallible entry point
 //! returns `kafka_common_Error_t *` (null on success), so a caught panic is that
-//! returned error: code `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE`, message
+//! returned error: code `kafka_common_Error_LOCAL_ILLEGAL_STATE`, message
 //! beginning `Rust panic caught at the FFI boundary in <function>`. Its
 //! `out_<name>` parameters are left unwritten, the body having stopped before
 //! it delivered a value; the C caller reads them only when the call returned
@@ -63,7 +63,7 @@
 //! | `bool` | `false` |
 //! | `i16`, `i32`, `i64` | `-1`, or `0` when the function name ends in `_count` or `_size`, since C feeds a count or size to `malloc` and to a `for` bound. A size that already returns -1 for a null key or value (`serialized_key_size`) still returns `0` on a panic. An accessor mapping Java's empty `Optional`, or `null`, to -1 whose Java domain is that or a value >= 0 (a leader epoch) declares `fallback = -2` |
 //! | `f64` | `f64::NAN` |
-//! | `kafka_common_ErrorCode_e` | `kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR` |
+//! | `kafka_common_Error_e` | `kafka_common_Error_UNKNOWN_SERVER_ERROR` |
 //! | `kafka_Bytes_t` | `kafka_Bytes_t::NULL`, Java's `null` array |
 //! | `*mut kafka_common_Error_t` | a boxed error, because null means success |
 //! | `*const kafka_common_Error_t` | a boxed error, leaked on purpose: the caller never frees a borrowed pointer, and null would read as "no error" |
@@ -86,7 +86,7 @@
 //! # Hardcoded paths
 //!
 //! The expansion names `crate::ffi::common::ffi_guard_or`,
-//! `crate::ffi::common::box_error`, `crate::ffi::common::kafka_common_ErrorCode_e`,
+//! `crate::ffi::common::box_error`, `crate::ffi::common::kafka_common_Error_e`,
 //! `crate::ffi::util::kafka_Bytes_t` and `crate::common::Error`. That is
 //! deliberate: the attribute exists only for the `confluent_kafka` crate's own
 //! `ffi` module, where those items live, and a procedural macro has no other
@@ -331,8 +331,8 @@ fn derived_fallback(sig: &Signature, error: &Ident) -> syn::Result<(TokenStream2
                 }
             } else if ident == "f64" {
                 quote!(::core::primitive::f64::NAN)
-            } else if ident == "kafka_common_ErrorCode_e" {
-                quote!(crate::ffi::common::kafka_common_ErrorCode_e::kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR)
+            } else if ident == "kafka_common_Error_e" {
+                quote!(crate::ffi::common::kafka_common_Error_e::kafka_common_Error_UNKNOWN_SERVER_ERROR)
             } else if ident == "kafka_Bytes_t" {
                 quote!(crate::ffi::util::kafka_Bytes_t::NULL)
             } else {
@@ -500,18 +500,18 @@ mod tests {
             ),
             (
                 quote!(
-                    extern "C" fn f() -> kafka_common_ErrorCode_e {}
+                    extern "C" fn f() -> kafka_common_Error_e {}
                 ),
-                quote!(move |_: crate::common::Error| -> kafka_common_ErrorCode_e {
-                    crate::ffi::common::kafka_common_ErrorCode_e::kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR
+                quote!(move |_: crate::common::Error| -> kafka_common_Error_e {
+                    crate::ffi::common::kafka_common_Error_e::kafka_common_Error_UNKNOWN_SERVER_ERROR
                 }),
             ),
             (
                 quote!(
-                    extern "C" fn f() -> crate::ffi::common::kafka_common_ErrorCode_e {}
+                    extern "C" fn f() -> crate::ffi::common::kafka_common_Error_e {}
                 ),
-                quote!(move |_: crate::common::Error| -> crate::ffi::common::kafka_common_ErrorCode_e {
-                    crate::ffi::common::kafka_common_ErrorCode_e::kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR
+                quote!(move |_: crate::common::Error| -> crate::ffi::common::kafka_common_Error_e {
+                    crate::ffi::common::kafka_common_Error_e::kafka_common_Error_UNKNOWN_SERVER_ERROR
                 }),
             ),
             (

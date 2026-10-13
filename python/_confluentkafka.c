@@ -641,7 +641,7 @@ static PyObject* error_to_py(const kafka_common_Error_t* e) {
     PyObject* py_opaque = opaque ? PyLong_FromVoidPtr(opaque) : (Py_INCREF(Py_None), Py_None);
     if (py_opaque == NULL) { Py_DECREF(py_msg); return NULL; }
     return Py_BuildValue("(iNOOON)",
-                         (int)kafka_common_Error_code(e),
+                         (int)kafka_common_Error__enum(e),
                          py_msg,
                          kafka_common_Error_is_retriable_error(e) ? Py_True : Py_False,
                          error_is_fatal(e) ? Py_True : Py_False,
@@ -1742,47 +1742,47 @@ static PyObject* py_Producer_metrics(PyObject* self, PyObject* args) {
 // `message` may be NULL.
 static kafka_common_Error_t* mock_error_from_code(int code, const char* message) {
     switch (code) {
-        case kafka_common_ErrorCode_LOCAL_TIMEOUT:
+        case kafka_common_Error_LOCAL_TIMEOUT:
             return kafka_common_Error_local_timeout(message);
-        case kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE:
+        case kafka_common_Error_LOCAL_ILLEGAL_STATE:
             return kafka_common_Error_local_illegal_state(message);
-        case kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT:
+        case kafka_common_Error_LOCAL_ILLEGAL_ARGUMENT:
             return kafka_common_Error_local_illegal_argument(message);
-        case kafka_common_ErrorCode_LOCAL_CONCURRENT_MODIFICATION:
+        case kafka_common_Error_LOCAL_CONCURRENT_MODIFICATION:
             return kafka_common_Error_local_concurrent_modification(message);
-        case kafka_common_ErrorCode_REQUEST_TIMED_OUT:
+        case kafka_common_Error_REQUEST_TIMED_OUT:
             return kafka_common_Error_timeout(message);
-        case kafka_common_ErrorCode_MESSAGE_TOO_LARGE:
+        case kafka_common_Error_MESSAGE_TOO_LARGE:
             return kafka_common_Error_record_too_large(message);
-        case kafka_common_ErrorCode_RECORD_LIST_TOO_LARGE:
+        case kafka_common_Error_RECORD_LIST_TOO_LARGE:
             return kafka_common_Error_record_batch_too_large(message);
-        case kafka_common_ErrorCode_INVALID_GROUP_ID:
+        case kafka_common_Error_INVALID_GROUP_ID:
             return kafka_common_Error_invalid_group_id(message);
-        case kafka_common_ErrorCode_UNSUPPORTED_VERSION:
+        case kafka_common_Error_UNSUPPORTED_VERSION:
             return kafka_common_Error_unsupported_version(message);
-        case kafka_common_ErrorCode_THROTTLING_QUOTA_EXCEEDED:
+        case kafka_common_Error_THROTTLING_QUOTA_EXCEEDED:
             return kafka_common_Error_throttling_quota_exceeded(0, message);
         // The (String message) constructors of the classes whose factory
         // takes a payload too: Java passes an empty set / null for it.
-        case kafka_common_ErrorCode_TOPIC_AUTHORIZATION_FAILED:
+        case kafka_common_Error_TOPIC_AUTHORIZATION_FAILED:
             return kafka_common_Error_topic_authorization_message(NULL, message);
-        case kafka_common_ErrorCode_INVALID_TOPIC_ERROR:
+        case kafka_common_Error_INVALID_TOPIC_ERROR:
             return kafka_common_Error_invalid_topics_message(NULL, message);
-        case kafka_common_ErrorCode_GROUP_AUTHORIZATION_FAILED:
+        case kafka_common_Error_GROUP_AUTHORIZATION_FAILED:
             return kafka_common_Error_group_authorization_with_message(NULL, message);
-        case kafka_common_ErrorCode_PRODUCER_BUFFER_EXHAUSTED:
+        case kafka_common_Error_PRODUCER_BUFFER_EXHAUSTED:
             return kafka_common_Error_buffer_exhausted(message);
-        case kafka_common_ErrorCode_CONFIG:
+        case kafka_common_Error_CONFIG:
             return kafka_common_Error_config_message(message);
-        case kafka_common_ErrorCode_INVALID_RECEIVE:
+        case kafka_common_Error_INVALID_RECEIVE:
             return kafka_common_Error_invalid_receive(message);
-        case kafka_common_ErrorCode_SCHEMA:
+        case kafka_common_Error_SCHEMA:
             return kafka_common_Error_schema(message);
-        case kafka_common_ErrorCode_SERIALIZATION:
+        case kafka_common_Error_SERIALIZATION:
             return kafka_common_Error_serialization(message);
-        case kafka_common_ErrorCode_WAKEUP:
+        case kafka_common_Error_WAKEUP:
             return kafka_common_Error_wakeup(message);
-        case kafka_common_ErrorCode_TRANSACTION_ABORTED:
+        case kafka_common_Error_TRANSACTION_ABORTED:
             return kafka_common_Error_transaction_aborted_message(message);
         default:
             PyErr_Format(PyExc_ValueError,
@@ -1894,7 +1894,7 @@ static PyObject* py_KafkaError_code(PyObject* self, PyObject* args) {
     unsigned long long ptr;
     if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
     kafka_common_Error_t *e = (kafka_common_Error_t*)(uintptr_t)ptr;
-    return PyLong_FromLong(kafka_common_Error_code(e));
+    return PyLong_FromLong(kafka_common_Error__enum(e));
 }
 
 static PyObject* py_KafkaError_message(PyObject* self, PyObject* args) {
@@ -1927,12 +1927,12 @@ static int error_is_fatal(const kafka_common_Error_t* e) {
     if (e == NULL) return 0;
     if (kafka_common_Error_is_authentication_error(e)) return 1;
     if (kafka_common_Error_is_authorization_error(e)) return 1;
-    switch (kafka_common_Error_code(e)) {
-        case kafka_common_ErrorCode_MISMATCHED_ENDPOINT_TYPE:
-        case kafka_common_ErrorCode_SECURITY_DISABLED:
-        case kafka_common_ErrorCode_UNSUPPORTED_VERSION:
-        case kafka_common_ErrorCode_UNSUPPORTED_ENDPOINT_TYPE:
-        case kafka_common_ErrorCode_UNSUPPORTED_FOR_MESSAGE_FORMAT:
+    switch (kafka_common_Error__enum(e)) {
+        case kafka_common_Error_MISMATCHED_ENDPOINT_TYPE:
+        case kafka_common_Error_SECURITY_DISABLED:
+        case kafka_common_Error_UNSUPPORTED_VERSION:
+        case kafka_common_Error_UNSUPPORTED_ENDPOINT_TYPE:
+        case kafka_common_Error_UNSUPPORTED_FOR_MESSAGE_FORMAT:
             return 1;
         default:
             return 0;
@@ -1999,7 +1999,7 @@ static PyObject* py_KafkaError_new(PyObject* self, PyObject* args) {
     const char* message = NULL;
     if (!PyArg_ParseTuple(args, "iz", &code, &message)) return NULL;
     kafka_common_Error_t* err;
-    if (code == kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR) {
+    if (code == kafka_common_Error_UNKNOWN_SERVER_ERROR) {
         err = message != NULL ? kafka_common_Error_kafka_message(message) : kafka_common_Error_kafka();
     } else {
         err = mock_error_from_code(code, message);
@@ -4959,7 +4959,7 @@ static PyObject* py_Admin__execute_callbacks(PyObject* self, PyObject* args) {
 // `admin._to_error` turns into a KafkaError; None for a NULL error.
 static PyObject* borrowed_error_to_py(const kafka_common_Error_t* e) {
     if (e == NULL) Py_RETURN_NONE;
-    return Py_BuildValue("(izii)", kafka_common_Error_code(e),
+    return Py_BuildValue("(izii)", kafka_common_Error__enum(e),
                          kafka_common_Error_message(e),
                          kafka_common_Error_is_retriable_error(e) ? 1 : 0,
                          error_is_fatal(e) ? 1 : 0);

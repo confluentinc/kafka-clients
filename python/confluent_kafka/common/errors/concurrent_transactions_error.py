@@ -34,7 +34,7 @@ class ConcurrentTransactionsError(RetriableError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 51  # kafka_common_ErrorCode_CONCURRENT_TRANSACTIONS
+    _ffi_id: ClassVar[int] = 51  # kafka_common_Error_CONCURRENT_TRANSACTIONS
 
     def __init__(
         self,

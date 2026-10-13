@@ -34,7 +34,7 @@ class IllegalGenerationError(ApplicationRecoverableError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 22  # kafka_common_ErrorCode_ILLEGAL_GENERATION
+    _ffi_id: ClassVar[int] = 22  # kafka_common_Error_ILLEGAL_GENERATION
 
     def __init__(
         self,

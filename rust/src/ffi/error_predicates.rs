@@ -22,7 +22,7 @@
 //! (`is_retriable_error` -> `kafka_common_Error_is_retriable_error`,
 //! CLAUDE.md §4). C cannot see the error's variants, so these predicates are
 //! how a C caller classifies an error beyond its numeric code
-//! (`kafka_common_Error_code`). Each returns `1` when it holds and `0` when it
+//! (`kafka_common_Error__enum`). Each returns `1` when it holds and `0` when it
 //! does not or the handle is null: booleans cross the C boundary as `int8_t`
 //! (CLAUDE.md §4), never as `bool`.
 

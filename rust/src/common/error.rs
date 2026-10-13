@@ -2261,7 +2261,7 @@ impl ErrorHierarchy for LocalCallbackError {
 /// error code: the wire-level `Errors` enum lives in `common.protocol`, a
 /// package Java marks "not a supported API", so the crate keeps it
 /// `pub(crate)`. The C bindings expose the class as the
-/// `kafka_common_ErrorCode_e` enum instead.
+/// `kafka_common_Error_e` enum instead.
 ///
 /// `message()` and `is_retriable_error()` are delegated to the inner
 /// [`KafkaError`] base. `request_utils::RequestUtils::is_fatal_error` and

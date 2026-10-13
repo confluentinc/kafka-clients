@@ -35,7 +35,7 @@ class GroupAuthorizationError(AuthorizationError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 30  # kafka_common_ErrorCode_GROUP_AUTHORIZATION_FAILED
+    _ffi_id: ClassVar[int] = 30  # kafka_common_Error_GROUP_AUTHORIZATION_FAILED
 
     def __init__(
         self,
