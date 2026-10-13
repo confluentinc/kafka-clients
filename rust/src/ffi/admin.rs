@@ -37788,7 +37788,7 @@ mod tests {
 
     /// Completes `future` with `outcome` from another thread after a short
     /// delay, so the accessor the test calls meanwhile has to wait for it.
-    fn complete_later<T: Clone + Send + Sync + 'static>(
+    fn complete_future_later<T: Clone + Send + Sync + 'static>(
         future: crate::common::internals::KafkaFutureImpl<T>,
         outcome: Result<T, Error>,
     ) -> std::thread::JoinHandle<()> {
@@ -37821,7 +37821,7 @@ mod tests {
         // read while it lives, and its `_destroy` is the single destroy.
         unsafe {
             assert!(!kafka_admin_CreateDelegationTokenResult_is_done(result));
-            let completer = complete_later(created, Ok(lazy_test_token("created-token")));
+            let completer = complete_future_later(created, Ok(lazy_test_token("created-token")));
             let token = kafka_admin_CreateDelegationTokenResult_get_token(result);
             completer.join().expect("completer thread");
             assert!(!token.is_null());
@@ -37861,7 +37861,7 @@ mod tests {
         // destroy.
         unsafe {
             assert!(!kafka_admin_RenewDelegationTokenResult_is_done(result));
-            let completer = complete_later(renewed, Ok(1_234));
+            let completer = complete_future_later(renewed, Ok(1_234));
             assert_eq!(kafka_admin_RenewDelegationTokenResult_expiry_timestamp(result), 1_234);
             completer.join().expect("completer thread");
             assert!(kafka_admin_RenewDelegationTokenResult_is_done(result));
@@ -37878,7 +37878,7 @@ mod tests {
         // `consume_message`, and its `_destroy` is the single destroy.
         unsafe {
             assert!(!kafka_admin_ExpireDelegationTokenResult_is_done(result));
-            let completer = complete_later(expired, Err(Error::timeout("expire timed out")));
+            let completer = complete_future_later(expired, Err(Error::timeout("expire timed out")));
             assert_eq!(
                 consume_message(kafka_admin_ExpireDelegationTokenResult_expiry_timestamp_error(result)),
                 "expire timed out"
@@ -37901,7 +37901,7 @@ mod tests {
         // are read while it lives, and its `_destroy` is the single destroy.
         unsafe {
             assert!(!kafka_admin_DescribeDelegationTokenResult_is_done(result));
-            let completer = complete_later(described, Ok(vec![lazy_test_token("first"), lazy_test_token("second")]));
+            let completer = complete_future_later(described, Ok(vec![lazy_test_token("first"), lazy_test_token("second")]));
             assert_eq!(kafka_admin_DescribeDelegationTokenResult_count(result), 2);
             completer.join().expect("completer thread");
             assert!(kafka_admin_DescribeDelegationTokenResult_is_done(result));
@@ -37961,7 +37961,7 @@ mod tests {
         // its `_destroy` is the single destroy.
         unsafe {
             assert!(!kafka_admin_DescribeFeaturesResult_is_done(result));
-            let completer = complete_later(metadata, Ok(FeatureMetadata::new(finalized, Some(7), supported)));
+            let completer = complete_future_later(metadata, Ok(FeatureMetadata::new(finalized, Some(7), supported)));
             assert_eq!(kafka_admin_DescribeFeaturesResult_finalized_count(result), 1);
             completer.join().expect("completer thread");
             assert!(kafka_admin_DescribeFeaturesResult_is_done(result));
@@ -37985,7 +37985,7 @@ mod tests {
         // `DescribeFeaturesResultInner`; the owned error is consumed by `consume_message`,
         // `&mut epoch` is a writable local, and its `_destroy` is the single destroy.
         unsafe {
-            let completer = complete_later(failed, Err(Error::timeout("features timed out")));
+            let completer = complete_future_later(failed, Err(Error::timeout("features timed out")));
             assert_eq!(
                 consume_message(kafka_admin_DescribeFeaturesResult_feature_metadata(result)),
                 "features timed out"
@@ -38045,7 +38045,7 @@ mod tests {
             assert!(!kafka_admin_UpdateFeaturesResult_is_done(result, 2));
             assert!(!kafka_admin_UpdateFeaturesResult_is_done(result, -1));
 
-            let completer = complete_later(slow, Err(Error::timeout("transaction.version timed out")));
+            let completer = complete_future_later(slow, Err(Error::timeout("transaction.version timed out")));
             assert_eq!(
                 consume_message(kafka_admin_UpdateFeaturesResult_all(result)),
                 "transaction.version timed out"
