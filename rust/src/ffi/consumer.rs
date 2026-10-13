@@ -665,13 +665,18 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_new(
 /// An `_async` operation still in flight is woken, as by
 /// [`kafka_consumer_Consumer_wakeup`], and waited for before the handle is
 /// freed. Its callback still fires exactly once, typically with a `WAKEUP`
-/// error, and possibly after this function has returned. An operation that
+/// error, and possibly after this function has returned, so its `user_data`
+/// must stay valid until the callback has run, not merely until this function
+/// returns. A rebalance listener's or commit callback's `user_data_destroy`
+/// hook may likewise fire after this function has returned. An operation that
 /// does not observe wakeups, such as [`kafka_consumer_Consumer_close_async`],
 /// is waited for until it completes.
 ///
 /// Called on the consumer's callback dispatcher thread (from inside one of its
 /// callbacks) or inside a tokio runtime, where that wait could deadlock, this
 /// function returns at once, and the wait and the free happen on a new thread.
+/// If that thread cannot be started, the handle is leaked instead: nothing is
+/// freed, no `user_data_destroy` hook fires, and an error is logged.
 ///
 /// # Safety
 ///

@@ -2690,13 +2690,33 @@ pub(crate) fn is_dispatcher_thread(dispatcher: &std::sync::Mutex<Option<std::thr
 /// Calling `teardown(handle)` once, on a newly spawned thread, must be sound, and
 /// this must be the handle's only teardown.
 pub(crate) unsafe fn spawn_teardown(name: &str, handle: usize, teardown: unsafe fn(usize)) {
-    let spawned = std::thread::Builder::new().name(name.to_string()).spawn(move || {
+    // SAFETY: this function's `# Safety` is the one `spawn_teardown_with` requires, and
+    // `Builder::spawn` either runs the body once on the thread it starts or returns an
+    // error without running it. Dropping the `JoinHandle` detaches that thread.
+    unsafe { spawn_teardown_with(name, handle, teardown, |builder, body| builder.spawn(body).map(drop)) }
+}
+
+/// [`spawn_teardown`] with the thread start passed in as `spawn`, so a test can
+/// make it fail.
+///
+/// # Safety
+///
+/// As for [`spawn_teardown`]. `spawn` must either run the body it is given once,
+/// on the thread it starts from the builder it is given, or return an error
+/// without running it.
+unsafe fn spawn_teardown_with(
+    name: &str,
+    handle: usize,
+    teardown: unsafe fn(usize),
+    spawn: impl FnOnce(std::thread::Builder, Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
+) {
+    let body: Box<dyn FnOnce() + Send> = Box::new(move || {
         // SAFETY: per this function's `# Safety`, `teardown(handle)` is sound to call
         // once on a newly spawned thread, and this is its only call: the closure is
-        // `FnOnce` and runs once, on the thread just spawned.
+        // `FnOnce`, and `spawn` runs it at most once, on the thread it starts.
         unsafe { teardown(handle) }
     });
-    if let Err(e) = spawned {
+    if let Err(e) = spawn(std::thread::Builder::new().name(name.to_string()), body) {
         log::error!("leaking a destroyed handle: could not spawn the {name} thread to free it: {e}");
     }
 }
@@ -4302,6 +4322,29 @@ mod tests {
         assert_eq!(code, kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE);
         // No `out_error` store is generated around an explicit closure.
         assert!(out_error.is_null());
+    }
+
+    /// A teardown thread that cannot be started leaks the handle rather than freeing
+    /// it: `teardown` runs neither on that thread nor inline on the caller's, which
+    /// handed it off because waiting there is not allowed.
+    #[test]
+    fn spawn_teardown_leaks_the_handle_when_the_thread_cannot_start() {
+        static TEARDOWNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        unsafe fn count_teardown(_: usize) {
+            TEARDOWNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        // SAFETY: Test code: `count_teardown` only counts its calls and never reads the
+        // address, so any number of calls on any thread would be sound.
+        unsafe {
+            spawn_teardown_with("kafka-test-destroy", 0x10, count_teardown, |_, _| {
+                Err(std::io::Error::other("thread limit reached"))
+            })
+        };
+        assert_eq!(
+            TEARDOWNS.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a failed spawn must free nothing"
+        );
     }
 
     #[test]
