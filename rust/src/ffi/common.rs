@@ -2737,6 +2737,39 @@ pub(crate) fn enqueue_or_run_inline(tx: &std::sync::mpsc::Sender<CompletionJob>,
     }
 }
 
+/// Blocks until the dispatcher has run every [`CompletionJob`] queued on `tx`
+/// before this call.
+///
+/// A blocking call whose Java counterpart returns only after the callbacks it
+/// completed have run (the producer's `flush` and `close`) calls this after the
+/// core operation returns. By then the core has queued those callbacks, so a
+/// marker job queued behind them runs only after they have.
+///
+/// Returns at once when called on the dispatcher thread (`dispatcher`), that is,
+/// from inside a callback: the dispatcher cannot run the queued jobs until the
+/// current one returns, so waiting would deadlock. The queued callbacks then run
+/// as soon as the calling callback returns.
+///
+/// Also returns if the dispatcher is gone: [`enqueue_or_run_inline`] then runs the
+/// marker inline, and a dispatcher that stops with the marker still queued drops
+/// it, which wakes the receiver below.
+pub(crate) fn wait_for_queued_completions(
+    tx: &std::sync::mpsc::Sender<CompletionJob>,
+    dispatcher: Option<std::thread::ThreadId>,
+) {
+    if dispatcher == Some(std::thread::current().id()) {
+        return;
+    }
+    let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    enqueue_or_run_inline(
+        tx,
+        Box::new(move || {
+            let _ = done_tx.send(());
+        }),
+    );
+    let _ = done_rx.recv();
+}
+
 /// Runs `f` on the dispatcher thread and awaits its return value.
 ///
 /// This is how an **async** FFI adapter invokes a C callback whose *completion*
