@@ -1186,7 +1186,7 @@ impl RequestManager for ConsumerHeartbeatRequestManager {
 ///   `first_heartbeat_includes_required_info_to_join_group`
 /// - `testSkippingHeartbeat` — `poll_returns_empty_when_no_coordinator`
 /// - `testMaximumTimeToWaitWhenHeartbeatShouldBeSkipped` — `maximum_time_to_wait_returns_max_when_unsubscribed`
-/// - KAFKA-20253 / KAFKA-21010 (Milestone 16 Phase 3):
+/// - KAFKA-20253 / KAFKA-21010 (Milestone 17 Phase 3):
 ///   `testMaximumTimeToWaitWhenCoordinatorUnavailableDoesNotSpin`,
 ///   `testMaximumTimeToWaitWhenJoiningAndCoordinatorUnknownDoesNotSpin`,
 ///   `testMaximumTimeToWaitWhenFatalReturnsMaxValue`,

@@ -339,8 +339,15 @@ current surface.
 
 **How to apply:**
 
-  - Do not change `admin.py`'s public surface until it is ported to the
-    conventions as a whole; `_legacy_compat.py` is deleted with that port.
+  - Do not change `admin.py`'s existing public surface until it is ported to
+    the conventions as a whole; `_legacy_compat.py` is deleted with that port.
+  - The one exception is additive: a method for an Admin RPC (or mock helper)
+    that Java newly adds, and that the multilanguage test suite exercises
+    through the Python gRPC arms, may be added to `admin.py` in its current
+    style, without changing any existing method. The current instance is the
+    Apache Kafka 4.4 bump (Milestone 17): `AdminClient.unregister_controller`
+    (sync and asyncio, KAFKA-20395) and `MockAdminClient.set_using_raft_controller`,
+    which `rust/tests/integration/admin_controllers_test.rs` drives.
   - Nothing in the `confluent_kafka` public surface may import
     `_legacy_compat.py`.
 

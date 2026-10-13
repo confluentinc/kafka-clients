@@ -1,6 +1,10 @@
-# Milestone 16 — Bring the Rust client up to Apache Kafka 4.4
+# Milestone 17 — Bring the Rust client up to Apache Kafka 4.4
 
 **Status:** Phases 0-12 reviewed clean and merged; Phase 13 close-out done 2026-10-08 (agent 103), pending its review. Audit in §7, open items in §8.
+
+**Numbering:** this milestone was Milestone 16 until master's Python client interface (#187) took that
+number (`design/history/Milestone-16-python-client-interface/`); it was renumbered 17 in the pre-push
+review (Critic 115 D1). Branch names, agent numbers and earlier commit messages keep "16" / "M16".
 
 **Branch:** `milestone-16-ak-4.4` (off `master`). If tracks run in parallel (§4), each track gets its own
 branch/worktree off the milestone branch and is merged back with a merge commit — never rebase + force-push.
@@ -47,7 +51,7 @@ The per-commit classification table is §6. Phase 13 completes it into the forma
   milestone adds no audience work beyond keeping the lint green for the new public types.
 - **The CLAUDE.md "Source Reference" line edit (4.3.1 → 4.4.0) is human-approved through this plan**, as in
   M13. Only that line changes. Any other CLAUDE.md or rules change goes through the suggestion process
-  (drafts go in `design/current/Milestone-16/rules-errata.md`).
+  (drafts go in `design/current/Milestone-17/rules-errata.md`).
 
 ### 1.2 Method: per-subsystem tree diff, with the commit list as a checklist
 
@@ -191,7 +195,7 @@ Every phase works the same way:
 - Update `README.md` and the `CLAUDE.md:93` source line "(Apache Kafka 4.3.1)" → "(Apache Kafka 4.4.0)".
 - Rules errata survey: re-check the Java `file:line` citations in `.claude/rules/*.md` against 4.4, chiefly
   `producer-transactions.md` (TransactionManager moves under KIP-1319) and `consumer-threading.md`. Write
-  the list to `design/current/Milestone-16/rules-errata.md`.
+  the list to `design/current/Milestone-17/rules-errata.md`.
 - Commits covered: 7997c9ebe0 (spec + errors portion only; the Streams RPC itself is out of scope),
   c274a7348f (spec + error portion), 8ba75d04cb, 04c3c00f25, 89ccd6a126 / 6be48c6e54 / 70dfc4236c
   (spec-only syncs).
@@ -235,7 +239,7 @@ Phase 0 completion notes (agent 90):
     `rust/tests/common/error_code.rs` are regenerated from it, and the multilanguage decoder maps -29.
 - **Docs:** `CLAUDE.md` Source Reference line and `rust/README.md` now say 4.4.0. The repository-root
   `README.md` names no Kafka version, so it has nothing to change.
-- **Rules errata:** `design/current/Milestone-16/rules-errata.md`. 46 citations: 36 drifted, 10
+- **Rules errata:** `design/current/Milestone-17/rules-errata.md`. 46 citations: 36 drifted, 10
   unchanged, and none whose rule claim breaks. It also lists 4.4 changes to code the rules reason about
   without a line cite: KIP-1319 vs producer-transactions §10-§12 (relevant to **Phase 5**), the
   MockAdminClient move and its new in-memory methods vs admin-client §9 (**Phase 12**), and KIP-909
@@ -1830,7 +1834,7 @@ notes commit.
 
     | median ns / record, production build | accumulator, explicit | accumulator, sticky | `do_send_bytes`, explicit | `do_send_bytes`, keyed |
     |---|---|---|---|---|
-    | `7ccc9ffb` (master before Milestone 16) | 91.90 | 97.26 | 103.84 | 112.66 |
+    | `7ccc9ffb` (master before Milestone 17) | 91.90 | 97.26 | 103.84 | 112.66 |
     | `3957e76f` (before Phase 8) | 92.06 | 97.12 | 103.50 | 111.69 |
     | after P1 (`67e85c90`) | 89.24 (−3.1 % / −2.9 %) | 97.42 (+0.3 % / +0.2 %) | 102.27 (−1.2 % / −1.5 %) | 113.37 (+1.5 % / +0.6 %) |
 
@@ -2687,6 +2691,36 @@ its 1, `ConsumerMembershipManager.onHeartbeatSuccess`, in 0d2e8766; Phase 11 cle
 disappeared with the merge of `milestone-16-producer` by agent 103; see §6.) The table header has been
 removed with the last row.
 
+### 5.2 Bump checklist: merging master's pure-Python layer onto a newer Java base
+
+No rule file holds a master-merge or Java-bump recipe, so this step lives here, for the next bump to copy
+(Critic 115 S4, user-approved).
+
+- **After merging master's pure-Python layer onto a newer Java base**, diff every Java class that
+  `python/confluent_kafka/` translates directly (CLAUDE.md, Python Binding Conventions, Implementation
+  over the FFI: value types, records, enums, errors, `CloseOptions`, the serdes, the `Mock*` classes and
+  the private helpers they use) between the two Java tags, ignoring comments, annotations, imports and
+  blank lines, and port every behavioural delta. Master's Python is written against the older tag, so a
+  merge carries no conflict there and the delta lands silently.
+- **The set** is every `org.apache.kafka.*` class a `confluent_kafka` module cites (218 at this bump: 53
+  classes plus 165 generated errors). Drop the FFI-backed ones (the client bases and `Kafka*` classes)
+  and the ones cited only in prose (`CommonClientConfigs`, `NetworkClient` in an error docstring), then
+  diff the rest file by file with `git -C kafka show <tag>:<path>`.
+- **Result at this bump (`4.3.1` → `4.4.0-rc4`, agent 117).** 44 of the 53 classes and 160 of the 165
+  errors are unchanged. The rest:
+
+  | Java class | Delta (code only) | Python |
+  |---|---|---|
+  | `common.Uuid` | `randomUuid` rejects any `-` (KAFKA-20072); `toArray` / `toList` refactors | ported in `801ee69e` (R2); the refactors are not behavioural |
+  | `common.metrics.KafkaMetric` | new `toString()` | ported in `5826e097` (R6), with the three new `KafkaMetricTest` cases |
+  | `clients.consumer.MockConsumer` | new `losePartitions` (KAFKA-20575) | ported at the master merge `f5c7b08d` (`consumer/_mock_core.py`) |
+  | `clients.consumer.internals.SubscriptionState` | `hasFetchablePartitions(Predicate)` added, `hasPartitionsNeedingValidation` removed | neither is among the methods the mock uses (`consumer/_subscription_state.py`); nothing to port |
+  | `common.Node` | a protected constructor taking `idString` | protected, so not generated; public behaviour unchanged |
+  | `common.Cluster` | `Collections.empty*` → `Set.of` / `List.of` | a placeholder in Python (`common/cluster.py`) |
+  | `common.errors.TopicAuthorizationException` | `Collections.emptySet()` → `Set.of()` | equivalent; generated |
+  | 4 new errors (`BootstrapResolution`, `ControllerIdNotRegistered`, `GroupDeletionFailed`, `StreamsTopologyDescriptionUpdateFailed`) | new classes | generated at the merge (`cargo xtask generate-error-codes`) |
+  | `clients.producer.KafkaProducer`, `CommonClientConfigs`, `NetworkClient` | KIP-1332 / KIP-909 config and I/O changes | FFI-backed or cited only in prose; the core carries them |
+
 ## 6. Commit classification (input to the Phase 13 audit)
 
 The full table (191 rows after Phase 13's correction; SHA, component, classification, subject, line counts) is in
@@ -2878,7 +2912,7 @@ bootstrap-window spin.)
     `MockConsumer_rebalance_async`), `record_accumulator.rs` and `producer_config.rs` keep both sides;
     master's 4.3.1 cites in the merged code move to 4.4.
   - #187 retired `_error_code.py`, `consumer.py` and `producer.py`. The error codes now come from
-    `cargo xtask generate-error-codes`: its BRIDGE table gains the four M16 ids, its exclusions
+    `cargo xtask generate-error-codes`: its BRIDGE table gains the four M17 ids, its exclusions
     `common.internals.UnsupportedProtocolFieldException`, and its evaluator `Set.of()`. The regenerated
     `_config_types.py` carries the 4.4 config keys.
   - `MockConsumer.lose_partitions` is translated into the pure-Python mock (`consumer/_mock_core.py`),
@@ -2886,7 +2920,7 @@ bootstrap-window spin.)
     went with #187's removal of the C extension's mock drivers.
 - Follow-ups: `0ba55fb7` (cite moves), `f787c406` (`kafka_common_Error_new(-29)` builds
   `BootstrapResolutionError`), and Critic 115's R1, R2, R4, R7 and R8 (`COMMENTS.DONE.115.md`). R3, R5,
-  R6, D1, D2 and S1-S4 are open for the user (`COMMENTS.115.md`).
+  R6, D1, D2 and S1-S4 were left for the user and are resolved below (agent 117).
 - Gates after `f787c406`: `cargo test --all-features` lib 4898 / 0 / 3, integration 326/326 (Docker
   broker); Python unit 1101 passed, 2 skipped, integration 45; C suites hand-built with `cc`, all pass;
   `build-c` fails only for want of cmake.
@@ -2903,11 +2937,11 @@ bootstrap-window spin.)
     runs only after success. The other four transaction methods have no 4.4 change beyond line shifts.
   - `record_accumulator.rs` takes master's set-aside-and-fail handling of split sub-batches;
     `async_kafka_consumer.rs` and `producer_config.rs` were doc-cite conflicts only.
-  - Semantic fixes: `ByteUtils` moved to `common::utils::internals` in 4.4, and the M16 KIP-1242
+  - Semantic fixes: `ByteUtils` moved to `common::utils::internals` in 4.4, and the M17 KIP-1242
     `test_metadata_cluster_check_enable` tests now expect #197's Java boolean-parse message.
 - Follow-ups: `f0eeac09` (cite moves, including the pre-existing `TransactionManager.java:443/:446`
   and their `TransactionManagerTest` neighbours) and `45be1d2a` (the admin config, whose only boolean
-  `metadata.cluster.check.enable` arrived with M16, parses booleans the same way).
+  `metadata.cluster.check.enable` arrived with M17, parses booleans the same way).
 - `EndTransactionMarker` is `pub` inside the `pub(crate) mod internal` of `common::record`, so it is
   crate-private as Java's `common.record.internal` requires; `cargo xtask lint` (public-audience and
   deprecated lints) is clean.
@@ -2933,6 +2967,17 @@ bootstrap-window spin.)
   integration 45, static 25, soak 160; the Python container arm skips on Darwin. `build-c` fails only
   for want of cmake; the seven C suites hand-built with `cc` against the release `.a` all pass
   (65 + 14 + 25 + 7 + 27 + 160 + 26, 0 failures).
+
+### Pre-push fixes (agent 117, Critic 115's open items)
+
+On branch `milestone-16-pre-push-fixes` (off `6a2f348b`), plain commits, merged back after agent 116's
+merge of master `95f67984`. Details in `COMMENTS.DONE.115.md`.
+
+- **D2 (user decision: keep).** `AdminClient.unregister_controller` (sync and asyncio) and
+  `MockAdminClient.set_using_raft_controller` stay in the paused `python/admin.py`: they are additive,
+  Java 4.4 adds the RPC, and `rust/tests/integration/admin_controllers_test.rs` drives them through the
+  Python gRPC arms. `.claude/rules/admin-client.md` §11 now allows exactly that kind of additive method
+  and names these two (S3).
 
 ## 7. Completeness audit (Phase 13, agent 103)
 
@@ -3030,7 +3075,7 @@ master merges and the one patch-equivalent commit that `--cherry-pick` drops, ma
 | `cac4d1f5c5` | Common | N | MINOR | No-op | Gradle test-fixtures build change |
 | `d85d257c99` | Common | N | KAFKA-20297 | Ported | D2 mirror, P1: `ProducerIdAndEpoch` → `common::utils::internals` (`5bc7915b`) |
 | `e7a568863e` | Common | N | KAFKA-20297 | No-op | KAFKA-20297 move of classes with no Rust counterpart |
-| `fac6838045` | Common | N | KAFKA-20032 | No-op | KIP-1265 audience annotations: already applied before M16 (`AUDIENCE_REF = 4.4.0-rc3`) |
+| `fac6838045` | Common | N | KAFKA-20032 | No-op | KIP-1265 audience annotations: already applied before M17 (`AUDIENCE_REF = 4.4.0-rc3`) |
 | `c0579dbfb4` | Common | O | KAFKA-20769 | Out of scope | `ListDeserializer` untranslated, §1.1 |
 | `d995cd14cc` | Common | O | KAFKA-20700 | Out of scope | Config providers (`AllowedPaths`) untranslated, §1.1 |
 | `46ad599a6e` | Common | P | MINOR | Ported | P1: `KafkaMetric` `Display` (`85325f15`, `0407ff80`) |
@@ -3173,7 +3218,7 @@ master merges and the one patch-equivalent commit that `--cherry-pick` drops, ma
 | `6be48c6e54` KAFKA-20441 (Broker) | Already in 4.3.1 | Cherry-pick of `cf9f8ad376` (in 4.3.0 / 4.3.1), dropped by `--cherry-pick`; broker-only, its `Broker*` specs synced in M13 (no `4.3.1..4.4.0-rc4` spec diff) |
 | `cc6d42206f` KAFKA-20864 (trunk, D3) | Ported ahead of 4.4 | P8: `6573e08b` (the batch-to-extend close check, retries bounded by `max.block.ms`, 9 + 2 tests); no Java markers until the submodule passes it (§8 F14) |
 | master `a4b3311e` (#205, decode & decompression DoS) | Merged | `73badfd9`; covers the stream-sizing half of `b69c07c816`; checked by hand against Phase 3 / Phase 1 (§6) |
-| master `1f4afc36` (#207, FFI & binding memory safety) | Merged | `5c207c9f`; the five new M16 FFI exports ported to `#[ffi_guard]` + `// SAFETY:` in the merge (§6) |
+| master `1f4afc36` (#207, FFI & binding memory safety) | Merged | `5c207c9f`; the five new M17 FFI exports ported to `#[ffi_guard]` + `// SAFETY:` in the merge (§6) |
 
 **Tally (191 commits):**
 
@@ -3192,7 +3237,7 @@ master merges and the one patch-equivalent commit that `--cherry-pick` drops, ma
 ## 8. Open decisions for the human and follow-ups
 
 Consolidated by Phase 13 (agent 103) from every phase's notes and the Critic files. Nothing here was
-implemented in Milestone 16. Each entry names where the detail lives.
+implemented in Milestone 17. Each entry names where the detail lives.
 
 ### 8.1 Open decisions
 

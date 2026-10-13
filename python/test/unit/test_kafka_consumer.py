@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``KafkaConsumerTest.java`` (as of Apache Kafka 4.3.1: the accounting below
-predates the 4.4.0 tests, which are not yet translated or named) for ``KafkaConsumer`` without a
+"""``KafkaConsumerTest.java`` (as of Apache Kafka 4.4.0) for ``KafkaConsumer`` without a
 broker, in Java order, with Java's messages; and the binding's own contracts that
 need no broker — the commit callback on the caller's thread (C47), the lifetime of
 the native handle across a racing ``close()``, the deserializers' configuration
@@ -23,8 +22,8 @@ only to make an operation time out, an unreachable bootstrap address and a short
 ``default.api.timeout.ms`` stand for it. ``test/integration/test_kafka_consumer_broker.py``
 runs, against a broker, the cases Java scripts through a ``MockClient``.
 
-Of Java's 126 tests, 31 are translated here and 14 in the broker module; the
-other 81, each named, are not, with the reason:
+Of Java's 135 tests, 35 are translated here and 14 in the broker module; the
+other 86, each named, are not, with the reason:
 
 - the classic protocol: Java runs these with ``group.protocol=classic`` only, and
   the core implements KIP-848 only (``consumer-threading.md`` §20):
@@ -54,8 +53,11 @@ other 81, each named, are not, with the reason:
   ``testCurrentLagClearsFlagOnRetriablePartitionError``,
   ``testEnforceRebalanceWithManualAssignment``,
   ``testEnforceRebalanceTriggersRebalanceOnNextPoll``,
-  ``testEnforceRebalanceReason``, ``testAssignorNameConflict`` and
-  ``testSubscribeToRe2jPatternNotSupportedForClassicConsumer``. The broker module
+  ``testEnforceRebalanceReason``, ``testAssignorNameConflict``,
+  ``testSubscribeToRe2jPatternNotSupportedForClassicConsumer``,
+  ``testPauseFlagPreservedForRetainedPartitionAcrossRebalance``,
+  ``testUnsubscribeDoesNotCommitOffsetsEvenWithAutoCommitEnabled`` and
+  ``testClassicConsumerCloseRunsRevocationCallbackAndAttemptsLeaveGroupWhenInterrupted``. The broker module
   covers what three of them check for the consumer protocol (a ``wakeup()``
   breaking a waiting ``poll()``, a failing deserializer leaving the position at
   the record, a listener's exception);
@@ -67,7 +69,7 @@ other 81, each named, are not, with the reason:
 - a ``MockClient`` answer a broker does not give, or a mocked collaborator:
   ``testFetchProgressWithMissingPartitionPosition`` (a
   ``NOT_LEADER_OR_FOLLOWER`` list-offsets answer for one partition),
-  ``fetchResponseWithUnexpectedPartitionIsIgnored`` (a fetch response naming an
+  ``testFetchResponseWithUnexpectedPartitionIsIgnored`` (a fetch response naming an
   unassigned partition), ``testFetchStableOffsetThrowInCommitted``,
   ``testFetchStableOffsetThrowInPoll`` and
   ``testFetchStableOffsetThrowInPosition`` (an ``OffsetFetch`` version without
@@ -79,7 +81,7 @@ other 81, each named, are not, with the reason:
   (``testSubscribingCustomMetricsDoesntAffectConsumerMetrics``,
   ``testSubscribingCustomMetricsWithSameNameDoesntAffectConsumerMetrics``,
   ``testUnsubscribingCustomMetricsWithSameNameDoesntAffectConsumerMetrics``,
-  ``testUnSubscribingNonExisingMetricsDoesntCauseError``); the core loads no
+  ``testUnsubscribingNonExistingMetricsDoesntCauseError``); the core loads no
   metric reporter, JMX or telemetry reporter
   (``testShouldOnlyCallMetricReporterMetricChangeOnceWithExistingConsumerMetric``,
   ``testShouldNotCallMetricReporterMetricRemovalWithExistingConsumerMetric``,
@@ -89,6 +91,9 @@ other 81, each named, are not, with the reason:
   ``testExplicitlyOnlyEnableClientTelemetryReporter``,
   ``testConstructorInvalidMetricReporters`` — ``metric.reporters`` is not loaded,
   so an invalid class is not detected — and ``testConsumerJmxPrefix``);
+  ``testMonitorablePlugins`` checks the ``Monitorable`` metrics of a
+  deserializer and interceptor plugin, and the client runs no interceptors and
+  registers no plugin metrics;
   ``testMetricConfigRecordingLevelInfo`` reads the private
   ``metricsRegistry().config()``; ``testPollTimeMetrics``, ``testPollIdleRatio``,
   ``testMeasureCommitSyncDurationOnFailure``, ``testMeasureCommitSyncDuration``,
@@ -120,7 +125,11 @@ other 81, each named, are not, with the reason:
 ``enable.auto.commit=true`` half is not asserted (the core does not reject it,
 Rust-core gap 11); ``testAssignedPartitionsMetrics``' group-assignment half needs
 a broker, and ``testClosingConsumerUnregistersConsumerMetrics``' after-close half
-reads ``metrics()`` after ``close()``, which raises ``IllegalStateError`` here.
+reads ``metrics()`` after ``close()``, which raises ``IllegalStateError`` here,
+as does ``testMetricsRemovedOnClose``' after-close half; ``testPollIdleRatioZero``
+checks only the default value, its zero-length poll being recorded through the
+package-private ``kafkaConsumerMetrics()`` on a ``MockTime``. Java runs most tests
+for both group protocols; the translations run the consumer protocol's arm.
 """
 
 from __future__ import annotations
@@ -144,6 +153,8 @@ from confluent_kafka import (
     ConcurrentModificationError, IllegalArgumentError, IllegalStateError, NullPointerError,
 )
 from confluent_kafka.common import KafkaError, TopicPartition
+from confluent_kafka.common.config import ConfigError
+from confluent_kafka.common.errors import BootstrapResolutionError
 from confluent_kafka.common.errors import InvalidGroupIdError, UnsupportedVersionError, WakeupError
 from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
 from confluent_kafka.common.serialization import string_deserializer
@@ -352,6 +363,26 @@ def test_pause() -> None:
         assert consumer.paused() == set()
 
 
+def test_pause_flag_preserved_for_retained_partition_on_manual_assignment_change() -> None:
+    # Java runs it for both protocols; the consumer protocol's arm.
+    tp1 = TopicPartition(topic=TOPIC, partition=1)
+    with new_consumer() as consumer:
+        # Manually assign two partitions and pause one of them.
+        consumer.assign(partitions=[TP0, tp1])
+        consumer.pause(partitions={TP0})
+        assert consumer.paused() == {TP0}
+
+        # Change the assignment while keeping tp0 assigned.
+        consumer.assign(partitions=[TP0])
+        assert consumer.assignment() == {TP0}
+        # "The pause state of the partition that remains assigned must be preserved"
+        assert consumer.paused() == {TP0}
+
+        # A partition that is (re)added to the assignment starts unpaused.
+        consumer.assign(partitions=[TP0, tp1])
+        assert consumer.paused() == {TP0}
+
+
 @pytest.mark.parametrize("setup", ["no-subscription", "empty-subscription", "empty-assignment"],
                          ids=["testPollWithNoSubscription", "testPollWithEmptySubscription",
                               "testPollWithEmptyUserAssignment"])
@@ -452,6 +483,45 @@ def test_closing_consumer_unregisters_consumer_metrics() -> None:
     consumer.close()
     with pytest.raises(IllegalStateError):
         consumer.metrics()
+
+
+def test_metrics_removed_on_close() -> None:
+    # Java runs it for both protocols; the consumer protocol's arm. Java then
+    # checks that close() removed every metric; here metrics() after close()
+    # raises IllegalStateError (use after close raises), so only Java's
+    # assertMetricsMap(true) half is checked.
+    consumer = KafkaConsumer(configs={"group.protocol": "consumer",
+                                      "bootstrap.servers": "localhost:9999"},
+                             key_deserializer=string_deserializer(),
+                             value_deserializer=string_deserializer())
+    # Copy the map because we're going to modify it.
+    metrics = dict(consumer.metrics())
+    # There's a meta-metric named "count" that is automatically added to the metrics map.
+    count_names = [name for name in metrics
+                   if name.name() == "count" and name.group() == "kafka-metrics-count"]
+    # Make sure the meta-metric is present and has an entry.
+    assert count_names, 'The "count" meta-metric was unexpectedly missing from the Consumer metrics'
+    assert metrics.pop(count_names[0]) is not None, (
+        'The "count" meta-metric key was removed from the Consumer metrics map, but it '
+        "unexpectedly had no entry")
+    assert metrics, "The consumer should have created metrics, but they are unexpectedly empty"
+    consumer.close(option=CloseOptions.timeout(timedelta(0)))
+    with pytest.raises(IllegalStateError) as e:
+        consumer.metrics()
+    assert str(e.value) == CLOSED
+
+
+def test_poll_idle_ratio_zero() -> None:
+    # Java runs it for both protocols; the consumer protocol's arm. Java then
+    # records a poll that starts and ends within one MockTime millisecond through
+    # the package-private kafkaConsumerMetrics() and expects 0.0; the core's
+    # clock cannot be injected and that method is not generated, so only the
+    # default value is checked.
+    with new_consumer() as consumer:
+        values = [metric.metric_value() for name, metric in consumer.metrics().items()
+                  if name.name() == "poll-idle-ratio-avg" and name.group() == "consumer-metrics"]
+        # Test default value
+        assert len(values) == 1 and math.isnan(values[0])
 
 
 def test_close_should_be_idempotent() -> None:
@@ -578,6 +648,64 @@ def test_invalid_group_metadata() -> None:
     with pytest.raises(IllegalStateError) as e:
         consumer.group_metadata()
     assert str(e.value) == CLOSED
+
+
+# Java's BootstrapResolutionException message (KIP-909), for a 3000 ms budget.
+BOOTSTRAP_RESOLUTION_FAILED = ("Failed to resolve bootstrap servers after 3000ms. Please check "
+                               "your bootstrap.servers configuration and DNS settings.")
+# An RFC 6761 reserved .invalid name: DNS resolution fails.
+UNRESOLVABLE_HOST = "unresolvable.invalid:9092"
+
+
+def test_consumer_bootstrap_resolution_error_propagated_to_poll() -> None:
+    # testConsumerBootstrapResolutionExceptionPropagatedToPoll (KIP-909). Java
+    # runs it for both protocols; the consumer protocol's arm.
+    with KafkaConsumer(configs={
+            "bootstrap.servers": UNRESOLVABLE_HOST,
+            # Set a short bootstrap timeout so the test doesn't take too long
+            "bootstrap.resolve.timeout.ms": "3000",
+            "group.protocol": "consumer",
+            "group.id": "test-group"},
+            key_deserializer=string_deserializer(),
+            value_deserializer=string_deserializer()) as consumer:
+        # Subscribe to a topic to trigger metadata fetch
+        consumer.subscribe(topics={"test-topic"})
+
+        # Poll continuously until we get the BootstrapResolutionError; it is
+        # raised after bootstrap.resolve.timeout.ms expires.
+        start = time.monotonic()
+        max_wait = 15.0  # 15 seconds max to prevent test hanging
+        with pytest.raises(BootstrapResolutionError) as e:
+            while time.monotonic() - start < max_wait:
+                consumer.poll(timeout=timedelta(milliseconds=100))
+            pytest.fail(f"Expected BootstrapResolutionError to be thrown within {max_wait * 1000:.0f}ms")
+        # Java accepts either of two phrasings; the core has one.
+        assert str(e.value) == BOOTSTRAP_RESOLUTION_FAILED
+
+        # After the first failure, any further API call must also raise. This
+        # guards against accidentally clearing the bootstrap error from the
+        # metadata layer.
+        with pytest.raises(BootstrapResolutionError) as again:
+            consumer.poll(timeout=timedelta(milliseconds=100))
+        assert str(again.value) == BOOTSTRAP_RESOLUTION_FAILED
+
+
+def test_consumer_constructor_fails_with_config_error_on_unresolvable_bootstrap_when_timeout_zero(
+) -> None:
+    # testConsumerConstructorFailsWithConfigExceptionOnUnresolvableBootstrapWhenTimeoutZero.
+    # Java runs it for both protocols; the consumer protocol's arm. The default
+    # bootstrap.resolve.timeout.ms=0 resolves DNS synchronously in the
+    # constructor; the failure surfaces as ConfigError, wrapped in the
+    # constructor's KafkaError, so no consumer is created.
+    with pytest.raises(KafkaError) as e:
+        KafkaConsumer(configs={"bootstrap.servers": UNRESOLVABLE_HOST,
+                               "group.protocol": "consumer", "group.id": "test-group"},
+                      key_deserializer=string_deserializer(),
+                      value_deserializer=string_deserializer())
+    assert type(e.value) is KafkaError
+    assert str(e.value) == "Failed to construct kafka consumer"
+    assert isinstance(e.value.__cause__, ConfigError)
+    assert str(e.value.__cause__) == "No resolvable bootstrap urls given in bootstrap.servers"
 
 
 # ---------------------------------------------------------------------------

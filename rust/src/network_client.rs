@@ -917,7 +917,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             // `IllegalStateException` here and the exception would escape
             // `poll()`, dropping the rest of the poll's responses, which Java's
             // I/O threads then catch. Rust skips the stale receive instead
-            // (deviation, Milestone 16 Phase 4 / Critic 94 Issue 1): a panic here
+            // (deviation, Milestone 17 Phase 4 / Critic 94 Issue 1): a panic here
             // would end the consumer's background task, which has no catch.
             if self.in_flight_requests.is_empty_for_node(&source) && self.connection_states.is_disconnected(&source) {
                 kafka_debug!(
@@ -5278,7 +5278,7 @@ mod tests {
         assert_eq!((5, None, -1), last_sent_api_versions(&client, &node));
     }
 
-    /// The rebootstrap cadence when every broker is unreachable (Milestone 16
+    /// The rebootstrap cadence when every broker is unreachable (Milestone 17
     /// Phase 4 follow-up). Java's `DefaultMetadataUpdater.maybeUpdate`
     /// (`NetworkClient.java:1450-1484`) rebootstraps whenever an update is due
     /// and no node is available, and then, with the bootstrap node still in

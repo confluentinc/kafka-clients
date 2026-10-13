@@ -17,7 +17,7 @@
 //!
 //! Java has no integration test for KIP-909: its coverage is the unit tests in
 //! `KafkaProducerTest`, `KafkaConsumerTest` and `KafkaAdminClientTest`, which
-//! the Rust unit tests translate. This file is Rust-only (Milestone 16 Phase 2)
+//! the Rust unit tests translate. This file is Rust-only (Milestone 17 Phase 2)
 //! and covers what those cannot:
 //!
 //! - **Unresolvable bootstrap host, positive timeout:** every client is created,

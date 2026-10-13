@@ -1359,7 +1359,7 @@ impl Selectable for Selector {
             // then sits until the request times out). Draining here is cheap
             // — one uncontended lock and an empty `Vec` take in the steady
             // state — and safe: it only moves `(token, direction)` entries
-            // into the selector-owned ready set. (Milestone 16 Phase 3: seen
+            // into the selector-owned ready set. (Milestone 17 Phase 3: seen
             // as a JOINING heartbeat stuck for the 30 s request timeout once
             // the consumer's application task stopped busy-looping and began
             // poking the background task every `retry.backoff.ms`.)

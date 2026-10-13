@@ -84,9 +84,15 @@ test: build
 # where `__rust` passes points at the binding or the bridge, not at the client
 # or the harness.
 #
+# The second line runs the unit tests of the build tooling, `xtask` and the
+# message `generator`: `--all-features` from the root runs the root package
+# only, so without it a stale generator or xtask test (Critic 115 R1) stays red
+# without failing `verify`.
+#
 # Part of the root `verify` (through `test`) and of the CI `verify-rust` job.
 test-all-features: build-all-features
 	cargo test --all-features -- --skip __grpc
+	cargo test -p xtask -p generator
 
 # Functional integration tests only. The performance tests live in their own
 # `performance` cargo test target (tests/performance/main.rs), so `--test
