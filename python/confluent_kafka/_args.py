@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import functools
 import inspect
+import linecache
 import warnings
 from collections.abc import Callable, Mapping
 from typing import Any, TypeVar
@@ -142,6 +143,114 @@ def is_given(value: object, default: object) -> bool:
     """Whether ``value`` counts as given against its implementation default
     ``default`` (the generated error constructors test given-ness with it)."""
     return not _is_not_given(value, default)
+
+
+class _Missing:
+    """A keyword a specialised wrapper's call left out (see ``_specialise``)."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "<missing>"
+
+
+_MISSING: Any = _Missing()
+
+
+def _specialise(fn: Callable[..., Any], generic: Callable[..., Any],
+                params: list[inspect.Parameter], n_positional: int, pass_form: bool,
+                always: int, bit: Mapping[str, int], marker: Mapping[str, object],
+                table: Mapping[int, tuple[int, tuple[tuple[str, object], ...], str | None]],
+                illegal: Callable[[int], Exception]) -> Callable[..., Any] | None:
+    """The wrapper of a ``java_forms`` method, written for its own keywords.
+
+    The generic wrapper packs a call's keywords into a dict and reads them one
+    by one to find the Java overload. This one is generated once, when the
+    class is defined, with the method's keywords as its own parameters (at the
+    method's defaults), so a call costs a few ``is`` checks, one table lookup
+    and the call itself. It gives the same results: the given mask, the
+    overload, the Java-given defaults, the error and the deprecation warning
+    are the generic wrapper's. A call that one leaves to ``fn`` (an unknown or
+    a missing keyword, an extra positional argument, ``_java_form`` passed in)
+    is handed to the generic wrapper with only the keywords it was given, so
+    Python raises its own ``TypeError``, word for word.
+    A method with ``*args`` or ``**kwargs`` of its own keeps the generic one.
+    """
+    if any(p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD) for p in params):
+        return None
+    names = [p.name for p in params if p.kind is p.KEYWORD_ONLY and p.name != _FORM_KEYWORD]
+    # Each overload's Java-given defaults, as one value per parameter that any
+    # overload fills (_MISSING where it fills none), so filling is an unpack
+    # and an `is` check per parameter rather than a loop over names.
+    fillable = [n for n in names if any(n == k for _, fills, _ in table.values() for k, _ in fills)]
+    vectors = {
+        given: (index, tuple(dict(fills).get(n, _MISSING) for n in fillable), note)
+        for given, (index, fills, note) in table.items()
+    }
+    ns: dict[str, Any] = {
+        "_jf_fn": fn, "_jf_generic": generic, "_jf_table_get": vectors.get,
+        "_jf_illegal": illegal, "_jf_warn": warnings.warn, "_jf_dw": DeprecationWarning,
+        "_jf_missing": _MISSING, "_jf_is_not_given": _is_not_given,
+    }
+    signature: list[str] = []
+    missing: list[str] = []
+    checks: list[str] = []
+    fill: list[str] = []
+    call: list[str] = []
+    start = always
+    for i, name in enumerate(names):
+        m = marker[name]
+        if m is _REQUIRED:
+            signature.append(f"{name}=_jf_missing")
+            missing.append(f" or {name} is _jf_missing")
+            start |= bit[name]  # given whenever present
+        else:
+            # Left out, it is the method's default (not given); passed, it is
+            # given unless it reads as that default.
+            ns[f"_jf_m{i}"] = m
+            signature.append(f"{name}=_jf_missing")
+            test = (f"{name} is not _jf_m{i}" if m is None or m is UNSET
+                    else f"not _jf_is_not_given({name}, _jf_m{i})")
+            checks.append(f"    if {name} is _jf_missing:\n        {name} = _jf_m{i}\n"
+                          f"    elif {test}:\n        _jf_g |= {bit[name]}")
+        if name in fillable:
+            j = fillable.index(name)
+            fill.append(f"    if _jf_f{j} is not _jf_missing:\n        {name} = _jf_f{j}")
+        call.append(f"{name}={name}")
+    passed = ", ".join(f"({name!r}, {name})" for name in names)
+    kw = "*_jf_args, " + ", ".join(call) + (", _java_form=_jf_index" if pass_form else "")
+    is_async = inspect.iscoroutinefunction(fn)
+    await_ = "await " if is_async else ""
+    params_src = ", ".join(signature)
+    src = (
+        f"{'async ' if is_async else ''}def _jf_wrapper(*_jf_args"
+        f"{', ' + params_src if params_src else ''}, **_jf_extra):\n"
+        f"    if _jf_extra or len(_jf_args) != {n_positional}{''.join(missing)}:\n"
+        f"        return {await_}_jf_generic(*_jf_args, **{{_jf_n: _jf_x for _jf_n, _jf_x in "
+        f"({passed}{',' if len(names) == 1 else ''}) if _jf_x is not _jf_missing}}, "
+        f"**_jf_extra)\n"
+        f"    _jf_g = {start}\n"
+        + "".join(c + "\n" for c in checks)
+        + "    _jf_e = _jf_table_get(_jf_g)\n"
+        "    if _jf_e is None:\n"
+        "        raise _jf_illegal(_jf_g)\n"
+        "    _jf_index, _jf_fills, _jf_note = _jf_e\n"
+        + (f"    {''.join(f'_jf_f{j}, ' for j in range(len(fillable)))}= _jf_fills\n"
+           if fillable else "")
+        + "".join(f + "\n" for f in fill)
+        + "    if _jf_note is not None:\n"
+        "        _jf_warn(_jf_note, _jf_dw, stacklevel=2)\n"
+        f"    return {await_}_jf_fn({kw})\n"
+    )
+    # Registered with linecache so a traceback through the wrapper shows its
+    # source line, as attrs and dataclasses do for the code they generate.
+    # The module is in the name, so two classes of one name cannot share it.
+    filename = f"<java_forms {fn.__module__}.{fn.__qualname__}>"
+    linecache.cache[filename] = (len(src), None, src.splitlines(True), filename)
+    exec(compile(src, filename, "exec"), ns)  # noqa: S102
+    specialised: Any = ns["_jf_wrapper"]
+    specialised.__code__ = specialised.__code__.replace(co_name=fn.__name__)
+    return functools.wraps(fn)(specialised)
 
 
 def _method_name(fn: Callable[..., Any], name: str | None) -> str:
@@ -285,21 +394,29 @@ def java_forms(*forms: Form, name: str | None = None) -> Callable[[_F], _F]:
             if pass_form:
                 kwargs[_FORM_KEYWORD] = index
 
-        wrapper: Any
+        generic: Any
         if inspect.iscoroutinefunction(fn):
             @functools.wraps(fn)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
                 resolve(args, kwargs)
                 return await fn(*args, **kwargs)
 
-            wrapper = async_wrapper
+            generic = async_wrapper
         else:
             @functools.wraps(fn)
             def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
                 resolve(args, kwargs)
                 return fn(*args, **kwargs)
 
-            wrapper = sync_wrapper
+            generic = sync_wrapper
+
+        def illegal(given: int) -> Exception:
+            from .illegal_argument_error import IllegalArgumentError
+
+            return IllegalArgumentError(message=prefix + in_order(given))
+
+        wrapper: Any = _specialise(fn, generic, params, n_positional, pass_form, always,
+                                   bit, marker, table, illegal) or generic
 
         if pass_form:
             wrapper.__signature__ = sig.replace(
