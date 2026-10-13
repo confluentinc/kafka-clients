@@ -173,10 +173,10 @@ use crate::admin::{
     DescribeUserScramCredentialsOptions, DescribeUserScramCredentialsResult, ElectLeadersOptions,
     ExpireDelegationTokenOptions, FeatureMetadata, FeatureUpdate, FenceProducersOptions, FilterResults, GroupListing,
     GroupOffsets, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec,
-    ListGroupsOptions, ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions,
-    ListTransactionsOptions, ListTransactionsResult, LogDirDescription, MemberAssignment, MemberDescription,
-    MemberToRemove, MockAdminClient, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, OpType,
-    PartitionProducerState, PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions,
+    ListGroupsOptions, ListGroupsResult, ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions,
+    ListTopicsOptions, ListTransactionsOptions, ListTransactionsResult, LogDirDescription, MemberAssignment,
+    MemberDescription, MemberToRemove, MockAdminClient, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec,
+    OpType, PartitionProducerState, PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions,
     RemoveMembersFromConsumerGroupResult, RenewDelegationTokenOptions, ReplicaLogDirInfo, ScramCredentialInfo,
     ScramMechanism, TerminateTransactionOptions, TopicDescription, TopicListing, TopicMetadataAndConfig,
     TransactionDescription, TransactionListing, TransactionState, UpdateFeaturesOptions, UpgradeType,
@@ -1215,7 +1215,6 @@ where
 }
 
 /// An already-resolved per-key outcome (the `_async` path).
-#[expect(dead_code, reason = "TEMP: used once the remaining RPC groups are converted")]
 fn resolved_keyed<T, V>(outcome: Result<T, Error>, value: impl FnOnce(T) -> V) -> LazyKeyed<V> {
     LazyOutcome::resolved(outcome.map(value).map_err(error_inner))
 }
@@ -14965,16 +14964,9 @@ pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_destroy(map: *mut kafk
 /// Per-key `KafkaFuture<Void>` outcomes keyed by a string (group id or group
 /// instance id).
 type GroupVoidOutcomes = HashMap<String, Result<(), Error>>;
-/// Per-partition `KafkaFuture<Void>` outcomes.
-type PartitionVoidOutcomes = HashMap<TopicPartition, Result<(), Error>>;
-/// The `valid()` listings and unkeyed `errors()` of `listGroups`.
-type ListGroupsOutcome = (Vec<GroupListing>, Vec<Error>);
-/// Per-group outcomes of `describeConsumerGroups`.
-type DescribeConsumerGroupsOutcomes = HashMap<String, Result<ConsumerGroupDescription, Error>>;
-/// Per-group outcomes of `describeClassicGroups`.
-type DescribeClassicGroupsOutcomes = HashMap<String, Result<ClassicGroupDescription, Error>>;
-/// Per-group outcomes of `listConsumerGroupOffsets`.
-type ListConsumerGroupOffsetsOutcomes = HashMap<String, Result<GroupOffsets, Error>>;
+/// The resolved `valid()` listings, unkeyed `errors()` and `all()` outcome of
+/// `listGroups`.
+type ListGroupsOutcome = (Vec<GroupListing>, Vec<Error>, Result<(), Error>);
 
 /// Reads a required C string parameter.
 ///
@@ -15052,23 +15044,6 @@ fn flatten_keyed_void_outcomes(outcomes: GroupVoidOutcomes) -> (Vec<CString>, Ve
         errors.push(outcome.err().map(error_inner));
     }
     (keys, errors)
-}
-
-/// Splits partition-keyed void outcomes into the parallel topic / partition /
-/// error vectors a per-key-error-only result handle stores.
-fn flatten_partition_void_outcomes(
-    outcomes: PartitionVoidOutcomes,
-) -> (Vec<CString>, Vec<i32>, Vec<Option<ErrorInner>>) {
-    let entries = sorted_partition_entries(outcomes);
-    let mut topics = Vec::with_capacity(entries.len());
-    let mut partitions = Vec::with_capacity(entries.len());
-    let mut errors = Vec::with_capacity(entries.len());
-    for (tp, outcome) in entries {
-        topics.push(to_cstring(tp.topic()));
-        partitions.push(tp.partition());
-        errors.push(outcome.err().map(error_inner));
-    }
-    (topics, partitions, errors)
 }
 
 /// Parses `count` `GroupState` names into a set.
@@ -15474,10 +15449,10 @@ unsafe fn read_alter_group_offsets(
 }
 
 /// Submits `listGroups` and returns a future over its `valid()` / `errors()`
-/// split.
+/// split and its `all()` outcome, for the `_async` path.
 ///
-/// Java's `ListGroupsResult` derives both views from one source future, so
-/// both are awaited before either is inspected — the `describeCluster`
+/// Java's `ListGroupsResult` derives all three views from one source future,
+/// so all three are awaited before any is inspected — the `describeCluster`
 /// discipline, which keeps a derived future from being abandoned.
 fn submit_list_groups(
     admin: &dyn Admin,
@@ -15486,28 +15461,19 @@ fn submit_list_groups(
     let result = admin.list_groups_with_options(options);
     let valid = result.valid();
     let errors = result.errors();
+    let all = result.all();
     async move {
         let valid = valid.get().await;
         let errors = errors.get().await;
-        Ok((valid?, errors?))
+        let all = all.get().await.map(|_| ());
+        Ok((valid?, errors?, all))
     }
 }
 
-/// Submits `describeConsumerGroups` and returns the collect-all future over its
-/// per-group futures.
-fn submit_describe_consumer_groups(
-    admin: &dyn Admin,
-    group_ids: &[String],
-    options: DescribeConsumerGroupsOptions,
-) -> KafkaFuture<DescribeConsumerGroupsOutcomes> {
-    let result = admin.describe_consumer_groups_with_options(group_ids, options);
-    KafkaFuture::join_map_results(result.described_groups().into_iter().collect())
-}
-
-/// Submits `describeConsumerGroups`, unjoined, for
-/// [`admin_async_per_key_op`]'s independent-per-key delivery. Same `Admin` call
-/// as [`submit_describe_consumer_groups`]; see the "RPC submission helpers —
-/// per-key (unjoined) variants" note above.
+/// Submits `describeConsumerGroups`, unjoined: the synchronous entry point
+/// wraps each group's future in its result handle, and the `_async` one hands
+/// them to [`admin_async_per_key_op`]'s independent-per-key delivery; see the
+/// "RPC submission helpers — per-key (unjoined) variants" note above.
 fn submit_describe_consumer_groups_entries(
     admin: &dyn Admin,
     group_ids: &[String],
@@ -15517,21 +15483,10 @@ fn submit_describe_consumer_groups_entries(
     result.described_groups().into_iter().collect()
 }
 
-/// Submits `describeClassicGroups` and returns the collect-all future over its
-/// per-group futures.
-fn submit_describe_classic_groups(
-    admin: &dyn Admin,
-    group_ids: &[String],
-    options: DescribeClassicGroupsOptions,
-) -> KafkaFuture<DescribeClassicGroupsOutcomes> {
-    let result = admin.describe_classic_groups_with_options(group_ids, options);
-    KafkaFuture::join_map_results(result.described_groups().into_iter().collect())
-}
-
-/// Submits `describeClassicGroups`, unjoined, for
-/// [`admin_async_per_key_op`]'s independent-per-key delivery. Same `Admin` call
-/// as [`submit_describe_classic_groups`]; see the "RPC submission helpers —
-/// per-key (unjoined) variants" note above.
+/// Submits `describeClassicGroups`, unjoined, for the synchronous entry point's
+/// result handle and for [`admin_async_per_key_op`]'s independent-per-key
+/// delivery; see the "RPC submission helpers — per-key (unjoined) variants"
+/// note above.
 fn submit_describe_classic_groups_entries(
     admin: &dyn Admin,
     group_ids: &[String],
@@ -15541,30 +15496,15 @@ fn submit_describe_classic_groups_entries(
     result.described_groups().into_iter().collect()
 }
 
-/// Submits `listConsumerGroupOffsets` and returns the collect-all future over
-/// its per-group futures.
+/// Submits `listConsumerGroupOffsets`, unjoined, for the synchronous entry
+/// point's result handle and for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery; see the "RPC submission helpers — per-key
+/// (unjoined) variants" note above.
 ///
 /// `ListConsumerGroupOffsetsResult` exposes its futures only through
 /// `partitionsToOffsetAndMetadata(groupId)`, so the requested group ids drive
-/// the join. That accessor throws for a group that was not requested, which
+/// the entries. That accessor throws for a group that was not requested, which
 /// cannot happen here; the error is propagated rather than dropped.
-fn submit_list_consumer_group_offsets(
-    admin: &dyn Admin,
-    group_specs: &HashMap<String, ListConsumerGroupOffsetsSpec>,
-    options: ListConsumerGroupOffsetsOptions,
-) -> Result<KafkaFuture<ListConsumerGroupOffsetsOutcomes>, Error> {
-    let result = admin.list_consumer_group_offsets_with_group_specs_options(group_specs, options);
-    let mut entries: Vec<(String, KafkaFuture<GroupOffsets>)> = Vec::with_capacity(group_specs.len());
-    for group_id in group_specs.keys() {
-        entries.push((group_id.clone(), result.partitions_to_offset_and_metadata_for_group(group_id)?));
-    }
-    Ok(KafkaFuture::join_map_results(entries))
-}
-
-/// Submits `listConsumerGroupOffsets`, unjoined, for
-/// [`admin_async_per_key_op`]'s independent-per-key delivery. Same `Admin` call
-/// as [`submit_list_consumer_group_offsets`]; see the "RPC submission helpers —
-/// per-key (unjoined) variants" note above.
 fn submit_list_consumer_group_offsets_entries(
     admin: &dyn Admin,
     group_specs: &HashMap<String, ListConsumerGroupOffsetsSpec>,
@@ -15586,20 +15526,22 @@ type PartitionErrorsOutcome = Result<HashMap<TopicPartition, Errors>, Error>;
 /// Java's `KafkaFuture<Map<MemberIdentity, Errors>>`.
 type MemberErrorsOutcome = Result<HashMap<MemberIdentity, Errors>, Error>;
 /// A submitted `alterConsumerGroupOffsets`, its requested partitions and the
-/// outcome of its single future — what its result handle is built from.
+/// outcome of its single future — what the `_async` path's result handle is
+/// built from.
 type AlterConsumerGroupOffsetsResolved = (AlterConsumerGroupOffsetsResult, Vec<TopicPartition>, PartitionErrorsOutcome);
 /// A submitted `deleteConsumerGroupOffsets`, its requested partitions and the
-/// outcome of its single future — what its result handle is built from.
+/// outcome of its single future — what the `_async` path's result handle is
+/// built from.
 type DeleteConsumerGroupOffsetsResolved =
     (DeleteConsumerGroupOffsetsResult, Vec<TopicPartition>, PartitionErrorsOutcome);
 /// A submitted `removeMembersFromConsumerGroup`, its requested members (empty
-/// in `removeAll` mode) and the outcome of its single future — what its result
-/// handle is built from.
+/// in `removeAll` mode) and the outcome of its single future — what the
+/// `_async` path's result handle is built from.
 type RemoveMembersFromConsumerGroupResolved =
     (RemoveMembersFromConsumerGroupResult, Vec<MemberToRemove>, MemberErrorsOutcome);
 
-/// Submits `alterConsumerGroupOffsets` and returns a future that awaits the
-/// result's **single** underlying future — Java's
+/// Submits `alterConsumerGroupOffsets` for the `_async` path and returns a
+/// future that awaits the result's **single** underlying future — Java's
 /// `KafkaFuture<Map<TopicPartition, Errors>>`, from which `partitionResult` and
 /// `all()` are both derived — once.
 ///
@@ -15620,8 +15562,8 @@ fn submit_alter_consumer_group_offsets(
     }
 }
 
-/// Submits `deleteConsumerGroupOffsets` and returns a future that awaits the
-/// result's single underlying future once. Same shape as
+/// Submits `deleteConsumerGroupOffsets` for the `_async` path and returns a
+/// future that awaits the result's single underlying future once. Same shape as
 /// [`submit_alter_consumer_group_offsets`].
 fn submit_delete_consumer_group_offsets(
     admin: &dyn Admin,
@@ -15636,21 +15578,11 @@ fn submit_delete_consumer_group_offsets(
         (result, requested, outcome)
     }
 }
-/// Submits `deleteConsumerGroups` and returns the collect-all future over its
-/// per-group futures.
-fn submit_delete_consumer_groups(
-    admin: &dyn Admin,
-    group_ids: &[String],
-    options: DeleteConsumerGroupsOptions,
-) -> KafkaFuture<GroupVoidOutcomes> {
-    let result = admin.delete_consumer_groups_with_options(group_ids, options);
-    KafkaFuture::join_map_results(result.deleted_groups().into_iter().collect())
-}
 
-/// Submits `deleteConsumerGroups`, unjoined, for [`admin_async_per_key_op`]'s
-/// independent-per-key delivery. Same `Admin` call as
-/// [`submit_delete_consumer_groups`]; see the "RPC submission helpers —
-/// per-key (unjoined) variants" note above.
+/// Submits `deleteConsumerGroups`, unjoined, for the synchronous entry point's
+/// result handle and for [`admin_async_per_key_op`]'s independent-per-key
+/// delivery; see the "RPC submission helpers — per-key (unjoined) variants"
+/// note above.
 fn submit_delete_consumer_groups_entries(
     admin: &dyn Admin,
     group_ids: &[String],
@@ -15660,8 +15592,8 @@ fn submit_delete_consumer_groups_entries(
     result.deleted_groups().into_iter().collect()
 }
 
-/// Submits `removeMembersFromConsumerGroup` and returns a future that awaits
-/// the result's single underlying future — Java's
+/// Submits `removeMembersFromConsumerGroup` for the `_async` path and returns
+/// a future that awaits the result's single underlying future — Java's
 /// `KafkaFuture<Map<MemberIdentity, Errors>>`, from which `memberResult` and
 /// `all()` are both derived — once. Same shape as
 /// [`submit_alter_consumer_group_offsets`].
@@ -15695,17 +15627,24 @@ fn submit_remove_members_from_consumer_group(
 //   - one `KafkaFuture<Map<K, Errors>>` with accessors derived from it
 //                                   -> Java's accessors (`_partition_result` /
 //                                      `_member_result` and `_all`), evaluated
-//                                      by the core result against the resolved
-//                                      outcome, plus `_get_error(i)` over the
-//                                      requested keys
+//                                      by the core result against the
+//                                      future's outcome, plus `_get_error(i)`
+//                                      over the requested keys
 //     (`alterConsumerGroupOffsets`, `deleteConsumerGroupOffsets`,
 //      `removeMembersFromConsumerGroup`)
-//   - one future split into `valid()` + `errors()`
-//                                   -> two independent lists, no key at all
+//   - one future split into `all()` + `valid()` + `errors()`
+//                                   -> two independent lists, no key at all,
+//                                      plus `_all`
 //     (`listGroups`)
+//
+// A handle from a synchronous entry point holds those futures unresolved, as
+// Java's `*Result` does: the keys are readable at once, and an accessor that
+// reads a future waits for that future only (Java's `get()`). A handle from an
+// `_async` callback holds already-resolved outcomes, so nothing on it waits.
 // ---------------------------------------------------------------------------
 
-/// Opaque handle to a flattened `ListGroupsResult`.
+/// Opaque handle to a `ListGroupsResult`: Java's `all()`, `valid()` and
+/// `errors()` futures, read by the accessors below.
 #[repr(C)]
 pub struct kafka_admin_ListGroupsResult_t {
     _private: [u8; 0],
@@ -15715,21 +15654,46 @@ pub struct kafka_admin_ListGroupsResult_t {
 ///
 /// Java's `ListGroupsResult` has no per-key future at all: one source future
 /// resolves to a mixed collection, which `valid()` and `errors()` split into a
-/// listing list and an unkeyed error list (`ListGroupsResult.java:82,95`). The
-/// two lists are independent and generally of different lengths, so this handle
-/// exposes them as two separate sequences rather than as parallel arrays.
+/// listing list and an unkeyed error list (`ListGroupsResult.java:82,95`), and
+/// `all()` fails with the first of those errors. The two lists are independent
+/// and generally of different lengths, so this handle exposes them as two
+/// separate sequences rather than as parallel arrays. Each of the three Java
+/// futures is held on its own; they resolve together, when the source does.
 struct ListGroupsResultInner {
-    valid: Vec<GroupListingInner>,
-    errors: Vec<ErrorInner>,
+    all: LazySingle<()>,
+    valid: LazySingle<Vec<GroupListingInner>>,
+    errors: LazySingle<Vec<ErrorInner>>,
 }
 
-/// Flattens the `listGroups` outcome into the C handle.
+/// Flattens `valid()`'s listings, keeping the order the brokers reported them in.
+fn list_groups_valid(valid: Vec<GroupListing>) -> Vec<GroupListingInner> {
+    valid.iter().map(GroupListingInner::new).collect()
+}
+
+/// Flattens `errors()`'s per-broker failures.
+fn list_groups_errors(errors: Vec<Error>) -> Vec<ErrorInner> {
+    errors.into_iter().map(error_inner).collect()
+}
+
+/// Wraps `listGroups`' three futures, unresolved, as the C handle's backing
+/// state.
+fn list_groups_result_inner(waiter: &FutureWaiter, result: &ListGroupsResult) -> ListGroupsResultInner {
+    ListGroupsResultInner {
+        all: lazy_single(waiter, result.all(), |_| ()),
+        valid: lazy_single(waiter, result.valid(), list_groups_valid),
+        errors: lazy_single(waiter, result.errors(), list_groups_errors),
+    }
+}
+
+/// Moves an already-resolved `listGroups` outcome (the `_async` path) into the
+/// C handle.
 fn box_list_groups_result(outcome: ListGroupsOutcome) -> *mut kafka_admin_ListGroupsResult_t {
-    let (valid, errors) = outcome;
-    Box::into_raw(Box::new(ListGroupsResultInner {
-        valid: valid.iter().map(GroupListingInner::new).collect(),
-        errors: errors.into_iter().map(error_inner).collect(),
-    })) as *mut kafka_admin_ListGroupsResult_t
+    let (valid, errors, all) = outcome;
+    into_handle(ListGroupsResultInner {
+        all: resolved_keyed(all, |_| ()),
+        valid: resolved_keyed(Ok(valid), list_groups_valid),
+        errors: resolved_keyed(Ok(errors), list_groups_errors),
+    })
 }
 
 /// Casts a `*const kafka_admin_ListGroupsResult_t` to a reference.
@@ -15741,7 +15705,7 @@ unsafe fn list_groups_result_ref(result: *const kafka_admin_ListGroupsResult_t) 
     // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
     // `list_groups` call, a requirement every caller discharges through its own `# Safety`
     // (`result` must be a valid `list_groups` result handle). Such a pointer is only ever
-    // produced by `Box::into_raw(Box::new(ListGroupsResultInner { .. }))` in
+    // produced by `into_handle` in `kafka_admin_AdminClient_list_groups` or in
     // `box_list_groups_result` and cast to the opaque marker type, so casting it back
     // yields an aligned, initialized `ListGroupsResultInner`. The `&'static` is used by
     // each caller only for the duration of its synchronous call, during which the C caller
@@ -15750,7 +15714,51 @@ unsafe fn list_groups_result_ref(result: *const kafka_admin_ListGroupsResult_t) 
     unsafe { &*(result as *const ListGroupsResultInner) }
 }
 
+/// Java's `all().get()`: **blocks** until the listing has resolved, then
+/// returns null if every broker listed its groups, or an **owned** error — free
+/// it with `kafka_common_Error_destroy` — otherwise: the first per-broker
+/// failure (the first entry of [`kafka_admin_ListGroupsResult_get_error`]), as
+/// Java's `all()` yields "nothing but the first exception which occurred". On
+/// success `all()`'s listings are exactly [`kafka_admin_ListGroupsResult_get_valid`]'s.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_groups` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListGroupsResult_all(
+    result: *const kafka_admin_ListGroupsResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `list_groups_result_ref` requires a non-null handle from a `list_groups`
+    // call; per this function's `# Safety`, `result` is a valid `list_groups` result
+    // handle that has not been destroyed. The reference is used only for the duration of
+    // this synchronous call, during which the C caller keeps the handle alive, and the
+    // returned error is a fresh copy owned by the caller.
+    single_error(&unsafe { list_groups_result_ref(result) }.all)
+}
+
+/// Returns whether the listing has resolved — Java's `isDone()` on `all()`,
+/// `valid()` and `errors()`, which complete together. Never blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_groups` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListGroupsResult_is_done(result: *const kafka_admin_ListGroupsResult_t) -> bool {
+    // SAFETY: `list_groups_result_ref` requires a non-null handle from a `list_groups`
+    // call; per this function's `# Safety`, `result` is a valid `list_groups` result
+    // handle that has not been destroyed. The reference is used only for this check within
+    // the call, during which the C caller keeps the handle alive.
+    let inner = unsafe { list_groups_result_ref(result) };
+    inner.all.is_done() && inner.valid.is_done() && inner.errors.is_done()
+}
+
 /// Returns the number of successfully listed groups (Java's `valid()`).
+/// **Blocks** until `valid()` has resolved. Java's `valid()` never fails; the
+/// count is 0 only if no group was listed, or if the admin client was destroyed
+/// while the listing was pending (then [`kafka_admin_ListGroupsResult_all`]
+/// reports why).
 ///
 /// # Safety
 ///
@@ -15762,14 +15770,15 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_valid_count(
 ) -> i32 {
     // SAFETY: `list_groups_result_ref` requires a non-null handle from a `list_groups`
     // call; per this function's `# Safety`, `result` is a valid `list_groups` result
-    // handle, i.e. one created by `Box::into_raw` in `box_list_groups_result` and not yet
-    // destroyed. The reference is used only for the duration of this synchronous call,
-    // during which the C caller keeps the handle alive, and only a count is copied out.
-    unsafe { list_groups_result_ref(result) }.valid.len() as i32
+    // handle that has not been destroyed. The reference is used only for the duration of
+    // this synchronous call, during which the C caller keeps the handle alive, and only a
+    // count is copied out.
+    single_data(&unsafe { list_groups_result_ref(result) }.valid).map_or(0, |valid| valid.len() as i32)
 }
 
 /// Returns the listing at `index` (borrowed), or null if out of range. Listings
 /// keep the order the brokers reported them in, as Java's `valid()` does.
+/// **Blocks** until `valid()` has resolved.
 ///
 /// # Safety
 ///
@@ -15785,19 +15794,19 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_get_valid(
     }
     // SAFETY: `list_groups_result_ref` requires a non-null handle from a `list_groups`
     // call; per this function's `# Safety`, `result` is a valid `list_groups` result
-    // handle, i.e. one created by `Box::into_raw` in `box_list_groups_result` and not yet
-    // destroyed. The reference is used only for the duration of this synchronous call,
-    // during which the C caller keeps the handle alive; the returned
-    // `kafka_admin_GroupListing_t` pointer borrows from the `valid` listings of the same
-    // `ListGroupsResultInner` allocation and is documented valid only until the handle is
-    // destroyed.
-    match unsafe { list_groups_result_ref(result) }.valid.get(index as usize) {
+    // handle that has not been destroyed. The reference is used only for the duration of
+    // this synchronous call, during which the C caller keeps the handle alive; the returned
+    // `kafka_admin_GroupListing_t` pointer borrows from the `valid` listings cached in the
+    // same `ListGroupsResultInner` allocation and is documented valid only until the handle
+    // is destroyed.
+    match single_data(&unsafe { list_groups_result_ref(result) }.valid).and_then(|valid| valid.get(index as usize)) {
         Some(listing) => listing as *const GroupListingInner as *const kafka_admin_GroupListing_t,
         None => std::ptr::null(),
     }
 }
 
-/// Returns the number of per-broker errors (Java's `errors()`).
+/// Returns the number of per-broker errors (Java's `errors()`). **Blocks**
+/// until `errors()` has resolved.
 ///
 /// # Safety
 ///
@@ -15809,14 +15818,14 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_error_count(
 ) -> i32 {
     // SAFETY: `list_groups_result_ref` requires a non-null handle from a `list_groups`
     // call; per this function's `# Safety`, `result` is a valid `list_groups` result
-    // handle, i.e. one created by `Box::into_raw` in `box_list_groups_result` and not yet
-    // destroyed. The reference is used only for the duration of this synchronous call,
-    // during which the C caller keeps the handle alive, and only a count is copied out.
-    unsafe { list_groups_result_ref(result) }.errors.len() as i32
+    // handle that has not been destroyed. The reference is used only for the duration of
+    // this synchronous call, during which the C caller keeps the handle alive, and only a
+    // count is copied out.
+    single_data(&unsafe { list_groups_result_ref(result) }.errors).map_or(0, |errors| errors.len() as i32)
 }
 
 /// Returns the error at `index` (borrowed), or null if out of range. Do not
-/// destroy it.
+/// destroy it. **Blocks** until `errors()` has resolved.
 ///
 /// **This list is not parallel to the listings.** Java's `errors()` is an
 /// unkeyed `Collection<Throwable>` of the failures some brokers reported, while
@@ -15825,7 +15834,7 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_error_count(
 /// [`kafka_admin_ListGroupsResult_error_count`], never with
 /// [`kafka_admin_ListGroupsResult_valid_count`]. A non-empty error list plus a
 /// non-empty listing list is Java's normal partial-success outcome, which is
-/// exactly what `all()` would have thrown on.
+/// exactly what [`kafka_admin_ListGroupsResult_all`] reports as a failure.
 ///
 /// # Safety
 ///
@@ -15841,11 +15850,13 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_get_error(
     }
     // SAFETY: `list_groups_result_ref` requires a non-null handle from a `list_groups`
     // call; per this function's `# Safety`, `result` is a valid `list_groups` result
-    // handle, i.e. one created by `Box::into_raw` in `box_list_groups_result` and not yet
-    // destroyed. The reference is used only for the duration of this synchronous call,
-    // during which the C caller keeps the handle alive; any error pointer returned borrows
-    // from the same allocation and is documented valid only until the handle is destroyed.
-    error_ptr(unsafe { list_groups_result_ref(result) }.errors.get(index as usize))
+    // handle that has not been destroyed. The reference is used only for the duration of
+    // this synchronous call, during which the C caller keeps the handle alive; any error
+    // pointer returned borrows from the errors cached in the same allocation and is
+    // documented valid only until the handle is destroyed.
+    error_ptr(
+        single_data(&unsafe { list_groups_result_ref(result) }.errors).and_then(|errors| errors.get(index as usize)),
+    )
 }
 
 /// Destroys a `list_groups` result handle. Safe with null (no-op).
@@ -15858,9 +15869,9 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_get_error(
 pub unsafe extern "C" fn kafka_admin_ListGroupsResult_destroy(result: *mut kafka_admin_ListGroupsResult_t) {
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
-        // a valid `list_groups` result handle: the pointer was created by
-        // `Box::into_raw(Box::new(ListGroupsResultInner { .. }))` in
-        // `box_list_groups_result` and handed to C exactly once, either through
+        // a valid `list_groups` result handle: the `Box<ListGroupsResultInner>` leaked by
+        // `into_handle` in `kafka_admin_AdminClient_list_groups` or in
+        // `box_list_groups_result`, and handed to C exactly once, either through
         // `finish_sync`'s write to `*out_result` or as the owned `result` argument of the
         // async callback. The destroy contract makes this the single, final release of that
         // allocation; the borrowed `kafka_admin_GroupListing_t` pointers, strings and error
@@ -15869,8 +15880,9 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_destroy(result: *mut kafka
     }
 }
 
-/// Opaque handle to a flattened `DescribeConsumerGroupsResult`, keyed by group
-/// id.
+/// Opaque handle to a `DescribeConsumerGroupsResult`, keyed by group id: one
+/// future per requested group (Java's `describedGroups()`), read by the
+/// accessors below.
 #[repr(C)]
 pub struct kafka_admin_DescribeConsumerGroupsResult_t {
     _private: [u8; 0],
@@ -15880,36 +15892,28 @@ pub struct kafka_admin_DescribeConsumerGroupsResult_t {
 ///
 /// Java's `describedGroups()` is `Map<String, KafkaFuture<ConsumerGroupDescription>>`
 /// — one future per group carrying a value — so this handle has both
-/// `_get_value(i)` and `_get_error(i)`.
+/// `_get_value(i)` and `_get_error(i)`. The group ids are known at submission,
+/// as Java's `describedGroups().keySet()` is; each group's future is resolved
+/// on first read.
 struct DescribeConsumerGroupsResultInner {
     group_ids: Vec<CString>,
-    descriptions: Vec<Option<ConsumerGroupDescriptionInner>>,
-    errors: Vec<Option<ErrorInner>>,
+    entries: Vec<LazyKeyed<ConsumerGroupDescriptionInner>>,
 }
 
-/// Flattens the per-group `describeConsumerGroups` outcomes into the C handle.
-fn box_describe_consumer_groups_result(
-    outcomes: DescribeConsumerGroupsOutcomes,
-) -> *mut kafka_admin_DescribeConsumerGroupsResult_t {
-    let entries = sorted_entries(outcomes);
-    let mut group_ids = Vec::with_capacity(entries.len());
-    let mut descriptions = Vec::with_capacity(entries.len());
-    let mut errors = Vec::with_capacity(entries.len());
-    for (group_id, outcome) in entries {
-        group_ids.push(to_cstring(&group_id));
-        match outcome {
-            Ok(description) => {
-                descriptions.push(Some(ConsumerGroupDescriptionInner::new(&description)));
-                errors.push(None);
-            },
-            Err(e) => {
-                descriptions.push(None);
-                errors.push(Some(error_inner(e)));
-            },
-        }
-    }
-    Box::into_raw(Box::new(DescribeConsumerGroupsResultInner { group_ids, descriptions, errors }))
-        as *mut kafka_admin_DescribeConsumerGroupsResult_t
+/// Wraps `describeConsumerGroups`' per-group futures, unresolved, as the C
+/// handle's backing state, sorted by group id.
+fn describe_consumer_groups_result_inner(
+    waiter: &FutureWaiter,
+    futures: Vec<(String, KafkaFuture<ConsumerGroupDescription>)>,
+) -> DescribeConsumerGroupsResultInner {
+    let mut futures = futures;
+    futures.sort_by(|a, b| a.0.cmp(&b.0));
+    let group_ids = futures.iter().map(|(group_id, _)| to_cstring(group_id)).collect();
+    let entries = futures
+        .into_iter()
+        .map(|(_, future)| lazy_keyed(waiter, future, |description| ConsumerGroupDescriptionInner::new(&description)))
+        .collect();
+    DescribeConsumerGroupsResultInner { group_ids, entries }
 }
 
 /// Casts a `*const kafka_admin_DescribeConsumerGroupsResult_t` to a reference.
@@ -15923,17 +15927,17 @@ unsafe fn describe_consumer_groups_result_ref(
     // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
     // `describe_consumer_groups` call, a requirement every caller discharges through its
     // own `# Safety` (`result` must be a valid `describe_consumer_groups` result handle).
-    // Such a pointer is only ever produced by
-    // `Box::into_raw(Box::new(DescribeConsumerGroupsResultInner { .. }))` in
-    // `box_describe_consumer_groups_result` and cast to the opaque marker type, so casting
-    // it back yields an aligned, initialized `DescribeConsumerGroupsResultInner`. The
-    // `&'static` is used by each caller only for the duration of its synchronous call,
-    // during which the C caller keeps the handle alive by not yet having called
-    // `kafka_admin_DescribeConsumerGroupsResult_destroy`.
+    // Such a pointer is only ever produced by `into_handle` in
+    // `kafka_admin_AdminClient_describe_consumer_groups` and cast to the opaque marker
+    // type, so casting it back yields an aligned, initialized
+    // `DescribeConsumerGroupsResultInner`. The `&'static` is used by each caller only for
+    // the duration of its synchronous call, during which the C caller keeps the handle
+    // alive by not yet having called `kafka_admin_DescribeConsumerGroupsResult_destroy`.
     unsafe { &*(result as *const DescribeConsumerGroupsResultInner) }
 }
 
-/// Returns the number of described groups.
+/// Returns the number of requested groups. Never blocks: the groups are known
+/// when the request is submitted.
 ///
 /// # Safety
 ///
@@ -15945,15 +15949,14 @@ pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_count(
 ) -> i32 {
     // SAFETY: `describe_consumer_groups_result_ref` requires a non-null handle from a
     // `describe_consumer_groups` call; per this function's `# Safety`, `result` is a valid
-    // `describe_consumer_groups` result handle, i.e. one created by `Box::into_raw` in
-    // `box_describe_consumer_groups_result` and not yet destroyed. The reference is used
-    // only for the duration of this synchronous call, during which the C caller keeps the
-    // handle alive, and only a count is copied out.
+    // `describe_consumer_groups` result handle that has not been destroyed. The reference
+    // is used only for the duration of this synchronous call, during which the C caller
+    // keeps the handle alive, and only a count is copied out.
     unsafe { describe_consumer_groups_result_ref(result) }.group_ids.len() as i32
 }
 
 /// Returns the group id of the entry at `index` (borrowed), or null if out of
-/// range. Entries are sorted by group id.
+/// range. Entries are sorted by group id. Never blocks.
 ///
 /// # Safety
 ///
@@ -15966,16 +15969,20 @@ pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_get_group_id(
 ) -> *const c_char {
     // SAFETY: `describe_consumer_groups_result_ref` requires a non-null handle from a
     // `describe_consumer_groups` call; per this function's `# Safety`, `result` is a valid
-    // `describe_consumer_groups` result handle, i.e. one created by `Box::into_raw` in
-    // `box_describe_consumer_groups_result` and not yet destroyed. The reference is used
-    // only for the duration of this synchronous call, during which the C caller keeps the
-    // handle alive; the returned group-id string borrows from the same allocation and is
-    // documented valid only until the handle is destroyed.
+    // `describe_consumer_groups` result handle that has not been destroyed. The reference
+    // is used only for the duration of this synchronous call, during which the C caller
+    // keeps the handle alive; the returned group-id string borrows from the same
+    // allocation and is documented valid only until the handle is destroyed.
     cstring_at(&unsafe { describe_consumer_groups_result_ref(result) }.group_ids, index)
 }
 
 /// Returns the description of the entry at `index` (borrowed), or null if the
 /// group failed or `index` is out of range. Do not destroy it.
+///
+/// **Blocks** until that group's future has resolved — Java's
+/// `describedGroups().get(groupId).get()` — but not on any other group. Never
+/// blocks for an out-of-range index. The pointer stays valid until
+/// [`kafka_admin_DescribeConsumerGroupsResult_destroy`].
 ///
 /// # Safety
 ///
@@ -15986,30 +15993,28 @@ pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_get_value(
     result: *const kafka_admin_DescribeConsumerGroupsResult_t,
     index: i32,
 ) -> *const kafka_admin_ConsumerGroupDescription_t {
-    if index < 0 {
-        return std::ptr::null();
-    }
     // SAFETY: `describe_consumer_groups_result_ref` requires a non-null handle from a
     // `describe_consumer_groups` call; per this function's `# Safety`, `result` is a valid
-    // `describe_consumer_groups` result handle, i.e. one created by `Box::into_raw` in
-    // `box_describe_consumer_groups_result` and not yet destroyed. The reference is used
-    // only for the duration of this synchronous call, during which the C caller keeps the
-    // handle alive; the returned `kafka_admin_ConsumerGroupDescription_t` pointer borrows
-    // from the `descriptions` of the same `DescribeConsumerGroupsResultInner` allocation
-    // and is documented valid only until the handle is destroyed.
-    match unsafe { describe_consumer_groups_result_ref(result) }
-        .descriptions
-        .get(index as usize)
-    {
-        Some(Some(description)) => {
+    // `describe_consumer_groups` result handle that has not been destroyed. The reference
+    // is used only for the duration of this synchronous call, during which the C caller
+    // keeps the handle alive; the returned `kafka_admin_ConsumerGroupDescription_t` pointer
+    // borrows a `ConsumerGroupDescriptionInner` cached in the same allocation and is
+    // documented valid only until the handle is destroyed.
+    match keyed_value_at(&unsafe { describe_consumer_groups_result_ref(result) }.entries, index) {
+        Some(description) => {
             description as *const ConsumerGroupDescriptionInner as *const kafka_admin_ConsumerGroupDescription_t
         },
-        _ => std::ptr::null(),
+        None => std::ptr::null(),
     }
 }
 
 /// Returns the error for the entry at `index` (borrowed), or null if the group
 /// was described successfully or `index` is out of range. Do not destroy it.
+///
+/// **Blocks** until that group's future has resolved, but not on any other
+/// group. Never blocks for an out-of-range index. A failure of the whole
+/// request (a timeout, say) is reported here for every group, as Java completes
+/// every group's future with it.
 ///
 /// # Safety
 ///
@@ -16020,23 +16025,56 @@ pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_get_error(
     result: *const kafka_admin_DescribeConsumerGroupsResult_t,
     index: i32,
 ) -> *const kafka_common_Error_t {
-    if index < 0 {
-        return std::ptr::null();
-    }
     // SAFETY: `describe_consumer_groups_result_ref` requires a non-null handle from a
     // `describe_consumer_groups` call; per this function's `# Safety`, `result` is a valid
-    // `describe_consumer_groups` result handle, i.e. one created by `Box::into_raw` in
-    // `box_describe_consumer_groups_result` and not yet destroyed. The reference is used
-    // only for the duration of this synchronous call, during which the C caller keeps the
-    // handle alive; any error pointer returned borrows from the same allocation and is
-    // documented valid only until the handle is destroyed.
-    match unsafe { describe_consumer_groups_result_ref(result) }
-        .errors
-        .get(index as usize)
-    {
-        Some(slot) => error_ptr(slot.as_ref()),
-        None => std::ptr::null(),
-    }
+    // `describe_consumer_groups` result handle that has not been destroyed. The reference
+    // is used only for the duration of this synchronous call, during which the C caller
+    // keeps the handle alive; any error pointer returned borrows an `ErrorInner` cached in
+    // the same allocation and is documented valid only until the handle is destroyed.
+    keyed_error_at(&unsafe { describe_consumer_groups_result_ref(result) }.entries, index)
+}
+
+/// Returns whether the future of the group at `index` has resolved — Java's
+/// `describedGroups().get(groupId).isDone()`. False if `index` is out of range.
+/// Never blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_consumer_groups` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_is_done(
+    result: *const kafka_admin_DescribeConsumerGroupsResult_t,
+    index: i32,
+) -> bool {
+    // SAFETY: `describe_consumer_groups_result_ref` requires a non-null handle from a
+    // `describe_consumer_groups` call; per this function's `# Safety`, `result` is a valid
+    // `describe_consumer_groups` result handle that has not been destroyed. The reference
+    // is used only for this check within the call, during which the C caller keeps the
+    // handle alive.
+    keyed_is_done_at(&unsafe { describe_consumer_groups_result_ref(result) }.entries, index)
+}
+
+/// Java's `all().get()`: **blocks** until every group's future has resolved,
+/// then returns null if every group was described, or an **owned** error — free
+/// it with `kafka_common_Error_destroy` — of a failed group (the first in index
+/// order; Java leaves which one unspecified). The descriptions themselves are
+/// read with [`kafka_admin_DescribeConsumerGroupsResult_get_value`].
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_consumer_groups` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_all(
+    result: *const kafka_admin_DescribeConsumerGroupsResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `describe_consumer_groups_result_ref` requires a non-null handle from a
+    // `describe_consumer_groups` call; per this function's `# Safety`, `result` is a valid
+    // `describe_consumer_groups` result handle that has not been destroyed. The reference
+    // is used only for the duration of this call, and the returned error is a fresh copy
+    // owned by the caller.
+    keyed_all(&unsafe { describe_consumer_groups_result_ref(result) }.entries)
 }
 
 /// Destroys a `describe_consumer_groups` result handle. Safe with null (no-op).
@@ -16051,20 +16089,20 @@ pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_destroy(
 ) {
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
-        // a valid `describe_consumer_groups` result handle: the pointer was created by
-        // `Box::into_raw(Box::new(DescribeConsumerGroupsResultInner { .. }))` in
-        // `box_describe_consumer_groups_result` and handed to C exactly once, either
-        // through `finish_sync`'s write to `*out_result` or as the owned `result` argument
-        // of the async callback. The destroy contract makes this the single, final release
-        // of that allocation; the borrowed description, member and assignment pointers,
-        // strings and error pointers obtained from it are documented valid only until this
-        // call.
+        // a valid `describe_consumer_groups` result handle: the
+        // `Box<DescribeConsumerGroupsResultInner>` leaked by `into_handle` in
+        // `kafka_admin_AdminClient_describe_consumer_groups` and handed to C exactly once,
+        // through `finish_sync`'s write to `*out_result`. The destroy contract makes this
+        // the single, final release of that allocation; the borrowed description, member and
+        // assignment pointers, strings and error pointers obtained from it are documented
+        // valid only until this call.
         unsafe { drop(Box::from_raw(result as *mut DescribeConsumerGroupsResultInner)) };
     }
 }
 
-/// Opaque handle to a flattened `DescribeClassicGroupsResult`, keyed by group
-/// id.
+/// Opaque handle to a `DescribeClassicGroupsResult`, keyed by group id: one
+/// future per requested group (Java's `describedGroups()`), read by the
+/// accessors below.
 #[repr(C)]
 pub struct kafka_admin_DescribeClassicGroupsResult_t {
     _private: [u8; 0],
@@ -16076,33 +16114,23 @@ pub struct kafka_admin_DescribeClassicGroupsResult_t {
 /// value.
 struct DescribeClassicGroupsResultInner {
     group_ids: Vec<CString>,
-    descriptions: Vec<Option<ClassicGroupDescriptionInner>>,
-    errors: Vec<Option<ErrorInner>>,
+    entries: Vec<LazyKeyed<ClassicGroupDescriptionInner>>,
 }
 
-/// Flattens the per-group `describeClassicGroups` outcomes into the C handle.
-fn box_describe_classic_groups_result(
-    outcomes: DescribeClassicGroupsOutcomes,
-) -> *mut kafka_admin_DescribeClassicGroupsResult_t {
-    let entries = sorted_entries(outcomes);
-    let mut group_ids = Vec::with_capacity(entries.len());
-    let mut descriptions = Vec::with_capacity(entries.len());
-    let mut errors = Vec::with_capacity(entries.len());
-    for (group_id, outcome) in entries {
-        group_ids.push(to_cstring(&group_id));
-        match outcome {
-            Ok(description) => {
-                descriptions.push(Some(ClassicGroupDescriptionInner::new(&description)));
-                errors.push(None);
-            },
-            Err(e) => {
-                descriptions.push(None);
-                errors.push(Some(error_inner(e)));
-            },
-        }
-    }
-    Box::into_raw(Box::new(DescribeClassicGroupsResultInner { group_ids, descriptions, errors }))
-        as *mut kafka_admin_DescribeClassicGroupsResult_t
+/// Wraps `describeClassicGroups`' per-group futures, unresolved, as the C
+/// handle's backing state, sorted by group id.
+fn describe_classic_groups_result_inner(
+    waiter: &FutureWaiter,
+    futures: Vec<(String, KafkaFuture<ClassicGroupDescription>)>,
+) -> DescribeClassicGroupsResultInner {
+    let mut futures = futures;
+    futures.sort_by(|a, b| a.0.cmp(&b.0));
+    let group_ids = futures.iter().map(|(group_id, _)| to_cstring(group_id)).collect();
+    let entries = futures
+        .into_iter()
+        .map(|(_, future)| lazy_keyed(waiter, future, |description| ClassicGroupDescriptionInner::new(&description)))
+        .collect();
+    DescribeClassicGroupsResultInner { group_ids, entries }
 }
 
 /// Casts a `*const kafka_admin_DescribeClassicGroupsResult_t` to a reference.
@@ -16116,17 +16144,17 @@ unsafe fn describe_classic_groups_result_ref(
     // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
     // `describe_classic_groups` call, a requirement every caller discharges through its own
     // `# Safety` (`result` must be a valid `describe_classic_groups` result handle). Such a
-    // pointer is only ever produced by
-    // `Box::into_raw(Box::new(DescribeClassicGroupsResultInner { .. }))` in
-    // `box_describe_classic_groups_result` and cast to the opaque marker type, so casting
-    // it back yields an aligned, initialized `DescribeClassicGroupsResultInner`. The
-    // `&'static` is used by each caller only for the duration of its synchronous call,
+    // pointer is only ever produced by `into_handle` in
+    // `kafka_admin_AdminClient_describe_classic_groups` and cast to the opaque marker type,
+    // so casting it back yields an aligned, initialized `DescribeClassicGroupsResultInner`.
+    // The `&'static` is used by each caller only for the duration of its synchronous call,
     // during which the C caller keeps the handle alive by not yet having called
     // `kafka_admin_DescribeClassicGroupsResult_destroy`.
     unsafe { &*(result as *const DescribeClassicGroupsResultInner) }
 }
 
-/// Returns the number of described groups.
+/// Returns the number of requested groups. Never blocks: the groups are known
+/// when the request is submitted.
 ///
 /// # Safety
 ///
@@ -16138,15 +16166,14 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_count(
 ) -> i32 {
     // SAFETY: `describe_classic_groups_result_ref` requires a non-null handle from a
     // `describe_classic_groups` call; per this function's `# Safety`, `result` is a valid
-    // `describe_classic_groups` result handle, i.e. one created by `Box::into_raw` in
-    // `box_describe_classic_groups_result` and not yet destroyed. The reference is used
-    // only for the duration of this synchronous call, during which the C caller keeps the
-    // handle alive, and only a count is copied out.
+    // `describe_classic_groups` result handle that has not been destroyed. The reference is
+    // used only for the duration of this synchronous call, during which the C caller keeps
+    // the handle alive, and only a count is copied out.
     unsafe { describe_classic_groups_result_ref(result) }.group_ids.len() as i32
 }
 
 /// Returns the group id of the entry at `index` (borrowed), or null if out of
-/// range. Entries are sorted by group id.
+/// range. Entries are sorted by group id. Never blocks.
 ///
 /// # Safety
 ///
@@ -16159,16 +16186,20 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_get_group_id(
 ) -> *const c_char {
     // SAFETY: `describe_classic_groups_result_ref` requires a non-null handle from a
     // `describe_classic_groups` call; per this function's `# Safety`, `result` is a valid
-    // `describe_classic_groups` result handle, i.e. one created by `Box::into_raw` in
-    // `box_describe_classic_groups_result` and not yet destroyed. The reference is used
-    // only for the duration of this synchronous call, during which the C caller keeps the
-    // handle alive; the returned group-id string borrows from the same allocation and is
-    // documented valid only until the handle is destroyed.
+    // `describe_classic_groups` result handle that has not been destroyed. The reference is
+    // used only for the duration of this synchronous call, during which the C caller keeps
+    // the handle alive; the returned group-id string borrows from the same allocation and
+    // is documented valid only until the handle is destroyed.
     cstring_at(&unsafe { describe_classic_groups_result_ref(result) }.group_ids, index)
 }
 
 /// Returns the description of the entry at `index` (borrowed), or null if the
 /// group failed or `index` is out of range. Do not destroy it.
+///
+/// **Blocks** until that group's future has resolved — Java's
+/// `describedGroups().get(groupId).get()` — but not on any other group. Never
+/// blocks for an out-of-range index. The pointer stays valid until
+/// [`kafka_admin_DescribeClassicGroupsResult_destroy`].
 ///
 /// # Safety
 ///
@@ -16179,30 +16210,28 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_get_value(
     result: *const kafka_admin_DescribeClassicGroupsResult_t,
     index: i32,
 ) -> *const kafka_admin_ClassicGroupDescription_t {
-    if index < 0 {
-        return std::ptr::null();
-    }
     // SAFETY: `describe_classic_groups_result_ref` requires a non-null handle from a
     // `describe_classic_groups` call; per this function's `# Safety`, `result` is a valid
-    // `describe_classic_groups` result handle, i.e. one created by `Box::into_raw` in
-    // `box_describe_classic_groups_result` and not yet destroyed. The reference is used
-    // only for the duration of this synchronous call, during which the C caller keeps the
-    // handle alive; the returned `kafka_admin_ClassicGroupDescription_t` pointer borrows
-    // from the `descriptions` of the same `DescribeClassicGroupsResultInner` allocation and
-    // is documented valid only until the handle is destroyed.
-    match unsafe { describe_classic_groups_result_ref(result) }
-        .descriptions
-        .get(index as usize)
-    {
-        Some(Some(description)) => {
+    // `describe_classic_groups` result handle that has not been destroyed. The reference is
+    // used only for the duration of this synchronous call, during which the C caller keeps
+    // the handle alive; the returned `kafka_admin_ClassicGroupDescription_t` pointer borrows
+    // a `ClassicGroupDescriptionInner` cached in the same allocation and is documented
+    // valid only until the handle is destroyed.
+    match keyed_value_at(&unsafe { describe_classic_groups_result_ref(result) }.entries, index) {
+        Some(description) => {
             description as *const ClassicGroupDescriptionInner as *const kafka_admin_ClassicGroupDescription_t
         },
-        _ => std::ptr::null(),
+        None => std::ptr::null(),
     }
 }
 
 /// Returns the error for the entry at `index` (borrowed), or null if the group
 /// was described successfully or `index` is out of range. Do not destroy it.
+///
+/// **Blocks** until that group's future has resolved, but not on any other
+/// group. Never blocks for an out-of-range index. A failure of the whole
+/// request is reported here for every group, as Java completes every group's
+/// future with it.
 ///
 /// # Safety
 ///
@@ -16213,20 +16242,56 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_get_error(
     result: *const kafka_admin_DescribeClassicGroupsResult_t,
     index: i32,
 ) -> *const kafka_common_Error_t {
-    if index < 0 {
-        return std::ptr::null();
-    }
     // SAFETY: `describe_classic_groups_result_ref` requires a non-null handle from a
     // `describe_classic_groups` call; per this function's `# Safety`, `result` is a valid
-    // `describe_classic_groups` result handle, i.e. one created by `Box::into_raw` in
-    // `box_describe_classic_groups_result` and not yet destroyed. The reference is used
-    // only for the duration of this synchronous call, during which the C caller keeps the
-    // handle alive; any error pointer returned borrows from the same allocation and is
-    // documented valid only until the handle is destroyed.
-    match unsafe { describe_classic_groups_result_ref(result) }.errors.get(index as usize) {
-        Some(slot) => error_ptr(slot.as_ref()),
-        None => std::ptr::null(),
-    }
+    // `describe_classic_groups` result handle that has not been destroyed. The reference is
+    // used only for the duration of this synchronous call, during which the C caller keeps
+    // the handle alive; any error pointer returned borrows an `ErrorInner` cached in the
+    // same allocation and is documented valid only until the handle is destroyed.
+    keyed_error_at(&unsafe { describe_classic_groups_result_ref(result) }.entries, index)
+}
+
+/// Returns whether the future of the group at `index` has resolved — Java's
+/// `describedGroups().get(groupId).isDone()`. False if `index` is out of range.
+/// Never blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_classic_groups` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_is_done(
+    result: *const kafka_admin_DescribeClassicGroupsResult_t,
+    index: i32,
+) -> bool {
+    // SAFETY: `describe_classic_groups_result_ref` requires a non-null handle from a
+    // `describe_classic_groups` call; per this function's `# Safety`, `result` is a valid
+    // `describe_classic_groups` result handle that has not been destroyed. The reference is
+    // used only for this check within the call, during which the C caller keeps the handle
+    // alive.
+    keyed_is_done_at(&unsafe { describe_classic_groups_result_ref(result) }.entries, index)
+}
+
+/// Java's `all().get()`: **blocks** until every group's future has resolved,
+/// then returns null if every group was described, or an **owned** error — free
+/// it with `kafka_common_Error_destroy` — of a failed group (the first in index
+/// order; Java leaves which one unspecified). The descriptions themselves are
+/// read with [`kafka_admin_DescribeClassicGroupsResult_get_value`].
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_classic_groups` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_all(
+    result: *const kafka_admin_DescribeClassicGroupsResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `describe_classic_groups_result_ref` requires a non-null handle from a
+    // `describe_classic_groups` call; per this function's `# Safety`, `result` is a valid
+    // `describe_classic_groups` result handle that has not been destroyed. The reference is
+    // used only for the duration of this call, and the returned error is a fresh copy owned
+    // by the caller.
+    keyed_all(&unsafe { describe_classic_groups_result_ref(result) }.entries)
 }
 
 /// Destroys a `describe_classic_groups` result handle. Safe with null (no-op).
@@ -16241,19 +16306,20 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_destroy(
 ) {
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
-        // a valid `describe_classic_groups` result handle: the pointer was created by
-        // `Box::into_raw(Box::new(DescribeClassicGroupsResultInner { .. }))` in
-        // `box_describe_classic_groups_result` and handed to C exactly once, either through
-        // `finish_sync`'s write to `*out_result` or as the owned `result` argument of the
-        // async callback. The destroy contract makes this the single, final release of that
-        // allocation; the borrowed description, member and assignment pointers, strings and
-        // error pointers obtained from it are documented valid only until this call.
+        // a valid `describe_classic_groups` result handle: the
+        // `Box<DescribeClassicGroupsResultInner>` leaked by `into_handle` in
+        // `kafka_admin_AdminClient_describe_classic_groups` and handed to C exactly once,
+        // through `finish_sync`'s write to `*out_result`. The destroy contract makes this the
+        // single, final release of that allocation; the borrowed description, member and
+        // assignment pointers, strings and error pointers obtained from it are documented
+        // valid only until this call.
         unsafe { drop(Box::from_raw(result as *mut DescribeClassicGroupsResultInner)) };
     }
 }
 
-/// Opaque handle to a flattened `ListConsumerGroupOffsetsResult`, keyed by
-/// group id.
+/// Opaque handle to a `ListConsumerGroupOffsetsResult`, keyed by group id: one
+/// future per requested group (Java's `partitionsToOffsetAndMetadata(groupId)`),
+/// read by the accessors below.
 #[repr(C)]
 pub struct kafka_admin_ListConsumerGroupOffsetsResult_t {
     _private: [u8; 0],
@@ -16263,36 +16329,28 @@ pub struct kafka_admin_ListConsumerGroupOffsetsResult_t {
 ///
 /// Two-level: Java's per-group future carries a whole
 /// `Map<TopicPartition, OffsetAndMetadata>`, so `_get_value(i)` hands out a
-/// borrowed [`kafka_admin_OffsetAndMetadataMap_t`] rather than a scalar.
+/// borrowed [`kafka_admin_OffsetAndMetadataMap_t`] rather than a scalar. The
+/// group ids are known at submission; each group's future is resolved on first
+/// read.
 struct ListConsumerGroupOffsetsResultInner {
     group_ids: Vec<CString>,
-    offsets: Vec<Option<OffsetAndMetadataMapInner>>,
-    errors: Vec<Option<ErrorInner>>,
+    entries: Vec<LazyKeyed<OffsetAndMetadataMapInner>>,
 }
 
-/// Flattens the per-group `listConsumerGroupOffsets` outcomes into the C handle.
-fn box_list_consumer_group_offsets_result(
-    outcomes: ListConsumerGroupOffsetsOutcomes,
-) -> *mut kafka_admin_ListConsumerGroupOffsetsResult_t {
-    let entries = sorted_entries(outcomes);
-    let mut group_ids = Vec::with_capacity(entries.len());
-    let mut offsets = Vec::with_capacity(entries.len());
-    let mut errors = Vec::with_capacity(entries.len());
-    for (group_id, outcome) in entries {
-        group_ids.push(to_cstring(&group_id));
-        match outcome {
-            Ok(group_offsets) => {
-                offsets.push(Some(OffsetAndMetadataMapInner::new(group_offsets)));
-                errors.push(None);
-            },
-            Err(e) => {
-                offsets.push(None);
-                errors.push(Some(error_inner(e)));
-            },
-        }
-    }
-    Box::into_raw(Box::new(ListConsumerGroupOffsetsResultInner { group_ids, offsets, errors }))
-        as *mut kafka_admin_ListConsumerGroupOffsetsResult_t
+/// Wraps `listConsumerGroupOffsets`' per-group futures, unresolved, as the C
+/// handle's backing state, sorted by group id.
+fn list_consumer_group_offsets_result_inner(
+    waiter: &FutureWaiter,
+    futures: Vec<(String, KafkaFuture<GroupOffsets>)>,
+) -> ListConsumerGroupOffsetsResultInner {
+    let mut futures = futures;
+    futures.sort_by(|a, b| a.0.cmp(&b.0));
+    let group_ids = futures.iter().map(|(group_id, _)| to_cstring(group_id)).collect();
+    let entries = futures
+        .into_iter()
+        .map(|(_, future)| lazy_keyed(waiter, future, OffsetAndMetadataMapInner::new))
+        .collect();
+    ListConsumerGroupOffsetsResultInner { group_ids, entries }
 }
 
 /// Casts a `*const kafka_admin_ListConsumerGroupOffsetsResult_t` to a
@@ -16308,17 +16366,17 @@ unsafe fn list_consumer_group_offsets_result_ref(
     // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
     // `list_consumer_group_offsets` call, a requirement every caller discharges through its
     // own `# Safety` (`result` must be a valid `list_consumer_group_offsets` result
-    // handle). Such a pointer is only ever produced by
-    // `Box::into_raw(Box::new(ListConsumerGroupOffsetsResultInner { .. }))` in
-    // `box_list_consumer_group_offsets_result` and cast to the opaque marker type, so
-    // casting it back yields an aligned, initialized `ListConsumerGroupOffsetsResultInner`.
-    // The `&'static` is used by each caller only for the duration of its synchronous call,
-    // during which the C caller keeps the handle alive by not yet having called
-    // `kafka_admin_ListConsumerGroupOffsetsResult_destroy`.
+    // handle). Such a pointer is only ever produced by `into_handle` in
+    // `kafka_admin_AdminClient_list_consumer_group_offsets` and cast to the opaque marker
+    // type, so casting it back yields an aligned, initialized
+    // `ListConsumerGroupOffsetsResultInner`. The `&'static` is used by each caller only for
+    // the duration of its synchronous call, during which the C caller keeps the handle
+    // alive by not yet having called `kafka_admin_ListConsumerGroupOffsetsResult_destroy`.
     unsafe { &*(result as *const ListConsumerGroupOffsetsResultInner) }
 }
 
-/// Returns the number of groups offsets were listed for.
+/// Returns the number of groups offsets were requested for. Never blocks: the
+/// groups are known when the request is submitted.
 ///
 /// # Safety
 ///
@@ -16330,15 +16388,14 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_count(
 ) -> i32 {
     // SAFETY: `list_consumer_group_offsets_result_ref` requires a non-null handle from a
     // `list_consumer_group_offsets` call; per this function's `# Safety`, `result` is a
-    // valid `list_consumer_group_offsets` result handle, i.e. one created by
-    // `Box::into_raw` in `box_list_consumer_group_offsets_result` and not yet destroyed.
-    // The reference is used only for the duration of this synchronous call, during which
-    // the C caller keeps the handle alive, and only a count is copied out.
+    // valid `list_consumer_group_offsets` result handle that has not been destroyed. The
+    // reference is used only for the duration of this synchronous call, during which the C
+    // caller keeps the handle alive, and only a count is copied out.
     unsafe { list_consumer_group_offsets_result_ref(result) }.group_ids.len() as i32
 }
 
 /// Returns the group id of the entry at `index` (borrowed), or null if out of
-/// range. Entries are sorted by group id.
+/// range. Entries are sorted by group id. Never blocks.
 ///
 /// # Safety
 ///
@@ -16351,16 +16408,20 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_get_group_id
 ) -> *const c_char {
     // SAFETY: `list_consumer_group_offsets_result_ref` requires a non-null handle from a
     // `list_consumer_group_offsets` call; per this function's `# Safety`, `result` is a
-    // valid `list_consumer_group_offsets` result handle, i.e. one created by
-    // `Box::into_raw` in `box_list_consumer_group_offsets_result` and not yet destroyed.
-    // The reference is used only for the duration of this synchronous call, during which
-    // the C caller keeps the handle alive; the returned group-id string borrows from the
-    // same allocation and is documented valid only until the handle is destroyed.
+    // valid `list_consumer_group_offsets` result handle that has not been destroyed. The
+    // reference is used only for the duration of this synchronous call, during which the C
+    // caller keeps the handle alive; the returned group-id string borrows from the same
+    // allocation and is documented valid only until the handle is destroyed.
     cstring_at(&unsafe { list_consumer_group_offsets_result_ref(result) }.group_ids, index)
 }
 
 /// Returns the group's committed offsets at `index` (borrowed), or null if the
 /// group failed or `index` is out of range. Do not destroy it.
+///
+/// **Blocks** until that group's future has resolved — Java's
+/// `partitionsToOffsetAndMetadata(groupId).get()` — but not on any other
+/// group. Never blocks for an out-of-range index. The pointer stays valid until
+/// [`kafka_admin_ListConsumerGroupOffsetsResult_destroy`].
 ///
 /// # Safety
 ///
@@ -16371,30 +16432,27 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_get_value(
     result: *const kafka_admin_ListConsumerGroupOffsetsResult_t,
     index: i32,
 ) -> *const kafka_admin_OffsetAndMetadataMap_t {
-    if index < 0 {
-        return std::ptr::null();
-    }
     // SAFETY: `list_consumer_group_offsets_result_ref` requires a non-null handle from a
     // `list_consumer_group_offsets` call; per this function's `# Safety`, `result` is a
-    // valid `list_consumer_group_offsets` result handle, i.e. one created by
-    // `Box::into_raw` in `box_list_consumer_group_offsets_result` and not yet destroyed.
-    // The reference is used only for the duration of this synchronous call, during which
-    // the C caller keeps the handle alive; the returned
-    // `kafka_admin_OffsetAndMetadataMap_t` pointer borrows from the `offsets` of the same
-    // `ListConsumerGroupOffsetsResultInner` allocation and is documented valid only until
-    // the handle is destroyed.
-    match unsafe { list_consumer_group_offsets_result_ref(result) }
-        .offsets
-        .get(index as usize)
-    {
-        Some(Some(map)) => map as *const OffsetAndMetadataMapInner as *const kafka_admin_OffsetAndMetadataMap_t,
-        _ => std::ptr::null(),
+    // valid `list_consumer_group_offsets` result handle that has not been destroyed. The
+    // reference is used only for the duration of this synchronous call, during which the C
+    // caller keeps the handle alive; the returned `kafka_admin_OffsetAndMetadataMap_t`
+    // pointer borrows an `OffsetAndMetadataMapInner` cached in the same allocation and is
+    // documented valid only until the handle is destroyed.
+    match keyed_value_at(&unsafe { list_consumer_group_offsets_result_ref(result) }.entries, index) {
+        Some(map) => map as *const OffsetAndMetadataMapInner as *const kafka_admin_OffsetAndMetadataMap_t,
+        None => std::ptr::null(),
     }
 }
 
 /// Returns the error for the entry at `index` (borrowed), or null if the
 /// group's offsets were listed successfully or `index` is out of range. Do not
 /// destroy it.
+///
+/// **Blocks** until that group's future has resolved, but not on any other
+/// group. Never blocks for an out-of-range index. A failure of the whole
+/// request is reported here for every group, as Java completes every group's
+/// future with it.
 ///
 /// # Safety
 ///
@@ -16405,23 +16463,57 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_get_error(
     result: *const kafka_admin_ListConsumerGroupOffsetsResult_t,
     index: i32,
 ) -> *const kafka_common_Error_t {
-    if index < 0 {
-        return std::ptr::null();
-    }
     // SAFETY: `list_consumer_group_offsets_result_ref` requires a non-null handle from a
     // `list_consumer_group_offsets` call; per this function's `# Safety`, `result` is a
-    // valid `list_consumer_group_offsets` result handle, i.e. one created by
-    // `Box::into_raw` in `box_list_consumer_group_offsets_result` and not yet destroyed.
-    // The reference is used only for the duration of this synchronous call, during which
-    // the C caller keeps the handle alive; any error pointer returned borrows from the same
-    // allocation and is documented valid only until the handle is destroyed.
-    match unsafe { list_consumer_group_offsets_result_ref(result) }
-        .errors
-        .get(index as usize)
-    {
-        Some(slot) => error_ptr(slot.as_ref()),
-        None => std::ptr::null(),
-    }
+    // valid `list_consumer_group_offsets` result handle that has not been destroyed. The
+    // reference is used only for the duration of this synchronous call, during which the C
+    // caller keeps the handle alive; any error pointer returned borrows an `ErrorInner`
+    // cached in the same allocation and is documented valid only until the handle is
+    // destroyed.
+    keyed_error_at(&unsafe { list_consumer_group_offsets_result_ref(result) }.entries, index)
+}
+
+/// Returns whether the future of the group at `index` has resolved — Java's
+/// `partitionsToOffsetAndMetadata(groupId).isDone()`. False if `index` is out
+/// of range. Never blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_consumer_group_offsets_with_group_specs` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_is_done(
+    result: *const kafka_admin_ListConsumerGroupOffsetsResult_t,
+    index: i32,
+) -> bool {
+    // SAFETY: `list_consumer_group_offsets_result_ref` requires a non-null handle from a
+    // `list_consumer_group_offsets` call; per this function's `# Safety`, `result` is a
+    // valid `list_consumer_group_offsets` result handle that has not been destroyed. The
+    // reference is used only for this check within the call, during which the C caller
+    // keeps the handle alive.
+    keyed_is_done_at(&unsafe { list_consumer_group_offsets_result_ref(result) }.entries, index)
+}
+
+/// Java's `all().get()`: **blocks** until every group's future has resolved,
+/// then returns null if every group's offsets were listed, or an **owned** error
+/// — free it with `kafka_common_Error_destroy` — of a failed group (the first in
+/// index order; Java leaves which one unspecified). The offsets themselves are
+/// read with [`kafka_admin_ListConsumerGroupOffsetsResult_get_value`].
+///
+/// # Safety
+///
+/// `result` must be a valid `list_consumer_group_offsets_with_group_specs` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_all(
+    result: *const kafka_admin_ListConsumerGroupOffsetsResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `list_consumer_group_offsets_result_ref` requires a non-null handle from a
+    // `list_consumer_group_offsets` call; per this function's `# Safety`, `result` is a
+    // valid `list_consumer_group_offsets` result handle that has not been destroyed. The
+    // reference is used only for the duration of this call, and the returned error is a
+    // fresh copy owned by the caller.
+    keyed_all(&unsafe { list_consumer_group_offsets_result_ref(result) }.entries)
 }
 
 /// Destroys a `list_consumer_group_offsets_with_group_specs` result handle. Safe with null
@@ -16438,33 +16530,112 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_destroy(
 ) {
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
-        // a valid `list_consumer_group_offsets` result handle: the pointer was created by
-        // `Box::into_raw(Box::new(ListConsumerGroupOffsetsResultInner { .. }))` in
-        // `box_list_consumer_group_offsets_result` and handed to C exactly once, either
-        // through `finish_sync`'s write to `*out_result` or as the owned `result` argument
-        // of the async callback. The destroy contract makes this the single, final release
-        // of that allocation; the borrowed `kafka_admin_OffsetAndMetadataMap_t` pointers,
-        // strings and error pointers obtained from it are documented valid only until this
-        // call.
+        // a valid `list_consumer_group_offsets` result handle: the
+        // `Box<ListConsumerGroupOffsetsResultInner>` leaked by `into_handle` in
+        // `kafka_admin_AdminClient_list_consumer_group_offsets` and handed to C exactly once,
+        // through `finish_sync`'s write to `*out_result`. The destroy contract makes this the
+        // single, final release of that allocation; the borrowed
+        // `kafka_admin_OffsetAndMetadataMap_t` pointers, strings and error pointers obtained
+        // from it are documented valid only until this call.
         unsafe { drop(Box::from_raw(result as *mut ListConsumerGroupOffsetsResultInner)) };
     }
+}
+
+/// The flattened outcome of the **single** future behind
+/// `alterConsumerGroupOffsets`, `deleteConsumerGroupOffsets` and
+/// `removeMembersFromConsumerGroup` (Java's `KafkaFuture<Map<K, Errors>>`):
+/// `outcome` is what Java's accessors are evaluated against, by the core
+/// result's `resolved_*` methods, and `key_errors` is each requested key's
+/// `partitionResult` / `memberResult` outcome, in the handle's index order.
+struct ConsumerGroupSingleOutcome<M> {
+    outcome: Result<M, Error>,
+    key_errors: Vec<Option<ErrorInner>>,
+}
+
+/// The core result's per-key derivation over the single future's outcome
+/// (`resolved_partition_result` / `resolved_member_result`).
+type ConsumerGroupKeyResult<R, K, M> = fn(&R, &Result<M, Error>, &K) -> Result<(), Error>;
+
+/// Evaluates `key_result` for each of `requested`, in order, against the
+/// single future's `outcome`.
+fn consumer_group_single_outcome<R, K, M>(
+    result: &R,
+    requested: &[K],
+    outcome: Result<M, Error>,
+    key_result: ConsumerGroupKeyResult<R, K, M>,
+) -> ConsumerGroupSingleOutcome<M> {
+    let key_errors = requested
+        .iter()
+        .map(|key| key_result(result, &outcome, key).err().map(error_inner))
+        .collect();
+    ConsumerGroupSingleOutcome { outcome, key_errors }
+}
+
+/// The single future `future` of `result`, flattened by
+/// [`consumer_group_single_outcome`] the first time an accessor reads it.
+fn lazy_consumer_group_single_outcome<R, K, M>(
+    waiter: &FutureWaiter,
+    result: &R,
+    future: KafkaFuture<M>,
+    requested: Vec<K>,
+    key_result: ConsumerGroupKeyResult<R, K, M>,
+) -> LazyOutcome<ConsumerGroupSingleOutcome<M>>
+where
+    R: Clone + Send + Sync + 'static,
+    K: Send + Sync + 'static,
+    M: Send + 'static,
+{
+    let result = result.clone();
+    LazyOutcome::pending(waiter, future, move |outcome| {
+        consumer_group_single_outcome(&result, &requested, outcome, key_result)
+    })
+}
+
+/// `_get_error(i)` over a single-future consumer-group result: waits for that
+/// future (never for an out-of-range `index`), then borrows the requested key's
+/// error. `count` is the number of requested keys.
+fn consumer_group_key_error_at<M>(
+    outcome: &LazyOutcome<ConsumerGroupSingleOutcome<M>>,
+    count: usize,
+    index: i32,
+) -> *const kafka_common_Error_t {
+    if index < 0 || index as usize >= count {
+        return std::ptr::null();
+    }
+    optional_error_at(&outcome.get().key_errors, index)
+}
+
+/// The requested partitions of a consumer-group offsets request, sorted by
+/// topic name then partition id — the handle's index order.
+fn sorted_consumer_group_partitions(requested: Vec<TopicPartition>) -> Vec<TopicPartition> {
+    let mut requested = requested;
+    requested.sort_by(|a, b| a.topic().cmp(b.topic()).then(a.partition().cmp(&b.partition())));
+    requested
+}
+
+/// The parallel topic / partition vectors of `requested`, for the index
+/// getters.
+fn consumer_group_partition_keys(requested: &[TopicPartition]) -> (Vec<CString>, Vec<i32>) {
+    let topics = requested.iter().map(|tp| to_cstring(tp.topic())).collect();
+    let partitions = requested.iter().map(TopicPartition::partition).collect();
+    (topics, partitions)
 }
 
 /// Opaque handle to an `AlterConsumerGroupOffsetsResult`.
 ///
 /// Java's result wraps **one** `KafkaFuture<Map<TopicPartition, Errors>>`.
-/// This handle holds that future's resolved outcome and answers Java's two
-/// accessors against it:
+/// This handle holds that future and answers Java's two accessors against it:
 /// [`kafka_admin_AlterConsumerGroupOffsetsResult_partition_result`]
 /// (`partitionResult(TopicPartition)`) and
-/// [`kafka_admin_AlterConsumerGroupOffsetsResult_all`] (`all()`). It also lists
-/// the requested partitions, sorted by topic name then partition id, each with
-/// its `partitionResult` outcome (`_count` / `_get_topic(i)` /
-/// `_get_partition(i)` / `_get_error(i)`).
+/// [`kafka_admin_AlterConsumerGroupOffsetsResult_all`] (`all()`), both of which
+/// wait for it. It also lists the requested partitions, sorted by topic name
+/// then partition id, each with its `partitionResult` outcome (`_count` /
+/// `_get_topic(i)` / `_get_partition(i)` / `_get_error(i)`).
 ///
-/// Built by both [`kafka_admin_AdminClient_alter_consumer_group_offsets`] and
-/// [`kafka_admin_AdminClient_alter_consumer_group_offsets_async`]; every
-/// function below works on a handle from either.
+/// Built by both [`kafka_admin_AdminClient_alter_consumer_group_offsets`]
+/// (unresolved) and [`kafka_admin_AdminClient_alter_consumer_group_offsets_async`]
+/// (already resolved, so nothing waits); every function below works on a handle
+/// from either.
 #[repr(C)]
 pub struct kafka_admin_AlterConsumerGroupOffsetsResult_t {
     _private: [u8; 0],
@@ -16473,41 +16644,52 @@ pub struct kafka_admin_AlterConsumerGroupOffsetsResult_t {
 /// Backing state for [`kafka_admin_AlterConsumerGroupOffsetsResult_t`].
 ///
 /// `result` and `outcome` back Java's accessors: the core result evaluates
-/// them against the resolved outcome (`resolved_partition_result` /
-/// `resolved_all`), so the Java derivation is not duplicated here. The three
-/// vectors are the requested partitions, flattened for the index getters.
-/// Java's `partitionResult(tp)` is a `KafkaFuture<Void>`, so there is no
-/// per-key value: a null `_get_error(i)` is the success signal.
+/// them against the single future's outcome (`resolved_partition_result` /
+/// `resolved_all`), so the Java derivation is not duplicated here. `topics` and
+/// `partitions` are the requested partitions, known at submission. Java's
+/// `partitionResult(tp)` is a `KafkaFuture<Void>`, so there is no per-key
+/// value: a null `_get_error(i)` is the success signal.
 struct AlterConsumerGroupOffsetsResultInner {
     result: AlterConsumerGroupOffsetsResult,
-    outcome: PartitionErrorsOutcome,
     topics: Vec<CString>,
     partitions: Vec<i32>,
-    errors: Vec<Option<ErrorInner>>,
+    outcome: LazyOutcome<ConsumerGroupSingleOutcome<HashMap<TopicPartition, Errors>>>,
 }
 
-/// Builds the backing state from a resolved `alterConsumerGroupOffsets`,
-/// deriving each requested partition's outcome through the core result's
-/// `partitionResult`.
+/// Wraps a submitted `alterConsumerGroupOffsets`' single future, unresolved,
+/// as the C handle's backing state.
 fn alter_consumer_group_offsets_result_inner(
-    (result, requested, outcome): AlterConsumerGroupOffsetsResolved,
+    waiter: &FutureWaiter,
+    result: AlterConsumerGroupOffsetsResult,
+    requested: Vec<TopicPartition>,
 ) -> AlterConsumerGroupOffsetsResultInner {
-    let per_partition: PartitionVoidOutcomes = requested
-        .into_iter()
-        .map(|tp| {
-            let partition_outcome = result.resolved_partition_result(&outcome, &tp);
-            (tp, partition_outcome)
-        })
-        .collect();
-    let (topics, partitions, errors) = flatten_partition_void_outcomes(per_partition);
-    AlterConsumerGroupOffsetsResultInner { result, outcome, topics, partitions, errors }
+    let requested = sorted_consumer_group_partitions(requested);
+    let (topics, partitions) = consumer_group_partition_keys(&requested);
+    let outcome = lazy_consumer_group_single_outcome(
+        waiter,
+        &result,
+        result.future().clone(),
+        requested,
+        AlterConsumerGroupOffsetsResult::resolved_partition_result,
+    );
+    AlterConsumerGroupOffsetsResultInner { result, topics, partitions, outcome }
 }
 
-/// Moves the backing state into the C handle.
+/// Moves an already-resolved `alterConsumerGroupOffsets` (the `_async` path)
+/// into the C handle, deriving each requested partition's outcome through the
+/// core result's `partitionResult`.
 fn box_alter_consumer_group_offsets_result(
-    inner: AlterConsumerGroupOffsetsResultInner,
+    (result, requested, outcome): AlterConsumerGroupOffsetsResolved,
 ) -> *mut kafka_admin_AlterConsumerGroupOffsetsResult_t {
-    Box::into_raw(Box::new(inner)) as *mut kafka_admin_AlterConsumerGroupOffsetsResult_t
+    let requested = sorted_consumer_group_partitions(requested);
+    let (topics, partitions) = consumer_group_partition_keys(&requested);
+    let outcome = LazyOutcome::resolved(consumer_group_single_outcome(
+        &result,
+        &requested,
+        outcome,
+        AlterConsumerGroupOffsetsResult::resolved_partition_result,
+    ));
+    into_handle(AlterConsumerGroupOffsetsResultInner { result, topics, partitions, outcome })
 }
 
 /// Casts a `*const kafka_admin_AlterConsumerGroupOffsetsResult_t` to a
@@ -16523,8 +16705,8 @@ unsafe fn alter_consumer_group_offsets_result_ref(
     // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from an
     // `alter_consumer_group_offsets` call, a requirement every caller discharges through
     // its own `# Safety` (`result` must be a valid `alter_consumer_group_offsets` result
-    // handle). Such a pointer is only ever produced by
-    // `Box::into_raw(Box::new(AlterConsumerGroupOffsetsResultInner { .. }))` in
+    // handle). Such a pointer is only ever produced by `into_handle` in
+    // `kafka_admin_AdminClient_alter_consumer_group_offsets` or in
     // `box_alter_consumer_group_offsets_result` and cast to the opaque marker type, so
     // casting it back yields an aligned, initialized
     // `AlterConsumerGroupOffsetsResultInner`. The `&'static` is used by each caller only
@@ -16556,8 +16738,10 @@ unsafe fn read_str(text: *const c_char) -> String {
     unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned()
 }
 
-/// Java's `partitionResult(TopicPartition)`: the outcome for one partition, as
-/// `partitionResult(tp).get()` reports it.
+/// Java's `partitionResult(TopicPartition).get()`: the outcome for one
+/// partition. **Blocks** until the result's single future has resolved — every
+/// partition's outcome, and `all()`'s, is derived from that one future, so they
+/// all become available at the same moment.
 ///
 /// Returns null when the partition's offset was committed. Otherwise returns
 /// an **owned** error — free it with `kafka_common_Error_destroy`:
@@ -16570,9 +16754,9 @@ unsafe fn read_str(text: *const c_char) -> String {
 ///   `IllegalArgumentException`) — including one that was never requested;
 /// - otherwise the partition's own error.
 ///
-/// The handle holds the already-resolved outcome, so this never blocks, needs
-/// no runtime and may be called from any thread — including from inside the
-/// completion callback.
+/// On a handle from the async callback the future has already resolved, so
+/// this returns at once and may be called from any thread — including from
+/// inside the completion callback.
 ///
 /// # Safety
 ///
@@ -16588,28 +16772,28 @@ pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_partition_r
     // SAFETY: `alter_consumer_group_offsets_result_ref` requires `result` to be a non-null handle
     // of the kind its `# Safety` names, which this function's `# Safety` requires of `result` (no
     // in-body null check, so the C caller's contract is the sole source). The reference is used
-    // only for the duration of this call, during which the C caller keeps the handle alive; any
-    // pointer returned borrows from the same allocation and is documented as valid until that
-    // handle is destroyed.
+    // only for the duration of this call, during which the C caller keeps the handle alive, and
+    // the returned error is a fresh copy owned by the caller.
     let inner = unsafe { alter_consumer_group_offsets_result_ref(result) };
     // SAFETY: `read_str` requires a valid, NUL-terminated C string, which this function's `#
     // Safety` requires of `topic` (a required parameter, so it is not null-checked); it is
     // copied into an owned `String` during this call.
     let tp = TopicPartition::new(unsafe { read_str(topic) }, partition);
-    void_outcome_to_error(inner.result.resolved_partition_result(&inner.outcome, &tp))
+    void_outcome_to_error(inner.result.resolved_partition_result(&inner.outcome.get().outcome, &tp))
 }
 
-/// Java's `all()`: null if every partition's offset was committed.
+/// Java's `all().get()`: **blocks** until the result's single future has
+/// resolved, then returns null if every partition's offset was committed.
 ///
 /// Otherwise returns an **owned** error — free it with
 /// `kafka_common_Error_destroy`: the whole request's error if the request
 /// failed, or else the error of a failed partition (which one is unspecified,
 /// as in Java) with the message `Failed altering group offsets for the
 /// following partitions: [<topic>-<partition>, ...]`, listing every failed
-/// partition sorted by topic name then partition id.
+/// partition sorted by topic name then partition id. With no partition
+/// requested this is the only accessor that reports a failure of the request.
 ///
-/// Never blocks and may be called from any thread, including from inside the
-/// completion callback (see
+/// On a handle from the async callback this returns at once (see
 /// [`kafka_admin_AlterConsumerGroupOffsetsResult_partition_result`]).
 ///
 /// # Safety
@@ -16623,14 +16807,34 @@ pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_all(
     // SAFETY: `alter_consumer_group_offsets_result_ref` requires `result` to be a non-null handle
     // of the kind its `# Safety` names, which this function's `# Safety` requires of `result` (no
     // in-body null check, so the C caller's contract is the sole source). The reference is used
-    // only for the duration of this call, during which the C caller keeps the handle alive; any
-    // pointer returned borrows from the same allocation and is documented as valid until that
-    // handle is destroyed.
+    // only for the duration of this call, during which the C caller keeps the handle alive, and
+    // the returned error is a fresh copy owned by the caller.
     let inner = unsafe { alter_consumer_group_offsets_result_ref(result) };
-    void_outcome_to_error(inner.result.resolved_all(&inner.outcome))
+    void_outcome_to_error(inner.result.resolved_all(&inner.outcome.get().outcome))
 }
 
-/// Returns the number of partitions in the request.
+/// Returns whether the result's single future has resolved — Java's
+/// `all().isDone()`, and equally `partitionResult(tp).isDone()` for every
+/// partition, since they are all derived from that one future. Never blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `alter_consumer_group_offsets` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_is_done(
+    result: *const kafka_admin_AlterConsumerGroupOffsetsResult_t,
+) -> bool {
+    // SAFETY: `alter_consumer_group_offsets_result_ref` requires a non-null handle from an
+    // `alter_consumer_group_offsets` call; per this function's `# Safety`, `result` is a
+    // valid `alter_consumer_group_offsets` result handle that has not been destroyed. The
+    // reference is used only for this check within the call, during which the C caller
+    // keeps the handle alive.
+    unsafe { alter_consumer_group_offsets_result_ref(result) }.outcome.is_done()
+}
+
+/// Returns the number of partitions in the request. Never blocks: the
+/// partitions are known when the request is submitted.
 ///
 /// # Safety
 ///
@@ -16642,15 +16846,14 @@ pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_count(
 ) -> i32 {
     // SAFETY: `alter_consumer_group_offsets_result_ref` requires a non-null handle from an
     // `alter_consumer_group_offsets` call; per this function's `# Safety`, `result` is a
-    // valid `alter_consumer_group_offsets` result handle, i.e. one created by
-    // `Box::into_raw` in `box_alter_consumer_group_offsets_result` and not yet destroyed.
-    // The reference is used only for the duration of this synchronous call, during which
-    // the C caller keeps the handle alive, and only a count is copied out.
+    // valid `alter_consumer_group_offsets` result handle that has not been destroyed. The
+    // reference is used only for the duration of this synchronous call, during which the C
+    // caller keeps the handle alive, and only a count is copied out.
     unsafe { alter_consumer_group_offsets_result_ref(result) }.topics.len() as i32
 }
 
 /// Returns the topic name of the entry at `index` (borrowed), or null if out of
-/// range. Entries are sorted by topic name then partition id.
+/// range. Entries are sorted by topic name then partition id. Never blocks.
 ///
 /// # Safety
 ///
@@ -16663,15 +16866,15 @@ pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_get_topic(
 ) -> *const c_char {
     // SAFETY: `alter_consumer_group_offsets_result_ref` requires a non-null handle from an
     // `alter_consumer_group_offsets` call; per this function's `# Safety`, `result` is a
-    // valid `alter_consumer_group_offsets` result handle, i.e. one created by
-    // `Box::into_raw` in `box_alter_consumer_group_offsets_result` and not yet destroyed.
-    // The reference is used only for the duration of this synchronous call, during which
-    // the C caller keeps the handle alive; the returned topic string borrows from the same
+    // valid `alter_consumer_group_offsets` result handle that has not been destroyed. The
+    // reference is used only for the duration of this synchronous call, during which the C
+    // caller keeps the handle alive; the returned topic string borrows from the same
     // allocation and is documented valid only until the handle is destroyed.
     cstring_at(&unsafe { alter_consumer_group_offsets_result_ref(result) }.topics, index)
 }
 
 /// Returns the partition id of the entry at `index`, or -1 if out of range.
+/// Never blocks.
 ///
 /// # Safety
 ///
@@ -16684,10 +16887,9 @@ pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_get_partiti
 ) -> i32 {
     // SAFETY: `alter_consumer_group_offsets_result_ref` requires a non-null handle from an
     // `alter_consumer_group_offsets` call; per this function's `# Safety`, `result` is a
-    // valid `alter_consumer_group_offsets` result handle, i.e. one created by
-    // `Box::into_raw` in `box_alter_consumer_group_offsets_result` and not yet destroyed.
-    // The reference is used only for the duration of this synchronous call, during which
-    // the C caller keeps the handle alive, and only a partition number is copied out.
+    // valid `alter_consumer_group_offsets` result handle that has not been destroyed. The
+    // reference is used only for the duration of this synchronous call, during which the C
+    // caller keeps the handle alive, and only a partition number is copied out.
     partition_at(&unsafe { alter_consumer_group_offsets_result_ref(result) }.partitions, index)
 }
 
@@ -16696,6 +16898,9 @@ pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_get_partiti
 /// range. Do not destroy it. It carries the same error
 /// [`kafka_admin_AlterConsumerGroupOffsetsResult_partition_result`] returns (as
 /// an owned copy) for that partition.
+///
+/// **Blocks** until the result's single future has resolved. Never blocks for
+/// an out-of-range index.
 ///
 /// # Safety
 ///
@@ -16708,12 +16913,13 @@ pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_get_error(
 ) -> *const kafka_common_Error_t {
     // SAFETY: `alter_consumer_group_offsets_result_ref` requires a non-null handle from an
     // `alter_consumer_group_offsets` call; per this function's `# Safety`, `result` is a
-    // valid `alter_consumer_group_offsets` result handle, i.e. one created by
-    // `Box::into_raw` in `box_alter_consumer_group_offsets_result` and not yet destroyed.
-    // The reference is used only for the duration of this synchronous call, during which
-    // the C caller keeps the handle alive; any error pointer returned borrows from the same
-    // allocation and is documented valid only until the handle is destroyed.
-    optional_error_at(&unsafe { alter_consumer_group_offsets_result_ref(result) }.errors, index)
+    // valid `alter_consumer_group_offsets` result handle that has not been destroyed. The
+    // reference is used only for the duration of this synchronous call, during which the C
+    // caller keeps the handle alive; any error pointer returned borrows from the outcome
+    // cached in the same allocation and is documented valid only until the handle is
+    // destroyed.
+    let inner = unsafe { alter_consumer_group_offsets_result_ref(result) };
+    consumer_group_key_error_at(&inner.outcome, inner.topics.len(), index)
 }
 
 /// Destroys an `alter_consumer_group_offsets` result handle. Safe with null
@@ -16730,13 +16936,14 @@ pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_destroy(
 ) {
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
-        // a valid `alter_consumer_group_offsets` result handle: the pointer was created by
-        // `Box::into_raw(Box::new(AlterConsumerGroupOffsetsResultInner { .. }))` in
-        // `box_alter_consumer_group_offsets_result` and handed to C exactly once, either
-        // through `finish_sync`'s write to `*out_result` or as the owned `result` argument
-        // of the async callback. The destroy contract makes this the single, final release
-        // of that allocation; the strings and error pointers borrowed from it are
-        // documented valid only until this call.
+        // a valid `alter_consumer_group_offsets` result handle: the
+        // `Box<AlterConsumerGroupOffsetsResultInner>` leaked by `into_handle` in
+        // `kafka_admin_AdminClient_alter_consumer_group_offsets` or in
+        // `box_alter_consumer_group_offsets_result`, and handed to C exactly once, either
+        // through `finish_sync`'s write to `*out_result` or as the owned `result` argument of
+        // the async callback. The destroy contract makes this the single, final release of
+        // that allocation; the strings and error pointers borrowed from it are documented
+        // valid only until this call.
         unsafe { drop(Box::from_raw(result as *mut AlterConsumerGroupOffsetsResultInner)) };
     }
 }
@@ -16744,18 +16951,19 @@ pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_destroy(
 /// Opaque handle to a `DeleteConsumerGroupOffsetsResult`.
 ///
 /// Java's result wraps **one** `KafkaFuture<Map<TopicPartition, Errors>>` plus
-/// the set of requested partitions. This handle holds that future's resolved
-/// outcome and answers Java's two accessors against it:
+/// the set of requested partitions. This handle holds that future and answers
+/// Java's two accessors against it:
 /// [`kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result`]
 /// (`partitionResult(TopicPartition)`) and
-/// [`kafka_admin_DeleteConsumerGroupOffsetsResult_all`] (`all()`). It also
-/// lists the requested partitions, sorted by topic name then partition id, each
-/// with its `partitionResult` outcome (`_count` / `_get_topic(i)` /
-/// `_get_partition(i)` / `_get_error(i)`).
+/// [`kafka_admin_DeleteConsumerGroupOffsetsResult_all`] (`all()`), both of which
+/// wait for it. It also lists the requested partitions, sorted by topic name
+/// then partition id, each with its `partitionResult` outcome (`_count` /
+/// `_get_topic(i)` / `_get_partition(i)` / `_get_error(i)`).
 ///
-/// Built by both [`kafka_admin_AdminClient_delete_consumer_group_offsets`] and
-/// [`kafka_admin_AdminClient_delete_consumer_group_offsets_async`]; every
-/// function below works on a handle from either.
+/// Built by both [`kafka_admin_AdminClient_delete_consumer_group_offsets`]
+/// (unresolved) and [`kafka_admin_AdminClient_delete_consumer_group_offsets_async`]
+/// (already resolved, so nothing waits); every function below works on a handle
+/// from either.
 #[repr(C)]
 pub struct kafka_admin_DeleteConsumerGroupOffsetsResult_t {
     _private: [u8; 0],
@@ -16765,34 +16973,45 @@ pub struct kafka_admin_DeleteConsumerGroupOffsetsResult_t {
 /// shape as [`AlterConsumerGroupOffsetsResultInner`].
 struct DeleteConsumerGroupOffsetsResultInner {
     result: DeleteConsumerGroupOffsetsResult,
-    outcome: PartitionErrorsOutcome,
     topics: Vec<CString>,
     partitions: Vec<i32>,
-    errors: Vec<Option<ErrorInner>>,
+    outcome: LazyOutcome<ConsumerGroupSingleOutcome<HashMap<TopicPartition, Errors>>>,
 }
 
-/// Builds the backing state from a resolved `deleteConsumerGroupOffsets`,
-/// deriving each requested partition's outcome through the core result's
-/// `partitionResult`.
+/// Wraps a submitted `deleteConsumerGroupOffsets`' single future, unresolved,
+/// as the C handle's backing state.
 fn delete_consumer_group_offsets_result_inner(
-    (result, requested, outcome): DeleteConsumerGroupOffsetsResolved,
+    waiter: &FutureWaiter,
+    result: DeleteConsumerGroupOffsetsResult,
+    requested: Vec<TopicPartition>,
 ) -> DeleteConsumerGroupOffsetsResultInner {
-    let per_partition: PartitionVoidOutcomes = requested
-        .into_iter()
-        .map(|tp| {
-            let partition_outcome = result.resolved_partition_result(&outcome, &tp);
-            (tp, partition_outcome)
-        })
-        .collect();
-    let (topics, partitions, errors) = flatten_partition_void_outcomes(per_partition);
-    DeleteConsumerGroupOffsetsResultInner { result, outcome, topics, partitions, errors }
+    let requested = sorted_consumer_group_partitions(requested);
+    let (topics, partitions) = consumer_group_partition_keys(&requested);
+    let outcome = lazy_consumer_group_single_outcome(
+        waiter,
+        &result,
+        result.future().clone(),
+        requested,
+        DeleteConsumerGroupOffsetsResult::resolved_partition_result,
+    );
+    DeleteConsumerGroupOffsetsResultInner { result, topics, partitions, outcome }
 }
 
-/// Moves the backing state into the C handle.
+/// Moves an already-resolved `deleteConsumerGroupOffsets` (the `_async` path)
+/// into the C handle, deriving each requested partition's outcome through the
+/// core result's `partitionResult`.
 fn box_delete_consumer_group_offsets_result(
-    inner: DeleteConsumerGroupOffsetsResultInner,
+    (result, requested, outcome): DeleteConsumerGroupOffsetsResolved,
 ) -> *mut kafka_admin_DeleteConsumerGroupOffsetsResult_t {
-    Box::into_raw(Box::new(inner)) as *mut kafka_admin_DeleteConsumerGroupOffsetsResult_t
+    let requested = sorted_consumer_group_partitions(requested);
+    let (topics, partitions) = consumer_group_partition_keys(&requested);
+    let outcome = LazyOutcome::resolved(consumer_group_single_outcome(
+        &result,
+        &requested,
+        outcome,
+        DeleteConsumerGroupOffsetsResult::resolved_partition_result,
+    ));
+    into_handle(DeleteConsumerGroupOffsetsResultInner { result, topics, partitions, outcome })
 }
 
 /// Casts a `*const kafka_admin_DeleteConsumerGroupOffsetsResult_t` to a
@@ -16808,8 +17027,8 @@ unsafe fn delete_consumer_group_offsets_result_ref(
     // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
     // `delete_consumer_group_offsets` call, a requirement every caller discharges through
     // its own `# Safety` (`result` must be a valid `delete_consumer_group_offsets` result
-    // handle). Such a pointer is only ever produced by
-    // `Box::into_raw(Box::new(DeleteConsumerGroupOffsetsResultInner { .. }))` in
+    // handle). Such a pointer is only ever produced by `into_handle` in
+    // `kafka_admin_AdminClient_delete_consumer_group_offsets` or in
     // `box_delete_consumer_group_offsets_result` and cast to the opaque marker type, so
     // casting it back yields an aligned, initialized
     // `DeleteConsumerGroupOffsetsResultInner`. The `&'static` is used by each caller only
@@ -16819,16 +17038,17 @@ unsafe fn delete_consumer_group_offsets_result_ref(
     unsafe { &*(result as *const DeleteConsumerGroupOffsetsResultInner) }
 }
 
-/// Java's `partitionResult(TopicPartition)`: the outcome for one partition, as
-/// `partitionResult(tp).get()` reports it.
+/// Java's `partitionResult(TopicPartition).get()`: the outcome for one
+/// partition.
 ///
 /// Returns null when the partition's offsets were deleted. Otherwise returns
 /// an **owned** error — free it with `kafka_common_Error_destroy`:
 ///
 /// - an illegal-argument error `Partition <topic>-<partition> was not included
 ///   in the original request` for a partition that was not requested. This is
-///   checked first, whatever the outcome, because Java throws it synchronously
-///   from `partitionResult` before looking at the future;
+///   checked first, whatever the outcome, and **never blocks**, because Java
+///   throws it synchronously from `partitionResult` before looking at the
+///   future;
 /// - the whole request's error, if the request failed (only possible on a
 ///   handle from the synchronous entry point: the async callback delivers a
 ///   whole-request failure as its `error` argument instead of a handle);
@@ -16837,9 +17057,11 @@ unsafe fn delete_consumer_group_offsets_result_ref(
 ///   partition absent from the response (Java's `getSubLevelError`);
 /// - otherwise the partition's own error.
 ///
-/// The handle holds the already-resolved outcome, so this never blocks, needs
-/// no runtime and may be called from any thread — including from inside the
-/// completion callback.
+/// For a requested partition this **blocks** until the result's single future
+/// has resolved — every partition's outcome, and `all()`'s, is derived from
+/// that one future. On a handle from the async callback the future has already
+/// resolved, so this returns at once and may be called from any thread —
+/// including from inside the completion callback.
 ///
 /// # Safety
 ///
@@ -16855,28 +17077,34 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_partition_
     // SAFETY: `delete_consumer_group_offsets_result_ref` requires `result` to be a non-null handle
     // of the kind its `# Safety` names, which this function's `# Safety` requires of `result` (no
     // in-body null check, so the C caller's contract is the sole source). The reference is used
-    // only for the duration of this call, during which the C caller keeps the handle alive; any
-    // pointer returned borrows from the same allocation and is documented as valid until that
-    // handle is destroyed.
+    // only for the duration of this call, during which the C caller keeps the handle alive, and
+    // the returned error is a fresh copy owned by the caller.
     let inner = unsafe { delete_consumer_group_offsets_result_ref(result) };
     // SAFETY: `read_str` requires a valid, NUL-terminated C string, which this function's `#
     // Safety` requires of `topic` (a required parameter, so it is not null-checked); it is
     // copied into an owned `String` during this call.
     let tp = TopicPartition::new(unsafe { read_str(topic) }, partition);
-    void_outcome_to_error(inner.result.resolved_partition_result(&inner.outcome, &tp))
+    // Java's synchronous guard, through the core accessor that throws it: an
+    // unrequested partition is rejected without waiting for the future.
+    if let Err(e) = inner.result.partition_result(&tp) {
+        return box_error(e);
+    }
+    void_outcome_to_error(inner.result.resolved_partition_result(&inner.outcome.get().outcome, &tp))
 }
 
-/// Java's `all()`: null if every requested partition's offsets were deleted.
+/// Java's `all().get()`: **blocks** until the result's single future has
+/// resolved, then returns null if every requested partition's offsets were
+/// deleted.
 ///
 /// Otherwise returns an **owned** error — free it with
 /// `kafka_common_Error_destroy`: the whole request's error if the request
 /// failed, or else the outcome
 /// [`kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result`] gives for
 /// the first failing requested partition, in topic-name-then-partition-id order
-/// (Java iterates the requested set in unspecified order).
+/// (Java iterates the requested set in unspecified order). With no partition
+/// requested this is the only accessor that reports a failure of the request.
 ///
-/// Never blocks and may be called from any thread, including from inside the
-/// completion callback.
+/// On a handle from the async callback this returns at once.
 ///
 /// # Safety
 ///
@@ -16889,14 +17117,35 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_all(
     // SAFETY: `delete_consumer_group_offsets_result_ref` requires `result` to be a non-null handle
     // of the kind its `# Safety` names, which this function's `# Safety` requires of `result` (no
     // in-body null check, so the C caller's contract is the sole source). The reference is used
-    // only for the duration of this call, during which the C caller keeps the handle alive; any
-    // pointer returned borrows from the same allocation and is documented as valid until that
-    // handle is destroyed.
+    // only for the duration of this call, during which the C caller keeps the handle alive, and
+    // the returned error is a fresh copy owned by the caller.
     let inner = unsafe { delete_consumer_group_offsets_result_ref(result) };
-    void_outcome_to_error(inner.result.resolved_all(&inner.outcome))
+    void_outcome_to_error(inner.result.resolved_all(&inner.outcome.get().outcome))
 }
 
-/// Returns the number of partitions in the request.
+/// Returns whether the result's single future has resolved — Java's
+/// `all().isDone()`, and equally `partitionResult(tp).isDone()` for every
+/// requested partition, since they are all derived from that one future. Never
+/// blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_consumer_group_offsets` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_is_done(
+    result: *const kafka_admin_DeleteConsumerGroupOffsetsResult_t,
+) -> bool {
+    // SAFETY: `delete_consumer_group_offsets_result_ref` requires a non-null handle from a
+    // `delete_consumer_group_offsets` call; per this function's `# Safety`, `result` is a
+    // valid `delete_consumer_group_offsets` result handle that has not been destroyed. The
+    // reference is used only for this check within the call, during which the C caller
+    // keeps the handle alive.
+    unsafe { delete_consumer_group_offsets_result_ref(result) }.outcome.is_done()
+}
+
+/// Returns the number of partitions in the request. Never blocks: the
+/// partitions are known when the request is submitted.
 ///
 /// # Safety
 ///
@@ -16908,15 +17157,14 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_count(
 ) -> i32 {
     // SAFETY: `delete_consumer_group_offsets_result_ref` requires a non-null handle from a
     // `delete_consumer_group_offsets` call; per this function's `# Safety`, `result` is a
-    // valid `delete_consumer_group_offsets` result handle, i.e. one created by
-    // `Box::into_raw` in `box_delete_consumer_group_offsets_result` and not yet destroyed.
-    // The reference is used only for the duration of this synchronous call, during which
-    // the C caller keeps the handle alive, and only a count is copied out.
+    // valid `delete_consumer_group_offsets` result handle that has not been destroyed. The
+    // reference is used only for the duration of this synchronous call, during which the C
+    // caller keeps the handle alive, and only a count is copied out.
     unsafe { delete_consumer_group_offsets_result_ref(result) }.topics.len() as i32
 }
 
 /// Returns the topic name of the entry at `index` (borrowed), or null if out of
-/// range. Entries are sorted by topic name then partition id.
+/// range. Entries are sorted by topic name then partition id. Never blocks.
 ///
 /// # Safety
 ///
@@ -16929,15 +17177,15 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_get_topic(
 ) -> *const c_char {
     // SAFETY: `delete_consumer_group_offsets_result_ref` requires a non-null handle from a
     // `delete_consumer_group_offsets` call; per this function's `# Safety`, `result` is a
-    // valid `delete_consumer_group_offsets` result handle, i.e. one created by
-    // `Box::into_raw` in `box_delete_consumer_group_offsets_result` and not yet destroyed.
-    // The reference is used only for the duration of this synchronous call, during which
-    // the C caller keeps the handle alive; the returned topic string borrows from the same
+    // valid `delete_consumer_group_offsets` result handle that has not been destroyed. The
+    // reference is used only for the duration of this synchronous call, during which the C
+    // caller keeps the handle alive; the returned topic string borrows from the same
     // allocation and is documented valid only until the handle is destroyed.
     cstring_at(&unsafe { delete_consumer_group_offsets_result_ref(result) }.topics, index)
 }
 
 /// Returns the partition id of the entry at `index`, or -1 if out of range.
+/// Never blocks.
 ///
 /// # Safety
 ///
@@ -16950,10 +17198,9 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_get_partit
 ) -> i32 {
     // SAFETY: `delete_consumer_group_offsets_result_ref` requires a non-null handle from a
     // `delete_consumer_group_offsets` call; per this function's `# Safety`, `result` is a
-    // valid `delete_consumer_group_offsets` result handle, i.e. one created by
-    // `Box::into_raw` in `box_delete_consumer_group_offsets_result` and not yet destroyed.
-    // The reference is used only for the duration of this synchronous call, during which
-    // the C caller keeps the handle alive, and only a partition number is copied out.
+    // valid `delete_consumer_group_offsets` result handle that has not been destroyed. The
+    // reference is used only for the duration of this synchronous call, during which the C
+    // caller keeps the handle alive, and only a partition number is copied out.
     partition_at(&unsafe { delete_consumer_group_offsets_result_ref(result) }.partitions, index)
 }
 
@@ -16962,6 +17209,9 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_get_partit
 /// range. Do not destroy it. It carries the same error
 /// [`kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result`] returns
 /// (as an owned copy) for that partition.
+///
+/// **Blocks** until the result's single future has resolved. Never blocks for
+/// an out-of-range index.
 ///
 /// # Safety
 ///
@@ -16974,12 +17224,13 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_get_error(
 ) -> *const kafka_common_Error_t {
     // SAFETY: `delete_consumer_group_offsets_result_ref` requires a non-null handle from a
     // `delete_consumer_group_offsets` call; per this function's `# Safety`, `result` is a
-    // valid `delete_consumer_group_offsets` result handle, i.e. one created by
-    // `Box::into_raw` in `box_delete_consumer_group_offsets_result` and not yet destroyed.
-    // The reference is used only for the duration of this synchronous call, during which
-    // the C caller keeps the handle alive; any error pointer returned borrows from the same
-    // allocation and is documented valid only until the handle is destroyed.
-    optional_error_at(&unsafe { delete_consumer_group_offsets_result_ref(result) }.errors, index)
+    // valid `delete_consumer_group_offsets` result handle that has not been destroyed. The
+    // reference is used only for the duration of this synchronous call, during which the C
+    // caller keeps the handle alive; any error pointer returned borrows from the outcome
+    // cached in the same allocation and is documented valid only until the handle is
+    // destroyed.
+    let inner = unsafe { delete_consumer_group_offsets_result_ref(result) };
+    consumer_group_key_error_at(&inner.outcome, inner.topics.len(), index)
 }
 
 /// Destroys a `delete_consumer_group_offsets` result handle. Safe with null
@@ -16996,18 +17247,21 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(
 ) {
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
-        // a valid `delete_consumer_group_offsets` result handle: the pointer was created by
-        // `Box::into_raw(Box::new(DeleteConsumerGroupOffsetsResultInner { .. }))` in
-        // `box_delete_consumer_group_offsets_result` and handed to C exactly once, either
-        // through `finish_sync`'s write to `*out_result` or as the owned `result` argument
-        // of the async callback. The destroy contract makes this the single, final release
-        // of that allocation; the strings and error pointers borrowed from it are
-        // documented valid only until this call.
+        // a valid `delete_consumer_group_offsets` result handle: the
+        // `Box<DeleteConsumerGroupOffsetsResultInner>` leaked by `into_handle` in
+        // `kafka_admin_AdminClient_delete_consumer_group_offsets` or in
+        // `box_delete_consumer_group_offsets_result`, and handed to C exactly once, either
+        // through `finish_sync`'s write to `*out_result` or as the owned `result` argument of
+        // the async callback. The destroy contract makes this the single, final release of
+        // that allocation; the strings and error pointers borrowed from it are documented
+        // valid only until this call.
         unsafe { drop(Box::from_raw(result as *mut DeleteConsumerGroupOffsetsResultInner)) };
     }
 }
 
-/// Opaque handle to a flattened `DeleteConsumerGroupsResult`, keyed by group id.
+/// Opaque handle to a `DeleteConsumerGroupsResult`, keyed by group id: one
+/// future per requested group (Java's `deletedGroups()`), read by the
+/// accessors below.
 #[repr(C)]
 pub struct kafka_admin_DeleteConsumerGroupsResult_t {
     _private: [u8; 0],
@@ -17016,17 +17270,27 @@ pub struct kafka_admin_DeleteConsumerGroupsResult_t {
 /// Backing state for [`kafka_admin_DeleteConsumerGroupsResult_t`].
 ///
 /// Java's `deletedGroups()` is `Map<String, KafkaFuture<Void>>`, so there is no
-/// per-key value: a null `_get_error(i)` is the success signal.
+/// per-key value: a null `_get_error(i)` is the success signal. The group ids
+/// are known at submission; each group's future is resolved on first read.
 struct DeleteConsumerGroupsResultInner {
     group_ids: Vec<CString>,
-    errors: Vec<Option<ErrorInner>>,
+    entries: Vec<LazyKeyed<()>>,
 }
 
-/// Flattens the per-group `deleteConsumerGroups` outcomes into the C handle.
-fn box_delete_consumer_groups_result(outcomes: GroupVoidOutcomes) -> *mut kafka_admin_DeleteConsumerGroupsResult_t {
-    let (group_ids, errors) = flatten_keyed_void_outcomes(outcomes);
-    Box::into_raw(Box::new(DeleteConsumerGroupsResultInner { group_ids, errors }))
-        as *mut kafka_admin_DeleteConsumerGroupsResult_t
+/// Wraps `deleteConsumerGroups`' per-group futures, unresolved, as the C
+/// handle's backing state, sorted by group id.
+fn delete_consumer_groups_result_inner(
+    waiter: &FutureWaiter,
+    futures: Vec<(String, KafkaFuture<()>)>,
+) -> DeleteConsumerGroupsResultInner {
+    let mut futures = futures;
+    futures.sort_by(|a, b| a.0.cmp(&b.0));
+    let group_ids = futures.iter().map(|(group_id, _)| to_cstring(group_id)).collect();
+    let entries = futures
+        .into_iter()
+        .map(|(_, future)| lazy_keyed(waiter, future, |()| ()))
+        .collect();
+    DeleteConsumerGroupsResultInner { group_ids, entries }
 }
 
 /// Casts a `*const kafka_admin_DeleteConsumerGroupsResult_t` to a reference.
@@ -17040,17 +17304,17 @@ unsafe fn delete_consumer_groups_result_ref(
     // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
     // `delete_consumer_groups` call, a requirement every caller discharges through its own
     // `# Safety` (`result` must be a valid `delete_consumer_groups` result handle). Such a
-    // pointer is only ever produced by
-    // `Box::into_raw(Box::new(DeleteConsumerGroupsResultInner { .. }))` in
-    // `box_delete_consumer_groups_result` and cast to the opaque marker type, so casting it
-    // back yields an aligned, initialized `DeleteConsumerGroupsResultInner`. The `&'static`
-    // is used by each caller only for the duration of its synchronous call, during which
-    // the C caller keeps the handle alive by not yet having called
+    // pointer is only ever produced by `into_handle` in
+    // `kafka_admin_AdminClient_delete_consumer_groups` and cast to the opaque marker type,
+    // so casting it back yields an aligned, initialized `DeleteConsumerGroupsResultInner`.
+    // The `&'static` is used by each caller only for the duration of its synchronous call,
+    // during which the C caller keeps the handle alive by not yet having called
     // `kafka_admin_DeleteConsumerGroupsResult_destroy`.
     unsafe { &*(result as *const DeleteConsumerGroupsResultInner) }
 }
 
-/// Returns the number of groups a deletion was attempted for.
+/// Returns the number of groups a deletion was requested for. Never blocks: the
+/// groups are known when the request is submitted.
 ///
 /// # Safety
 ///
@@ -17062,15 +17326,14 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_count(
 ) -> i32 {
     // SAFETY: `delete_consumer_groups_result_ref` requires a non-null handle from a
     // `delete_consumer_groups` call; per this function's `# Safety`, `result` is a valid
-    // `delete_consumer_groups` result handle, i.e. one created by `Box::into_raw` in
-    // `box_delete_consumer_groups_result` and not yet destroyed. The reference is used only
-    // for the duration of this synchronous call, during which the C caller keeps the handle
-    // alive, and only a count is copied out.
+    // `delete_consumer_groups` result handle that has not been destroyed. The reference is
+    // used only for the duration of this synchronous call, during which the C caller keeps
+    // the handle alive, and only a count is copied out.
     unsafe { delete_consumer_groups_result_ref(result) }.group_ids.len() as i32
 }
 
 /// Returns the group id of the entry at `index` (borrowed), or null if out of
-/// range. Entries are sorted by group id.
+/// range. Entries are sorted by group id. Never blocks.
 ///
 /// # Safety
 ///
@@ -17083,16 +17346,23 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_get_group_id(
 ) -> *const c_char {
     // SAFETY: `delete_consumer_groups_result_ref` requires a non-null handle from a
     // `delete_consumer_groups` call; per this function's `# Safety`, `result` is a valid
-    // `delete_consumer_groups` result handle, i.e. one created by `Box::into_raw` in
-    // `box_delete_consumer_groups_result` and not yet destroyed. The reference is used only
-    // for the duration of this synchronous call, during which the C caller keeps the handle
-    // alive; the returned group-id string borrows from the same allocation and is
-    // documented valid only until the handle is destroyed.
+    // `delete_consumer_groups` result handle that has not been destroyed. The reference is
+    // used only for the duration of this synchronous call, during which the C caller keeps
+    // the handle alive; the returned group-id string borrows from the same allocation and
+    // is documented valid only until the handle is destroyed.
     cstring_at(&unsafe { delete_consumer_groups_result_ref(result) }.group_ids, index)
 }
 
 /// Returns the error for the entry at `index` (borrowed), or null if the group
 /// was deleted successfully or `index` is out of range. Do not destroy it.
+///
+/// **Blocks** until that group's future has resolved — Java's
+/// `deletedGroups().get(groupId).get()` — but not on any other group. Never
+/// blocks for an out-of-range index. A failure of the whole request is reported
+/// here for every group, as Java completes every group's future with it.
+///
+/// There is no `_get_value`: Java's per-group future is `KafkaFuture<Void>`,
+/// so a null error *is* the success value.
 ///
 /// # Safety
 ///
@@ -17105,12 +17375,53 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_get_error(
 ) -> *const kafka_common_Error_t {
     // SAFETY: `delete_consumer_groups_result_ref` requires a non-null handle from a
     // `delete_consumer_groups` call; per this function's `# Safety`, `result` is a valid
-    // `delete_consumer_groups` result handle, i.e. one created by `Box::into_raw` in
-    // `box_delete_consumer_groups_result` and not yet destroyed. The reference is used only
-    // for the duration of this synchronous call, during which the C caller keeps the handle
-    // alive; any error pointer returned borrows from the same allocation and is documented
-    // valid only until the handle is destroyed.
-    optional_error_at(&unsafe { delete_consumer_groups_result_ref(result) }.errors, index)
+    // `delete_consumer_groups` result handle that has not been destroyed. The reference is
+    // used only for the duration of this synchronous call, during which the C caller keeps
+    // the handle alive; any error pointer returned borrows an `ErrorInner` cached in the
+    // same allocation and is documented valid only until the handle is destroyed.
+    keyed_error_at(&unsafe { delete_consumer_groups_result_ref(result) }.entries, index)
+}
+
+/// Returns whether the future of the group at `index` has resolved — Java's
+/// `deletedGroups().get(groupId).isDone()`. False if `index` is out of range.
+/// Never blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_consumer_groups` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_is_done(
+    result: *const kafka_admin_DeleteConsumerGroupsResult_t,
+    index: i32,
+) -> bool {
+    // SAFETY: `delete_consumer_groups_result_ref` requires a non-null handle from a
+    // `delete_consumer_groups` call; per this function's `# Safety`, `result` is a valid
+    // `delete_consumer_groups` result handle that has not been destroyed. The reference is
+    // used only for this check within the call, during which the C caller keeps the handle
+    // alive.
+    keyed_is_done_at(&unsafe { delete_consumer_groups_result_ref(result) }.entries, index)
+}
+
+/// Java's `all().get()`: **blocks** until every group's future has resolved,
+/// then returns null if every group was deleted, or an **owned** error — free it
+/// with `kafka_common_Error_destroy` — of a failed group (the first in index
+/// order; Java leaves which one unspecified).
+///
+/// # Safety
+///
+/// `result` must be a valid `delete_consumer_groups` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_all(
+    result: *const kafka_admin_DeleteConsumerGroupsResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `delete_consumer_groups_result_ref` requires a non-null handle from a
+    // `delete_consumer_groups` call; per this function's `# Safety`, `result` is a valid
+    // `delete_consumer_groups` result handle that has not been destroyed. The reference is
+    // used only for the duration of this call, and the returned error is a fresh copy owned
+    // by the caller.
+    keyed_all(&unsafe { delete_consumer_groups_result_ref(result) }.entries)
 }
 
 /// Destroys a `delete_consumer_groups` result handle. Safe with null (no-op).
@@ -17125,13 +17436,12 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_destroy(
 ) {
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
-        // a valid `delete_consumer_groups` result handle: the pointer was created by
-        // `Box::into_raw(Box::new(DeleteConsumerGroupsResultInner { .. }))` in
-        // `box_delete_consumer_groups_result` and handed to C exactly once, either through
-        // `finish_sync`'s write to `*out_result` or as the owned `result` argument of the
-        // async callback. The destroy contract makes this the single, final release of that
-        // allocation; the strings and error pointers borrowed from it are documented valid
-        // only until this call.
+        // a valid `delete_consumer_groups` result handle: the
+        // `Box<DeleteConsumerGroupsResultInner>` leaked by `into_handle` in
+        // `kafka_admin_AdminClient_delete_consumer_groups` and handed to C exactly once,
+        // through `finish_sync`'s write to `*out_result`. The destroy contract makes this the
+        // single, final release of that allocation; the strings and error pointers borrowed
+        // from it are documented valid only until this call.
         unsafe { drop(Box::from_raw(result as *mut DeleteConsumerGroupsResultInner)) };
     }
 }
@@ -17140,18 +17450,20 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_destroy(
 ///
 /// Java's result wraps **one** `KafkaFuture<Map<MemberIdentity, Errors>>` plus
 /// the set of requested members (empty in `removeAll` mode). This handle holds
-/// that future's resolved outcome and answers Java's two accessors against it:
+/// that future and answers Java's two accessors against it:
 /// [`kafka_admin_RemoveMembersFromConsumerGroupResult_member_result`]
 /// (`memberResult(MemberToRemove)`) and
-/// [`kafka_admin_RemoveMembersFromConsumerGroupResult_all`] (`all()`). It also
-/// lists the requested members by group instance id, sorted, each with its
-/// `memberResult` outcome (`_count` / `_get_group_instance_id(i)` /
-/// `_get_error(i)`); that list is empty in `removeAll` mode, where Java refuses
-/// `memberResult` altogether.
+/// [`kafka_admin_RemoveMembersFromConsumerGroupResult_all`] (`all()`), both of
+/// which wait for it. It also lists the requested members by group instance id,
+/// sorted, each with its `memberResult` outcome (`_count` /
+/// `_get_group_instance_id(i)` / `_get_error(i)`); that list is empty in
+/// `removeAll` mode, where Java refuses `memberResult` altogether.
 ///
 /// Built by both [`kafka_admin_AdminClient_remove_members_from_consumer_group`]
-/// and [`kafka_admin_AdminClient_remove_members_from_consumer_group_async`];
-/// every function below works on a handle from either.
+/// (unresolved) and
+/// [`kafka_admin_AdminClient_remove_members_from_consumer_group_async`] (already
+/// resolved, so nothing waits); every function below works on a handle from
+/// either.
 #[repr(C)]
 pub struct kafka_admin_RemoveMembersFromConsumerGroupResult_t {
     _private: [u8; 0],
@@ -17161,39 +17473,56 @@ pub struct kafka_admin_RemoveMembersFromConsumerGroupResult_t {
 ///
 /// `result` and `outcome` back Java's accessors through the core result's
 /// `resolved_member_result` / `resolved_all`, so the Java derivation is not
-/// duplicated here. The two vectors are the requested members, flattened for
-/// the index getters. Java's `memberResult(MemberToRemove)` is a
-/// `KafkaFuture<Void>`, so there is no per-key value: a null `_get_error(i)` is
-/// the success signal.
+/// duplicated here. `group_instance_ids` are the requested members, known at
+/// submission. Java's `memberResult(MemberToRemove)` is a `KafkaFuture<Void>`,
+/// so there is no per-key value: a null `_get_error(i)` is the success signal.
 struct RemoveMembersFromConsumerGroupResultInner {
     result: RemoveMembersFromConsumerGroupResult,
-    outcome: MemberErrorsOutcome,
     group_instance_ids: Vec<CString>,
-    errors: Vec<Option<ErrorInner>>,
+    outcome: LazyOutcome<ConsumerGroupSingleOutcome<HashMap<MemberIdentity, Errors>>>,
 }
 
-/// Builds the backing state from a resolved `removeMembersFromConsumerGroup`,
-/// deriving each requested member's outcome through the core result's
-/// `memberResult`.
+/// The requested members, sorted by group instance id — the handle's index
+/// order — and their ids for the index getters.
+fn sorted_members_to_remove(requested: Vec<MemberToRemove>) -> (Vec<MemberToRemove>, Vec<CString>) {
+    let mut requested = requested;
+    requested.sort_by(|a, b| a.group_instance_id().cmp(b.group_instance_id()));
+    let group_instance_ids = requested.iter().map(|member| to_cstring(member.group_instance_id())).collect();
+    (requested, group_instance_ids)
+}
+
+/// Wraps a submitted `removeMembersFromConsumerGroup`'s single future,
+/// unresolved, as the C handle's backing state.
 fn remove_members_from_consumer_group_result_inner(
-    (result, requested, outcome): RemoveMembersFromConsumerGroupResolved,
+    waiter: &FutureWaiter,
+    result: RemoveMembersFromConsumerGroupResult,
+    requested: Vec<MemberToRemove>,
 ) -> RemoveMembersFromConsumerGroupResultInner {
-    let per_member: GroupVoidOutcomes = requested
-        .iter()
-        .map(|member| {
-            let member_outcome = result.resolved_member_result(&outcome, member);
-            (member.group_instance_id().to_string(), member_outcome)
-        })
-        .collect();
-    let (group_instance_ids, errors) = flatten_keyed_void_outcomes(per_member);
-    RemoveMembersFromConsumerGroupResultInner { result, outcome, group_instance_ids, errors }
+    let (requested, group_instance_ids) = sorted_members_to_remove(requested);
+    let outcome = lazy_consumer_group_single_outcome(
+        waiter,
+        &result,
+        result.future().clone(),
+        requested,
+        RemoveMembersFromConsumerGroupResult::resolved_member_result,
+    );
+    RemoveMembersFromConsumerGroupResultInner { result, group_instance_ids, outcome }
 }
 
-/// Moves the backing state into the C handle.
+/// Moves an already-resolved `removeMembersFromConsumerGroup` (the `_async`
+/// path) into the C handle, deriving each requested member's outcome through
+/// the core result's `memberResult`.
 fn box_remove_members_from_consumer_group_result(
-    inner: RemoveMembersFromConsumerGroupResultInner,
+    (result, requested, outcome): RemoveMembersFromConsumerGroupResolved,
 ) -> *mut kafka_admin_RemoveMembersFromConsumerGroupResult_t {
-    Box::into_raw(Box::new(inner)) as *mut kafka_admin_RemoveMembersFromConsumerGroupResult_t
+    let (requested, group_instance_ids) = sorted_members_to_remove(requested);
+    let outcome = LazyOutcome::resolved(consumer_group_single_outcome(
+        &result,
+        &requested,
+        outcome,
+        RemoveMembersFromConsumerGroupResult::resolved_member_result,
+    ));
+    into_handle(RemoveMembersFromConsumerGroupResultInner { result, group_instance_ids, outcome })
 }
 
 /// Casts a `*const kafka_admin_RemoveMembersFromConsumerGroupResult_t` to a
@@ -17210,8 +17539,8 @@ unsafe fn remove_members_result_ref(
     // `remove_members_from_consumer_group` call, a requirement every caller discharges
     // through its own `# Safety` (`result` must be a valid
     // `remove_members_from_consumer_group` result handle). Such a pointer is only ever
-    // produced by `Box::into_raw(Box::new(RemoveMembersFromConsumerGroupResultInner { ..
-    // }))` in `box_remove_members_from_consumer_group_result` and cast to the opaque marker
+    // produced by `into_handle` in `kafka_admin_AdminClient_remove_members_from_consumer_group`
+    // or in `box_remove_members_from_consumer_group_result` and cast to the opaque marker
     // type, so casting it back yields an aligned, initialized
     // `RemoveMembersFromConsumerGroupResultInner`. The `&'static` is used by each caller
     // only for the duration of its synchronous call, during which the C caller keeps the
@@ -17220,9 +17549,8 @@ unsafe fn remove_members_result_ref(
     unsafe { &*(result as *const RemoveMembersFromConsumerGroupResultInner) }
 }
 
-/// Java's `memberResult(MemberToRemove)` for the member whose
-/// `group.instance.id` is `group_instance_id`: the outcome for that member, as
-/// `memberResult(member).get()` reports it.
+/// Java's `memberResult(MemberToRemove).get()` for the member whose
+/// `group.instance.id` is `group_instance_id`: the outcome for that member.
 ///
 /// Returns null when the member was removed. Otherwise returns an **owned**
 /// error — free it with `kafka_common_Error_destroy`:
@@ -17234,8 +17562,9 @@ unsafe fn remove_members_result_ref(
 ///   the `MemberToRemove` object itself, which has no `toString()` of its own;
 ///   the group instance id is its identity, hence the rendering here.)
 ///
-///   Both checks come first, whatever the outcome, because Java throws them
-///   synchronously from `memberResult` before looking at the future;
+///   Both checks come first, whatever the outcome, and **never block**, because
+///   Java throws them synchronously from `memberResult` before looking at the
+///   future;
 /// - the whole request's error, if the request failed (only possible on a
 ///   handle from the synchronous entry point: the async callback delivers a
 ///   whole-request failure as its `error` argument instead of a handle);
@@ -17245,9 +17574,11 @@ unsafe fn remove_members_result_ref(
 ///   `getSubLevelError`);
 /// - otherwise the member's own error.
 ///
-/// The handle holds the already-resolved outcome, so this never blocks, needs
-/// no runtime and may be called from any thread — including from inside the
-/// completion callback.
+/// For a requested member this **blocks** until the result's single future has
+/// resolved — every member's outcome, and `all()`'s, is derived from that one
+/// future. On a handle from the async callback the future has already resolved,
+/// so this returns at once and may be called from any thread — including from
+/// inside the completion callback.
 ///
 /// # Safety
 ///
@@ -17262,23 +17593,30 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_member
     // SAFETY: `remove_members_result_ref` requires `result` to be a non-null handle of the kind its
     // `# Safety` names, which this function's `# Safety` requires of `result` (no in-body null
     // check, so the C caller's contract is the sole source). The reference is used only for the
-    // duration of this call, during which the C caller keeps the handle alive; any pointer returned
-    // borrows from the same allocation and is documented as valid until that handle is destroyed.
+    // duration of this call, during which the C caller keeps the handle alive, and the returned
+    // error is a fresh copy owned by the caller.
     let inner = unsafe { remove_members_result_ref(result) };
     // SAFETY: `read_str` requires a valid, NUL-terminated C string, which this function's `#
     // Safety` requires of `group_instance_id` (a required parameter, so it is not
     // null-checked); it is copied into an owned `String` during this call.
     let member = MemberToRemove::new(unsafe { read_str(group_instance_id) });
-    void_outcome_to_error(inner.result.resolved_member_result(&inner.outcome, &member))
+    // Java's two synchronous guards, through the core accessor that throws them:
+    // a refused member is rejected without waiting for the future.
+    if let Err(e) = inner.result.member_result(&member) {
+        return box_error(e);
+    }
+    void_outcome_to_error(inner.result.resolved_member_result(&inner.outcome.get().outcome, &member))
 }
 
-/// Java's `all()`: null if the request was 100% successful — no top-level and
-/// no member-level error.
+/// Java's `all().get()`: **blocks** until the result's single future has
+/// resolved, then returns null if the request was 100% successful — no
+/// top-level and no member-level error.
 ///
 /// Otherwise returns an **owned** error — free it with
 /// `kafka_common_Error_destroy`:
 ///
-/// - the whole request's error, if the request failed;
+/// - the whole request's error, if the request failed — in `removeAll` mode
+///   this is the only accessor that reports it;
 /// - on a `remove_all` result, for the first member the broker reports as
 ///   failed: a plain Kafka error (code `UNKNOWN_SERVER_ERROR`, not an API
 ///   error) with the message `Encounter error when trying to remove:
@@ -17298,8 +17636,7 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_member
 ///   for the first failing requested member, in group-instance-id order (Java
 ///   iterates the requested set in unspecified order).
 ///
-/// Never blocks and may be called from any thread, including from inside the
-/// completion callback.
+/// On a handle from the async callback this returns at once.
 ///
 /// # Safety
 ///
@@ -17312,14 +17649,36 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_all(
     // SAFETY: `remove_members_result_ref` requires `result` to be a non-null handle of the kind its
     // `# Safety` names, which this function's `# Safety` requires of `result` (no in-body null
     // check, so the C caller's contract is the sole source). The reference is used only for the
-    // duration of this call, during which the C caller keeps the handle alive; any pointer returned
-    // borrows from the same allocation and is documented as valid until that handle is destroyed.
+    // duration of this call, during which the C caller keeps the handle alive, and the returned
+    // error is a fresh copy owned by the caller.
     let inner = unsafe { remove_members_result_ref(result) };
-    void_outcome_to_error(inner.result.resolved_all(&inner.outcome))
+    void_outcome_to_error(inner.result.resolved_all(&inner.outcome.get().outcome))
+}
+
+/// Returns whether the result's single future has resolved — Java's
+/// `all().isDone()`, and equally `memberResult(member).isDone()` for every
+/// requested member, since they are all derived from that one future. Never
+/// blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `remove_members_from_consumer_group` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_is_done(
+    result: *const kafka_admin_RemoveMembersFromConsumerGroupResult_t,
+) -> bool {
+    // SAFETY: `remove_members_result_ref` requires a non-null handle from a
+    // `remove_members_from_consumer_group` call; per this function's `# Safety`, `result`
+    // is a valid `remove_members_from_consumer_group` result handle that has not been
+    // destroyed. The reference is used only for this check within the call, during which
+    // the C caller keeps the handle alive.
+    unsafe { remove_members_result_ref(result) }.outcome.is_done()
 }
 
 /// Returns the number of members in the request. This is 0 in `remove_all`
-/// mode, where Java exposes no per-member outcome.
+/// mode, where Java exposes no per-member outcome. Never blocks: the members
+/// are known when the request is submitted.
 ///
 /// # Safety
 ///
@@ -17331,15 +17690,14 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_count(
 ) -> i32 {
     // SAFETY: `remove_members_result_ref` requires a non-null handle from a
     // `remove_members_from_consumer_group` call; per this function's `# Safety`, `result`
-    // is a valid `remove_members_from_consumer_group` result handle, i.e. one created by
-    // `Box::into_raw` in `box_remove_members_from_consumer_group_result` and not yet
+    // is a valid `remove_members_from_consumer_group` result handle that has not been
     // destroyed. The reference is used only for the duration of this synchronous call,
     // during which the C caller keeps the handle alive, and only a count is copied out.
     unsafe { remove_members_result_ref(result) }.group_instance_ids.len() as i32
 }
 
 /// Returns the group instance id of the entry at `index` (borrowed), or null if
-/// out of range. Entries are sorted by group instance id.
+/// out of range. Entries are sorted by group instance id. Never blocks.
 ///
 /// # Safety
 ///
@@ -17352,8 +17710,7 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_get_gr
 ) -> *const c_char {
     // SAFETY: `remove_members_result_ref` requires a non-null handle from a
     // `remove_members_from_consumer_group` call; per this function's `# Safety`, `result`
-    // is a valid `remove_members_from_consumer_group` result handle, i.e. one created by
-    // `Box::into_raw` in `box_remove_members_from_consumer_group_result` and not yet
+    // is a valid `remove_members_from_consumer_group` result handle that has not been
     // destroyed. The reference is used only for the duration of this synchronous call,
     // during which the C caller keeps the handle alive; the returned group-instance-id
     // string (or null) borrows from the same allocation and is documented valid only until
@@ -17367,6 +17724,9 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_get_gr
 /// [`kafka_admin_RemoveMembersFromConsumerGroupResult_member_result`] returns
 /// (as an owned copy) for that member.
 ///
+/// **Blocks** until the result's single future has resolved. Never blocks for
+/// an out-of-range index.
+///
 /// # Safety
 ///
 /// `result` must be a valid `remove_members_from_consumer_group` result handle.
@@ -17378,12 +17738,13 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_get_er
 ) -> *const kafka_common_Error_t {
     // SAFETY: `remove_members_result_ref` requires a non-null handle from a
     // `remove_members_from_consumer_group` call; per this function's `# Safety`, `result`
-    // is a valid `remove_members_from_consumer_group` result handle, i.e. one created by
-    // `Box::into_raw` in `box_remove_members_from_consumer_group_result` and not yet
+    // is a valid `remove_members_from_consumer_group` result handle that has not been
     // destroyed. The reference is used only for the duration of this synchronous call,
     // during which the C caller keeps the handle alive; any error pointer returned borrows
-    // from the same allocation and is documented valid only until the handle is destroyed.
-    optional_error_at(&unsafe { remove_members_result_ref(result) }.errors, index)
+    // from the outcome cached in the same allocation and is documented valid only until the
+    // handle is destroyed.
+    let inner = unsafe { remove_members_result_ref(result) };
+    consumer_group_key_error_at(&inner.outcome, inner.group_instance_ids.len(), index)
 }
 
 /// Destroys a `remove_members_from_consumer_group` result handle. Safe with
@@ -17400,13 +17761,14 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_destro
 ) {
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
-        // a valid `remove_members_from_consumer_group` result handle: the pointer was
-        // created by `Box::into_raw(Box::new(RemoveMembersFromConsumerGroupResultInner { ..
-        // }))` in `box_remove_members_from_consumer_group_result` and handed to C exactly
-        // once, either through `finish_sync`'s write to `*out_result` or as the owned
-        // `result` argument of the async callback. The destroy contract makes this the
-        // single, final release of that allocation; the strings and error pointers borrowed
-        // from it are documented valid only until this call.
+        // a valid `remove_members_from_consumer_group` result handle: the
+        // `Box<RemoveMembersFromConsumerGroupResultInner>` leaked by `into_handle` in
+        // `kafka_admin_AdminClient_remove_members_from_consumer_group` or in
+        // `box_remove_members_from_consumer_group_result`, and handed to C exactly once,
+        // either through `finish_sync`'s write to `*out_result` or as the owned `result`
+        // argument of the async callback. The destroy contract makes this the single, final
+        // release of that allocation; the strings and error pointers borrowed from it are
+        // documented valid only until this call.
         unsafe { drop(Box::from_raw(result as *mut RemoveMembersFromConsumerGroupResultInner)) };
     }
 }
@@ -17425,17 +17787,24 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_destro
 pub type kafka_admin_AdminClient_list_groups_callback_t =
     unsafe extern "C" fn(*mut kafka_admin_ListGroupsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
-/// Lists the groups in the cluster, blocking until the listing has resolved
-/// (synchronous).
-///
-/// This is `listGroups(ListGroupsOptions)`.
+/// Lists the groups in the cluster — Java's `listGroups(ListGroupsOptions)`.
+/// Like Java, this **does not wait**: it submits the request and returns at
+/// once.
 ///
 /// On success writes a [`kafka_admin_ListGroupsResult_t`] to `*out_result`
 /// (free it with [`kafka_admin_ListGroupsResult_destroy`]) and returns null.
-/// **A per-broker failure is not a call failure**: Java splits the outcome into
-/// `valid()` listings and an unkeyed `errors()` collection, which the result
-/// handle exposes as two independent lists. A non-null return means the listing
-/// could not be run at all, and `*out_result` is left untouched.
+/// The handle holds Java's `all()`, `valid()` and `errors()` futures: the
+/// `valid()` accessors ([`kafka_admin_ListGroupsResult_valid_count`] /
+/// [`kafka_admin_ListGroupsResult_get_valid`]) and the `errors()` accessors
+/// ([`kafka_admin_ListGroupsResult_error_count`] /
+/// [`kafka_admin_ListGroupsResult_get_error`]) each wait for their own future,
+/// and [`kafka_admin_ListGroupsResult_all`] for `all()` (Java's `get()`).
+/// **Every failure of the request — a per-broker failure, or not finding the
+/// brokers at all, such as a timeout — is read from the handle**: Java splits
+/// the outcome into `valid()` listings and an unkeyed `errors()` collection,
+/// which the handle exposes as two independent lists, and `all()` fails with
+/// the first error. A non-null return means the request could not be submitted
+/// at all (a NULL `admin`), and `*out_result` is left untouched.
 ///
 /// # Parameters
 ///
@@ -17488,21 +17857,24 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_groups(
             timeout_ms,
         )
     };
-    // SAFETY: `admin_sync_future_op` requires `admin` to be a valid handle from an
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
     // admin-client constructor, which this function's `# Safety` promises (`admin` must be
     // a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a NULL
-    // `admin` before `handle_ref` is reached. The `&'static AdminHandle` it derives is used
-    // only on the calling thread for the duration of this blocking call, during which the C
-    // caller keeps the handle alive, and the `submit` closure captures only the owned
-    // `options` built above.
-    let outcome = unsafe { admin_sync_future_op(admin, move |a| Ok(submit_list_groups(a, options))) };
+    // `admin` before `handle_ref` is reached. The `submit` closure runs on the calling
+    // thread inside the helper and captures only the owned `options` built above; the
+    // handle it builds holds only the futures and the waiter.
+    let outcome = unsafe {
+        admin_sync_submit(admin, move |a, w| {
+            Ok(list_groups_result_inner(w, &a.list_groups_with_options(options)))
+        })
+    };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
     // which this function's `# Safety` promises (`out_result` must be null or writable). It
     // null-checks `out_result` and writes exactly one element, a handle freshly built by
-    // `box_list_groups_result`, only on `Ok`, giving the C caller sole ownership to release
-    // via `kafka_admin_ListGroupsResult_destroy`; on `Err` it leaves `*out_result`
-    // untouched and returns a fresh `box_error` handle the caller owns.
-    unsafe { finish_sync(outcome, out_result, box_list_groups_result) }
+    // `into_handle`, only on `Ok`, giving the C caller sole ownership to release via
+    // `kafka_admin_ListGroupsResult_destroy`; on `Err` it leaves `*out_result` untouched and
+    // returns a fresh `box_error` handle the caller owns.
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// Lists the groups asynchronously. See [`kafka_admin_AdminClient_list_groups`].
@@ -17612,7 +17984,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_groups_async(
 /// `value` is owned by the callback and must be freed with
 /// [`kafka_admin_ConsumerGroupDescription_destroy`] (**not**
 /// [`kafka_admin_DescribeConsumerGroupsResult_destroy`], which is for the
-/// synchronous / flattened result only), and `error` with
+/// synchronous entry point's result handle only), and `error` with
 /// `kafka_common_Error_destroy`.
 pub type kafka_admin_AdminClient_describe_consumer_groups_callback_t = unsafe extern "C" fn(
     *const c_char, /* group_id */
@@ -17621,22 +17993,25 @@ pub type kafka_admin_AdminClient_describe_consumer_groups_callback_t = unsafe ex
     *mut c_void,
 );
 
-/// Describes consumer groups, blocking until every per-group future has
-/// resolved (synchronous).
-///
-/// This is
+/// Describes consumer groups — Java's
 /// `describeConsumerGroups(Collection<String>, DescribeConsumerGroupsOptions)`.
 /// It describes both classic and consumer (KIP-848) protocol groups; the
 /// classic-only sibling is
 /// [`kafka_admin_AdminClient_describe_classic_groups`].
 ///
-/// On success writes a [`kafka_admin_DescribeConsumerGroupsResult_t`] to
+/// Like Java, this **does not wait**: it submits the request and returns at
+/// once. On success writes a [`kafka_admin_DescribeConsumerGroupsResult_t`] to
 /// `*out_result` (free it with
-/// [`kafka_admin_DescribeConsumerGroupsResult_destroy`]) and returns null.
-/// **A per-group failure is not a call failure**: it is reported by
-/// [`kafka_admin_DescribeConsumerGroupsResult_get_error`] for that key. A
-/// non-null return means the request could not be submitted at all, and
-/// `*out_result` is left untouched.
+/// [`kafka_admin_DescribeConsumerGroupsResult_destroy`]) and returns null. The
+/// handle holds one future per group, as Java's `describedGroups()` does. Its
+/// group ids are readable at once;
+/// [`kafka_admin_DescribeConsumerGroupsResult_get_value`] /
+/// [`kafka_admin_DescribeConsumerGroupsResult_get_error`] wait for that group's
+/// future only, and [`kafka_admin_DescribeConsumerGroupsResult_all`] waits for
+/// every group (Java's `get()`). **Every failure of the request — per group, or
+/// of the request as a whole, such as a timeout — is read from the handle**, as
+/// in Java. A non-null return means the request could not be submitted at all
+/// (a NULL `admin`), and `*out_result` is left untouched.
 ///
 /// # Parameters
 ///
@@ -17670,22 +18045,27 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_consumer_groups(
     // call.
     let ids = unsafe { read_strings(group_ids, count) };
     let options = describe_consumer_groups_options(timeout_ms, include_authorized_operations);
-    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
     // admin-client constructor, which this function's `# Safety` promises (`admin` must be
     // a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a NULL
-    // `admin` before `handle_ref` is reached. The `&'static AdminHandle` it derives is used
-    // only on the calling thread for the duration of this blocking call, during which the C
-    // caller keeps the handle alive, and the `submit` closure captures only the owned
-    // `group_ids` and `options` built above.
-    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_describe_consumer_groups(a, &ids, options))) };
+    // `admin` before `handle_ref` is reached. The `submit` closure runs on the calling
+    // thread inside the helper, borrowing the owned `ids` only there and consuming
+    // `options`; the handle it builds holds only owned futures and the waiter.
+    let outcome = unsafe {
+        admin_sync_submit(admin, move |a, w| {
+            Ok(describe_consumer_groups_result_inner(
+                w,
+                submit_describe_consumer_groups_entries(a, &ids, options),
+            ))
+        })
+    };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
     // which this function's `# Safety` promises (`out_result` must be null or writable). It
     // null-checks `out_result` and writes exactly one element, a handle freshly built by
-    // `box_describe_consumer_groups_result`, only on `Ok`, giving the C caller sole
-    // ownership to release via `kafka_admin_DescribeConsumerGroupsResult_destroy`; on `Err`
-    // it leaves `*out_result` untouched and returns a fresh `box_error` handle the caller
-    // owns.
-    unsafe { finish_sync(outcome, out_result, box_describe_consumer_groups_result) }
+    // `into_handle`, only on `Ok`, giving the C caller sole ownership to release via
+    // `kafka_admin_DescribeConsumerGroupsResult_destroy`; on `Err` it leaves `*out_result`
+    // untouched and returns a fresh `box_error` handle the caller owns.
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// The body of [`kafka_admin_AdminClient_describe_consumer_groups_async`], shared with its `#[ffi_guard]`'s `on_panic`.
@@ -17840,7 +18220,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_consumer_groups_async(
 /// `value` is owned by the callback and must be freed with
 /// [`kafka_admin_ClassicGroupDescription_destroy`] (**not**
 /// [`kafka_admin_DescribeClassicGroupsResult_destroy`], which is for the
-/// synchronous / flattened result only), and `error` with
+/// synchronous entry point's result handle only), and `error` with
 /// `kafka_common_Error_destroy`.
 pub type kafka_admin_AdminClient_describe_classic_groups_callback_t = unsafe extern "C" fn(
     *const c_char, /* group_id */
@@ -17849,20 +18229,25 @@ pub type kafka_admin_AdminClient_describe_classic_groups_callback_t = unsafe ext
     *mut c_void,
 );
 
-/// Describes classic groups, blocking until every per-group future has resolved
-/// (synchronous).
-///
-/// This is
+/// Describes classic groups — Java's
 /// `describeClassicGroups(Collection<String>, DescribeClassicGroupsOptions)`.
 /// Unlike [`kafka_admin_AdminClient_describe_consumer_groups`] it covers only
 /// classic-protocol groups, and its description carries the group's `protocol`
 /// and `protocolData` rather than a group epoch.
 ///
-/// On success writes a [`kafka_admin_DescribeClassicGroupsResult_t`] to
+/// Like Java, this **does not wait**: it submits the request and returns at
+/// once. On success writes a [`kafka_admin_DescribeClassicGroupsResult_t`] to
 /// `*out_result` (free it with
-/// [`kafka_admin_DescribeClassicGroupsResult_destroy`]) and returns null. A
-/// per-group failure is not a call failure; it is reported by
-/// [`kafka_admin_DescribeClassicGroupsResult_get_error`] for that key.
+/// [`kafka_admin_DescribeClassicGroupsResult_destroy`]) and returns null. The
+/// handle holds one future per group, as Java's `describedGroups()` does. Its
+/// group ids are readable at once;
+/// [`kafka_admin_DescribeClassicGroupsResult_get_value`] /
+/// [`kafka_admin_DescribeClassicGroupsResult_get_error`] wait for that group's
+/// future only, and [`kafka_admin_DescribeClassicGroupsResult_all`] waits for
+/// every group (Java's `get()`). **Every failure of the request — per group, or
+/// of the request as a whole, such as a timeout — is read from the handle**, as
+/// in Java. A non-null return means the request could not be submitted at all
+/// (a NULL `admin`).
 ///
 /// # Parameters
 ///
@@ -17894,22 +18279,27 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_classic_groups(
     // call.
     let ids = unsafe { read_strings(group_ids, count) };
     let options = describe_classic_groups_options(timeout_ms, include_authorized_operations);
-    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
     // admin-client constructor, which this function's `# Safety` promises (`admin` must be
     // a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a NULL
-    // `admin` before `handle_ref` is reached. The `&'static AdminHandle` it derives is used
-    // only on the calling thread for the duration of this blocking call, during which the C
-    // caller keeps the handle alive, and the `submit` closure captures only the owned
-    // `group_ids` and `options` built above.
-    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_describe_classic_groups(a, &ids, options))) };
+    // `admin` before `handle_ref` is reached. The `submit` closure runs on the calling
+    // thread inside the helper, borrowing the owned `ids` only there and consuming
+    // `options`; the handle it builds holds only owned futures and the waiter.
+    let outcome = unsafe {
+        admin_sync_submit(admin, move |a, w| {
+            Ok(describe_classic_groups_result_inner(
+                w,
+                submit_describe_classic_groups_entries(a, &ids, options),
+            ))
+        })
+    };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
     // which this function's `# Safety` promises (`out_result` must be null or writable). It
     // null-checks `out_result` and writes exactly one element, a handle freshly built by
-    // `box_describe_classic_groups_result`, only on `Ok`, giving the C caller sole
-    // ownership to release via `kafka_admin_DescribeClassicGroupsResult_destroy`; on `Err`
-    // it leaves `*out_result` untouched and returns a fresh `box_error` handle the caller
-    // owns.
-    unsafe { finish_sync(outcome, out_result, box_describe_classic_groups_result) }
+    // `into_handle`, only on `Ok`, giving the C caller sole ownership to release via
+    // `kafka_admin_DescribeClassicGroupsResult_destroy`; on `Err` it leaves `*out_result`
+    // untouched and returns a fresh `box_error` handle the caller owns.
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// The body of [`kafka_admin_AdminClient_describe_classic_groups_async`], shared with its `#[ffi_guard]`'s `on_panic`.
@@ -18064,7 +18454,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_classic_groups_async(
 /// `value` is owned by the callback and must be freed with
 /// [`kafka_admin_OffsetAndMetadataMap_destroy`] (**not**
 /// [`kafka_admin_ListConsumerGroupOffsetsResult_destroy`], which is for the
-/// synchronous / flattened result only), and `error` with
+/// synchronous entry point's result handle only), and `error` with
 /// `kafka_common_Error_destroy`.
 pub type kafka_admin_AdminClient_list_consumer_group_offsets_callback_t = unsafe extern "C" fn(
     *const c_char, /* group_id */
@@ -18073,10 +18463,7 @@ pub type kafka_admin_AdminClient_list_consumer_group_offsets_callback_t = unsafe
     *mut c_void,
 );
 
-/// Lists committed offsets for one or more consumer groups, blocking until
-/// every per-group future has resolved (synchronous).
-///
-/// This is
+/// Lists committed offsets for one or more consumer groups — Java's
 /// `listConsumerGroupOffsets(Map<String, ListConsumerGroupOffsetsSpec>, ListConsumerGroupOffsetsOptions)`.
 ///
 /// The request is two-level — a set of groups, each with its own partition
@@ -18086,11 +18473,19 @@ pub type kafka_admin_AdminClient_list_consumer_group_offsets_callback_t = unsafe
 /// [`kafka_admin_ListConsumerGroupOffsetsResult_get_value`] hands out a
 /// [`kafka_admin_OffsetAndMetadataMap_t`] per group.
 ///
-/// On success writes a [`kafka_admin_ListConsumerGroupOffsetsResult_t`] to
+/// Like Java, this **does not wait**: it submits the request and returns at
+/// once. On success writes a [`kafka_admin_ListConsumerGroupOffsetsResult_t`] to
 /// `*out_result` (free it with
-/// [`kafka_admin_ListConsumerGroupOffsetsResult_destroy`]) and returns null. A
-/// per-group failure is not a call failure; it is reported by
-/// [`kafka_admin_ListConsumerGroupOffsetsResult_get_error`] for that key.
+/// [`kafka_admin_ListConsumerGroupOffsetsResult_destroy`]) and returns null.
+/// The handle holds one future per group, as Java's
+/// `partitionsToOffsetAndMetadata(groupId)` does. Its group ids are readable at
+/// once; [`kafka_admin_ListConsumerGroupOffsetsResult_get_value`] /
+/// [`kafka_admin_ListConsumerGroupOffsetsResult_get_error`] wait for that
+/// group's future only, and [`kafka_admin_ListConsumerGroupOffsetsResult_all`]
+/// waits for every group (Java's `get()`). **Every failure of the request — per
+/// group, or of the request as a whole, such as a timeout — is read from the
+/// handle**, as in Java. A non-null return means the request could not be
+/// submitted at all: a NULL `admin`, or a NULL or duplicate group id.
 ///
 /// # Parameters
 ///
@@ -18143,23 +18538,28 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_consumer_group_offsets(
         read_group_offsets_specs(group_ids, all_partitions, topics, partitions, partition_counts, group_count)
     };
     let options = list_consumer_group_offsets_options(timeout_ms, require_stable);
-    let outcome =
-        // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
-        // admin-client constructor, which this function's `# Safety` promises (`admin` must
-        // be a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a
-        // NULL `admin` before `handle_ref` is reached. The `&'static AdminHandle` it
-        // derives is used only on the calling thread for the duration of this blocking
-        // call, during which the C caller keeps the handle alive, and the `submit` closure
-        // captures only the owned `specs` result and `options` built above.
-        unsafe { admin_sync_value_op(admin, move |a| submit_list_consumer_group_offsets(a, &specs?, options)) };
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
+    // a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a NULL
+    // `admin` before `handle_ref` is reached. The `submit` closure runs on the calling
+    // thread inside the helper and captures only the owned `specs` result and `options`
+    // built above (a `specs` marshalling error is returned before anything is submitted);
+    // the handle it builds holds only owned futures and the waiter.
+    let outcome = unsafe {
+        admin_sync_submit(admin, move |a, w| {
+            Ok(list_consumer_group_offsets_result_inner(
+                w,
+                submit_list_consumer_group_offsets_entries(a, &specs?, options)?,
+            ))
+        })
+    };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
     // which this function's `# Safety` promises (`out_result` must be null or writable). It
     // null-checks `out_result` and writes exactly one element, a handle freshly built by
-    // `box_list_consumer_group_offsets_result`, only on `Ok`, giving the C caller sole
-    // ownership to release via `kafka_admin_ListConsumerGroupOffsetsResult_destroy`; on
-    // `Err` it leaves `*out_result` untouched and returns a fresh `box_error` handle the
-    // caller owns.
-    unsafe { finish_sync(outcome, out_result, box_list_consumer_group_offsets_result) }
+    // `into_handle`, only on `Ok`, giving the C caller sole ownership to release via
+    // `kafka_admin_ListConsumerGroupOffsetsResult_destroy`; on `Err` it leaves
+    // `*out_result` untouched and returns a fresh `box_error` handle the caller owns.
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// The body of [`kafka_admin_AdminClient_list_consumer_group_offsets_async`], shared with its `#[ffi_guard]`'s `on_panic`.
@@ -18356,25 +18756,24 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_consumer_group_offsets_asy
 pub type kafka_admin_AdminClient_alter_consumer_group_offsets_callback_t =
     unsafe extern "C" fn(*mut kafka_admin_AlterConsumerGroupOffsetsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
-/// Commits offsets on behalf of a consumer group, blocking until the result's
-/// single future has resolved (synchronous).
-///
-/// This is
+/// Commits offsets on behalf of a consumer group — Java's
 /// `alterConsumerGroupOffsets(String, Map<TopicPartition, OffsetAndMetadata>, AlterConsumerGroupOffsetsOptions)`.
 ///
-/// On success writes a [`kafka_admin_AlterConsumerGroupOffsetsResult_t`] to
-/// `*out_result` (free it with
+/// Like Java, this **does not wait**: it submits the request and returns at
+/// once. On success writes a [`kafka_admin_AlterConsumerGroupOffsetsResult_t`]
+/// to `*out_result` (free it with
 /// [`kafka_admin_AlterConsumerGroupOffsetsResult_destroy`]) and returns null.
-/// The handle answers Java's accessors,
+/// The handle holds Java's single future. Its requested partitions are readable
+/// at once; Java's accessors,
 /// [`kafka_admin_AlterConsumerGroupOffsetsResult_partition_result`] and
-/// [`kafka_admin_AlterConsumerGroupOffsetsResult_all`]. **A per-partition
-/// failure is not a call failure**: it is reported by those accessors and by
-/// [`kafka_admin_AlterConsumerGroupOffsetsResult_get_error`] for that key —
-/// and so is a failure of the whole request, which every requested partition
-/// then reports. A non-null return means the request could not be submitted at
-/// all — or that `count` was 0 and `all()` failed, in which case there is no
-/// per-key slot for the outcome and the whole-request error is returned
-/// instead.
+/// [`kafka_admin_AlterConsumerGroupOffsetsResult_all`], and
+/// [`kafka_admin_AlterConsumerGroupOffsetsResult_get_error`] wait for that
+/// future (Java's `get()`). **Every failure of the request — per partition, or
+/// of the request as a whole, such as a timeout — is read from the handle**, as
+/// in Java: a whole-request failure is reported for every requested partition
+/// and by `_all`, which is the only accessor that reports it when `count` is 0.
+/// A non-null return means the request could not be submitted at all: a NULL
+/// `admin`, a NULL `group_id`, a NULL topic entry or a negative offset.
 ///
 /// # Parameters
 ///
@@ -18431,34 +18830,33 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_consumer_group_offsets(
         read_alter_group_offsets(topics, partitions, offsets, metadata, leader_epochs, has_leader_epoch, count)
     };
     let options = alter_consumer_group_offsets_options(timeout_ms);
-    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
     // admin-client constructor, which this function's `# Safety` promises (`admin` must be
     // a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a NULL
-    // `admin` before `handle_ref` is reached. The `&'static AdminHandle` it derives is used
-    // only on the calling thread for the duration of this blocking call, during which the C
-    // caller keeps the handle alive, and the `submit` closure captures only the owned
-    // `group` and `parsed` results and `options` built above.
+    // `admin` before `handle_ref` is reached. The `submit` closure runs on the calling
+    // thread inside the helper and captures only the owned `group` and `parsed` results and
+    // `options` built above (a marshalling error is returned before anything is
+    // submitted); the handle it builds holds only the owned core result, its future and the
+    // waiter.
     let outcome = unsafe {
-        admin_sync_future_op(admin, move |a| {
-            let resolved = submit_alter_consumer_group_offsets(a, &group?, &parsed?, options);
-            Ok(async move {
-                let (result, requested, outcome) = resolved.await;
-                if requested.is_empty() {
-                    // No per-key slot: `all()` is the only observable.
-                    result.resolved_all(&outcome)?;
-                }
-                Ok(alter_consumer_group_offsets_result_inner((result, requested, outcome)))
-            })
+        admin_sync_submit(admin, move |a, w| {
+            let group = group?;
+            let offsets = parsed?;
+            let result = a.alter_consumer_group_offsets_with_options(&group, &offsets, options);
+            Ok(alter_consumer_group_offsets_result_inner(
+                w,
+                result,
+                offsets.into_keys().collect(),
+            ))
         })
     };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
     // which this function's `# Safety` promises (`out_result` must be null or writable). It
     // null-checks `out_result` and writes exactly one element, a handle freshly built by
-    // `box_alter_consumer_group_offsets_result`, only on `Ok`, giving the C caller sole
-    // ownership to release via `kafka_admin_AlterConsumerGroupOffsetsResult_destroy`; on
-    // `Err` it leaves `*out_result` untouched and returns a fresh `box_error` handle the
-    // caller owns.
-    unsafe { finish_sync(outcome, out_result, box_alter_consumer_group_offsets_result) }
+    // `into_handle`, only on `Ok`, giving the C caller sole ownership to release via
+    // `kafka_admin_AlterConsumerGroupOffsetsResult_destroy`; on `Err` it leaves
+    // `*out_result` untouched and returns a fresh `box_error` handle the caller owns.
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// Commits consumer group offsets asynchronously. See
@@ -18555,12 +18953,12 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_consumer_group_offsets_as
                     let (result, requested, outcome) = resolved.await;
                     // A failed future is the whole request's error.
                     let errors = outcome?;
-                    Ok(alter_consumer_group_offsets_result_inner((result, requested, Ok(errors))))
+                    Ok((result, requested, Ok(errors)))
                 })
             },
             move |outcome, ud| {
                 let (result, error) = match outcome {
-                    Ok(inner) => (box_alter_consumer_group_offsets_result(inner), std::ptr::null_mut()),
+                    Ok(resolved) => (box_alter_consumer_group_offsets_result(resolved), std::ptr::null_mut()),
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
                 callback(result, error, ud);
@@ -18597,25 +18995,26 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_consumer_group_offsets_as
 pub type kafka_admin_AdminClient_delete_consumer_group_offsets_callback_t =
     unsafe extern "C" fn(*mut kafka_admin_DeleteConsumerGroupOffsetsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
-/// Deletes committed offsets for a set of partitions in a consumer group,
-/// blocking until the result's single future has resolved (synchronous).
-///
-/// This is
+/// Deletes committed offsets for a set of partitions in a consumer group —
+/// Java's
 /// `deleteConsumerGroupOffsets(String, Set<TopicPartition>, DeleteConsumerGroupOffsetsOptions)`.
 ///
-/// On success writes a [`kafka_admin_DeleteConsumerGroupOffsetsResult_t`] to
-/// `*out_result` (free it with
+/// Like Java, this **does not wait**: it submits the request and returns at
+/// once. On success writes a [`kafka_admin_DeleteConsumerGroupOffsetsResult_t`]
+/// to `*out_result` (free it with
 /// [`kafka_admin_DeleteConsumerGroupOffsetsResult_destroy`]) and returns null.
-/// The handle answers Java's accessors,
-/// [`kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result`] and
-/// [`kafka_admin_DeleteConsumerGroupOffsetsResult_all`]. **A per-partition
-/// failure is not a call failure**: it is reported by those accessors and by
-/// [`kafka_admin_DeleteConsumerGroupOffsetsResult_get_error`] for that key —
-/// and so is a failure of the whole request, which every requested partition
-/// then reports. A non-null return means the request could not be submitted at
-/// all — or that `count` was 0 and `all()` failed, in which case there is no
-/// per-key slot for the outcome and the whole-request error is returned
-/// instead.
+/// The handle holds Java's single future. Its requested partitions are readable
+/// at once; Java's accessors,
+/// [`kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result`] (except
+/// for an unrequested partition, which it rejects at once, as Java does) and
+/// [`kafka_admin_DeleteConsumerGroupOffsetsResult_all`], and
+/// [`kafka_admin_DeleteConsumerGroupOffsetsResult_get_error`] wait for that
+/// future (Java's `get()`). **Every failure of the request — per partition, or
+/// of the request as a whole, such as a timeout — is read from the handle**, as
+/// in Java: a whole-request failure is reported for every requested partition
+/// and by `_all`, which is the only accessor that reports it when `count` is 0.
+/// A non-null return means the request could not be submitted at all: a NULL
+/// `admin` or a NULL `group_id`.
 ///
 /// # Parameters
 ///
@@ -18658,34 +19057,32 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_group_offsets(
         .into_iter()
         .collect();
     let options = delete_consumer_group_offsets_options(timeout_ms);
-    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
     // admin-client constructor, which this function's `# Safety` promises (`admin` must be
     // a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a NULL
-    // `admin` before `handle_ref` is reached. The `&'static AdminHandle` it derives is used
-    // only on the calling thread for the duration of this blocking call, during which the C
-    // caller keeps the handle alive, and the `submit` closure captures only the owned
-    // `group` result, `selection` set and `options` built above.
+    // `admin` before `handle_ref` is reached. The `submit` closure runs on the calling
+    // thread inside the helper and captures only the owned `group` result, `selection` set
+    // and `options` built above (a NULL `group_id` is returned before anything is
+    // submitted); the handle it builds holds only the owned core result, its future and the
+    // waiter.
     let outcome = unsafe {
-        admin_sync_future_op(admin, move |a| {
-            let resolved = submit_delete_consumer_group_offsets(a, &group?, &selection, options);
-            Ok(async move {
-                let (result, requested, outcome) = resolved.await;
-                if requested.is_empty() {
-                    // No per-key slot: `all()` is the only observable.
-                    result.resolved_all(&outcome)?;
-                }
-                Ok(delete_consumer_group_offsets_result_inner((result, requested, outcome)))
-            })
+        admin_sync_submit(admin, move |a, w| {
+            let group = group?;
+            let result = a.delete_consumer_group_offsets_with_options(&group, &selection, options);
+            Ok(delete_consumer_group_offsets_result_inner(
+                w,
+                result,
+                selection.into_iter().collect(),
+            ))
         })
     };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
     // which this function's `# Safety` promises (`out_result` must be null or writable). It
     // null-checks `out_result` and writes exactly one element, a handle freshly built by
-    // `box_delete_consumer_group_offsets_result`, only on `Ok`, giving the C caller sole
-    // ownership to release via `kafka_admin_DeleteConsumerGroupOffsetsResult_destroy`; on
-    // `Err` it leaves `*out_result` untouched and returns a fresh `box_error` handle the
-    // caller owns.
-    unsafe { finish_sync(outcome, out_result, box_delete_consumer_group_offsets_result) }
+    // `into_handle`, only on `Ok`, giving the C caller sole ownership to release via
+    // `kafka_admin_DeleteConsumerGroupOffsetsResult_destroy`; on `Err` it leaves
+    // `*out_result` untouched and returns a fresh `box_error` handle the caller owns.
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// Deletes consumer group offsets asynchronously. See
@@ -18775,12 +19172,12 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_group_offsets_a
                     let (result, requested, outcome) = resolved.await;
                     // A failed future is the whole request's error.
                     let errors = outcome?;
-                    Ok(delete_consumer_group_offsets_result_inner((result, requested, Ok(errors))))
+                    Ok((result, requested, Ok(errors)))
                 })
             },
             move |outcome, ud| {
                 let (result, error) = match outcome {
-                    Ok(inner) => (box_delete_consumer_group_offsets_result(inner), std::ptr::null_mut()),
+                    Ok(resolved) => (box_delete_consumer_group_offsets_result(resolved), std::ptr::null_mut()),
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
                 callback(result, error, ud);
@@ -18807,18 +19204,21 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_group_offsets_a
 pub type kafka_admin_AdminClient_delete_consumer_groups_callback_t =
     unsafe extern "C" fn(*const c_char, *mut kafka_common_Error_t, *mut c_void);
 
-/// Deletes consumer groups, blocking until every per-group future has resolved
-/// (synchronous).
-///
-/// This is
+/// Deletes consumer groups — Java's
 /// `deleteConsumerGroups(Collection<String>, DeleteConsumerGroupsOptions)`.
 ///
-/// On success writes a [`kafka_admin_DeleteConsumerGroupsResult_t`] to
+/// Like Java, this **does not wait**: it submits the request and returns at
+/// once. On success writes a [`kafka_admin_DeleteConsumerGroupsResult_t`] to
 /// `*out_result` (free it with
-/// [`kafka_admin_DeleteConsumerGroupsResult_destroy`]) and returns null.
-/// **A per-group failure is not a call failure**: it is reported by
-/// [`kafka_admin_DeleteConsumerGroupsResult_get_error`] for that key. A
-/// non-null return means the request could not be submitted at all.
+/// [`kafka_admin_DeleteConsumerGroupsResult_destroy`]) and returns null. The
+/// handle holds one future per group, as Java's `deletedGroups()` does. Its
+/// group ids are readable at once;
+/// [`kafka_admin_DeleteConsumerGroupsResult_get_error`] waits for that group's
+/// future only, and [`kafka_admin_DeleteConsumerGroupsResult_all`] waits for
+/// every group (Java's `get()`). **Every failure of the request — per group, or
+/// of the request as a whole, such as a timeout — is read from the handle**, as
+/// in Java. A non-null return means the request could not be submitted at all
+/// (a NULL `admin`).
 ///
 /// # Parameters
 ///
@@ -18848,21 +19248,27 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_groups(
     // call.
     let ids = unsafe { read_strings(group_ids, count) };
     let options = delete_consumer_groups_options(timeout_ms);
-    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
     // admin-client constructor, which this function's `# Safety` promises (`admin` must be
     // a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a NULL
-    // `admin` before `handle_ref` is reached. The `&'static AdminHandle` it derives is used
-    // only on the calling thread for the duration of this blocking call, during which the C
-    // caller keeps the handle alive, and the `submit` closure captures only the owned
-    // `group_ids` and `options` built above.
-    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_delete_consumer_groups(a, &ids, options))) };
+    // `admin` before `handle_ref` is reached. The `submit` closure runs on the calling
+    // thread inside the helper, borrowing the owned `ids` only there and consuming
+    // `options`; the handle it builds holds only owned futures and the waiter.
+    let outcome = unsafe {
+        admin_sync_submit(admin, move |a, w| {
+            Ok(delete_consumer_groups_result_inner(
+                w,
+                submit_delete_consumer_groups_entries(a, &ids, options),
+            ))
+        })
+    };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
     // which this function's `# Safety` promises (`out_result` must be null or writable). It
     // null-checks `out_result` and writes exactly one element, a handle freshly built by
-    // `box_delete_consumer_groups_result`, only on `Ok`, giving the C caller sole ownership
-    // to release via `kafka_admin_DeleteConsumerGroupsResult_destroy`; on `Err` it leaves
-    // `*out_result` untouched and returns a fresh `box_error` handle the caller owns.
-    unsafe { finish_sync(outcome, out_result, box_delete_consumer_groups_result) }
+    // `into_handle`, only on `Ok`, giving the C caller sole ownership to release via
+    // `kafka_admin_DeleteConsumerGroupsResult_destroy`; on `Err` it leaves `*out_result`
+    // untouched and returns a fresh `box_error` handle the caller owns.
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// The body of [`kafka_admin_AdminClient_delete_consumer_groups_async`], shared with its `#[ffi_guard]`'s `on_panic`.
@@ -19016,26 +19422,27 @@ pub type kafka_admin_AdminClient_remove_members_from_consumer_group_callback_t =
     *mut c_void,
 );
 
-/// Removes members from a consumer group, blocking until the result's single
-/// future has resolved (synchronous).
-///
-/// This is
+/// Removes members from a consumer group — Java's
 /// `removeMembersFromConsumerGroup(String, RemoveMembersFromConsumerGroupOptions)`.
 ///
-/// On success writes a
+/// Like Java, this **does not wait**: it submits the request and returns at
+/// once. On success writes a
 /// [`kafka_admin_RemoveMembersFromConsumerGroupResult_t`] to `*out_result`
 /// (free it with
 /// [`kafka_admin_RemoveMembersFromConsumerGroupResult_destroy`]) and returns
-/// null. The handle answers Java's accessors,
-/// [`kafka_admin_RemoveMembersFromConsumerGroupResult_member_result`] and
-/// [`kafka_admin_RemoveMembersFromConsumerGroupResult_all`]. **A per-member
-/// failure is not a call failure**: it is reported by those accessors and by
-/// [`kafka_admin_RemoveMembersFromConsumerGroupResult_get_error`] for that
-/// member — and so is a failure of the whole request, which every requested
-/// member then reports. A non-null return means the request could not be
-/// submitted at all — or that `remove_all` was true and `all()` failed: Java
-/// exposes no per-member outcome in that mode, so there is no per-key slot and
-/// the error is returned here.
+/// null. The handle holds Java's single future. Its requested members are
+/// readable at once; Java's accessors,
+/// [`kafka_admin_RemoveMembersFromConsumerGroupResult_member_result`] (except
+/// where it refuses the member, which it does at once, as Java does) and
+/// [`kafka_admin_RemoveMembersFromConsumerGroupResult_all`], and
+/// [`kafka_admin_RemoveMembersFromConsumerGroupResult_get_error`] wait for
+/// that future (Java's `get()`). **Every failure of the request — per member,
+/// or of the request as a whole, such as a timeout — is read from the
+/// handle**, as in Java: a whole-request failure is reported for every
+/// requested member and by `_all`, which is the only accessor that reports it
+/// in `remove_all` mode, where Java exposes no per-member outcome. A non-null
+/// return means the request could not be submitted at all: a NULL `admin`, a
+/// NULL `group_id`, or an empty member list without `remove_all`.
 ///
 /// # Parameters
 ///
@@ -19088,36 +19495,28 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_gr
     // bounds its loop by `member_count.max(0)`). The helper null-checks `reason` before
     // `CStr::from_ptr`, and every read happens on the calling thread during this call.
     let options = unsafe { remove_members_options(remove_all, group_instance_ids, member_count, reason, timeout_ms) };
-    // SAFETY: `admin_sync_future_op` requires `admin` to be a valid handle from an
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
     // admin-client constructor, which this function's `# Safety` promises (`admin` must be
     // a valid handle); the helper itself returns an error for a NULL `admin` before
-    // dereferencing it. The `&dyn Admin` it derives through `handle_ref` is used only
-    // inside the `submit` closure (`submit_remove_members_from_consumer_group`) and the
-    // following `block_on`, both on the calling thread during this synchronous call, while
-    // the C caller keeps the handle alive (it has not called
-    // `kafka_admin_AdminClient_destroy`); the awaited future owns its result and borrows
-    // nothing from the handle, so nothing derived from it outlives the call. A `group` or
-    // `options` marshaling error makes `submit` return `Err` without touching the handle.
+    // dereferencing it. The `submit` closure runs on the calling thread inside the helper
+    // and captures only the owned `group` and `options` results built above; a `group` or
+    // `options` marshaling error makes it return `Err` before anything is submitted, and
+    // the handle it builds holds only the owned core result, its future and the waiter.
     let outcome = unsafe {
-        admin_sync_future_op(admin, move |a| {
-            let resolved = submit_remove_members_from_consumer_group(a, &group?, options?);
-            Ok(async move {
-                let (result, requested, outcome) = resolved.await;
-                if requested.is_empty() {
-                    // `removeAll` mode: no per-key slot, `all()` is the only
-                    // observable.
-                    result.resolved_all(&outcome)?;
-                }
-                Ok(remove_members_from_consumer_group_result_inner((result, requested, outcome)))
-            })
+        admin_sync_submit(admin, move |a, w| {
+            let group = group?;
+            let options = options?;
+            let requested: Vec<MemberToRemove> = options.members().iter().cloned().collect();
+            let result = a.remove_members_from_consumer_group_with_options(&group, options);
+            Ok(remove_members_from_consumer_group_result_inner(w, result, requested))
         })
     };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
     // which this function's `# Safety` promises (`out_result` must be null or writable);
     // the helper null-checks `out_result` and on success writes exactly one element, the
-    // `kafka_admin_RemoveMembersFromConsumerGroupResult_t` freshly boxed by
-    // `box_remove_members_from_consumer_group_result`, leaving it untouched on error.
-    unsafe { finish_sync(outcome, out_result, box_remove_members_from_consumer_group_result) }
+    // `kafka_admin_RemoveMembersFromConsumerGroupResult_t` freshly boxed by `into_handle`,
+    // leaving it untouched on error.
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// Removes members from a consumer group asynchronously. See
@@ -19207,12 +19606,12 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_gr
                     let (result, requested, outcome) = resolved.await;
                     // A failed future is the whole request's error.
                     let errors = outcome?;
-                    Ok(remove_members_from_consumer_group_result_inner((result, requested, Ok(errors))))
+                    Ok((result, requested, Ok(errors)))
                 })
             },
             move |outcome, ud| {
                 let (result, error) = match outcome {
-                    Ok(inner) => (box_remove_members_from_consumer_group_result(inner), std::ptr::null_mut()),
+                    Ok(resolved) => (box_remove_members_from_consumer_group_result(resolved), std::ptr::null_mut()),
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
                 callback(result, error, ud);
@@ -32737,9 +33136,10 @@ mod tests {
             ("g-ok".to_string(), Ok(description)),
             ("g-bad".to_string(), Err(Error::new(Errors::GroupIdNotFound))),
         ]);
-        let result = box_describe_consumer_groups_result(outcomes);
+        let result: *mut kafka_admin_DescribeConsumerGroupsResult_t =
+            resolved_keyed_handle(outcomes, describe_consumer_groups_result_inner);
         // SAFETY: Test code: `result` was built just above by
-        // `box_describe_consumer_groups_result`, so it is a valid handle for every
+        // `resolved_keyed_handle`, so it is a valid handle for every
         // `kafka_admin_DescribeConsumerGroupsResult_*` getter; `value` and `error` are
         // borrowed from it and only read while it lives, the member and coordinator handles
         // are likewise borrowed, and `&mut epoch` is a writable local for the
@@ -32805,6 +33205,90 @@ mod tests {
         }
     }
 
+    /// A minimal consumer-group description for the lazy-handle tests.
+    fn lazy_consumer_group_description(group_id: &str) -> ConsumerGroupDescription {
+        ConsumerGroupDescription::new(
+            group_id,
+            false,
+            vec![],
+            "range",
+            GroupType::Consumer,
+            GroupState::Stable,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+
+    /// A synchronous `describe_consumer_groups` handle holds one future per
+    /// group, as Java's `describedGroups()` does: the group ids are readable at
+    /// once, a resolved group is read while another is still pending, `isDone()`
+    /// never blocks, and a pending group's accessors wait for that group's
+    /// future only.
+    #[test]
+    fn describe_consumer_groups_result_accessors_wait_for_their_own_group_only() {
+        let (_runtime, waiter) = lazy_test_waiter();
+        let fast = crate::common::internals::KafkaFutureImpl::<ConsumerGroupDescription>::new();
+        let slow = crate::common::internals::KafkaFutureImpl::<ConsumerGroupDescription>::new();
+        let result: *mut kafka_admin_DescribeConsumerGroupsResult_t =
+            into_handle(describe_consumer_groups_result_inner(
+                &waiter,
+                vec![("slow".to_string(), slow.future()), ("fast".to_string(), fast.future())],
+            ));
+        // SAFETY: Test code: `result` was built just above by `into_handle`, so it is a valid
+        // handle for every `kafka_admin_DescribeConsumerGroupsResult_*` accessor; the strings,
+        // description and error pointers borrowed from it are read before it is destroyed,
+        // the owned `all()` error is destroyed once, and the handle is destroyed exactly once.
+        unsafe {
+            // Sorted by group id, and readable before either group resolves.
+            assert_eq!(kafka_admin_DescribeConsumerGroupsResult_count(result), 2);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_DescribeConsumerGroupsResult_get_group_id(result, 0)).to_str(),
+                Ok("fast")
+            );
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_DescribeConsumerGroupsResult_get_group_id(result, 1)).to_str(),
+                Ok("slow")
+            );
+            assert!(!kafka_admin_DescribeConsumerGroupsResult_is_done(result, 0));
+            assert!(!kafka_admin_DescribeConsumerGroupsResult_is_done(result, 1));
+
+            fast.complete(lazy_consumer_group_description("fast"));
+            assert!(kafka_admin_DescribeConsumerGroupsResult_is_done(result, 0));
+            // "slow" is still pending, so reading "fast" must not wait on it.
+            let value = kafka_admin_DescribeConsumerGroupsResult_get_value(result, 0);
+            assert!(!value.is_null());
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_ConsumerGroupDescription_group_id(value)).to_str(),
+                Ok("fast")
+            );
+            assert!(kafka_admin_DescribeConsumerGroupsResult_get_error(result, 0).is_null());
+            assert!(!kafka_admin_DescribeConsumerGroupsResult_is_done(result, 1));
+            // Out-of-range indices never block, even with a group pending.
+            assert!(kafka_admin_DescribeConsumerGroupsResult_get_value(result, 2).is_null());
+            assert!(kafka_admin_DescribeConsumerGroupsResult_get_error(result, -1).is_null());
+            assert!(!kafka_admin_DescribeConsumerGroupsResult_is_done(result, 2));
+
+            let completer = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                slow.complete_with_error(Error::timeout("slow group timed out"));
+            });
+            assert_eq!(
+                borrowed_message(kafka_admin_DescribeConsumerGroupsResult_get_error(result, 1)),
+                "slow group timed out"
+            );
+            completer.join().expect("completer thread");
+            assert!(kafka_admin_DescribeConsumerGroupsResult_is_done(result, 1));
+            assert!(kafka_admin_DescribeConsumerGroupsResult_get_value(result, 1).is_null());
+            assert_eq!(
+                consume_message(kafka_admin_DescribeConsumerGroupsResult_all(result)),
+                "slow group timed out"
+            );
+            kafka_admin_DescribeConsumerGroupsResult_destroy(result);
+        }
+    }
+
     #[test]
     fn describe_classic_groups_result_carries_protocol_and_protocol_data() {
         let description = ClassicGroupDescription::new(
@@ -32817,9 +33301,10 @@ mod tests {
             Some(BTreeSet::from([AclOperation::Delete])),
         );
         let outcomes = HashMap::from([("cg".to_string(), Ok(description))]);
-        let result = box_describe_classic_groups_result(outcomes);
+        let result: *mut kafka_admin_DescribeClassicGroupsResult_t =
+            resolved_keyed_handle(outcomes, describe_classic_groups_result_inner);
         // SAFETY: Test code: `result` was built just above by
-        // `box_describe_classic_groups_result`, so it is a valid handle for every
+        // `resolved_keyed_handle`, so it is a valid handle for every
         // `kafka_admin_DescribeClassicGroupsResult_*` getter; `value` is the borrowed
         // `ClassicGroupDescription` handle for index 0 (asserted non-null) and is only read
         // through its getters while `result` lives.
@@ -32859,6 +33344,69 @@ mod tests {
         }
     }
 
+    /// A synchronous `describe_classic_groups` handle waits per group, as
+    /// Java's `describedGroups()` does, and `all()` waits for every group.
+    #[test]
+    fn describe_classic_groups_result_accessors_wait_for_their_own_group_only() {
+        let (_runtime, waiter) = lazy_test_waiter();
+        let fast = crate::common::internals::KafkaFutureImpl::<ClassicGroupDescription>::new();
+        let slow = crate::common::internals::KafkaFutureImpl::<ClassicGroupDescription>::new();
+        let result: *mut kafka_admin_DescribeClassicGroupsResult_t = into_handle(describe_classic_groups_result_inner(
+            &waiter,
+            vec![
+                ("b-slow".to_string(), slow.future()),
+                ("a-fast".to_string(), fast.future()),
+            ],
+        ));
+        // SAFETY: Test code: `result` was built just above by `into_handle`, so it is a valid
+        // handle for every `kafka_admin_DescribeClassicGroupsResult_*` accessor; the strings,
+        // description and error pointers borrowed from it are read before it is destroyed,
+        // the owned `all()` error is destroyed once, and the handle is destroyed exactly once.
+        unsafe {
+            assert_eq!(kafka_admin_DescribeClassicGroupsResult_count(result), 2);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_DescribeClassicGroupsResult_get_group_id(result, 1)).to_str(),
+                Ok("b-slow")
+            );
+            assert!(!kafka_admin_DescribeClassicGroupsResult_is_done(result, 0));
+
+            fast.complete(ClassicGroupDescription::new(
+                "a-fast",
+                "consumer",
+                "range",
+                vec![],
+                ClassicGroupState::Empty,
+                None,
+                None,
+            ));
+            let value = kafka_admin_DescribeClassicGroupsResult_get_value(result, 0);
+            assert!(!value.is_null());
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_ClassicGroupDescription_state(value)).to_str(),
+                Ok("Empty")
+            );
+            assert!(!kafka_admin_DescribeClassicGroupsResult_is_done(result, 1));
+            assert!(!kafka_admin_DescribeClassicGroupsResult_is_done(result, -1));
+
+            let completer = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                slow.complete_with_error(Error::timeout("classic group timed out"));
+            });
+            assert_eq!(
+                consume_message(kafka_admin_DescribeClassicGroupsResult_all(result)),
+                "classic group timed out"
+            );
+            completer.join().expect("completer thread");
+            assert!(kafka_admin_DescribeClassicGroupsResult_is_done(result, 1));
+            assert_eq!(
+                borrowed_message(kafka_admin_DescribeClassicGroupsResult_get_error(result, 1)),
+                "classic group timed out"
+            );
+            assert!(kafka_admin_DescribeClassicGroupsResult_get_value(result, 1).is_null());
+            kafka_admin_DescribeClassicGroupsResult_destroy(result);
+        }
+    }
+
     /// The coordinator must cross the boundary as a whole endpoint.
     ///
     /// `KafkaAdminClient` hands the group handlers `Call.curNode()`, so
@@ -32892,11 +33440,17 @@ mod tests {
             Some(BTreeSet::new()),
         );
 
-        let consumer_result = box_describe_consumer_groups_result(HashMap::from([("g".to_string(), Ok(consumer))]));
-        let classic_result = box_describe_classic_groups_result(HashMap::from([("cg".to_string(), Ok(classic))]));
+        let consumer_result: *mut kafka_admin_DescribeConsumerGroupsResult_t = resolved_keyed_handle(
+            HashMap::from([("g".to_string(), Ok(consumer))]),
+            describe_consumer_groups_result_inner,
+        );
+        let classic_result: *mut kafka_admin_DescribeClassicGroupsResult_t = resolved_keyed_handle(
+            HashMap::from([("cg".to_string(), Ok(classic))]),
+            describe_classic_groups_result_inner,
+        );
         // SAFETY: Test code: `consumer_result` and `classic_result` were built just above
-        // by `box_describe_consumer_groups_result` and
-        // `box_describe_classic_groups_result`, so the `get_value` / `coordinator` chains
+        // by `resolved_keyed_handle` from already-resolved groups, so the `get_value` /
+        // `coordinator` chains
         // yield borrowed `Node` handles (asserted non-null) valid while the results live;
         // `&mut len` is a writable local, and `kafka_common_Node_host` returns a pointer
         // into the node's host string whose length it wrote to `len`, so
@@ -33251,14 +33805,22 @@ mod tests {
                 GroupListing::new("g3", Some(GroupType::Classic), "", Some(GroupState::Empty)),
             ],
             vec![Error::new(Errors::CoordinatorNotAvailable)],
+            Err(Error::new(Errors::CoordinatorNotAvailable)),
         );
         let result = box_list_groups_result(outcome);
         // SAFETY: Test code: `result` was built just above by `box_list_groups_result`, so
         // it is a valid handle for every `kafka_admin_ListGroupsResult_*` getter; `first`,
         // `second`, `third` and `error` are borrowed listing / error handles read only
-        // while `result` lives, out-of-range indices exercise the documented null paths,
-        // and `kafka_admin_ListGroupsResult_destroy(result)` is the single destroy.
+        // while `result` lives, the owned `all()` error is destroyed once, out-of-range
+        // indices exercise the documented null paths, and
+        // `kafka_admin_ListGroupsResult_destroy(result)` is the single destroy.
         unsafe {
+            // An `_async`-path handle is already resolved.
+            assert!(kafka_admin_ListGroupsResult_is_done(result));
+            assert_eq!(
+                consume_error_code(kafka_admin_ListGroupsResult_all(result)),
+                Some(Errors::CoordinatorNotAvailable.code() as i32)
+            );
             assert_eq!(kafka_admin_ListGroupsResult_valid_count(result), 3);
             assert_eq!(kafka_admin_ListGroupsResult_error_count(result), 1);
 
@@ -33316,6 +33878,58 @@ mod tests {
         }
     }
 
+    /// A synchronous `list_groups` handle holds Java's `all()`, `valid()` and
+    /// `errors()` futures unresolved: every accessor waits for the one it
+    /// reads, and `all()` reports the first per-broker error.
+    #[test]
+    fn list_groups_result_accessors_wait_for_the_listing() {
+        let (_runtime, waiter) = lazy_test_waiter();
+        let source = crate::common::internals::KafkaFutureImpl::<Vec<Result<GroupListing, Error>>>::new();
+        let result: *mut kafka_admin_ListGroupsResult_t =
+            into_handle(list_groups_result_inner(&waiter, &ListGroupsResult::new(source.future())));
+        // SAFETY: Test code: `result` was built just above by `into_handle`, so it is a valid
+        // handle for every `kafka_admin_ListGroupsResult_*` accessor; the listing and error
+        // pointers borrowed from it are read before it is destroyed, the owned `all()` error
+        // is destroyed once, and the handle is destroyed exactly once.
+        unsafe {
+            assert!(!kafka_admin_ListGroupsResult_is_done(result));
+            let completer = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                source.complete(vec![
+                    Ok(GroupListing::new("g1", Some(GroupType::Consumer), "consumer", None)),
+                    Err(Error::timeout("broker 2 timed out")),
+                ]);
+            });
+            // `valid()` waits for the listing, then holds only the listings.
+            assert_eq!(kafka_admin_ListGroupsResult_valid_count(result), 1);
+            completer.join().expect("completer thread");
+            assert!(kafka_admin_ListGroupsResult_is_done(result));
+            let listing = kafka_admin_ListGroupsResult_get_valid(result, 0);
+            assert_eq!(CStr::from_ptr(kafka_admin_GroupListing_group_id(listing)).to_str(), Ok("g1"));
+            assert_eq!(kafka_admin_ListGroupsResult_error_count(result), 1);
+            assert_eq!(
+                borrowed_message(kafka_admin_ListGroupsResult_get_error(result, 0)),
+                "broker 2 timed out"
+            );
+            assert_eq!(consume_message(kafka_admin_ListGroupsResult_all(result)), "broker 2 timed out");
+            kafka_admin_ListGroupsResult_destroy(result);
+        }
+
+        // With no per-broker error, `all()` succeeds.
+        let source = crate::common::internals::KafkaFutureImpl::<Vec<Result<GroupListing, Error>>>::new();
+        let result: *mut kafka_admin_ListGroupsResult_t =
+            into_handle(list_groups_result_inner(&waiter, &ListGroupsResult::new(source.future())));
+        source.complete(vec![]);
+        // SAFETY: Test code: `result` was built just above by `into_handle` and is destroyed
+        // exactly once, after its accessors are read.
+        unsafe {
+            assert!(kafka_admin_ListGroupsResult_all(result).is_null());
+            assert_eq!(kafka_admin_ListGroupsResult_valid_count(result), 0);
+            assert_eq!(kafka_admin_ListGroupsResult_error_count(result), 0);
+            kafka_admin_ListGroupsResult_destroy(result);
+        }
+    }
+
     #[test]
     fn list_consumer_group_offsets_result_is_two_level_and_keeps_null_offsets() {
         let offsets: GroupOffsets = HashMap::from([
@@ -33331,9 +33945,10 @@ mod tests {
             ("g-ok".to_string(), Ok(offsets)),
             ("g-bad".to_string(), Err(Error::unsupported_version("Not implemented yet"))),
         ]);
-        let result = box_list_consumer_group_offsets_result(outcomes);
+        let result: *mut kafka_admin_ListConsumerGroupOffsetsResult_t =
+            resolved_keyed_handle(outcomes, list_consumer_group_offsets_result_inner);
         // SAFETY: Test code: `result` was built just above by
-        // `box_list_consumer_group_offsets_result`, so it is a valid handle for every
+        // `resolved_keyed_handle`, so it is a valid handle for every
         // getter; `error` and `map` are borrowed from it (the `OffsetAndMetadataMap` handle
         // asserted non-null) and only read while `result` lives, `&mut epoch` is a writable
         // local for the single-element out-param writes, out-of-range indices exercise the
@@ -33392,6 +34007,62 @@ mod tests {
         }
     }
 
+    /// A synchronous `list_consumer_group_offsets` handle waits per group, as
+    /// Java's `partitionsToOffsetAndMetadata(groupId)` does.
+    #[test]
+    fn list_consumer_group_offsets_result_accessors_wait_for_their_own_group_only() {
+        let (_runtime, waiter) = lazy_test_waiter();
+        let fast = crate::common::internals::KafkaFutureImpl::<GroupOffsets>::new();
+        let slow = crate::common::internals::KafkaFutureImpl::<GroupOffsets>::new();
+        let result: *mut kafka_admin_ListConsumerGroupOffsetsResult_t =
+            into_handle(list_consumer_group_offsets_result_inner(
+                &waiter,
+                vec![
+                    ("g-slow".to_string(), slow.future()),
+                    ("g-fast".to_string(), fast.future()),
+                ],
+            ));
+        // SAFETY: Test code: `result` was built just above by `into_handle`, so it is a valid
+        // handle for every `kafka_admin_ListConsumerGroupOffsetsResult_*` accessor; the
+        // strings, offset map and error pointers borrowed from it are read before it is
+        // destroyed, the owned `all()` error is destroyed once, and the handle is destroyed
+        // exactly once.
+        unsafe {
+            assert_eq!(kafka_admin_ListConsumerGroupOffsetsResult_count(result), 2);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_ListConsumerGroupOffsetsResult_get_group_id(result, 0)).to_str(),
+                Ok("g-fast")
+            );
+            assert!(!kafka_admin_ListConsumerGroupOffsetsResult_is_done(result, 0));
+
+            fast.complete(HashMap::from([(
+                TopicPartition::new("t", 0),
+                Some(OffsetAndMetadata::new(42).unwrap()),
+            )]));
+            let map = kafka_admin_ListConsumerGroupOffsetsResult_get_value(result, 0);
+            assert!(!map.is_null());
+            assert_eq!(kafka_admin_OffsetAndMetadataMap_get_offset(map, 0), 42);
+            assert!(!kafka_admin_ListConsumerGroupOffsetsResult_is_done(result, 1));
+            assert!(kafka_admin_ListConsumerGroupOffsetsResult_get_value(result, 2).is_null());
+
+            let completer = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                slow.complete_with_error(Error::timeout("offsets timed out"));
+            });
+            assert_eq!(
+                borrowed_message(kafka_admin_ListConsumerGroupOffsetsResult_get_error(result, 1)),
+                "offsets timed out"
+            );
+            completer.join().expect("completer thread");
+            assert!(kafka_admin_ListConsumerGroupOffsetsResult_get_value(result, 1).is_null());
+            assert_eq!(
+                consume_message(kafka_admin_ListConsumerGroupOffsetsResult_all(result)),
+                "offsets timed out"
+            );
+            kafka_admin_ListConsumerGroupOffsetsResult_destroy(result);
+        }
+    }
+
     /// Reads an owned error's message and destroys it; `None` for null.
     unsafe fn consume_error_message(error: *mut kafka_common_Error_t) -> Option<String> {
         if error.is_null() {
@@ -33440,6 +34111,27 @@ mod tests {
         handle.future()
     }
 
+    /// Builds a per-group result handle whose futures have already resolved to
+    /// `outcomes`, through `build` — the same builder the synchronous entry
+    /// point uses. Nothing on it waits, so the waiter's runtime is not needed
+    /// afterwards.
+    fn resolved_keyed_handle<T, I, R>(
+        outcomes: HashMap<String, Result<T, Error>>,
+        build: impl FnOnce(&FutureWaiter, Vec<(String, KafkaFuture<T>)>) -> I,
+    ) -> *mut R
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        let (_runtime, waiter) = lazy_test_waiter();
+        into_handle(build(
+            &waiter,
+            outcomes
+                .into_iter()
+                .map(|(key, outcome)| (key, resolved_future(outcome)))
+                .collect(),
+        ))
+    }
+
     /// `alterConsumerGroupOffsets` handle: Java's `partitionResult(tp)` and
     /// `all()` over one resolved `Map<TopicPartition, Errors>`, with the exact
     /// Java messages, plus the index getters over the requested partitions.
@@ -33452,9 +34144,7 @@ mod tests {
         let outcome: PartitionErrorsOutcome = Ok(map);
         let result = AlterConsumerGroupOffsetsResult::new(resolved_future(outcome.clone()));
         let requested = vec![TopicPartition::new("t", 1), TopicPartition::new("t", 0)];
-        let altered = box_alter_consumer_group_offsets_result(alter_consumer_group_offsets_result_inner((
-            result, requested, outcome,
-        )));
+        let altered = box_alter_consumer_group_offsets_result((result, requested, outcome));
         // SAFETY: Test code: `altered` was built just above by
         // `box_alter_consumer_group_offsets_result`, so it is a valid handle for its getters
         // and accessors; the topic strings and error pointers borrowed from it are read
@@ -33517,9 +34207,7 @@ mod tests {
         for requested in [vec![TopicPartition::new("t", 0)], Vec::new()] {
             let outcome: PartitionErrorsOutcome = Ok(HashMap::from([(TopicPartition::new("t", 0), Errors::None)]));
             let result = AlterConsumerGroupOffsetsResult::new(resolved_future(outcome.clone()));
-            let altered = box_alter_consumer_group_offsets_result(alter_consumer_group_offsets_result_inner((
-                result, requested, outcome,
-            )));
+            let altered = box_alter_consumer_group_offsets_result((result, requested, outcome));
             // SAFETY: Test code: Each handle passed to a `_destroy` is a live, owned handle (built by
             // this test or received by the callback) that nothing uses afterwards, destroyed exactly
             // once. Every accessor is called on a live handle (built by this test or received by the
@@ -33532,22 +34220,84 @@ mod tests {
         }
     }
 
+    /// A synchronous `alter_consumer_group_offsets` handle holds Java's single
+    /// future unresolved: the requested partitions are readable at once,
+    /// `isDone()` never blocks, and `partitionResult` / `all()` / `_get_error`
+    /// wait for that future.
+    #[test]
+    fn alter_consumer_group_offsets_result_accessors_wait_for_the_single_future() {
+        let (_runtime, waiter) = lazy_test_waiter();
+        let future = crate::common::internals::KafkaFutureImpl::<HashMap<TopicPartition, Errors>>::new();
+        let result: *mut kafka_admin_AlterConsumerGroupOffsetsResult_t =
+            into_handle(alter_consumer_group_offsets_result_inner(
+                &waiter,
+                AlterConsumerGroupOffsetsResult::new(future.future()),
+                vec![TopicPartition::new("t", 1), TopicPartition::new("t", 0)],
+            ));
+        // SAFETY: Test code: `result` was built just above by `into_handle`, so it is a valid
+        // handle for every `kafka_admin_AlterConsumerGroupOffsetsResult_*` accessor; the
+        // strings and error pointers borrowed from it are read before it is destroyed, every
+        // owned error is destroyed once, and the handle is destroyed exactly once.
+        unsafe {
+            assert_eq!(kafka_admin_AlterConsumerGroupOffsetsResult_count(result), 2);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_AlterConsumerGroupOffsetsResult_get_topic(result, 0)).to_str(),
+                Ok("t")
+            );
+            assert_eq!(kafka_admin_AlterConsumerGroupOffsetsResult_get_partition(result, 0), 0);
+            assert_eq!(kafka_admin_AlterConsumerGroupOffsetsResult_get_partition(result, 1), 1);
+            assert!(!kafka_admin_AlterConsumerGroupOffsetsResult_is_done(result));
+            // An out-of-range index never blocks, even with the future pending.
+            assert!(kafka_admin_AlterConsumerGroupOffsetsResult_get_error(result, 2).is_null());
+            assert!(kafka_admin_AlterConsumerGroupOffsetsResult_get_error(result, -1).is_null());
+
+            let completer = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                future.complete(HashMap::from([
+                    (TopicPartition::new("t", 0), Errors::None),
+                    (TopicPartition::new("t", 1), Errors::UnknownMemberId),
+                ]));
+            });
+            assert_eq!(
+                consume_error_code(kafka_admin_AlterConsumerGroupOffsetsResult_partition_result(
+                    result,
+                    c"t".as_ptr(),
+                    1
+                )),
+                Some(Errors::UnknownMemberId.code() as i32)
+            );
+            completer.join().expect("completer thread");
+            assert!(kafka_admin_AlterConsumerGroupOffsetsResult_is_done(result));
+            assert!(kafka_admin_AlterConsumerGroupOffsetsResult_get_error(result, 0).is_null());
+            assert_eq!(
+                common::kafka_common_Error_code(kafka_admin_AlterConsumerGroupOffsetsResult_get_error(result, 1))
+                    as i32,
+                Errors::UnknownMemberId.code() as i32
+            );
+            assert_eq!(
+                consume_message(kafka_admin_AlterConsumerGroupOffsetsResult_all(result)),
+                "Failed altering group offsets for the following partitions: [t-1]"
+            );
+            kafka_admin_AlterConsumerGroupOffsetsResult_destroy(result);
+        }
+    }
+
     /// A whole-request failure on a synchronous-path handle: every accessor
     /// reports it, as Java's `whenComplete` forwards the `throwable`.
     #[test]
     fn consumer_group_offsets_results_report_a_whole_request_failure_through_every_accessor() {
         let requested = vec![TopicPartition::new("t", 0)];
         let failed: PartitionErrorsOutcome = Err(Error::group_authorization("g"));
-        let altered = box_alter_consumer_group_offsets_result(alter_consumer_group_offsets_result_inner((
+        let altered = box_alter_consumer_group_offsets_result((
             AlterConsumerGroupOffsetsResult::new(resolved_future(failed.clone())),
             requested.clone(),
             failed.clone(),
-        )));
-        let deleted = box_delete_consumer_group_offsets_result(delete_consumer_group_offsets_result_inner((
+        ));
+        let deleted = box_delete_consumer_group_offsets_result((
             DeleteConsumerGroupOffsetsResult::new(resolved_future(failed.clone()), requested.iter().cloned().collect()),
             requested,
             failed,
-        )));
+        ));
         let code = Errors::GroupAuthorizationFailed.code() as i32;
         // SAFETY: Test code: Each handle passed to a `_destroy` is a live, owned handle (built by
         // this test or received by the callback) that nothing uses afterwards, destroyed exactly
@@ -33614,9 +34364,7 @@ mod tests {
             resolved_future(outcome.clone()),
             requested.iter().cloned().collect(),
         );
-        let deleted = box_delete_consumer_group_offsets_result(delete_consumer_group_offsets_result_inner((
-            result, requested, outcome,
-        )));
+        let deleted = box_delete_consumer_group_offsets_result((result, requested, outcome));
         let missing = "Offset deletion result for partition \"topic-1\" was not included in the response";
         // SAFETY: Test code: Each string read with `CStr::from_ptr` is a non-null, NUL-terminated
         // string borrowed from a live handle or passed to the running callback, and is copied
@@ -33679,11 +34427,7 @@ mod tests {
                 resolved_future(outcome.clone()),
                 requested.iter().cloned().collect(),
             );
-            let deleted = box_delete_consumer_group_offsets_result(delete_consumer_group_offsets_result_inner((
-                result,
-                requested.clone(),
-                outcome,
-            )));
+            let deleted = box_delete_consumer_group_offsets_result((result, requested.clone(), outcome));
             // SAFETY: Test code: Each handle passed to a `_destroy` is a live, owned handle (built by
             // this test or received by the callback) that nothing uses afterwards, destroyed exactly
             // once. Each error handle consumed is an owned handle just returned by the call it wraps,
@@ -33701,6 +34445,73 @@ mod tests {
         }
     }
 
+    /// A synchronous `delete_consumer_group_offsets` handle waits on Java's
+    /// single future — except for an unrequested partition, which Java's
+    /// `partitionResult` rejects synchronously, so it is reported without
+    /// waiting.
+    #[test]
+    fn delete_consumer_group_offsets_result_accessors_wait_for_the_single_future() {
+        let (_runtime, waiter) = lazy_test_waiter();
+        let future = crate::common::internals::KafkaFutureImpl::<HashMap<TopicPartition, Errors>>::new();
+        let requested = vec![TopicPartition::new("topic", 0)];
+        let result: *mut kafka_admin_DeleteConsumerGroupOffsetsResult_t =
+            into_handle(delete_consumer_group_offsets_result_inner(
+                &waiter,
+                DeleteConsumerGroupOffsetsResult::new(future.future(), requested.iter().cloned().collect()),
+                requested,
+            ));
+        // SAFETY: Test code: `result` was built just above by `into_handle`, so it is a valid
+        // handle for every `kafka_admin_DeleteConsumerGroupOffsetsResult_*` accessor; the
+        // strings and error pointers borrowed from it are read before it is destroyed, every
+        // owned error is destroyed once, and the handle is destroyed exactly once.
+        unsafe {
+            assert_eq!(kafka_admin_DeleteConsumerGroupOffsetsResult_count(result), 1);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_DeleteConsumerGroupOffsetsResult_get_topic(result, 0)).to_str(),
+                Ok("topic")
+            );
+            assert!(!kafka_admin_DeleteConsumerGroupOffsetsResult_is_done(result));
+            // Java's synchronous guard: answered while the future is still pending.
+            assert_eq!(
+                consume_message(kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(
+                    result,
+                    c"other".as_ptr(),
+                    0
+                )),
+                "Partition other-0 was not included in the original request"
+            );
+            assert!(!kafka_admin_DeleteConsumerGroupOffsetsResult_is_done(result));
+
+            let completer = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                future.complete(HashMap::from([(
+                    TopicPartition::new("topic", 0),
+                    Errors::GroupSubscribedToTopic,
+                )]));
+            });
+            assert_eq!(
+                consume_error_code(kafka_admin_DeleteConsumerGroupOffsetsResult_all(result)),
+                Some(Errors::GroupSubscribedToTopic.code() as i32)
+            );
+            completer.join().expect("completer thread");
+            assert!(kafka_admin_DeleteConsumerGroupOffsetsResult_is_done(result));
+            assert_eq!(
+                common::kafka_common_Error_code(kafka_admin_DeleteConsumerGroupOffsetsResult_get_error(result, 0))
+                    as i32,
+                Errors::GroupSubscribedToTopic.code() as i32
+            );
+            assert_eq!(
+                consume_error_code(kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(
+                    result,
+                    c"topic".as_ptr(),
+                    0
+                )),
+                Some(Errors::GroupSubscribedToTopic.code() as i32)
+            );
+            kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(result);
+        }
+    }
+
     /// `removeMembersFromConsumerGroup` handle with explicit members: Java's
     /// `memberResult(member)` and `all()`.
     #[test]
@@ -33714,9 +34525,7 @@ mod tests {
             resolved_future(outcome.clone()),
             requested.iter().cloned().collect(),
         );
-        let removed = box_remove_members_from_consumer_group_result(remove_members_from_consumer_group_result_inner((
-            result, requested, outcome,
-        )));
+        let removed = box_remove_members_from_consumer_group_result((result, requested, outcome));
         let fenced = Errors::FencedInstanceId.code() as i32;
         // SAFETY: Test code: Each string read with `CStr::from_ptr` is a non-null, NUL-terminated
         // string borrowed from a live handle or passed to the running callback, and is copied
@@ -33773,9 +34582,7 @@ mod tests {
             resolved_future(outcome.clone()),
             requested.iter().cloned().collect(),
         );
-        let removed = box_remove_members_from_consumer_group_result(remove_members_from_consumer_group_result_inner((
-            result, requested, outcome,
-        )));
+        let removed = box_remove_members_from_consumer_group_result((result, requested, outcome));
         let missing = "Member \"MemberIdentity(memberId='', groupInstanceId='instance-2', reason=null)\" was not \
                        included in the removal response";
         // SAFETY: Test code: Each handle passed to a `_destroy` is a live, owned handle (built by
@@ -33813,9 +34620,7 @@ mod tests {
         for (error, fails) in [(Errors::None, false), (Errors::UnknownMemberId, true)] {
             let outcome: MemberErrorsOutcome = Ok(HashMap::from([(identity.clone(), error)]));
             let result = RemoveMembersFromConsumerGroupResult::new(resolved_future(outcome.clone()), HashSet::new());
-            let removed = box_remove_members_from_consumer_group_result(
-                remove_members_from_consumer_group_result_inner((result, Vec::new(), outcome)),
-            );
+            let removed = box_remove_members_from_consumer_group_result((result, Vec::new(), outcome));
             // SAFETY: Test code: Each handle passed to a `_destroy` is a live, owned handle (built by
             // this test or received by the callback) that nothing uses afterwards, destroyed exactly
             // once. Each error handle consumed is an owned handle just returned by the call it wraps,
@@ -33856,17 +34661,111 @@ mod tests {
         }
     }
 
+    /// A synchronous `remove_members_from_consumer_group` handle waits on
+    /// Java's single future — except where Java's `memberResult` refuses the
+    /// member synchronously (an unrequested member, or `removeAll` mode), which
+    /// is reported without waiting.
+    #[test]
+    fn remove_members_from_consumer_group_result_accessors_wait_for_the_single_future() {
+        let (_runtime, waiter) = lazy_test_waiter();
+        let future = crate::common::internals::KafkaFutureImpl::<HashMap<MemberIdentity, Errors>>::new();
+        let requested = vec![MemberToRemove::new("instance-2"), MemberToRemove::new("instance-1")];
+        let result: *mut kafka_admin_RemoveMembersFromConsumerGroupResult_t =
+            into_handle(remove_members_from_consumer_group_result_inner(
+                &waiter,
+                RemoveMembersFromConsumerGroupResult::new(future.future(), requested.iter().cloned().collect()),
+                requested,
+            ));
+        // SAFETY: Test code: `result` was built just above by `into_handle`, so it is a valid
+        // handle for every `kafka_admin_RemoveMembersFromConsumerGroupResult_*` accessor; the
+        // strings and error pointers borrowed from it are read before it is destroyed, every
+        // owned error is destroyed once, and the handle is destroyed exactly once.
+        unsafe {
+            assert_eq!(kafka_admin_RemoveMembersFromConsumerGroupResult_count(result), 2);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_RemoveMembersFromConsumerGroupResult_get_group_instance_id(
+                    result, 0
+                ))
+                .to_str(),
+                Ok("instance-1")
+            );
+            assert!(!kafka_admin_RemoveMembersFromConsumerGroupResult_is_done(result));
+            assert_eq!(
+                consume_message(kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(
+                    result,
+                    c"instance-9".as_ptr()
+                )),
+                "Member instance-9 was not included in the original request"
+            );
+            assert!(kafka_admin_RemoveMembersFromConsumerGroupResult_get_error(result, 2).is_null());
+            assert!(!kafka_admin_RemoveMembersFromConsumerGroupResult_is_done(result));
+
+            let completer = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                future.complete(HashMap::from([
+                    (MemberToRemove::new("instance-1").to_member_identity(), Errors::None),
+                    (MemberToRemove::new("instance-2").to_member_identity(), Errors::FencedInstanceId),
+                ]));
+            });
+            assert!(
+                kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(result, c"instance-1".as_ptr())
+                    .is_null()
+            );
+            completer.join().expect("completer thread");
+            assert!(kafka_admin_RemoveMembersFromConsumerGroupResult_is_done(result));
+            assert_eq!(
+                common::kafka_common_Error_code(kafka_admin_RemoveMembersFromConsumerGroupResult_get_error(result, 1))
+                    as i32,
+                Errors::FencedInstanceId.code() as i32
+            );
+            assert_eq!(
+                consume_error_code(kafka_admin_RemoveMembersFromConsumerGroupResult_all(result)),
+                Some(Errors::FencedInstanceId.code() as i32)
+            );
+            kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(result);
+        }
+
+        // `removeAll` mode: `memberResult` is refused at once; `all()` waits.
+        let future = crate::common::internals::KafkaFutureImpl::<HashMap<MemberIdentity, Errors>>::new();
+        let result: *mut kafka_admin_RemoveMembersFromConsumerGroupResult_t =
+            into_handle(remove_members_from_consumer_group_result_inner(
+                &waiter,
+                RemoveMembersFromConsumerGroupResult::new(future.future(), HashSet::new()),
+                Vec::new(),
+            ));
+        // SAFETY: Test code: `result` was built just above by `into_handle`, so it is a valid
+        // handle for its accessors; every owned error is destroyed once, and the handle is
+        // destroyed exactly once.
+        unsafe {
+            assert_eq!(kafka_admin_RemoveMembersFromConsumerGroupResult_count(result), 0);
+            assert_eq!(
+                consume_message(kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(
+                    result,
+                    c"instance-1".as_ptr()
+                )),
+                "The method: memberResult is not applicable in 'removeAll' mode"
+            );
+            assert!(!kafka_admin_RemoveMembersFromConsumerGroupResult_is_done(result));
+            let completer = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                future.complete_with_error(Error::timeout("remove all timed out"));
+            });
+            assert_eq!(
+                consume_message(kafka_admin_RemoveMembersFromConsumerGroupResult_all(result)),
+                "remove all timed out"
+            );
+            completer.join().expect("completer thread");
+            kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(result);
+        }
+    }
+
     /// The accessors evaluate the handle's already-resolved outcome, so they
     /// need no Tokio runtime and work from an arbitrary thread.
     #[test]
     fn consumer_group_result_accessors_run_off_any_runtime() {
         let outcome: PartitionErrorsOutcome = Ok(HashMap::from([(TopicPartition::new("t", 0), Errors::None)]));
         let result = AlterConsumerGroupOffsetsResult::new(resolved_future(outcome.clone()));
-        let altered = box_alter_consumer_group_offsets_result(alter_consumer_group_offsets_result_inner((
-            result,
-            vec![TopicPartition::new("t", 0)],
-            outcome,
-        )));
+        let altered = box_alter_consumer_group_offsets_result((result, vec![TopicPartition::new("t", 0)], outcome));
         let handle = altered as usize;
         // SAFETY: Test code: Every accessor is called on a live handle (built by this test or
         // received by the running callback and not yet destroyed); borrowed results are read before
@@ -33892,9 +34791,10 @@ mod tests {
             ("a".to_string(), Ok(())),
             ("b".to_string(), Err(Error::new(Errors::GroupIdNotFound))),
         ]);
-        let groups = box_delete_consumer_groups_result(outcomes);
+        let groups: *mut kafka_admin_DeleteConsumerGroupsResult_t =
+            resolved_keyed_handle(outcomes, delete_consumer_groups_result_inner);
         // SAFETY: Test code: `groups` was built just above by
-        // `box_delete_consumer_groups_result`, so it is a valid handle for its getters; the
+        // `resolved_keyed_handle`, so it is a valid handle for its getters; the
         // group-id strings and error pointers are borrowed and read before the handle is
         // freed, out-of-range indices exercise the documented null paths, and the handle is
         // destroyed exactly once by its own `_destroy`.
@@ -33911,6 +34811,51 @@ mod tests {
             );
             assert!(kafka_admin_DeleteConsumerGroupsResult_get_group_id(groups, 2).is_null());
             kafka_admin_DeleteConsumerGroupsResult_destroy(groups);
+        }
+    }
+
+    /// A synchronous `delete_consumer_groups` handle waits per group, as
+    /// Java's `deletedGroups()` does, and `all()` waits for every group.
+    #[test]
+    fn delete_consumer_groups_result_accessors_wait_for_their_own_group_only() {
+        let (_runtime, waiter) = lazy_test_waiter();
+        let fast = crate::common::internals::KafkaFutureImpl::<()>::new();
+        let slow = crate::common::internals::KafkaFutureImpl::<()>::new();
+        let result: *mut kafka_admin_DeleteConsumerGroupsResult_t = into_handle(delete_consumer_groups_result_inner(
+            &waiter,
+            vec![("b".to_string(), slow.future()), ("a".to_string(), fast.future())],
+        ));
+        // SAFETY: Test code: `result` was built just above by `into_handle`, so it is a valid
+        // handle for every `kafka_admin_DeleteConsumerGroupsResult_*` accessor; the strings
+        // and error pointers borrowed from it are read before it is destroyed, the owned
+        // `all()` error is destroyed once, and the handle is destroyed exactly once.
+        unsafe {
+            assert_eq!(kafka_admin_DeleteConsumerGroupsResult_count(result), 2);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_DeleteConsumerGroupsResult_get_group_id(result, 0)).to_str(),
+                Ok("a")
+            );
+            assert!(!kafka_admin_DeleteConsumerGroupsResult_is_done(result, 0));
+            fast.complete(());
+            assert!(kafka_admin_DeleteConsumerGroupsResult_get_error(result, 0).is_null());
+            assert!(!kafka_admin_DeleteConsumerGroupsResult_is_done(result, 1));
+            assert!(kafka_admin_DeleteConsumerGroupsResult_get_error(result, 2).is_null());
+
+            let completer = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                slow.complete_with_error(Error::timeout("delete timed out"));
+            });
+            assert_eq!(
+                consume_message(kafka_admin_DeleteConsumerGroupsResult_all(result)),
+                "delete timed out"
+            );
+            completer.join().expect("completer thread");
+            assert!(kafka_admin_DeleteConsumerGroupsResult_is_done(result, 1));
+            assert_eq!(
+                borrowed_message(kafka_admin_DeleteConsumerGroupsResult_get_error(result, 1)),
+                "delete timed out"
+            );
+            kafka_admin_DeleteConsumerGroupsResult_destroy(result);
         }
     }
 
@@ -39131,7 +40076,172 @@ mod tests {
             );
             kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(removed);
 
+            // With no per-key slot — no partition requested, or `removeAll` mode —
+            // the whole-request failure is still read from the handle, through
+            // `all()`, as in Java; the entry point itself does not report it.
+            let mut altered = std::ptr::null_mut();
+            assert!(
+                kafka_admin_AdminClient_alter_consumer_group_offsets(
+                    admin,
+                    c"g".as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    0,
+                    -1,
+                    &mut altered,
+                )
+                .is_null()
+            );
+            assert_eq!(kafka_admin_AlterConsumerGroupOffsetsResult_count(altered), 0);
+            assert_eq!(
+                consume_error_message(kafka_admin_AlterConsumerGroupOffsetsResult_all(altered)).as_deref(),
+                Some("Not implement yet")
+            );
+            kafka_admin_AlterConsumerGroupOffsetsResult_destroy(altered);
+
+            let mut removed = std::ptr::null_mut();
+            assert!(
+                kafka_admin_AdminClient_remove_members_from_consumer_group(
+                    admin,
+                    c"g".as_ptr(),
+                    true,
+                    ids.as_ptr(),
+                    1,
+                    std::ptr::null(),
+                    -1,
+                    &mut removed,
+                )
+                .is_null()
+            );
+            assert_eq!(kafka_admin_RemoveMembersFromConsumerGroupResult_count(removed), 0);
+            assert_eq!(
+                consume_error_message(kafka_admin_RemoveMembersFromConsumerGroupResult_all(removed)).as_deref(),
+                Some("Not implemented yet")
+            );
+            kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(removed);
+
             kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// End to end, against the production client: the consumer-group entry
+    /// points return before their requests resolve (Java's `Admin` methods do
+    /// not block), the requested keys are readable at once, and each request's
+    /// timeout is read from the handle rather than returned by the call.
+    #[test]
+    fn consumer_group_entry_points_return_before_the_request_resolves_and_report_its_timeout_from_the_handle() {
+        let admin = unreachable_admin_client();
+        let (_ids_owned, ids) = c_array(&["lazy-group"]);
+        let (_topics_owned, topics) = c_array(&["lazy-topic"]);
+        let partitions = [0i32];
+        let offsets = [5i64];
+        let mut described: *mut kafka_admin_DescribeConsumerGroupsResult_t = std::ptr::null_mut();
+        let mut altered: *mut kafka_admin_AlterConsumerGroupOffsetsResult_t = std::ptr::null_mut();
+        let mut listed: *mut kafka_admin_ListGroupsResult_t = std::ptr::null_mut();
+
+        let started = std::time::Instant::now();
+        // SAFETY: Test code: `admin` is live; `ids`, `topics`, `partitions` and `offsets` hold
+        // one valid entry each and outlive the calls; the NULL optional arrays are allowed;
+        // each `out_result` is a writable slot.
+        unsafe {
+            assert!(
+                kafka_admin_AdminClient_describe_consumer_groups(admin, ids.as_ptr(), 1, 1_000, false, &mut described)
+                    .is_null()
+            );
+            assert!(
+                kafka_admin_AdminClient_alter_consumer_group_offsets(
+                    admin,
+                    c"lazy-group".as_ptr(),
+                    topics.as_ptr(),
+                    partitions.as_ptr(),
+                    offsets.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    1,
+                    1_000,
+                    &mut altered,
+                )
+                .is_null()
+            );
+            assert!(
+                kafka_admin_AdminClient_list_groups(
+                    admin,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    1_000,
+                    &mut listed
+                )
+                .is_null()
+            );
+        }
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "a consumer-group entry point waited for its request"
+        );
+
+        // SAFETY: Test code: the three result handles were written above and are live; every
+        // borrowed pointer is read before its handle is destroyed, every owned error is
+        // destroyed once, and `admin` is destroyed once, before the handles.
+        unsafe {
+            assert_eq!(kafka_admin_DescribeConsumerGroupsResult_count(described), 1);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_DescribeConsumerGroupsResult_get_group_id(described, 0)).to_str(),
+                Ok("lazy-group")
+            );
+            assert!(!kafka_admin_DescribeConsumerGroupsResult_is_done(described, 0));
+            assert_eq!(kafka_admin_AlterConsumerGroupOffsetsResult_count(altered), 1);
+            assert!(!kafka_admin_AlterConsumerGroupOffsetsResult_is_done(altered));
+            assert!(!kafka_admin_ListGroupsResult_is_done(listed));
+
+            let all = kafka_admin_DescribeConsumerGroupsResult_all(described);
+            assert_eq!(common::kafka_common_Error_code(all) as i32, Errors::RequestTimedOut as i32);
+            assert_eq!(
+                borrowed_message(all),
+                "Timed out waiting for a node assignment. Call: describeConsumerGroups(api=FIND_COORDINATOR)"
+            );
+            common::kafka_common_Error_destroy(all);
+            assert!(kafka_admin_DescribeConsumerGroupsResult_is_done(described, 0));
+            assert!(kafka_admin_DescribeConsumerGroupsResult_get_value(described, 0).is_null());
+
+            let all = kafka_admin_AlterConsumerGroupOffsetsResult_all(altered);
+            assert_eq!(common::kafka_common_Error_code(all) as i32, Errors::RequestTimedOut as i32);
+            assert_eq!(
+                borrowed_message(all),
+                "Timed out waiting for a node assignment. Call: offsetCommit(api=FIND_COORDINATOR)"
+            );
+            common::kafka_common_Error_destroy(all);
+            assert_eq!(
+                common::kafka_common_Error_code(kafka_admin_AlterConsumerGroupOffsetsResult_get_error(altered, 0))
+                    as i32,
+                Errors::RequestTimedOut as i32
+            );
+
+            // Java's `listGroups` turns a failed broker lookup into an `errors()` entry,
+            // `KafkaException("Failed to find brokers to send ListGroups", cause)`,
+            // which `all()` then fails with: a bare Kafka error, not the timeout itself.
+            let all = kafka_admin_ListGroupsResult_all(listed);
+            assert_eq!(
+                common::kafka_common_Error_code(all) as i32,
+                Errors::UnknownServerError.code() as i32
+            );
+            assert_eq!(borrowed_message(all), "Failed to find brokers to send ListGroups");
+            common::kafka_common_Error_destroy(all);
+            assert_eq!(kafka_admin_ListGroupsResult_valid_count(listed), 0);
+            assert_eq!(kafka_admin_ListGroupsResult_error_count(listed), 1);
+
+            kafka_admin_AdminClient_destroy(admin);
+            kafka_admin_DescribeConsumerGroupsResult_destroy(described);
+            kafka_admin_AlterConsumerGroupOffsetsResult_destroy(altered);
+            kafka_admin_ListGroupsResult_destroy(listed);
         }
     }
 
