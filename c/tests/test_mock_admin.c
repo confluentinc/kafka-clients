@@ -661,20 +661,25 @@ static void test_mock_admin_list_topics_async(void) {
 }
 
 /* `timeout_next_request` makes the mock fail the next RPC. For listTopics that
- * is a whole-call failure (Java has one future), so it surfaces as the call's
- * error rather than a per-key error. */
+ * fails Java's single future, so — as with Java's listTopics, which returns
+ * before the future resolves — the call itself succeeds and the failure is
+ * read from the handle through namesToListings().get(). */
 static void test_mock_admin_list_topics_call_error(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
     kafka_admin_MockAdminClient_timeout_next_request(admin, 1);
 
     kafka_admin_ListTopicsResult_t *result = NULL;
-    kafka_common_Error_t *err =
-        kafka_admin_AdminClient_list_topics(admin, -1, true, &result);
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_list_topics(admin, -1, true, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_TRUE(kafka_admin_ListTopicsResult_is_done(result));
+    kafka_common_Error_t *err = kafka_admin_ListTopicsResult_names_to_listings(result);
     TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_NULL(result);
     TEST_ASSERT_EQUAL_STRING("The mock timed out the request.",
                              kafka_common_Error_message(err));
     kafka_common_Error_destroy(err);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_ListTopicsResult_count(result));
+    TEST_ASSERT_NULL(kafka_admin_ListTopicsResult_get_value(result, 0));
+    kafka_admin_ListTopicsResult_destroy(result);
     kafka_admin_AdminClient_destroy(admin);
 }
 

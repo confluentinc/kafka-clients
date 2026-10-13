@@ -2019,7 +2019,15 @@ class AdminServiceImpl final : public AdminService::Service {
       return grpc::Status::OK;
     }
     // Whole-value response: Java's ListTopicsResult holds one future for the
-    // entire map, so no listing can fail on its own.
+    // entire map, so no listing can fail on its own. The call returned before
+    // that future resolved (as Java's listTopics does); namesToListings().get()
+    // waits for it and reports its failure.
+    kafka_common_Error_t* list_err = kafka_admin_ListTopicsResult_names_to_listings(result);
+    if (list_err != nullptr) {
+      fill_proto_error(resp->mutable_error(), list_err);
+      kafka_admin_ListTopicsResult_destroy(result);
+      return grpc::Status::OK;
+    }
     const int32_t count = kafka_admin_ListTopicsResult_count(result);
     for (int32_t i = 0; i < count; i++) {
       const kafka_admin_TopicListing_t* listing =

@@ -206,26 +206,26 @@ static void test_kafka_admin_mock_driver_null_handle(void) {
 // RPCs against the unreachable bootstrap: they must return, not hang
 // ---------------------------------------------------------------------------
 
-/* A sync RPC on AdminKind::Kafka drives `admin_sync_value_op`'s block_on over
- * the real client. With no broker it fails (typically a timeout); if a broker
- * happens to be listening it may succeed. Either outcome is fine — what is
- * asserted is that exactly one of them is produced, promptly, and that the
- * ownership contract holds (a non-null return means *out_result was left
- * untouched). */
+/* A sync RPC on AdminKind::Kafka returns at once, as Java's listTopics does:
+ * the call only submits the request and writes a handle holding its future.
+ * namesToListings().get() then waits for that future. With no broker it fails
+ * (typically a timeout); if a broker happens to be listening it may succeed.
+ * Either outcome is fine — what is asserted is that the submission succeeds and
+ * the wait produces exactly one outcome, promptly. */
 static void test_kafka_admin_list_topics_returns_without_hanging(void) {
     kafka_admin_AdminClient_t *admin = create_admin();
 
     kafka_admin_ListTopicsResult_t *result = NULL;
-    kafka_common_Error_t *err =
-        kafka_admin_AdminClient_list_topics(admin, RPC_TIMEOUT_MS, true, &result);
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_list_topics(admin, RPC_TIMEOUT_MS, true, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    kafka_common_Error_t *err = kafka_admin_ListTopicsResult_names_to_listings(result);
+    TEST_ASSERT_TRUE(kafka_admin_ListTopicsResult_is_done(result));
     if (err != NULL) {
-        TEST_ASSERT_NULL(result);
         TEST_ASSERT_NOT_NULL(kafka_common_Error_message(err));
+        TEST_ASSERT_EQUAL_INT32(0, kafka_admin_ListTopicsResult_count(result));
         kafka_common_Error_destroy(err);
-    } else {
-        TEST_ASSERT_NOT_NULL(result);
-        kafka_admin_ListTopicsResult_destroy(result);
     }
+    kafka_admin_ListTopicsResult_destroy(result);
 
     kafka_admin_AdminClient_close(admin, RPC_TIMEOUT_MS);
     kafka_admin_AdminClient_destroy(admin);
