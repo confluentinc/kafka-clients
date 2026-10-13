@@ -741,20 +741,50 @@ commit bodies list the mutations.
 
 ### 13.3 Follow-ups, not done here
 
-- **Item 1's pattern in other `Display` impls.** These render an enum with `{:?}`, so they print the Rust
-  variant name where Java prints the constant name:
+- **Item 1's pattern in other `Display` impls.** Of the 37 `Display` impls under `rust/src/admin/`, 14
+  format a field with `{:?}`. Each was checked against Java 4.3.1: 13 print the field differently from
+  Java's `toString()`, as does `config_resource.rs` in `rust/src/common/`. (Completed after Critic 85's
+  review of round 6: this list used to miss four of the sites and leave seven unchecked.) These render an
+  enum with `{:?}`, so they print the Rust variant name where Java prints the constant name:
   - `rust/src/admin/feature_update.rs:124` (`upgradeType`);
   - `rust/src/admin/scram_credential_info.rs:59` (`mechanism`);
   - `rust/src/common/config/config_resource.rs:114` (`type`; `mock_admin_client.rs:2550` asserts
     `type=Topic`);
   - `rust/src/admin/topic_description.rs:152` (the set of `AclOperation`s).
 
-  These render an `Option` or a collection with `{:?}`. Each needs checking against its Java
-  `toString()`, which renders an `Optional` as `Optional[x]` or `Optional.empty`, a nullable value as
-  itself or `null`, and a collection as `[a, b]`: `log_dir_description.rs:137`,
-  `list_offsets_result.rs:106`, `producer_state.rs:99`, `transaction_description.rs:114`,
-  `new_topic.rs:170`, `partition_reassignment.rs:70` and `user_scram_credentials_description.rs:62`, all
-  under `rust/src/admin/`.
+  These render an `Option` or a collection with `{:?}`, which prints `Some(x)` or `None`, and a
+  collection's elements through their `Debug`. Java's `toString()` renders an `Optional` as `Optional[x]`
+  or `Optional.empty` (an `OptionalInt` or `OptionalLong` likewise, under its own name), a nullable value
+  as itself or `null`, a collection as `[a, b]` and a map as `{k=v}`, each element through its own
+  `toString()`. All are under `rust/src/admin/`:
+  - `log_dir_description.rs:137`: `replicaInfos` (a map whose keys and values print through their
+    derived `Debug`), `error` (`Some(..)` or `None` where Java prints the exception or `null`), and
+    `totalBytes` and `usableBytes` (Java's `OptionalLong`s);
+  - `list_offsets_result.rs:106`: `leaderEpoch` (Java's `Optional<Integer>`);
+  - `producer_state.rs:99`: `coordinatorEpoch` and `currentTransactionStartOffset` (Java's `OptionalInt`
+    and `OptionalLong`);
+  - `transaction_description.rs:114`: `transactionStartTimeMs` (Java's `OptionalLong`) and the set
+    `topicPartitions` (`{..}`, each element through its derived `Debug`, where Java prints `[t-0]`);
+  - `new_topic.rs:170`: the maps `replicasAssignments` and `configs` (for example `Some({0: [1]})` or
+    `None` where Java prints `{0=[1]}` or `null`);
+  - `user_scram_credentials_description.rs:62`: `credentialInfos` (each element through its derived
+    `Debug`);
+  - `list_consumer_group_offsets_spec.rs:62`: `topicPartitions` (`Some([..])` or `None`, each element
+    through its derived `Debug`, where Java prints `[t-0]` or `null`);
+  - `describe_producers_result.rs:51`: `activeProducers` (each `ProducerState` through its derived
+    `Debug`, where Java uses its `toString()`);
+  - `new_partitions.rs:75`: `newAssignments` (`Some([[1, 2]])` or `None` where Java prints `[[1, 2]]` or
+    `null`);
+  - `internals/all_brokers_strategy.rs:68`: `brokerId` (`Some(1)` or `None` where Java prints
+    `OptionalInt[1]` or `OptionalInt.empty`), which the `Invalid lookup mapping` message (`:231`) embeds.
+
+  The fourteenth, `partition_reassignment.rs:70`, formats three `Vec<i32>`s, which `{:?}` prints as Java
+  does (`[1, 2]`), so it needs no change.
+
+  `Display` impls outside `rust/src/admin/`, other than `config_resource.rs`, were not checked. The same
+  use of `{:?}` shows in `rust/src/common/`: `cluster.rs:499`, `node.rs:140`, `metric_name.rs:113`,
+  `metric_name_template.rs:94`, `cluster_resource.rs:44`, and `client_quota_alteration.rs:106`,
+  `client_quota_entity.rs:104` and `client_quota_filter.rs:90` under `quota/`.
 
   The C FFI keeps its own copy of item 1's name mapping: `config_source_name` and `config_type_name`
   (`rust/src/ffi/admin.rs:1727`, `:1744`).
@@ -763,14 +793,53 @@ commit bodies list the mutations.
   `shouldImplementEqualsProperly`, `shouldImplementHashCodeProperly`, `testHashCodeAndEqualsWithNull`
   and `testEquals`. Two Rust tests, `new_indexes_entries_by_name` and `equality_is_order_independent`,
   cover some of their assertions without citing them.
-- **Item 11: one-machine statements elsewhere in the agent memory.** Seven memory files still describe
-  one machine: `/opt/homebrew` paths, and what is or is not installed, or what wedged, "on this machine".
-  They are `ffi_callback_bridging_phase1_notes.md`, `ffi_callback_bridging_phase6_notes.md`,
-  `ffi_verify_env_milestone11_cffi.md`, `phase3_transaction_manager_notes.md`,
-  `python_bindings_local_build_test_macos.md` and `python_soak_client_notes.md` under `actor-executor/`,
-  and `kafka-critic/review_ffi_callback_bridging.md`. Item 11 changed two of them only where they advised
-  `--no-verify`, and in `python_bindings_local_build_test_macos.md` also the Docker-harness sentence
-  beside that line. That file still calls its host "this macOS box" (`:3`, `:9`).
+- **Item 11: one-machine statements elsewhere in the agent memory.** At least 40 memory files still
+  describe one machine: what is or is not installed, available or reachable, or what wedged, "on this
+  host" or "on this machine"; its toolchain paths (`/opt/homebrew`, the nix store) and the size of its
+  Docker VM; a Docker image built by hand, `ckr-pytest:dev`, which no repo script builds; or plan files in
+  one user's home directory (`~/.claude/plans/`). (Corrected after Critic 85's review of round 6: this
+  bullet used to count seven.) Critic 85's search,
+  `grep -rniE 'this (macos )?host|on this machine|this macos box|/opt/homebrew' .claude/agent-memory`,
+  finds 16 of them:
+  - under `actor-executor/`: `cbindgen_export_and_multilang_topology.md`,
+    `ffi_callback_bridging_phase1_notes.md`, `ffi_callback_bridging_phase6_notes.md`,
+    `ffi_verify_env_milestone11_cffi.md`, `integration_flake_hunting.md`, `m11_bindings_b0_b1_notes.md`,
+    `m11_bindings_gate_coverage.md`, `m11_known_defect_fixes.md`,
+    `macos_verify_docker_multilang_blocked.md`, `multilanguage_suite_on_macos.md`,
+    `phase3_transaction_manager_notes.md`, `python_bindings_local_build_test_macos.md` and
+    `python_soak_client_notes.md`;
+  - under `kafka-critic/`: `review_cext_tp_new_owned_handle.md`, `review_ffi_callback_bridging.md` and
+    `review_python_bindings_callbacks.md`.
+
+  A wider search adds phrases such as "this env", "the host has no", "not on PATH", "IS installed",
+  "missing here", "nix store", "without rustup", `CodeArtifact`, `PIP_INDEX_URL`, `ckr-` and `~/`. Every
+  hit was read, and it finds 24 more:
+  - under `actor-executor/`, what is installed, available or reachable:
+    `critic3_wakeup_and_logstate_round.md`, `ffi_callback_bridging_phase7_notes.md`,
+    `m11_g1_admin_topics_notes.md`, `m11_g2_admin_cluster_configs_notes.md`,
+    `m11_g3_admin_elections_offsets_notes.md`, `m11_real_broker_findings_notes.md`,
+    `m11_round17_claim_accuracy_patterns.md`, `m13_phase6_sweep_closeout_notes.md`,
+    `phase17_security_wiring_notes.md` and `phaseP4_producer_metrics_bindings_notes.md`;
+  - under `actor-executor/`, the hand-built image: `m11_bindings_b4_notes.md`, `m11_bindings_b6_notes.md`
+    and `soak_rss_spike_diagnosis.md`;
+  - under `actor-executor/`, the home-directory plans: `ffi_callback_bridging_phase2_notes.md`,
+    `ffi_callback_bridging_phase3_notes.md`, `ffi_callback_bridging_phase4_notes.md`,
+    `ffi_callback_bridging_phase5_notes.md` and `phaseM1_metrics_core_notes.md`;
+  - `actor-executor/MEMORY.md`, whose index lines for two of the files above repeat their one-machine
+    statements (`:154`, `:168`);
+  - under `kafka-critic/`: `review_m11_g0_multilanguage_admin.md`,
+    `review_m11_g6_transactions_and_branch_verdict.md`, `review_m11_phase5a.md`,
+    `review_pr148_fixround.md` and `review_python_soak_pr_findings.md`.
+
+  That makes 32 under `actor-executor/`, 8 under `kafka-critic/` and none under `project-manager/`. Both
+  searches match phrases, so they can miss a file: hence "at least". Facts true of any macOS or zsh setup,
+  such as the missing `flock` or zsh's `:s` modifier, are not counted.
+
+  Item 11 changed three of these files only where they advised `--no-verify`: `MEMORY.md` (the index
+  lines of the two hook notes), `python_bindings_local_build_test_macos.md` and
+  `python_soak_client_notes.md`. In `python_bindings_local_build_test_macos.md` it also changed the
+  Docker-harness sentence beside that line. That file still calls its host "this macOS box" (`:3`, `:9`),
+  quotes a plan's "on this machine" (`:11`), and names its Homebrew Python (`:18`, `:35`, `:74`).
 - **`--no-verify` in a document from `master`.** `design/current/python-rules-execution-plan.md:19-20`,
   which came with #187, still tells an agent to commit with `git commit --no-verify` and leave
   `make verify` to the Manager. That contradicts the rule item 11 wrote into the agent memory (§13.4).
@@ -821,7 +890,24 @@ verified.
   (item 5), `a20fa3cb` (item 6), `937ea026` (item 4's doc links, which item 7's doc check found),
   `937dad94` (item 7), `4f58998c` (item 9), `ce1140d8`, `9a99cdea` and `9bbd226a` (item 11), `fc0d2a82`
   (item 10, which added this section) and the plain `docs:` commit that follows it (item 8).
-- **The full gate runs once on the final tree, after the renumbering commit:** `make verify-sandbox`;
-  `cargo test --all-features --lib` from `rust/`, because the hook runs none of the crate's unit
-  tests; `make doc-check`, which the hook does not run and CI runs as a job of its own;
-  `make package-check`; and `make check-bindings`.
+- **The full gate ran once, on `cca3eea1`, the renumbering commit.** It is the hook's target,
+  `make verify-sandbox`, plus four checks the hook does not run: the crate's unit tests, `make doc-check`
+  (which CI runs as a job of its own), `make package-check` and `make check-bindings`.
+  - On 2026-10-12, `make doc-check`, `cargo test --all-features --lib` from `rust/` (4622 passed, 0
+    failed, 3 ignored), `make package-check` and `make check-bindings` passed.
+  - `make verify-sandbox` passed build-rust, build-c, format-check, check-generated and lint. Docker's
+    engine then died during test-integration, so test-integration and test-c were run again on their
+    own, on the same tree.
+  - `make test-c` passed, 7 of 7 ctest tests; the C integration tests skip off Linux.
+  - `make test-integration`: the user stopped the 2026-10-12 attempt after Docker ran out of memory and
+    killed brokers. By then 271 tests had passed and 1 had failed,
+    `consumer_bounce_test::test_async_subscribe_when_topic_unavailable`, the test that failed item 3's
+    first hook run; 18 had not run. The 2026-10-13 attempt passed. The `--test integration` binary had
+    288 passed, 0 failed and 2 ignored, and the lib's `integration_tests::` had 31 passed. The two
+    ignored tests need a Kafka 4.3 broker config and the harness image is 4.2.0, so they are ignored by
+    design.
+- **Critic 85 reviewed `384b9c2a..cca3eea1` on 2026-10-13.** It found all 11 items resolved, and one low
+  documentation issue: §13.3's counts. The fixup of `3455a5c0` that follows `cca3eea1` resolves it. That
+  commit changes only this plan and `COMMENTS.DONE.85.md`, which no build, lint or test reads. With the
+  user's OK (2026-10-13) it skipped the hook: it passed `git diff --cached --check`, and the Manager
+  committed it with `--no-verify`.

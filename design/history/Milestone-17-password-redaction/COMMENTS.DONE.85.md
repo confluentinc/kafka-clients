@@ -393,7 +393,7 @@ The entries below are round 6: the pull-request review, relayed by the Manager o
   - `python_bindings_local_build_test_macos.md` also drops its one-machine wording about the Docker multilanguage harness: "(avoid — it has wedged this machine)" now reads "(avoid running it locally: it can wedge Docker)".
 - `9a99cdea`: `m17_merge_review_followup_notes.md` drops the cache size, the `.git/info/exclude` advice, the zsh and BSD shell-gotcha list and the "Attribution" paragraph. It keeps the portable fact: after the `rust/` move, a pre-move root `target/` is not ignored.
 - `9bbd226a`: `kafka-critic/review_lint_java_rules_repro.md` drops its "Shell traps hit while doing this" list, which `afbef61f` added and `3e444252` extended. The recipe and its round-5 section are unchanged.
-- The user's decisions on the hook (2026-10-12) are in plan §13.4, and §13.5 records how each commit of this round was verified. Seven older memory files still describe one machine; plan §13.3 lists them as a follow-up.
+- The user's decisions on the hook (2026-10-12) are in plan §13.4, and §13.5 records how each commit of this round was verified. At least 40 older memory files still describe one machine; plan §13.3 lists them as a follow-up, with the two searches that found them. (Corrected after Critic 85's review of round 6: this bullet used to say seven.)
 
 ## Issue: stale claims in the PLAN, `COMMENTS.DONE.85.md` and the Critic's final-review record
 - **File**: `design/history/Milestone-17-password-redaction/PLAN.md:545-546` and §12 (`:499-508`);
@@ -464,4 +464,51 @@ The entries below are round 6: the pull-request review, relayed by the Manager o
 - In this folder, "Milestone 15" and `M15` became 17 wherever they named this milestone. The plan gains a dated line at its top: the milestone was renumbered from 15 to 17 because #206 took 15, so `M15` in this branch's commit subjects means this milestone. The Critic's record says in its round-6 note that this item renamed it too.
 - The `M15` mentions in `workflow_teeth_check_mtime.md` and `review_lint_java_rules_repro.md` are now `M17`.
 - Checked: `git grep -n 'Milestone-15-password\|m15_\|m15-'` prints only this entry, which quotes the review. `git grep -n 'Milestone 15\|M15'` hits only `master`'s Milestone 15 heading, this entry and the plan's renumbering lines.
+- Docs-only, so there is no test to teeth-check.
+
+The entry below is from Critic 85's review of round 6 (`384b9c2a..cca3eea1`) on 2026-10-13. Its line numbers are at `cca3eea1`.
+
+## Issue: Plan §13.3 and item 11's resolution undercount the memory files that describe one machine
+- **File**: `design/history/Milestone-17-password-redaction/PLAN.md:766-773` (§13.3, bullet "Item 11:
+  one-machine statements elsewhere in the agent memory") and
+  `design/history/Milestone-17-password-redaction/COMMENTS.DONE.85.md:396` (item 11's resolution, last
+  bullet).
+- **Severity**: Documentation (low; a follow-up list, not blocking).
+- **Java Reference**: N/A.
+- **Commit to fix up**: `fc0d2a82` (itself a fixup of `3455a5c0`); `git log -S` over
+  `384b9c2a..cca3eea1` gives `fc0d2a82` for both sentences.
+- **Description**: Both places say that **seven** memory files still describe one machine. §13.3 names
+  seven (six under `actor-executor/`, plus `kafka-critic/review_ffi_callback_bridging.md`). At
+  `cca3eea1` at least nine more files under `.claude/agent-memory/` do the same: they say what is or is
+  not installed, what does or does not resolve, or how big the Docker VM is, on "this host". The search
+  apparently looked for "this machine" and `/opt/homebrew` only:
+  - `actor-executor/cbindgen_export_and_multilang_topology.md:39`: "none present on this macOS host";
+  - `actor-executor/integration_flake_hunting.md:92-94`: "This host's Docker VM is 8 GiB", 18 CPUs;
+  - `actor-executor/m11_bindings_b0_b1_notes.md:90`: "the Python extension cannot be built on this host
+    at all";
+  - `actor-executor/m11_bindings_gate_coverage.md:48`: "Toolchain on this host: no rustup, so nix store
+    paths directly";
+  - `actor-executor/m11_known_defect_fixes.md:69` ("`make test-c` cannot run on this host (no `cmake`)")
+    and `:76` ("Building and testing the Python bindings on this host");
+  - `actor-executor/macos_verify_docker_multilang_blocked.md:8-9` ("DO run on this macOS host now") and
+    `:71`;
+  - `actor-executor/multilanguage_suite_on_macos.md:39`: "cannot resolve on this host";
+  - `kafka-critic/review_cext_tp_new_owned_handle.md:55`: "Build/run recipe (this host)";
+  - `kafka-critic/review_python_bindings_callbacks.md:64`: "Environment (this host, macOS arm64)".
+
+  Reproduce with
+  `grep -rniE 'this (macos )?host|on this machine|this macos box|/opt/homebrew' .claude/agent-memory`.
+  The follow-up list is what a later cleanup will work from, so an undercount means files get missed.
+- **Expected**: §13.3 lists every file the follow-up covers, or states the search it used and says "at
+  least". Item 11's resolution (`COMMENTS.DONE.85.md:396`) gives the same count as §13.3.
+- **Actual**: both say "Seven", and §13.3 names only those seven.
+
+**Resolved in** the fixup of `3455a5c0` that follows `cca3eea1`, which adds this entry. It names `3455a5c0`, not `fc0d2a82`, because `fc0d2a82`, which wrote both sentences, is itself a fixup of `3455a5c0`.
+- Plan §13.3's item-11 bullet now counts at least 40 files: 32 under `actor-executor/`, 8 under `kafka-critic/` and none under `project-manager/`. It lists every one, grouped by directory and by the search that found it. Critic 85's search finds 16. A wider one adds phrases, such as "the host has no", "not on PATH", "IS installed", "nix store", `PIP_INDEX_URL` and `~/`. Every hit was read, and it finds 24 more: notes that say what is installed, available or reachable, that use a Docker image built by hand, or that point at plan files in one user's home directory, and `MEMORY.md`, whose index lines for two of the listed files repeat their one-machine statements. Facts true of any macOS or zsh setup are not counted. The bullet says "at least" because both searches match phrases.
+- The bullet's text on item 11's own changes now says three files, not two: item 11 also changed `MEMORY.md`'s index lines for the two hook notes, and `MEMORY.md` is now on the list. It adds that `python_bindings_local_build_test_macos.md` quotes a plan's "on this machine" (`:11`) and names its Homebrew Python (`:18`, `:35`, `:74`).
+- Item 11's resolution above gives the same count and points to §13.3. It and both changed §13.3 bullets say that they changed after this review.
+- The Manager added two changes:
+  - Plan §13.3's item-1 list missed four admin `Display` impls that format a field with `{:?}`: `list_consumer_group_offsets_spec.rs:62`, `describe_producers_result.rs:51`, `new_partitions.rs:75` and `internals/all_brokers_strategy.rs:68`. Each prints its field differently from Java 4.3.1's `toString()`. A sweep of all 37 `Display` impls under `rust/src/admin/` finds 14 that use `{:?}`, and the bullet now lists each with what it prints where Java prints otherwise. The seven it used to leave unchecked were checked too: six differ, and `partition_reassignment.rs:70` prints its `Vec<i32>`s as Java does, so it needs no change. The bullet says that `Display` impls outside `rust/src/admin/`, other than `config_resource.rs`, were not checked, and names those in `rust/src/common/` that use `{:?}` the same way. Item 1's resolution above ("Plan §13.3 lists them") holds again.
+  - Plan §13.5's last bullet described the full gate as still to run on the final tree. It now records what ran on `cca3eea1` and passed, Docker's engine dying during `make verify-sandbox`'s test-integration, the stopped and the passing `make test-integration` attempts, and this review, with no detail of one machine.
+- Checked: every path and line number that the changed text cites exists at this commit, and so does every memory file the plan lists.
 - Docs-only, so there is no test to teeth-check.
