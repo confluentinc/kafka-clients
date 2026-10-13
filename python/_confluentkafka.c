@@ -41,6 +41,31 @@ static int checked_len_to_int32(Py_ssize_t len, const char* what, int32_t* out) 
     return 0;
 }
 
+// Takes the GIL for a callback that the Rust client fires on one of its own
+// threads, unless the interpreter is shutting down. Returns 1 with the GIL held
+// (release it with PyGILState_Release), or 0 without it, and the callback must
+// then return at once without touching Python. A callback can fire after the
+// client was destroyed (an in-flight close still completes), and so after Python
+// began exiting, when PyGILState_Ensure would end the calling thread (or, from
+// 3.14, hang it). This only narrows that window, since finalization can still
+// start between the check and the Ensure: CPython offers no way to take the GIL
+// that fails instead. Whatever the skipped callback owns is leaked, since a
+// Python reference cannot be dropped without the GIL. A thread that already
+// holds the GIL, such as one tearing the client down that runs a callback inline,
+// is let through even mid-shutdown, because re-entering the GIL there is safe.
+static int gil_ensure_unless_finalizing(PyGILState_STATE* gstate) {
+#if PY_VERSION_HEX >= 0x030D00A1
+    int finalizing = Py_IsFinalizing();
+#else
+    int finalizing = _Py_IsFinalizing();  // the only spelling before 3.13
+#endif
+    if (!PyGILState_Check() && (!Py_IsInitialized() || finalizing)) {
+        return 0;
+    }
+    *gstate = PyGILState_Ensure();
+    return 1;
+}
+
 // ProducerRecord C extension type
 typedef struct {
     PyObject_HEAD
@@ -926,7 +951,8 @@ static PyObject* py_Producer_test_set_paused(PyObject* self, PyObject* args) {
 // consumer's consumer_op_trampoline.
 static void producer_op_trampoline(kafka_common_Error_t* error, void* user_data) {
     PyObject* cb = (PyObject*)user_data;
-    PyGILState_STATE g = PyGILState_Ensure();
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) return;
     PyObject* r = PyObject_CallFunction(cb, "K", (unsigned long long)(uintptr_t)error);
     if (r) Py_DECREF(r); else PyErr_Print();
     Py_DECREF(cb);
@@ -939,7 +965,8 @@ static void producer_op_trampoline(kafka_common_Error_t* error, void* user_data)
 static void producer_partitions_for_trampoline(kafka_common_PartitionInfoList_t* list,
                                                kafka_common_Error_t* error, void* user_data) {
     PyObject* cb = (PyObject*)user_data;
-    PyGILState_STATE g = PyGILState_Ensure();
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) return;
     PyObject* r = PyObject_CallFunction(cb, "KK",
         (unsigned long long)(uintptr_t)list,
         (unsigned long long)(uintptr_t)error);
@@ -2018,7 +2045,8 @@ static PyObject* py_Producer_send_offsets_to_transaction_async(PyObject* self, P
 // op callback: (error, user_data) -> py_cb(error_int)
 static void consumer_op_trampoline(kafka_common_Error_t* error, void* user_data) {
     PyObject* cb = (PyObject*)user_data;
-    PyGILState_STATE g = PyGILState_Ensure();
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) return;
     PyObject* r = PyObject_CallFunction(cb, "K", (unsigned long long)(uintptr_t)error);
     if (r) Py_DECREF(r); else PyErr_Print();
     Py_DECREF(cb);
@@ -2029,7 +2057,8 @@ static void consumer_op_trampoline(kafka_common_Error_t* error, void* user_data)
 static void consumer_poll_trampoline(kafka_consumer_ConsumerRecords_t* records,
                                      kafka_common_Error_t* error, void* user_data) {
     PyObject* cb = (PyObject*)user_data;
-    PyGILState_STATE g = PyGILState_Ensure();
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) return;
     PyObject* r = PyObject_CallFunction(cb, "KK",
         (unsigned long long)(uintptr_t)records,
         (unsigned long long)(uintptr_t)error);
@@ -2042,7 +2071,8 @@ static void consumer_poll_trampoline(kafka_consumer_ConsumerRecords_t* records,
 static void consumer_position_trampoline(int64_t position,
                                          kafka_common_Error_t* error, void* user_data) {
     PyObject* cb = (PyObject*)user_data;
-    PyGILState_STATE g = PyGILState_Ensure();
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) return;
     PyObject* r = PyObject_CallFunction(cb, "LK",
         (long long)position, (unsigned long long)(uintptr_t)error);
     if (r) Py_DECREF(r); else PyErr_Print();
@@ -2056,7 +2086,8 @@ static void consumer_position_trampoline(int64_t position,
 // drains the handle via the matching *_drain function.
 static void fire_handle_cb(void* handle, kafka_common_Error_t* error, void* user_data) {
     PyObject* cb = (PyObject*)user_data;
-    PyGILState_STATE g = PyGILState_Ensure();
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) return;
     PyObject* r = PyObject_CallFunction(cb, "KK",
         (unsigned long long)(uintptr_t)handle,
         (unsigned long long)(uintptr_t)error);
@@ -2125,7 +2156,13 @@ static kafka_common_Error_t* listener_invoke(const char* method,
                                                   void* user_data) {
     PyObject* adapter = (PyObject*)user_data;
     kafka_common_Error_t* err = NULL;
-    PyGILState_STATE g = PyGILState_Ensure();
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) {
+        // `list` is leaked with the rest. The listener did not run, so the
+        // rebalance must fail as if it had raised, not go on as if it had passed.
+        return kafka_common_Error_new(PY_LISTENER_ERROR_CODE,
+            "the rebalance listener cannot run: the Python interpreter is shutting down");
+    }
     PyObject* partitions = topic_partition_list_to_py(list);  // destroys `list`
     if (partitions == NULL) {
         err = error_from_py_exception("failed to convert the rebalance partitions");
@@ -2164,7 +2201,8 @@ static kafka_common_Error_t* listener_on_lost_trampoline(
 // May run on any thread, hence PyGILState_Ensure.
 static void listener_user_data_destroy_trampoline(void* user_data) {
     PyObject* adapter = (PyObject*)user_data;
-    PyGILState_STATE g = PyGILState_Ensure();
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) return;
     Py_DECREF(adapter);
     PyGILState_Release(g);
 }
@@ -2181,7 +2219,8 @@ static void consumer_commit_callback_trampoline(kafka_consumer_OffsetMap_t* offs
                                                 kafka_common_Error_t* error,
                                                 void* user_data) {
     PyObject* cb = (PyObject*)user_data;
-    PyGILState_STATE g = PyGILState_Ensure();
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) return;
     PyObject* r = PyObject_CallFunction(cb, "KK",
         (unsigned long long)(uintptr_t)offsets,
         (unsigned long long)(uintptr_t)error);
@@ -2191,7 +2230,8 @@ static void consumer_commit_callback_trampoline(kafka_consumer_OffsetMap_t* offs
 
 static void commit_callback_user_data_destroy_trampoline(void* user_data) {
     PyObject* cb = (PyObject*)user_data;
-    PyGILState_STATE g = PyGILState_Ensure();
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) return;
     Py_DECREF(cb);
     PyGILState_Release(g);
 }
@@ -3381,7 +3421,8 @@ static PyObject* py_MockConsumer_set_poll_error(PyObject* self, PyObject* args) 
 // void-op callback (close): (error, user_data) -> py_cb(error_int)
 static void admin_op_trampoline(kafka_common_Error_t* error, void* user_data) {
     PyObject* cb = (PyObject*)user_data;
-    PyGILState_STATE g = PyGILState_Ensure();
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) return;
     PyObject* r = PyObject_CallFunction(cb, "K", (unsigned long long)(uintptr_t)error);
     if (r) Py_DECREF(r); else PyErr_Print();
     Py_DECREF(cb);
