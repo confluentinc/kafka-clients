@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import logging
 from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Generic, TypeVar
 
@@ -40,8 +39,6 @@ __all__ = ["AsyncMockConsumer"]
 
 K = TypeVar("K")
 V = TypeVar("V")
-
-_LOG = logging.getLogger("confluent_kafka.consumer")
 
 
 class AsyncMockConsumer(MockConsumerCore[K, V], AsyncConsumer[K, V], Generic[K, V]):
@@ -73,9 +70,9 @@ class AsyncMockConsumer(MockConsumerCore[K, V], AsyncConsumer[K, V], Generic[K, 
         calls it, and what it returns is awaited when awaitable. The task waits
         for the previously deferred one first, so the callbacks start in commit
         order, each after the previous one ended. An exception the callback
-        raises, ``CancelledError`` included, is logged: the ``commit_nowait()``
-        Java's mock would raise it from has returned. The awaited calls wait for
-        the task (``_await_commit_callbacks``)."""
+        raises, ``CancelledError`` included, is kept: the ``commit_nowait()``
+        Java's mock would raise it from has returned, so the next awaited call,
+        which waits for the task, raises it (``_await_commit_callbacks``)."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -89,8 +86,8 @@ class AsyncMockConsumer(MockConsumerCore[K, V], AsyncConsumer[K, V], Generic[K, 
                 result = start()
                 if inspect.isawaitable(result):
                     await result
-            except BaseException as exc:  # noqa: BLE001 - nothing it can propagate to
-                _LOG.error("Error in OffsetCommitCallback", exc_info=exc)
+            except BaseException as exc:  # noqa: BLE001 - raised by the next awaited call
+                self._commit_callback_errors.append(exc)
 
         task = loop.create_task(run())
         self._commit_callback_tail = task

@@ -1134,17 +1134,110 @@ def test_commit_callbacks_run_on_the_thread_of_the_call_delivering_them() -> Non
         consumer.close()
 
 
-def test_a_raising_commit_callback_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+class CommitCallbackError(ValueError):
+    pass
+
+
+def queue_a_raising_commit_callback(consumer: KafkaConsumer[bytes, bytes], raised: BaseException,
+                                    events: list[str]) -> None:
+    """Queue a commit callback that raises ``raised``, with one more callback
+    queued behind it: the raising one queues it (an empty commit completes at
+    once) before it raises."""
+    def boom(offsets: Any, exception: Any) -> None:
+        events.append("boom")
+        consumer.commit_nowait(offsets={}, callback=lambda o, e: events.append("next"))
+        raise raised
+
+    consumer.commit_nowait(offsets={}, callback=boom)
+
+
+# Java's OffsetCommitCallbackInvoker.executeCallbacks calls onComplete without a
+# try: the exception propagates out of the call that runs it -- commitSync and
+# commitAsync as it is (AsyncKafkaConsumer.commit runs executeCallbacks first),
+# poll wrapped by maybeWrapAsKafkaException after clearing the inflight poll --
+# and the callbacks queued behind it stay queued for the next call.
+@pytest.mark.parametrize("delivering", ["commit", "commit_nowait", "poll"])
+def test_a_raising_commit_callback_propagates_from_the_delivering_call(delivering: str) -> None:
+    raised = CommitCallbackError("callback boom")
+    events: list[str] = []
+    with new_consumer() as consumer:
+        consumer.assign(partitions=[TP0])
+        queue_a_raising_commit_callback(consumer, raised, events)
+        if delivering == "poll":
+            with pytest.raises(KafkaError) as wrapped:
+                consumer.poll(timeout=0)
+            # Java's new KafkaException(t): the message is t.toString().
+            assert type(wrapped.value) is KafkaError
+            assert str(wrapped.value) == f"{__name__}.CommitCallbackError: callback boom"
+            assert wrapped.value.__cause__ is raised
+        else:
+            with pytest.raises(CommitCallbackError) as e:
+                if delivering == "commit":
+                    consumer.commit(offsets={})
+                else:
+                    consumer.commit_nowait(offsets={}, callback=None)
+            assert e.value is raised
+            assert str(e.value) == "callback boom"
+        assert events == ["boom"]
+        # The callback queued behind it runs inside the next call, and the
+        # consumer goes on (the inflight poll was cleared).
+        consumer.commit(offsets={})
+        assert events == ["boom", "next"]
+        assert len(consumer.poll(timeout=0)) == 0
+
+
+def test_a_raising_commit_callback_propagates_from_a_commit_inside_a_callback() -> None:
+    # A commit through the ConsumerHandle runs the queued callbacks first, as
+    # Java's commit() does: the exception propagates out of it, into the
+    # callback that issued it.
+    raised = CommitCallbackError("callback boom")
+    seen: list[BaseException] = []
     with new_consumer() as consumer:
         consumer.assign(partitions=[TP0])
 
-        def boom(offsets: Any, exception: Any) -> None:
-            raise ValueError("callback boom")
+        def raising(offsets: Any, exception: Any) -> None:
+            raise raised
 
-        consumer.commit_nowait(offsets={}, callback=boom)
-        with caplog.at_level("ERROR", logger="confluent_kafka.consumer"):
-            consumer.commit(offsets={})
-        assert any("Error in OffsetCommitCallback" in r.getMessage() for r in caplog.records)
+        def first(offsets: Any, exception: Any) -> None:
+            consumer.commit_nowait(offsets={}, callback=raising)
+            try:
+                consumer.commit(offsets={})
+            except CommitCallbackError as exc:
+                seen.append(exc)
+
+        consumer.commit_nowait(offsets={}, callback=first)
+        consumer.commit(offsets={})
+        assert len(seen) == 1 and seen[0] is raised
+
+
+def test_close_wraps_a_raising_commit_callback() -> None:
+    # Java's close(): the error of awaitPendingAsyncCommitsAndExecuteCommitCallbacks
+    # is kept and thrown as KafkaException("Failed to close kafka consumer", e).
+    raised = CommitCallbackError("callback boom")
+    events: list[str] = []
+    consumer = new_consumer(**{"enable.auto.commit": False})
+    consumer.assign(partitions=[TP0])
+    queue_a_raising_commit_callback(consumer, raised, events)
+    with pytest.raises(KafkaError) as e:
+        consumer.close(option=CloseOptions.timeout(timedelta(seconds=5)))
+    assert type(e.value) is KafkaError
+    assert str(e.value) == "Failed to close kafka consumer"
+    assert e.value.__cause__ is raised
+    # Closed all the same.
+    with pytest.raises(IllegalStateError):
+        consumer.assignment()
+
+
+def test_close_swallows_a_raising_commit_callback_of_the_auto_commit() -> None:
+    # Java's autoCommitOnClose: commitSyncAllConsumed logs a failed commit
+    # ("Synchronous auto-commit failed") and close goes on.
+    raised = CommitCallbackError("callback boom")
+    events: list[str] = []
+    consumer = new_consumer(**{"enable.auto.commit": True})
+    consumer.assign(partitions=[TP0])
+    queue_a_raising_commit_callback(consumer, raised, events)
+    consumer.close(option=CloseOptions.timeout(timedelta(seconds=5)))
+    assert events == ["boom", "next"]
 
 
 def test_commit_callback_must_be_callable() -> None:

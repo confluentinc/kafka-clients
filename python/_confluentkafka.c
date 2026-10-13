@@ -3227,16 +3227,18 @@ static int listener_build(Consumer* c, PyObject* adapter, ListenerCtx** out_ctx,
 // ---- commit-callback trampoline ---------------------------------------------
 //
 // Java's OffsetCommitCallback.onComplete returns void, so the report carries
-// no result. The adapter (consumer/_base.py's _wrap_commit_callback) receives
+// no result, only the error it raised. The adapter (consumer/_base.py's _wrap_commit_callback) receives
 // the committed offsets, the BORROWED error handle and the callback id, and
 // follows listener_fire's split:
 //   * None  -> the callback returned: report success now;
 //   * True  -> the consumer deferred the awaitable an `async def` callback
 //              returned (AsyncConsumer) and reports through
 //              Consumer__set_callback_result once it is awaited;
-//   * raise -> the adapter logged it; report it as a foreign callback error
-//              owning a reference to the exception (the core ignores a commit
-//              callback's error, as Java's onComplete is void).
+//   * raise -> report it as a foreign callback error owning a reference to
+//              the exception: the core propagates it out of the delivering
+//              call, as Java's onComplete is called without a try, and the
+//              call reads the exception back (consumer/_base.py's
+//              _raise_error).
 // The core waits for the report before it delivers the next commit callback.
 // The context is released after the call -- unless orphaned, see above; a
 // deferred report goes through the consumer's handle, not the context.

@@ -35,9 +35,10 @@ waits instead of failing (Java's mock is not thread-safe but serializes).
 ``AsyncMockConsumer`` awaits the same body. An ``async def`` commit callback
 Java's mock would run inside ``commitAsync`` is awaited in a task on the loop,
 the callbacks one at a time in commit order, and each awaited method first
-waits for them (``_defer_commit_callback``); one that raises is logged ("Error
-in OffsetCommitCallback"), since the call it would have raised from has
-returned. ``rebalance`` awaits a coroutine
+waits for them (``_defer_commit_callback``). The exception one raises cannot
+propagate out of ``commit_nowait()``, as Java's would, since that call has
+returned: it is a deferred error, raised by the next awaited call once the
+callbacks ended (``close()`` closes the mock first). ``rebalance`` awaits a coroutine
 listener method there, and holds the mock's monitor for its task until it
 returns, as Java's ``synchronized`` ``rebalance`` runs the listener inside it
 (``_Monitor``). Meanwhile a method that enters Java's monitor, called from
@@ -181,6 +182,9 @@ class MockConsumerCore(Generic[K, V]):
         # awaited call waits for.
         self._commit_callback_tasks: set[asyncio.Task[None]] = set()
         self._commit_callback_tail: asyncio.Task[None] | None = None
+        # AsyncMockConsumer: the exceptions those callbacks raised, oldest
+        # first, each raised by one later awaited call (a deferred error).
+        self._commit_callback_errors: deque[BaseException] = deque()
 
     # ---- the interface methods ----------------------------------------------
     def _c_assignment(self) -> set[TopicPartition]:
@@ -367,14 +371,25 @@ class MockConsumerCore(Generic[K, V]):
         whether it was deferred. Only ``AsyncMockConsumer`` defers."""
         return False
 
-    async def _await_commit_callbacks(self) -> None:
+    async def _await_commit_callbacks(self, *, raise_error: bool = True) -> None:
         """Wait for the deferred commit callbacks, ahead of an awaited call
-        (``AsyncMockConsumer``); a callback's own call back into the mock does
-        not wait for itself."""
+        (``AsyncMockConsumer``), then raise the oldest exception one of them
+        raised and no call has raised yet, unless ``raise_error`` is false: Java's
+        mock raises it from ``commitAsync``, which has returned here, so it is a
+        deferred error. A callback's own call back into the mock does not wait
+        for itself."""
         if _current_task() in self._commit_callback_tasks:
             return
         while self._commit_callback_tasks:
             await asyncio.wait(set(self._commit_callback_tasks))
+        if raise_error:
+            self._raise_commit_callback_error()
+
+    def _raise_commit_callback_error(self) -> None:
+        """Raise the oldest exception a deferred commit callback raised, if any
+        (see ``_await_commit_callbacks``)."""
+        if self._commit_callback_errors:
+            raise self._commit_callback_errors.popleft()
 
     def _c_commit(self, offsets: Mapping[TopicPartition, OffsetAndMetadata] | None) -> None:
         """Java's ``commitSync()`` / ``commitSync(Map)``."""
@@ -600,8 +615,10 @@ class MockConsumerCore(Generic[K, V]):
         return self._c_end_offsets(partitions)
 
     async def _a_close(self, option: CloseOptions | None) -> None:
-        await self._await_commit_callbacks()
+        # The mock closes before a deferred callback error is raised.
+        await self._await_commit_callbacks(raise_error=False)
         self._c_close(option)
+        self._raise_commit_callback_error()
 
     # ---- the Java mock's own methods ------------------------------------------
     def add_record(self, *, record: ConsumerRecord[K, V]) -> None:

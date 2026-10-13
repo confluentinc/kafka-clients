@@ -95,8 +95,7 @@ def test_kafka_consumer_callback_of_an_empty_commit_gets_null_offsets() -> None:
 
 
 @pytest.mark.parametrize("make", [kafka_consumer, mock_consumer])
-def test_a_coroutine_callback_is_closed_and_reported(make: Any,
-                                                     caplog: pytest.LogCaptureFixture) -> None:
+def test_a_coroutine_callback_is_closed_and_reported(make: Any) -> None:
     consumer = make()
     closed = threading.Event()
 
@@ -108,11 +107,10 @@ def test_a_coroutine_callback_is_closed_and_reported(make: Any,
 
     if isinstance(consumer, KafkaConsumer):
         consumer.commit_nowait(offsets={}, callback=callback)  # type: ignore[arg-type]
-        with caplog.at_level("ERROR", logger="confluent_kafka.consumer"):
+        # The delivering call fails, as for a coroutine listener method.
+        with pytest.raises(TypeError) as e:
             consumer.commit(offsets={})
-        assert [r.getMessage() for r in caplog.records] == [
-            "An OffsetCommitCallback returned an awaitable; only an AsyncConsumer on its "
-            "event loop awaits it, and it was not awaited"]
+        assert str(e.value) == "a coroutine OffsetCommitCallback requires an AsyncConsumer"
         # Closed, not awaited: its body never ran.
         assert not closed.is_set()
     else:
@@ -269,8 +267,12 @@ class CallbackError(ValueError):
 @pytest.mark.parametrize("make", ASYNC_MAKERS)
 @pytest.mark.parametrize("raised", [CallbackError("bad"), asyncio.CancelledError()],
                          ids=["error", "cancelled"])
-def test_async_raising_coroutine_callback_is_logged(make: Any, raised: BaseException,
-                                                    caplog: pytest.LogCaptureFixture) -> None:
+def test_async_raising_coroutine_callback_propagates(make: Any, raised: BaseException) -> None:
+    # Java's onComplete is called without a try: the exception propagates out
+    # of the call that runs it. AsyncKafkaConsumer awaits the coroutine inside
+    # that call and reports the exception to the core, which raises it from the
+    # call; AsyncMockConsumer awaits it after commit_nowait() returned, so the
+    # next awaited call raises it (a deferred error).
     async def main() -> None:
         consumer = await make()
 
@@ -281,12 +283,85 @@ def test_async_raising_coroutine_callback_is_logged(make: Any, raised: BaseExcep
         consumer.commit_nowait(offsets={TP: OffsetAndMetadata(offset=1)} if
                                isinstance(consumer, AsyncMockConsumer) else {},
                                callback=callback)
-        with caplog.at_level("ERROR", logger="confluent_kafka.consumer"):
-            # Logged, not raised: the call that delivered it goes on.
+        with pytest.raises(type(raised)) as e:
             await consumer.commit(offsets={})
-        records = [r for r in caplog.records if r.name == "confluent_kafka.consumer"]
-        assert [r.getMessage() for r in records] == ["Error in OffsetCommitCallback"]
-        assert records[0].exc_info is not None and records[0].exc_info[1] is raised
+        assert e.value is raised
+        # Raised once: the consumer goes on.
+        await consumer.commit(offsets={})
+        await consumer.close(option=CloseOptions.timeout(5))
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize("make", ASYNC_MAKERS)
+def test_async_plain_raising_callback_propagates(make: Any) -> None:
+    async def main() -> None:
+        consumer = await make()
+        raised = CallbackError("bad")
+
+        def callback(offsets: Any, exception: Any) -> None:
+            raise raised
+
+        if isinstance(consumer, AsyncMockConsumer):
+            # Java's mock runs it inside commitAsync.
+            with pytest.raises(CallbackError) as e:
+                consumer.commit_nowait(offsets={TP: OffsetAndMetadata(offset=1)},
+                                       callback=callback)
+        else:
+            consumer.commit_nowait(offsets={}, callback=callback)
+            with pytest.raises(CallbackError) as e:
+                await consumer.commit(offsets={})
+        assert e.value is raised
+        await consumer.close(option=CloseOptions.timeout(5))
+
+    asyncio.run(main())
+
+
+def test_async_mock_close_raises_a_deferred_callback_error_once_closed() -> None:
+    async def main() -> None:
+        consumer = await async_mock_consumer()
+        raised = CallbackError("bad")
+
+        async def callback(offsets: Any, exception: Any) -> None:
+            await asyncio.sleep(0)
+            raise raised
+
+        consumer.commit_nowait(offsets={TP: OffsetAndMetadata(offset=1)}, callback=callback)
+        with pytest.raises(CallbackError) as e:
+            await consumer.close(option=CloseOptions.timeout(5))
+        assert e.value is raised
+        assert consumer.closed()
+
+    asyncio.run(main())
+
+
+def test_async_kafka_consumer_raising_coroutine_callback_inside_a_nested_commit() -> None:
+    # Delivered inside a blocking ConsumerHandle commit, which blocks the loop,
+    # the coroutine callback is reported to the core at once and awaited after
+    # it; the delivering call raises its exception once it ended (a deferred
+    # error; Java raises it from the nested commit).
+    async def main() -> None:
+        consumer = await async_kafka_consumer()
+        raised = CallbackError("bad")
+        events: list[str] = []
+
+        async def raising(offsets: Any, exception: Any) -> None:
+            await asyncio.sleep(0)
+            events.append("raising")
+            raise raised
+
+        async def first(offsets: Any, exception: Any) -> None:
+            await asyncio.sleep(0)
+            consumer.commit_nowait(offsets={}, callback=raising)
+            await consumer.commit(offsets={})
+            events.append("first end")
+
+        consumer.commit_nowait(offsets={}, callback=first)
+        with pytest.raises(CallbackError) as e:
+            await asyncio.wait_for(consumer.commit(offsets={}), 10)
+        assert e.value is raised
+        assert events == ["first end", "raising"]
+        await asyncio.wait_for(consumer.commit(offsets={}), 10)
         await consumer.close(option=CloseOptions.timeout(5))
 
     asyncio.run(main())

@@ -36,10 +36,11 @@ at once: the core's guard would refuse it too, but its answer would be queued
 behind the running callback, where a nested drain (which runs nothing) cannot
 reach it.
 
-A listener's exception reaches the core as a foreign callback error owning a
+A listener's or an ``OffsetCommitCallback``'s exception reaches the core as a
+foreign callback error owning a
 reference to the exception object (``kafka_common_Error_local_callback``), which
 it releases when its last copy drops; the call it fails reads the object back
-from its error and raises it, as Java surfaces the listener's own ``Throwable``
+from its error and raises it, as Java surfaces the callback's own ``Throwable``
 (``_raise_error``).
 
 ``KafkaConsumer`` is not thread-safe: a call while another thread is inside the
@@ -57,7 +58,6 @@ import asyncio
 import contextlib
 import contextvars
 import inspect
-import logging
 import math
 import threading
 import weakref
@@ -103,7 +103,6 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
-_LOG = logging.getLogger("confluent_kafka.consumer")
 
 # Java's Long.MAX_VALUE, the largest Duration.toMillis().
 _LONG_MAX = (1 << 63) - 1
@@ -177,10 +176,15 @@ def raise_if_error(error: int) -> None:
         raise from_ffi_error(error)
 
 
-def _log_commit_callback_error(error: BaseException) -> None:
-    """Log the exception an ``OffsetCommitCallback`` raised, which cannot
-    propagate out of the call that delivered it."""
-    _LOG.error("Error in OffsetCommitCallback", exc_info=error)
+def _wraps_its_source(error: int) -> bool:
+    """Whether the error is Java's ``new KafkaException(t)`` around a foreign
+    callback error: its source is that error and its message the source's
+    ``toString()``, which the core renders ``"LocalCallbackError: <message>"``
+    (``common::LocalCallbackError``'s ``Display``)."""
+    source: int = _lib.KafkaError_source(error)
+    return bool(source) and _lib.KafkaError_code(source) == _LOCAL_CALLBACK and (
+        _lib.KafkaError_message(error)
+        == "LocalCallbackError: " + _lib.KafkaError_message(source))
 
 
 class _ListenerAdapter:
@@ -381,6 +385,9 @@ class _ConsumerState:
         # the next awaited call.
         self._commit_continuation: asyncio.Task[None] | None = None
         self._deferred_error: BaseException | None = None
+        # AsyncConsumer: the exception a coroutine commit callback raised after
+        # its invocation was reported (see _take_callback_error).
+        self._callback_error: BaseException | None = None
         # The threads inside a blocking ConsumerHandle commit, with their
         # counts: the commit callbacks it runs inside it run on that thread
         # while it waits (AsyncConsumer's _defer_callback reads it).
@@ -614,29 +621,47 @@ class _ConsumerState:
             self._exit_callback(token)
         return None
 
-    def _defer_callback(self, awaitable: Awaitable[object], callback_id: int,
-                        failed: Callable[[BaseException], None] | None = None) -> bool:
+    def _defer_callback(self, awaitable: Awaitable[object], callback_id: int) -> bool:
         """Await the awaitable a coroutine callback (a listener method or an
-        ``OffsetCommitCallback``) returned later, then report it to the core
-        under ``callback_id``, calling ``failed`` first with the exception it
-        raised; whether it was deferred. The synchronous consumer cannot
-        (``AsyncConsumer`` can)."""
+        ``OffsetCommitCallback``) returned later, then report it, or the
+        exception it raised, to the core under ``callback_id``; whether it was
+        deferred. The synchronous consumer cannot (``AsyncConsumer`` can)."""
         return False
+
+    def _take_callback_error(self) -> BaseException | None:
+        """The exception a coroutine commit callback raised after its
+        invocation was already reported to the core (``AsyncConsumer``'s
+        ``_defer_callback`` inside a blocking ConsumerHandle commit), cleared;
+        the delivering call raises it once it has ended."""
+        error, self._callback_error = self._callback_error, None
+        return error
 
     def _raise_error(self, error: int) -> NoReturn:
         """Raise the typed error of an OWNED error handle, a waiting call's
-        result, swapping a listener's own exception back in.
+        result, swapping a callback's own exception back in.
 
         When the error, or its cause chain, is the foreign callback error
-        reporting an exception the listener raised during the call, Java would
-        surface that exception: as it is when the client reported it unwrapped
-        (code ``LOCAL_CALLBACK``), or when it is a ``KafkaError`` or a
-        ``KeyboardInterrupt``, which Java's ``maybeWrapAsKafkaException``
-        leaves unwrapped (``KafkaException``, ``InterruptException``); otherwise
-        as the wrapping ``KafkaError`` ("User rebalance callback throws an
-        error"), with the original as its ``__cause__``."""
+        reporting an exception a listener method or an ``OffsetCommitCallback``
+        raised during the call, Java would surface that exception: as it is
+        when the client reported it unwrapped (code ``LOCAL_CALLBACK``: a commit
+        callback's from ``commit``, ``commit_nowait`` and ``close``), or when it
+        is a ``KafkaError`` or a ``KeyboardInterrupt``, which Java's
+        ``maybeWrapAsKafkaException`` leaves unwrapped (``KafkaException``,
+        ``InterruptException``); otherwise as the wrapping ``KafkaError`` (a
+        listener's "User rebalance callback throws an error", or the
+        ``close`` wrap "Failed to close kafka consumer"), with the original as
+        its ``__cause__``. ``poll``'s wrap of a commit callback's exception,
+        Java's ``new KafkaException(t)``, is a ``KafkaError`` whose message is
+        that exception's ``toString()``, as Java's."""
         original: BaseException | None = _lib.KafkaError_callback_exception(error)
         code = _lib.KafkaError_code(error)
+        if (original is not None and code != _LOCAL_CALLBACK
+                and not isinstance(original, (KafkaError, KeyboardInterrupt))
+                and _wraps_its_source(error)):
+            # Java's `new KafkaException(t)` (poll's maybeWrapAsKafkaException):
+            # its message is t.toString(), the callback's own exception's.
+            _lib.KafkaError_destroy(error)
+            raise KafkaError(cause=original) from original
         typed = from_ffi_error(error)
         if original is None:
             raise typed
@@ -663,11 +688,16 @@ class _ConsumerState:
         returned, and the trampoline reports the invocation; ``True`` when the
         consumer deferred the awaitable an ``async def`` callback returned
         (``AsyncConsumer``, see ``_defer_callback``), which reports it once
-        awaited. Java lets an exception from ``onComplete`` propagate out of the
-        delivering call; across the FFI it cannot, so it is logged, then raised
-        to the trampoline, which reports it (the core ignores a commit
-        callback's error). On the synchronous consumer an awaitable is closed
-        and reported, not awaited."""
+        awaited. An exception the callback raises, or the awaitable raises once
+        awaited, is raised to the trampoline, which reports it to the core as a
+        foreign callback error owning the exception: as in Java, where
+        ``onComplete`` is called without a ``try``, it propagates out of the
+        delivering call (``poll`` wraps it in a ``KafkaError`` unless it is one,
+        as Java's ``maybeWrapAsKafkaException``; ``commit``, ``commit_nowait``
+        and ``close`` raise it as it is, see ``_raise_error``), and the
+        callbacks queued behind it run in a later call. On the synchronous
+        consumer an awaitable cannot be awaited: it is closed and the delivering
+        call fails with ``TypeError``, as for a coroutine listener."""
         if callback is None:
             return None
         if not callable(callback):
@@ -675,30 +705,23 @@ class _ConsumerState:
 
         def adapter(raw_offsets: dict[Any, Any], error_handle: int,
                     callback_id: int) -> bool | None:
+            offsets: dict[TopicPartition, OffsetAndMetadata] | None = None
+            if not error_handle and not empty_offsets:
+                offsets = {tp: oam for tp, oam in to_offset_map(raw_offsets).items()
+                           if oam is not None}
+            exception = from_ffi_error(error_handle, owned=False) if error_handle else None
+            token = self._enter_callback()
             try:
-                offsets: dict[TopicPartition, OffsetAndMetadata] | None = None
-                if not error_handle and not empty_offsets:
-                    offsets = {tp: oam for tp, oam in to_offset_map(raw_offsets).items()
-                               if oam is not None}
-                exception = from_ffi_error(error_handle, owned=False) if error_handle else None
-                token = self._enter_callback()
-                try:
-                    result: object = callback(offsets, cast(Exception, exception))
-                    if inspect.isawaitable(result):
-                        if self._defer_callback(cast("Awaitable[object]", result), callback_id,
-                                                _log_commit_callback_error):
-                            return True
-                        close = getattr(result, "close", None)
-                        if callable(close):
-                            close()
-                        _LOG.error("An OffsetCommitCallback returned an awaitable; only an "
-                                   "AsyncConsumer on its event loop awaits it, and it was not "
-                                   "awaited")
-                finally:
-                    self._exit_callback(token)
-            except BaseException:
-                _LOG.exception("Error in OffsetCommitCallback")
-                raise
+                result: object = callback(offsets, cast(Exception, exception))
+                if inspect.isawaitable(result):
+                    if self._defer_callback(cast("Awaitable[object]", result), callback_id):
+                        return True
+                    close = getattr(result, "close", None)
+                    if callable(close):
+                        close()
+                    raise TypeError("a coroutine OffsetCommitCallback requires an AsyncConsumer")
+            finally:
+                self._exit_callback(token)
             return None
 
         return adapter
@@ -799,6 +822,10 @@ class _ConsumerState:
         if cancelled is not None:
             free(payload)
             raise cancelled
+        callback_error = self._take_callback_error()
+        if callback_error is not None:
+            free(payload)
+            raise callback_error
         return resolve(payload)
 
     async def _wait_on_loop(self, h: int, done: Callable[[], bool],
@@ -1064,10 +1091,12 @@ class _ConsumerState:
                     callback, empty_offsets=offsets is not None and not offsets)
                 with self._handle_commit():
                     if adapter is None:
-                        raise_if_error(_lib.ConsumerHandle_commit_async(self._handle(), spec))
+                        error = _lib.ConsumerHandle_commit_async(self._handle(), spec)
                     else:
-                        raise_if_error(_lib.ConsumerHandle_commit_async_callback(
-                            h, self._handle(), spec, adapter))
+                        error = _lib.ConsumerHandle_commit_async_callback(
+                            h, self._handle(), spec, adapter)
+                if error:
+                    self._raise_error(error)
                 return
         with self._use():
             spec = None if offsets is None else offsets_to_spec(offsets)
@@ -1101,7 +1130,9 @@ class _ConsumerState:
             (offsets,) = args
             spec = None if offsets is None else offsets_to_spec(offsets)
             with self._handle_commit():
-                raise_if_error(_lib.ConsumerHandle_commit_sync(handle, spec))
+                error = _lib.ConsumerHandle_commit_sync(handle, spec)
+            if error:
+                self._raise_error(error)
             return None
         if op == "seek":
             partition, offset, oam = args

@@ -166,12 +166,13 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         ``close()``, …), which returns only after it ended. Callbacks still
         start one at a time in the order the commits complete, each after the
         previous one ended. An exception it raises, ``CancelledError``
-        included, is logged ("Error in OffsetCommitCallback"), not raised, as
-        for a plain callback. On the synchronous ``Consumer`` an ``async def``
-        callback is rejected: its coroutine is closed, not awaited, and an
-        error is logged. ``AsyncMockConsumer`` awaits it after this call
-        returns (Java's mock runs the callback inside ``commitAsync``), before
-        its next awaited call goes on.
+        included, propagates out of the call that delivers it, as for a plain
+        callback (see :meth:`Consumer.commit_nowait`). On the synchronous
+        ``Consumer`` an ``async def`` callback is rejected: its coroutine is
+        closed, not awaited, and the delivering call raises ``TypeError``.
+        ``AsyncMockConsumer`` awaits it after this call returns (Java's mock
+        runs the callback inside ``commitAsync``), before its next awaited call
+        goes on, which raises the exception it raised (a deferred error).
 
         While the commit waits for its offsets, the core may deliver a queued
         listener callback (``consumer-threading.md`` §31). A plain method runs
@@ -448,13 +449,13 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
             raise deferred
 
     # ---- coroutine callbacks (listener methods, commit callbacks) -----------
-    def _defer_callback(self, awaitable: Awaitable[object], callback_id: int,
-                        failed: Callable[[BaseException], None] | None = None) -> bool:
+    def _defer_callback(self, awaitable: Awaitable[object], callback_id: int) -> bool:
         """Await a coroutine callback -- a listener method, or an
         ``OffsetCommitCallback`` -- in a task on the running loop, then report
-        its result to the core (``kafka_consumer_Consumer__set_callback_result``),
-        having passed the exception it raised to ``failed``, ``CancelledError``
-        included. The call delivering it waits for the task before going on
+        its result to the core (``kafka_consumer_Consumer__set_callback_result``):
+        the exception it raised, ``CancelledError`` included, as a foreign
+        callback error owning it, which the delivering call raises
+        (``_raise_error``). The call delivering it waits for the task before going on
         (``_wait_on_loop``, or ``_commit_nowait_on_loop``'s hand-off), and the
         core waits for the report before it delivers the next callback, so the
         callback still runs inside that call, callbacks start in the order the
@@ -467,10 +468,11 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         (``_handle_commit``: a callback committing again, as Java's ``commit()``
         runs ``executeCallbacks()`` first) is delivered while that commit blocks
         the loop, so its task cannot run before the commit returns: it is
-        reported to the core at once, and the task only awaits it. Its exception
-        is still logged; the callbacks after it may start before it ends, and
-        the delivering call still waits for it (*deviation*: Java runs it to its
-        end inside that commit)."""
+        reported to the core at once, and the task only awaits it; the callbacks
+        after it may start before it ends, and the delivering call still waits
+        for it, then raises the exception it raised, instead of its own result
+        (``_take_callback_error``) -- a deferred error (*deviation*: Java runs
+        it to its end inside that commit, which raises the exception)."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -483,9 +485,9 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
                 await awaitable
             except BaseException as exc:  # noqa: BLE001 - reported to the core
                 error = exc
-            if error is not None and failed is not None:
-                failed(error)
             if report_now:
+                if error is not None and self._callback_error is None:
+                    self._callback_error = error
                 return
             # Under the lifecycle lock: close() clears the handle under it
             # before it frees the handle, so a live handle is not freed meanwhile.
@@ -590,6 +592,11 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
             if cancelled is not None:
                 free(payload)
                 raise cancelled
+            callback_error = self._take_callback_error()
+            if callback_error is not None:
+                free(payload)
+                self._deferred_error = callback_error
+                return
             try:
                 resolve(payload)
             except Exception as exc:  # noqa: BLE001 - raised by the next awaited call

@@ -248,10 +248,17 @@ class Consumer(Generic[K, V], _ConsumerState):
         queued behind the running one, inside this call, as Java's
         ``commitAsync`` does; its own ``callback`` runs inside a later call.
 
+        An exception the ``callback`` raises propagates out of the call that
+        delivers it, as Java's ``onComplete`` is called without a ``try``:
+        ``poll()`` raises it wrapped in a ``KafkaError`` (unless it is one, as
+        Java's ``maybeWrapAsKafkaException``), ``commit()``,
+        ``commit_nowait()`` and ``close()`` raise the very exception; the
+        callbacks queued behind it run inside a later call.
+
         The ``callback`` is a plain function here: an ``async def`` one is
-        rejected when it is delivered, its coroutine closed, not awaited, and an
-        error logged (``MockConsumer`` raises ``TypeError``). Only
-        ``AsyncConsumer`` awaits one.
+        rejected when it is delivered, its coroutine closed, not awaited, and
+        the delivering call raises ``TypeError`` (``MockConsumer`` raises it
+        from this call). Only ``AsyncConsumer`` awaits one.
         """
         self._c_commit_nowait(offsets, callback)
 
