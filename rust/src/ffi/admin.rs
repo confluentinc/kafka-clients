@@ -2412,10 +2412,10 @@ impl ConfigInner {
 /// `config` must be a non-null borrowed pointer from a result-handle getter.
 unsafe fn config_ref(config: *const kafka_admin_Config_t) -> &'static ConfigInner {
     // SAFETY: Per this helper's `# Safety`, `config` is a non-null borrowed pointer from a
-    // result-handle getter, i.e. it points at a `ConfigInner` stored in a result handle's
-    // values vec, which is never resized after the handle is built, so it stays valid until
-    // that result handle is destroyed; callers use the reference only within their own
-    // synchronous getter call.
+    // result-handle getter, i.e. it points at a `ConfigInner` cached in a result handle's
+    // entry, which is set once and never moved or resized after the handle is built, so it
+    // stays valid until that result handle is destroyed; callers use the reference only
+    // within their own synchronous getter call.
     unsafe { &*(config as *const ConfigInner) }
 }
 
@@ -7753,7 +7753,8 @@ pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_destroy(info: *mut kafka_
 // ---------------------------------------------------------------------------
 
 /// The four independently-completable attributes of Java's
-/// `DescribeClusterResult`, resolved into one value for the C handle.
+/// `DescribeClusterResult`, resolved into one value — what the `_async` path's
+/// single callback delivers.
 struct DescribeClusterOutcome {
     nodes: Vec<Node>,
     controller: Option<Node>,
@@ -7773,31 +7774,63 @@ pub struct kafka_admin_DescribeClusterResult_t {
 
 /// Backing state for [`kafka_admin_DescribeClusterResult_t`].
 ///
-/// Unlike the per-key RPCs there is no key/value/error triple: Java's result is
-/// four attributes of one cluster, not a map, so the handle exposes them
-/// directly and any failure is a whole-call failure.
+/// Java's result is four attributes of one cluster, not a map, each its own
+/// `KafkaFuture`: `nodes()`, `controller()`, `clusterId()` and
+/// `authorizedOperations()`. The handle holds each as its own lazily resolved
+/// future, so an accessor waits only for the attribute it reads, and each
+/// attribute's failure is read with its own `_error` getter. On a handle from
+/// the `_async` callback all four are already resolved.
 struct DescribeClusterResultInner {
-    cluster_id_c: Option<CString>,
-    nodes: Vec<Node>,
-    controller: Option<Node>,
+    nodes: LazySingle<Vec<Node>>,
+    controller: LazySingle<Option<Node>>,
+    /// `None` is Java's null cluster id.
+    cluster_id: LazySingle<Option<CString>>,
     /// `None` is Java's null (the broker did not report the operations), which
     /// the C surface exposes through
     /// [`kafka_admin_DescribeClusterResult_has_authorized_operations`] rather than
     /// a negative count. See the module docs, section "Counts are never negative".
-    authorized_operations: Option<Vec<i32>>,
+    authorized_operations: LazySingle<Option<Vec<i32>>>,
 }
 
-/// Flattens the cluster description into the C handle.
+/// Flattens a nullable cluster id into the C form.
+fn describe_cluster_id_c(cluster_id: Option<String>) -> Option<CString> {
+    cluster_id.as_deref().map(to_cstring)
+}
+
+/// Flattens the cluster's nullable authorized-operation set into
+/// `AclOperation.code()` values.
+fn describe_cluster_operation_codes(operations: Option<BTreeSet<AclOperation>>) -> Option<Vec<i32>> {
+    operations.map(|ops| ops.iter().map(|op| i32::from(op.code())).collect())
+}
+
+/// Wraps `describeCluster`'s four attribute futures, unresolved, as the C
+/// handle's backing state.
+fn describe_cluster_result_inner(
+    waiter: &FutureWaiter,
+    nodes: KafkaFuture<Vec<Node>>,
+    controller: KafkaFuture<Option<Node>>,
+    cluster_id: KafkaFuture<Option<String>>,
+    authorized_operations: KafkaFuture<Option<BTreeSet<AclOperation>>>,
+) -> DescribeClusterResultInner {
+    DescribeClusterResultInner {
+        nodes: lazy_single(waiter, nodes, |nodes| nodes),
+        controller: lazy_single(waiter, controller, |controller| controller),
+        cluster_id: lazy_single(waiter, cluster_id, describe_cluster_id_c),
+        authorized_operations: lazy_single(waiter, authorized_operations, describe_cluster_operation_codes),
+    }
+}
+
+/// Moves an already-resolved cluster description (the `_async` path) into the
+/// C handle.
 fn box_describe_cluster_result(outcome: DescribeClusterOutcome) -> *mut kafka_admin_DescribeClusterResult_t {
-    let inner = DescribeClusterResultInner {
-        cluster_id_c: outcome.cluster_id.as_deref().map(to_cstring),
-        nodes: outcome.nodes,
-        controller: outcome.controller,
-        authorized_operations: outcome
-            .authorized_operations
-            .map(|ops| ops.iter().map(|op| i32::from(op.code())).collect()),
-    };
-    Box::into_raw(Box::new(inner)) as *mut kafka_admin_DescribeClusterResult_t
+    into_handle(DescribeClusterResultInner {
+        nodes: LazyOutcome::resolved(Ok(outcome.nodes)),
+        controller: LazyOutcome::resolved(Ok(outcome.controller)),
+        cluster_id: LazyOutcome::resolved(Ok(describe_cluster_id_c(outcome.cluster_id))),
+        authorized_operations: LazyOutcome::resolved(Ok(describe_cluster_operation_codes(
+            outcome.authorized_operations,
+        ))),
+    })
 }
 
 /// Casts a `*const kafka_admin_DescribeClusterResult_t` to a reference.
@@ -7810,7 +7843,8 @@ unsafe fn describe_cluster_result_ref(
 ) -> &'static DescribeClusterResultInner {
     // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
     // `describe_cluster` call, i.e. the `Box<DescribeClusterResultInner>` leaked by
-    // `Box::into_raw` in `box_describe_cluster_result` and freed only by
+    // `into_handle` in `kafka_admin_AdminClient_describe_cluster` or
+    // `box_describe_cluster_result` and freed only by
     // `kafka_admin_DescribeClusterResult_destroy`, so it is aligned and live; callers use
     // the reference only within their own synchronous getter call, during which the C
     // caller keeps the handle alive.
@@ -7818,8 +7852,13 @@ unsafe fn describe_cluster_result_ref(
 }
 
 /// Returns the cluster id (borrowed), or null where Java's `clusterId()` is
-/// null: a broker too old for `DescribeCluster` is answered through the
-/// `Metadata` fallback, whose `ClusterId` is nullable.
+/// null — a broker too old for `DescribeCluster` is answered through the
+/// `Metadata` fallback, whose `ClusterId` is nullable — or where the
+/// `clusterId()` future failed (see
+/// [`kafka_admin_DescribeClusterResult_cluster_id_error`]).
+///
+/// **Blocks** until the `clusterId()` future has resolved — Java's
+/// `clusterId().get()` — but not on the other attributes.
 ///
 /// # Safety
 ///
@@ -7833,15 +7872,57 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_cluster_id(
     // handle, which this function's `# Safety` requires of `result` (no in-body null check,
     // so the C caller's contract is the sole source); the reference is used only for the
     // duration of this call, and a non-null returned string pointer borrows the cluster-id
-    // `CString` owned by the handle, valid until
+    // `CString` cached in the handle, valid until
     // `kafka_admin_DescribeClusterResult_destroy`.
-    match &unsafe { describe_cluster_result_ref(result) }.cluster_id_c {
-        Some(cluster_id) => cluster_id.as_ptr(),
-        None => std::ptr::null(),
+    match single_data(&unsafe { describe_cluster_result_ref(result) }.cluster_id) {
+        Some(Some(cluster_id)) => cluster_id.as_ptr(),
+        _ => std::ptr::null(),
     }
 }
 
-/// Returns the number of nodes in the cluster.
+/// Java's `clusterId().get()`: **blocks** until the cluster-id future has
+/// resolved, then returns null on success, or an **owned** error — free it with
+/// `kafka_common_Error_destroy` — if it failed. Does not wait on the other
+/// attributes.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_cluster` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_cluster_id_error(
+    result: *const kafka_admin_DescribeClusterResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `describe_cluster_result_ref` requires a non-null `describe_cluster` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for the
+    // duration of this call, and the returned error is a fresh copy owned by the caller.
+    single_error(&unsafe { describe_cluster_result_ref(result) }.cluster_id)
+}
+
+/// Returns whether the cluster-id future has resolved — Java's
+/// `clusterId().isDone()`. Never blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_cluster` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_cluster_id_is_done(
+    result: *const kafka_admin_DescribeClusterResult_t,
+) -> bool {
+    // SAFETY: `describe_cluster_result_ref` requires a non-null `describe_cluster` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for this
+    // check.
+    unsafe { describe_cluster_result_ref(result) }.cluster_id.is_done()
+}
+
+/// Returns the number of nodes in the cluster, or 0 if the `nodes()` future
+/// failed (see [`kafka_admin_DescribeClusterResult_nodes_error`]).
+///
+/// **Blocks** until the `nodes()` future has resolved — Java's `nodes().get()`
+/// — but not on the other attributes.
 ///
 /// # Safety
 ///
@@ -7855,11 +7936,15 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_node_count(
     // handle, which this function's `# Safety` requires of `result` (no in-body null check,
     // so the C caller's contract is the sole source); the reference is used only for this
     // `len()` within the call, during which the C caller keeps the handle alive.
-    unsafe { describe_cluster_result_ref(result) }.nodes.len() as i32
+    single_data(&unsafe { describe_cluster_result_ref(result) }.nodes).map_or(0, |nodes| nodes.len() as i32)
 }
 
-/// Returns the node at `index` (borrowed), or null if out of range. Read it with
-/// the `kafka_common_Node_*` accessors; do not destroy it.
+/// Returns the node at `index` (borrowed), or null if out of range or the
+/// `nodes()` future failed. Read it with the `kafka_common_Node_*` accessors;
+/// do not destroy it.
+///
+/// **Blocks** until the `nodes()` future has resolved, but not on the other
+/// attributes. Never blocks for a negative index.
 ///
 /// # Safety
 ///
@@ -7870,17 +7955,65 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_get_node(
     result: *const kafka_admin_DescribeClusterResult_t,
     index: i32,
 ) -> *const kafka_common_Node_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
     // SAFETY: `describe_cluster_result_ref` requires a non-null `describe_cluster` result
     // handle, which this function's `# Safety` requires of `result` (no in-body null check,
     // so the C caller's contract is the sole source); `node_at` bounds-checks `index`, the
     // reference is used only for the duration of this call, and the returned
-    // `kafka_common_Node_t` pointer borrows a `Node` in the handle's nodes vec, valid until
-    // `kafka_admin_DescribeClusterResult_destroy`.
-    node_at(&unsafe { describe_cluster_result_ref(result) }.nodes, index)
+    // `kafka_common_Node_t` pointer borrows a `Node` in the nodes vec cached in the handle,
+    // valid until `kafka_admin_DescribeClusterResult_destroy`.
+    match single_data(&unsafe { describe_cluster_result_ref(result) }.nodes) {
+        Some(nodes) => node_at(nodes, index),
+        None => std::ptr::null(),
+    }
+}
+
+/// Java's `nodes().get()`: **blocks** until the nodes future has resolved, then
+/// returns null on success, or an **owned** error — free it with
+/// `kafka_common_Error_destroy` — if it failed. Does not wait on the other
+/// attributes.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_cluster` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_nodes_error(
+    result: *const kafka_admin_DescribeClusterResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `describe_cluster_result_ref` requires a non-null `describe_cluster` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for the
+    // duration of this call, and the returned error is a fresh copy owned by the caller.
+    single_error(&unsafe { describe_cluster_result_ref(result) }.nodes)
+}
+
+/// Returns whether the nodes future has resolved — Java's `nodes().isDone()`.
+/// Never blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_cluster` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_nodes_is_done(
+    result: *const kafka_admin_DescribeClusterResult_t,
+) -> bool {
+    // SAFETY: `describe_cluster_result_ref` requires a non-null `describe_cluster` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for this
+    // check.
+    unsafe { describe_cluster_result_ref(result) }.nodes.is_done()
 }
 
 /// Returns the current controller node (borrowed), or null if there is none
-/// (Java's `controller()` yields null).
+/// (Java's `controller()` yields null) or the `controller()` future failed (see
+/// [`kafka_admin_DescribeClusterResult_controller_error`]).
+///
+/// **Blocks** until the `controller()` future has resolved — Java's
+/// `controller().get()` — but not on the other attributes.
 ///
 /// # Safety
 ///
@@ -7894,19 +8027,61 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_controller(
     // handle, which this function's `# Safety` requires of `result` (no in-body null check,
     // so the C caller's contract is the sole source); the reference is used only for the
     // duration of this call, and the returned `kafka_common_Node_t` pointer borrows the
-    // controller `Node` owned by the handle, valid until
+    // controller `Node` cached in the handle, valid until
     // `kafka_admin_DescribeClusterResult_destroy`.
-    match &unsafe { describe_cluster_result_ref(result) }.controller {
-        Some(node) => node as *const Node as *const kafka_common_Node_t,
-        None => std::ptr::null(),
+    match single_data(&unsafe { describe_cluster_result_ref(result) }.controller) {
+        Some(Some(node)) => node as *const Node as *const kafka_common_Node_t,
+        _ => std::ptr::null(),
     }
 }
 
+/// Java's `controller().get()`: **blocks** until the controller future has
+/// resolved, then returns null on success, or an **owned** error — free it with
+/// `kafka_common_Error_destroy` — if it failed. Does not wait on the other
+/// attributes.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_cluster` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_controller_error(
+    result: *const kafka_admin_DescribeClusterResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `describe_cluster_result_ref` requires a non-null `describe_cluster` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for the
+    // duration of this call, and the returned error is a fresh copy owned by the caller.
+    single_error(&unsafe { describe_cluster_result_ref(result) }.controller)
+}
+
+/// Returns whether the controller future has resolved — Java's
+/// `controller().isDone()`. Never blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_cluster` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_controller_is_done(
+    result: *const kafka_admin_DescribeClusterResult_t,
+) -> bool {
+    // SAFETY: `describe_cluster_result_ref` requires a non-null `describe_cluster` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for this
+    // check.
+    unsafe { describe_cluster_result_ref(result) }.controller.is_done()
+}
+
 /// Returns the number of authorized operations reported for the cluster, always
-/// non-negative. 0 covers both "the broker did not report them" (Java yields
-/// null) and "reported, but none authorized"; use
-/// [`kafka_admin_DescribeClusterResult_has_authorized_operations`] to tell them
-/// apart.
+/// non-negative. 0 covers "the broker did not report them" (Java yields null),
+/// "reported, but none authorized" and a failed `authorizedOperations()` future;
+/// use [`kafka_admin_DescribeClusterResult_has_authorized_operations`] and
+/// [`kafka_admin_DescribeClusterResult_authorized_operations_error`] to tell
+/// them apart.
+///
+/// **Blocks** until the `authorizedOperations()` future has resolved — Java's
+/// `authorizedOperations().get()` — but not on the other attributes.
 ///
 /// # Safety
 ///
@@ -7920,12 +8095,16 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_authorized_operation_
     // handle, which this function's `# Safety` requires of `result` (no in-body null check,
     // so the C caller's contract is the sole source); the reference is used only for this
     // count within the call, during which the C caller keeps the handle alive.
-    authorized_operation_count(unsafe { describe_cluster_result_ref(result) }.authorized_operations.as_deref())
+    let operations = single_data(&unsafe { describe_cluster_result_ref(result) }.authorized_operations);
+    authorized_operation_count(operations.and_then(Option::as_deref))
 }
 
 /// Returns whether the broker reported the cluster's authorized operations at
-/// all: `false` is Java's null, `true` with a count of 0 is a reported-but-empty
-/// set.
+/// all: `false` is Java's null (or a failed `authorizedOperations()` future),
+/// `true` with a count of 0 is a reported-but-empty set.
+///
+/// **Blocks** until the `authorizedOperations()` future has resolved, but not on
+/// the other attributes.
 ///
 /// # Safety
 ///
@@ -7939,11 +8118,15 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_has_authorized_operat
     // handle, which this function's `# Safety` requires of `result` (no in-body null check,
     // so the C caller's contract is the sole source); the reference is used only for this
     // presence test within the call, during which the C caller keeps the handle alive.
-    unsafe { describe_cluster_result_ref(result) }.authorized_operations.is_some()
+    single_data(&unsafe { describe_cluster_result_ref(result) }.authorized_operations).is_some_and(Option::is_some)
 }
 
 /// Returns the `AclOperation` wire code (Java's `AclOperation.code()`) of the
-/// authorized operation at `index`, or -1 if out of range or absent.
+/// authorized operation at `index`, or -1 if out of range, absent, or the
+/// `authorizedOperations()` future failed.
+///
+/// **Blocks** until the `authorizedOperations()` future has resolved, but not on
+/// the other attributes. Never blocks for a negative index.
 ///
 /// # Safety
 ///
@@ -7954,16 +8137,54 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_authorized_operation(
     result: *const kafka_admin_DescribeClusterResult_t,
     index: i32,
 ) -> i32 {
-    authorized_operation_at(
-        // SAFETY: `describe_cluster_result_ref` requires a non-null `describe_cluster`
-        // result handle, which this function's `# Safety` requires of `result` (no in-body
-        // null check, so the C caller's contract is the sole source);
-        // `authorized_operation_at` bounds-checks `index`, and the reference is used only
-        // for this indexed read within the call, during which the C caller keeps the handle
-        // alive.
-        unsafe { describe_cluster_result_ref(result) }.authorized_operations.as_deref(),
-        index,
-    )
+    if index < 0 {
+        return -1;
+    }
+    // SAFETY: `describe_cluster_result_ref` requires a non-null `describe_cluster` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); `authorized_operation_at`
+    // bounds-checks `index`, and the reference is used only for this indexed read within
+    // the call, during which the C caller keeps the handle alive.
+    let operations = single_data(&unsafe { describe_cluster_result_ref(result) }.authorized_operations);
+    authorized_operation_at(operations.and_then(Option::as_deref), index)
+}
+
+/// Java's `authorizedOperations().get()`: **blocks** until the
+/// authorized-operations future has resolved, then returns null on success, or
+/// an **owned** error — free it with `kafka_common_Error_destroy` — if it
+/// failed. Does not wait on the other attributes.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_cluster` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_authorized_operations_error(
+    result: *const kafka_admin_DescribeClusterResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `describe_cluster_result_ref` requires a non-null `describe_cluster` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for the
+    // duration of this call, and the returned error is a fresh copy owned by the caller.
+    single_error(&unsafe { describe_cluster_result_ref(result) }.authorized_operations)
+}
+
+/// Returns whether the authorized-operations future has resolved — Java's
+/// `authorizedOperations().isDone()`. Never blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_cluster` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_authorized_operations_is_done(
+    result: *const kafka_admin_DescribeClusterResult_t,
+) -> bool {
+    // SAFETY: `describe_cluster_result_ref` requires a non-null `describe_cluster` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for this
+    // check.
+    unsafe { describe_cluster_result_ref(result) }.authorized_operations.is_done()
 }
 
 /// Destroys a `describe_cluster` result handle, invalidating every borrowed
@@ -7978,20 +8199,22 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_destroy(result: *mut 
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
         // a valid `describe_cluster` result handle, i.e. the
-        // `Box<DescribeClusterResultInner>` leaked by `Box::into_raw` in
-        // `box_describe_cluster_result`. This is the single, final use: the contract states
-        // the handle and every borrowed sub-handle are invalid afterwards, and no other
-        // function frees it.
+        // `Box<DescribeClusterResultInner>` leaked by `into_handle` in
+        // `kafka_admin_AdminClient_describe_cluster` or `box_describe_cluster_result`. This
+        // is the single, final use: the contract states the handle and every borrowed
+        // sub-handle are invalid afterwards, and no other function frees it.
         unsafe { drop(Box::from_raw(result as *mut DescribeClusterResultInner)) };
     }
 }
 
-/// Submits `describeCluster` and returns a future over its four attributes.
+/// Submits `describeCluster` and returns a future over its four attributes, for
+/// the `_async` path's single callback.
 ///
 /// All four are awaited before any error is reported, so none is abandoned; if
 /// more than one failed, the first in Java's declaration order (nodes,
-/// controller, cluster id, authorized operations) is returned. C has one handle
-/// per call, so a failure of any attribute is a whole-call failure.
+/// controller, cluster id, authorized operations) is returned. The callback has
+/// one handle per call, so there a failure of any attribute is a whole-call
+/// failure.
 fn submit_describe_cluster(
     admin: &dyn Admin,
     options: DescribeClusterOptions,
@@ -8035,14 +8258,22 @@ fn describe_cluster_options(
 pub type kafka_admin_AdminClient_describe_cluster_callback_t =
     unsafe extern "C" fn(*mut kafka_admin_DescribeClusterResult_t, *mut kafka_common_Error_t, *mut c_void);
 
-/// Describes the cluster, blocking until every attribute future has resolved
-/// (synchronous).
+/// Describes the cluster — Java's `describeCluster`. Like Java, this **does not
+/// wait**: it submits the request and returns at once.
 ///
 /// On success writes a [`kafka_admin_DescribeClusterResult_t`] to `*out_result`
 /// (free it with [`kafka_admin_DescribeClusterResult_destroy`]) and returns null.
-/// Java's result holds four independent futures rather than a per-key map, so
-/// unlike the batch RPCs there are no per-key errors: any failure is returned
-/// here.
+/// The handle holds Java's four independent futures — `nodes()`,
+/// `controller()`, `clusterId()` and `authorizedOperations()` — and each
+/// accessor waits for the one future it reads only (Java's `get()`): the node
+/// accessors for `nodes()`, [`kafka_admin_DescribeClusterResult_controller`] for
+/// `controller()`, [`kafka_admin_DescribeClusterResult_cluster_id`] for
+/// `clusterId()`, and the authorized-operation accessors for
+/// `authorizedOperations()`. **Every failure of the request, such as a timeout,
+/// is read from the handle**, with the `_error` getter of each attribute
+/// ([`kafka_admin_DescribeClusterResult_nodes_error`], ...), as in Java. A
+/// non-null return means the request could not be submitted at all (a NULL
+/// `admin`).
 ///
 /// # Parameters
 ///
@@ -8064,18 +8295,28 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_cluster(
     out_result: *mut *mut kafka_admin_DescribeClusterResult_t,
 ) -> *mut kafka_common_Error_t {
     let options = describe_cluster_options(timeout_ms, include_authorized_operations, include_fenced_brokers);
-    // SAFETY: `admin_sync_future_op` requires `admin` to be a valid handle from an
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
     // admin-client constructor, as this function's `# Safety` requires of the C caller (the
-    // helper additionally turns a NULL `admin` into an illegal-argument error).
-    // `submit_describe_cluster` runs on the calling thread inside the helper and returns a
-    // future over the four attribute `KafkaFuture`s that borrows nothing from the handle,
-    // and `block_on` consumes it before this call returns.
-    let outcome = unsafe { admin_sync_future_op(admin, move |a| Ok(submit_describe_cluster(a, options))) };
+    // helper additionally turns a NULL `admin` into an illegal-argument error). The
+    // `submit` closure runs on the calling thread inside the helper and captures only the
+    // owned `options`; the handle it builds holds only the four futures and the waiter.
+    let outcome = unsafe {
+        admin_sync_submit(admin, move |a, w| {
+            let result = a.describe_cluster_with_options(options);
+            Ok(describe_cluster_result_inner(
+                w,
+                result.nodes(),
+                result.controller(),
+                result.cluster_id(),
+                result.authorized_operations(),
+            ))
+        })
+    };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
     // which is exactly what this function's `# Safety` promises (`out_result` must be null
     // or writable); it null-checks before writing exactly one freshly boxed
     // `DescribeClusterResult` handle, whose ownership passes to the C caller.
-    unsafe { finish_sync(outcome, out_result, box_describe_cluster_result) }
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// Describes the cluster asynchronously. See
@@ -8149,17 +8390,17 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_cluster_async(
 // describeConfigs
 // ---------------------------------------------------------------------------
 
-/// Per-resource outcomes of `describeConfigs`.
-type DescribeConfigsOutcomes = HashMap<ConfigResource, Result<Config, Error>>;
-
 /// Opaque handle to a flattened `DescribeConfigsResult`, keyed by config
-/// resource.
+/// resource: one future per requested resource (Java's `values()`), read by the
+/// accessors below.
 #[repr(C)]
 pub struct kafka_admin_DescribeConfigsResult_t {
     _private: [u8; 0],
 }
 
-/// Backing state for [`kafka_admin_DescribeConfigsResult_t`].
+/// Backing state for [`kafka_admin_DescribeConfigsResult_t`]: the requested
+/// resources (known at submission, as Java's `values().keySet()` is) and each
+/// resource's future, resolved on first read.
 ///
 /// The key is a `ConfigResource`, which C reads as a type code plus a name
 /// (`_get_key_type(i)` / `_get_key_name(i)`) rather than through a dedicated
@@ -8168,33 +8409,23 @@ pub struct kafka_admin_DescribeConfigsResult_t {
 struct DescribeConfigsResultInner {
     key_types: Vec<i32>,
     key_names: Vec<CString>,
-    values: Vec<Option<ConfigInner>>,
-    errors: Vec<Option<ErrorInner>>,
+    entries: Vec<LazyKeyed<ConfigInner>>,
 }
 
-/// Flattens the per-resource `describeConfigs` outcomes into the C handle.
-fn box_describe_configs_result(outcomes: DescribeConfigsOutcomes) -> *mut kafka_admin_DescribeConfigsResult_t {
-    let entries = sorted_config_resource_entries(outcomes);
-    let mut key_types = Vec::with_capacity(entries.len());
-    let mut key_names = Vec::with_capacity(entries.len());
-    let mut values = Vec::with_capacity(entries.len());
-    let mut errors = Vec::with_capacity(entries.len());
-    for (resource, outcome) in entries {
-        key_types.push(i32::from(resource.resource_type().id()));
-        key_names.push(to_cstring(resource.name()));
-        match outcome {
-            Ok(config) => {
-                values.push(Some(ConfigInner::new(&config)));
-                errors.push(None);
-            },
-            Err(e) => {
-                values.push(None);
-                errors.push(Some(error_inner(e)));
-            },
-        }
-    }
-    Box::into_raw(Box::new(DescribeConfigsResultInner { key_types, key_names, values, errors }))
-        as *mut kafka_admin_DescribeConfigsResult_t
+/// Wraps `describeConfigs`' per-resource futures, unresolved, as the C handle's
+/// backing state. Entries are sorted by `(type id, name)`.
+fn describe_configs_result_inner(
+    waiter: &FutureWaiter,
+    futures: Vec<(ConfigResource, KafkaFuture<Config>)>,
+) -> DescribeConfigsResultInner {
+    let entries = sorted_config_resource_entries(futures.into_iter().collect());
+    let key_types = entries.iter().map(|(r, _)| i32::from(r.resource_type().id())).collect();
+    let key_names = entries.iter().map(|(r, _)| to_cstring(r.name())).collect();
+    let entries = entries
+        .into_iter()
+        .map(|(_, future)| lazy_keyed(waiter, future, |config| ConfigInner::new(&config)))
+        .collect();
+    DescribeConfigsResultInner { key_types, key_names, entries }
 }
 
 /// Casts a `*const kafka_admin_DescribeConfigsResult_t` to a reference.
@@ -8207,14 +8438,15 @@ unsafe fn describe_configs_result_ref(
 ) -> &'static DescribeConfigsResultInner {
     // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
     // `describe_configs` call, i.e. the `Box<DescribeConfigsResultInner>` leaked by
-    // `Box::into_raw` in `box_describe_configs_result` and freed only by
+    // `into_handle` in `kafka_admin_AdminClient_describe_configs` and freed only by
     // `kafka_admin_DescribeConfigsResult_destroy`, so it is aligned and live; callers use
     // the reference only within their own synchronous getter call, during which the C
     // caller keeps the handle alive.
     unsafe { &*(result as *const DescribeConfigsResultInner) }
 }
 
-/// Returns the number of requested resources.
+/// Returns the number of requested resources. Never blocks: the resources are
+/// known when the request is submitted.
 ///
 /// # Safety
 ///
@@ -8232,7 +8464,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_count(
 }
 
 /// Returns the `ConfigResource.Type.id()` of the resource at `index`, or -1 if
-/// out of range. Entries are sorted by `(type id, name)`.
+/// out of range. Entries are sorted by `(type id, name)`. Never blocks.
 ///
 /// # Safety
 ///
@@ -8259,7 +8491,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_get_key_type(
 }
 
 /// Returns the name of the resource at `index` (borrowed), or null if out of
-/// range.
+/// range. Never blocks.
 ///
 /// # Safety
 ///
@@ -8283,6 +8515,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_get_key_name(
 /// resource failed (see [`kafka_admin_DescribeConfigsResult_get_error`]) or
 /// `index` is out of range.
 ///
+/// **Blocks** until that resource's future has resolved — Java's
+/// `values().get(resource).get()` — but not on any other resource. Never blocks
+/// for an out-of-range index. The pointer stays valid until
+/// [`kafka_admin_DescribeConfigsResult_destroy`].
+///
 /// # Safety
 ///
 /// `result` must be a valid `describe_configs` result handle.
@@ -8292,22 +8529,25 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_get_value(
     result: *const kafka_admin_DescribeConfigsResult_t,
     index: i32,
 ) -> *const kafka_admin_Config_t {
-    if index < 0 {
-        return std::ptr::null();
-    }
     // SAFETY: `describe_configs_result_ref` requires a non-null `describe_configs` result
-    // handle, which this function's `# Safety` requires of `result` (no in-body null
-    // check); `index` is non-negative (checked above) and bounds-checked by `get`. The
-    // returned pointer borrows a `ConfigInner` in the handle's values vec, valid until
-    // `kafka_admin_DescribeConfigsResult_destroy`.
-    match unsafe { describe_configs_result_ref(result) }.values.get(index as usize) {
-        Some(Some(config)) => config as *const ConfigInner as *const kafka_admin_Config_t,
-        _ => std::ptr::null(),
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for the
+    // duration of this call, and the returned pointer borrows a `ConfigInner` cached in the
+    // handle, valid until `kafka_admin_DescribeConfigsResult_destroy`.
+    match keyed_value_at(&unsafe { describe_configs_result_ref(result) }.entries, index) {
+        Some(config) => config as *const ConfigInner as *const kafka_admin_Config_t,
+        None => std::ptr::null(),
     }
 }
 
 /// Returns the error for the resource at `index` (borrowed), or null if it was
 /// described successfully or `index` is out of range. Do not destroy it.
+///
+/// **Blocks** until that resource's future has resolved — Java's
+/// `values().get(resource).get()` — but not on any other resource. Never blocks
+/// for an out-of-range index. A failure of the whole request (a timeout, say) is
+/// reported here for every resource, as Java completes every resource's future
+/// with it.
 ///
 /// # Safety
 ///
@@ -8318,18 +8558,54 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_get_error(
     result: *const kafka_admin_DescribeConfigsResult_t,
     index: i32,
 ) -> *const kafka_common_Error_t {
-    if index < 0 {
-        return std::ptr::null();
-    }
     // SAFETY: `describe_configs_result_ref` requires a non-null `describe_configs` result
-    // handle, which this function's `# Safety` requires of `result` (no in-body null
-    // check); `index` is non-negative (checked above) and bounds-checked by `get`. The
-    // returned error pointer borrows an `ErrorInner` owned by the handle (not to be
-    // destroyed), valid until `kafka_admin_DescribeConfigsResult_destroy`.
-    match unsafe { describe_configs_result_ref(result) }.errors.get(index as usize) {
-        Some(slot) => error_ptr(slot.as_ref()),
-        None => std::ptr::null(),
-    }
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for the
+    // duration of this call, and the returned error pointer borrows an `ErrorInner` cached
+    // in the handle (not to be destroyed), valid until
+    // `kafka_admin_DescribeConfigsResult_destroy`.
+    keyed_error_at(&unsafe { describe_configs_result_ref(result) }.entries, index)
+}
+
+/// Returns whether the future of the resource at `index` has resolved — Java's
+/// `values().get(resource).isDone()`. False if `index` is out of range. Never
+/// blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_configs` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_is_done(
+    result: *const kafka_admin_DescribeConfigsResult_t,
+    index: i32,
+) -> bool {
+    // SAFETY: `describe_configs_result_ref` requires a non-null `describe_configs` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for this
+    // check within the call, during which the C caller keeps the handle alive.
+    keyed_is_done_at(&unsafe { describe_configs_result_ref(result) }.entries, index)
+}
+
+/// Java's `all().get()`: **blocks** until every resource's future has resolved,
+/// then returns null if all succeeded, or an **owned** error — free it with
+/// `kafka_common_Error_destroy` — of a failed resource (the first in index
+/// order; Java leaves which one unspecified). The configs themselves are read
+/// per resource with [`kafka_admin_DescribeConfigsResult_get_value`].
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_configs` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_all(
+    result: *const kafka_admin_DescribeConfigsResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `describe_configs_result_ref` requires a non-null `describe_configs` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for the
+    // duration of this call, and the returned error is a fresh copy owned by the caller.
+    keyed_all(&unsafe { describe_configs_result_ref(result) }.entries)
 }
 
 /// Destroys a `describe_configs` result handle, invalidating every borrowed
@@ -8344,30 +8620,17 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_destroy(result: *mut 
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
         // a valid `describe_configs` result handle, i.e. the
-        // `Box<DescribeConfigsResultInner>` leaked by `Box::into_raw` in
-        // `box_describe_configs_result`. This is the single, final use: the contract states
-        // the handle and every borrowed sub-handle are invalid afterwards, and no other
-        // function frees it.
+        // `Box<DescribeConfigsResultInner>` leaked by `into_handle` in
+        // `kafka_admin_AdminClient_describe_configs`. This is the single, final use: the
+        // contract states the handle and every borrowed sub-handle are invalid afterwards,
+        // and no other function frees it.
         unsafe { drop(Box::from_raw(result as *mut DescribeConfigsResultInner)) };
     }
 }
 
-/// Submits `describeConfigs` and returns the collect-all future over its
-/// per-resource futures.
-fn submit_describe_configs(
-    admin: &dyn Admin,
-    resources: &[ConfigResource],
-    options: DescribeConfigsOptions,
-) -> KafkaFuture<DescribeConfigsOutcomes> {
-    let result = admin.describe_configs_with_options(resources, options);
-    let entries: Vec<(ConfigResource, KafkaFuture<Config>)> =
-        result.values().iter().map(|(r, f)| (r.clone(), f.clone())).collect();
-    KafkaFuture::join_map_results(entries)
-}
-
-/// Submits `describeConfigs`, unjoined, for [`admin_async_per_key_op`]'s
-/// independent-per-key delivery. Same `Admin` call as [`submit_describe_configs`];
-/// see the "RPC submission helpers — per-key (unjoined) variants" note above.
+/// Submits `describeConfigs` and returns its per-resource futures, unjoined —
+/// for the synchronous handle and for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery alike.
 fn submit_describe_configs_entries(
     admin: &dyn Admin,
     resources: &[ConfigResource],
@@ -8406,8 +8669,9 @@ fn describe_configs_options(
 pub type kafka_admin_AdminClient_describe_configs_callback_t =
     unsafe extern "C" fn(i32, *const c_char, *mut kafka_admin_Config_t, *mut kafka_common_Error_t, *mut c_void);
 
-/// Describes the configuration of the given resources, blocking until every
-/// per-resource future has resolved (synchronous).
+/// Describes the configuration of the given resources — Java's
+/// `describeConfigs`. Like Java, this **does not wait**: it submits the request
+/// and returns at once.
 ///
 /// Java's `Collection<ConfigResource>` becomes two parallel arrays: entry `i` is
 /// the resource `(resource_types[i], resource_names[i])`, where the type is a
@@ -8416,9 +8680,15 @@ pub type kafka_admin_AdminClient_describe_configs_callback_t =
 ///
 /// On success writes a [`kafka_admin_DescribeConfigsResult_t`] to `*out_result`
 /// (free it with [`kafka_admin_DescribeConfigsResult_destroy`]) and returns null.
-/// **A per-resource failure is not a call failure**: it is reported by
-/// [`kafka_admin_DescribeConfigsResult_get_error`] for that key. A non-null return
-/// means the request could not be submitted at all.
+/// The handle holds one future per resource, as Java's `values()` does. Its
+/// resources are readable at once;
+/// [`kafka_admin_DescribeConfigsResult_get_value`] /
+/// [`kafka_admin_DescribeConfigsResult_get_error`] wait for that resource's
+/// future only, and [`kafka_admin_DescribeConfigsResult_all`] waits for every
+/// resource (Java's `get()`). **Every failure of the request — per resource, or
+/// of the request as a whole, such as a timeout — is read from the handle**, as
+/// in Java. A non-null return means the request could not be submitted at all
+/// (a NULL `admin`).
 ///
 /// # Parameters
 ///
@@ -8450,18 +8720,24 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_configs(
     // this call.
     let resources = unsafe { read_config_resources(resource_types, resource_names, count) };
     let options = describe_configs_options(timeout_ms, include_synonyms, include_documentation);
-    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
     // admin-client constructor, as this function's `# Safety` requires of the C caller (the
     // helper additionally turns a NULL `admin` into an illegal-argument error). The
     // `submit` closure runs on the calling thread inside the helper, borrowing `resources`
-    // only there, and the helper uses the handle only until `block_on` returns within this
-    // call.
-    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_describe_configs(a, &resources, options))) };
+    // only there; the handle it builds holds only owned futures and the waiter.
+    let outcome = unsafe {
+        admin_sync_submit(admin, move |a, w| {
+            Ok(describe_configs_result_inner(
+                w,
+                submit_describe_configs_entries(a, &resources, options),
+            ))
+        })
+    };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
     // which is exactly what this function's `# Safety` promises (`out_result` must be null
     // or writable); it null-checks before writing exactly one freshly boxed
     // `DescribeConfigsResult` handle, whose ownership passes to the C caller.
-    unsafe { finish_sync(outcome, out_result, box_describe_configs_result) }
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// The body of [`kafka_admin_AdminClient_describe_configs_async`], shared with its `#[ffi_guard]`'s `on_panic`.
@@ -8624,39 +8900,40 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_configs_async(
 // incrementalAlterConfigs
 // ---------------------------------------------------------------------------
 
-/// Per-resource outcomes of `incrementalAlterConfigs`.
-type AlterConfigsOutcomes = HashMap<ConfigResource, Result<(), Error>>;
-
-/// Opaque handle to a flattened `AlterConfigsResult`, keyed by config resource.
+/// Opaque handle to a flattened `AlterConfigsResult`, keyed by config resource:
+/// one future per altered resource (Java's `values()`), read by the accessors
+/// below.
 #[repr(C)]
 pub struct kafka_admin_AlterConfigsResult_t {
     _private: [u8; 0],
 }
 
-/// Backing state for [`kafka_admin_AlterConfigsResult_t`].
+/// Backing state for [`kafka_admin_AlterConfigsResult_t`]: the altered
+/// resources (known at submission, as Java's `values().keySet()` is) and each
+/// resource's future, resolved on first read.
 ///
 /// There is no per-key value: Java's per-resource future is `KafkaFuture<Void>`,
 /// so a null error *is* the success value.
 struct AlterConfigsResultInner {
     key_types: Vec<i32>,
     key_names: Vec<CString>,
-    errors: Vec<Option<ErrorInner>>,
+    entries: Vec<LazyKeyed<()>>,
 }
 
-/// Flattens the per-resource `incrementalAlterConfigs` outcomes into the C
-/// handle.
-fn box_alter_configs_result(outcomes: AlterConfigsOutcomes) -> *mut kafka_admin_AlterConfigsResult_t {
-    let entries = sorted_config_resource_entries(outcomes);
-    let mut key_types = Vec::with_capacity(entries.len());
-    let mut key_names = Vec::with_capacity(entries.len());
-    let mut errors = Vec::with_capacity(entries.len());
-    for (resource, outcome) in entries {
-        key_types.push(i32::from(resource.resource_type().id()));
-        key_names.push(to_cstring(resource.name()));
-        errors.push(outcome.err().map(error_inner));
-    }
-    Box::into_raw(Box::new(AlterConfigsResultInner { key_types, key_names, errors }))
-        as *mut kafka_admin_AlterConfigsResult_t
+/// Wraps `incrementalAlterConfigs`' per-resource futures, unresolved, as the C
+/// handle's backing state. Entries are sorted by `(type id, name)`.
+fn alter_configs_result_inner(
+    waiter: &FutureWaiter,
+    futures: Vec<(ConfigResource, KafkaFuture<()>)>,
+) -> AlterConfigsResultInner {
+    let entries = sorted_config_resource_entries(futures.into_iter().collect());
+    let key_types = entries.iter().map(|(r, _)| i32::from(r.resource_type().id())).collect();
+    let key_names = entries.iter().map(|(r, _)| to_cstring(r.name())).collect();
+    let entries = entries
+        .into_iter()
+        .map(|(_, future)| lazy_keyed(waiter, future, |()| ()))
+        .collect();
+    AlterConfigsResultInner { key_types, key_names, entries }
 }
 
 /// Casts a `*const kafka_admin_AlterConfigsResult_t` to a reference.
@@ -8669,14 +8946,15 @@ unsafe fn alter_configs_result_ref(
 ) -> &'static AlterConfigsResultInner {
     // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from an
     // `incremental_alter_configs` call, i.e. the `Box<AlterConfigsResultInner>` leaked by
-    // `Box::into_raw` in `box_alter_configs_result` and freed only by
-    // `kafka_admin_AlterConfigsResult_destroy`, so it is aligned and live; callers use the
-    // reference only within their own synchronous getter call, during which the C caller
-    // keeps the handle alive.
+    // `into_handle` in `kafka_admin_AdminClient_incremental_alter_configs` and freed only
+    // by `kafka_admin_AlterConfigsResult_destroy`, so it is aligned and live; callers use
+    // the reference only within their own synchronous getter call, during which the C
+    // caller keeps the handle alive.
     unsafe { &*(result as *const AlterConfigsResultInner) }
 }
 
-/// Returns the number of altered resources.
+/// Returns the number of altered resources. Never blocks: the resources are
+/// known when the request is submitted.
 ///
 /// # Safety
 ///
@@ -8692,7 +8970,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_count(result: *const kaf
 }
 
 /// Returns the `ConfigResource.Type.id()` of the resource at `index`, or -1 if
-/// out of range. Entries are sorted by `(type id, name)`.
+/// out of range. Entries are sorted by `(type id, name)`. Never blocks.
 ///
 /// # Safety
 ///
@@ -8719,7 +8997,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_get_key_type(
 }
 
 /// Returns the name of the resource at `index` (borrowed), or null if out of
-/// range.
+/// range. Never blocks.
 ///
 /// # Safety
 ///
@@ -8745,6 +9023,12 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_get_key_name(
 /// There is no `_get_value`: Java's per-resource future is `KafkaFuture<Void>`,
 /// so a null error *is* the success value.
 ///
+/// **Blocks** until that resource's future has resolved — Java's
+/// `values().get(resource).get()` — but not on any other resource. Never blocks
+/// for an out-of-range index. A failure of the whole request (a timeout, say) is
+/// reported here for every resource, as Java completes every resource's future
+/// with it.
+///
 /// # Safety
 ///
 /// `result` must be a valid `incremental_alter_configs` result handle.
@@ -8754,18 +9038,53 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_get_error(
     result: *const kafka_admin_AlterConfigsResult_t,
     index: i32,
 ) -> *const kafka_common_Error_t {
-    if index < 0 {
-        return std::ptr::null();
-    }
     // SAFETY: `alter_configs_result_ref` requires a non-null `incremental_alter_configs`
     // result handle, which this function's `# Safety` requires of `result` (no in-body null
-    // check); `index` is non-negative (checked above) and bounds-checked by `get`. The
-    // returned error pointer borrows an `ErrorInner` owned by the handle (not to be
-    // destroyed), valid until `kafka_admin_AlterConfigsResult_destroy`.
-    match unsafe { alter_configs_result_ref(result) }.errors.get(index as usize) {
-        Some(slot) => error_ptr(slot.as_ref()),
-        None => std::ptr::null(),
-    }
+    // check, so the C caller's contract is the sole source); the reference is used only for
+    // the duration of this call, and the returned error pointer borrows an `ErrorInner`
+    // cached in the handle (not to be destroyed), valid until
+    // `kafka_admin_AlterConfigsResult_destroy`.
+    keyed_error_at(&unsafe { alter_configs_result_ref(result) }.entries, index)
+}
+
+/// Returns whether the future of the resource at `index` has resolved — Java's
+/// `values().get(resource).isDone()`. False if `index` is out of range. Never
+/// blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `incremental_alter_configs` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_is_done(
+    result: *const kafka_admin_AlterConfigsResult_t,
+    index: i32,
+) -> bool {
+    // SAFETY: `alter_configs_result_ref` requires a non-null `incremental_alter_configs`
+    // result handle, which this function's `# Safety` requires of `result` (no in-body null
+    // check, so the C caller's contract is the sole source); the reference is used only for
+    // this check within the call, during which the C caller keeps the handle alive.
+    keyed_is_done_at(&unsafe { alter_configs_result_ref(result) }.entries, index)
+}
+
+/// Java's `all().get()`: **blocks** until every resource's future has resolved,
+/// then returns null if all succeeded, or an **owned** error — free it with
+/// `kafka_common_Error_destroy` — of a failed resource (the first in index
+/// order; Java leaves which one unspecified).
+///
+/// # Safety
+///
+/// `result` must be a valid `incremental_alter_configs` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_all(
+    result: *const kafka_admin_AlterConfigsResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `alter_configs_result_ref` requires a non-null `incremental_alter_configs`
+    // result handle, which this function's `# Safety` requires of `result` (no in-body null
+    // check, so the C caller's contract is the sole source); the reference is used only for
+    // the duration of this call, and the returned error is a fresh copy owned by the caller.
+    keyed_all(&unsafe { alter_configs_result_ref(result) }.entries)
 }
 
 /// Destroys an `incremental_alter_configs` result handle. Safe with null
@@ -8780,30 +9099,17 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_destroy(result: *mut kaf
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
         // a valid `incremental_alter_configs` result handle, i.e. the
-        // `Box<AlterConfigsResultInner>` leaked by `Box::into_raw` in
-        // `box_alter_configs_result`. This is the single, final use: the contract states
-        // the handle is invalid afterwards and no other function frees it.
+        // `Box<AlterConfigsResultInner>` leaked by `into_handle` in
+        // `kafka_admin_AdminClient_incremental_alter_configs`. This is the single, final
+        // use: the contract states the handle is invalid afterwards and no other function
+        // frees it.
         unsafe { drop(Box::from_raw(result as *mut AlterConfigsResultInner)) };
     }
 }
 
-/// Submits `incrementalAlterConfigs` and returns the collect-all future over its
-/// per-resource futures.
-fn submit_incremental_alter_configs(
-    admin: &dyn Admin,
-    configs: &HashMap<ConfigResource, Vec<AlterConfigOp>>,
-    options: AlterConfigsOptions,
-) -> KafkaFuture<AlterConfigsOutcomes> {
-    let result = admin.incremental_alter_configs_with_options(configs, options);
-    let entries: Vec<(ConfigResource, KafkaFuture<()>)> =
-        result.values().iter().map(|(r, f)| (r.clone(), f.clone())).collect();
-    KafkaFuture::join_map_results(entries)
-}
-
-/// Submits `incrementalAlterConfigs`, unjoined, for [`admin_async_per_key_op`]'s
-/// independent-per-key delivery. Same `Admin` call as
-/// [`submit_incremental_alter_configs`]; see the "RPC submission helpers —
-/// per-key (unjoined) variants" note above.
+/// Submits `incrementalAlterConfigs` and returns its per-resource futures,
+/// unjoined — for the synchronous handle and for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery alike.
 fn submit_incremental_alter_configs_entries(
     admin: &dyn Admin,
     configs: &HashMap<ConfigResource, Vec<AlterConfigOp>>,
@@ -8827,8 +9133,9 @@ fn submit_incremental_alter_configs_entries(
 pub type kafka_admin_AdminClient_incremental_alter_configs_callback_t =
     unsafe extern "C" fn(i32, *const c_char, *mut kafka_common_Error_t, *mut c_void);
 
-/// Incrementally alters resource configurations, blocking until every
-/// per-resource future has resolved (synchronous).
+/// Incrementally alters resource configurations — Java's
+/// `incrementalAlterConfigs`. Like Java, this **does not wait**: it submits the
+/// request and returns at once.
 ///
 /// Java's `Map<ConfigResource, Collection<AlterConfigOp>>` becomes five parallel
 /// arrays, **one row per operation**: row `i` applies
@@ -8843,12 +9150,19 @@ pub type kafka_admin_AdminClient_incremental_alter_configs_callback_t =
 /// creates a future for every map key regardless of whether its op list is
 /// empty. A NULL `config_values` entry (on a row that does carry a config
 /// name) is the null value DELETE uses. An unknown op-type code fails the
-/// whole call with an illegal-argument error.
+/// whole call with an illegal-argument error, returned here before anything is
+/// submitted.
 ///
 /// On success writes a [`kafka_admin_AlterConfigsResult_t`] to `*out_result`
 /// (free it with [`kafka_admin_AlterConfigsResult_destroy`]) and returns null.
-/// Per-resource failures are reported by
-/// [`kafka_admin_AlterConfigsResult_get_error`], not by the return value.
+/// The handle holds one future per resource, as Java's `values()` does. Its
+/// resources are readable at once; [`kafka_admin_AlterConfigsResult_get_error`]
+/// waits for that resource's future only, and
+/// [`kafka_admin_AlterConfigsResult_all`] waits for every resource (Java's
+/// `get()`). **Every failure of the request — per resource, or of the request
+/// as a whole, such as a timeout — is read from the handle**, as in Java. A
+/// non-null return means the request could not be submitted at all (a NULL
+/// `admin`, or an unknown op-type code).
 ///
 /// # Parameters
 ///
@@ -8890,19 +9204,24 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_incremental_alter_configs(
     let options = AlterConfigsOptions::new()
         .set_timeout_ms(option_timeout(timeout_ms))
         .set_validate_only(validate_only);
-    let outcome =
-        // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
-        // admin-client constructor, as this function's `# Safety` requires of the C caller
-        // (the helper additionally turns a NULL `admin` into an illegal-argument error).
-        // The `submit` closure runs on the calling thread inside the helper, borrowing
-        // `configs` only there, and the helper uses the handle only until `block_on`
-        // returns within this call.
-        unsafe { admin_sync_value_op(admin, move |a| Ok(submit_incremental_alter_configs(a, &configs, options))) };
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires of the C caller (the
+    // helper additionally turns a NULL `admin` into an illegal-argument error). The
+    // `submit` closure runs on the calling thread inside the helper, borrowing `configs`
+    // only there; the handle it builds holds only owned futures and the waiter.
+    let outcome = unsafe {
+        admin_sync_submit(admin, move |a, w| {
+            Ok(alter_configs_result_inner(
+                w,
+                submit_incremental_alter_configs_entries(a, &configs, options),
+            ))
+        })
+    };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
     // which is exactly what this function's `# Safety` promises (`out_result` must be null
     // or writable); it null-checks before writing exactly one freshly boxed
     // `AlterConfigsResult` handle, whose ownership passes to the C caller.
-    unsafe { finish_sync(outcome, out_result, box_alter_configs_result) }
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// The body of [`kafka_admin_AdminClient_incremental_alter_configs_async`], shared with its `#[ffi_guard]`'s `on_panic`.
@@ -9077,15 +9396,24 @@ pub struct kafka_admin_ListConfigResourcesResult_t {
 ///
 /// Java's `listConfigResources` has a single `KafkaFuture<Collection<
 /// ConfigResource>>`, so there are no per-key errors: the whole call either
-/// succeeds or fails.
+/// succeeds or fails, and the failure is read with
+/// [`kafka_admin_ListConfigResourcesResult_all`]. On a handle from the
+/// synchronous entry point that future may still be unresolved, and every
+/// accessor waits for it; a handle from the `_async` callback is always
+/// resolved.
 struct ListConfigResourcesResultInner {
+    resources: LazySingle<ListConfigResourcesData>,
+}
+
+/// The resolved resources, sorted by `(type id, name)`.
+struct ListConfigResourcesData {
     types: Vec<i32>,
     names: Vec<CString>,
 }
 
-/// Flattens the listed resources into the C handle, sorted by
-/// `(type id, name)` — Java returns an unordered collection, but C indexes it.
-fn box_list_config_resources_result(resources: Vec<ConfigResource>) -> *mut kafka_admin_ListConfigResourcesResult_t {
+/// Flattens the listed resources, sorted by `(type id, name)` — Java returns an
+/// unordered collection, but C indexes it.
+fn list_config_resources_data(resources: Vec<ConfigResource>) -> ListConfigResourcesData {
     let mut sorted = resources;
     sorted.sort_by(|a, b| {
         a.resource_type()
@@ -9099,8 +9427,14 @@ fn box_list_config_resources_result(resources: Vec<ConfigResource>) -> *mut kafk
         types.push(i32::from(resource.resource_type().id()));
         names.push(to_cstring(resource.name()));
     }
-    Box::into_raw(Box::new(ListConfigResourcesResultInner { types, names }))
-        as *mut kafka_admin_ListConfigResourcesResult_t
+    ListConfigResourcesData { types, names }
+}
+
+/// Moves already-resolved resources (the `_async` path) into the C handle.
+fn box_list_config_resources_result(resources: Vec<ConfigResource>) -> *mut kafka_admin_ListConfigResourcesResult_t {
+    into_handle(ListConfigResourcesResultInner {
+        resources: LazyOutcome::resolved(Ok(list_config_resources_data(resources))),
+    })
 }
 
 /// Casts a `*const kafka_admin_ListConfigResourcesResult_t` to a reference.
@@ -9113,14 +9447,58 @@ unsafe fn list_config_resources_result_ref(
 ) -> &'static ListConfigResourcesResultInner {
     // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
     // `list_config_resources` call, i.e. the `Box<ListConfigResourcesResultInner>` leaked
-    // by `Box::into_raw` in `box_list_config_resources_result` and freed only by
+    // by `into_handle` in `kafka_admin_AdminClient_list_config_resources` or
+    // `box_list_config_resources_result` and freed only by
     // `kafka_admin_ListConfigResourcesResult_destroy`, so it is aligned and live; callers
     // use the reference only within their own synchronous getter call, during which the C
     // caller keeps the handle alive.
     unsafe { &*(result as *const ListConfigResourcesResultInner) }
 }
 
-/// Returns the number of listed config resources.
+/// Java's `all().get()`: **blocks** until the resource listing has resolved,
+/// then returns null on success, or an **owned** error — free it with
+/// `kafka_common_Error_destroy` — if the request failed. The resources are read
+/// with [`kafka_admin_ListConfigResourcesResult_count`] /
+/// [`kafka_admin_ListConfigResourcesResult_get_type`] /
+/// [`kafka_admin_ListConfigResourcesResult_get_name`].
+///
+/// # Safety
+///
+/// `result` must be a valid `list_config_resources` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_all(
+    result: *const kafka_admin_ListConfigResourcesResult_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: `list_config_resources_result_ref` requires a non-null
+    // `list_config_resources` result handle, which this function's `# Safety` requires of
+    // `result` (no in-body null check, so the C caller's contract is the sole source); the
+    // reference is used only for the duration of this call, and the returned error is a
+    // fresh copy owned by the caller.
+    single_error(&unsafe { list_config_resources_result_ref(result) }.resources)
+}
+
+/// Returns whether the resource listing has resolved — Java's
+/// `all().isDone()`. Never blocks.
+///
+/// # Safety
+///
+/// `result` must be a valid `list_config_resources` result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_is_done(
+    result: *const kafka_admin_ListConfigResourcesResult_t,
+) -> bool {
+    // SAFETY: `list_config_resources_result_ref` requires a non-null
+    // `list_config_resources` result handle, which this function's `# Safety` requires of
+    // `result` (no in-body null check, so the C caller's contract is the sole source); the
+    // reference is used only for this check.
+    unsafe { list_config_resources_result_ref(result) }.resources.is_done()
+}
+
+/// Returns the number of listed config resources, or 0 if the request failed
+/// (see [`kafka_admin_ListConfigResourcesResult_all`]). **Blocks** until the
+/// listing has resolved.
 ///
 /// # Safety
 ///
@@ -9135,11 +9513,13 @@ pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_count(
     // `result` (no in-body null check, so the C caller's contract is the sole source); the
     // reference is used only for this `len()` within the call, during which the C caller
     // keeps the handle alive.
-    unsafe { list_config_resources_result_ref(result) }.names.len() as i32
+    single_data(&unsafe { list_config_resources_result_ref(result) }.resources).map_or(0, |d| d.names.len() as i32)
 }
 
 /// Returns the `ConfigResource.Type.id()` of the resource at `index`, or -1 if
-/// out of range. Entries are sorted by `(type id, name)`.
+/// out of range or the request failed. Entries are sorted by `(type id, name)`.
+/// **Blocks** until the listing has resolved; never blocks for a negative
+/// index.
 ///
 /// # Safety
 ///
@@ -9158,15 +9538,13 @@ pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_get_type(
     // `result` (no in-body null check, so the C caller's contract is the sole source);
     // `index` is non-negative (checked above) and bounds-checked by `get`, and the
     // reference is used only for this copied read within the call.
-    unsafe { list_config_resources_result_ref(result) }
-        .types
-        .get(index as usize)
-        .copied()
+    single_data(&unsafe { list_config_resources_result_ref(result) }.resources)
+        .and_then(|d| d.types.get(index as usize).copied())
         .unwrap_or(-1)
 }
 
 /// Returns the name of the resource at `index` (borrowed), or null if out of
-/// range.
+/// range or the request failed. **Blocks** until the listing has resolved.
 ///
 /// # Safety
 ///
@@ -9181,9 +9559,12 @@ pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_get_name(
     // `list_config_resources` result handle, which this function's `# Safety` requires of
     // `result` (no in-body null check, so the C caller's contract is the sole source);
     // `cstring_at` bounds-checks `index`, the reference is used only for the duration of
-    // this call, and the returned string pointer borrows a name `CString` owned by the
+    // this call, and the returned string pointer borrows a name `CString` cached in the
     // handle, valid until `kafka_admin_ListConfigResourcesResult_destroy`.
-    cstring_at(&unsafe { list_config_resources_result_ref(result) }.names, index)
+    match single_data(&unsafe { list_config_resources_result_ref(result) }.resources) {
+        Some(d) => cstring_at(&d.names, index),
+        None => std::ptr::null(),
+    }
 }
 
 /// Destroys a `list_config_resources` result handle. Safe with null (no-op).
@@ -9199,7 +9580,8 @@ pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_destroy(
     if !result.is_null() {
         // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
         // a valid `list_config_resources` result handle, i.e. the
-        // `Box<ListConfigResourcesResultInner>` leaked by `Box::into_raw` in
+        // `Box<ListConfigResourcesResultInner>` leaked by `into_handle` in
+        // `kafka_admin_AdminClient_list_config_resources` or
         // `box_list_config_resources_result`. This is the single, final use: the contract
         // states the handle is invalid afterwards and no other function frees it.
         unsafe { drop(Box::from_raw(result as *mut ListConfigResourcesResultInner)) };
@@ -9213,16 +9595,20 @@ pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_destroy(
 pub type kafka_admin_AdminClient_list_config_resources_callback_t =
     unsafe extern "C" fn(*mut kafka_admin_ListConfigResourcesResult_t, *mut kafka_common_Error_t, *mut c_void);
 
-/// Lists the cluster's config resources whose type is in `resource_types`
-/// (synchronous).
+/// Lists the cluster's config resources whose type is in `resource_types` —
+/// Java's `listConfigResources`. Like Java, this **does not wait**: it submits
+/// the request and returns at once.
 ///
 /// `resource_types` hold `ConfigResource.Type.id()` codes; pass NULL or
 /// `count == 0` for Java's empty set, which means "every supported type".
 ///
 /// On success writes a [`kafka_admin_ListConfigResourcesResult_t`] to
 /// `*out_result` (free with
-/// [`kafka_admin_ListConfigResourcesResult_destroy`]) and returns null. Java has
-/// a single future here, so any failure is a call failure and is returned.
+/// [`kafka_admin_ListConfigResourcesResult_destroy`]) and returns null. The
+/// handle holds Java's single `all()` future; every accessor waits for it, and
+/// its failure — such as a timeout — is read with
+/// [`kafka_admin_ListConfigResourcesResult_all`] (Java's `get()`). A non-null
+/// return means the request could not be submitted at all (a NULL `admin`).
 ///
 /// # Safety
 ///
@@ -9243,19 +9629,22 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_config_resources(
     // negative `count` to zero, and the values are copied out within this call.
     let types = unsafe { read_config_resource_types(resource_types, count) };
     let options = ListConfigResourcesOptions::new().set_timeout_ms(option_timeout(timeout_ms));
-    let outcome =
-        // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
-        // admin-client constructor, as this function's `# Safety` requires of the C caller
-        // (the helper additionally turns a NULL `admin` into an illegal-argument error).
-        // The `submit` closure runs on the calling thread inside the helper, borrowing
-        // `types` only there, and the helper uses the handle only until `block_on` returns
-        // within this call.
-        unsafe { admin_sync_value_op(admin, move |a| Ok(a.list_config_resources_with_options(&types, options).all())) };
+    // SAFETY: `admin_sync_submit` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires of the C caller (the
+    // helper additionally turns a NULL `admin` into an illegal-argument error). The
+    // `submit` closure runs on the calling thread inside the helper, borrowing `types` only
+    // there; the handle it builds holds only the future and the waiter.
+    let outcome = unsafe {
+        admin_sync_submit(admin, move |a, w| {
+            let future = a.list_config_resources_with_options(&types, options).all();
+            Ok(ListConfigResourcesResultInner { resources: lazy_single(w, future, list_config_resources_data) })
+        })
+    };
     // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
     // which is exactly what this function's `# Safety` promises (`out_result` must be null
     // or writable); it null-checks before writing exactly one freshly boxed
     // `ListConfigResourcesResult` handle, whose ownership passes to the C caller.
-    unsafe { finish_sync(outcome, out_result, box_list_config_resources_result) }
+    unsafe { finish_sync(outcome, out_result, into_handle) }
 }
 
 /// Lists the cluster's config resources asynchronously. See
@@ -33058,6 +33447,153 @@ mod tests {
         }
     }
 
+    /// Java's `DescribeClusterResult` holds four independent futures: each
+    /// accessor waits only for the attribute it reads, `isDone()` never blocks,
+    /// and each attribute's failure is read from its own `_error` getter.
+    #[test]
+    fn describe_cluster_accessors_wait_for_the_attribute_they_read() {
+        let (_runtime, waiter) = lazy_test_waiter();
+        let nodes = crate::common::internals::KafkaFutureImpl::<Vec<Node>>::new();
+        let controller = crate::common::internals::KafkaFutureImpl::<Option<Node>>::new();
+        let cluster_id = crate::common::internals::KafkaFutureImpl::<Option<String>>::new();
+        let operations = crate::common::internals::KafkaFutureImpl::<Option<BTreeSet<AclOperation>>>::new();
+        let result: *mut kafka_admin_DescribeClusterResult_t = into_handle(describe_cluster_result_inner(
+            &waiter,
+            nodes.future(),
+            controller.future(),
+            cluster_id.future(),
+            operations.future(),
+        ));
+        // SAFETY: Test code: `result` is the live handle built above, read only through its
+        // getters, with borrowed pointers read before it is destroyed exactly once at the end.
+        unsafe {
+            assert!(!kafka_admin_DescribeClusterResult_nodes_is_done(result));
+            assert!(!kafka_admin_DescribeClusterResult_controller_is_done(result));
+            assert!(!kafka_admin_DescribeClusterResult_cluster_id_is_done(result));
+            assert!(!kafka_admin_DescribeClusterResult_authorized_operations_is_done(result));
+
+            cluster_id.complete(Some("abc".to_string()));
+            assert!(kafka_admin_DescribeClusterResult_cluster_id_is_done(result));
+            // The other three attributes are still pending, so reading the cluster id
+            // must not wait on them.
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_DescribeClusterResult_cluster_id(result)).to_str(),
+                Ok("abc")
+            );
+            assert!(kafka_admin_DescribeClusterResult_cluster_id_error(result).is_null());
+            assert!(!kafka_admin_DescribeClusterResult_nodes_is_done(result));
+            // A negative index never blocks, even with its attribute pending.
+            assert!(kafka_admin_DescribeClusterResult_get_node(result, -1).is_null());
+            assert_eq!(kafka_admin_DescribeClusterResult_authorized_operation(result, -1), -1);
+
+            controller.complete_with_error(Error::timeout("controller timed out"));
+            assert!(kafka_admin_DescribeClusterResult_controller(result).is_null());
+            assert_eq!(
+                consume_message(kafka_admin_DescribeClusterResult_controller_error(result)),
+                "controller timed out"
+            );
+            assert!(!kafka_admin_DescribeClusterResult_nodes_is_done(result));
+
+            let completer = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                nodes.complete(vec![Node::new(7, "broker-7".to_string(), 9092)]);
+            });
+            assert_eq!(kafka_admin_DescribeClusterResult_node_count(result), 1);
+            completer.join().expect("completer thread");
+            assert!(kafka_admin_DescribeClusterResult_nodes_is_done(result));
+            assert!(kafka_admin_DescribeClusterResult_nodes_error(result).is_null());
+            let node = kafka_admin_DescribeClusterResult_get_node(result, 0);
+            assert_eq!((*(node as *const Node)).id(), 7);
+            assert!(kafka_admin_DescribeClusterResult_get_node(result, 1).is_null());
+            assert!(!kafka_admin_DescribeClusterResult_authorized_operations_is_done(result));
+
+            operations.complete(Some(BTreeSet::from([AclOperation::Describe])));
+            assert!(kafka_admin_DescribeClusterResult_has_authorized_operations(result));
+            assert_eq!(kafka_admin_DescribeClusterResult_authorized_operation_count(result), 1);
+            assert_eq!(
+                kafka_admin_DescribeClusterResult_authorized_operation(result, 0),
+                i32::from(AclOperation::Describe.code())
+            );
+            assert!(kafka_admin_DescribeClusterResult_authorized_operations_error(result).is_null());
+            kafka_admin_DescribeClusterResult_destroy(result);
+        }
+
+        // A failed `authorizedOperations()` future reads as absent, with its own error.
+        let operations = crate::common::internals::KafkaFutureImpl::<Option<BTreeSet<AclOperation>>>::new();
+        let resolved = crate::common::internals::KafkaFutureImpl::<Vec<Node>>::new();
+        resolved.complete(vec![]);
+        let pending_controller = crate::common::internals::KafkaFutureImpl::<Option<Node>>::new();
+        let pending_id = crate::common::internals::KafkaFutureImpl::<Option<String>>::new();
+        let result: *mut kafka_admin_DescribeClusterResult_t = into_handle(describe_cluster_result_inner(
+            &waiter,
+            resolved.future(),
+            pending_controller.future(),
+            pending_id.future(),
+            operations.future(),
+        ));
+        operations.complete_with_error(Error::timeout("operations timed out"));
+        // SAFETY: Test code: `result` is the live handle built above, destroyed exactly once.
+        unsafe {
+            assert_eq!(kafka_admin_DescribeClusterResult_node_count(result), 0);
+            assert!(!kafka_admin_DescribeClusterResult_has_authorized_operations(result));
+            assert_eq!(kafka_admin_DescribeClusterResult_authorized_operation_count(result), 0);
+            assert_eq!(
+                consume_message(kafka_admin_DescribeClusterResult_authorized_operations_error(result)),
+                "operations timed out"
+            );
+            assert!(!kafka_admin_DescribeClusterResult_cluster_id_is_done(result));
+            kafka_admin_DescribeClusterResult_destroy(result);
+        }
+    }
+
+    /// End to end, against the production client: `describe_cluster` returns
+    /// before its request resolves (Java's `describeCluster` does not block),
+    /// and the request's timeout is read from each attribute's `_error` getter
+    /// rather than returned by the call.
+    #[test]
+    fn describe_cluster_returns_before_the_request_resolves_and_reports_its_timeout_from_the_handle() {
+        let admin = unreachable_admin_client();
+        let mut result: *mut kafka_admin_DescribeClusterResult_t = std::ptr::null_mut();
+        let started = std::time::Instant::now();
+        // SAFETY: Test code: `admin` is live and `result` is a writable slot.
+        let error = unsafe { kafka_admin_AdminClient_describe_cluster(admin, 1_000, false, false, &mut result) };
+        assert!(error.is_null(), "submission must not fail");
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "describe_cluster waited for the request"
+        );
+
+        // SAFETY: Test code: `result` is the live handle written above and `admin` the live
+        // client, each destroyed exactly once; the result handle is destroyed last.
+        unsafe {
+            assert!(!kafka_admin_DescribeClusterResult_nodes_is_done(result));
+            let nodes = kafka_admin_DescribeClusterResult_nodes_error(result);
+            assert!(!nodes.is_null(), "an unreachable cluster must time the request out");
+            assert_eq!(common::kafka_common_Error_code(nodes) as i32, Errors::RequestTimedOut as i32);
+            // Java names the `describeCluster` call "listNodes".
+            assert_eq!(
+                consume_message(nodes),
+                "Timed out waiting for a node assignment. Call: listNodes"
+            );
+            for attribute in [
+                kafka_admin_DescribeClusterResult_controller_error(result),
+                kafka_admin_DescribeClusterResult_cluster_id_error(result),
+                kafka_admin_DescribeClusterResult_authorized_operations_error(result),
+            ] {
+                assert_eq!(
+                    common::kafka_common_Error_code(attribute) as i32,
+                    Errors::RequestTimedOut as i32
+                );
+                common::kafka_common_Error_destroy(attribute);
+            }
+            assert_eq!(kafka_admin_DescribeClusterResult_node_count(result), 0);
+            assert!(kafka_admin_DescribeClusterResult_controller(result).is_null());
+            assert!(kafka_admin_DescribeClusterResult_cluster_id(result).is_null());
+            kafka_admin_AdminClient_destroy(admin);
+            kafka_admin_DescribeClusterResult_destroy(result);
+        }
+    }
+
     /// Every one of the four `authorized_operations` surfaces uses the same
     /// encoding: a non-negative count plus a `_has_` presence bit. An absent set
     /// and a reported-but-empty one differ only in the bit.
@@ -36899,6 +37435,134 @@ mod tests {
         drop(slow);
     }
 
+    /// The synchronous `DescribeConfigsResult` handle follows Java's
+    /// `values().get(resource).get()`: resources are readable at once, a
+    /// resolved resource's config is read while another resource is still
+    /// pending, and `all()` waits for every resource.
+    #[test]
+    fn describe_configs_accessors_wait_for_their_own_resource_only() {
+        let (_runtime, waiter) = lazy_test_waiter();
+        let broker = ConfigResource::new(config_resource::Type::Broker, "1".to_string());
+        let topic = ConfigResource::new(config_resource::Type::Topic, "topic-a".to_string());
+        let fast = crate::common::internals::KafkaFutureImpl::<Config>::new();
+        let slow = crate::common::internals::KafkaFutureImpl::<Config>::new();
+        let result: *mut kafka_admin_DescribeConfigsResult_t = into_handle(describe_configs_result_inner(
+            &waiter,
+            vec![(broker, slow.future()), (topic, fast.future())],
+        ));
+        // SAFETY: Test code: `result` is the live handle built above, read only through its
+        // getters, with borrowed pointers read before it is destroyed exactly once at the end.
+        unsafe {
+            // Sorted by (type id, name): TOPIC (2) before BROKER (4). Never blocks.
+            assert_eq!(kafka_admin_DescribeConfigsResult_count(result), 2);
+            assert_eq!(kafka_admin_DescribeConfigsResult_get_key_type(result, 0), 2);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_DescribeConfigsResult_get_key_name(result, 0)).to_str(),
+                Ok("topic-a")
+            );
+            assert_eq!(kafka_admin_DescribeConfigsResult_get_key_type(result, 1), 4);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_DescribeConfigsResult_get_key_name(result, 1)).to_str(),
+                Ok("1")
+            );
+            assert!(!kafka_admin_DescribeConfigsResult_is_done(result, 0));
+            assert!(!kafka_admin_DescribeConfigsResult_is_done(result, 1));
+
+            fast.complete(Config::new(vec![ConfigEntry::new(
+                "retention.ms".to_string(),
+                Some("1000".to_string()),
+            )]));
+            assert!(kafka_admin_DescribeConfigsResult_is_done(result, 0));
+            // The broker resource is still pending, so reading the topic must not wait on it.
+            let config = kafka_admin_DescribeConfigsResult_get_value(result, 0);
+            assert!(!config.is_null());
+            assert_eq!(config_ref(config).entries.len(), 1);
+            assert!(kafka_admin_DescribeConfigsResult_get_error(result, 0).is_null());
+            assert!(!kafka_admin_DescribeConfigsResult_is_done(result, 1));
+            // Out-of-range indices never block.
+            assert!(kafka_admin_DescribeConfigsResult_get_value(result, 2).is_null());
+            assert!(kafka_admin_DescribeConfigsResult_get_error(result, -1).is_null());
+            assert!(!kafka_admin_DescribeConfigsResult_is_done(result, 2));
+
+            let completer = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                slow.complete_with_error(Error::timeout("broker config timed out"));
+            });
+            assert_eq!(
+                consume_message(kafka_admin_DescribeConfigsResult_all(result)),
+                "broker config timed out"
+            );
+            completer.join().expect("completer thread");
+            assert!(kafka_admin_DescribeConfigsResult_is_done(result, 1));
+            assert_eq!(
+                borrowed_message(kafka_admin_DescribeConfigsResult_get_error(result, 1)),
+                "broker config timed out"
+            );
+            assert!(kafka_admin_DescribeConfigsResult_get_value(result, 1).is_null());
+            kafka_admin_DescribeConfigsResult_destroy(result);
+        }
+    }
+
+    /// End to end, against the production client: `describe_configs` returns
+    /// before its request resolves (Java's `describeConfigs` does not block),
+    /// the resource is readable at once, and the request's timeout is read from
+    /// the handle — per resource and through `all()` — rather than returned by
+    /// the call.
+    #[test]
+    fn describe_configs_returns_before_the_request_resolves_and_reports_its_timeout_from_the_handle() {
+        let admin = unreachable_admin_client();
+        let types = [2_i32];
+        let name = CString::new("lazy-topic").unwrap();
+        let names = [name.as_ptr()];
+        let mut result: *mut kafka_admin_DescribeConfigsResult_t = std::ptr::null_mut();
+        let started = std::time::Instant::now();
+        // SAFETY: Test code: `admin` is live; `types` and `names` hold one entry each, the name
+        // owned by a `CString` that outlives the call; `result` is a writable slot.
+        let error = unsafe {
+            kafka_admin_AdminClient_describe_configs(
+                admin,
+                types.as_ptr(),
+                names.as_ptr(),
+                1,
+                1_000,
+                false,
+                false,
+                &mut result,
+            )
+        };
+        assert!(error.is_null(), "submission must not fail");
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "describe_configs waited for the request"
+        );
+
+        // SAFETY: Test code: `result` is the live handle written above and `admin` the live
+        // client, each destroyed exactly once; borrowed pointers are read before the result
+        // handle is destroyed last.
+        unsafe {
+            assert_eq!(kafka_admin_DescribeConfigsResult_count(result), 1);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_DescribeConfigsResult_get_key_name(result, 0)).to_str(),
+                Ok("lazy-topic")
+            );
+            assert!(!kafka_admin_DescribeConfigsResult_is_done(result, 0));
+
+            let all = kafka_admin_DescribeConfigsResult_all(result);
+            assert!(!all.is_null(), "an unreachable cluster must time the request out");
+            assert_eq!(common::kafka_common_Error_code(all) as i32, Errors::RequestTimedOut as i32);
+            common::kafka_common_Error_destroy(all);
+            assert!(kafka_admin_DescribeConfigsResult_is_done(result, 0));
+            let per_resource = kafka_admin_DescribeConfigsResult_get_error(result, 0);
+            assert_eq!(
+                common::kafka_common_Error_code(per_resource) as i32,
+                Errors::RequestTimedOut as i32
+            );
+            assert!(kafka_admin_DescribeConfigsResult_get_value(result, 0).is_null());
+            kafka_admin_AdminClient_destroy(admin);
+            kafka_admin_DescribeConfigsResult_destroy(result);
+        }
+    }
+
     // COMMENTS.66.md finding 1: a resource mapped to an EMPTY `AlterConfigOp`
     // list produced zero C rows (`for resource, ops in configs.items() for op
     // in ops`), so it was invisible to `read_alter_config_ops` and never
@@ -37058,6 +37722,165 @@ mod tests {
         unsafe {
             drop(Box::from_raw(ctx_ptr));
             kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// The synchronous `AlterConfigsResult` handle follows Java's
+    /// `values().get(resource).get()`: resources are readable at once, a
+    /// resolved resource's outcome is read while another resource is still
+    /// pending, and `all()` waits for every resource.
+    #[test]
+    fn alter_configs_accessors_wait_for_their_own_resource_only() {
+        let (_runtime, waiter) = lazy_test_waiter();
+        let topic_a = ConfigResource::new(config_resource::Type::Topic, "topic-a".to_string());
+        let topic_b = ConfigResource::new(config_resource::Type::Topic, "topic-b".to_string());
+        let fast = crate::common::internals::KafkaFutureImpl::<()>::new();
+        let slow = crate::common::internals::KafkaFutureImpl::<()>::new();
+        let result: *mut kafka_admin_AlterConfigsResult_t = into_handle(alter_configs_result_inner(
+            &waiter,
+            vec![(topic_b, slow.future()), (topic_a, fast.future())],
+        ));
+        // SAFETY: Test code: `result` is the live handle built above, read only through its
+        // getters, with borrowed pointers read before it is destroyed exactly once at the end.
+        unsafe {
+            assert_eq!(kafka_admin_AlterConfigsResult_count(result), 2);
+            assert_eq!(kafka_admin_AlterConfigsResult_get_key_type(result, 0), 2);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_AlterConfigsResult_get_key_name(result, 0)).to_str(),
+                Ok("topic-a")
+            );
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_AlterConfigsResult_get_key_name(result, 1)).to_str(),
+                Ok("topic-b")
+            );
+            assert!(!kafka_admin_AlterConfigsResult_is_done(result, 0));
+            assert!(!kafka_admin_AlterConfigsResult_is_done(result, 1));
+
+            fast.complete(());
+            assert!(kafka_admin_AlterConfigsResult_is_done(result, 0));
+            // "topic-b" is still pending, so reading "topic-a" must not wait on it.
+            assert!(kafka_admin_AlterConfigsResult_get_error(result, 0).is_null());
+            assert!(!kafka_admin_AlterConfigsResult_is_done(result, 1));
+            assert!(kafka_admin_AlterConfigsResult_get_error(result, 2).is_null());
+            assert!(!kafka_admin_AlterConfigsResult_is_done(result, -1));
+
+            let completer = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                slow.complete_with_error(Error::timeout("alter timed out"));
+            });
+            assert_eq!(
+                borrowed_message(kafka_admin_AlterConfigsResult_get_error(result, 1)),
+                "alter timed out"
+            );
+            completer.join().expect("completer thread");
+            assert_eq!(consume_message(kafka_admin_AlterConfigsResult_all(result)), "alter timed out");
+            kafka_admin_AlterConfigsResult_destroy(result);
+        }
+
+        let succeeded = crate::common::internals::KafkaFutureImpl::<()>::new();
+        succeeded.complete(());
+        let result: *mut kafka_admin_AlterConfigsResult_t = into_handle(alter_configs_result_inner(
+            &waiter,
+            vec![(
+                ConfigResource::new(config_resource::Type::Topic, "t".to_string()),
+                succeeded.future(),
+            )],
+        ));
+        // SAFETY: Test code: `result` is the live handle built above, destroyed exactly once.
+        unsafe {
+            assert!(kafka_admin_AlterConfigsResult_all(result).is_null());
+            kafka_admin_AlterConfigsResult_destroy(result);
+        }
+    }
+
+    /// A rejected op-type code is still a synchronous failure of the call (the
+    /// input cannot be marshalled), and no handle is written.
+    #[test]
+    fn incremental_alter_configs_rejects_an_unknown_op_type_before_submitting() {
+        let admin = unreachable_admin_client();
+        let types = [2_i32];
+        let resource = CString::new("t").unwrap();
+        let config = CString::new("retention.ms").unwrap();
+        let resources = [resource.as_ptr()];
+        let configs = [config.as_ptr()];
+        let values = [std::ptr::null::<c_char>()];
+        let ops = [9_i32];
+        let mut result: *mut kafka_admin_AlterConfigsResult_t = std::ptr::null_mut();
+        // SAFETY: Test code: `admin` is live; every array holds one entry, strings owned by
+        // `CString`s that outlive the call; `result` is a writable slot. The returned error is
+        // owned and destroyed by `consume_message`; `admin` is destroyed exactly once.
+        unsafe {
+            let error = kafka_admin_AdminClient_incremental_alter_configs(
+                admin,
+                types.as_ptr(),
+                resources.as_ptr(),
+                configs.as_ptr(),
+                values.as_ptr(),
+                ops.as_ptr(),
+                1,
+                1_000,
+                false,
+                &mut result,
+            );
+            assert_eq!(consume_message(error), "unknown AlterConfigOp op type id 9 at index 0");
+            assert!(result.is_null());
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// The synchronous `ListConfigResourcesResult` handle holds Java's single
+    /// `all()` future: every accessor waits for it, and its error is read with
+    /// `_all`.
+    #[test]
+    fn list_config_resources_accessors_wait_for_the_listing() {
+        let (_runtime, waiter) = lazy_test_waiter();
+        let listing = crate::common::internals::KafkaFutureImpl::<Vec<ConfigResource>>::new();
+        let result: *mut kafka_admin_ListConfigResourcesResult_t = into_handle(ListConfigResourcesResultInner {
+            resources: lazy_single(&waiter, listing.future(), list_config_resources_data),
+        });
+        // SAFETY: Test code: `result` is the live handle built above, read only through its
+        // getters, with borrowed pointers read before it is destroyed exactly once at the end.
+        unsafe {
+            assert!(!kafka_admin_ListConfigResourcesResult_is_done(result));
+            // A negative index never blocks, even with the listing pending.
+            assert_eq!(kafka_admin_ListConfigResourcesResult_get_type(result, -1), -1);
+            let completer = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                listing.complete(vec![
+                    ConfigResource::new(config_resource::Type::Group, "g".to_string()),
+                    ConfigResource::new(config_resource::Type::ClientMetrics, "m".to_string()),
+                ]);
+            });
+            assert_eq!(kafka_admin_ListConfigResourcesResult_count(result), 2);
+            completer.join().expect("completer thread");
+            assert!(kafka_admin_ListConfigResourcesResult_is_done(result));
+            assert!(kafka_admin_ListConfigResourcesResult_all(result).is_null());
+            // Sorted by (type id, name): CLIENT_METRICS (16) before GROUP (32).
+            assert_eq!(kafka_admin_ListConfigResourcesResult_get_type(result, 0), 16);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_ListConfigResourcesResult_get_name(result, 0)).to_str(),
+                Ok("m")
+            );
+            assert_eq!(kafka_admin_ListConfigResourcesResult_get_type(result, 1), 32);
+            assert_eq!(kafka_admin_ListConfigResourcesResult_get_type(result, 2), -1);
+            kafka_admin_ListConfigResourcesResult_destroy(result);
+        }
+
+        let failing = crate::common::internals::KafkaFutureImpl::<Vec<ConfigResource>>::new();
+        let result: *mut kafka_admin_ListConfigResourcesResult_t = into_handle(ListConfigResourcesResultInner {
+            resources: lazy_single(&waiter, failing.future(), list_config_resources_data),
+        });
+        failing.complete_with_error(Error::timeout("listing timed out"));
+        // SAFETY: Test code: `result` is the live handle built above, destroyed exactly once.
+        unsafe {
+            assert_eq!(
+                consume_message(kafka_admin_ListConfigResourcesResult_all(result)),
+                "listing timed out"
+            );
+            assert_eq!(kafka_admin_ListConfigResourcesResult_count(result), 0);
+            assert_eq!(kafka_admin_ListConfigResourcesResult_get_type(result, 0), -1);
+            assert!(kafka_admin_ListConfigResourcesResult_get_name(result, 0).is_null());
+            kafka_admin_ListConfigResourcesResult_destroy(result);
         }
     }
 
