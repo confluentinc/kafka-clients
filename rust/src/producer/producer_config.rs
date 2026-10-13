@@ -2021,13 +2021,9 @@ mod tests {
         props.insert("partitioner.rack.aware".to_string(), "yes".to_string());
         let err = ProducerConfig::new(&props).unwrap_err();
         assert!(matches!(err, Error::Config(_)), "got {err:?}");
-        // Prefix only: Java appends ": Expected value to be either true or false"
-        // (`ConfigDef.parseType`), which the shared `parse_bool` does not (pre-existing,
-        // every boolean key; recorded in the Phase 6 notes).
-        assert!(
-            err.message()
-                .starts_with("Invalid value yes for configuration partitioner.rack.aware"),
-            "unexpected message: {err}"
+        assert_eq!(
+            err.message(),
+            "Invalid value yes for configuration partitioner.rack.aware: Expected value to be either true or false"
         );
     }
 
