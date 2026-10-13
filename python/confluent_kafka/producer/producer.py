@@ -60,7 +60,7 @@ import logging
 import threading
 from collections.abc import Callable, Mapping
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
@@ -415,7 +415,7 @@ class Producer(Generic[K, V], _ProducerState):
             # returned, if any.
             nonlocal rethrown
             if error:
-                exception = from_ffi_error(error)
+                exception = cast("Exception", from_ffi_error(error))
                 if waiting:
                     # Rethrown by send(), as Java's doSend does. The record's
                     # Callback may still run: doSend appends the record, its

@@ -44,7 +44,7 @@ import logging
 import threading
 import weakref
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
@@ -296,7 +296,7 @@ class AsyncProducer(Generic[K, V], _ProducerState):
             # The handover: the error the Rust send() returned, if any.
             nonlocal rethrown
             if error:
-                exception = from_ffi_error(error)
+                exception = cast("Exception", from_ffi_error(error))
                 if waiting:
                     # Rethrown by send(), and the record's Callback may still
                     # run, once, if the record had reached the accumulator (see
