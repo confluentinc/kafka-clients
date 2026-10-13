@@ -2890,10 +2890,21 @@ bootstrap-window spin.)
     went with #187's removal of the C extension's mock drivers.
 - Follow-ups: `0ba55fb7` (cite moves), `f787c406` (`kafka_common_Error_new(-29)` builds
   `BootstrapResolutionError`), and Critic 115's R1, R2, R4, R7 and R8 (`COMMENTS.DONE.115.md`). R3, R5,
-  R6, D1, D2 and S1-S4 are open for the user (`COMMENTS.115.md`).
+  R6, D1, D2 and S1-S4 were left for the user and are resolved below (agent 117).
 - Gates after `f787c406`: `cargo test --all-features` lib 4898 / 0 / 3, integration 326/326 (Docker
   broker); Python unit 1101 passed, 2 skipped, integration 45; C suites hand-built with `cc`, all pass;
   `build-c` fails only for want of cmake.
+
+### Pre-push fixes (agent 117, Critic 115's open items)
+
+On branch `milestone-16-pre-push-fixes` (off `6a2f348b`), plain commits, merged back after agent 116's
+merge of master `95f67984`. Details in `COMMENTS.DONE.115.md`.
+
+- **D2 (user decision: keep).** `AdminClient.unregister_controller` (sync and asyncio) and
+  `MockAdminClient.set_using_raft_controller` stay in the paused `python/admin.py`: they are additive,
+  Java 4.4 adds the RPC, and `rust/tests/integration/admin_controllers_test.rs` drives them through the
+  Python gRPC arms. `.claude/rules/admin-client.md` §11 now allows exactly that kind of additive method
+  and names these two (S3).
 
 ## 7. Completeness audit (Phase 13, agent 103)
 
