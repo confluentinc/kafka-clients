@@ -145,9 +145,9 @@ pub struct AppendFailure {
     /// The partition the record was being appended to when the append failed.
     ///
     /// Java's `append` tells the caller the partition as soon as it is chosen
-    /// (`setPartition`, `RecordAccumulator.java:309-310`), before it tries to append
+    /// (`setPartition`), before it tries to append
     /// or waits for memory, and `doSend` reports it to the callback on failure
-    /// through `appendCallbacks.topicPartition()` (`KafkaProducer.java:1052`). When
+    /// through `appendCallbacks.topicPartition()`. When
     /// the built-in partitioner chooses, the caller's own partition is still
     /// `UNKNOWN_PARTITION`, so the chosen one comes back here.
     pub partition: i32,
