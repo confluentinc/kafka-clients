@@ -51,8 +51,8 @@
 //! destroyed before the future completed". A `get_cb` after that invokes the
 //! callback inline, the same way, as for a future with no client. A blocking
 //! `get` still waiting when the client is destroyed returns the same way once
-//! the destroy has stopped the client's background work and run its last
-//! completions, and a `get` after that returns at once. While the destroy
+//! the destroy has stopped the client's background work, and a `get` after
+//! that returns at once. While the destroy
 //! stops the client's runtime, a `get_with_timeout` waits without its
 //! timeout, since the runtime's timers stop with it.
 

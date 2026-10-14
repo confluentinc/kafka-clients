@@ -207,11 +207,13 @@ impl CallbackQueue {
         self.client_stopping.cancel();
     }
 
-    /// Records that the client's background work is gone and its last
-    /// completions have run, for a client's `_destroy`: every future of the
-    /// client that will ever complete has, so a blocking `KafkaFuture_get`
-    /// still waiting on one answers what the future holds now, and a later
-    /// one does not wait. Implies [stopping](Self::mark_client_stopping).
+    /// Records that the client's background work is gone, for a client's
+    /// `_destroy`: nothing but the queue's last callbacks completes a future
+    /// of the client any more, so a blocking `KafkaFuture_get` still waiting
+    /// on one answers what the future holds now, and a later one, a callback's
+    /// included, does not wait. Called before those last callbacks run, which
+    /// may make such a `get` themselves. Implies
+    /// [stopping](Self::mark_client_stopping).
     pub(crate) fn mark_client_stopped(&self) {
         self.client_stopping.cancel();
         self.client_stopped.cancel();
