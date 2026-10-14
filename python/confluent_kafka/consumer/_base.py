@@ -287,7 +287,7 @@ def blank_null_topic_partitions(partitions: Iterable[TopicPartition]) -> list[To
 
 def close_args(option: CloseOptions | None) -> tuple[int, int]:
     """``(timeout_ms, group-membership-operation code)`` for
-    ``kafka_consumer_Consumer_close_with_option``: ``close(CloseOptions)``
+    ``kafka_consumer_Consumer_close_with_options``: ``close(CloseOptions)``
     rejects a negative timeout (``AsyncKafkaConsumer.close(CloseOptions)``).
     ``-1`` is the FFI's "no timeout set", the default close timeout."""
     timeout: Duration | None = None
