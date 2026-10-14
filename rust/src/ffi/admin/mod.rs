@@ -55,15 +55,23 @@
 //!
 //! # Destroy
 //!
-//! `_destroy` waits for the tasks spawned by `_cb` calls, runs the
-//! still-pending callbacks so each fires exactly once (§4 rule 5), drops the
-//! client and shuts the runtime down; the `kafka_common_KafkaFuture_get_cb`
-//! calls still waiting on its futures fire last, once each (see
-//! `ffi::kafka_future`). It first closes the client with no grace period
-//! (Java's `close(Duration.ZERO)` deadline), so the calls still pending fail
-//! with `kafka_common_Error_is_timeout_error`, "The AdminClient thread has
-//! exited.", rather than never completing; a caller that wants in-flight
-//! work to finish calls `close` with a timeout first.
+//! `_destroy` waits for the tasks spawned by `_cb` calls (so a
+//! `close_with_timeout_cb` still running keeps its grace period), then closes
+//! the client with no grace period (Java's `close(Duration.ZERO)` deadline),
+//! so the calls still pending fail with `kafka_common_Error_is_timeout_error`,
+//! "The AdminClient thread has exited."; a caller that wants in-flight work to
+//! finish calls `close` with a timeout first. It then runs the still-pending
+//! callbacks so each fires exactly once (§4 rule 5), drops the client and
+//! shuts the runtime down; the `kafka_common_KafkaFuture_get_cb` calls still
+//! waiting on its futures fire last, once each (see `ffi::kafka_future`).
+//!
+//! The close joins the background task for a bounded time only: a task
+//! inside a TCP connect the broker never answers cannot reach the step that
+//! fails the pending calls, and is cancelled with the runtime. Its calls'
+//! futures then never complete: a `get_cb` on one fires, and a blocking
+//! `kafka_common_KafkaFuture_get` on one returns, with the
+//! `kafka_common_Error_LOCAL_ILLEGAL_STATE` error "The client was destroyed
+//! before the future completed".
 //!
 //! Called inside a tokio runtime (on a worker thread, or inside a
 //! `block_on`), where it cannot wait, `_destroy` returns at once and all of
@@ -374,31 +382,20 @@ impl AdminClassHandle {
         }
     }
 
-    /// Closes the client with no grace period, awaits every spawned task,
+    /// Awaits every spawned task, closes the client with no grace period,
     /// fires the pending callbacks and drops the client (see the module
-    /// docs), then stops the runtime and fires the
-    /// completions of the `KafkaFuture_get_cb` calls still waiting, each
-    /// exactly once.
+    /// docs), then stops the runtime, releasing the blocking `KafkaFuture_get`
+    /// calls still waiting, and fires the completions of the
+    /// `KafkaFuture_get_cb` calls still waiting, each exactly once.
     ///
     /// A panic caught earlier may have poisoned `tasks`; it is taken
     /// regardless, so the handle is still freed and every pending callback
     /// still fires exactly once.
     fn teardown(self) {
         let Self { client, runtime, mock } = self;
-        // Shutting the runtime down below cancels the background task where it
-        // stands, so a call still pending would never complete and a blocking
-        // `KafkaFuture_get` on it would never return. Close first, with the
-        // hard-shutdown deadline at once: the task's `finally`
-        // (`AdminClientRunnable.run`, `KafkaAdminClient.java:1557-1562`) fails
-        // every pending call with `TimeoutException("The AdminClient thread has
-        // exited.")`. The zero close only installs the deadline (it does not
-        // join, see `close_with_timeout`); the second keeps that earlier deadline
-        // and joins the task, bounded. Both are no-ops after a `close` of the
-        // caller's.
-        runtime.block_on(async {
-            client.admin.close_with_timeout(Duration::ZERO).await;
-            client.admin.close_with_timeout(DESTROY_JOIN_TIMEOUT).await;
-        });
+        // The `_cb` tasks first: they are the two `close` twins, each bounded by
+        // its own timeout, so a `close_with_timeout_cb` the caller started keeps
+        // its grace period instead of being cut short by the close below.
         loop {
             let tasks: Vec<JoinHandle<()>> =
                 std::mem::take(&mut *client.tasks.lock().unwrap_or_else(PoisonError::into_inner));
@@ -411,6 +408,19 @@ impl AdminClassHandle {
                 }
             });
         }
+        // Shutting the runtime down below cancels the background task where it
+        // stands, so a call still pending would never complete. Close with the
+        // hard-shutdown deadline at once: the task's `finally`
+        // (`AdminClientRunnable.run`, `KafkaAdminClient.java:1557-1562`) fails
+        // every pending call with `TimeoutException("The AdminClient thread has
+        // exited.")`. The zero close only installs the deadline (it does not
+        // join, see `close_with_timeout`); the second keeps that earlier deadline
+        // and joins the task, bounded. Both are no-ops after a `close` of the
+        // caller's.
+        runtime.block_on(async {
+            client.admin.close_with_timeout(Duration::ZERO).await;
+            client.admin.close_with_timeout(DESTROY_JOIN_TIMEOUT).await;
+        });
         client.queue.execute();
         // A `KafkaAdminClient` needs the runtime context to stop its
         // background task on drop; the runtime is shut down last.
@@ -420,6 +430,12 @@ impl AdminClassHandle {
             drop(mock);
             drop(client);
         }
+        // A background task the join above missed (inside a TCP connect no
+        // shutdown deadline interrupts) is cancelled with the runtime, so the
+        // futures of its pending calls never complete: release the blocking
+        // `KafkaFuture_get` calls waiting on them, before the runtime's timers
+        // stop under a `get` with a timeout (see `ffi::kafka_future`).
+        queue.mark_client_stopped();
         runtime.shutdown_timeout(DESTROY_JOIN_TIMEOUT);
         // Shutting the runtime down dropped the `KafkaFuture_get_cb` tasks
         // still waiting, each queuing its completion as it went (see
@@ -878,6 +894,7 @@ mod tests {
     };
     use crate::ffi::kafka_future::{
         kafka_common_KafkaFuture_destroy, kafka_common_KafkaFuture_get, kafka_common_KafkaFuture_get_cb,
+        kafka_common_KafkaFuture_get_with_timeout,
     };
     use crate::ffi::util::{kafka_Map_destroy, kafka_Map_new, kafka_Map_put};
     use std::sync::Mutex;
@@ -1043,6 +1060,149 @@ mod tests {
             assert_eq!((timeout, message.as_str()), (1, exited));
             assert_eq!(*fired.lock().unwrap(), [Some((1, 0, exited.to_string()))]);
             kafka_common_KafkaFuture_destroy(names);
+            kafka_admin_ListTopicsResult_destroy(result);
+        }
+    }
+
+    /// A destroy whose background task is stuck inside a TCP connect the
+    /// broker never answers cannot fail the call still pending: the bounded
+    /// join misses and the runtime cancels the task where it stands. The
+    /// blocking `get` waiting on the call's future still returns, the `get_cb`
+    /// still fires, both with the "client destroyed" error, and a `get` after
+    /// the destroy returns at once.
+    #[test]
+    fn destroy_releases_a_blocking_get_whose_call_is_stuck_in_the_connect() {
+        // A listener whose accept queue is full: Linux drops the SYNs it gets
+        // next, so a connect to it waits out the SYN retries, about two minutes.
+        let listener_runtime = tokio::runtime::Builder::new_current_thread().enable_io().build().unwrap();
+        let listener = listener_runtime.block_on(async {
+            let socket = tokio::net::TcpSocket::new_v4().unwrap();
+            socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            socket.listen(0).unwrap()
+        });
+        let address = listener.local_addr().unwrap();
+        let fillers: Vec<std::net::TcpStream> = (0..4)
+            .filter_map(|_| std::net::TcpStream::connect_timeout(&address, Duration::from_millis(200)).ok())
+            .collect();
+        assert!(!fillers.is_empty(), "the accept queue takes one connection");
+        let bootstrap_address = std::ffi::CString::new(address.to_string()).unwrap();
+        // SAFETY: Test code: every map, config, admin, result and future handle is live until it
+        // is destroyed once below; `err` is a valid slot pointing at null; `fired` outlives the
+        // destroy, which fires the completion; the getter threads are joined before `names` is
+        // destroyed.
+        unsafe {
+            let props = kafka_Map_new();
+            let bootstrap = c"bootstrap.servers";
+            kafka_Map_put(
+                props,
+                bootstrap.as_ptr() as *mut c_void,
+                bootstrap_address.as_ptr() as *mut c_void,
+            );
+            let mut err = std::ptr::null_mut();
+            let config = kafka_admin_AdminClientConfig_new(props, &mut err);
+            assert!(err.is_null());
+            kafka_Map_destroy(props);
+            let admin = kafka_admin_AdminClient_create(config, &mut err);
+            assert!(err.is_null());
+            kafka_admin_AdminClientConfig_destroy(config);
+
+            let result = kafka_admin_Admin_list_topics(admin);
+            let names = kafka_admin_ListTopicsResult_names(result);
+            let fired = Fired::default();
+            kafka_common_KafkaFuture_get_cb(names, record_completion, &fired as *const Fired as *mut c_void);
+            let blocking = names as usize;
+            let (got_tx, got_rx) = std::sync::mpsc::channel();
+            // A `get` and a `get_with_timeout`: the timed one waits on a timer of
+            // the runtime the destroy stops, so it must be released before that.
+            let getters: Vec<_> = [None, Some(120_000)]
+                .into_iter()
+                .map(|timeout| {
+                    let got_tx = got_tx.clone();
+                    std::thread::spawn(move || {
+                        let future = blocking as *const kafka_common_KafkaFuture_t;
+                        let mut err = std::ptr::null_mut();
+                        let value = match timeout {
+                            None => kafka_common_KafkaFuture_get(future, &mut err),
+                            Some(timeout) => kafka_common_KafkaFuture_get_with_timeout(future, timeout, &mut err),
+                        };
+                        assert!(value.is_null());
+                        let message = std::ffi::CStr::from_ptr(kafka_common_Error_message(err))
+                            .to_string_lossy()
+                            .into_owned();
+                        let illegal_state = kafka_common_Error_is_local_illegal_state_error(err);
+                        kafka_common_Error_destroy(err);
+                        let _ = got_tx.send((timeout, illegal_state, message));
+                    })
+                })
+                .collect();
+            // Let the background task reach the connect.
+            std::thread::sleep(Duration::from_millis(500));
+
+            kafka_admin_Admin_destroy(admin);
+            let destroyed = "The client was destroyed before the future completed";
+            let mut got: Vec<_> = (0..2)
+                .map(|_| got_rx.recv_timeout(Duration::from_secs(10)).expect("the blocking get returned"))
+                .collect();
+            got.sort();
+            for getter in getters {
+                getter.join().unwrap();
+            }
+            assert_eq!(
+                got,
+                [
+                    (None, 1, destroyed.to_string()),
+                    (Some(120_000), 1, destroyed.to_string())
+                ]
+            );
+            assert_eq!(*fired.lock().unwrap(), [Some((0, 1, destroyed.to_string()))]);
+
+            let started = std::time::Instant::now();
+            assert!(kafka_common_KafkaFuture_get(names, &mut err).is_null());
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "a get after the destroy waits for nothing"
+            );
+            assert_eq!(kafka_common_Error_is_local_illegal_state_error(err), 1);
+            kafka_common_Error_destroy(err);
+            kafka_common_KafkaFuture_destroy(names);
+            kafka_admin_ListTopicsResult_destroy(result);
+        }
+        drop(fillers);
+        listener_runtime.block_on(async move { drop(listener) });
+    }
+
+    /// A `close_with_timeout_cb` still running when `_destroy` is called keeps
+    /// its grace period: the destroy waits for it before closing with none, so
+    /// the call still pending is given the whole timeout, and the completion
+    /// fires once.
+    #[test]
+    fn destroy_lets_a_running_close_with_timeout_cb_keep_its_grace_period() {
+        // SAFETY: Test code: every map, config, admin and result handle is live until it is
+        // destroyed once below; `err` is a valid slot pointing at null; `close` outlives the
+        // destroy, which fires the completion.
+        unsafe {
+            let props = kafka_Map_new();
+            let (bootstrap, address) = (c"bootstrap.servers", c"127.0.0.1:1");
+            kafka_Map_put(props, bootstrap.as_ptr() as *mut c_void, address.as_ptr() as *mut c_void);
+            let mut err = std::ptr::null_mut();
+            let config = kafka_admin_AdminClientConfig_new(props, &mut err);
+            assert!(err.is_null());
+            kafka_Map_destroy(props);
+            let admin = kafka_admin_AdminClient_create(config, &mut err);
+            assert!(err.is_null());
+            kafka_admin_AdminClientConfig_destroy(config);
+
+            let result = kafka_admin_Admin_list_topics(admin);
+            let close = Probe::default();
+            let started = std::time::Instant::now();
+            kafka_admin_Admin_close_with_timeout_cb(admin, 1500, on_opaque, close.as_opaque());
+            kafka_admin_Admin_destroy(admin);
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed >= Duration::from_millis(1400),
+                "destroy cut the close short: {elapsed:?}"
+            );
+            assert_eq!(close.fired(), ["<no error>"]);
             kafka_admin_ListTopicsResult_destroy(result);
         }
     }

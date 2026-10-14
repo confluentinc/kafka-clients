@@ -49,7 +49,10 @@
 //! value when the future has resolved, else with a
 //! `kafka_common_Error_LOCAL_ILLEGAL_STATE` error, "The client was
 //! destroyed before the future completed". A `get_cb` after that invokes the
-//! callback inline, the same way, as for a future with no client.
+//! callback inline, the same way, as for a future with no client. A blocking
+//! `get` still waiting when the client is destroyed returns the same way once
+//! the destroy has stopped the client's background work, and a `get` after
+//! that returns at once.
 
 // FFI type names follow the kafka_<TypeName>_<method> convention with PascalCase
 // type names, which intentionally differs from Rust's snake_case convention.
@@ -229,11 +232,13 @@ impl FutureInner {
         match &self.runtime {
             Some(runtime) => {
                 let value = match &self.queue {
-                    // The producer was destroyed, its `_destroy` completing every
-                    // record still awaiting its report, so the value is there.
-                    Some(queue) if self.drains_queue && queue.is_closed() => return self.resolve_now(),
+                    // The client is stopped: every future of it that will ever
+                    // complete has (a producer's `_destroy` completes every record
+                    // still awaiting its report), so nothing is left to wait for.
+                    Some(queue) if queue.is_client_stopped() => return self.resolve_now(),
                     Some(queue) if self.drains_queue => self.resolve_draining(runtime, queue, timeout)?,
-                    _ => block_on(runtime, self.resolve_future(timeout))?,
+                    Some(queue) => block_on(runtime, self.resolve_until_stopped(queue, timeout))?,
+                    None => block_on(runtime, self.resolve_future(timeout))?,
                 };
                 Ok(self.result.get_or_init(|| value).clone())
             },
@@ -262,10 +267,13 @@ impl FutureInner {
             queue.execute();
             let step = block_on(runtime, async {
                 let remaining = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
-                // Both branches are cancellation-safe: `get` only waits for the shared completion,
-                // and a push that races `pushed` leaves its permit behind.
+                // Every branch is cancellation-safe: the stop is a latch, `get` only waits for the
+                // shared completion, and a push that races `pushed` leaves its permit behind. The
+                // stop comes first, so a wait the runtime's shutdown wakes is not polled into its
+                // stopped timer.
                 tokio::select! {
                     biased;
+                    () = queue.client_stopped() => Some(self.resolve_now()),
                     result = self.resolve_future(remaining) => Some(result),
                     () = queue.pushed() => None,
                 }
@@ -273,6 +281,26 @@ impl FutureInner {
             if let Some(result) = step {
                 return result;
             }
+        }
+    }
+
+    /// Resolves the future, or, once the client stops
+    /// ([`CallbackQueue::mark_client_stopped`]), answers what it holds then
+    /// ([`Self::resolve_now`]): a client whose `_destroy` had to cancel its
+    /// background task where it stood (an admin client inside a TCP connect
+    /// that outlasted the destroy's join) leaves its futures pending forever.
+    async fn resolve_until_stopped(
+        &self,
+        queue: &CallbackQueue,
+        timeout: Option<Duration>,
+    ) -> Result<Arc<FfiValue>, Error> {
+        // Both branches are cancellation-safe: the stop is a latch, and `get` only waits for the
+        // shared completion. The stop comes first, so a wait the runtime's shutdown wakes is not
+        // polled into its stopped timer.
+        tokio::select! {
+            biased;
+            () = queue.client_stopped() => self.resolve_now(),
+            result = self.resolve_future(timeout) => result,
         }
     }
 

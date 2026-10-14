@@ -462,12 +462,9 @@ pub(crate) mod fail_point {
     }
 }
 
-/// Test-only recorder for the completions a `_cb` entry point fires, one
-/// callback per completion shape, so the tests of every module can check that
-/// a caught panic is delivered exactly once, as the error of [`panic_error`].
-/// The test side of [`spawn_teardown`]: a `void` completion that reports
-/// which thread fired it, so a test can tell a destroy run inline from one
-/// handed off to its teardown thread.
+/// The test side of [`spawn_teardown`]: an `(error, opaque)` completion that
+/// reports which thread fired it, so a test can tell a destroy run inline from
+/// one handed off to its teardown thread.
 #[cfg(test)]
 pub(crate) mod teardown_probe {
     use std::ffi::c_void;
@@ -511,6 +508,9 @@ pub(crate) mod teardown_probe {
     }
 }
 
+/// Test-only recorder for the completions a `_cb` entry point fires, one
+/// callback per completion shape, so the tests of every module can check that
+/// a caught panic is delivered exactly once, as the error of [`panic_error`].
 #[cfg(test)]
 pub(crate) mod panic_probe {
     use std::ffi::c_void;
