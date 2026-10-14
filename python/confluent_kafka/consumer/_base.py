@@ -1110,11 +1110,16 @@ class _ConsumerState:
         if not wakeable:
             return False
         error = payload[-1] if payload else 0
-        if error and _lib.KafkaError_code(error) == WakeupError._ffi_id:
-            left, self._own_wake_left = self._own_wake_left, False
-            return left and not ending
-        if mark is not None and mark == self._user_wakeups:
-            self._own_wake_left = True
+        woken = bool(error) and _lib.KafkaError_code(error) == WakeupError._ffi_id
+        # Under _lifecycle, as _c_wakeup counts the user's wakeup and clears
+        # the record: a user wakeup() can never fall between the compare and
+        # the store.
+        with self._lifecycle:
+            if woken:
+                left, self._own_wake_left = self._own_wake_left, False
+                return left and not ending
+            if mark is not None and mark == self._user_wakeups:
+                self._own_wake_left = True
         return False
 
     def _own_wake_raised(self, error: int) -> bool:
