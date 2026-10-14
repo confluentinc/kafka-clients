@@ -1589,15 +1589,19 @@ def test_cancelling_a_call_awaiting_a_coroutine_commit_callback_it_delivered(
         call: str, monkeypatch: pytest.MonkeyPatch) -> None:
     # A wakeable call delivers a coroutine commit callback (Java's poll and
     # commitSync run executeCallbacks) and waits for its report; the call is
-    # cancelled while the callback runs. The core operation checks for a
-    # wakeup after the report (commitSync's setActiveTask,
-    # AsyncKafkaConsumer.java:1801-1804; poll's setFetchAction after an empty
+    # cancelled while the callback runs, and the consumer wakes it. A poll
+    # checks for a wakeup after the report (setFetchAction after an empty
     # collectFetch(), AsyncKafkaConsumer.java:1964-2016, which Java runs also
-    # when the poll's timeout has expired), so the consumer wakes it and the
-    # wakeup is consumed: the next poll returns. That holds for a poll(0), and
-    # for a poll cancelled before its deadline whose callback ends after it.
-    # A wakeup the call did not consume would stay armed, and the next poll
-    # would raise WakeupError although wakeup() was never called.
+    # when the poll's timeout has expired) and consumes the wake. That holds
+    # for a poll(0), and for a poll cancelled before its deadline whose
+    # callback ends after it. commit(offsets={}) does not consume it: its
+    # futures are already done, and Java's setActiveTask leaves a wakeup
+    # pending for a done future (AsyncKafkaConsumer.java:1801-1804,
+    # WakeupTrigger.setActiveTask), so the wake stays armed in the core. Either
+    # way the next poll returns: a wakeup the consumer sent itself never
+    # outlives the call that sent it (the next call the core ends with
+    # WakeupError for it is submitted again), and the next poll would otherwise
+    # raise WakeupError although wakeup() was never called.
     timeout, release_after = _CANCELLED_DURING_CALLBACK[call]
     wakeups = _counting_wakeups(monkeypatch)
 
@@ -1629,6 +1633,116 @@ def test_cancelling_a_call_awaiting_a_coroutine_commit_callback_it_delivered(
         await consumer.close(option=CloseOptions.timeout(0))
 
     asyncio.run(main())
+
+
+def test_a_wakeup_before_commit_with_empty_offsets_is_raised_by_the_next_poll() -> None:
+    # Java's commitSync(emptyMap) registers futures that are already done, and
+    # WakeupTrigger.setActiveTask leaves a pending wakeup for a done future
+    # (WakeupTriggerTest.testExceptionTriggeredWhenTaskAsynchronouslyCompleted
+    # BeforeSet): the commit returns, and the next wakeable call, here poll,
+    # raises WakeupException. The poll after it returns.
+    consumer = new_consumer()
+    try:
+        consumer.assign(partitions=[TP0])
+        consumer.wakeup()
+        consumer.commit(offsets={})
+        with pytest.raises(WakeupError):
+            consumer.poll(timeout=0)
+        assert consumer.poll(timeout=0).is_empty()
+    finally:
+        consumer.close(option=CloseOptions.timeout(0))
+
+
+def test_async_a_wakeup_before_commit_with_empty_offsets_is_raised_by_the_next_poll() -> None:
+    # The AsyncKafkaConsumer peer of the test above.
+    async def main() -> None:
+        consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
+        try:
+            await consumer.assign(partitions=[TP0])
+            consumer.wakeup()
+            await consumer.commit(offsets={})
+            with pytest.raises(WakeupError):
+                await consumer.poll(timeout=0)
+            assert (await consumer.poll(timeout=0)).is_empty()
+        finally:
+            await consumer.close(option=CloseOptions.timeout(0))
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize("then", ["poll", "user_wakeup", "handle_committed"])
+def test_a_wake_on_ctrl_c_the_call_did_not_consume_never_outlives_it(
+        then: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Ctrl+C lands in a commit() (Java's commitSync, wakeable) before the drain
+    # that runs its queued completion, and the drain after it does not see the
+    # completion yet, as when the core completes just after the drain: the
+    # consumer wakes itself, and the core, whose operation has ended, leaves
+    # the wakeup armed. The consumer's own wakeup never outlives the call that
+    # sent it: the next wakeable call -- a poll, or a ConsumerHandle
+    # committed() inside a commit callback -- that the core ends with
+    # WakeupError for it is submitted again. A user's wakeup() after it is the
+    # user's, and the next poll raises it, as Java's.
+    wakeups = _counting_wakeups(monkeypatch)
+    consumer = new_consumer(**{"default.api.timeout.ms": 500})
+    event = _NotifiedEvent()
+    consumer._pending_event = event  # type: ignore[attr-defined]
+    state = {"armed": False, "interrupted": False, "held": False, "completed": False}
+    real_submit = _lib.Consumer_commit_sync_cb
+    real_execute = _lib.Consumer__execute_callbacks
+
+    def submit(h: int, spec: Any, timeout: int, cb: Callable[..., None]) -> None:
+        def completed(*payload: Any) -> None:
+            state["completed"] = True
+            cb(*payload)
+
+        event.notified = False
+        state["armed"] = True
+        real_submit(h, spec, timeout, completed)
+
+    def execute(h: int) -> int:
+        if state["armed"] and event.notified:
+            if not state["interrupted"]:
+                state["interrupted"] = True
+                raise KeyboardInterrupt
+            if not state["held"]:
+                state["held"] = True
+                return 0
+            state["armed"] = False
+        ran: int = real_execute(h)
+        return ran
+
+    try:
+        consumer.assign(partitions=[TP0])
+        monkeypatch.setattr(_lib, "Consumer_commit_sync_cb", submit)
+        monkeypatch.setattr(_lib, "Consumer__execute_callbacks", execute)
+        with pytest.raises(KeyboardInterrupt):
+            consumer.commit(offsets={})
+        monkeypatch.setattr(_lib, "Consumer_commit_sync_cb", real_submit)
+        monkeypatch.setattr(_lib, "Consumer__execute_callbacks", real_execute)
+        assert state["completed"] and state["held"]
+        assert len(wakeups) == 1
+        if then == "user_wakeup":
+            consumer.wakeup()
+            with pytest.raises(WakeupError):
+                consumer.poll(timeout=0)
+        elif then == "handle_committed":
+            raised: list[BaseException] = []
+
+            def committed(offsets: Any, exception: Any) -> None:
+                try:
+                    consumer.committed(partitions=[TP0])
+                except Exception as exc:
+                    raised.append(exc)
+
+            # The first commit_nowait queues the callback, the second delivers
+            # it; the ConsumerHandle committed() it calls waits for the
+            # unreachable coordinator until default.api.timeout.ms.
+            consumer.commit_nowait(offsets={}, callback=committed)
+            consumer.commit_nowait(offsets={}, callback=None)
+            assert [type(e) for e in raised] == [KafkaTimeoutError]
+        assert consumer.poll(timeout=0).is_empty()
+    finally:
+        consumer.close(option=CloseOptions.timeout(0))
 
 
 def test_a_wakeup_from_a_commit_callback_of_an_expired_poll_is_raised_by_that_poll() -> None:

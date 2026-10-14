@@ -71,6 +71,7 @@ from confluent_kafka._async import Undelivered
 from confluent_kafka._config import duration_to_ms, prepare
 from confluent_kafka._errors import from_ffi_error
 from confluent_kafka.common.errors.invalid_group_id_error import InvalidGroupIdError
+from confluent_kafka.common.errors.wakeup_error import WakeupError
 from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.common.serialization import bytes_deserializer
 from confluent_kafka.common.serialization._supply import close_if_defined, resolve_serde
@@ -379,6 +380,16 @@ class _ConsumerState:
         self._key_deserializer: Deserializer[Any] = bytes_deserializer()
         self._value_deserializer: Deserializer[Any] = bytes_deserializer()
         self._reentrant_handle = 0
+        # The wakeup the consumer sent itself to end a wakeable call sooner on
+        # Ctrl+C or cancellation (_run_sync, _wait_on_loop), left armed because
+        # the call ended without consuming it (_own_wake_outcome). The next
+        # wakeable call that the core ends with WakeupError for it is submitted
+        # again, so the wakeup never outlives the call that sent it. A user's
+        # wakeup() clears it (_c_wakeup): the wakeup armed is then the user's.
+        self._own_wake_left = False
+        # The user's wakeup() calls, so a call can tell whether the wakeup it
+        # sent itself is still the only one armed.
+        self._user_wakeups = 0
         self._group_id_defined = False
         # Set by the notify hook (on a core task) and by an operation's
         # completion, so the waiting call wakes and drains.
@@ -811,42 +822,49 @@ class _ConsumerState:
 
         The wake waits for a drain to run to its end, and is sent only if the
         completion has still not arrived: an interrupted drain may have left
-        it queued, or it may have run just before the interrupt. A wakeup the
-        core operation no longer consumes would stay armed, and the next
-        wakeable call would raise ``WakeupError`` although ``wakeup()`` was
-        never called."""
+        it queued, or it may have run just before the interrupt. A wake the
+        core operation still does not consume (Java's ``WakeupTrigger`` leaves
+        a wakeup pending when the operation's future is already done) stays
+        armed; the binding never leaves its own wakeup behind, so the next
+        wakeable call the core ends with ``WakeupError`` for it is submitted
+        again (``_own_wake_outcome``)."""
         self._refuse_inside_callback()
-        box: list[tuple[Any, ...]] = []
         event = self._pending_event
-
-        def cb(*payload: Any) -> None:
-            box.append(payload)
-            event.set()
-
         interrupted: KeyboardInterrupt | None = None
-        wake_due = False
         with self._use() as h:
             # What an earlier call left queued runs first, so the notify of this
             # call's completion is not lost behind it.
             event.clear()
             self._drain(h)
-            submit(h, cb)
-            while not box:
-                try:
-                    if wake_due:
+            while True:
+                box: list[tuple[Any, ...]] = []
+
+                def cb(*payload: Any, box: list[tuple[Any, ...]] = box) -> None:
+                    box.append(payload)
+                    event.set()
+
+                submit(h, cb)
+                wake_due = False
+                mark: int | None = None
+                while not box:
+                    try:
+                        if wake_due:
+                            self._drain(h)
+                            wake_due = False
+                            if not box and wakeable:
+                                mark = self._own_wake(h)
+                            continue
+                        event.wait(0.1)
+                        event.clear()
                         self._drain(h)
-                        wake_due = False
-                        if not box and wakeable:
-                            _lib.Consumer_wakeup(h)
-                        continue
-                    event.wait(0.1)
-                    event.clear()
-                    self._drain(h)
-                except KeyboardInterrupt as exc:
-                    if interrupted is None:
-                        interrupted = exc
-                        wake_due = True
-        payload = box[0]
+                    except KeyboardInterrupt as exc:
+                        if interrupted is None:
+                            interrupted = exc
+                            wake_due = True
+                payload = box[0]
+                if not self._own_wake_outcome(payload, wakeable, mark, interrupted is not None):
+                    break
+                free(payload)
         if interrupted is not None:
             free(payload)
             raise interrupted
@@ -881,22 +899,26 @@ class _ConsumerState:
             self._raise_deferred_error(site)
         self._refuse_inside_callback()
         loop = asyncio.get_running_loop()
-        fut: asyncio.Future[tuple[Any, ...]] = loop.create_future()
         pending = asyncio.Event()
         waiter = (loop, pending)
 
-        arrived: list[bool] = []
+        def attempt() -> tuple[asyncio.Future[tuple[Any, ...]], Callable[[], bool],
+                               Callable[..., None]]:
+            fut: asyncio.Future[tuple[Any, ...]] = loop.create_future()
+            arrived: list[bool] = []
 
-        def deliver(payload: tuple[Any, ...]) -> None:
-            if not fut.done():
-                fut.set_result(payload)
-            pending.set()
+            def deliver(payload: tuple[Any, ...]) -> None:
+                if not fut.done():
+                    fut.set_result(payload)
+                pending.set()
 
-        def cb(*payload: Any) -> None:
-            # The completion has arrived: ``fut`` gets it one loop iteration
-            # later (``hand_over``), a wakeup now would find no operation.
-            arrived.append(True)
-            self._undelivered.hand_over(loop, deliver, payload, free)
+            def cb(*payload: Any) -> None:
+                # The completion has arrived: ``fut`` gets it one loop iteration
+                # later (``hand_over``), a wakeup now would find no operation.
+                arrived.append(True)
+                self._undelivered.hand_over(loop, deliver, payload, free)
+
+            return fut, lambda: bool(arrived), cb
 
         use = self._use()
         with use as h:
@@ -905,12 +927,18 @@ class _ConsumerState:
                 # What an earlier call left queued runs first, so the notify of
                 # this call's completion is not lost behind it.
                 self._drain(h)
-                submit(h, cb)
-                cancelled = await self._wait_on_loop(h, fut.done, lambda: bool(arrived),
-                                                     pending, wakeable)
+                while True:
+                    fut, has_arrived, cb = attempt()
+                    submit(h, cb)
+                    cancelled, mark = await self._wait_on_loop(
+                        h, fut.done, has_arrived, pending, wakeable)
+                    payload = fut.result()
+                    if not self._own_wake_outcome(payload, wakeable, mark,
+                                                  cancelled is not None):
+                        break
+                    free(payload)
             finally:
                 self._async_waiters.pop(waiter, None)
-        payload = fut.result()
         if cancelled is not None:
             free(payload)
             raise cancelled
@@ -934,29 +962,33 @@ class _ConsumerState:
 
     async def _wait_on_loop(self, h: int, done: Callable[[], bool],
                             arrived: Callable[[], bool], pending: asyncio.Event,
-                            wakeable: bool) -> asyncio.CancelledError | None:
+                            wakeable: bool) -> tuple[asyncio.CancelledError | None, int | None]:
         """Wait on the loop until ``done()``, running the queued callbacks each
         time the notify sets ``pending``, and awaiting the coroutine listener
         methods they defer before going on. The first cancellation is returned
         once the call has ended; it wakes the consumer when the operation is
-        ``wakeable``, and only if its completion has not ``arrived()``. A
-        wakeup the core operation no longer consumes would stay armed, and the
-        next wakeable call would raise ``WakeupError`` although ``wakeup()`` was
-        never called.
+        ``wakeable``, and only if its completion has not ``arrived()``. Returned
+        with it is the mark of that wake (``_own_wake``), ``None`` when none was
+        sent: a wake the core operation does not consume stays armed, and the
+        binding never leaves its own wakeup behind (``_own_wake_outcome``).
 
         A cancellation while a deferred callback is awaited wakes at once: the
         core operation that delivered it waits for its report, and checks for a
-        wakeup after it (Java's ``pollForFetches`` ``setFetchAction``, also for
-        an expired ``poll``; ``commitSync``'s ``setActiveTask`` after the commit
-        callbacks). Any other cancellation first drains: the completion may
-        already be queued, and a wake sent then would find no operation to
-        end."""
+        wakeup after it unless its own result is ready by then (Java's
+        ``pollForFetches`` ``setFetchAction``, also for an expired ``poll``;
+        ``commitSync``'s ``setActiveTask`` after the commit callbacks, which
+        leaves the wakeup pending when the commit's future is already done, as
+        ``commit(offsets={})``'s is). Any other cancellation first drains: the
+        completion may already be queued, and a wake sent then would find no
+        operation to end."""
         cancelled: asyncio.CancelledError | None = None
         wake_due = False
+        mark: int | None = None
 
         def wake() -> None:
+            nonlocal mark
             if wakeable and not arrived():
-                _lib.Consumer_wakeup(h)
+                mark = self._own_wake(h)
 
         while True:
             awaiting_callbacks = False
@@ -971,7 +1003,7 @@ class _ConsumerState:
                     wake()
                     continue
                 if done():
-                    return cancelled
+                    return cancelled, mark
                 await pending.wait()
                 pending.clear()
                 self._drain(h)
@@ -982,6 +1014,54 @@ class _ConsumerState:
                         wake()
                     else:
                         wake_due = True
+
+    # ---- the consumer's own wakeup ------------------------------------------
+    def _own_wake(self, h: int) -> int:
+        """Wake the consumer to end the call in progress sooner (Ctrl+C,
+        cancellation), returning the count of the user's ``wakeup()`` calls at
+        that moment, the mark ``_own_wake_outcome`` checks."""
+        mark = self._user_wakeups
+        _lib.Consumer_wakeup(h)
+        return mark
+
+    def _own_wake_outcome(self, payload: tuple[Any, ...], wakeable: bool, mark: int | None,
+                          ending: bool) -> bool:
+        """Account for the consumer's own wakeup once a wakeable call has ended
+        with ``payload``: whether the call must be submitted again (its error
+        is the ``WakeupError`` only the consumer's own leftover wakeup raised).
+
+        The core ends a wakeable call with ``WakeupError`` when it consumes a
+        wakeup, and rotates it: none is armed after that. The consumer's own
+        wake (``mark``, see ``_own_wake``) that the call ended without
+        consuming stays armed, as Java's ``WakeupTrigger`` keeps a wakeup that
+        found the operation's future already done; unless the user called
+        ``wakeup()`` since, it is the consumer's alone, and the next wakeable
+        call it ends is submitted again, as if the wakeup had not been sent.
+        A call ``ending`` on Ctrl+C or cancellation is never submitted again.
+
+        Submitting again repeats the operation from the start: the core raised
+        ``WakeupError`` before it waited, so a commit's offsets are committed
+        again (the first commit still completes, as Java's woken
+        ``commitSync``'s does) and a lookup is sent again."""
+        if not wakeable:
+            return False
+        error = payload[-1] if payload else 0
+        if error and _lib.KafkaError_code(error) == WakeupError._ffi_id:
+            left, self._own_wake_left = self._own_wake_left, False
+            return left and not ending
+        if mark is not None and mark == self._user_wakeups:
+            self._own_wake_left = True
+        return False
+
+    def _own_wake_raised(self, error: int) -> bool:
+        """``_own_wake_outcome`` for a ConsumerHandle call inside a callback,
+        which never sends a wake itself: whether ``error``, an OWNED error
+        handle, is the ``WakeupError`` only the consumer's own leftover wakeup
+        raised; it is then freed and the call is made again."""
+        if not self._own_wake_outcome((error,), True, None, False):
+            return False
+        _lib.KafkaError_destroy(error)
+        return True
 
     # ---- payload handlers ---------------------------------------------------
     def _resolve_void(self, payload: tuple[Any, ...]) -> None:
@@ -1025,11 +1105,16 @@ class _ConsumerState:
     # ``wakeupTrigger.setFetchAction`` after an empty ``collectFetch()`` also
     # when no time is left (``AsyncKafkaConsumer.java:1964-2016``), so a wakeup
     # sent while a commit callback the poll delivers runs is raised by that
-    # poll. Two windows remain where a wake does not end the operation and stays
-    # armed, as a user's ``wakeup()`` there does in Java: a ``poll`` that
-    # returns records already buffered when its callbacks end (Java's first
-    # ``collectFetch()`` returns them before any wakeup check), and the moment
-    # between the core's last wakeup check and its completion.
+    # poll. A wake does not end the operation, and stays armed, as a user's
+    # ``wakeup()`` there does in Java, when the operation's result is ready
+    # before the core checks for it: Java's ``setActiveTask`` leaves a wakeup
+    # pending for a future already done (``commit(offsets={})``, a ``commit``
+    # whose earlier async commits have completed), a ``poll`` returns records
+    # already buffered when its callbacks end (Java's first ``collectFetch()``
+    # returns them before any wakeup check), and the core may complete just
+    # after its last check. The consumer never leaves its own wake behind: the
+    # next wakeable call the core ends with ``WakeupError`` for it is submitted
+    # again (``_own_wake_outcome``).
     def _void_spec(self, fn: Callable[..., None], *args: Any,
                    wakeable: bool = False) -> tuple[Any, Any, Any, bool]:
         return (lambda h, cb: fn(h, *args, cb), self._resolve_void, self._free_void, wakeable)
@@ -1255,6 +1340,9 @@ class _ConsumerState:
                 return
             self._uses += 1
             h = self._h
+            # The wakeup armed from now on is the user's (see _own_wake_left).
+            self._user_wakeups += 1
+            self._own_wake_left = False
         try:
             _lib.Consumer_wakeup(h)
         finally:
@@ -1275,6 +1363,8 @@ class _ConsumerState:
             spec = None if offsets is None else offsets_to_spec(offsets)
             with self._handle_commit():
                 error = _lib.ConsumerHandle_commit_sync(handle, spec)
+                while self._own_wake_raised(error):
+                    error = _lib.ConsumerHandle_commit_sync(handle, spec)
             if error:
                 self._raise_error(error)
             return None
@@ -1297,11 +1387,16 @@ class _ConsumerState:
             (partition,) = args
             position, error = _lib.ConsumerHandle_position(
                 handle, partition.topic(), partition.partition(), _NO_TIMEOUT)
+            while self._own_wake_raised(error):
+                position, error = _lib.ConsumerHandle_position(
+                    handle, partition.topic(), partition.partition(), _NO_TIMEOUT)
             raise_if_error(error)
             return int(position)
         if op == "committed":
             (partitions,) = args
             raw, error = _lib.ConsumerHandle_committed(handle, tp_to_spec(partitions))
+            while self._own_wake_raised(error):
+                raw, error = _lib.ConsumerHandle_committed(handle, tp_to_spec(partitions))
             raise_if_error(error)
             result = to_offset_map(raw or {})
             for tp in partitions:
