@@ -62,7 +62,7 @@ use crate::consumer::AsyncKafkaConsumer;
 // `crate::consumer::ConsumerHandle` is aliased because this module already has a
 // private `ConsumerHandle` (the state behind `kafka_consumer_Consumer_t`), which
 // is an unrelated concept.
-use crate::consumer::internals::AutoOffsetResetStrategy;
+use crate::consumer::internals::{AutoOffsetResetStrategy, ConsumerRebalanceListenerMethodName};
 use crate::consumer::{
     CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerHandle, ConsumerRebalanceListener, ConsumerRecord,
     ConsumerRecords, GroupMembershipOperation, GroupProtocol, MockConsumer, OffsetAndMetadata, OffsetAndTimestamp,
@@ -698,12 +698,16 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_new(
 ///
 /// A rebalance-listener or commit callback still queued for delivery on the
 /// caller's thread ([`kafka_consumer_Consumer_set_pending_callback_notify`]) is
-/// dropped without running, as is one queued after this function was called:
-/// the operation waiting for it carries on as if the callback had returned
-/// without an error, and a dropped commit callback never fires. An entry
-/// already taken with [`kafka_consumer_Consumer_next_pending_callback`] is not
-/// dropped, and the operation waiting for it can hold this function up until
-/// it is acked, so ack it first.
+/// dropped without running, as is one queued after this function was called.
+/// A dropped listener callback counts as having failed with a
+/// `REQUEST_TIMED_OUT` error, "<method> could not be completed before the
+/// consumer closed" (the method as in
+/// `ConsumerRebalanceListener.onPartitionsRevoked`), as Java fails a callback
+/// still pending when the consumer closes. A dropped commit callback never
+/// fires. An entry already taken with
+/// [`kafka_consumer_Consumer_next_pending_callback`] is not dropped, and the
+/// operation waiting for it can hold this function up until it is acked, so
+/// ack it first.
 ///
 /// Called on the consumer's callback dispatcher thread (from inside one of its
 /// callbacks) or inside a tokio runtime, where that wait could deadlock, this
@@ -765,9 +769,10 @@ unsafe fn teardown_consumer(addr: usize) {
     // hold shared references of their own, and is dead before the `Box` is reclaimed.
     let h = unsafe { handle_ref(addr as *const kafka_consumer_Consumer_t) };
     // Close the caller-thread queue first: a task parked on a callback queued there would
-    // wait for an ack that no call will send now. Dropping the entries resolves those tasks
-    // as if the callbacks had returned (`CallerThreadRebalanceListener::enqueue_and_wait`),
-    // and a callback queued from now on is dropped at once (`enqueue_pending`). An entry
+    // wait for an ack that no call will send now. Dropping the entries resolves those tasks,
+    // a listener callback as failed (`CallerThreadRebalanceListener::enqueue_and_wait`) and a
+    // commit callback as never fired (`FfiOffsetCommitCallback::on_complete`), and a callback
+    // queued from now on is dropped at once (`enqueue_pending`). An entry
     // the embedder has already taken is its to ack. Read poison-tolerantly for the reason
     // given below: skipping the close on poison would leave the join below hung.
     let queued = h
@@ -2760,7 +2765,16 @@ struct CallerThreadRebalanceListener {
 }
 
 impl CallerThreadRebalanceListener {
-    async fn enqueue_and_wait(&self, method: i32, partitions: &[TopicPartition]) -> Result<(), Error> {
+    async fn enqueue_and_wait(
+        &self,
+        method_name: ConsumerRebalanceListenerMethodName,
+        partitions: &[TopicPartition],
+    ) -> Result<(), Error> {
+        let method = match method_name {
+            ConsumerRebalanceListenerMethodName::OnPartitionsRevoked => PENDING_METHOD_REVOKED,
+            ConsumerRebalanceListenerMethodName::OnPartitionsAssigned => PENDING_METHOD_ASSIGNED,
+            ConsumerRebalanceListenerMethodName::OnPartitionsLost => PENDING_METHOD_LOST,
+        };
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<Result<(), Error>>();
         // Wake the embedder's blocking-API wait loop from the dispatcher thread
         // (GIL-safe for the Python binding), so it drains the queue.
@@ -2770,12 +2784,17 @@ impl CallerThreadRebalanceListener {
             &self.notify,
             PendingRebalanceCallback { method, partitions: partitions.to_vec(), ack: ack_tx, job: None },
         );
-        // Park on the ack. Dropping the sender (embedder never acked, e.g. the
-        // consumer is being torn down) resolves to an Err via `recv` error →
-        // treat as "no error" so teardown is not blocked.
+        // Park on the ack. The sender is dropped unacked only once `destroy` has
+        // closed the queue, and then the callback never runs: fail it, as Java's
+        // `CompletableEventReaper.completeEventsExceptionallyOnClose` fails a
+        // callback event still queued when the consumer closes. Teardown is not
+        // held up either way.
         match ack_rx.await {
             Ok(result) => result,
-            Err(_) => Ok(()),
+            Err(_) => Err(Error::timeout(format!(
+                "{} could not be completed before the consumer closed",
+                method_name.fully_qualified_method_name()
+            ))),
         }
     }
 }
@@ -2783,15 +2802,18 @@ impl CallerThreadRebalanceListener {
 #[async_trait]
 impl ConsumerRebalanceListener for CallerThreadRebalanceListener {
     async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
-        self.enqueue_and_wait(PENDING_METHOD_REVOKED, partitions).await
+        self.enqueue_and_wait(ConsumerRebalanceListenerMethodName::OnPartitionsRevoked, partitions)
+            .await
     }
 
     async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
-        self.enqueue_and_wait(PENDING_METHOD_ASSIGNED, partitions).await
+        self.enqueue_and_wait(ConsumerRebalanceListenerMethodName::OnPartitionsAssigned, partitions)
+            .await
     }
 
     async fn on_partitions_lost(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
-        self.enqueue_and_wait(PENDING_METHOD_LOST, partitions).await
+        self.enqueue_and_wait(ConsumerRebalanceListenerMethodName::OnPartitionsLost, partitions)
+            .await
     }
 }
 
@@ -8619,7 +8641,7 @@ mod tests {
     use crate::consumer::ConsumerGroupMetadataImpl;
     use crate::ffi::common::kafka_common_ErrorCode_t::{
         kafka_common_ErrorCode_LOCAL_CONCURRENT_MODIFICATION, kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE,
-        kafka_common_ErrorCode_NONE, kafka_common_ErrorCode_WAKEUP,
+        kafka_common_ErrorCode_NONE, kafka_common_ErrorCode_REQUEST_TIMED_OUT, kafka_common_ErrorCode_WAKEUP,
     };
     use crate::ffi::common::{kafka_common_Error_code, kafka_common_Error_destroy, kafka_common_Error_message};
     use std::collections::BTreeMap;
@@ -9743,6 +9765,32 @@ mod tests {
         assert!(queue.lock().unwrap().is_none(), "the queue must stay closed");
     }
 
+    /// Once `destroy` has closed the queue, a listener method cannot be delivered:
+    /// each fails at once with Java's close-time `TimeoutException`, naming the
+    /// method, rather than counting as having run.
+    #[tokio::test]
+    async fn listener_on_a_closed_queue_fails_with_a_timeout() {
+        let (completion_tx, _completion_rx) = std::sync::mpsc::channel::<CompletionJob>();
+        let listener = CallerThreadRebalanceListener {
+            queue: Arc::new(Mutex::new(None)),
+            completion_tx,
+            notify: Arc::new(Mutex::new(None)),
+        };
+        let partitions = [TopicPartition::new("t", 0)];
+        for (result, method) in [
+            (listener.on_partitions_revoked(&partitions).await, "onPartitionsRevoked"),
+            (listener.on_partitions_assigned(&partitions).await, "onPartitionsAssigned"),
+            (listener.on_partitions_lost(&partitions).await, "onPartitionsLost"),
+        ] {
+            let error = result.expect_err("a dropped listener callback must fail");
+            assert!(matches!(error, Error::Timeout(_)), "unexpected error: {error:?}");
+            assert_eq!(
+                error.message(),
+                format!("ConsumerRebalanceListener.{method} could not be completed before the consumer closed")
+            );
+        }
+    }
+
     /// A commit callback invoked on a runtime worker once `destroy` has closed the
     /// queue is dropped: `on_complete` returns at once, and the C callback never
     /// fires.
@@ -10420,10 +10468,10 @@ mod tests {
     }
 
     /// `destroy` with an `_async` operation parked on a caller-thread callback that
-    /// nobody takes drops the queued entry: the operation carries on as if the
-    /// listener had returned, its callback fires once, and the handle is freed.
-    /// Waiting for the operation's task while the entry stayed queued hung, since
-    /// nothing would ever ack it.
+    /// nobody takes drops the queued entry: the listener counts as having failed
+    /// with Java's close-time `TimeoutException`, the operation's callback fires
+    /// once with that error, and the handle is freed. Waiting for the operation's
+    /// task while the entry stayed queued hung, since nothing would ever ack it.
     #[test]
     fn test_destroy_drops_the_queued_caller_thread_callbacks() {
         // SAFETY: Test: `auto_offset_reset` is a deliberate NULL, which
@@ -10508,7 +10556,15 @@ mod tests {
             wait_until(Duration::from_secs(5), || rebalanced.calls.load(Ordering::SeqCst) > 0),
             "the rebalance's callback must still fire"
         );
-        assert_eq!(rebalanced.code.load(Ordering::SeqCst), kafka_common_ErrorCode_NONE as i32);
+        // The mock's `rebalance` returns the listener's error, as Java's lets it propagate.
+        assert_eq!(
+            rebalanced.code.load(Ordering::SeqCst),
+            kafka_common_ErrorCode_REQUEST_TIMED_OUT as i32
+        );
+        assert_eq!(
+            rebalanced.message.lock().unwrap().as_deref(),
+            Some("ConsumerRebalanceListener.onPartitionsAssigned could not be completed before the consumer closed")
+        );
         assert!(
             wait_until(Duration::from_secs(10), || dispatcher.is_finished()),
             "destroy must free the handle once the rebalance's task has finished"
