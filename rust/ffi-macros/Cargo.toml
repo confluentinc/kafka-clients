@@ -1,0 +1,15 @@
+[package]
+name = "ffi-macros"
+version = "0.1.0"
+edition = "2024"
+description = "The #[ffi_guard] attribute that keeps a Rust panic from unwinding into the C API's callers"
+
+[lib]
+proc-macro = true
+
+# All three are already in Cargo.lock through async-trait / tokio-macros /
+# serde_derive, so this crate adds no new external code to the tree.
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }

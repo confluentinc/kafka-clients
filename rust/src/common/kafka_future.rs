@@ -147,26 +147,6 @@ impl<T: Send + 'static> KafkaFuture<T> {
         KafkaFuture::new(Arc::new(AllOfFuture { futures }))
     }
 
-    /// Returns a new `KafkaFuture` that, when this future completes normally,
-    /// is completed with the result of applying `function` to this future's
-    /// value. If this future completes exceptionally, the returned future
-    /// completes with the same exception.
-    ///
-    /// Translated from `org.apache.kafka.common.KafkaFuture.thenApply`, for the
-    /// common case where the transform cannot fail.
-    #[doc(alias = "org.apache.kafka.common.KafkaFuture#thenApply")]
-    pub fn then_apply<R, F>(&self, function: F) -> KafkaFuture<R>
-    where
-        T: Clone + Sync,
-        R: Clone + Send + Sync + 'static,
-        F: Fn(T) -> R + Send + Sync + 'static,
-    {
-        KafkaFuture::new(Arc::new(ThenApplyFuture {
-            source: self.clone(),
-            function: Arc::new(move |value| Ok(function(value))),
-        }))
-    }
-
     /// Returns a future that completes when all the given keyed futures
     /// complete, yielding a map from each key to its resolved value. If any
     /// future completes exceptionally, the returned future yields that error.
@@ -184,39 +164,18 @@ impl<T: Send + 'static> KafkaFuture<T> {
         KafkaFuture::new(Arc::new(JoinMapFuture { entries }))
     }
 
-    /// Returns a future that completes when all the given keyed futures
-    /// complete, yielding a map from each key to that future's **outcome**.
+    /// Returns a new `KafkaFuture` that, when this future completes normally,
+    /// is completed with the result of applying `function` to this future's
+    /// value. If this future completes exceptionally, the returned future
+    /// completes with the same exception.
     ///
-    /// This is the collect-all counterpart of [`join_map`](Self::join_map):
-    /// a failed input future does **not** short-circuit, so every key's
-    /// `Result` is preserved. Java has no direct equivalent because callers
-    /// there hold the per-key `KafkaFuture`s themselves and inspect each one;
-    /// the C FFI has no `KafkaFuture` type, so the admin bindings flatten a
-    /// multi-key `*Result` into one handle carrying a value *and* an error per
-    /// key (see `PLAN-bindings.md` §2 / D2 and `admin-client.md` §5, which
-    /// requires per-key granularity to survive the boundary). `join_map`
-    /// cannot be reused for that: its `future.get().await?` abandons the
-    /// remaining keys on the first error.
-    #[cfg(any(feature = "ffi", test))]
-    pub(crate) fn join_map_results<K>(
-        entries: Vec<(K, KafkaFuture<T>)>,
-    ) -> KafkaFuture<std::collections::HashMap<K, Result<T, Error>>>
-    where
-        T: Clone + Sync,
-        K: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
-    {
-        KafkaFuture::new(Arc::new(JoinMapResultsFuture { entries }))
-    }
-
-    /// Like [`then_apply`](Self::then_apply) but the transform may fail. If
-    /// `function` returns `Err`, the returned future completes with that error.
-    ///
-    /// This models the Java `thenApply` cases whose `BaseFunction` throws — for
-    /// example `CreateTopicsResult.TopicMetadataAndConfig` accessors that call
-    /// `ensureSuccess()` and rethrow a stored exception.
-    // the fallible thenApply variant (admin-client.md §4)
-    #[doc(alias = "rust-only")]
-    pub fn then_apply_try<R, F>(&self, function: F) -> KafkaFuture<R>
+    /// Java's `BaseFunction.apply` may throw, failing the returned future; here
+    /// `function` returns `Err` instead (e.g. the
+    /// `CreateTopicsResult.TopicMetadataAndConfig` accessors, which call
+    /// `ensureSuccess()` and rethrow a stored exception). A transform that
+    /// cannot fail returns `Ok`.
+    #[doc(alias = "org.apache.kafka.common.KafkaFuture#thenApply")]
+    pub fn then_apply<R, F>(&self, function: F) -> KafkaFuture<R>
     where
         T: Clone + Sync,
         R: Clone + Send + Sync + 'static,
@@ -309,8 +268,7 @@ impl<T: Clone + Send + Sync + 'static> KafkaFutureOps<()> for AllOfFuture<T> {
     }
 }
 
-/// Internal `KafkaFutureOps` impl backing [`KafkaFuture::then_apply`] /
-/// [`KafkaFuture::then_apply_try`].
+/// Internal `KafkaFutureOps` impl backing [`KafkaFuture::then_apply`].
 struct ThenApplyFuture<T, R>
 where
     T: Clone + Send + Sync + 'static,
@@ -395,61 +353,6 @@ where
                 // `org.apache.kafka.common.errors.TimeoutException`.
                 Err(_) => Err(Error::local_timeout(format!(
                     "Timed out waiting for KafkaFuture.join_map after {} ms",
-                    timeout.as_millis()
-                ))),
-            }
-        })
-    }
-
-    fn is_done(&self) -> bool {
-        self.entries.iter().all(|(_, f)| f.is_done())
-    }
-}
-
-/// Internal `KafkaFutureOps` impl backing [`KafkaFuture::join_map_results`].
-///
-/// Mirrors [`JoinMapFuture`] but records each key's `Result` instead of
-/// propagating the first error, so a partially failed batch keeps every
-/// per-key outcome.
-#[cfg(any(feature = "ffi", test))]
-struct JoinMapResultsFuture<K, T>
-where
-    K: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
-    T: Clone + Send + Sync + 'static,
-{
-    entries: Vec<(K, KafkaFuture<T>)>,
-}
-
-/// Shorthand for the per-key outcome map produced by [`JoinMapResultsFuture`].
-#[cfg(any(feature = "ffi", test))]
-type ResultMap<K, T> = std::collections::HashMap<K, Result<T, Error>>;
-
-#[cfg(any(feature = "ffi", test))]
-impl<K, T> KafkaFutureOps<ResultMap<K, T>> for JoinMapResultsFuture<K, T>
-where
-    K: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
-    T: Clone + Send + Sync + 'static,
-{
-    fn get(&self) -> Pin<Box<dyn std::future::Future<Output = Result<ResultMap<K, T>, Error>> + Send + '_>> {
-        Box::pin(async move {
-            let mut map: ResultMap<K, T> = std::collections::HashMap::with_capacity(self.entries.len());
-            for (key, future) in &self.entries {
-                // No `?`: a failed key is recorded, not propagated.
-                map.insert(key.clone(), future.get().await);
-            }
-            Ok(map)
-        })
-    }
-
-    fn get_with_timeout(
-        &self,
-        timeout: Duration,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<ResultMap<K, T>, Error>> + Send + '_>> {
-        Box::pin(async move {
-            match tokio::time::timeout(timeout, self.get()).await {
-                Ok(result) => result,
-                Err(_) => Err(Error::timeout(format!(
-                    "Timed out waiting for KafkaFuture.join_map_results after {} ms",
                     timeout.as_millis()
                 ))),
             }
@@ -595,7 +498,7 @@ mod tests {
     #[tokio::test]
     async fn then_apply_transforms_value() {
         let handle: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
-        let mapped = handle.future().then_apply(|v| v * 2);
+        let mapped = handle.future().then_apply(|v| Ok(v * 2));
         handle.complete(21);
         assert_eq!(mapped.get().await.unwrap(), 42);
     }
@@ -603,7 +506,7 @@ mod tests {
     #[tokio::test]
     async fn then_apply_propagates_source_error() {
         let handle: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
-        let mapped = handle.future().then_apply(|v| v * 2);
+        let mapped = handle.future().then_apply(|v| Ok(v * 2));
         handle.complete_with_error(Error::local_illegal_argument("src".to_string()));
         assert!(matches!(mapped.get().await, Err(Error::LocalIllegalArgument(_))));
     }
@@ -649,82 +552,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn join_map_results_collects_values_when_all_succeed() {
-        let h1: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
-        let h2: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
-        let joined = KafkaFuture::join_map_results(vec![("a", h1.future()), ("b", h2.future())]);
-        assert!(!joined.is_done());
-        h1.complete(1);
-        h2.complete(2);
-        assert!(joined.is_done());
-        let map = joined.get().await.unwrap();
-        assert_eq!(map.len(), 2);
-        assert_eq!(*map["a"].as_ref().unwrap(), 1);
-        assert_eq!(*map["b"].as_ref().unwrap(), 2);
-    }
-
-    /// The whole point: a partially failed batch keeps both outcomes.
-    #[tokio::test]
-    async fn join_map_results_keeps_per_key_outcomes_on_mixed_batch() {
-        let ok: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
-        let bad: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
-        let last: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
-        // Order matters: the failing key comes first, so a short-circuiting
-        // implementation would drop the two that follow.
-        let joined =
-            KafkaFuture::join_map_results(vec![("bad", bad.future()), ("ok", ok.future()), ("last", last.future())]);
-        bad.complete_with_error(Error::local_illegal_argument("boom"));
-        ok.complete(7);
-        last.complete(9);
-
-        let map = joined.get().await.unwrap();
-        assert_eq!(map.len(), 3);
-        match map["bad"].as_ref() {
-            Err(Error::LocalIllegalArgument(e)) => assert_eq!(e.message(), "boom"),
-            other => panic!("expected IllegalArgument for `bad`, got {other:?}"),
-        }
-        assert_eq!(*map["ok"].as_ref().unwrap(), 7);
-        assert_eq!(*map["last"].as_ref().unwrap(), 9);
-    }
-
-    #[tokio::test]
-    async fn join_map_results_records_every_error_when_all_fail() {
-        let h1: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
-        let h2: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
-        let joined = KafkaFuture::join_map_results(vec![("a", h1.future()), ("b", h2.future())]);
-        h1.complete_with_error(Error::local_illegal_argument("a"));
-        h2.complete_with_error(Error::local_illegal_state("b"));
-        let map = joined.get().await.unwrap();
-        assert!(matches!(map["a"].as_ref(), Err(Error::LocalIllegalArgument(_))));
-        assert!(matches!(map["b"].as_ref(), Err(Error::LocalIllegalState(_))));
-    }
-
-    #[tokio::test]
-    async fn join_map_results_empty_is_done_and_yields_empty_map() {
-        let joined: KafkaFuture<std::collections::HashMap<&str, Result<i32, Error>>> =
-            KafkaFuture::join_map_results(Vec::new());
-        assert!(joined.is_done());
-        assert!(joined.get().await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn join_map_results_get_timeout_elapses_when_a_key_never_completes() {
-        let h1: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
-        let h2: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
-        let joined = KafkaFuture::join_map_results(vec![("a", h1.future()), ("b", h2.future())]);
-        h1.complete(1);
-        match joined.get_with_timeout(Duration::from_millis(20)).await {
-            Err(Error::Timeout(e)) => assert!(e.message().contains("join_map_results"), "unexpected message: {e}"),
-            other => panic!("expected Timeout, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn then_apply_try_can_fail() {
+    async fn then_apply_can_fail() {
         let handle: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
         let mapped = handle
             .future()
-            .then_apply_try(|_v| Err::<i32, _>(Error::local_illegal_state("bad".to_string())));
+            .then_apply(|_v| Err::<i32, _>(Error::local_illegal_state("bad".to_string())));
         handle.complete(1);
         assert!(matches!(mapped.get().await, Err(Error::LocalIllegalState(_))));
     }

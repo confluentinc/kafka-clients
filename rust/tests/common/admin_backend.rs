@@ -519,9 +519,9 @@ pub trait AdminBackend {
     /// Java's `DescribeUserScramCredentialsResult` holds one future over the raw
     /// response data and exposes three views (`all()` / `users()` /
     /// `description(user)`); this is the per-user shape that subsumes all three,
-    /// identical to what `src/ffi/admin.rs`'s
-    /// `submit_describe_user_scram_credentials` composes and what `admin.py`
-    /// returns, so all four backends answer with the same key set.
+    /// composed the same way by the C gRPC server (`c/grpc_server/server.cc`)
+    /// and the Python extension's `assemble_scram` (`python/_confluentkafka.c`,
+    /// behind `admin.py`), so every backend answers with the same key set.
     ///
     /// The broker never returns the salted password or the salt, so the value
     /// carries only the mechanism and iteration count per credential.
@@ -1582,9 +1582,10 @@ impl AdminBackend for RustNativeAdmin {
         options: DescribeUserScramCredentialsOptions,
     ) -> Result<Outcomes<String, UserScramCredentialsDescription>, Error> {
         let result = self.admin.describe_user_scram_credentials_with_users_options(users, options);
-        // Java's three views composed into the per-user shape, exactly as
-        // `src/ffi/admin.rs`'s `submit_describe_user_scram_credentials` does — so
-        // all four backends answer with the same key set and the same errors.
+        // Java's three views composed into the per-user shape, as the C gRPC
+        // server (`c/grpc_server/server.cc`) and the Python extension's
+        // `assemble_scram` (`python/_confluentkafka.c`) also compose them — so
+        // every backend answers with the same key set and the same errors.
         //
         //   - `all()` succeeds only when every user's error code is NONE or
         //     RESOURCE_NOT_FOUND, so when it does its keys are the complete user
@@ -1852,7 +1853,7 @@ where
 /// `CreateTopicsResult::futures()` `pub(crate)` (correctly — Java's field is
 /// private too), so the only public route is the four `topicId` /
 /// `numPartitions` / `replicationFactor` / `config` views. Every one of them is
-/// `then_apply_try` over the *same* source object, so they all fail with the same
+/// `then_apply` over the *same* source object, so they all fail with the same
 /// error when the broker reported no usable metadata, which is exactly the
 /// `TopicMetadataAndConfig(KafkaException)` state.
 async fn metadata_of(result: &CreateTopicsResult, topic: &str) -> TopicMetadataAndConfig {

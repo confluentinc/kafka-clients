@@ -27,7 +27,7 @@ use crate::common::{Error, KafkaFuture};
 /// `GroupListing`s and `Throwable`s and, via `thenApply`, splits it into the
 /// `all`/`valid`/`errors` futures. The Rust port models the mixed collection as
 /// `Vec<Result<GroupListing, Error>>` (a listing is `Ok`, an error is
-/// `Err`) and derives the three views lazily with `then_apply`/`then_apply_try`
+/// `Err`) and derives the three views lazily with `then_apply`
 /// — semantically identical (`all` fails with the first error; `valid`/`errors`
 /// never fail).
 #[derive(Clone, Debug)]
@@ -48,7 +48,7 @@ impl ListGroupsResult {
     /// Mirrors `all()`.
     #[doc(alias = "org.apache.kafka.clients.admin.ListGroupsResult#all")]
     pub fn all(&self) -> KafkaFuture<Vec<GroupListing>> {
-        self.source.then_apply_try(|results| {
+        self.source.then_apply(|results| {
             let mut valid = Vec::new();
             for result in results {
                 match result {
@@ -64,14 +64,14 @@ impl ListGroupsResult {
     #[doc(alias = "org.apache.kafka.clients.admin.ListGroupsResult#valid")]
     pub fn valid(&self) -> KafkaFuture<Vec<GroupListing>> {
         self.source
-            .then_apply(|results| results.into_iter().filter_map(Result::ok).collect())
+            .then_apply(|results| Ok(results.into_iter().filter_map(Result::ok).collect()))
     }
 
     /// A future yielding just the errors (never fails). Mirrors `errors()`.
     #[doc(alias = "org.apache.kafka.clients.admin.ListGroupsResult#errors")]
     pub fn errors(&self) -> KafkaFuture<Vec<Error>> {
         self.source
-            .then_apply(|results| results.into_iter().filter_map(Result::err).collect())
+            .then_apply(|results| Ok(results.into_iter().filter_map(Result::err).collect()))
     }
 }
 

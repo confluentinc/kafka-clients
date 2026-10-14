@@ -41,9 +41,9 @@ use super::NetworkReceive;
 use super::NetworkSend;
 use super::Receive;
 use super::Selectable;
-use super::is_authentication_error;
 use super::selectable::USE_DEFAULT_BUFFER_SIZE;
 use super::{ChannelState, channel_state};
+use super::{is_authentication_error, is_invalid_receive_error};
 
 use indexmap::IndexMap;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -683,16 +683,8 @@ impl Selector {
                 format!("unknown (channelId={channel_id})")
             };
 
-            // Route by typed error, not by an opaque ErrorKind heuristic
-            // (mirrors Java's `e instanceof AuthenticationException` in
-            // Selector): only genuine authentication failures log "Failed
-            // authentication"; everything else (connection reset, broken pipe,
-            // EOF) is a retriable network disconnect.
-            if is_authentication_error(&e) {
-                kafka_error!(self.log_context, "Failed authentication with {} ({})", desc, e);
-            } else {
-                kafka_debug!(self.log_context, "Connection with {} disconnected: {}", desc, e);
-            }
+            let (level, message) = channel_error_log(&desc, &e);
+            log::log!(level, "{}{}", self.log_context.prefix(), message);
 
             self.close_channel_internal(channel_id, CloseMode::Graceful).await;
         }
@@ -746,16 +738,8 @@ impl Selector {
                     format!("unknown (channelId={id})")
                 };
 
-                // Route by typed error, not by an opaque ErrorKind heuristic
-                // (mirrors Java's `e instanceof AuthenticationException`): only
-                // genuine authentication failures log "Failed authentication";
-                // a transient handshake/write I/O error is a retriable
-                // disconnect.
-                if is_authentication_error(&error) {
-                    kafka_error!(self.log_context, "Failed authentication with {} ({})", desc, error);
-                } else {
-                    kafka_debug!(self.log_context, "Connection with {} disconnected: {}", desc, error);
-                }
+                let (level, message) = channel_error_log(&desc, &error);
+                log::log!(level, "{}{}", self.log_context.prefix(), message);
 
                 let close_mode = if send_failed {
                     CloseMode::NotifyOnly
@@ -1595,7 +1579,7 @@ impl Selectable for Selector {
             }
         }
 
-        // Phase 30 cancel-safety: the WAIT may have drained `(token, dir)`
+        // Phase 30 cancel-safety — the WAIT may have drained `(token, dir)`
         // fires into `ready_ids` and cleared their armed flags, then been
         // cancelled by a wakeup / deadline before pass-1 could process them
         // (the break paths above). Those channels are now neither armed nor
@@ -1736,6 +1720,36 @@ impl Selectable for Selector {
     }
 }
 
+/// The level and text with which the error closing a channel is logged: the
+/// `catch` in Java's `Selector.pollSelectionKeys` (`Selector.java:600-626`),
+/// shared by the read and the write path, which Java handles in one block.
+///
+/// Routed by typed payload, not by [`io::ErrorKind`], as Java routes by
+/// `instanceof`:
+///
+///   - an authentication failure logs "Failed authentication" (Java: INFO,
+///     `:622`; this client logs it at ERROR, left as it was);
+///   - an invalid receive logs "Unexpected error" at WARN (`:625`). Java gets
+///     there because `InvalidReceiveException` is a `KafkaException`, not an
+///     `IOException`, and it is the one such payload the receive path raises
+///     here, so the `else` of the Java chain reduces to it. At DEBUG, as it
+///     was, a size header the client refuses left no trace: the client closed,
+///     reconnected and refetched with nothing in the logs;
+///   - everything else (reset, broken pipe, EOF, a failed TLS handshake) is an
+///     I/O disconnect, DEBUG (`:612`), as the error is retriable.
+fn channel_error_log(desc: &str, e: &io::Error) -> (log::Level, String) {
+    if is_authentication_error(e) {
+        (log::Level::Error, format!("Failed authentication with {desc} ({e})"))
+    } else if is_invalid_receive_error(e) {
+        (
+            log::Level::Warn,
+            format!("Unexpected error from {desc}; closing connection: {e}"),
+        )
+    } else {
+        (log::Level::Debug, format!("Connection with {desc} disconnected: {e}"))
+    }
+}
+
 /// Result of a single channel write operation.
 struct ChannelWriteResult {
     bytes_written: usize,
@@ -1840,6 +1854,7 @@ mod tests {
     use super::*;
     use crate::common::network::ByteBufferSend;
     use crate::common::network::PlaintextChannelBuilder;
+    use crate::common::network::{InvalidReceiveError, auth_io_error};
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -3744,5 +3759,46 @@ mod tests {
             selector.close_channel(id).await;
         }
         selector.poll(0).await.unwrap();
+    }
+
+    /// The `catch` in Java's `pollSelectionKeys` logs the error closing a channel
+    /// at one of three levels (`Selector.java:600-626`). An invalid receive is a
+    /// `KafkaException`, so it takes the WARN "Unexpected error" branch (`:625`),
+    /// not the DEBUG disconnect every `IOException` gets (`:612`). Both selector
+    /// paths log through `channel_error_log`, so this pins the level and the text.
+    #[test]
+    fn test_channel_error_log_routes_as_java_does() {
+        let desc = "127.0.0.1:9092 (channelId=0)";
+
+        let invalid = io::Error::from(InvalidReceiveError::new("Invalid receive (size = -1)"));
+        assert_eq!(
+            (
+                log::Level::Warn,
+                "Unexpected error from 127.0.0.1:9092 (channelId=0); closing connection: \
+                 InvalidReceiveError: Invalid receive (size = -1)"
+                    .to_string()
+            ),
+            channel_error_log(desc, &invalid)
+        );
+
+        let reset = io::Error::new(io::ErrorKind::ConnectionReset, "Connection reset by peer (os error 104)");
+        assert_eq!(
+            (
+                log::Level::Debug,
+                "Connection with 127.0.0.1:9092 (channelId=0) disconnected: Connection reset by peer (os error 104)"
+                    .to_string()
+            ),
+            channel_error_log(desc, &reset)
+        );
+
+        let auth = auth_io_error("bad credentials");
+        assert_eq!(
+            (
+                log::Level::Error,
+                "Failed authentication with 127.0.0.1:9092 (channelId=0) (AuthenticationError: bad credentials)"
+                    .to_string()
+            ),
+            channel_error_log(desc, &auth)
+        );
     }
 }

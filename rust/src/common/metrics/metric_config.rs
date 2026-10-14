@@ -122,9 +122,14 @@ impl MetricConfig {
         self.samples
     }
 
-    /// Set the number of samples. Panics if `samples < 1`, mirroring Java's
-    /// `IllegalArgumentException` — this is a configuration-time programming
-    /// error rather than a recoverable runtime condition.
+    /// Set the number of samples.
+    ///
+    /// # Panics
+    ///
+    /// If `samples < 1`, mirroring Java's `IllegalArgumentException` — a
+    /// broken argument precondition rather than a recoverable runtime
+    /// condition. The client configs reject `metrics.num.samples` below 1
+    /// before it reaches here, as Java's `atLeast(1)` does.
     #[doc(alias = "org.apache.kafka.common.metrics.MetricConfig#samples")]
     pub fn set_samples(mut self, samples: i32) -> Self {
         assert!(samples >= 1, "The number of samples must be at least 1.");
@@ -165,5 +170,11 @@ mod tests {
     #[should_panic(expected = "The number of samples must be at least 1.")]
     fn samples_below_one_panics() {
         let _ = MetricConfig::new().set_samples(0);
+    }
+
+    #[test]
+    fn samples_at_the_bounds_are_accepted() {
+        assert_eq!(MetricConfig::new().set_samples(1).samples(), 1);
+        assert_eq!(MetricConfig::new().set_samples(i32::MAX).samples(), i32::MAX);
     }
 }

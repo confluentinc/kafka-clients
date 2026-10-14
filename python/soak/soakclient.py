@@ -188,8 +188,13 @@ CONSUMER_CONFIG_KEYS = frozenset([
 ACCEPTED_CONFIG_PREFIXES = ("ssl.",)
 
 # Protocol error codes (src/common/protocol/errors.rs) used to classify the
-# errors a broker roll produces. Client-side errors (Wakeup, Timeout, ...) all
-# report UnknownServerError (-1), so they are classified by message instead.
+# errors a broker roll produces. Wakeup and the other client-only errors have
+# negative FFI ids (WAKEUP is -18), which these tables do not list, so a wakeup
+# is recognized by its WakeupError type or its message. A client-side
+# TimeoutError (Java's common.errors.TimeoutException) carries REQUEST_TIMED_OUT
+# (7), which DISCONNECT_ERROR_CODES lists; only the root confluent_kafka
+# TimeoutError (java.util.concurrent's, LOCAL_TIMEOUT -5) is negative, and it is
+# caught by DISCONNECT_MESSAGE_MARKERS.
 COORDINATOR_ERROR_CODES = frozenset([
     14,  # CoordinatorLoadInProgress
     15,  # CoordinatorNotAvailable
@@ -267,9 +272,12 @@ def _bindings():
     ``OffsetAndMetadata``, plus ``KafkaError`` / ``RecordMetadata`` for callers
     that want the types themselves.
 
-    The bindings install *flat* top-level modules (`producer`, `consumer`);
-    there is no package, so nothing in this directory may be named producer.py
-    or consumer.py.
+    The producer and consumer come from the ``confluent_kafka`` package
+    (``confluent_kafka.producer`` / ``.consumer`` / ``.common``), whose API is
+    keyword-only with accessor *methods* (``record.value()``, ``tp.topic()``).
+    Topic administration still goes through the flat, paused ``admin`` module,
+    whose ``KafkaError`` is the flat admin error type (``code`` / ``message`` /
+    ``is_retriable`` properties).
 
     Raises ``RuntimeError`` with an actionable message rather than letting a bare
     ``ModuleNotFoundError`` escape — the overwhelmingly likely cause is that
@@ -279,8 +287,11 @@ def _bindings():
     if _BINDINGS is None:
         try:
             import admin as _admin
-            import consumer as _consumer
-            import producer as _producer
+            from confluent_kafka.common import TopicPartition
+            from confluent_kafka.common.serialization import memoryview_deserializer
+            from confluent_kafka.consumer import KafkaConsumer, OffsetAndMetadata
+            from confluent_kafka.producer import (KafkaProducer, ProducerRecord,
+                                                  RecordMetadata)
         except ImportError as ex:
             raise RuntimeError(
                 "the Rust client's Python bindings are not importable ({}). Run "
@@ -289,13 +300,14 @@ def _bindings():
                 "includes <threads.h> (C11 threads), which macOS does not "
                 "ship.".format(ex)) from ex
         _BINDINGS = types.SimpleNamespace(
-            KafkaProducer=_producer.KafkaProducer,
-            ProducerRecord=_producer.ProducerRecord,
-            RecordMetadata=_producer.RecordMetadata,
-            KafkaError=_producer.KafkaError,
-            KafkaConsumer=_consumer.KafkaConsumer,
-            TopicPartition=_consumer.TopicPartition,
-            OffsetAndMetadata=_consumer.OffsetAndMetadata,
+            KafkaProducer=KafkaProducer,
+            ProducerRecord=ProducerRecord,
+            RecordMetadata=RecordMetadata,
+            KafkaConsumer=KafkaConsumer,
+            TopicPartition=TopicPartition,
+            OffsetAndMetadata=OffsetAndMetadata,
+            memoryview_deserializer=memoryview_deserializer,
+            KafkaError=_admin.KafkaError,
             AdminClient=_admin.AdminClient,
             NewTopic=_admin.NewTopic,
         )
@@ -305,27 +317,59 @@ def _bindings():
 def error_message(ex):
     """The message of a client error, without needing its type.
 
-    ``KafkaError`` exposes ``message`` as a property; anything else falls back to
-    ``str(ex)``. Read by duck typing so the error-classification helpers stay
-    importable — and unit-testable — without the bindings.
+    The admin binding's flat ``KafkaError`` exposes ``message`` as a property;
+    anything else — including every ``confluent_kafka`` error, whose ``str()`` is
+    Java's ``getMessage()`` — falls back to ``str(ex)``. Read by duck typing so the
+    error-classification helpers stay importable — and unit-testable — without
+    the bindings.
     """
     message = getattr(ex, "message", None)
     return message if isinstance(message, str) else str(ex)
 
 
+def _is_int_code(code):
+    return isinstance(code, int) and not isinstance(code, bool)
+
+
 def error_code(ex):
     """The protocol error code of a client error, or ``None``.
 
-    ``KafkaError.code`` is an ``int`` property. Duck-typed for the same reason as
-    :func:`error_message`.
+    The admin binding's flat ``KafkaError.code`` is an ``int`` property. A
+    ``confluent_kafka`` error has no ``code()`` (its type is the predicate), so
+    the class's FFI id is read instead: it equals Java's wire code for every API
+    error (``NotCoordinatorError`` -> 16), which is what the code tables above are
+    keyed by, and is a distinct negative id for a client-side error. Duck-typed
+    for the same reason as :func:`error_message`.
     """
     code = getattr(ex, "code", None)
-    return code if isinstance(code, int) and not isinstance(code, bool) else None
+    if _is_int_code(code):
+        return code
+    ffi_id = getattr(type(ex), "_ffi_id", None)
+    return ffi_id if _is_int_code(ffi_id) else None
+
+
+def _error_class(name):
+    """A ``confluent_kafka.common.errors`` class by name, or ``None`` when the
+    bindings are not importable (so this module stays importable without them)."""
+    try:
+        from confluent_kafka.common import errors
+    except ImportError:
+        return None
+    return getattr(errors, name, None)
 
 
 def error_is_retriable(ex):
-    """Whether a client error advertises itself as retriable."""
-    return getattr(ex, "is_retriable", False) is True
+    """Whether a client error advertises itself as retriable.
+
+    The admin binding's flat ``KafkaError`` carries an ``is_retriable`` property;
+    a ``confluent_kafka`` error is retriable when it is a ``RetriableError``
+    (Java's ``RetriableException``), the same set ``Error::is_retriable_error()``
+    answers for.
+    """
+    if getattr(ex, "is_retriable", False) is True:
+        return True
+    retriable = _error_class("RetriableError")
+    return retriable is not None and isinstance(ex, retriable)
 
 
 class SoakRecord(object):
@@ -334,13 +378,10 @@ class SoakRecord(object):
     ``b"{msgid}|{send_time_ms}|{txcnt}|" + padding``
 
     The Python soak client stamps ``msgid`` / ``time`` / ``txcnt`` as *record
-    headers*. This binding cannot: ``ProducerRecord`` accepts only
-    ``{topic, value, key, partition, timestamp}``, and the underlying
-    ``kafka_producer_ProducerRecord_t`` has no headers field at all, so all four
-    FFI send paths pass NULL headers. Producing headers is a client-side gap
-    tracked separately; the soak therefore carries the same three fields inside
-    the value, which costs nothing and keeps the end-to-end latency measurement
-    intact.
+    headers*. This soak was written when the binding could not send headers, so
+    it carries the same three fields inside the value; the format is kept so
+    runs stay comparable. It costs nothing and keeps the end-to-end latency
+    measurement intact.
 
     Padding brings the serialized record up to the profile's target payload
     size, so ``848-hi-throughput-*`` exercises ~10 KB records at the same
@@ -392,7 +433,7 @@ class SoakRecord(object):
         """
         if binstr is None:
             raise ValueError("empty payload (None)")
-        # `record.value` is a zero-copy memoryview over the fetch batch; copy
+        # `record.value()` is a zero-copy memoryview over the fetch batch; copy
         # before parsing so nothing is retained past the poll loop.
         data = bytes(binstr)
         parts = data.split(b"|", 3)
@@ -1251,10 +1292,16 @@ class SoakClient(object):
         # Both clients are constructed before either thread starts, so a
         # failure here cannot leave the producer running with no consumer.
         self.logger.info("producer: using client.id %s", pconf['client.id'])
-        self.producer = bindings.KafkaProducer(pconf)
+        self.producer = bindings.KafkaProducer(configs=pconf)
 
         self.logger.info("consumer: using group.id %s", cconf.get('group.id'))
-        self.consumer = bindings.KafkaConsumer(cconf)
+        # memoryview deserializers: the record value stays a zero-copy view over
+        # the fetch batch (SoakRecord.deserialize copies it before parsing), so
+        # the soak measures the client without a per-record copy of its own.
+        self.consumer = bindings.KafkaConsumer(
+            configs=cconf,
+            key_deserializer=bindings.memoryview_deserializer(),
+            value_deserializer=bindings.memoryview_deserializer())
 
         # Counters that must appear in the metrics even while they stay at
         # zero. producer.errorcb / consumer.errorcb have no source in this
@@ -1413,8 +1460,8 @@ class SoakClient(object):
         """Account for one successful delivery report.
 
         ``metadata`` is a ``RecordMetadata``, whose accessors are *methods*
-        (``offset()``, ``topic()``, ``partition()``, ``timestamp()``) — unlike
-        ``ConsumerRecord``'s, which are properties.
+        (``offset()``, ``topic()``, ``partition()``, ``timestamp()``), as are
+        ``ConsumerRecord``'s.
         """
         with self._lock:
             self.dr_cnt += 1
@@ -1438,11 +1485,11 @@ class SoakClient(object):
                     self.outstanding -= 1
             self._record_delivery(metadata, (time.time() - sent_at) * 1000.0)
         except Exception as ex:
-            # A failed send raises KafkaError through the future; a cancelled
-            # one raises CancelledError. Both are counted the same way, and the
-            # error's code/message are read by duck typing (error_code /
-            # error_message) rather than by isinstance, so this file needs no
-            # module-scope KafkaError.
+            # A failed send raises its error through the future (the future
+            # cannot be cancelled, and close() does not cancel it: it waits for
+            # the in-flight sends, as Java's does). The error's code/message are
+            # read by duck typing (error_code / error_message) rather than by
+            # isinstance, so this file needs no module-scope KafkaError.
             with self._lock:
                 self.dr_err_cnt += 1
             code = error_code(ex)
@@ -1469,13 +1516,14 @@ class SoakClient(object):
         while self.run and txcnt < self.max_send_attempts:
             txcnt += 1
             record = SoakRecord(msgid, txcnt=txcnt)
-            producer_record = self._ProducerRecord(self.topic, record.serialize())
+            producer_record = self._ProducerRecord(topic=self.topic,
+                                                   value=record.serialize())
 
             with self._lock:
                 self.outstanding += 1
             sent_at = time.time()
             try:
-                future = self.producer.send(producer_record)
+                future = self.producer.send(record=producer_record)
             except Exception as ex:
                 with self._lock:
                     self.outstanding -= 1
@@ -1599,13 +1647,12 @@ class SoakClient(object):
     def _check_assignment(self, previous):
         """Report assignment changes — the only rebalance signal available.
 
-        The binding bridges no ``ConsumerRebalanceListener`` callbacks (see
-        consumer.py's module docstring), so a rebalance is observed after the
-        fact, by polling ``assignment()``.
+        The soak registers no ``ConsumerRebalanceListener``, so a rebalance is
+        observed after the fact, by polling ``assignment()``.
         """
         try:
             current = frozenset(
-                (tp.topic, tp.partition) for tp in self.consumer.assignment())
+                (tp.topic(), tp.partition()) for tp in self.consumer.assignment())
         except Exception as ex:
             self.logger.warning("consumer: assignment() failed: %s", ex)
             return previous
@@ -1620,12 +1667,13 @@ class SoakClient(object):
 
     def _consume_record(self, record, hwmarks, pending):
         """Verify and account for one record."""
+        topic, partition, offset = record.topic(), record.partition(), record.offset()
         try:
-            soak_record = SoakRecord.deserialize(record.value)
+            soak_record = SoakRecord.deserialize(record.value())
         except ValueError as ex:
             self.logger.info(
                 "consumer: Failed to deserialize message in %s [%d] at offset "
-                "%d: %s", record.topic, record.partition, record.offset, ex)
+                "%d: %s", topic, partition, offset, ex)
             with self._lock:
                 self.msg_err_cnt += 1
             self.incr_counter("consumer.msgerr", 1)
@@ -1647,23 +1695,23 @@ class SoakClient(object):
         # `int(0.016) == 0` and reports p50/p90/p99/p999 as zero.
         latency_ms = (time.time() * 1000.0) - soak_record.send_time_ms
         self.set_gauge("consumer.e2e_latency", latency_ms,
-                       tags={"partition": "{}".format(record.partition)})
-        self.metrics.observe_message(record.serialized_value_size, latency_ms)
+                       tags={"partition": "{}".format(partition)})
+        self.metrics.observe_message(record.serialized_value_size(), latency_ms)
 
         if (msg_cnt % self.disprate) == 0:
             self.logger.info(
                 "consumer: %d messages consumed: Message %s [%d] at offset %d "
                 "(msgid %d, txcnt %d, latency %.1f ms)",
-                msg_cnt, record.topic, record.partition, record.offset,
+                msg_cnt, topic, partition, offset,
                 soak_record.msgid, soak_record.txcnt, latency_ms)
 
-        hwkey = "{}-{}".format(record.topic, record.partition)
-        duplicates, missed = hwmarks.observe(hwkey, record.offset)
+        hwkey = "{}-{}".format(topic, partition)
+        duplicates, missed = hwmarks.observe(hwkey, offset)
         if duplicates:
             self.logger.warning(
                 "consumer: Old or duplicate message %s [%d] at offset %d: "
                 "wanted a higher offset (%d duplicate(s), last committed %s)",
-                record.topic, record.partition, record.offset, duplicates,
+                topic, partition, offset, duplicates,
                 self.last_committed)
             with self._lock:
                 self.msg_dup_cnt += duplicates
@@ -1672,31 +1720,32 @@ class SoakClient(object):
             self.logger.warning(
                 "consumer: Lost messages, now at %s [%d] offset %d: "
                 "%d message(s) missed (last committed %s)",
-                record.topic, record.partition, record.offset, missed,
+                topic, partition, offset, missed,
                 self.last_committed)
             with self._lock:
                 self.msg_miss_cnt += missed
             self.incr_counter("consumer.missedmsg", missed)
 
-        pending[self._TopicPartition(record.topic, record.partition)] = \
-            self._OffsetAndMetadata(record.offset + 1)
+        pending[self._TopicPartition(topic=topic, partition=partition)] = \
+            self._OffsetAndMetadata(offset=offset + 1)
 
     @staticmethod
     def _is_wakeup(ex):
         """Whether an exception is this client's WakeupException equivalent.
 
-        Client-side errors carry no distinct protocol code (KafkaError::Wakeup
-        reports UnknownServerError, -1), so the message is the only signal.
+        A ``confluent_kafka`` wakeup raises ``WakeupError``; any other error is
+        classified by its message, the only signal a duck-typed error carries.
         """
+        wakeup = _error_class("WakeupError")
+        if wakeup is not None and isinstance(ex, wakeup):
+            return True
         return "wakeup" in error_message(ex).lower()
 
     def _commit(self, pending):
         """Commit the pending offsets synchronously.
 
-        ``commit_async()`` takes neither offsets nor a completion callback in
-        this binding, so the sync form is the only one whose failures can be
-        counted — which is the whole point of the Python soak's ``on_commit``
-        callback.
+        The sync form is used so every commit failure is counted inline, which
+        is the whole point of the Python soak's ``on_commit`` callback.
 
         A commit aborted by ``wakeup()`` is retried once rather than counted as
         a failure. ``wakeup()`` aborts exactly one blocking operation, and a
@@ -1708,7 +1757,7 @@ class SoakClient(object):
             return
         offsets = dict(pending)
         try:
-            self.consumer.commit(offsets)
+            self.consumer.commit(offsets=offsets)
         except Exception as ex:
             # KafkaError is an Exception subclass; _classify_error reads its
             # code/message by duck typing (error_code / error_message).
@@ -1717,12 +1766,12 @@ class SoakClient(object):
                 return
             self.logger.info("consumer: commit aborted by wakeup; retrying once")
             try:
-                self.consumer.commit(offsets)
+                self.consumer.commit(offsets=offsets)
             except Exception as retry_ex:
                 self._classify_error("consumer: offset commit failed", retry_ex)
                 return
         self.last_committed = {
-            "{}-{}".format(tp.topic, tp.partition): oam.offset
+            "{}-{}".format(tp.topic(), tp.partition()): oam.offset()
             for tp, oam in offsets.items()
         }
         pending.clear()
@@ -1760,7 +1809,7 @@ class SoakClient(object):
 
     def consumer_run(self):
         """Consumer main loop."""
-        self.consumer.subscribe([self.topic])
+        self.consumer.subscribe(topics=[self.topic])
 
         hwmarks = HighWaterMarks()
         pending = {}
@@ -1781,7 +1830,7 @@ class SoakClient(object):
 
             try:
                 # NOTE: poll() takes SECONDS (float) here, not milliseconds.
-                records = self.consumer.poll(self.poll_timeout)
+                records = self.consumer.poll(timeout=self.poll_timeout)
             except Exception as ex:
                 if not self.run:
                     break  # wakeup() from the signal handler

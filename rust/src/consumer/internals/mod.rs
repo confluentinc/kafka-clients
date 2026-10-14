@@ -101,7 +101,9 @@ pub(crate) use member_state::MemberState;
 pub(crate) use member_state_listener::MemberStateListener;
 pub(crate) use network_client_delegate::{NetworkClientDelegate, PollResult, UnsentRequest};
 pub(crate) use offset_and_timestamp_internal::OffsetAndTimestampInternal;
-pub(crate) use offset_commit_callback_invoker::{AutoCommitInterceptorHook, OffsetCommitCallbackInvoker};
+pub(crate) use offset_commit_callback_invoker::{
+    AutoCommitInterceptorHook, OffsetCommitCallbackInvoker, OffsetCommitCallbackQueue,
+};
 pub(crate) use offset_fetcher_utils::{ListOffsetData, ListOffsetResult, OffsetFetcherUtils};
 pub(crate) use offsets_for_leader_epoch_client::{OffsetForEpochResult, OffsetsForLeaderEpochClient};
 pub(crate) use offsets_request_manager::OffsetsRequestManager;

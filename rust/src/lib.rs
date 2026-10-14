@@ -46,7 +46,6 @@ mod kafka_client;
 mod least_loaded_node;
 #[expect(dead_code)]
 mod metadata;
-#[cfg_attr(not(test), expect(dead_code))]
 mod metadata_recovery_strategy;
 mod metadata_snapshot;
 mod metadata_updater;
@@ -128,3 +127,8 @@ pub(crate) mod test_generated {
 // module docs. The public-API suites stay in `tests/integration`.
 #[cfg(all(test, feature = "integration-tests"))]
 mod integration_tests;
+// The shared `tests/common` harness, compiled into `integration_tests` by path,
+// names the crate `confluent_kafka::` as the external `tests/integration` binary
+// does; this alias resolves those paths inside the crate's own test binary.
+#[cfg(all(test, feature = "integration-tests"))]
+extern crate self as confluent_kafka;
