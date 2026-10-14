@@ -4095,7 +4095,8 @@ fn generate_array_element_read_to_vec(
 }
 
 /// `java_name` is the array field's Java `camelCaseName()`; an element string's
-/// length-guard message names it `"<name> element"`, as Java's does.
+/// null and length-guard messages name it `"<name> element"`, as Java's do
+/// (`MessageDataGenerator.java:708-716`).
 fn generate_array_element_read_with_prefix(
     file: &mut fs::File,
     element_type: &FieldType,
@@ -4135,24 +4136,34 @@ fn generate_array_element_read_with_prefix(
             writeln!(file, "                {}.push(readable.read_double()?);", target)?;
         },
         FieldType::String => {
+            // Elements are non-nullable (`Versions.NONE`, `MessageDataGenerator.java:712`),
+            // so Java throws on a length that encodes null (`:644-648`), before the `0x7fff`
+            // guard: a negative standard-encoding length, or a compact length of 0, which
+            // Java reads as `readUnsignedVarint() - 1` = -1 (`:633`). An empty compact
+            // string is 1, not 0. Check the standard length before the `usize` cast: a
+            // negative `i16` sign-extends to a huge size, which `read_array` rejects, but
+            // not with Java's message.
+            let null_action = format!(
+                "return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, \"non-nullable field {} was serialized as null\"));",
+                element_name
+            );
             if !flexible_versions.empty() {
                 if flexible_versions.lowest() == 0 {
                     // All versions flexible: use compact encoding
                     writeln!(file, "                let str_len = readable.read_unsigned_varint()?;")?;
                     writeln!(file, "                if str_len == 0 {{")?;
-                    writeln!(file, "                    {}.push(String::new());", target)?;
-                    writeln!(file, "                }} else {{")?;
-                    write_string_length_guard(file, "                    ", "(str_len - 1)", &element_name)?;
+                    writeln!(file, "                    {}", null_action)?;
+                    writeln!(file, "                }}")?;
+                    write_string_length_guard(file, "                ", "(str_len - 1)", &element_name)?;
                     writeln!(
                         file,
-                        "                    let bytes = readable.read_array((str_len - 1) as usize)?;"
+                        "                let bytes = readable.read_array((str_len - 1) as usize)?;"
                     )?;
                     writeln!(
                         file,
-                        "                    {}.push(String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);",
+                        "                {}.push(String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);",
                         target
                     )?;
-                    writeln!(file, "                }}")?;
                 } else {
                     // Mixed versions: check at runtime
                     if flexible_versions.highest() == i16::MAX {
@@ -4167,22 +4178,24 @@ fn generate_array_element_read_with_prefix(
                     }
                     writeln!(file, "                    let str_len = readable.read_unsigned_varint()?;")?;
                     writeln!(file, "                    if str_len == 0 {{")?;
-                    writeln!(file, "                        {}.push(String::new());", target)?;
-                    writeln!(file, "                    }} else {{")?;
-                    write_string_length_guard(file, "                        ", "(str_len - 1)", &element_name)?;
+                    writeln!(file, "                        {}", null_action)?;
+                    writeln!(file, "                    }}")?;
+                    write_string_length_guard(file, "                    ", "(str_len - 1)", &element_name)?;
                     writeln!(
                         file,
-                        "                        let bytes = readable.read_array((str_len - 1) as usize)?;"
+                        "                    let bytes = readable.read_array((str_len - 1) as usize)?;"
                     )?;
                     writeln!(
                         file,
-                        "                        {}.push(String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);",
+                        "                    {}.push(String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);",
                         target
                     )?;
-                    writeln!(file, "                    }}")?;
                     writeln!(file, "                }} else {{")?;
-                    writeln!(file, "                    let str_len = readable.read_short()? as usize;")?;
-                    writeln!(file, "                    let bytes = readable.read_array(str_len)?;")?;
+                    writeln!(file, "                    let str_len = readable.read_short()?;")?;
+                    writeln!(file, "                    if str_len < 0 {{")?;
+                    writeln!(file, "                        {}", null_action)?;
+                    writeln!(file, "                    }}")?;
+                    writeln!(file, "                    let bytes = readable.read_array(str_len as usize)?;")?;
                     writeln!(
                         file,
                         "                    {}.push(String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);",
@@ -4192,8 +4205,11 @@ fn generate_array_element_read_with_prefix(
                 }
             } else {
                 // No flexible versions: always use standard encoding
-                writeln!(file, "                let str_len = readable.read_short()? as usize;")?;
-                writeln!(file, "                let bytes = readable.read_array(str_len)?;")?;
+                writeln!(file, "                let str_len = readable.read_short()?;")?;
+                writeln!(file, "                if str_len < 0 {{")?;
+                writeln!(file, "                    {}", null_action)?;
+                writeln!(file, "                }}")?;
+                writeln!(file, "                let bytes = readable.read_array(str_len as usize)?;")?;
                 writeln!(
                     file,
                     "                {}.push(String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);",

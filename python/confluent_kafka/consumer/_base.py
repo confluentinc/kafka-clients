@@ -635,14 +635,18 @@ class _ConsumerState:
             return listener.on_partitions_assigned(partitions)  # type: ignore[func-returns-value]
         return listener.on_partitions_lost(partitions)  # type: ignore[func-returns-value]
 
-    def _next_pending(self, h: int) -> tuple[int, int, set[TopicPartition]] | None:
-        pending = _lib.Consumer_next_pending_callback(h)
-        if pending is None:
-            return None
-        method = _lib.PendingCallback_method(pending)
-        partitions = {TopicPartition(topic=t, partition=p)
-                      for (t, p) in _lib.PendingCallback_partitions(pending)}
-        return pending, method, partitions
+    @staticmethod
+    def _ack_pending(pending: int, error_handle: int, failed: bool) -> None:
+        """Ack an entry taken from the caller-thread queue with ``error_handle``
+        (0 when the listener returned), unparking the core. A failed listener
+        whose error could not be reported, because reporting it raised in turn
+        (a second Ctrl+C, say), fails with Java's wrapper message instead; it
+        counts as a success only if even that is interrupted."""
+        try:
+            if failed and not error_handle:
+                error_handle = _lib.KafkaError_new(KafkaError._ffi_id, _LISTENER_ERROR_MESSAGE)
+        finally:
+            _lib.Consumer_ack_pending_callback(pending, error_handle)
 
     @staticmethod
     def _listener_failure(exc: BaseException, errors: _ListenerErrors) -> int:
@@ -684,61 +688,79 @@ class _ConsumerState:
         core), after the commit callbacks the helper thread handed to this call
         (``forward``).
 
+        An entry is acked once from the moment it is taken, whatever is raised
+        meanwhile, Ctrl+C included: an exception before the ack fails the
+        listener, as a listener that throws, so neither the call parked on the
+        entry nor ``destroy`` waits for an ack that never comes. Only the
+        instant between the C call returning the entry and its being stored is
+        not covered, and for an entry handed over, the one before
+        ``_await_listener`` starts.
+
         A coroutine listener needs an event loop: with ``handoff`` the drain
-        stops and returns the entry with its awaitable, unacked (the caller
-        awaits it on the loop); otherwise it is closed and the rebalance fails
-        with a ``TypeError``."""
+        stops and returns the entry with its awaitable, unacked, and the caller
+        awaits it on the loop with ``_await_listener``, which acks it; otherwise
+        it is closed and the rebalance fails with a ``TypeError``."""
         while True:
             if forward is not None:
                 forward.run_pending()
-            entry = self._next_pending(h)
-            if entry is None:
-                return None
-            pending, method, partitions = entry
-            if method == _PENDING_COMMIT:
-                # The ack runs the commit callback (the adapter) on this thread.
-                _lib.Consumer_ack_pending_callback(pending, 0)
-                continue
+            pending: int | None = None
             error_handle = 0
-            interrupted: KeyboardInterrupt | None = None
-            token = self._enter_callback()
+            failure: BaseException | None = None
             try:
-                result = self._invoke_listener(method, partitions)
-                if inspect.isawaitable(result):
-                    if handoff:
-                        return pending, cast("Awaitable[object]", result)
-                    close = getattr(result, "close", None)
-                    if callable(close):
-                        close()
-                    raise TypeError("a coroutine rebalance listener requires an AsyncConsumer")
+                pending = _lib.Consumer_next_pending_callback(h)
+                if pending is None:
+                    return None
+                method = _lib.PendingCallback_method(pending)
+                if method == _PENDING_COMMIT:
+                    # The ack runs the commit callback (the adapter) on this thread.
+                    continue
+                partitions = {TopicPartition(topic=t, partition=p)
+                              for (t, p) in _lib.PendingCallback_partitions(pending)}
+                token = self._enter_callback()
+                try:
+                    result = self._invoke_listener(method, partitions)
+                    awaited = inspect.isawaitable(result)
+                    if awaited and not handoff:
+                        close = getattr(result, "close", None)
+                        if callable(close):
+                            close()
+                        raise TypeError("a coroutine rebalance listener requires an AsyncConsumer")
+                finally:
+                    self._exit_callback(token)
+                if awaited:
+                    awaitable = cast("Awaitable[object]", result)
+                    # Handed over: from here the caller acks it.
+                    handed, pending = pending, None
+                    return handed, awaitable
             except BaseException as exc:  # noqa: BLE001 - reported to the core
+                failure = exc
                 error_handle = self._listener_failure(exc, errors)
-                if isinstance(exc, KeyboardInterrupt):
-                    interrupted = exc
             finally:
-                self._exit_callback(token)
-            _lib.Consumer_ack_pending_callback(pending, error_handle)
-            if interrupted is not None:
-                raise interrupted
+                if pending is not None:
+                    self._ack_pending(pending, error_handle, failure is not None)
+            if isinstance(failure, KeyboardInterrupt):
+                raise failure
 
     async def _await_listener(self, pending: int, awaitable: Awaitable[object],
                               errors: _ListenerErrors) -> None:
         """Await a coroutine listener's result on this loop, inside the callback
-        window, and ack its entry."""
+        window, and ack the entry the drain handed over, once, whatever is
+        raised meanwhile (see ``_drain_pending``)."""
         error_handle = 0
-        cancelled: BaseException | None = None
-        token = self._enter_callback()
+        failure: BaseException | None = None
         try:
-            await awaitable
+            token = self._enter_callback()
+            try:
+                await awaitable
+            finally:
+                self._exit_callback(token)
         except BaseException as exc:  # noqa: BLE001 - reported to the core
+            failure = exc
             error_handle = self._listener_failure(exc, errors)
-            if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt)):
-                cancelled = exc
         finally:
-            self._exit_callback(token)
-        _lib.Consumer_ack_pending_callback(pending, error_handle)
-        if cancelled is not None:
-            raise cancelled
+            self._ack_pending(pending, error_handle, failure is not None)
+        if isinstance(failure, (asyncio.CancelledError, KeyboardInterrupt)):
+            raise failure
 
     async def _drain_pending_async(self, h: int, errors: _ListenerErrors,
                                    forward: _Forward | None = None) -> None:
