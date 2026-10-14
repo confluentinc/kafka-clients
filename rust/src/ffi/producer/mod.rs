@@ -2377,7 +2377,8 @@ mod tests {
         }
     }
 
-    /// A delivery callback that never reports; the destroy completes it.
+    /// A delivery callback that never reports (the mock never completes the
+    /// record, so it never fires either).
     unsafe extern "C" fn unreported(
         _self: *mut c_void,
         _metadata: *const kafka_producer_RecordMetadata_t,

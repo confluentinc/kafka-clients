@@ -52,9 +52,9 @@
 //! callback inline, the same way, as for a future with no client. A blocking
 //! `get` still waiting when the client is destroyed returns the same way once
 //! the destroy has stopped the client's background work, and a `get` after
-//! that returns at once. While the destroy
-//! stops the client's runtime, a `get_with_timeout` waits without its
-//! timeout, since the runtime's timers stop with it.
+//! that returns at once. While the destroy stops the client's runtime, a
+//! `get_with_timeout` waits without its timeout, since the runtime's timers
+//! stop with it.
 
 // FFI type names follow the kafka_<TypeName>_<method> convention with PascalCase
 // type names, which intentionally differs from Rust's snake_case convention.
@@ -234,9 +234,9 @@ impl FutureInner {
         match &self.runtime {
             Some(runtime) => {
                 let value = match &self.queue {
-                    // The client is stopped: every future of it that will ever
-                    // complete has (a producer's `_destroy` completes every record
-                    // still awaiting its report), so nothing is left to wait for.
+                    // The client is stopped: only the destroy's last callbacks can
+                    // still complete a future of it, and a wait here may be one of
+                    // them, so it answers what the future holds now.
                     Some(queue) if queue.is_client_stopped() => return self.resolve_now(),
                     Some(queue) if self.drains_queue => self.resolve_draining(runtime, queue, timeout)?,
                     Some(queue) => block_on(runtime, self.resolve_until_stopped(queue, timeout))?,

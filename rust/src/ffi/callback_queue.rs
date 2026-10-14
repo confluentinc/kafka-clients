@@ -95,9 +95,10 @@ pub(crate) struct CallbackQueue {
     /// waits on (see `ffi::kafka_future`).
     client_stopping: CancellationToken,
     /// Cancelled by [`mark_client_stopped`](Self::mark_client_stopped) once
-    /// the client's background work is gone, so nothing will complete a
-    /// future of it any more: a blocking `KafkaFuture_get` waiting on one
-    /// then answers instead of waiting forever (see `ffi::kafka_future`).
+    /// the client's background work is gone, so only the queue's last
+    /// callbacks can complete a future of it: a blocking `KafkaFuture_get`
+    /// waiting on one then answers instead of waiting forever (see
+    /// `ffi::kafka_future`).
     client_stopped: CancellationToken,
 }
 
