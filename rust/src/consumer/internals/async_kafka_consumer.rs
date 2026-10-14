@@ -1020,7 +1020,7 @@ impl AsyncConsumerHandleState {
         let now_ms = self.time.milliseconds();
         let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
         let receiver = self
-            .commit(CommitEventKind::Sync { offsets, deadline_ms }, /* enable_wakeup = */ true)
+            .commit(CommitEventKind::Sync { offsets, deadline_ms })
             .await?
             .unwrap_or_else(completed_commit_result);
 
@@ -1080,9 +1080,7 @@ impl AsyncConsumerHandleState {
     ) -> Result<(), Error> {
         // Java's commitAsync is non-blocking and never throws Wakeup: the
         // offsets-ready wait runs with wakeup disabled.
-        let receiver = self
-            .commit(CommitEventKind::Async { offsets }, /* enable_wakeup = */ false)
-            .await?;
+        let receiver = self.commit(CommitEventKind::Async { offsets }).await?;
         self.commit_state.register_async_commit(receiver, callback);
         Ok(())
     }
@@ -1090,11 +1088,7 @@ impl AsyncConsumerHandleState {
     /// Java's `commit(CommitEvent)` (`AsyncKafkaConsumer.java:1126-1140`) for
     /// a handle: [`AsyncCommitState::submit_commit`], then the offsets-ready
     /// wait, bounded by `default.api.timeout.ms` as the consumer's.
-    async fn commit(
-        &self,
-        commit_event: CommitEventKind,
-        enable_wakeup: bool,
-    ) -> Result<Option<CommitResultReceiver>, Error> {
+    async fn commit(&self, commit_event: CommitEventKind) -> Result<Option<CommitResultReceiver>, Error> {
         let Some((offsets_ready_rx, receiver)) = self
             .commit_state
             .submit_commit(
@@ -1107,11 +1101,14 @@ impl AsyncConsumerHandleState {
         else {
             return Ok(None);
         };
+        // Not wakeable, as Java's `offsetsReady` wait
+        // (`AsyncKafkaConsumer.java:1136-1138`): see
+        // `AsyncKafkaConsumer::commit_inner`.
         self.await_completion::<()>(
             offsets_ready_rx,
             self.default_api_timeout_deadline_ms(),
             OFFSETS_READY_TIMEOUT_MSG,
-            enable_wakeup,
+            /* enable_wakeup = */ false,
         )
         .await?;
         Ok(Some(receiver))
@@ -5267,11 +5264,7 @@ where
     /// for empty explicit offsets (Java's `completedFuture(null)`). Callers
     /// either await it (sync path) or attach a spawned-task continuation
     /// (async path).
-    async fn commit_inner(
-        &mut self,
-        commit_event: CommitEventKind,
-        enable_wakeup: bool,
-    ) -> Result<Option<CommitResultReceiver>, Error> {
+    async fn commit_inner(&mut self, commit_event: CommitEventKind) -> Result<Option<CommitResultReceiver>, Error> {
         let Some((offsets_ready_rx, receiver)) = self
             .commit_state
             .submit_commit(
@@ -5294,23 +5287,23 @@ where
         // the caller's task instead of blocking the bg task on its
         // ack.
         //
-        // Wakeup observation is per-caller: `commit_sync` passes
-        // `enable_wakeup=true` to match Java's `setActiveTask(commitFuture)`
-        // contract (every user-blocking phase of commit_sync responds to
-        // wakeup, so we tighten the offsets-ready wait too — Java's
-        // `setActiveTask` happens after this wait, but the uniform
-        // wakeup-observable semantic across all phases of commit_sync is
-        // more useful than strict Java parity here). `commit_async` passes
-        // `enable_wakeup=false` because Java's `commitAsync` is documented
-        // as non-blocking and never throws `WakeupException` — Issue 22
-        // regression (`AsyncKafkaConsumer.java:1684-1700`).
+        // The wait is not wakeable, for `commit_sync` as for `commit_async`:
+        // Java waits on `offsetsReady` without `setActiveTask`
+        // (`AsyncKafkaConsumer.java:1136-1138`), so a woken `commitSync` throws
+        // only after the background task has snapshotted the offsets
+        // (`ApplicationEventProcessor.java:278-281`), from its later
+        // wakeup-registered waits (`:1801-1804`). Waking it here could return
+        // `WakeupError` with the `CommitSync` event not yet processed, and a
+        // `poll` after it could advance the positions the woken commit then
+        // snapshots. `commitAsync` never throws `WakeupException` either
+        // (`AsyncKafkaConsumer.java:1684-1700`, Issue 22).
         let or_deadline_ms = self.default_api_timeout_deadline_ms();
         self.process_background_events_until::<()>(
             offsets_ready_rx,
             or_deadline_ms,
             |_| false,
             OFFSETS_READY_TIMEOUT_MSG,
-            enable_wakeup,
+            /* enable_wakeup = */ false,
         )
         .await?;
 
@@ -5397,7 +5390,7 @@ where
         let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
 
         let receiver = self
-            .commit_inner(CommitEventKind::Sync { offsets, deadline_ms }, /* enable_wakeup = */ true)
+            .commit_inner(CommitEventKind::Sync { offsets, deadline_ms })
             .await?
             .unwrap_or_else(completed_commit_result);
 
@@ -5477,12 +5470,9 @@ where
         self.ensure_open()?;
         // Issue 22 / `AsyncKafkaConsumer.java:1684-1700`: Java's
         // `commitAsync` is documented as non-blocking and never throws
-        // `WakeupException`. Pass `enable_wakeup=false` so a concurrent
-        // `wakeup()` does NOT interrupt the preliminary offsets-ready
-        // wait — the commit completes normally on the bg task.
-        let receiver = self
-            .commit_inner(CommitEventKind::Async { offsets }, /* enable_wakeup = */ false)
-            .await?;
+        // `WakeupException`; `commit_inner`'s offsets-ready wait is not
+        // wakeable, so the commit completes normally on the bg task.
+        let receiver = self.commit_inner(CommitEventKind::Async { offsets }).await?;
         self.commit_state.register_async_commit(receiver, callback);
         Ok(())
     }
@@ -9252,16 +9242,52 @@ mod tests {
         }
     }
 
-    /// Issue 11 regression: a blocking API with `enable_wakeup=true`
-    /// (`commit_sync`, here) must observe a `wakeup()` posted by
-    /// another task and return `Error::Wakeup`. This mirrors
-    /// Java's `wakeupTrigger.setActiveTask(commitFuture)` discipline at
-    /// `AsyncKafkaConsumer.java:1716`.
+    /// Stands in for the bg task's `CommitSync` handling
+    /// (`ApplicationEventProcessor.java:278-281`): on the first `CommitSync`
+    /// it logs `"snapshot"`, after `before_snapshot` (when given) has run and
+    /// 200 ms have passed, then marks the offsets ready and keeps the commit future pending, so
+    /// the commit's later wait is the one a wakeup ends. Every
+    /// `CommitSync` after it completes at once.
+    fn spawn_commit_sync_snapshotter(
+        mut app_event_rx: mpsc::UnboundedReceiver<ApplicationEventEnvelope>,
+        log: Arc<Mutex<Vec<&'static str>>>,
+        before_snapshot: Option<Box<dyn FnOnce() + Send>>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut before_snapshot = before_snapshot;
+            let mut pending = Vec::new();
+            while let Some(env) = app_event_rx.recv().await {
+                if let ApplicationEvent::CommitSync { handle, offsets_ready, .. } = env.event {
+                    if pending.is_empty() {
+                        if let Some(before) = before_snapshot.take() {
+                            before();
+                            // The commit is still waiting well after it.
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                        }
+                        log.lock().unwrap().push("snapshot");
+                        offsets_ready.complete(());
+                        // Held, so the commit future stays pending.
+                        pending.push(handle);
+                    } else {
+                        offsets_ready.complete(());
+                        handle.complete(HashMap::new());
+                    }
+                }
+            }
+        })
+    }
+
+    /// Issue 11 regression: `commit_sync` observes a pending `wakeup()` and
+    /// returns `Error::Wakeup`, at Java's point: only once the bg task has
+    /// snapshotted the offsets. Java's offsets-ready wait has no
+    /// `setActiveTask` (`AsyncKafkaConsumer.java:1136-1138`); its
+    /// `wakeupTrigger.setActiveTask(commitFuture)` comes after it (`:1804`).
     #[tokio::test]
     async fn issue_11_commit_sync_observes_wakeup_during_wait() {
-        let (mut consumer, _handles) = make_test_consumer_with_channels();
-        // Pre-cancel the wakeup token. The drain helper's top-of-loop
-        // `maybe_trigger_wakeup` check will see this and return.
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let ConsumerTestHandles { app_event_rx, bg_event_tx: _bg_event_tx, .. } = handles;
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let bg = spawn_commit_sync_snapshotter(app_event_rx, Arc::clone(&log), None);
         consumer.wakeup_trigger.wakeup();
 
         let err = consumer
@@ -9269,8 +9295,69 @@ mod tests {
             .await
             .expect_err("must wake up before deadline");
         assert!(matches!(err, Error::Wakeup(_)), "expected Wakeup, got {err:?}");
+        log.lock().unwrap().push("wakeup");
+        assert_eq!(*log.lock().unwrap(), vec!["snapshot", "wakeup"]);
         // Token rotated after the wakeup was surfaced.
         assert!(!consumer.wakeup_trigger.current_token().is_cancelled());
+        bg.abort();
+    }
+
+    /// A `wakeup()` while `commit_sync` waits for its offsets does not end
+    /// that wait: the commit raises `Error::Wakeup` only after the bg task has
+    /// snapshotted the offsets (`ApplicationEventProcessor.java:278-281`), so
+    /// a `poll` after the `WakeupError` cannot move the positions the woken
+    /// commit commits. Java's `offsetsReady` wait has no `setActiveTask`
+    /// (`AsyncKafkaConsumer.java:1136-1138`).
+    #[tokio::test]
+    async fn a_wakeup_during_the_offsets_ready_wait_is_raised_after_the_snapshot() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let ConsumerTestHandles { app_event_rx, bg_event_tx: _bg_event_tx, .. } = handles;
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let trigger = consumer.wakeup_trigger.clone();
+        let before_log = Arc::clone(&log);
+        // The wakeup lands while the commit waits for its offsets.
+        let before: Box<dyn FnOnce() + Send> = Box::new(move || {
+            trigger.wakeup();
+            before_log.lock().unwrap().push("wakeup()");
+        });
+        let bg = spawn_commit_sync_snapshotter(app_event_rx, Arc::clone(&log), Some(before));
+
+        let err = consumer
+            .commit_sync_with_timeout(Duration::from_secs(5))
+            .await
+            .expect_err("the wakeup is raised by the commit future's wait");
+        assert!(matches!(err, Error::Wakeup(_)), "expected Wakeup, got {err:?}");
+        log.lock().unwrap().push("WakeupError");
+        assert_eq!(*log.lock().unwrap(), vec!["wakeup()", "snapshot", "WakeupError"]);
+        assert!(!consumer.wakeup_trigger.current_token().is_cancelled());
+        bg.abort();
+    }
+
+    /// The same through a [`ConsumerHandle`]: its offsets-ready wait is not
+    /// wakeable either, and the wakeup is raised after the snapshot.
+    #[tokio::test]
+    async fn handle_a_wakeup_during_the_offsets_ready_wait_is_raised_after_the_snapshot() {
+        let (consumer, handles) = make_test_consumer_with_channels();
+        let ConsumerTestHandles { app_event_rx, bg_event_tx: _bg_event_tx, .. } = handles;
+        let handle = consumer.handle();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let waker = handle.clone();
+        let before_log = Arc::clone(&log);
+        let before: Box<dyn FnOnce() + Send> = Box::new(move || {
+            waker.wakeup();
+            before_log.lock().unwrap().push("wakeup()");
+        });
+        let bg = spawn_commit_sync_snapshotter(app_event_rx, Arc::clone(&log), Some(before));
+
+        let err = handle
+            .commit_sync()
+            .await
+            .expect_err("the wakeup is raised by the commit future's wait");
+        assert!(matches!(err, Error::Wakeup(_)), "expected Wakeup, got {err:?}");
+        log.lock().unwrap().push("WakeupError");
+        assert_eq!(*log.lock().unwrap(), vec!["wakeup()", "snapshot", "WakeupError"]);
+        bg.abort();
+        drop(consumer);
     }
 
     /// Issue 11 regression: `committed_with_timeout` ALSO observes wakeup
@@ -9815,11 +9902,9 @@ mod tests {
     #[tokio::test]
     async fn issue_22_commit_async_does_not_observe_wakeup() {
         let (mut consumer, mut handles) = make_test_consumer_with_channels();
-        // Pre-cancel the wakeup token. With Issue 22's fix
-        // (`enable_wakeup=false` in `commit_async`), this must not
-        // surface a Wakeup error from `commit_async`. Without the fix,
-        // the shared `commit_inner` would return Wakeup from the
-        // offsets-ready wait, which is a divergence from Java.
+        // Pre-cancel the wakeup token: `commit_async` must not surface a
+        // Wakeup error from the shared `commit_inner`'s offsets-ready wait,
+        // which is not wakeable (Java's `offsetsReady` wait).
         consumer.wakeup_trigger.wakeup();
 
         // Drainer: complete the CommitAsync envelope normally.
