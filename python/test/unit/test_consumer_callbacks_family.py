@@ -699,18 +699,18 @@ def async_ffi_mock() -> AsyncKafkaConsumer[bytes, bytes]:
     return cast("AsyncKafkaConsumer[bytes, bytes]", ffi_mock_backed(consumer))
 
 
-def rebalance_spec(consumer: Any) -> tuple[Any, Any, Any, float]:
+def rebalance_spec(consumer: Any) -> tuple[Any, Any, Any, bool]:
     """Drive ``MockConsumer.rebalance([TP])`` as a waiting call, collecting the
     garbage before the error is read back, so only the error keeps the
     listener's exception alive."""
-    submit, resolve, free, wake_until = consumer._void_spec(_lib.MockConsumer_rebalance_cb,
-                                                            [(TP.topic(), TP.partition())])
+    submit, resolve, free, wakeable = consumer._void_spec(_lib.MockConsumer_rebalance_cb,
+                                                          [(TP.topic(), TP.partition())])
 
     def collected_then_resolved(payload: tuple[Any, ...]) -> None:
         gc.collect()
         resolve(payload)
 
-    return submit, collected_then_resolved, free, wake_until
+    return submit, collected_then_resolved, free, wakeable
 
 
 class ListenerError(ValueError):

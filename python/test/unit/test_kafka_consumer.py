@@ -1574,18 +1574,31 @@ def _counting_wakeups(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     return wakeups
 
 
-@pytest.mark.parametrize("call", ["expired_poll", "poll", "commit"])
+# call -> (the poll timeout, or None for commit(); the seconds the callback
+# runs on after the cancellation).
+_CANCELLED_DURING_CALLBACK = {
+    "expired_poll": (0.0, 0.05),
+    "deadline_passes_in_callback": (0.3, 0.6),
+    "poll": (30.0, 0.05),
+    "commit": (None, 0.05),
+}
+
+
+@pytest.mark.parametrize("call", list(_CANCELLED_DURING_CALLBACK))
 def test_cancelling_a_call_awaiting_a_coroutine_commit_callback_it_delivered(
         call: str, monkeypatch: pytest.MonkeyPatch) -> None:
     # A wakeable call delivers a coroutine commit callback (Java's poll and
     # commitSync run executeCallbacks) and waits for its report; the call is
     # cancelled while the callback runs. The core operation checks for a
-    # wakeup after the report (the poll loop's maybeTriggerWakeup, commitSync's
-    # setActiveTask, AsyncKafkaConsumer.java:942-966, 1801-1804), so the
-    # consumer wakes it and the wakeup is consumed: the next poll returns. But a
-    # poll whose timeout has expired ends after the callback without another
-    # check, so it is not woken: a wakeup would stay armed and the next poll
+    # wakeup after the report (commitSync's setActiveTask,
+    # AsyncKafkaConsumer.java:1801-1804; poll's setFetchAction after an empty
+    # collectFetch(), AsyncKafkaConsumer.java:1964-2016, which Java runs also
+    # when the poll's timeout has expired), so the consumer wakes it and the
+    # wakeup is consumed: the next poll returns. That holds for a poll(0), and
+    # for a poll cancelled before its deadline whose callback ends after it.
+    # A wakeup the call did not consume would stay armed, and the next poll
     # would raise WakeupError although wakeup() was never called.
+    timeout, release_after = _CANCELLED_DURING_CALLBACK[call]
     wakeups = _counting_wakeups(monkeypatch)
 
     async def main() -> None:
@@ -1600,24 +1613,39 @@ def test_cancelling_a_call_awaiting_a_coroutine_commit_callback_it_delivered(
 
         await consumer.commit_nowait(offsets={}, callback=slow)
         running: asyncio.Future[Any]
-        if call == "expired_poll":
-            running = asyncio.ensure_future(consumer.poll(timeout=0))
-        elif call == "poll":
-            running = asyncio.ensure_future(consumer.poll(timeout=30))
-        else:
+        if timeout is None:
             running = asyncio.ensure_future(consumer.commit(offsets={}))
+        else:
+            running = asyncio.ensure_future(consumer.poll(timeout=timeout))
         await started.wait()
         running.cancel()
-        asyncio.get_running_loop().call_later(0.05, release.set)
+        asyncio.get_running_loop().call_later(release_after, release.set)
         start = time.monotonic()
         with pytest.raises(asyncio.CancelledError):
             await running
         assert time.monotonic() - start < 5
-        assert len(wakeups) == (0 if call == "expired_poll" else 1)
+        assert len(wakeups) == 1
         assert (await consumer.poll(timeout=0)).is_empty()
         await consumer.close(option=CloseOptions.timeout(0))
 
     asyncio.run(main())
+
+
+def test_a_wakeup_from_a_commit_callback_of_an_expired_poll_is_raised_by_that_poll() -> None:
+    # Java's testWakeupAfterEmptyFetch with no time left: a wakeup() sent while
+    # poll(0) runs a commit callback is raised by that poll, since Java's
+    # pollForFetches calls setFetchAction after the empty collectFetch()
+    # whatever the remaining time (AsyncKafkaConsumer.java:1964-2016). The
+    # next poll returns.
+    consumer = new_consumer()
+    try:
+        consumer.assign(partitions=[TP0])
+        consumer.commit_nowait(offsets={}, callback=lambda o, e: consumer.wakeup())
+        with pytest.raises(WakeupError):
+            consumer.poll(timeout=0)
+        assert consumer.poll(timeout=0).is_empty()
+    finally:
+        consumer.close(option=CloseOptions.timeout(0))
 
 
 def test_cancelling_a_call_whose_completion_is_queued_leaves_no_wakeup_armed(
@@ -1906,14 +1934,9 @@ def test_only_the_calls_java_wakes_are_woken() -> None:
             "beginning_offsets": c._long_offsets_spec(_lib.Consumer_beginning_offsets_cb, []),
             "close": c._close_spec(0, 0),
         }
-        woken = {name for name, (_, _, _, wake_until) in specs.items()
-                 if wake_until > -math.inf}
+        woken = {name for name, (_, _, _, wakeable) in specs.items() if wakeable}
         assert woken == {"poll", "commit", "position", "committed", "partitions_for",
                          "list_topics"}
-        # Only poll stops consuming a wakeup before it ends: once its timeout
-        # has expired (AsyncKafkaConsumer.java:942-966).
-        assert {name for name in woken if specs[name][3] < math.inf} == {"poll"}
-        assert specs["poll"][3] <= time.monotonic()
 
 
 class _InterruptedOnce(threading.Event):
