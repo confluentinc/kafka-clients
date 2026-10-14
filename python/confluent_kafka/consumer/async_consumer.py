@@ -33,7 +33,6 @@ Not generated: :class:`Consumer`'s omissions.
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, overload
 
@@ -71,8 +70,6 @@ __all__ = ["AsyncConsumer"]
 
 K = TypeVar("K")
 V = TypeVar("V")
-
-_LOG = logging.getLogger("confluent_kafka.consumer")
 
 
 class AsyncConsumer(Generic[K, V], _ConsumerState):
@@ -333,13 +330,13 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         timeout_ms = poll_timeout_ms(timeout)
         # A deferred error the poll keeps (see _run_async) is not raised by the
         # seeks back: the records go to the user first.
-        result: Deserialized = await self._run_async(*self._poll_spec(timeout_ms), site=_AT_POLL)
-        for partition, offset in result.rewind:
-            try:
-                await self._run_async(*self._seek_spec(partition, offset, None),
-                                      raise_deferred=False)
-            except Exception:  # noqa: BLE001 - the deserialization error matters
-                _LOG.exception("Could not seek %s back to offset %d", partition, offset)
+        result: Deserialized = await self._run_async(*self._poll_spec(timeout_ms), site=_AT_POLL,
+                                                     abandoned=self._fetched_positions)
+        cancelled = await self._rewind_async(result.rewind)
+        if cancelled is not None:
+            # Cancelled during the seeks back: the records are not returned either.
+            await self._rewind_async(result.unreturned())
+            raise cancelled
         if result.error is not None and result.records.is_empty():
             raise result.error
         return result.records

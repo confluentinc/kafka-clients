@@ -2108,6 +2108,185 @@ def test_ctrl_c_wakes_only_a_call_java_can_wake(
         consumer.close(option=CloseOptions.timeout(0))
 
 
+class _NativeRecord:
+    """A record of the native batch ``Consumer_poll_cb`` hands over; its value
+    is ``b"<partition>:<offset>"``."""
+
+    def __init__(self, tp: TopicPartition, offset: int) -> None:
+        self.topic = tp.topic()
+        self.partition = tp.partition()
+        self.offset = offset
+        self.timestamp = 0
+        self.timestamp_type = 0
+        self.serialized_key_size = -1
+        self.serialized_value_size = 3
+        self.key = None
+        self.value = memoryview(f"{tp.partition()}:{offset}".encode())
+        self.headers = ()
+        self.leader_epoch = None
+
+
+class _NativeBatch:
+    """The native ``ConsumerRecords`` batch: the records, then the next offsets."""
+
+    def __init__(self, records: list[_NativeRecord]) -> None:
+        self._records = records
+
+    def count(self) -> int:
+        return len(self._records)
+
+    def get(self, i: int) -> _NativeRecord:
+        return self._records[i]
+
+    def next_offsets(self) -> dict[tuple[str, int], tuple[int, str, int | None]]:
+        return {(r.topic, r.partition): (r.offset + 1, "", None) for r in self._records}
+
+
+TP1 = TopicPartition(topic=TOPIC, partition=1)
+
+
+class _FetchingCore:
+    """Stands for the core's fetch path: ``Consumer_poll_cb`` returns the
+    records of ``LOG`` (in its order, interleaving the partitions) from each
+    partition's position on, and moves the positions past them, as
+    ``FetchCollector`` sets the position while it collects; ``Consumer_seek_cb``
+    moves a position back (and seeks the core too). The poll's completion is
+    queued for a drain, which the notify of an async consumer's waiting call
+    has run, as the core's does. The first drain after a poll (``interrupt``)
+    or a seek (``interrupt_seek``) is submitted raises ``KeyboardInterrupt``, as
+    Ctrl+C landing while the call waits; the completion is held back, and not
+    notified, until ``release``, for a cancellation to land first."""
+
+    LOG = [(TP0, 3), (TP1, 7), (TP0, 4)]
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, consumer: Any) -> None:
+        self.positions = {TP0: 3, TP1: 7}
+        self.seeks: list[tuple[str, int, int]] = []
+        self.interrupt = False
+        self.interrupt_seek = False
+        self.release = True
+        self._pending: Callable[..., None] | None = None
+        self._interrupt_drain = False
+        real_execute = _lib.Consumer__execute_callbacks
+        real_seek = _lib.Consumer_seek_cb
+
+        def poll_cb(h: int, timeout_ms: int, cb: Callable[..., None]) -> None:
+            self._pending = cb
+            self._interrupt_drain = self.interrupt
+            if self.release:
+                for loop, pending in list(consumer._async_waiters):
+                    loop.call_soon_threadsafe(pending.set)
+
+        def seek_cb(h: int, topic: str, partition: int, offset: int,
+                    cb: Callable[..., None]) -> None:
+            self.seeks.append((topic, partition, offset))
+            self.positions[TopicPartition(topic=topic, partition=partition)] = offset
+            self._interrupt_drain, self.interrupt_seek = self.interrupt_seek, False
+            real_seek(h, topic, partition, offset, cb)
+
+        def execute(h: int) -> int:
+            if self._interrupt_drain:
+                self._interrupt_drain = False
+                raise KeyboardInterrupt
+            cb = self._pending
+            if cb is not None and self.release:
+                self._pending = None
+                cb(self._fetch(), 0)
+                return 1
+            return int(real_execute(h))
+
+        monkeypatch.setattr(_lib, "Consumer_poll_cb", poll_cb)
+        monkeypatch.setattr(_lib, "Consumer_seek_cb", seek_cb)
+        monkeypatch.setattr(_lib, "Consumer__execute_callbacks", execute)
+
+    def _fetch(self) -> _NativeBatch:
+        records = [_NativeRecord(tp, offset) for tp, offset in self.LOG
+                   if offset >= self.positions[tp]]
+        for record in records:
+            tp = TopicPartition(topic=record.topic, partition=record.partition)
+            self.positions[tp] = record.offset + 1
+        return _NativeBatch(records)
+
+
+def _fetched(records: Any) -> list[tuple[int, int]]:
+    return sorted((r.partition(), r.offset()) for r in records)
+
+
+def test_ctrl_c_during_a_poll_returning_records_seeks_them_back(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # Ctrl+C while a poll waits lets the core call end; when that call returns
+    # records (records already buffered come back before any wakeup check), the
+    # poll does not return them and raises KeyboardInterrupt. The core has moved
+    # the positions past them, so a commit after Ctrl+C would commit records the
+    # user never received: each partition is first sought back to its first
+    # fetched record, and the next poll returns them. Java's poll never loses
+    # records the positions moved past (AsyncKafkaConsumer.java:940-960).
+    consumer = new_consumer()
+    try:
+        consumer.assign(partitions=[TP0, TP1])
+        core = _FetchingCore(monkeypatch, consumer)
+        core.interrupt = True
+        with pytest.raises(KeyboardInterrupt):
+            consumer.poll(timeout=30)
+        assert core.seeks == [(TOPIC, 0, 3), (TOPIC, 1, 7)]
+        assert core.positions == {TP0: 3, TP1: 7}
+        core.interrupt = False
+        assert _fetched(consumer.poll(timeout=30)) == [(0, 3), (0, 4), (1, 7)]
+        assert core.positions == {TP0: 5, TP1: 8}
+    finally:
+        consumer.close(option=CloseOptions.timeout(0))
+
+
+def test_ctrl_c_during_the_seek_back_of_a_failed_deserialization_seeks_every_record_back(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # The value deserializer fails on TP0's offset 4: the poll would return
+    # TP0's 3 and TP1's 7 and seek TP0 back to 4. Ctrl+C during that seek lets
+    # it end; the poll then raises KeyboardInterrupt instead of returning the
+    # records, so each partition goes back to its first record not returned.
+    def value_deserializer(topic: str, data: Any, headers: Any = None) -> bytes:
+        if bytes(data) == b"0:4":
+            raise ValueError("bad value")
+        return bytes(data)
+
+    consumer: KafkaConsumer[bytes, bytes] = KafkaConsumer(
+        configs=configs(), value_deserializer=value_deserializer)
+    try:
+        consumer.assign(partitions=[TP0, TP1])
+        core = _FetchingCore(monkeypatch, consumer)
+        core.interrupt_seek = True
+        with pytest.raises(KeyboardInterrupt):
+            consumer.poll(timeout=30)
+        assert core.seeks == [(TOPIC, 0, 4), (TOPIC, 0, 3), (TOPIC, 1, 7)]
+        assert core.positions == {TP0: 3, TP1: 7}
+    finally:
+        consumer.close(option=CloseOptions.timeout(0))
+
+
+def test_cancelling_an_async_poll_returning_records_seeks_them_back(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # The async peer of the Ctrl+C case: the awaiting task is cancelled while
+    # the poll waits, and the core call then returns records. The seeks back
+    # are awaited before the CancelledError propagates, and the next poll
+    # returns the records.
+    async def main() -> None:
+        consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
+        await consumer.assign(partitions=[TP0, TP1])
+        core = _FetchingCore(monkeypatch, consumer)
+        core.release = False
+        poll = asyncio.ensure_future(consumer.poll(timeout=30))
+        await asyncio.sleep(0.2)
+        core.release = True
+        poll.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await poll
+        assert core.seeks == [(TOPIC, 0, 3), (TOPIC, 1, 7)]
+        assert core.positions == {TP0: 3, TP1: 7}
+        assert _fetched(await consumer.poll(timeout=30)) == [(0, 3), (0, 4), (1, 7)]
+        await consumer.close(option=CloseOptions.timeout(0))
+
+    asyncio.run(main())
+
+
 class _NotifiedEvent(threading.Event):
     """The consumer's pending-callback event, recording a ``set`` (the notify
     hook's, or a completion's) since ``notified`` was last cleared."""

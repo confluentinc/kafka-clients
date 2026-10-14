@@ -49,7 +49,6 @@ Dropped: ``enforceRebalance()`` / ``enforceRebalance(String)``, whose
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, overload
 
@@ -82,8 +81,6 @@ __all__ = ["Consumer"]
 
 K = TypeVar("K")
 V = TypeVar("V")
-
-_LOG = logging.getLogger("confluent_kafka.consumer")
 
 SUBSCRIBE_FORMS = (Form("topics"), Form("topics", "callback"),
                    Form("pattern", "callback"), Form("pattern"))
@@ -472,12 +469,13 @@ class Consumer(Generic[K, V], _ConsumerState):
         # The closed check first, then Java's Timer check (Order).
         self._check_open()
         timeout_ms = poll_timeout_ms(timeout)
-        result: Deserialized = self._run_sync(*self._poll_spec(timeout_ms))
-        for partition, offset in result.rewind:
-            try:
-                self._run_sync(*self._seek_spec(partition, offset, None))
-            except Exception:  # noqa: BLE001 - the deserialization error matters
-                _LOG.exception("Could not seek %s back to offset %d", partition, offset)
+        result: Deserialized = self._run_sync(*self._poll_spec(timeout_ms),
+                                              abandoned=self._fetched_positions)
+        interrupted = self._rewind_sync(result.rewind)
+        if interrupted is not None:
+            # Ctrl+C during the seeks back: the records are not returned either.
+            self._rewind_sync(result.unreturned())
+            raise interrupted
         if result.error is not None and result.records.is_empty():
             raise result.error
         return result.records

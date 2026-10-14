@@ -58,6 +58,7 @@ import asyncio
 import contextlib
 import contextvars
 import inspect
+import logging
 import math
 import threading
 import weakref
@@ -86,7 +87,7 @@ from ._conversions import (
     to_offset_and_timestamp_map, to_offset_map, to_partition_info_list,
     to_topics_map, tp_to_spec,
 )
-from ._poll import Deserialized, deserialize_batch
+from ._poll import Deserialized, deserialize_batch, fetched_positions
 from .close_options import CloseOptions
 from .consumer_group_metadata import ConsumerGroupMetadata
 
@@ -103,6 +104,13 @@ if TYPE_CHECKING:
     from .offset_commit_callback import OffsetCommitCallback
 
 _T = TypeVar("_T")
+
+_LOG = logging.getLogger("confluent_kafka.consumer")
+
+# The ``abandoned`` of a waiting call whose result carries records (``poll``):
+# the ``(partition, offset)`` positions to seek back to when the call does not
+# return its result (Ctrl+C, cancellation).
+_Abandoned = Callable[[tuple[Any, ...]], list[tuple[TopicPartition, int]]]
 
 
 # Java's Long.MAX_VALUE, the largest Duration.toMillis().
@@ -811,14 +819,19 @@ class _ConsumerState:
 
     def _run_sync(self, submit: Callable[[int, Callable[..., None]], None],
                   resolve: Callable[[tuple[Any, ...]], _T],
-                  free: Callable[[tuple[Any, ...]], None], wakeable: bool) -> _T:
+                  free: Callable[[tuple[Any, ...]], None], wakeable: bool, *,
+                  abandoned: _Abandoned | None = None) -> _T:
         """Submit a ``_cb`` FFI operation (``submit(handle, cb)``) and wait for
         its completion on this thread, running the queued callbacks meanwhile,
         in 100 ms slices so a ``KeyboardInterrupt`` is delivered. Ctrl+C lets
         the call end, frees its result and re-raises ``KeyboardInterrupt``;
         when the operation is one Java's ``wakeup()`` interrupts
         (``wakeable``, see ``_void_spec``) it first wakes the consumer once, so
-        the call ends sooner.
+        the call ends sooner. A result whose records the call then does not
+        return (``abandoned``, ``poll``'s ``_fetched_positions``) first seeks
+        each of their partitions back to its first one (``_rewind_sync``): the
+        core has moved the positions past them, and a later commit would
+        commit past records the user never received.
 
         The wake waits for a drain to run to its end, and is sent only if the
         completion has still not arrived: an interrupted drain may have left
@@ -866,19 +879,24 @@ class _ConsumerState:
                     break
                 free(payload)
         if interrupted is not None:
+            positions = abandoned(payload) if abandoned is not None else []
             free(payload)
+            self._rewind_sync(positions)
             raise interrupted
         return resolve(payload)
 
     async def _run_async(self, submit: Callable[[int, Callable[..., None]], None],
                          resolve: Callable[[tuple[Any, ...]], _T],
                          free: Callable[[tuple[Any, ...]], None], wakeable: bool, *,
-                         raise_deferred: bool = True, site: int = _AT_CALL) -> _T:
+                         raise_deferred: bool = True, site: int = _AT_CALL,
+                         abandoned: _Abandoned | None = None) -> _T:
         """Async peer of ``_run_sync``: awaits the completion on the event loop,
         running the queued callbacks on the loop, and awaiting a coroutine
         listener there. Cancelling the awaiting task lets the call end, frees
         its result and re-raises ``CancelledError``, first waking the consumer
-        when the operation is ``wakeable``, as ``_run_sync`` does on Ctrl+C.
+        when the operation is ``wakeable``, as ``_run_sync`` does on Ctrl+C,
+        and first awaiting the seeks back of the records it does not return
+        (``abandoned``, ``_rewind_async``).
 
         It first raises the exception of a coroutine commit callback an
         earlier ``poll`` kept (``raise_deferred``), wrapped as the call at
@@ -940,7 +958,9 @@ class _ConsumerState:
             finally:
                 self._async_waiters.pop(waiter, None)
         if cancelled is not None:
+            positions = abandoned(payload) if abandoned is not None else []
             free(payload)
+            await self._rewind_async(positions)
             raise cancelled
         return self._finish_async(payload, resolve, free, site)
 
@@ -1014,6 +1034,50 @@ class _ConsumerState:
                         wake()
                     else:
                         wake_due = True
+
+    # ---- seeking back records that are not returned -------------------------
+    @staticmethod
+    def _fetched_positions(payload: tuple[Any, ...]) -> list[tuple[TopicPartition, int]]:
+        """The ``abandoned`` of a ``poll`` (``_run_sync``): each partition's
+        first fetched record (``fetched_positions``)."""
+        return fetched_positions(payload[0])
+
+    def _rewind_sync(self, positions: list[tuple[TopicPartition, int]]
+                     ) -> KeyboardInterrupt | None:
+        """Seek each partition back to its ``(partition, offset)`` position:
+        records a ``poll`` does not return, whose positions the core has moved
+        past. Every seek runs to its end: a Ctrl+C during one lets it end, as
+        ``_run_sync`` does, and the next ones still run; the first such
+        ``KeyboardInterrupt`` is returned, for the caller to raise once the
+        positions are back. A seek that fails is logged."""
+        interrupted: KeyboardInterrupt | None = None
+        for partition, offset in positions:
+            try:
+                self._run_sync(*self._seek_spec(partition, offset, None))
+            except KeyboardInterrupt as exc:
+                if interrupted is None:
+                    interrupted = exc
+            except Exception:  # noqa: BLE001 - the caller's outcome matters
+                _LOG.exception("Could not seek %s back to offset %d", partition, offset)
+        return interrupted
+
+    async def _rewind_async(self, positions: list[tuple[TopicPartition, int]]
+                            ) -> asyncio.CancelledError | None:
+        """Async peer of ``_rewind_sync``: a cancellation during a seek lets it
+        end, the next ones still run, and the first ``CancelledError`` is
+        returned. A deferred commit-callback error is not raised by the seeks
+        (``raise_deferred=False``): the outcome of the poll goes first."""
+        cancelled: asyncio.CancelledError | None = None
+        for partition, offset in positions:
+            try:
+                await self._run_async(*self._seek_spec(partition, offset, None),
+                                      raise_deferred=False)
+            except asyncio.CancelledError as exc:
+                if cancelled is None:
+                    cancelled = exc
+            except Exception:  # noqa: BLE001 - the caller's outcome matters
+                _LOG.exception("Could not seek %s back to offset %d", partition, offset)
+        return cancelled
 
     # ---- the consumer's own wakeup ------------------------------------------
     def _own_wake(self, h: int) -> int:
