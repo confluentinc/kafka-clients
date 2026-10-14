@@ -48,6 +48,7 @@ use confluent_kafka::common::errors::ApiError;
 use confluent_kafka::common::errors::AuthenticationError;
 use confluent_kafka::common::errors::AuthorizationError;
 use confluent_kafka::common::errors::AuthorizerNotReadyError;
+use confluent_kafka::common::errors::BootstrapResolutionError;
 use confluent_kafka::common::errors::DisconnectError;
 use confluent_kafka::common::errors::InterruptError;
 use confluent_kafka::common::errors::InvalidOffsetError;
@@ -238,7 +239,7 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
         let mut client = self.client.clone();
         let request = SendRequest {
             producer_id: self.producer_id,
-            record: Some(producer_record_to_proto(record)),
+            record: Some(producer_record_to_proto(&record)),
             with_callback: callback.is_some(),
         };
         let response = client
@@ -357,18 +358,25 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
 // Wire <-> domain conversions
 // ---------------------------------------------------------------------------
 
-fn producer_record_to_proto(record: ProducerRecord<Vec<u8>, Vec<u8>>) -> proto::ProducerRecord {
-    let (topic, partition, timestamp, headers, key, value) = record.into_parts();
+fn producer_record_to_proto(record: &ProducerRecord<Vec<u8>, Vec<u8>>) -> proto::ProducerRecord {
     // Iterate inline so we don't have to name the internal RecordHeaders type;
     // the public Header trait gives us key() and value() accessors.
-    let headers = (&headers)
+    let headers = record
+        .headers()
         .into_iter()
         .map(|h| proto::Header {
             key: h.key().to_string(),
             value: h.value().map(|v| v.to_vec()).unwrap_or_default(),
         })
         .collect();
-    proto::ProducerRecord { topic, partition, timestamp, key, value, headers }
+    proto::ProducerRecord {
+        topic: record.topic().to_string(),
+        partition: record.partition(),
+        timestamp: record.timestamp(),
+        key: record.key().cloned(),
+        value: record.value().cloned(),
+        headers,
+    }
 }
 
 fn metric_from_proto(m: proto::Metric) -> (MetricName, Arc<KafkaMetric>) {
@@ -427,7 +435,7 @@ pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> Error {
     use crate::common::error_code::*;
 
     // `code` is the sole discriminator. It is the FFI error code
-    // (`kafka_common_ErrorCode_t`), which is injective over the client's error
+    // (`kafka_common_Error_e`), which is injective over the client's error
     // classes, so it identifies the class on its own — that is why the proto no
     // longer carries a `variant` field and neither server hand-matches message
     // text any more.
@@ -474,6 +482,7 @@ pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> Error {
         },
         INVALID_RECEIVE => Error::invalid_receive(p.message),
         PRODUCER_BUFFER_EXHAUSTED => Error::buffer_exhausted(p.message),
+        BOOTSTRAP_RESOLUTION => Error::BootstrapResolution(BootstrapResolutionError::new(p.message)),
 
         // Everything else is a class that owns its protocol code, which is
         // exactly what the generated `error_with_message` table (a copy of

@@ -34,7 +34,7 @@ use crate::consumer::{ConsumerRecords, OffsetAndMetadata};
 /// operator sees a message and a stack trace. The nearest Rust equivalent is
 /// the panic payload, which for `panic!("...")` is a `String` or `&str`; any
 /// other payload type is opaque and reported as such.
-fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> &str {
+pub(super) fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> &str {
     payload
         .downcast_ref::<String>()
         .map(|s| s.as_str())
@@ -58,7 +58,7 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> &str {
 /// ## Java's structural guarantee vs Rust's behavioral guarantee
 ///
 /// Java's `ConsumerRecords` is **structurally immutable** (see
-/// `ConsumerRecords.java:37-50`: `private final` fields, `Map.copyOf`,
+/// `ConsumerRecords.java:41-50, 78`: `private final` fields, `Map.copyOf`,
 /// `Collections.unmodifiableList(...)` views). When an interceptor
 /// throws in Java, the input batch **cannot** have been mutated —
 /// `interceptRecords` retains its previous-good value because the

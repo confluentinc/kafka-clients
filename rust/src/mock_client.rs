@@ -27,6 +27,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use tokio::sync::Notify;
 
+use crate::common::errors::UnsupportedVersionError;
 use crate::common::requests::AbstractRequest;
 use crate::common::requests::ConcreteResponse;
 use crate::common::requests::RequestBuilder;
@@ -736,7 +737,7 @@ impl KafkaClient for MockClient {
             //     test pay for a build it never reads. Nothing downstream of a matched
             //     future response reads the request body, so the narrower build is
             //     equivalent.
-            //   - Safety: `produce_request::Builder::build_version` *drains* its builder —
+            //   - Correctness: `produce_request::Builder::build_version` *drains* its builder —
             //     `std::mem::replace(&mut self.data, ProduceRequestData::new())`
             //     (`common/requests/produce_request.rs:307`) — so a second build of the
             //     same request yields empty `topic_data`. Java's
@@ -762,9 +763,13 @@ impl KafkaClient for MockClient {
             let callback = request.take_callback();
 
             let version_mismatch = if let Some(message) = future_resp.version_mismatch_message {
-                Some(message)
+                Some(UnsupportedVersionError::new(message))
             } else if future_resp.is_unsupported_request {
-                Some(format!("Api {} with version {}", request.api_key(), version))
+                Some(UnsupportedVersionError::new(format!(
+                    "Api {} with version {}",
+                    request.api_key(),
+                    version
+                )))
             } else {
                 None
             };

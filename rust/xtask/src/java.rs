@@ -57,6 +57,12 @@ pub const JAVA_MAIN_ROOT: &str = "../kafka/clients/src/main/java/org/apache/kafk
 /// Where the Java client's tests live.
 pub const JAVA_TEST_ROOT: &str = "../kafka/clients/src/test/java/org/apache/kafka";
 
+/// Where the Java client's test fixtures live: the test utilities other modules
+/// share (`MockTime`, `MockAdminClient`, ..), which Kafka 4.4 moved out of the
+/// test tree into the `testFixtures` source set (KAFKA commit 3b6c8385ca).
+/// Indexed as test classes, like [`JAVA_TEST_ROOT`].
+pub const JAVA_TEST_FIXTURES_ROOT: &str = "../kafka/clients/src/testFixtures/java/org/apache/kafka";
+
 /// The Kafka versions whose `@Deprecated`s count (CLAUDE.md §3: deprecated API
 /// is not translated): the source reference and the next release.
 pub const DEPRECATION_REFS: &[&str] = &["4.3.1", "4.4.0-rc3"];
@@ -179,7 +185,19 @@ impl JavaClass {
     /// by its top-level package (`consumer.OffsetOutOfRangeException` ->
     /// `ConsumerOffsetOutOfRangeError`).
     pub fn rust_name(&self) -> String {
-        let name = self.name();
+        self.rust_name_of(self.name())
+    }
+
+    /// The Rust names of every class on `path`, outermost first — the
+    /// top-level class as [`rust_name`](Self::rust_name) would name it, each
+    /// nested class by its translated words
+    /// (`["RecordDeserializationError", "DeserializationErrorOrigin"]`).
+    pub fn rust_path(&self) -> Vec<String> {
+        self.path.iter().map(|name| self.rust_name_of(name)).collect()
+    }
+
+    /// [`rust_name`](Self::rust_name) for `name`, one of the classes on `path`.
+    fn rust_name_of(&self, name: &str) -> String {
         let translated = translate_camel_words(name);
         if !name.ends_with("Exception") {
             return translated;
@@ -500,16 +518,19 @@ fn upper_first(s: &str) -> String {
 }
 
 /// Every class of the Java client, main and test.
+#[derive(Clone)]
 pub struct JavaIndex {
     pub classes: Vec<JavaClass>,
 }
 
 impl JavaIndex {
-    /// Loads both trees; empty when the `kafka` submodule is not checked out.
+    /// Loads the main, test and test-fixtures trees; empty when the `kafka`
+    /// submodule is not checked out.
     pub fn load() -> Self {
         let mut classes = Vec::new();
         collect(Path::new(JAVA_MAIN_ROOT), &mut Vec::new(), false, &mut classes);
         collect(Path::new(JAVA_TEST_ROOT), &mut Vec::new(), true, &mut classes);
+        collect(Path::new(JAVA_TEST_FIXTURES_ROOT), &mut Vec::new(), true, &mut classes);
         JavaIndex { classes }
     }
 

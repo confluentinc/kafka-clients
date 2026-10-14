@@ -28,7 +28,7 @@ use super::AbstractResponse;
 
 /// Possible error codes:
 /// - [`Errors::SaslAuthenticationFailed`] (57): Authentication failed
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.SaslAuthenticateResponse")]
 pub struct SaslAuthenticateResponse {
     data: SaslAuthenticateResponseData,
@@ -102,13 +102,6 @@ impl SaslAuthenticateResponse {
         // Not supported by the response schema
     }
 
-    /// Returns whether the client should throttle upon receiving this response.
-    ///
-    /// Always returns `false` for SASL authenticate responses.
-    pub fn should_client_throttle(&self, _version: i16) -> bool {
-        false
-    }
-
     /// Parses a `SaslAuthenticateResponse` from a readable buffer at the given version.
     ///
     /// # Errors
@@ -129,6 +122,16 @@ impl std::fmt::Display for SaslAuthenticateResponse {
         let mut temp_data = self.data.clone();
         temp_data.set_auth_bytes(Vec::new());
         write!(f, "SaslAuthenticateResponse(data={:?})", temp_data)
+    }
+}
+
+/// Renders exactly what the redacting [`Display`](std::fmt::Display) renders.
+///
+/// Java has a single `toString()`; a derived `Debug` would be a second,
+/// unredacted rendering that prints the auth bytes.
+impl std::fmt::Debug for SaslAuthenticateResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
     }
 }
 
@@ -193,17 +196,6 @@ mod tests {
         assert_eq!(response.throttle_time_ms(), AbstractResponse::DEFAULT_THROTTLE_TIME);
     }
 
-    #[test]
-    fn test_should_client_throttle() {
-        let data = SaslAuthenticateResponseData::new();
-        let response = SaslAuthenticateResponse::new(data);
-        for version in SaslAuthenticateResponseData::LOWEST_SUPPORTED_VERSION
-            ..=SaslAuthenticateResponseData::HIGHEST_SUPPORTED_VERSION
-        {
-            assert!(!response.should_client_throttle(version));
-        }
-    }
-
     /// Translated from `RequestResponseTest.testSaslAuthenticateRequestResponseToStringMasksSensitiveData`
     /// (response portion).
     ///
@@ -221,6 +213,30 @@ mod tests {
             "auth_bytes field should be empty in Display output, got: {}",
             display
         );
+    }
+
+    /// `Debug` renders exactly what `Display` does (Java has a single
+    /// `toString()`): `auth_bytes` present but empty, never the token bytes a
+    /// derived `Debug` would print as their byte values.
+    #[test]
+    fn test_debug_redacted() {
+        let auth_bytes = b"sensitive-auth-token-123";
+        let mut data = SaslAuthenticateResponseData::new();
+        data.set_auth_bytes(auth_bytes.to_vec());
+        let response = SaslAuthenticateResponse::new(data);
+        for debug in [format!("{:?}", response), format!("{:#?}", response)] {
+            assert_eq!(debug, format!("{}", response));
+            assert!(
+                debug.contains("auth_bytes: []"),
+                "auth_bytes field should be empty in Debug output, got: {}",
+                debug
+            );
+            assert!(
+                !debug.contains(&format!("{:?}", &auth_bytes[..])),
+                "auth bytes leaked: {}",
+                debug
+            );
+        }
     }
 
     #[test]

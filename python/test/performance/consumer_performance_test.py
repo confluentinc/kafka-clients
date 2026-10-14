@@ -20,7 +20,8 @@ Methodology (matches the C benchmark):
     ``int(time.time()*1000)``), read right after touching the record bytes.
   * Consumer config: ``group.protocol=consumer`` (KIP-848),
     ``auto.offset.reset=latest``, ``fetch.min.bytes`` / ``max.partition.fetch.bytes``
-    = 4 MiB, ``check.crcs=false`` (v2 only — the Rust client does not surface it).
+    = 4 MiB, ``check.crcs=false`` (v2/librdkafka only; the Rust client keeps its
+    default ``check.crcs=true``, matching the Java client).
   * Settle to the live edge (poll until empty) before load starts.
   * Time-based ``WARMUP_SECONDS`` (excluded from stats) then
     ``TEST_DURATION_SECONDS`` measured; per-``INTERVAL_SECONDS`` snapshots to
@@ -28,8 +29,11 @@ Methodology (matches the C benchmark):
     producer perf test and the Rust harness).
   * Summary: min/avg + p50/p90/p95/p99/p999, throughput msg/s and MiB/s.
 
-Backends (``CLIENT_VERSION``): ``3`` = the Rust binding (``consumer.py``
-``KafkaConsumer``), ``2`` = ``confluent_kafka.Consumer`` (librdkafka baseline).
+Backends (``CLIENT_VERSION``): ``3`` = the Rust binding
+(``confluent_kafka.consumer.KafkaConsumer`` of this repo's package), ``2`` =
+the PyPI ``confluent_kafka.Consumer`` (librdkafka baseline). The two packages
+share the top-level name ``confluent_kafka``, so each runs in its own venv (see
+``librdkafka_helpers``); the Makefile targets pick the interpreter.
 
 Load generation (like ``consumer-perf/compare/librdkafka_e2e.py``): if
 ``KAFKA_BIN`` is set, spawn ``kafka-producer-perf-test.sh`` and kill it at the
@@ -57,10 +61,11 @@ import time
 import pytest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_BINDINGS = os.path.dirname(os.path.dirname(_HERE))  # python (consumer.py, _confluentkafka)
-for _p in (_HERE, _BINDINGS):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+# Only this directory (performance_common, librdkafka_helpers). Not python/:
+# its confluent_kafka/ source tree would shadow the PyPI package of the same
+# name in the CLIENT_VERSION=2 baseline venv.
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 from performance_common import Metrics, MAX_LATENCY_MS, percentile_from_hist, recreate_topic  # noqa: E402
 
 
@@ -154,15 +159,16 @@ class Config:
 # Consumer backends — normalized to a poll() yielding (timestamp_ms, nbytes).
 # ---------------------------------------------------------------------------
 class _RustConsumer:
-    """python/consumer.py KafkaConsumer (CLIENT_VERSION=3)."""
+    """confluent_kafka.consumer.KafkaConsumer, this repo's package
+    (CLIENT_VERSION=3)."""
 
     def __init__(self, cfg):
-        from consumer import KafkaConsumer
+        from confluent_kafka.common.serialization import memoryview_deserializer
+        from confluent_kafka.consumer import KafkaConsumer
         custom_conf = {} if cfg.use_defaults else {
             "fetch.min.bytes": str(cfg.fetch_min_bytes),
             "max.partition.fetch.bytes": str(cfg.fetch_max_bytes),
             "max.poll.records": str(cfg.batch_size + 500),
-            "check.crcs": "false",
         }
         conf = {
             "bootstrap.servers": cfg.bootstrap_servers,
@@ -174,11 +180,15 @@ class _RustConsumer:
             **custom_conf
         }
         conf.update(sasl_config_from_env(v2=False))
-        self._c = KafkaConsumer(conf)
+        # memoryview deserializers: key and value stay zero-copy views over the
+        # fetch batch, so no per-record copy is added to what is measured.
+        self._c = KafkaConsumer(configs=conf,
+                                key_deserializer=memoryview_deserializer(),
+                                value_deserializer=memoryview_deserializer())
         self._timeout = cfg.poll_timeout_ms / 1000.0
 
     def subscribe(self, topic):
-        self._c.subscribe([topic])
+        self._c.subscribe(topics=[topic])
 
     def assigned(self):
         try:
@@ -188,12 +198,12 @@ class _RustConsumer:
 
     def poll_batch(self):
         """Yield (timestamp_ms, nbytes) for each record in one poll."""
-        records = self._c.poll(self._timeout)
+        records = self._c.poll(timeout=self._timeout)
         for r in records:
-            value = r.value
-            key = r.key
+            value = r.value()
+            key = r.key()
             nbytes = (len(value) if value is not None else 0) + (len(key) if key is not None else 0)
-            yield r.timestamp, nbytes
+            yield r.timestamp(), nbytes
 
     def poll_single(self):
         """POLL_SINGLE: the Rust binding exposes no single-message API, so reuse
@@ -273,15 +283,16 @@ def build_consumer(cfg):
 # async; poll_batch is an async generator.
 # ---------------------------------------------------------------------------
 class _AsyncRustConsumer:
-    """python/consumer.py AsyncKafkaConsumer (CLIENT_VERSION=3)."""
+    """confluent_kafka.consumer.AsyncKafkaConsumer, this repo's package
+    (CLIENT_VERSION=3)."""
 
     def __init__(self, cfg):
-        from consumer import AsyncKafkaConsumer
+        from confluent_kafka.common.serialization import memoryview_deserializer
+        from confluent_kafka.consumer import AsyncKafkaConsumer
         custom_conf = {} if cfg.use_defaults else {
             "fetch.min.bytes": str(cfg.fetch_min_bytes),
             "max.partition.fetch.bytes": str(cfg.fetch_max_bytes),
             "max.poll.records": str(cfg.batch_size + 500),
-            "check.crcs": "false",
         }
         conf = {
             "bootstrap.servers": cfg.bootstrap_servers,
@@ -293,11 +304,14 @@ class _AsyncRustConsumer:
             **custom_conf
         }
         conf.update(sasl_config_from_env(v2=False))
-        self._c = AsyncKafkaConsumer(conf)
+        # memoryview deserializers, as in _RustConsumer.
+        self._c = AsyncKafkaConsumer(configs=conf,
+                                     key_deserializer=memoryview_deserializer(),
+                                     value_deserializer=memoryview_deserializer())
         self._timeout = cfg.poll_timeout_ms / 1000.0
 
     async def subscribe(self, topic):
-        await self._c.subscribe([topic])
+        await self._c.subscribe(topics=[topic])
 
     async def assigned(self):
         # assignment() is a sync (non-blocking) getter on the Rust consumer.
@@ -307,12 +321,12 @@ class _AsyncRustConsumer:
             return False
 
     async def poll_batch(self):
-        records = await self._c.poll(self._timeout)
+        records = await self._c.poll(timeout=self._timeout)
         for r in records:
-            value = r.value
-            key = r.key
+            value = r.value()
+            key = r.key()
             nbytes = (len(value) if value is not None else 0) + (len(key) if key is not None else 0)
-            yield r.timestamp, nbytes
+            yield r.timestamp(), nbytes
 
     async def poll_single(self):
         """POLL_SINGLE: no single-message API on the Rust async binding; reuse
@@ -481,7 +495,21 @@ class _Measurement:
         self.measure_start = None
         self.no_data_deadline = None
 
+    def _reset_cpu_baseline(self):
+        # psutil's cpu_percent() (what the shared CPUBucket samples each window)
+        # reports CPU over the span since its previous call, and its very first
+        # call returns a meaningless 0.0. Calling it here restarts that span at
+        # "now", so the first measured sample covers only measured time: no
+        # warmup CPU (warmup completing mid-window) and no spurious 0.0 (warmup
+        # disabled, measurement starting with the sampler).
+        try:
+            self.metrics.cpu.process.cpu_percent()
+        except Exception:  # noqa: BLE001
+            pass
+
     def begin(self):
+        # Prime the CPU baseline before the sampler starts (no race with it).
+        self._reset_cpu_baseline()
         self.metrics.start_collecting(interval_s=self.cfg.interval_seconds)
         if self.warmup_complete:
             self.measure_start = time.monotonic()
@@ -497,6 +525,8 @@ class _Measurement:
             if now - self.consume_start >= self.cfg.warmup_seconds:
                 self.warmup_complete = True
                 self.measure_start = now
+                # Exclude warmup CPU from the first measured CPU sample.
+                self._reset_cpu_baseline()
                 self.metrics.measurement_start_ms = _now_ms()
                 print(f">>> warmup complete ({self.cfg.warmup_seconds}s); measuring", flush=True)
             return
@@ -642,7 +672,8 @@ def run(cfg, metrics=None):
         if own_metrics:
             metrics.stop_collecting()
 
-    return _summarize(cfg, meas.latency_hist, meas.measured_messages, measured_duration)
+    return _summarize(cfg, meas.latency_hist, meas.measured_messages, measured_duration,
+                      metrics)
 
 
 async def run_async(cfg, metrics=None):
@@ -736,10 +767,12 @@ async def run_async(cfg, metrics=None):
         if own_metrics:
             metrics.stop_collecting()
 
-    return _summarize(cfg, meas.latency_hist, meas.measured_messages, measured_duration)
+    return _summarize(cfg, meas.latency_hist, meas.measured_messages, measured_duration,
+                      metrics)
 
 
-def _summarize(cfg, latency_hist, measured_messages, measured_duration):
+def _summarize(cfg, latency_hist, measured_messages, measured_duration,
+               metrics=None):
     p50 = percentile_from_hist(latency_hist, 0.50)
     p90 = percentile_from_hist(latency_hist, 0.90)
     p95 = percentile_from_hist(latency_hist, 0.95)
@@ -759,6 +792,18 @@ def _summarize(cfg, latency_hist, measured_messages, measured_duration):
         "latency_ms": {"min": mn, "avg": round(avg, 2), "p50": p50, "p90": p90,
                        "p95": p95, "p99": p99, "p999": p999, "max": mx},
     }
+    # CPU/RSS averages over the measured interval, from the shared Metrics
+    # sampler (psutil, per-interval buckets already written to metrics.jsonl).
+    # Same keys and units (rss_avg_mb, MB) as the other consumer harnesses'
+    # summaries (rust/consumer-perf, librdkafka_e2e.c, JavaE2E.java); the
+    # producer harnesses' results.json use rss_avg_kib instead.
+    cpu_avg = rss_avg_mb = None
+    if metrics is not None and metrics.total_external_metrics > 0:
+        n = metrics.total_external_metrics
+        cpu_avg = metrics.total_cpu / n
+        rss_avg_mb = metrics.total_rss / n / (1024.0 * 1024.0)
+        stats["cpu_avg_pct"] = round(cpu_avg, 2)
+        stats["rss_avg_mb"] = round(rss_avg_mb, 2)
     print("\n" + "=" * 72)
     print(f"SUMMARY - CLIENT_VERSION={cfg.client_version} (warmup excluded)")
     print("=" * 72)
@@ -767,6 +812,9 @@ def _summarize(cfg, latency_hist, measured_messages, measured_duration):
     print(f"Throughput:        {thr_msg:.0f} msg/s  ({thr_mib:.2f} MiB/s)")
     print(f"E2E latency (ms):  min={mn} avg={avg:.2f} p50={p50} p90={p90} "
           f"p95={p95} p99={p99} p99.9={p999} max={mx}")
+    if cpu_avg is not None:
+        print(f"CPU (% one core):  avg={cpu_avg:.1f}")
+        print(f"RSS (MB):          avg={rss_avg_mb:.1f}")
     print("=" * 72, flush=True)
     try:
         with open("results.json", "w") as fh:

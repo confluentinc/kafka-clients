@@ -369,8 +369,13 @@ impl EventReporter {
 impl OffsetCommitCallback for EventReporter {
     /// Java `onComplete` (lines 180-195): print `offsets_committed` with
     /// success/error derived from `exception`.
-    async fn on_complete(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
+    async fn on_complete(
+        &self,
+        offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+        error: Option<&Error>,
+    ) -> Result<(), Error> {
         print_json(&OffsetsCommitted::from_commit(offsets, error));
+        Ok(())
     }
 }
 
@@ -546,7 +551,7 @@ impl VerifiableConsumer {
     async fn commit_sync(&mut self, offsets: HashMap<TopicPartition, OffsetAndMetadata>) -> Result<(), Error> {
         match self.consumer.commit_sync_with_offsets(offsets.clone()).await {
             Ok(()) => {
-                self.reporter.on_complete(&offsets, None).await;
+                self.reporter.on_complete(&offsets, None).await?;
                 Ok(())
             },
             Err(e) if matches!(e, Error::Wakeup(_)) => {
@@ -557,7 +562,7 @@ impl VerifiableConsumer {
             },
             Err(e) if matches!(e, Error::FencedInstanceId(_)) => Err(e),
             Err(e) => {
-                self.reporter.on_complete(&offsets, Some(&e)).await;
+                self.reporter.on_complete(&offsets, Some(&e)).await?;
                 Ok(())
             },
         }

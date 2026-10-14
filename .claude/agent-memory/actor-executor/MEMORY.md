@@ -31,7 +31,7 @@
 - [M11 Tier3 P3 SCRAM](m11_tier3_phase3_scram_notes.md) — aws-lc-rs default-features-off; hi()=PBKDF2 first block; SASL integration gap
 - [M11 G4 admin groups/offsets](m11_g4_admin_groups_offsets_notes.md) — valid()/errors() is whole-value; NOT_READY is STREAMS-only
 - [M11 real-broker findings](m11_real_broker_findings_notes.md) — id-only assertions hide endpoint bugs; pipe masks clippy exit
-- [Teeth-check mtime gotcha](workflow_teeth_check_mtime.md) — after mv-restoring a corrupted source, touch it or cargo runs the stale binary
+- [Teeth-check traps](workflow_teeth_check_mtime.md) — touch a mv-restored source; deny(warnings) unused-import mutation = silent compile fail
 - [Phase 1 foundation types](phase1_design_notes.md) — M8 P1: ConsumerRecord Arc<str>, ConsumerError enum, group.protocol default
 - [Phase 2 trait surface](phase2_design_notes.md) — M8 P2: Clone for panic recovery; 'static bounds; Arc<State> in tests
 - [Phase 3 MockConsumer](phase3_design_notes.md) — M8 P3: KafkaError::Wakeup, PollTask alias, async rebalance
@@ -164,7 +164,7 @@
 - [M11 known-defect fixes](m11_known_defect_fixes.md) — Result-not-panic at FFI-reachable sites; python unit tests via the gRPC image
 - [Merge reconciliation test/impl hazard](merge_reconciliation_test_impl_hazard.md) — adopting side A's impl can break side B's auto-merged tests; run B's suite too
 - [Python bindings local build/test on macOS](python_bindings_local_build_test_macos.md) — build+run the C-extension + pytest locally; setuptools/pip workarounds
-- [Commit hook timeout](commit_hook_timeout.md) — pre-commit runs make verify-sandbox and exceeds the watchdog; commit --no-verify after cargo checks
+- [Commit hook timeout](commit_hook_timeout.md) — pre-commit runs make verify-sandbox (~10 min, Docker); commit in the background; --no-verify only with the user's OK
 - [FFI verify env (M11 CFFI branch)](ffi_verify_env_milestone11_cffi.md) — cmake IS installed; xtask lint covers ffi
 - [cbindgen export + multilang topology](cbindgen_export_and_multilang_topology.md) — [export].include lists types/typedefs only; multilang proto/server topology
 - [Dead-code blanket-allow removal](deadcode_blanket_allow_removal.md) — targeted allows not blanket; cherry-pick across a feature revert changes the dead-set
@@ -176,5 +176,7 @@
 - [New error path needs its catch](new_error_path_needs_its_catch.md) — making a silent path loud is half a translation; §9.1's guard turned a silent drop into an I/O-task panic
 - [Skips recorded in prose](skips_recorded_in_prose.md) — untranslated tests park in comments, not just #[ignore]; grep the Rust tree for the blocker's words
 - [Nullable array default](generator_nullable_array_default.md) — a new guard's first failures are wrong defaults; Java's array default is empty, not null
-- [Docker wedged → --no-verify](workflow_docker_wedged_no_verify.md) — pre-commit runs make verify-sandbox (needs Docker); run the non-Docker gate and say the rest is owed
+- [Docker wedged → stop and ask](workflow_docker_wedged_no_verify.md) — hook needs Docker; never bypass it alone: ask the user (via the Manager) and list the checks owed
 - [M14 verifiable-clients](m14_verifiable_clients_notes.md) — tools crate; EventReporter Arc split for listener/callback; Box<dyn Consumer> (dyn-compatible) not generic; StringDeserializer in main crate; JSON stdout is the wire
+- [M17 Password redaction](m17_password_redaction_notes.md) — Vec<u8> Debug teeth; raw maps = key sets; file allow(dead_code) kills dead-code teeth
+- [M17 merge + review](m17_merge_review_followup_notes.md) — rust/ move strands new dirs; Java lint rules via stand-in; unsupported pkg → pub(crate)

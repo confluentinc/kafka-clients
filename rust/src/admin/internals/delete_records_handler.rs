@@ -26,7 +26,7 @@ use crate::admin::RecordsToDelete;
 use crate::common::errors::ApiError;
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, RequestBuilder, delete_records_request};
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::LogContext;
 use crate::common::{Error, Node, TopicPartition};
 use crate::delete_records_request_data::{DeleteRecordsPartition, DeleteRecordsTopic};
 use crate::kafka_debug;

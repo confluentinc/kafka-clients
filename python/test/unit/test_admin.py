@@ -22,6 +22,7 @@ import threading
 import time
 
 import pytest
+import _confluentkafka as _lib
 from admin import (
     MockAdminClient, AsyncMockAdminClient, AdminClient, AsyncAdminClient,
     NewTopic, NewPartitions, RecordsToDelete, DeletedRecords,
@@ -47,14 +48,17 @@ from admin import (
     _to_delete_acls, _to_describe_acls, _to_describe_client_quotas,
     _to_describe_classic_groups, _to_describe_consumer_groups,
     _to_describe_log_dirs, _to_describe_replica_log_dirs,
-    _to_elect_leaders, _to_full_config_entry, _to_keyed_errors,
+    _to_elect_leaders, _to_error, _to_full_config_entry, _to_keyed_errors,
     _to_list_consumer_group_offsets, _to_list_groups, _to_list_offsets,
     _to_list_partition_reassignments, _to_log_dir_description,
     _to_member_description, _to_cluster_description, _to_describe_topics,
     _to_partition_info,
-    _close_ms, _ms,
+    _close_ms, _ms, _MockAdminClientMixin,
 )
-from producer import KafkaError
+# The admin binding is paused and keeps its flat ``KafkaError`` (code /
+# is_retriable / is_fatal). It now lives in the private package shim that
+# replaced the retired top-level ``producer.py``.
+from confluent_kafka._legacy_compat import KafkaError
 
 # Numeric `Errors` codes (src/common/protocol/errors.rs).
 UNKNOWN_TOPIC_OR_PARTITION = 3
@@ -507,6 +511,20 @@ def test_timeout_accepts_float_and_timedelta():
         assert admin.list_topics(timeout=dt.timedelta(seconds=5), list_internal=True)
 
 
+def test_a_timeout_above_int32_max_ms_raises_instead_of_wrapping():
+    # Java's `Integer timeoutMs` cannot hold 2**31 ms; the extension's
+    # int32_t cast used to wrap it to a negative value (the default timeout).
+    import datetime as dt
+    with MockAdminClient(1) as admin:
+        _created(admin, "t1")
+        with pytest.raises(OverflowError, match="does not fit a 32-bit signed int"):
+            admin.list_topics(timeout=dt.timedelta(milliseconds=2**31), list_internal=True)
+        with pytest.raises(OverflowError):
+            admin.describe_cluster(timeout=float(2**31) / 1000)
+        # INT32_MAX itself is still a valid timeout.
+        assert admin.list_topics(timeout=dt.timedelta(milliseconds=2**31 - 1), list_internal=True)
+
+
 # -- asyncio API -------------------------------------------------------------
 
 async def test_async_create_and_describe():
@@ -740,8 +758,8 @@ def test_list_config_resources():
         _created(admin, "lcr-a")
 
         topics = admin.list_config_resources([ConfigResourceType.TOPIC])
-        # Sorted by (type id, name).
-        assert [r.name for r in topics] == ["lcr-a", "lcr-b"]
+        # Unordered: Java's MockAdminClient collects a HashSet (MockAdminClient.java:1402).
+        assert sorted(r.name for r in topics) == ["lcr-a", "lcr-b"]
         assert all(r.resource_type == ConfigResourceType.TOPIC for r in topics)
 
         # No filter means every supported type: 2 topics + 1 BROKER and
@@ -972,6 +990,18 @@ def test_to_full_config_entry_preserves_nulls_and_empty_synonyms():
     assert entry.is_default is True
 
 
+def test_config_entry_repr_redacts_sensitive_value():
+    """Java's `toString` prints "Redacted" for every sensitive entry, even one
+    whose value is null, and the value itself otherwise."""
+    sensitive = ConfigEntry("ssl.key.password", "secret", False, True, False)
+    assert repr(sensitive) == "ConfigEntry(name='ssl.key.password', value=Redacted)"
+    assert "secret" not in str(sensitive)
+    assert (repr(ConfigEntry("ssl.key.password", None, False, True, False))
+            == "ConfigEntry(name='ssl.key.password', value=Redacted)")
+    assert (repr(ConfigEntry("retention.ms", "1000", False, False, False))
+            == "ConfigEntry(name='retention.ms', value='1000')")
+
+
 def test_to_log_dir_description_carries_error_and_volume_bytes():
     description = _to_log_dir_description(
         ((KAFKA_STORAGE_ERROR, "offline", 0, 0), 2000, 1000,
@@ -1054,33 +1084,93 @@ def test_handle_survives_gc_of_intermediate_objects():
         assert listings["gc-topic"].topic_id == described.topic_id
 
 
+def test_run_sync_raises_a_submit_error_before_resolving_anything():
+    """``_run_sync`` is the shared waiter behind every sync RPC: ``submit()``
+    issues the C call and returns ``(job, error)``. An owned error handle means a
+    typed constructor rejected an argument before anything was sent, so it is
+    raised as a :class:`KafkaError` and the converter never runs -- there is no
+    job to resolve.
+    """
+    with MockAdminClient(1) as admin:
+        _created(admin, "before-submit-error")
+
+        def submit():
+            # An empty member list is rejected by
+            # RemoveMembersFromConsumerGroupOptions.with_members itself.
+            return _lib.Admin_remove_members_from_consumer_group(
+                admin._h, "g", False, [], None, -1)
+
+        def convert(payload):
+            raise AssertionError("convert must not run when submit failed")
+
+        with pytest.raises(KafkaError) as excinfo:
+            admin._run_sync(submit, convert)
+        assert str(excinfo.value) == "Invalid empty members has been provided"
+
+        # The client is still usable afterwards.
+        assert "before-submit-error" in admin.list_topics(list_internal=True)
+
+
+def test_sync_client_uses_the_cb_twins_not_the_blocking_entry_points(monkeypatch):
+    """The sync client must never park the thread inside a native block
+    (``Admin_resolve`` / ``Admin_close``): every RPC is resolved through
+    ``Admin_resolve_cb`` and ``close`` through ``Admin_close_cb``, with the
+    completion drained by the waiter on the calling thread. Making the blocking
+    entry points fail proves no sync path reaches them."""
+    def forbidden(*args):
+        raise AssertionError("the sync client must not call a blocking entry point")
+
+    monkeypatch.setattr(_lib, "Admin_resolve", forbidden)
+    monkeypatch.setattr(_lib, "Admin_close", forbidden)
+
+    drained = []
+    admin = MockAdminClient(1)
+    real_drain = admin._execute_callbacks
+
+    def counting_drain():
+        n = real_drain()
+        drained.append(n)
+        return n
+
+    admin._waiter._execute_callbacks = counting_drain
+    _created(admin, "cb-twin")
+    listings = admin.list_topics(list_internal=True)
+    assert "cb-twin" in listings
+    # The completions were delivered through the waiter's drain, on this thread.
+    assert sum(drained) >= 2
+    # A whole-call failure still raises from the `_cb` payload's `exc` slot.
+    with pytest.raises(KafkaError) as exc:
+        admin.elect_leaders(ElectionType.PREFERRED, [("cb-twin", 0)])
+    assert str(exc.value) == "Not implemented yet"
+    admin.close(timeout=_dt.timedelta(seconds=5))
+    assert admin.closed
+    assert admin._h is None
+
+
 def test_sigint_while_waiting_drains_callback_then_reraises():
     """A SIGINT delivered while a sync call is waiting must raise
-    KeyboardInterrupt *after* the in-flight callback has been drained, so the
-    result handles are freed rather than leaked, and the client stays usable.
+    KeyboardInterrupt *after* the in-flight completion has been drained, so the
+    result is freed rather than leaked, and the client stays usable.
 
-    ``_run_sync`` is the shared waiter behind every sync RPC. It is driven here
-    with a deliberately slow submit because the mock resolves every real RPC
-    instantly, leaving no window for the signal to land inside the wait.
+    The waiter (``admin._waiter.run``) is the shared mechanism behind every
+    sync RPC and ``close``. It is driven here with a deliberately slow submit
+    because the mock resolves every real RPC instantly, leaving no window for
+    the signal to land inside the wait.
     """
     with MockAdminClient(1) as admin:
         _created(admin, "before-sigint")
 
-        freed = []
         callback_fired = threading.Event()
+        payload_seen = []
 
         def submit(cb):
             def fire():
                 time.sleep(0.5)
                 callback_fired.set()
-                cb(0)  # payload shape of a void op: (error_int,)
+                # Payload shape of `Admin_resolve_cb`: cb(payload, None).
+                payload_seen.append(("payload", None))
+                cb("payload", None)
             threading.Thread(target=fire, daemon=True).start()
-
-        def resolve(payload):
-            raise AssertionError("resolve must not run after an interrupt")
-
-        def free(payload):
-            freed.append(payload)
 
         def raise_sigint():
             time.sleep(0.15)
@@ -1088,17 +1178,71 @@ def test_sigint_while_waiting_drains_callback_then_reraises():
 
         th = threading.Thread(target=raise_sigint)
         th.start()
+        started = time.monotonic()
+        # No `on_interrupt`: there is no admin wakeup(), the operation finishes.
         with pytest.raises(KeyboardInterrupt):
-            admin._run_sync(submit, resolve, free)
+            admin._waiter.run(submit, on_interrupt=None)
+        elapsed = time.monotonic() - started
         th.join()
 
-        # The interrupt was deferred until the callback arrived, and its payload
-        # was freed rather than leaked.
+        # The interrupt was deferred until the completion arrived (~0.5 s), not
+        # raised at 0.15 s and not delayed beyond the completion by much.
         assert callback_fired.is_set()
-        assert freed == [(0,)]
+        assert payload_seen == [("payload", None)]
+        assert 0.45 <= elapsed < 2.0
 
         # The client is still usable afterwards.
         assert "before-sigint" in admin.list_topics(list_internal=True)
+
+
+def test_sigint_during_close_finishes_the_close_then_reraises():
+    """``close`` waits through the same waiter. A SIGINT while it waits cannot
+    abort the close: the waiter finishes it, the client is freed, and the
+    interrupt is re-raised afterwards."""
+    admin = MockAdminClient(1)
+    real_close_cb = _lib.Admin_close_cb
+
+    def slow_close_cb(h, ms, cb):
+        # Delay the real completion so the signal lands inside the wait.
+        def fire():
+            time.sleep(0.5)
+            real_close_cb(h, ms, cb)
+        threading.Thread(target=fire, daemon=True).start()
+
+    def raise_sigint():
+        time.sleep(0.15)
+        signal.raise_signal(signal.SIGINT)
+
+    th = threading.Thread(target=raise_sigint)
+    th.start()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(_lib, "Admin_close_cb", slow_close_cb)
+        with pytest.raises(KeyboardInterrupt):
+            admin.close()
+    th.join()
+    assert admin.closed
+    assert admin._h is None
+    admin.close()  # idempotent after the interrupted close
+
+
+async def test_run_async_raises_a_submit_error_before_resolving_anything():
+    """The asyncio mirror of the test above: a ``submit()`` error is raised
+    from the coroutine before any ``KafkaFuture`` callback is registered."""
+    admin = AsyncMockAdminClient(1)
+    try:
+        def submit():
+            return _lib.Admin_remove_members_from_consumer_group(
+                admin._h, "g", False, [], None, -1)
+
+        def convert(payload):
+            raise AssertionError("convert must not run when submit failed")
+
+        with pytest.raises(KafkaError) as excinfo:
+            await admin._run_async(submit, convert)
+        assert str(excinfo.value) == "Invalid empty members has been provided"
+        assert (await admin.describe_cluster()).controller.id == 0
+    finally:
+        await admin.close()
 
 
 # -- B3: elections, reassignments, offsets -----------------------------------
@@ -1811,6 +1955,42 @@ def test_to_keyed_errors_maps_none_to_success():
     assert converted["g"].code == 69
 
 
+def test_to_error_derives_txn_requires_abort_from_code():
+    """A per-key admin error is built via `KafkaError._from_parts` from a copied
+    `(code, message, is_retriable, is_fatal)` tuple -- the borrowed error handle
+    is already destroyed, so the flag cannot come from the Rust predicate and is
+    derived from the code instead. `txn_requires_abort` must be a bool (not raise
+    AttributeError), True only for TRANSACTION_ABORTABLE (120).
+
+    The live-handle `_from_c` path reads the flag from the Rust predicate
+    (`KafkaError_txn_requires_abort`) instead.
+    """
+    abortable = _to_error((120, "aborted", 0, 0))
+    assert abortable.txn_requires_abort is True
+    assert abortable.code == 120
+    assert abortable.message == "aborted"
+
+    not_abortable = _to_error((69, "nope", 0, 0))
+    assert not_abortable.txn_requires_abort is False
+    assert not_abortable.code == 69
+    assert not_abortable.message == "nope"
+
+
+def test_describe_missing_topic_per_key_error_has_txn_requires_abort():
+    """End-to-end through the real C copy-out (`borrowed_error_to_py` ->
+    `_to_error` -> `_from_parts`): a per-key `KafkaError` for a missing topic
+    must expose `txn_requires_abort` as a bool rather than raising
+    AttributeError. UNKNOWN_TOPIC_OR_PARTITION is not abortable, so it is
+    False."""
+    with MockAdminClient(3) as admin:
+        _created(admin, "described", 2, 2)
+        result = admin.describe_topics(["described", "missing"])
+        missing = result["missing"]
+        assert isinstance(missing, KafkaError)
+        assert missing.code == UNKNOWN_TOPIC_OR_PARTITION
+        assert missing.txn_requires_abort is False
+
+
 # ---------------------------------------------------------------------------
 # B5a — ACLs and client quotas
 #
@@ -2015,21 +2195,20 @@ def test_alter_client_quotas_keeps_the_default_entity_distinct():
         assert by_name["alice"].entries == {ClientQuotaEntity.USER: "alice"}
 
 
-def test_alter_client_quotas_rejects_a_duplicate_entity():
-    """A deliberate deviation: Java accepts a duplicate entity -- both
-    alterations are sent and only the future map collapses
-    (`KafkaAdminClient.java:4301-4313`) -- but the C result is a flat array
-    built from that map, so the surviving outcome could not be attributed to
-    either row."""
+def test_alter_client_quotas_collapses_a_duplicate_entity():
+    """Java accepts a duplicate entity: both alterations are sent and only the
+    future map collapses (`KafkaAdminClient.java:4315-4318`). The branch C
+    result is that map (`AlterClientQuotasResult_values`), so the deviation the
+    flat-array C result needed is gone: one key, the mock's own outcome."""
     with MockAdminClient(1) as admin:
         entity = ClientQuotaEntity({ClientQuotaEntity.USER: "alice"})
-        with pytest.raises(KafkaError) as exc:
-            admin.alter_client_quotas([
-                ClientQuotaAlteration(entity, [ClientQuotaOp("producer_byte_rate", 1.0)]),
-                ClientQuotaAlteration(entity, [ClientQuotaOp("consumer_byte_rate", 2.0)]),
-            ])
-        assert str(exc.value) == (
-            "quota alteration at index 1 repeats an entity already altered by an earlier entry")
+        result = admin.alter_client_quotas([
+            ClientQuotaAlteration(entity, [ClientQuotaOp("producer_byte_rate", 1.0)]),
+            ClientQuotaAlteration(entity, [ClientQuotaOp("consumer_byte_rate", 2.0)]),
+        ])
+        assert list(result) == [entity]
+        # MockAdminClient.java:1250 throws UnsupportedOperationException.
+        assert str(result[entity]) == "Not implement yet"
 
 
 def test_client_quota_op_none_value_means_remove():
@@ -2424,6 +2603,22 @@ def test_to_delegation_token_unpacks_the_whole_chain():
     assert str(token.token_info.owner) == "User:owner"
 
 
+def test_delegation_token_repr_hides_the_hmac():
+    """The token id and the HMAC together are a delegation-token login, so the
+    repr masks the HMAC as Java's `toString` does. The token id stays: Java
+    prints it too."""
+    raw = ("token-1", ("User", "owner", False), ("User", "owner", False), [],
+           1000, 5000, 9000, b"\x01\x00\x02", "AQAC")
+    token = _to_delegation_token(raw)
+    assert repr(token) == (
+        "DelegationToken(token_info=TokenInformation(token_id='token-1', "
+        "owner=KafkaPrincipal(principal_type='User', name='owner', token_authenticated=False), "
+        "renewers=[], expiry_timestamp=5000), hmac=[*******])")
+    assert "AQAC" not in repr(token)
+    assert "AQAC" not in str(token)
+    assert "token_id='token-1'" in repr(token)
+
+
 def test_to_describe_user_scram_credentials_splits_errors_from_descriptions():
     """The mock throws before any of this is reachable end to end."""
     raw = {
@@ -2531,6 +2726,24 @@ def test_alter_user_scram_credentials_accepts_an_explicitly_empty_salt():
         assert sorted(out) == ["explicit-empty", "generated"]
         for user in ("explicit-empty", "generated"):
             assert str(out[user]) == "Not implemented yet"
+
+
+def test_byte_arguments_of_2_gib_raise_overflow_error(two_gib_bytes):
+    # The C API takes int32_t lengths; a plain cast turned 2**31 into a
+    # negative length, which it reads as empty. Each argument is checked before
+    # the call is submitted, so the error is raised synchronously.
+    info = ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096)
+    with MockAdminClient(1) as admin:
+        with pytest.raises(OverflowError, match=r"^hmac exceeds 2 GiB$"):
+            admin.renew_delegation_token(two_gib_bytes)
+        with pytest.raises(OverflowError, match=r"^hmac exceeds 2 GiB$"):
+            admin.expire_delegation_token(two_gib_bytes)
+        with pytest.raises(OverflowError, match=r"^password exceeds 2 GiB$"):
+            admin.alter_user_scram_credentials(
+                [UserScramCredentialUpsertion("alice", info, two_gib_bytes)])
+        with pytest.raises(OverflowError, match=r"^salt exceeds 2 GiB$"):
+            admin.alter_user_scram_credentials(
+                [UserScramCredentialUpsertion("alice", info, b"pw", salt=two_gib_bytes)])
 
 
 def test_create_delegation_token_without_a_renewer_raises():
@@ -2878,6 +3091,47 @@ async def test_async_b6_rpcs():
 
         with pytest.raises(KafkaError):
             await admin.force_terminate_transaction("txn-a")
+
+# --- unregisterController (KAFKA-20395) -------------------------------------
+
+def test_unregister_controller_follows_the_mock_raft_controller_setting():
+    """Java's MockAdminClient.unregisterController succeeds with a Raft
+    controller and otherwise fails with UnsupportedVersionException("")."""
+    with MockAdminClient(1) as admin:
+        with pytest.raises(KafkaError) as exc:
+            admin.unregister_controller(1)
+        assert exc.value.code == UNSUPPORTED_VERSION
+        assert str(exc.value) == ""
+
+        admin.set_using_raft_controller(True)
+        assert admin.unregister_controller(1) is None
+        assert admin.unregister_controller(1, timeout=5.0) is None
+
+        admin.set_using_raft_controller(False)
+        with pytest.raises(KafkaError):
+            admin.unregister_controller(1)
+
+
+def test_set_using_raft_controller_rejects_a_real_client():
+    admin = AdminClient({"bootstrap.servers": "localhost:9092"})
+    try:
+        with pytest.raises(KafkaError) as exc:
+            _MockAdminClientMixin.set_using_raft_controller(admin, True)
+        assert str(exc.value) == "this operation is only supported on a MockAdminClient"
+    finally:
+        admin.close(timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_async_unregister_controller():
+    async with AsyncMockAdminClient(1) as admin:
+        with pytest.raises(KafkaError) as exc:
+            await admin.unregister_controller(1)
+        assert exc.value.code == UNSUPPORTED_VERSION
+
+        admin.set_using_raft_controller(True)
+        assert await admin.unregister_controller(1) is None
+
 
 def test_authorized_operations_none_stays_distinct_from_empty():
     """Java's authorizedOperations() is null when the broker did not report the

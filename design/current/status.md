@@ -1,19 +1,93 @@
-# Current Status: Milestones 1–13 complete — client tracks Apache Kafka 4.3.1
+# Current Status: Milestones 1–17 complete — client tracks Apache Kafka 4.4.0 (4.4.0-rc4)
+
+> **Current state (2026-10-14, `esabellico/c_ffi_interface_uniformed`):** master
+> `c3a02e2e7` (Milestone 17, password redaction, the negative-length and
+> destroy fixes) is merged into the `out_err` C FFI. Master's new public API has
+> its C bindings in the branch's shape (`kafka_admin_Admin_unregister_controller`
+> + `UnregisterControllerOptions_t` / `Result_t`,
+> `MockAdminClient_set_using_raft_controller`, `MockConsumer_lose_partitions` /
+> `_cb`, the four new error classes). Master's lifetime fixes are carried over:
+> admin destroy fails the RPCs still waiting ("The AdminClient thread has
+> exited."), consumer destroy wakes a waiting poll, and a destroy called inside a
+> Tokio runtime hands off to a teardown thread. Error codes: `-1..=136` from the
+> broker, `BOOTSTRAP_RESOLUTION` keeps master's -29 and `LOCAL_CALLBACK` moves to
+> -30. `src/ffi/` is 269 files and 2353 exports, 172 of them generated error
+> predicates; `common::Error` has 167 variants.
+
+> **Current state (2026-10-08, Milestone 17 close-out):** the Rust client is up
+> to **Apache Kafka 4.4.0**, built against `4.4.0-rc4` (`1156b2752a`) because
+> 4.4.0 final was not yet tagged (the bump steps for final are in
+> `design/history/Milestone-17/PLAN.md`, Phase 13 notes). The `kafka/` submodule is at
+> 4.4.0-rc4, `generator/messages/` holds **203 specs** and matches the 4.4.0-rc4
+> corpus byte for byte, and `generator/test-messages/` holds 5. `AUDIENCE_REF` /
+> `DEPRECATION_REFS` are `4.4.0-rc3` / `[4.3.1, 4.4.0-rc3]`, valid for rc4
+> (`rc3..rc4` has no `clients/src/main` change). Error codes run `-1..=136`.
+> - **What landed:** KIP-909 async bootstrap DNS resolution and its consumer
+>   busy-loop follow-ups; KIP-1242 misrouted-connection detection; KIP-1319
+>   TxnOffsetCommit v6; rack-aware producer partitioning; KIP-1332 incremental
+>   buffer allocation (plus the trunk-only KAFKA-20864); KAFKA-18157's
+>   `UnsupportedProtocolFieldError` and `is_unsupported_version_error()`;
+>   schema-derived throttling; generated-reader bounds; the
+>   `common::utils::internals` moves; consumer heartbeat / fetch / offsets /
+>   metrics fixes; `MockConsumer::lose_partitions`; `Admin::unregister_controller`.
+>   See `design/history/MILESTONES.md` → Milestone 17.
+> - **Audit:** `design/history/Milestone-17/PLAN.md` §7 maps all 191 `clients/src` commits of
+>   `4.3.1...4.4.0-rc4`, KAFKA-20864 and the two master merges to a phase or a
+>   reasoned skip, with no gaps.
+> - **Open:** `design/history/Milestone-17/PLAN.md` §8 lists the decisions left to the human
+>   (S1/S2 producer batch timing, admin close grace period, `unregisterBroker`,
+>   the consumer I/O-loop catch-all, two upstream JIRAs, the keyed-send cost) and the follow-ups;
+>   `design/history/Milestone-17/rules-errata.md` holds the drafted rules amendments.
+> - **Tests at the last merge (`5c207c9f`):** `cargo test` 4641 passed / 0
+>   failed / 10 ignored (lib 4585 / 3); `--features ffi --lib` 4835 / 0 / 3.
+>   The broker reruns owed on that merge passed on the same code (Critic 103:
+>   4.2.0 consumer 109/109, producer 100/100, lib 35/35; 4.4.0-rc4
+>   `cluster_check_test` 3/3, `producer_transactions_test` 40/40).
+>   `make verify` runs on the milestone branch after Phase 13 merges back.
+> - The Milestone-13 block below ("tracks Apache Kafka 4.3.1") is now
+>   historical, like the older blocks.
+
 
 > **Paths (2026-09-27):** the repository was split into `rust/`, `python/` and
 > `c/` (see [structure.md](structure.md#top-level)). Crate paths below — `src/…`,
 > `tests/…`, `generator/…`, `xtask/…` — are relative to `rust/`; the bindings
 > formerly under `bindings/python/` and `bindings/c/` are now `python/` and `c/`.
 
-> **Current state (2026-09-27, re-verified against the tree):** several
+> **Current state (2026-10-12):** Milestone 17 landed secret redaction aligned
+> with Java's `Password` type (`[hidden]`): the `ConfigDef.Type.PASSWORD` fields
+> of `SslConfigs` / `SaslConfigs` and the Rust-only `SaslConfigs` `password` field
+> are typed `Password`; `ProducerConfig` renders its raw `originals` map as keys
+> only; `DelegationToken` and the six SASL / delegation-token wrappers delegate
+> `Debug` to their redacting `Display`; and `UserScramCredentialUpsertion`, which
+> has no `Display` (Java has no `toString()` there), hides its salt and password
+> in a hand-written `Debug`. Its Phase 2 and review rounds fixed the
+> `NetworkClient` disconnect log (`{:?}` → `Display`), the remaining request,
+> builder and admin-config types whose Java `toString()` masks, and three
+> Rust-only options types. Milestone 14 added the
+> `verifiable-clients` crate (`VerifiableProducer` / `VerifiableConsumer`) for
+> ducktape system tests. Milestones 15 (integration-test parity with the Java
+> 4.3.1 suites) and 16 (the Python client interface) came from `master`. See
+> `design/history/MILESTONES.md` for every milestone, and
+> `design/history/Milestone-17-password-redaction/PLAN.md` for Milestone 17.
+
+> **Current state (2026-10-08, re-verified against the tree):** several
 > statements further down this file were true when written and are now
 > false. The corrections:
 >
-> - **Admin bindings exist.** `src/ffi/admin.rs` exports 490 symbols (47 of
->   them `*_async`) around `kafka_admin_AdminClient_t`, and
->   `python/admin.py` provides `Admin` / `AdminClient` / `MockAdminClient`
->   and their `Async*` twins. Every "C FFI / Python bindings deferred" line
->   below is historical.
+> - **Admin bindings exist.** `src/ffi/admin/` (130 files) exports 844
+>   symbols around `kafka_admin_Admin_t` / `kafka_admin_MockAdminClient_t`,
+>   with one `<Rpc>Options_t` and one per-key-`KafkaFuture_t` `<Rpc>Result_t`
+>   per Java class, and `python/admin.py` provides `Admin` / `AdminClient` /
+>   `MockAdminClient` and their `Async*` twins. Every "C FFI / Python
+>   bindings deferred" line below is historical.
+> - **The C FFI follows CLAUDE.md §4 one-to-one** (2026-10-08 refactor, see
+>   `design.md` → C FFI): one file per Java class under `src/ffi/`
+>   (265 files, 2299 exports), error slot + trailing `out_` parameters, `_cb`
+>   twins only for Rust `async fn`s, per-client `__execute_callbacks` /
+>   `__set_callbacks_notify` instead of a dispatcher thread, `kafka_List_t` /
+>   `kafka_Map_t` / `kafka_Bytes_t`, enum singletons, `__as_<Interface>`
+>   views. `cargo xtask lint-custom check-ffi-translation` enforces it; the
+>   baseline `xtask/ffi-baseline.txt` holds 5 by-design closure gaps.
 > - **The admin client supports security.** `AdminClientConfig` carries
 >   `security.protocol` and the SSL / SASL settings, and
 >   `KafkaAdminClient::new` builds its channel builder from them
@@ -27,15 +101,16 @@
 >   `src/admin/mod.rs:240` declares 94 sync `fn`s (44 of them required) plus
 >   `async fn close` / `close_with_timeout`, and the naming uses
 >   `_with_options` (e.g. `create_topics_with_options`).
-> - **Lib tests: 4144** (`cargo test --lib -- --list`), **4361 with
+> - **Lib tests: 4211** (`cargo test --lib -- --list`), **4464 with
 >   `--features ffi`**. Integration: 27 files, 109 `#[tokio::test]`s. The
 >   cargo test targets are `producer`, `consumer`, `integration` and the
 >   opt-in `performance`; the `common` target (`tests/main.rs`) is gone, its
 >   message/protocol tests now in-crate under `src/common/message/`.
-> - **Crate size:** 777 files, ~334,000 lines under `src/`.
-> - **The FFI dispatcher** (`CompletionJob`, `spawn_dispatcher`,
->   `enqueue_or_run_inline`) is at `src/ffi/common.rs:1922-1949`, not
->   `:214-241`.
+> - **Crate size:** 1040 files, ~375,000 lines under `src/`.
+> - **There is no FFI dispatcher any more.** `CompletionJob`,
+>   `spawn_dispatcher` and `enqueue_or_run_inline` were deleted on
+>   2026-10-08; completions go through `src/ffi/callback_queue.rs` and are
+>   run by the caller's `<Client>__execute_callbacks()`.
 > - **Error model:** `KafkaGenericError` and the 13-variant `KafkaError` enum
 >   are gone. The error type is `common::Error` (162 variants), with Java's
 >   `KafkaException` as the embedded `KafkaError` struct; see `design.md` →
@@ -46,13 +121,15 @@
 > **Public surface restricted (2026-09-25):** the Rust crate and the C API now
 > export only what Java's audience allows (`@InterfaceAudience.Public` at 4.4,
 > outside `internal*` and "not a supported API" packages), enforced by
-> `cargo xtask lint-custom` → `check-public-audience`, with the exceptions in
-> `xtask/public-audience-allowlist.txt`. Crate-private internals are now tested
+> `cargo xtask lint-custom` → `check-public-audience`, with the exceptions tagged
+> in the code (`#[doc(alias = "rust-only")]`, `#[doc(alias = "public-in-rust")]`;
+> the allowlist file this note first named is gone). Crate-private internals are now tested
 > in-crate. C symbols were renamed to follow their Java package
 > (`kafka_common_TopicPartition*`, `kafka_common_acl_AclBinding*`,
 > `kafka_common_KafkaFuture_RecordMetadata*`, ...) and the
 > `CorrelationIdMismatchError` binding was removed. See
-> `structure.md` → "Public surface".
+> `structure.md` → "Public surface". (The typed future was itself replaced
+> by the generic `kafka_common_KafkaFuture_t` on 2026-10-08.)
 
 > **Current state (2026-08-26):** the Rust client is up to **Apache Kafka
 > 4.3.1**. Milestone 13 bumped the `kafka/` submodule reference from 4.2.0
@@ -88,13 +165,13 @@
 >
 > **On the "C FFI / Python bindings deferred" scope line repeated throughout
 > this file:** when this banner was written it was still true *for Admin*.
-> It no longer is — see the 2026-09-27 banner at the top. It was already
-> untrue of the client as a whole: `src/ffi/producer.rs`,
-> `src/ffi/consumer.rs` and `src/ffi/common.rs` all exist (Milestones 4, 9,
+> It no longer is — see the 2026-10-08 banner at the top. It was already
+> untrue of the client as a whole: `src/ffi/producer/`,
+> `src/ffi/consumer/` and `src/ffi/common/` all exist (Milestones 4, 9,
 > 10), as do `python/{producer,consumer}.py` and the C test suite
 > under `c/tests/`. The "async dispatcher in PR #116" that the
-> deferral notes point at is now in-tree at `src/ffi/common.rs:1922-1949`
-> (`CompletionJob`, `spawn_dispatcher`, `enqueue_or_run_inline`).
+> deferral notes point at was in-tree until 2026-10-08 and was then replaced
+> by the `_cb` / `__execute_callbacks` model (`src/ffi/callback_queue.rs`).
 >
 > The sections immediately below (Milestone 1 / Milestone 3) are **historical and
 > stale** — they predate the Producer, Consumer and Admin milestones and are left
@@ -195,7 +272,7 @@ that file has been removed — see the document inventory note at the end.)
 - **TopicPartition** (`common/topic_partition.rs`): Topic/partition identifier
 - **Cluster** (`common/cluster.rs`): Cluster metadata with node collection
 - **ApiKeys** (`common/protocol/api_keys.rs`): Enum of all Kafka API request types
-- **Errors** (`common/protocol/errors.rs:30`): Kafka error codes with retriable/fatal classification — **135** variants today (codes `-1..=133`, ending at `ShareSessionLimitReached`); this line said 134 when written
+- **Errors** (`common/protocol/errors.rs:30`): Kafka error codes with retriable/fatal classification — **138** variants today (codes `-1..=136`, ending at `ControllerIdNotRegistered`, Kafka 4.4); this line said 134 when written
 
 ### Layer 2 — Wire Protocol (5 classes) ✓
 - **Readable** (`common/protocol/readable.rs`): Trait for reading wire protocol data
@@ -288,7 +365,7 @@ that file has been removed — see the document inventory note at the end.)
 
 ### Supporting Infrastructure ✓
 - **Uuid** (`common/uuid.rs`): 128-bit UUID with base64 URL encoding and signed comparison matching Java
-- **ByteUtils** (`common/utils/byte_utils.rs`): Protocol Buffers varint/varlong encoding (unsigned and zig-zag)
+- **ByteUtils** (`common/utils/internals/byte_utils.rs`): Protocol Buffers varint/varlong encoding (unsigned and zig-zag)
 - **MessageSizeAccumulator** (`common/protocol/message_size_accumulator.rs`): Two-pass size tracking
 - **ObjectSerializationCache** (`common/protocol/object_serialization_cache.rs`): Two-pass serialization cache
 - **MessageUtil** (`common/protocol/message_util.rs`): Helpers (to_byte_buffer_accessor, compare_raw_tagged_fields)
@@ -321,7 +398,7 @@ that file has been removed — see the document inventory note at the end.)
 - `generator/test-messages/`: 3 test JSON specs → `OUT_DIR/test_generated/` (included via `tests/common/mod.rs`)
 - Generated code includes: structs, Message impl, ApiMessage impl, Eq/Hash/Display, builder setters
 - `cargo xtask format`: Formats source code (generated files are already formatted by the generator)
-- `cargo xtask check-generated`: Validates generated code formatting
+- `cargo xtask check-generated`: Validates that `generator/messages/` matches the `kafka` submodule's specs, generated code formatting, and the error-code tables
 - `cargo xtask lint` / `cargo xtask lint-fix`: Clippy with warnings as errors
 
 ## Key Java Source Reference
@@ -1002,10 +1079,10 @@ groups/KIP-932, KRaft raft-voter admin (`addRaftVoter`/`removeRaftVoter`/
 `describeMetadataQuorum`/`unregisterBroker`), and `ForwardingAdmin` (broker-plugin
 delegate). Deferred for the reasons in `design/history/Milestone-11/PLAN.md`.
 
-> **Status of that first deferral, as of 2026-09-27:** **closed.**
-> `src/ffi/admin.rs` (490 exported symbols) and `python/admin.py` now exist.
-> The dispatcher they use is in-tree at `src/ffi/common.rs:1922-1949`. Tier 4
-> remains untouched: no
+> **Status of that first deferral, as of 2026-10-08:** **closed.**
+> `src/ffi/admin/` (844 exported symbols) and `python/admin.py` now exist;
+> there is no dispatcher, completions are pumped by
+> `kafka_admin_Admin__execute_callbacks`. Tier 4 remains untouched: no
 > `add_raft_voter` / `remove_raft_voter` / `describe_metadata_quorum` /
 > `unregister_broker` / `ForwardingAdmin` exists in `src/admin/`.
 

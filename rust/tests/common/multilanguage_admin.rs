@@ -46,8 +46,8 @@ use confluent_kafka::admin::{
     NewPartitions, NewTopic, OffsetSpec, PartitionProducerState, PartitionReassignment, ProducerState, RecordsToDelete,
     RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions, ReplicaInfo, ScramCredentialInfo,
     ScramMechanism, SupportedVersionRange, TerminateTransactionOptions, TopicDescription, TopicListing,
-    TopicMetadataAndConfig, TransactionDescription, TransactionListing, TransactionState, UpdateFeaturesOptions,
-    UserScramCredentialAlteration, UserScramCredentialsDescription,
+    TopicMetadataAndConfig, TransactionDescription, TransactionListing, TransactionState, UnregisterControllerOptions,
+    UpdateFeaturesOptions, UserScramCredentialAlteration, UserScramCredentialsDescription,
 };
 use confluent_kafka::common::acl::{
     AccessControlEntry, AccessControlEntryFilter, AclBinding, AclBindingFilter, AclOperation, AclPermissionType,
@@ -2374,6 +2374,20 @@ impl AdminBackend for MultilanguageAdmin {
         let response = self
             .call(|mut c| async move { c.force_terminate_transaction(request).await })
             .await?;
+        void_outcome(response.error)
+    }
+
+    async fn unregister_controller(
+        &self,
+        controller_id: i32,
+        options: UnregisterControllerOptions,
+    ) -> Result<(), Error> {
+        let request = proto::UnregisterControllerRequest {
+            admin_id: self.admin_id,
+            controller_id,
+            timeout_ms: options.timeout_ms(),
+        };
+        let response = self.call(|mut c| async move { c.unregister_controller(request).await }).await?;
         void_outcome(response.error)
     }
 

@@ -21,13 +21,16 @@
 //! config keys.
 
 use std::any::{Any, type_name};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::fmt;
 use std::sync::atomic::{self, AtomicI32};
 
 use log::{info, warn};
 
+use crate::MetadataRecoveryStrategy;
 use crate::common::Error;
 use crate::common::config::config_def::ValidList;
+use crate::common::config::types::Password;
 use crate::common::config::{SaslConfigs, SslConfigs};
 use crate::common::record::internal::CompressionType;
 use crate::common::security::auth::SecurityProtocol;
@@ -52,7 +55,10 @@ const MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION_FOR_IDEMPOTENCE: i32 = 5;
 /// [Kafka documentation](http://kafka.apache.org/documentation.html#producerconfigs).
 ///
 /// Corresponds to `org.apache.kafka.clients.producer.ProducerConfig`.
-#[derive(Debug)]
+///
+/// `Debug` is hand-written so that it never renders a secret: the typed
+/// secrets are `Password`s, and the raw user map (`originals`) renders as
+/// its key set only.
 #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfig")]
 pub struct ProducerConfig {
     // --- Connection ---
@@ -66,6 +72,13 @@ pub struct ProducerConfig {
 
     /// `client.id` - An id string to pass to the server when making requests.
     pub(crate) client_id: String,
+
+    /// `client.rack` - A rack identifier for this client. This can be any string
+    /// value which indicates where this client is physically located. It
+    /// corresponds with the broker config `broker.rack`. Default:
+    /// [`ProducerConfig::DEFAULT_CLIENT_RACK`] (`""`). Used by the built-in
+    /// partitioner when `partitioner.rack.aware` is enabled (KIP-1123).
+    pub(crate) client_rack: String,
 
     // --- Security ---
     /// `security.protocol` - Protocol used to communicate with brokers.
@@ -92,6 +105,21 @@ pub struct ProducerConfig {
     /// `buffer.memory` - Total bytes of memory the producer can use to buffer records
     /// waiting to be sent. Default: 32 MiB.
     pub(crate) buffer_memory: i64,
+
+    /// `buffer.memory.allocation.strategy` - Controls how the producer allocates memory from
+    /// `buffer.memory` for record batches. The following values are supported:
+    ///
+    /// - `full`: reserves a full `batch.size` up front when a batch is created, regardless of how
+    ///   much data it ends up holding. Pool memory therefore scales with the number of active
+    ///   partitions.
+    /// - `incremental`: allocates memory on demand as records are appended, growing a batch up to
+    ///   `batch.size`. Pool memory therefore scales with the data actually buffered rather than
+    ///   the number of active partitions, allowing larger `batch.size` values (e.g. for
+    ///   high-latency clusters) without reserving `batch.size` for every active partition.
+    ///
+    /// Default: `full`. Internal (Java's `defineInternal`) until the incremental strategy is fully
+    /// implemented. Validated case-insensitively and kept as given; `KafkaProducer` lower-cases it.
+    pub(crate) buffer_memory_allocation_strategy: String,
 
     /// `max.block.ms` - Maximum time `send()` and `partitionsFor()` will block.
     /// Default: 60000 ms.
@@ -153,6 +181,13 @@ pub struct ProducerConfig {
     /// Default: 1000 ms.
     pub(crate) retry_backoff_max_ms: i64,
 
+    /// `bootstrap.resolve.timeout.ms` - Selects the bootstrap DNS resolution
+    /// mode (KIP-909): `0` resolves `bootstrap.servers` synchronously at
+    /// construction; a positive value resolves asynchronously for at most this
+    /// long. Default: 0. See
+    /// [`ProducerConfig::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG`].
+    pub(crate) bootstrap_resolve_timeout_ms: i64,
+
     // --- Socket ---
     /// `send.buffer.bytes` - TCP send buffer size. Default: 131072 (128 KiB).
     pub(crate) send_buffer_bytes: i32,
@@ -177,6 +212,22 @@ pub struct ProducerConfig {
     /// an idle topic. Default: 300000 ms (5 minutes).
     pub(crate) metadata_max_idle_ms: i64,
 
+    /// `metadata.recovery.strategy` - How the client recovers when none of the
+    /// brokers known to it is available. Default: `rebootstrap`
+    /// (`ProducerConfig.java:595-601`).
+    pub(crate) metadata_recovery_strategy: MetadataRecoveryStrategy,
+
+    /// `metadata.recovery.rebootstrap.trigger.ms` - How long a client configured
+    /// to rebootstrap waits without obtaining metadata before it rebootstraps.
+    /// Default: 300000 ms (`ProducerConfig.java:602-607`).
+    pub(crate) metadata_recovery_rebootstrap_trigger_ms: i64,
+
+    /// `metadata.cluster.check.enable` (KIP-1242) - Whether the client sends the
+    /// cluster id and node id it expects in ApiVersions so the broker can detect
+    /// a misrouted connection; ignored when `metadata.recovery.strategy=none`.
+    /// Default: true (`ProducerConfig.java:608-612`).
+    pub(crate) metadata_cluster_check_enable: bool,
+
     // --- Partitioning ---
     /// `partitioner.adaptive.partitioning.enable` - Adapt to broker performance.
     /// Default: true.
@@ -189,6 +240,18 @@ pub struct ProducerConfig {
     /// `partitioner.ignore.keys` - Ignore record keys for partitioning.
     /// Default: false.
     pub(crate) partitioner_ignore_keys: bool,
+
+    /// `partitioner.rack.aware` - Controls whether the default partitioner is
+    /// rack-aware. This has no effect when a custom partitioner is used.
+    /// Default: false.
+    ///
+    /// When `client.rack` is specified and `partitioner.rack.aware=true`, the
+    /// sticky partition is chosen from partitions with the leader broker in the
+    /// same rack, if at least one is available. If none are available, it falls
+    /// back on selecting from all available partitions (KIP-1123). Enabling it
+    /// with a blank `client.rack` makes the producer constructor fail with
+    /// `"client.rack must be provided if partitioner.rack.aware is enabled"`.
+    pub(crate) partitioner_rack_aware: bool,
 
     /// `partitioner.type` - Selects the partitioning strategy. Default: `None`
     /// (unset), which uses the built-in default partitioner keyed by IEEE CRC-32
@@ -297,12 +360,14 @@ impl Default for ProducerConfig {
             bootstrap_servers: Vec::new(),
             client_dns_lookup: ClientDnsLookup::UseAllDnsIps,
             client_id: String::new(),
+            client_rack: Self::DEFAULT_CLIENT_RACK.to_string(),
             security_protocol: SecurityProtocol::Plaintext,
             sasl_config: SaslConfigs::default(),
             ssl_config: SslConfigs::default(),
             batch_size: 16384,
             linger_ms: 5,
             buffer_memory: 32 * 1024 * 1024,
+            buffer_memory_allocation_strategy: Self::BUFFER_MEMORY_ALLOCATION_STRATEGY_FULL.to_string(),
             max_block_ms: 60 * 1000,
             acks: -1, // "all"
             retries: i32::MAX,
@@ -317,15 +382,20 @@ impl Default for ProducerConfig {
             reconnect_backoff_max_ms: 1000,
             retry_backoff_ms: 100,
             retry_backoff_max_ms: 1000,
+            bootstrap_resolve_timeout_ms: CommonClientConfigs::DEFAULT_BOOTSTRAP_RESOLVE_TIMEOUT_MS,
             send_buffer_bytes: 128 * 1024,
             receive_buffer_bytes: 32 * 1024,
             socket_connection_setup_timeout_ms: 10_000,
             socket_connection_setup_timeout_max_ms: 30_000,
             metadata_max_age_ms: 5 * 60 * 1000,
             metadata_max_idle_ms: 5 * 60 * 1000,
+            metadata_recovery_strategy: MetadataRecoveryStrategy::Rebootstrap,
+            metadata_recovery_rebootstrap_trigger_ms: 300 * 1000,
+            metadata_cluster_check_enable: true,
             partitioner_adaptive_partitioning_enable: true,
             partitioner_availability_timeout_ms: 0,
             partitioner_ignore_keys: false,
+            partitioner_rack_aware: false,
             partitioner_type: None,
             partitioner: None,
             transactional_id: None,
@@ -336,6 +406,141 @@ impl Default for ProducerConfig {
             two_phase_commit_enable: false,
             originals: HashMap::new(),
         }
+    }
+}
+
+/// Renders every field in declaration order, as the derive it replaces did,
+/// but never a secret.
+///
+/// The typed secrets are `Password`s inside `sasl_config` / `ssl_config` and
+/// render as `Password::HIDDEN` on their own. `originals`, the raw user map,
+/// renders as its sorted key set, with no values at all, because Java never
+/// prints a raw `originals` value: `AbstractConfig.logAll()`
+/// (`AbstractConfig.java:371-385`) prints only the values parsed for the keys
+/// the `ConfigDef` defines (`:118`), with each `Type.PASSWORD` value rendered
+/// as `[hidden]`, and `logUnused()` (`:390-395`) prints key names only. Every
+/// known non-secret value is already visible through the typed fields of this
+/// struct, so the raw map is shown as its key set.
+///
+/// Hiding values by key instead cannot match Java: `originals` holds every key
+/// the user passed, including keys this client does not parse, such as Java's
+/// OAuth `Type.PASSWORD` keys or a serializer's credentials, and Java prints
+/// none of their values.
+impl fmt::Debug for ProducerConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Destructured exhaustively: a field added to the struct fails to
+        // compile until it is bound here, and a bound but unrendered field is
+        // an unused variable, which the lint rejects.
+        let Self {
+            bootstrap_servers,
+            client_dns_lookup,
+            client_id,
+            client_rack,
+            security_protocol,
+            sasl_config,
+            ssl_config,
+            batch_size,
+            linger_ms,
+            buffer_memory,
+            buffer_memory_allocation_strategy,
+            max_block_ms,
+            acks,
+            retries,
+            delivery_timeout_ms,
+            request_timeout_ms,
+            enable_idempotence,
+            max_request_size,
+            max_in_flight_requests_per_connection,
+            compression_type,
+            connections_max_idle_ms,
+            reconnect_backoff_ms,
+            reconnect_backoff_max_ms,
+            retry_backoff_ms,
+            retry_backoff_max_ms,
+            bootstrap_resolve_timeout_ms,
+            send_buffer_bytes,
+            receive_buffer_bytes,
+            socket_connection_setup_timeout_ms,
+            socket_connection_setup_timeout_max_ms,
+            metadata_max_age_ms,
+            metadata_max_idle_ms,
+            metadata_recovery_strategy,
+            metadata_recovery_rebootstrap_trigger_ms,
+            metadata_cluster_check_enable,
+            partitioner_adaptive_partitioning_enable,
+            partitioner_availability_timeout_ms,
+            partitioner_ignore_keys,
+            partitioner_rack_aware,
+            partitioner_type,
+            partitioner,
+            transactional_id,
+            transaction_timeout_ms,
+            metrics_sample_window_ms,
+            metrics_num_samples,
+            metrics_recording_level,
+            two_phase_commit_enable,
+            originals,
+        } = self;
+        // The keys only, never a value (see above). Sorted so the rendering is
+        // deterministic, as Java's `logAll()` sorts; borrowed, so no key is
+        // copied.
+        let originals: BTreeSet<&str> = originals.keys().map(String::as_str).collect();
+        f.debug_struct("ProducerConfig")
+            .field("bootstrap_servers", bootstrap_servers)
+            .field("client_dns_lookup", client_dns_lookup)
+            .field("client_id", client_id)
+            .field("client_rack", client_rack)
+            .field("security_protocol", security_protocol)
+            .field("sasl_config", sasl_config)
+            .field("ssl_config", ssl_config)
+            .field("batch_size", batch_size)
+            .field("linger_ms", linger_ms)
+            .field("buffer_memory", buffer_memory)
+            .field("buffer_memory_allocation_strategy", buffer_memory_allocation_strategy)
+            .field("max_block_ms", max_block_ms)
+            .field("acks", acks)
+            .field("retries", retries)
+            .field("delivery_timeout_ms", delivery_timeout_ms)
+            .field("request_timeout_ms", request_timeout_ms)
+            .field("enable_idempotence", enable_idempotence)
+            .field("max_request_size", max_request_size)
+            .field("max_in_flight_requests_per_connection", max_in_flight_requests_per_connection)
+            .field("compression_type", compression_type)
+            .field("connections_max_idle_ms", connections_max_idle_ms)
+            .field("reconnect_backoff_ms", reconnect_backoff_ms)
+            .field("reconnect_backoff_max_ms", reconnect_backoff_max_ms)
+            .field("retry_backoff_ms", retry_backoff_ms)
+            .field("retry_backoff_max_ms", retry_backoff_max_ms)
+            .field("bootstrap_resolve_timeout_ms", bootstrap_resolve_timeout_ms)
+            .field("send_buffer_bytes", send_buffer_bytes)
+            .field("receive_buffer_bytes", receive_buffer_bytes)
+            .field("socket_connection_setup_timeout_ms", socket_connection_setup_timeout_ms)
+            .field("socket_connection_setup_timeout_max_ms", socket_connection_setup_timeout_max_ms)
+            .field("metadata_max_age_ms", metadata_max_age_ms)
+            .field("metadata_max_idle_ms", metadata_max_idle_ms)
+            .field("metadata_recovery_strategy", metadata_recovery_strategy)
+            .field(
+                "metadata_recovery_rebootstrap_trigger_ms",
+                metadata_recovery_rebootstrap_trigger_ms,
+            )
+            .field("metadata_cluster_check_enable", metadata_cluster_check_enable)
+            .field(
+                "partitioner_adaptive_partitioning_enable",
+                partitioner_adaptive_partitioning_enable,
+            )
+            .field("partitioner_availability_timeout_ms", partitioner_availability_timeout_ms)
+            .field("partitioner_ignore_keys", partitioner_ignore_keys)
+            .field("partitioner_rack_aware", partitioner_rack_aware)
+            .field("partitioner_type", partitioner_type)
+            .field("partitioner", partitioner)
+            .field("transactional_id", transactional_id)
+            .field("transaction_timeout_ms", transaction_timeout_ms)
+            .field("metrics_sample_window_ms", metrics_sample_window_ms)
+            .field("metrics_num_samples", metrics_num_samples)
+            .field("metrics_recording_level", metrics_recording_level)
+            .field("two_phase_commit_enable", two_phase_commit_enable)
+            .field("originals", &originals)
+            .finish()
     }
 }
 
@@ -352,12 +557,25 @@ impl ProducerConfig {
     pub const CLIENT_DNS_LOOKUP_CONFIG: &'static str = CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG;
     /// Config key: `client.id`
     pub const CLIENT_ID_CONFIG: &'static str = "client.id";
+    /// Config key: `client.rack`
+    pub const CLIENT_RACK_CONFIG: &'static str = CommonClientConfigs::CLIENT_RACK_CONFIG;
+    /// Default value of `client.rack`: no rack.
+    pub const DEFAULT_CLIENT_RACK: &'static str = CommonClientConfigs::DEFAULT_CLIENT_RACK;
     /// Config key: `batch.size`
     pub const BATCH_SIZE_CONFIG: &'static str = "batch.size";
     /// Config key: `linger.ms`
     pub const LINGER_MS_CONFIG: &'static str = "linger.ms";
     /// Config key: `buffer.memory`
     pub const BUFFER_MEMORY_CONFIG: &'static str = "buffer.memory";
+    /// Config key: `buffer.memory.allocation.strategy` (KIP-1332). Internal until the incremental
+    /// strategy is fully implemented.
+    pub const BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG: &'static str = "buffer.memory.allocation.strategy";
+    /// `buffer.memory.allocation.strategy` value: reserve a full `batch.size` per batch up front
+    /// (the default).
+    pub const BUFFER_MEMORY_ALLOCATION_STRATEGY_FULL: &'static str = "full";
+    /// `buffer.memory.allocation.strategy` value: allocate memory on demand as records are
+    /// appended.
+    pub const BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL: &'static str = "incremental";
     /// Config key: `max.block.ms`
     pub const MAX_BLOCK_MS_CONFIG: &'static str = "max.block.ms";
     /// Config key: `acks`
@@ -386,6 +604,21 @@ impl ProducerConfig {
     pub const RETRY_BACKOFF_MS_CONFIG: &'static str = "retry.backoff.ms";
     /// Config key: `retry.backoff.max.ms`
     pub const RETRY_BACKOFF_MAX_MS_CONFIG: &'static str = "retry.backoff.max.ms";
+    /// Config key: `bootstrap.resolve.timeout.ms` (KIP-909)
+    ///
+    /// Selects the client's bootstrap DNS resolution mode. When set to `0` (the
+    /// default), DNS is resolved synchronously during client construction; any
+    /// failure surfaces as a config error and no client instance is created.
+    /// When set to a positive value, DNS is resolved asynchronously and this is
+    /// the maximum amount of time the client will spend retrying resolution
+    /// before failing with an unrecoverable
+    /// [`BootstrapResolutionError`](crate::common::errors::BootstrapResolutionError)
+    /// from subsequent API calls (the client must then be closed and re-created
+    /// after fixing the underlying DNS or `bootstrap.servers` configuration
+    /// issue). Setting this config to a positive value enables an evolving
+    /// feature whose compatibility may be broken in a minor release.
+    pub const BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG: &'static str =
+        CommonClientConfigs::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG;
     /// Config key: `send.buffer.bytes`
     pub const SEND_BUFFER_CONFIG: &'static str = "send.buffer.bytes";
     /// Config key: `receive.buffer.bytes`
@@ -394,6 +627,11 @@ impl ProducerConfig {
     pub const METADATA_MAX_AGE_CONFIG: &'static str = "metadata.max.age.ms";
     /// Config key: `metadata.max.idle.ms`
     pub const METADATA_MAX_IDLE_CONFIG: &'static str = "metadata.max.idle.ms";
+    /// Config key: `metadata.recovery.strategy`
+    pub const METADATA_RECOVERY_STRATEGY_CONFIG: &'static str = "metadata.recovery.strategy";
+    /// Config key: `metadata.recovery.rebootstrap.trigger.ms`
+    pub const METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG: &'static str =
+        "metadata.recovery.rebootstrap.trigger.ms";
     /// Config key: `partitioner.adaptive.partitioning.enable`
     pub const PARTITIONER_ADAPTIVE_PARTITIONING_ENABLE_CONFIG: &'static str =
         "partitioner.adaptive.partitioning.enable";
@@ -401,6 +639,8 @@ impl ProducerConfig {
     pub const PARTITIONER_AVAILABILITY_TIMEOUT_MS_CONFIG: &'static str = "partitioner.availability.timeout.ms";
     /// Config key: `partitioner.ignore.keys`
     pub const PARTITIONER_IGNORE_KEYS_CONFIG: &'static str = "partitioner.ignore.keys";
+    /// Config key: `partitioner.rack.aware`
+    pub const PARTITIONER_RACK_AWARE_CONFIG: &'static str = "partitioner.rack.aware";
     /// Config key: `partitioner.type`
     pub const PARTITIONER_TYPE_CONFIG: &'static str = "partitioner.type";
     /// Accepted `partitioner.type` value selecting the CRC-32 key hash
@@ -450,9 +690,9 @@ impl ProducerConfig {
         // computed. Clone it up front, before `maybe_override_client_id` runs.
         let mut config = Self { originals: props.clone(), ..Default::default() };
 
-        // `bootstrap.servers` is defined with `NO_DEFAULT_VALUE` (`ProducerConfig.java:376-378`), so
+        // `bootstrap.servers` is defined with `NO_DEFAULT_VALUE` (`ProducerConfig.java:407-409`), so
         // `ConfigDef.parseValue` rejects a missing key at parse time
-        // (`ConfigDef.java:537`). It is the first key `ConfigDef` defines, so this
+        // (`ConfigDef.java:539`). It is the first key `ConfigDef` defines, so this
         // check runs before any other value is parsed, as in Java.
         if !props.contains_key(Self::BOOTSTRAP_SERVERS_CONFIG) {
             return Err(Error::config_message(format!(
@@ -464,55 +704,94 @@ impl ProducerConfig {
         for (key, value) in props {
             match key.as_str() {
                 Self::BOOTSTRAP_SERVERS_CONFIG => {
-                    // `ValidList.anyNonDuplicateValues(false, false)` (`ProducerConfig.java:379`).
+                    // `ValidList.anyNonDuplicateValues(false, false)` (`ProducerConfig.java:410`).
                     config.bootstrap_servers = ValidList::parse_any_non_duplicate_values(key, value, false)?;
                 },
                 Self::CLIENT_DNS_LOOKUP_CONFIG => {
                     config.client_dns_lookup = ClientDnsLookup::parse_config_value(value)?;
                 },
                 Self::CLIENT_ID_CONFIG => {
-                    // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:729-731`).
+                    // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:731-733`).
                     config.client_id = value.trim().to_string();
                 },
+                Self::CLIENT_RACK_CONFIG => {
+                    // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:731-733`).
+                    config.client_rack = value.trim().to_string();
+                },
+                // The `at_least` bounds below are the `ConfigDef` validators of
+                // Java's `ProducerConfig` `define(...)` chain
+                // (`ProducerConfig.java:416-577`): `atLeast(0)` unless noted.
                 Self::BATCH_SIZE_CONFIG => {
-                    config.batch_size = Self::parse_i32(key, value)?;
+                    config.batch_size = Self::at_least(key, Self::parse_i32(key, value)?, 0)?;
                 },
                 Self::LINGER_MS_CONFIG => {
-                    config.linger_ms = Self::parse_i64(key, value)?;
+                    config.linger_ms = Self::at_least(key, Self::parse_i64(key, value)?, 0)?;
                 },
                 Self::BUFFER_MEMORY_CONFIG => {
-                    config.buffer_memory = Self::parse_i64(key, value)?;
+                    config.buffer_memory = Self::at_least(key, Self::parse_i64(key, value)?, 0)?;
+                },
+                Self::BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG => {
+                    // Java: `ConfigDef.CaseInsensitiveValidString.in(FULL, INCREMENTAL)`
+                    // (`ProducerConfig.java:422-428`). `ConfigDef.parseType` trims every
+                    // `Type.STRING` value (`ConfigDef.java:731-733`).
+                    let strategy = value.trim();
+                    if !strategy.eq_ignore_ascii_case(Self::BUFFER_MEMORY_ALLOCATION_STRATEGY_FULL)
+                        && !strategy.eq_ignore_ascii_case(Self::BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL)
+                    {
+                        return Err(Error::config_name_value_message(
+                            key,
+                            strategy,
+                            "String must be one of (case insensitive): FULL, INCREMENTAL",
+                        ));
+                    }
+                    config.buffer_memory_allocation_strategy = strategy.to_string();
                 },
                 Self::MAX_BLOCK_MS_CONFIG => {
-                    config.max_block_ms = Self::parse_i64(key, value)?;
+                    config.max_block_ms = Self::at_least(key, Self::parse_i64(key, value)?, 0)?;
                 },
                 Self::ACKS_CONFIG => {
-                    config.acks = Self::parse_acks(value)?;
+                    // `in("all", "-1", "0", "1")` (`ProducerConfig.java:430-435`):
+                    // `ConfigDef.ValidString.ensureValid` (`ConfigDef.java:1116`)
+                    // matches the trimmed value exactly (case-sensitive) before
+                    // `parseAcks` runs, so ` all ` is accepted, `ALL`/`2` are not,
+                    // and the error prints the trimmed value.
+                    let trimmed = value.trim();
+                    if !Self::ACKS_VALID_STRINGS.contains(&trimmed) {
+                        return Err(Error::config_name_value_message(
+                            key,
+                            trimmed,
+                            format!("String must be one of: {}", Self::ACKS_VALID_STRINGS.join(", ")),
+                        ));
+                    }
+                    config.acks = Self::parse_acks(trimmed)?;
                 },
                 Self::RETRIES_CONFIG => {
-                    config.retries = Self::parse_i32(key, value)?;
+                    // `between(0, Integer.MAX_VALUE)`: the upper bound is the `i32` range.
+                    config.retries = Self::at_least(key, Self::parse_i32(key, value)?, 0)?;
                 },
                 Self::DELIVERY_TIMEOUT_MS_CONFIG => {
-                    config.delivery_timeout_ms = Self::parse_i32(key, value)?;
+                    config.delivery_timeout_ms = Self::at_least(key, Self::parse_i32(key, value)?, 0)?;
                 },
                 Self::REQUEST_TIMEOUT_MS_CONFIG => {
-                    config.request_timeout_ms = Self::parse_i32(key, value)?;
+                    config.request_timeout_ms = Self::at_least(key, Self::parse_i32(key, value)?, 0)?;
                 },
                 Self::ENABLE_IDEMPOTENCE_CONFIG => {
                     config.enable_idempotence = Self::parse_bool(key, value)?;
                 },
                 Self::MAX_REQUEST_SIZE_CONFIG => {
-                    config.max_request_size = Self::parse_i32(key, value)?;
+                    config.max_request_size = Self::at_least(key, Self::parse_i32(key, value)?, 0)?;
                 },
                 Self::MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION => {
-                    config.max_in_flight_requests_per_connection = Self::parse_i32(key, value)?;
+                    // `atLeast(1)`.
+                    config.max_in_flight_requests_per_connection =
+                        Self::at_least(key, Self::parse_i32(key, value)?, 1)?;
                 },
                 Self::COMPRESSION_TYPE_CONFIG => {
                     // Java never reaches `CompressionType.forName` for a bad
-                    // property: `ProducerConfig.java:397` declares the key with
+                    // property: `ProducerConfig.java:436` declares the key with
                     // `in(Utils.enumOptions(CompressionType.class))`, so
                     // `ConfigDef.ValidString.ensureValid` rejects it first with a
-                    // `ConfigException` (`ConfigDef.java:1103`). Letting
+                    // `ConfigException` (`ConfigDef.java:1116`). Letting
                     // `for_name`'s `IllegalArgumentException` escape here would put
                     // the error outside the `KafkaException` hierarchy, unlike every
                     // other key in this `match`.
@@ -528,37 +807,70 @@ impl ProducerConfig {
                     config.connections_max_idle_ms = Self::parse_i64(key, value)?;
                 },
                 Self::RECONNECT_BACKOFF_MS_CONFIG => {
-                    config.reconnect_backoff_ms = Self::parse_i64(key, value)?;
+                    config.reconnect_backoff_ms = Self::at_least(key, Self::parse_i64(key, value)?, 0)?;
                 },
                 Self::RECONNECT_BACKOFF_MAX_MS_CONFIG => {
-                    config.reconnect_backoff_max_ms = Self::parse_i64(key, value)?;
+                    config.reconnect_backoff_max_ms = Self::at_least(key, Self::parse_i64(key, value)?, 0)?;
                 },
                 Self::RETRY_BACKOFF_MS_CONFIG => {
-                    config.retry_backoff_ms = Self::parse_i64(key, value)?;
+                    config.retry_backoff_ms = Self::at_least(key, Self::parse_i64(key, value)?, 0)?;
                 },
                 Self::RETRY_BACKOFF_MAX_MS_CONFIG => {
-                    config.retry_backoff_max_ms = Self::parse_i64(key, value)?;
+                    config.retry_backoff_max_ms = Self::at_least(key, Self::parse_i64(key, value)?, 0)?;
+                },
+                Self::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG => {
+                    // Java `ProducerConfig` (`:471-476`, KAFKA-20939): `Type.LONG`, `atLeast(0L)`.
+                    let v = Self::parse_i64(key, value)?;
+                    if v < 0 {
+                        return Err(Error::config_name_value_message(key, v, "Value must be at least 0"));
+                    }
+                    config.bootstrap_resolve_timeout_ms = v;
                 },
                 Self::SEND_BUFFER_CONFIG => {
-                    config.send_buffer_bytes = Self::parse_i32(key, value)?;
+                    // `atLeast(CommonClientConfigs.SEND_BUFFER_LOWER_BOUND)`, -1.
+                    config.send_buffer_bytes = Self::at_least(key, Self::parse_i32(key, value)?, -1)?;
                 },
                 Self::RECEIVE_BUFFER_CONFIG => {
-                    config.receive_buffer_bytes = Self::parse_i32(key, value)?;
+                    // `atLeast(CommonClientConfigs.RECEIVE_BUFFER_LOWER_BOUND)`, -1.
+                    config.receive_buffer_bytes = Self::at_least(key, Self::parse_i32(key, value)?, -1)?;
                 },
                 Self::METADATA_MAX_AGE_CONFIG => {
-                    config.metadata_max_age_ms = Self::parse_i64(key, value)?;
+                    config.metadata_max_age_ms = Self::at_least(key, Self::parse_i64(key, value)?, 0)?;
                 },
                 Self::METADATA_MAX_IDLE_CONFIG => {
-                    config.metadata_max_idle_ms = Self::parse_i64(key, value)?;
+                    // `atLeast(5000)`.
+                    config.metadata_max_idle_ms = Self::at_least(key, Self::parse_i64(key, value)?, 5000)?;
+                },
+                Self::METADATA_RECOVERY_STRATEGY_CONFIG => {
+                    // Java: `ConfigDef.CaseInsensitiveValidString.in("none", "rebootstrap")`
+                    // (`ProducerConfig.java:598-599`).
+                    config.metadata_recovery_strategy =
+                        MetadataRecoveryStrategy::for_name(value).map_err(|_| Error::config_name_value(key, value))?;
+                },
+                Self::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG => {
+                    // Java `ProducerConfig` (`:602-605`):
+                    // `metadata.recovery.rebootstrap.trigger.ms` is `atLeast(0)`.
+                    let v = Self::parse_i64(key, value)?;
+                    if v < 0 {
+                        return Err(Error::config_name_value_message(key, v, "Value must be at least 0"));
+                    }
+                    config.metadata_recovery_rebootstrap_trigger_ms = v;
+                },
+                CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG => {
+                    // Java `ProducerConfig` (`:608-612`): `Type.BOOLEAN`, default `true`.
+                    config.metadata_cluster_check_enable = Self::parse_bool(key, value)?;
                 },
                 Self::PARTITIONER_ADAPTIVE_PARTITIONING_ENABLE_CONFIG => {
                     config.partitioner_adaptive_partitioning_enable = Self::parse_bool(key, value)?;
                 },
                 Self::PARTITIONER_AVAILABILITY_TIMEOUT_MS_CONFIG => {
-                    config.partitioner_availability_timeout_ms = Self::parse_i64(key, value)?;
+                    config.partitioner_availability_timeout_ms = Self::at_least(key, Self::parse_i64(key, value)?, 0)?;
                 },
                 Self::PARTITIONER_IGNORE_KEYS_CONFIG => {
                     config.partitioner_ignore_keys = Self::parse_bool(key, value)?;
+                },
+                Self::PARTITIONER_RACK_AWARE_CONFIG => {
+                    config.partitioner_rack_aware = Self::parse_bool(key, value)?;
                 },
                 Self::PARTITIONER_TYPE_CONFIG => {
                     // Only the built-in partitioner types are accepted. The two
@@ -585,11 +897,17 @@ impl ProducerConfig {
                     config.partitioner_type = Some(value.to_string());
                 },
                 Self::TRANSACTIONAL_ID_CONFIG => {
-                    config.transactional_id = if value.is_empty() {
-                        None
-                    } else {
-                        Some(value.to_string())
-                    };
+                    // `new ConfigDef.NonEmptyString()` (`ProducerConfig.java:584-587`
+                    // → `ConfigDef.java:1225-1233`) on the trimmed value
+                    // (`ConfigDef.parseType` trims a `STRING`): an empty or blank id
+                    // is rejected, not read as "no transactional id", and the error
+                    // prints the trimmed (empty) value; ` my-txn ` is stored as
+                    // `my-txn`. An absent key is Java's `null` default.
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() {
+                        return Err(Error::config_name_value_message(key, trimmed, "String must be non-empty"));
+                    }
+                    config.transactional_id = Some(trimmed.to_string());
                 },
                 Self::TRANSACTION_TIMEOUT_CONFIG => {
                     config.transaction_timeout_ms = Self::parse_i32(key, value)?;
@@ -646,7 +964,7 @@ impl ProducerConfig {
                     config.sasl_config.jaas_config = if value.is_empty() {
                         None
                     } else {
-                        Some(value.to_string())
+                        Some(Password::new(value))
                     };
                 },
                 key if key.starts_with("ssl.") => {
@@ -701,7 +1019,7 @@ impl ProducerConfig {
     ///
     /// This is the Rust stand-in for Java's
     /// `config.getConfiguredInstance(PARTITIONER_CLASS_CONFIG, Partitioner.class,
-    /// ...)` (`KafkaProducer.java:382-385`), which reflectively loads and
+    /// ...)` (`KafkaProducer.java:389-392`), which reflectively loads and
     /// instantiates the named class. Rust has no reflection, so only the
     /// built-in names resolve here:
     ///
@@ -753,7 +1071,7 @@ impl ProducerConfig {
     /// Java names a class, which the producer instantiates by reflection; here
     /// the partitioner itself is the value. [`KafkaProducer::new`](crate::producer::KafkaProducer::new)
     /// `configure`s it with the user configs plus the resolved `client.id`, as
-    /// Java does (`KafkaProducer.java:381-388`), and closes it on `close`. As
+    /// Java does (`KafkaProducer.java:388-395`), and closes it on `close`. As
     /// with any configured partitioner, adaptive partitioning is then disabled.
     /// The producer built from this config takes ownership of the partitioner.
     ///
@@ -886,6 +1204,24 @@ impl ProducerConfig {
         };
     }
 
+    /// The `in("all", "-1", "0", "1")` validator of `acks`
+    /// (`ProducerConfig.java:430-435`).
+    const ACKS_VALID_STRINGS: [&'static str; 4] = ["all", "-1", "0", "1"];
+
+    /// Java's `ConfigDef.Range.atLeast(min)`: a `value` below `min` is rejected
+    /// with `ConfigException(name, value, "Value must be at least " + min)`
+    /// (`ConfigDef.java:1013`).
+    fn at_least<T: PartialOrd + std::fmt::Display>(key: &str, value: T, min: T) -> Result<T, Error> {
+        if value < min {
+            return Err(Error::config_name_value_message(
+                key,
+                value,
+                format!("Value must be at least {min}"),
+            ));
+        }
+        Ok(value)
+    }
+
     /// Parses a string value as `i32`.
     fn parse_i32(key: &str, value: &str) -> Result<i32, Error> {
         value.trim().parse::<i32>().map_err(|_| Error::config_name_value(key, value))
@@ -897,21 +1233,39 @@ impl ProducerConfig {
     }
 
     /// Parses a string value as `bool`.
+    ///
+    /// Java's `ConfigDef.parseType(BOOLEAN)` (`ConfigDef.java:703-737`) trims the
+    /// value, then accepts `equalsIgnoreCase("true")` / `("false")`; anything else
+    /// throws `ConfigException(name, value, "Expected value to be either true or
+    /// false")`, where `value` is the **original, untrimmed** string.
     fn parse_bool(key: &str, value: &str) -> Result<bool, Error> {
-        match value.trim() {
-            "true" => Ok(true),
-            "false" => Ok(false),
-            _ => Err(Error::config_name_value(key, value)),
+        let trimmed = value.trim();
+        if trimmed.eq_ignore_ascii_case("true") {
+            Ok(true)
+        } else if trimmed.eq_ignore_ascii_case("false") {
+            Ok(false)
+        } else {
+            Err(Error::config_name_value_message(
+                key,
+                value,
+                "Expected value to be either true or false",
+            ))
         }
     }
 
     /// Parses the acks string, converting "all" to -1.
     ///
     /// Java's `parseAcks` catches `NumberFormatException` and throws
-    /// `ConfigException` (`ProducerConfig.java:653-659`). `ConfigException extends
+    /// `ConfigException` (`ProducerConfig.java:705-711`). `ConfigException extends
     /// KafkaException`, so the error must stay inside the `KafkaException`
     /// hierarchy: returning a `String` here erased the class at the boundary and
     /// left the caller free to pick the wrong one.
+    ///
+    /// [`from_properties`](Self::from_properties) applies the
+    /// `in("all", "-1", "0", "1")` validator first (as Java's `ConfigDef` runs
+    /// `ConfigDef.ValidString` before `parseAcks`), so the numeric-parse error
+    /// branch below is unreachable through that path — it fires only when
+    /// `parse_acks` is called directly, exactly as in Java.
     #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfig#parseAcks")]
     pub(crate) fn parse_acks(acks_string: &str) -> Result<i16, Error> {
         let trimmed = acks_string.trim();
@@ -959,9 +1313,13 @@ mod tests {
         assert_eq!(config.receive_buffer_bytes, 32_768);
         assert_eq!(config.metadata_max_age_ms, 300_000);
         assert_eq!(config.metadata_max_idle_ms, 300_000);
+        assert_eq!(config.metadata_recovery_strategy, MetadataRecoveryStrategy::Rebootstrap);
+        assert_eq!(config.metadata_recovery_rebootstrap_trigger_ms, 300_000);
         assert!(config.partitioner_adaptive_partitioning_enable);
         assert_eq!(config.partitioner_availability_timeout_ms, 0);
         assert!(!config.partitioner_ignore_keys);
+        assert!(!config.partitioner_rack_aware);
+        assert_eq!(config.client_rack, "");
         assert!(config.partitioner_type.is_none());
         // The default (unset) key hash is CRC-32 (librdkafka parity), NOT the
         // Java-client murmur2 default.
@@ -973,6 +1331,34 @@ mod tests {
         assert_eq!(config.metrics_recording_level, "INFO");
         // Java's `originals()` on a config built with no user map is empty.
         assert!(config.originals.is_empty());
+    }
+
+    /// `metadata.recovery.strategy` is a case-insensitive `none` / `rebootstrap`
+    /// string (`ProducerConfig.java:595-601`) and
+    /// `metadata.recovery.rebootstrap.trigger.ms` a long (`:602-607`). Before
+    /// these keys were parsed the producer silently ignored them and never
+    /// rebootstrapped (`ClientRebootstrapTest.testProducerRebootstrap`).
+    #[test]
+    fn test_metadata_recovery_configs() {
+        let mut props = base_props();
+        props.insert("metadata.recovery.strategy".to_string(), "NONE".to_string());
+        props.insert("metadata.recovery.rebootstrap.trigger.ms".to_string(), "1234".to_string());
+        let c = ProducerConfig::new(&props).unwrap();
+        assert_eq!(c.metadata_recovery_strategy, MetadataRecoveryStrategy::None);
+        assert_eq!(c.metadata_recovery_rebootstrap_trigger_ms, 1234);
+
+        let mut props = base_props();
+        props.insert("metadata.recovery.strategy".to_string(), "rebootstrap".to_string());
+        let c = ProducerConfig::new(&props).unwrap();
+        assert_eq!(c.metadata_recovery_strategy, MetadataRecoveryStrategy::Rebootstrap);
+
+        let mut props = base_props();
+        props.insert("metadata.recovery.strategy".to_string(), "bogus".to_string());
+        let err = ProducerConfig::new(&props).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            Error::config_name_value("metadata.recovery.strategy", "bogus").to_string()
+        );
     }
 
     /// `metrics.num.samples` is `atLeast(1)` (Java ProducerConfig /
@@ -996,6 +1382,79 @@ mod tests {
         let mut props = base_props();
         props.insert("metrics.num.samples".to_string(), "-1".to_string());
         assert!(ProducerConfig::new(&props).is_err());
+    }
+
+    /// `metadata.recovery.rebootstrap.trigger.ms` is `atLeast(0)` (Java
+    /// `ProducerConfig.java:602-605`): 0 is accepted, -1 is rejected with
+    /// Java's `ConfigDef.Range.atLeast` message.
+    #[test]
+    fn test_metadata_recovery_rebootstrap_trigger_ms_validator() {
+        let mut props = base_props();
+        props.insert("metadata.recovery.rebootstrap.trigger.ms".to_string(), "0".to_string());
+        let c = ProducerConfig::new(&props).unwrap();
+        assert_eq!(c.metadata_recovery_rebootstrap_trigger_ms, 0);
+
+        let mut props = base_props();
+        props.insert("metadata.recovery.rebootstrap.trigger.ms".to_string(), "-1".to_string());
+        let err = ProducerConfig::new(&props).unwrap_err();
+        let Error::Config(config_error) = err else {
+            panic!("expected a config error, got {err:?}");
+        };
+        assert_eq!(
+            config_error.message(),
+            "Invalid value -1 for configuration metadata.recovery.rebootstrap.trigger.ms: \
+             Value must be at least 0"
+        );
+    }
+
+    /// `metadata.cluster.check.enable` (KIP-1242): `Type.BOOLEAN`, default `true`
+    /// (`ProducerConfig.java:608-612`).
+    #[test]
+    fn test_metadata_cluster_check_enable() {
+        let c = ProducerConfig::new(&base_props()).unwrap();
+        assert!(c.metadata_cluster_check_enable);
+
+        let mut props = base_props();
+        props.insert(
+            CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG.to_string(),
+            "false".to_string(),
+        );
+        assert!(!ProducerConfig::new(&props).unwrap().metadata_cluster_check_enable);
+
+        props.insert(
+            CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG.to_string(),
+            "maybe".to_string(),
+        );
+        assert_eq!(
+            ProducerConfig::new(&props).unwrap_err().message(),
+            "Invalid value maybe for configuration metadata.cluster.check.enable: Expected value to be either true or false"
+        );
+    }
+
+    /// `bootstrap.resolve.timeout.ms` (KIP-909): `Type.LONG`, default `0`
+    /// (synchronous resolution), `atLeast(0L)` since KAFKA-20939.
+    #[test]
+    fn test_bootstrap_resolve_timeout_ms() {
+        assert_eq!(
+            ProducerConfig::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG,
+            "bootstrap.resolve.timeout.ms"
+        );
+        let c = ProducerConfig::new(&base_props()).unwrap();
+        assert_eq!(c.bootstrap_resolve_timeout_ms, 0);
+
+        let mut props = base_props();
+        props.insert("bootstrap.resolve.timeout.ms".to_string(), "3000".to_string());
+        assert_eq!(ProducerConfig::new(&props).unwrap().bootstrap_resolve_timeout_ms, 3000);
+
+        props.insert("bootstrap.resolve.timeout.ms".to_string(), "-1".to_string());
+        let err = ProducerConfig::new(&props).unwrap_err();
+        let Error::Config(config_error) = err else {
+            panic!("expected a config error, got {err:?}");
+        };
+        assert_eq!(
+            config_error.message(),
+            "Invalid value -1 for configuration bootstrap.resolve.timeout.ms: Value must be at least 0"
+        );
     }
 
     /// `metrics.sample.window.ms` is `atLeast(0)` (Java ProducerConfig /
@@ -1084,7 +1543,7 @@ mod tests {
         assert!(!config.enable_idempotence);
     }
 
-    /// `bootstrap.servers` has `NO_DEFAULT_VALUE` (`ProducerConfig.java:376-378`), so a config
+    /// `bootstrap.servers` has `NO_DEFAULT_VALUE` (`ProducerConfig.java:407-409`), so a config
     /// without it fails at parse time with `ConfigDef.parseValue`'s message.
     #[test]
     fn test_missing_bootstrap_servers_rejected_with_exact_message() {
@@ -1203,7 +1662,7 @@ mod tests {
     /// [`resolve_partitioner`](ProducerConfig::resolve_partitioner) returns a
     /// built-in [`RoundRobinPartitioner`] instance for the simple name — the
     /// Rust stand-in for Java's reflective `getConfiguredInstance` of
-    /// `partitioner.class` (`KafkaProducer.java:382-385`).
+    /// `partitioner.class` (`KafkaProducer.java:389-392`).
     #[test]
     fn test_resolve_partitioner_round_robin_simple_name() {
         let mut props = base_props();
@@ -1279,16 +1738,108 @@ mod tests {
 
     #[test]
     fn test_new_transactional_id() {
-        let mut props = base_props();
-        props.insert("transactional.id".to_string(), "my-txn".to_string());
-        let config = ProducerConfig::new(&props).unwrap();
+        let config = ProducerConfig::new(&props_with(&[("transactional.id", "my-txn")])).unwrap();
         assert_eq!(config.transactional_id, Some("my-txn".to_string()));
 
-        // Empty string -> None
-        let mut props = base_props();
-        props.insert("transactional.id".to_string(), String::new());
-        let config = ProducerConfig::new(&props).unwrap();
-        assert_eq!(config.transactional_id, None);
+        // Java trims before validating (`ConfigDef.parseType(STRING)`), so a padded
+        // id is stored trimmed.
+        let config = ProducerConfig::new(&props_with(&[("transactional.id", " my-txn ")])).unwrap();
+        assert_eq!(config.transactional_id, Some("my-txn".to_string()));
+
+        // Java's `ConfigDef.NonEmptyString` validator (`ProducerConfig.java:584-587`
+        // → `ConfigDef.java:1225-1233`) rejects an empty string; a whitespace-only
+        // id trims to empty and is rejected the same way. The error prints the
+        // trimmed (empty) value, so "Invalid value " is followed by two spaces.
+        for raw in ["", "   "] {
+            let error = ProducerConfig::new(&props_with(&[("transactional.id", raw)]))
+                .expect_err("an empty transactional.id must be rejected");
+            assert_eq!(
+                error.message(),
+                "Invalid value  for configuration transactional.id: String must be non-empty",
+                "for transactional.id={raw:?}"
+            );
+            assert!(
+                matches!(error, Error::Config(_)),
+                "for transactional.id={raw:?}: expected Error::Config, got {error:?}"
+            );
+            assert!(
+                error.is_kafka_error(),
+                "for transactional.id={raw:?}: a config error is a Kafka error"
+            );
+        }
+
+        // Only an absent key means "no transactional id" (Java's `null` default).
+        assert_eq!(ProducerConfig::new(&base_props()).unwrap().transactional_id, None);
+    }
+
+    /// Java's `ProducerConfig` `ConfigDef` validators (`ProducerConfig.java:416-577`):
+    /// each bound rejects the value just below it with `ConfigDef.Range.atLeast`'s
+    /// message and accepts the bound itself.
+    #[test]
+    fn test_config_def_range_validators() {
+        let cases: [(&str, i64); 20] = [
+            ("batch.size", 0),
+            ("linger.ms", 0),
+            ("buffer.memory", 0),
+            ("max.block.ms", 0),
+            ("retries", 0),
+            ("delivery.timeout.ms", 0),
+            ("request.timeout.ms", 0),
+            ("max.request.size", 0),
+            ("max.in.flight.requests.per.connection", 1),
+            ("reconnect.backoff.ms", 0),
+            ("reconnect.backoff.max.ms", 0),
+            ("retry.backoff.ms", 0),
+            ("retry.backoff.max.ms", 0),
+            ("bootstrap.resolve.timeout.ms", 0),
+            ("send.buffer.bytes", -1),
+            ("receive.buffer.bytes", -1),
+            ("metadata.max.age.ms", 0),
+            ("metadata.max.idle.ms", 5000),
+            ("partitioner.availability.timeout.ms", 0),
+            ("metrics.sample.window.ms", 0),
+        ];
+        for (key, min) in cases {
+            let below = (min - 1).to_string();
+            let error = ProducerConfig::new(&props_with(&[(key, &below)]))
+                .expect_err(&format!("{key}={below} must be rejected"));
+            assert!(
+                matches!(error, Error::Config(_)),
+                "{key}: expected Error::Config, got {error:?}"
+            );
+            assert_eq!(
+                error.message(),
+                format!("Invalid value {below} for configuration {key}: Value must be at least {min}"),
+            );
+            let at = min.to_string();
+            ProducerConfig::new(&props_with(&[(key, &at)]))
+                .unwrap_or_else(|e| panic!("{key}={at} must be accepted: {e}"));
+        }
+    }
+
+    /// `acks` accepts exactly `all`, `-1`, `0`, `1` (after trimming) and rejects
+    /// anything else, mirroring Java's `ConfigDef.ValidString.in("all", "-1",
+    /// "0", "1")` (`ProducerConfig.java:430-435`, `ConfigDef.java:1116`), which
+    /// runs before `parseAcks`. The error names the trimmed value because the
+    /// validator runs on the parsed (trimmed) value; the check is exact-match, so
+    /// `ALL` and `2` are rejected while a padded ` all ` is accepted.
+    #[test]
+    fn test_acks_valid_strings() {
+        for (acks, expected) in [("all", -1), (" all ", -1), ("-1", -1), ("0", 0), ("1", 1)] {
+            let props = props_with(&[("acks", acks), ("enable.idempotence", "false")]);
+            assert_eq!(ProducerConfig::new(&props).unwrap().acks, expected, "acks={acks:?}");
+        }
+        // Rejected: wrong case, out-of-range numbers and non-numbers. Each is a
+        // `ConfigException` (a Kafka error) naming the value.
+        for acks in ["ALL", "2", "-2", "100", "invalid"] {
+            let error = ProducerConfig::new(&props_with(&[("acks", acks)])).expect_err("rejected");
+            assert!(matches!(error, Error::Config(_)), "expected Error::Config, got {error:?}");
+            assert_eq!(
+                error.message(),
+                format!("Invalid value {acks} for configuration acks: String must be one of: all, -1, 0, 1"),
+            );
+            assert!(error.is_kafka_error(), "for acks={acks}: a config error is a Kafka error");
+        }
     }
 
     #[test]
@@ -1300,7 +1851,7 @@ mod tests {
         assert_eq!(ProducerConfig::parse_acks("1").unwrap(), 1);
 
         // Java's `parseAcks` catches `NumberFormatException` and throws
-        // `ConfigException` (`ProducerConfig.java:653-659`), so the class matters
+        // `ConfigException` (`ProducerConfig.java:705-711`), so the class matters
         // as much as the message: `ConfigException extends KafkaException`, and a
         // caller validating a config map with `is_kafka_error()` must see it.
         let error = ProducerConfig::parse_acks("invalid").expect_err("a non-numeric acks is a config error");
@@ -1309,21 +1860,53 @@ mod tests {
         assert!(error.is_kafka_error());
     }
 
+    /// Boolean config values are parsed case-insensitively after trimming, and an
+    /// unparseable value is rejected with Java's message and the original,
+    /// untrimmed value. Mirrors `ConfigDef.parseType(BOOLEAN)`
+    /// (`ConfigDef.java:703-737`): `equalsIgnoreCase("true")` / `("false")`, else
+    /// `ConfigException(name, value, "Expected value to be either true or false")`.
+    #[test]
+    fn test_parse_bool_matches_java_boolean() {
+        // Accepted regardless of case, and after trimming surrounding whitespace.
+        for raw in ["true", "True", "TRUE"] {
+            let config = ProducerConfig::new(&props_with(&[("enable.idempotence", raw)]))
+                .unwrap_or_else(|e| panic!("enable.idempotence={raw} should be valid: {e:?}"));
+            assert!(config.enable_idempotence, "for enable.idempotence={raw}");
+        }
+        for raw in ["false", "False", " false "] {
+            let config = ProducerConfig::new(&props_with(&[("enable.idempotence", raw)]))
+                .unwrap_or_else(|e| panic!("enable.idempotence={raw} should be valid: {e:?}"));
+            assert!(!config.enable_idempotence, "for enable.idempotence={raw}");
+        }
+
+        // Rejected: a non-boolean string. Java prints the original (untrimmed) value.
+        let error = ProducerConfig::new(&props_with(&[("enable.idempotence", "yes")]))
+            .expect_err("a non-boolean enable.idempotence must be rejected");
+        assert_eq!(
+            error.message(),
+            "Invalid value yes for configuration enable.idempotence: Expected value to be either true or false",
+        );
+        assert!(matches!(error, Error::Config(_)), "expected Error::Config, got {error:?}");
+        assert!(error.is_kafka_error());
+    }
+
     /// Every `ConfigException` this config raises must answer `true` to
     /// `is_kafka_error()`, matching `ConfigException extends KafkaException`.
     ///
-    /// The six sites are Java's `parseAcks` (`ProducerConfig.java:657`) and the
-    /// five throws in `postProcessAndValidateIdempotenceConfigs` (`:603`, `:612`,
-    /// `:621`, `:635`, `:645`). They all used to be `IllegalArgumentException`,
-    /// which sits *beside* `KafkaException` rather than below it, so
-    /// `is_kafka_error()` answered `false` and a bad `acks` slipped past a caller
-    /// that a bad `linger.ms` did not.
+    /// The six sites are the `acks` `ConfigDef.ValidString` validator
+    /// (`ProducerConfig.java:430-435` → `ConfigDef.java:1116`, which runs before
+    /// Java's `parseAcks` at `:709`) and the five throws in
+    /// `postProcessAndValidateIdempotenceConfigs` (`:655`, `:664`, `:673`, `:687`,
+    /// `:697`). They all used to be `IllegalArgumentException`, which sits
+    /// *beside* `KafkaException` rather than below it, so `is_kafka_error()`
+    /// answered `false` and a bad `acks` slipped past a caller that a bad
+    /// `linger.ms` did not.
     #[test]
     fn config_errors_are_inside_the_kafka_error_hierarchy() {
         let cases: [(&[(&str, &str)], &str); 6] = [
             (
                 &[("acks", "not-a-number")],
-                "Invalid configuration value for 'acks': not-a-number",
+                "Invalid value not-a-number for configuration acks: String must be one of: all, -1, 0, 1",
             ),
             (
                 &[("enable.idempotence", "true"), ("retries", "0")],
@@ -1412,11 +1995,68 @@ mod tests {
         );
     }
 
+    /// Translated from `ProducerConfigTest.testDefaultBufferMemoryAllocationStrategy`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfigTest#testDefaultBufferMemoryAllocationStrategy")]
+    fn test_default_buffer_memory_allocation_strategy() {
+        let producer_config = ProducerConfig::new(&base_props()).unwrap();
+        assert_eq!(
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_FULL,
+            producer_config.buffer_memory_allocation_strategy
+        );
+    }
+
+    /// Translated from `ProducerConfigTest.testValidBufferMemoryAllocationStrategy`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfigTest#testValidBufferMemoryAllocationStrategy")]
+    fn test_valid_buffer_memory_allocation_strategy() {
+        let mut props = base_props();
+        props.insert(
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG.to_string(),
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL.to_string(),
+        );
+        let producer_config = ProducerConfig::new(&props).unwrap();
+        assert_eq!(
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL,
+            producer_config.buffer_memory_allocation_strategy
+        );
+
+        // Rust-only: `CaseInsensitiveValidString` accepts any case, and the value is kept as given.
+        props.insert(
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG.to_string(),
+            "INCREMENTAL".to_string(),
+        );
+        assert_eq!(
+            "INCREMENTAL",
+            ProducerConfig::new(&props).unwrap().buffer_memory_allocation_strategy
+        );
+    }
+
+    /// Translated from `ProducerConfigTest.testInvalidBufferMemoryAllocationStrategy`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfigTest#testInvalidBufferMemoryAllocationStrategy")]
+    fn test_invalid_buffer_memory_allocation_strategy() {
+        let mut props = base_props();
+        props.insert(
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG.to_string(),
+            "abc".to_string(),
+        );
+        let err = ProducerConfig::new(&props).unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "expected Error::Config, got {err:?}");
+        assert!(err.message().contains(ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG));
+        // Rust-only: the whole `CaseInsensitiveValidString` message.
+        assert_eq!(
+            err.message(),
+            "Invalid value abc for configuration buffer.memory.allocation.strategy: \
+             String must be one of (case insensitive): FULL, INCREMENTAL"
+        );
+    }
+
     /// An unrecognised `compression.type` is a `ConfigException`, not the
     /// `IllegalArgumentException` `CompressionType.forName` would raise: Java
     /// validates the key with `in(Utils.enumOptions(CompressionType.class))`
-    /// (`ProducerConfig.java:397`), so `ConfigDef.ValidString.ensureValid`
-    /// (`ConfigDef.java:1103`) rejects the value before the enum lookup runs.
+    /// (`ProducerConfig.java:436`), so `ConfigDef.ValidString.ensureValid`
+    /// (`ConfigDef.java:1116`) rejects the value before the enum lookup runs.
     #[test]
     fn test_invalid_compression_type_is_a_config_error() {
         let mut props = base_props();
@@ -1500,6 +2140,33 @@ mod tests {
     /// Java's `KafkaProducerTest.baseProperties()`.
     fn base_properties() -> HashMap<String, String> {
         HashMap::from([("bootstrap.servers".to_string(), "localhost:9999".to_string())])
+    }
+
+    /// KIP-1123 (KAFKA-19193): `partitioner.rack.aware` is a `Type.BOOLEAN` and the
+    /// producer's `client.rack` a `Type.STRING` (trimmed by `ConfigDef.parseType`),
+    /// defined with the keys and defaults Java's `ProducerConfig` gives them.
+    #[test]
+    fn test_partitioner_rack_aware_and_client_rack() {
+        assert_eq!(ProducerConfig::PARTITIONER_RACK_AWARE_CONFIG, "partitioner.rack.aware");
+        assert_eq!(ProducerConfig::CLIENT_RACK_CONFIG, "client.rack");
+        assert_eq!(ProducerConfig::CLIENT_RACK_CONFIG, CommonClientConfigs::CLIENT_RACK_CONFIG);
+        assert_eq!(ProducerConfig::DEFAULT_CLIENT_RACK, "");
+
+        let mut props = base_props();
+        props.insert("partitioner.rack.aware".to_string(), "true".to_string());
+        props.insert("client.rack".to_string(), " rack0 ".to_string());
+        let config = ProducerConfig::new(&props).expect("valid config");
+        assert!(config.partitioner_rack_aware);
+        assert_eq!(config.client_rack, "rack0");
+
+        let mut props = base_props();
+        props.insert("partitioner.rack.aware".to_string(), "yes".to_string());
+        let err = ProducerConfig::new(&props).unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "got {err:?}");
+        assert_eq!(
+            err.message(),
+            "Invalid value yes for configuration partitioner.rack.aware: Expected value to be either true or false"
+        );
     }
 
     fn props_with(extra: &[(&str, &str)]) -> HashMap<String, String> {
@@ -1759,7 +2426,7 @@ mod tests {
 
     /// `ConfigDef.parseType` trims `client.id`. The producer keys generation
     /// on the key being present in the originals, not on emptiness
-    /// (`ProducerConfig.java:581-583`), so a blank explicit id stays empty,
+    /// (`ProducerConfig.java:633-635`), so a blank explicit id stays empty,
     /// as in Java. The consumer and admin client generate one instead.
     #[test]
     fn test_explicit_client_id_is_trimmed() {
@@ -1814,7 +2481,7 @@ mod tests {
     }
 
     /// `bootstrap.servers` is validated with Java's
-    /// `ValidList.anyNonDuplicateValues(false, false)` (`ProducerConfig.java:379`): an empty
+    /// `ValidList.anyNonDuplicateValues(false, false)` (`ProducerConfig.java:410`): an empty
     /// element is rejected with `ConfigDef`'s exact message and duplicates are removed
     /// (single-message `ConfigException`, no `Invalid value` prefix). An empty list is rejected too.
     #[test]
@@ -1852,5 +2519,134 @@ mod tests {
             ProducerConfig::new(&props).unwrap().bootstrap_servers,
             ["a:1".to_string(), "b:1".to_string()]
         );
+    }
+
+    // -- Debug redaction -----------------------------------------------------
+
+    /// `{:?}` renders no secret the user passed, and `originals` only as its
+    /// key set. The props hold the seven `Type.PASSWORD` keys this client
+    /// parses (`SslConfigs.java:133-137`, `:140`, `SaslConfigs.java:380`), the
+    /// two OAuth `Type.PASSWORD` keys it does not parse (`SaslConfigs.java:392`,
+    /// `:402`), and an unknown key carrying a serializer credential: Java
+    /// prints none of those values. The parsed secrets render as `[hidden]`
+    /// through their typed fields, and the non-secret `bootstrap.servers` value
+    /// stays visible through its typed field only.
+    #[test]
+    fn test_debug_hides_secrets_and_renders_originals_as_key_set() {
+        let secrets = [
+            (
+                "sasl.jaas.config",
+                "org.apache.kafka.common.security.plain.PlainLoginModule required \
+                 username=\"jaas-user\" password=\"jaas-S3cr3t\";",
+            ),
+            ("ssl.truststore.password", "truststore-password-S3cr3t"),
+            ("ssl.truststore.certificates", "truststore-certificates-S3cr3t"),
+            ("ssl.keystore.password", "keystore-password-S3cr3t"),
+            ("ssl.keystore.key", "keystore-key-S3cr3t"),
+            ("ssl.keystore.certificate.chain", "keystore-certificate-chain-S3cr3t"),
+            ("ssl.key.password", "key-password-S3cr3t"),
+            (
+                "sasl.oauthbearer.client.credentials.client.secret",
+                "oauth-client-secret-S3cr3t",
+            ),
+            ("sasl.oauthbearer.assertion.private.key.passphrase", "oauth-passphrase-S3cr3t"),
+            ("basic.auth.user.info", "registry-key:registry-S3cr3t"),
+        ];
+        let mut props: HashMap<String, String> = secrets
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        props.insert("bootstrap.servers".to_string(), "visible-host:9092".to_string());
+        let config = ProducerConfig::new(&props).unwrap();
+
+        // The secrets did reach the config, typed and raw (so `originals` can
+        // still be forwarded, e.g. to a `Partitioner`); they are only hidden
+        // from `Debug`.
+        assert_eq!(config.sasl_config.resolve_password(), Some("jaas-S3cr3t"));
+        assert_eq!(
+            config.ssl_config.key_password.as_ref().map(Password::value),
+            Some("key-password-S3cr3t")
+        );
+        for (key, value) in secrets {
+            assert_eq!(config.originals.get(key).map(String::as_str), Some(value), "{key}");
+        }
+
+        for rendered in [format!("{config:?}"), format!("{config:#?}")] {
+            for (key, value) in secrets {
+                assert!(!rendered.contains(value), "the value of {key} leaked: {rendered}");
+                // Only `originals` renders key names, so this proves the key
+                // set is there.
+                assert!(rendered.contains(&format!("{key:?}")), "key {key} missing: {rendered}");
+            }
+            for fragment in ["S3cr3t", "jaas-user", "PlainLoginModule", "registry-key"] {
+                assert!(!rendered.contains(fragment), "{fragment:?} leaked: {rendered}");
+            }
+            // `[hidden]` comes from the seven typed `Password` fields only.
+            assert_eq!(rendered.matches(Password::HIDDEN).count(), 7, "{rendered}");
+            // The non-secret value renders once, through its typed field and
+            // not through `originals`.
+            assert_eq!(rendered.matches("visible-host:9092").count(), 1, "{rendered}");
+        }
+
+        let rendered = format!("{config:?}");
+        assert!(rendered.contains("bootstrap_servers: [\"visible-host:9092\"]"), "{rendered}");
+        for field in [
+            "jaas_config",
+            "truststore_password",
+            "truststore_certificates",
+            "keystore_password",
+            "keystore_key",
+            "keystore_certificate_chain",
+            "key_password",
+        ] {
+            let hidden = format!("{field}: Some([hidden])");
+            assert!(rendered.contains(&hidden), "{hidden} missing: {rendered}");
+        }
+        // `originals` renders as its key set, sorted, with no value at all.
+        let expected_originals = concat!(
+            "originals: {",
+            "\"basic.auth.user.info\", ",
+            "\"bootstrap.servers\", ",
+            "\"sasl.jaas.config\", ",
+            "\"sasl.oauthbearer.assertion.private.key.passphrase\", ",
+            "\"sasl.oauthbearer.client.credentials.client.secret\", ",
+            "\"ssl.key.password\", ",
+            "\"ssl.keystore.certificate.chain\", ",
+            "\"ssl.keystore.key\", ",
+            "\"ssl.keystore.password\", ",
+            "\"ssl.truststore.certificates\", ",
+            "\"ssl.truststore.password\"",
+            "} }",
+        );
+        assert!(rendered.ends_with(expected_originals), "{rendered}");
+    }
+
+    /// The hand-written `Debug` renders every field, in declaration order, as
+    /// the derive it replaced did. The expected names are scanned from this
+    /// file's struct definition, so the expectation cannot drift from it.
+    #[test]
+    fn test_debug_renders_every_field_in_declaration_order() {
+        let source = include_str!("producer_config.rs");
+        let start = source.find("pub struct ProducerConfig {").expect("struct definition");
+        let definition = &source[start..];
+        let end = definition.find("\n}\n").expect("end of struct definition");
+        let declared: Vec<&str> = definition[..end]
+            .lines()
+            .filter_map(|line| line.strip_prefix("    pub(crate) "))
+            .filter_map(|rest| rest.split_once(':').map(|(name, _)| name))
+            .collect();
+        assert_eq!(declared.first(), Some(&"bootstrap_servers"), "{declared:?}");
+        assert!(declared.contains(&"originals"), "{declared:?}");
+
+        let rendered = format!("{:#?}", ProducerConfig::default());
+        assert!(rendered.starts_with("ProducerConfig {\n"), "{rendered}");
+        // Top-level fields are the lines indented exactly one level.
+        let rendered_fields: Vec<&str> = rendered
+            .lines()
+            .filter_map(|line| line.strip_prefix("    "))
+            .filter(|rest| !rest.starts_with(' '))
+            .filter_map(|rest| rest.split_once(": ").map(|(name, _)| name))
+            .collect();
+        assert_eq!(rendered_fields, declared);
     }
 }

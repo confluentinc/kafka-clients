@@ -32,6 +32,8 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::common::internals::UnsupportedProtocolFieldErrorOptionsBuilder;
+
 use crate::OffsetFetchRequestData;
 use crate::OffsetFetchResponseData;
 use crate::common::TopicPartition;
@@ -399,10 +401,12 @@ impl RequestBuilder for Builder {
             && version < OffsetFetchRequest::REQUIRE_STABLE_OFFSET_MIN_VERSION
             && self.throw_on_fetch_stable_offsets_unsupported
         {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!("Broker unexpectedly doesn't support requireStable flag on version {version}"),
-            ));
+            return Err(UnsupportedProtocolFieldErrorOptionsBuilder::new()
+                .set_field_or_value("RequireStable")
+                .set_api_key_name(&ApiKeys::OFFSET_FETCH.to_string())
+                .set_api_version(version)
+                .set_lowest_supported_version(7)
+                .into_io_error());
         }
         // Java logs `trace` and clears the flag in the non-strict case;
         // the clearing happens further below by mutating a downgraded copy
@@ -533,7 +537,10 @@ mod tests {
         data.set_require_stable(true);
         let mut builder = Builder::for_topic_ids_or_names(data, true);
         let err = builder.build_version(6).unwrap_err();
-        assert!(err.to_string().contains("requireStable"));
+        crate::common::internals::assert_unsupported_protocol_field(
+            &err,
+            "The cluster does not support [RequireStable] in OFFSET_FETCH API version 6. Upgrade the cluster to OFFSET_FETCH API version >= 7 to enable [RequireStable].",
+        );
     }
 
     /// `build_version` silently falls back when `requireStable` is set on

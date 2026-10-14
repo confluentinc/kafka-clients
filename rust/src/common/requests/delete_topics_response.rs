@@ -90,10 +90,11 @@ impl DeleteTopicsResponse {
         Ok(Self::new(data))
     }
 
-    /// Whether the client should throttle on this response (v1+).
+    /// Whether the client should throttle on this response (v2+, the first
+    /// version after KIP-219).
     #[doc(alias = "org.apache.kafka.common.requests.DeleteTopicsResponse#shouldClientThrottle")]
     pub fn should_client_throttle(&self, version: i16) -> bool {
-        version >= 1
+        version >= 2
     }
 }
 
@@ -125,9 +126,9 @@ mod tests {
     }
 
     #[test]
-    fn should_client_throttle_v1_threshold() {
+    fn should_client_throttle_v2_threshold() {
         let response = DeleteTopicsResponse::new(DeleteTopicsResponseData::new());
-        assert!(!response.should_client_throttle(0));
-        assert!(response.should_client_throttle(1));
+        assert!(!response.should_client_throttle(1));
+        assert!(response.should_client_throttle(2));
     }
 }

@@ -294,6 +294,12 @@ impl FetchMetricsRegistry {
     }
 
     /// Returns every template, mirroring Java's `getAllTemplates()`.
+    ///
+    /// Java's only non-test caller is `FetchMetricsRegistry.main`, which
+    /// c39e2af92c (KAFKA-20408) moved here from the deleted `ConsumerMetrics`
+    /// wrapper: it prints `Metrics.toHtmlTable("kafka.consumer", ..)` for the
+    /// docs build (`genConsumerMetricsDocs`). Rust has neither that wrapper nor
+    /// an HTML-table generator, so `main` is not translated.
     #[cfg(test)]
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsRegistry#getAllTemplates")]
     pub(crate) fn get_all_templates(&self) -> Vec<&MetricNameTemplate> {

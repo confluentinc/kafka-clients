@@ -24,7 +24,7 @@ use crate::common::network::selectable::USE_DEFAULT_BUFFER_SIZE;
 use crate::common::network::{PlaintextChannelBuilder, SaslChannelBuilder, Selectable, Selector, SslChannelBuilder};
 use crate::common::security::auth::SecurityProtocol;
 use crate::common::security::ssl::SslFactory;
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::LogContext;
 
 use super::test_context::{TestContext, TestProtocol};
 

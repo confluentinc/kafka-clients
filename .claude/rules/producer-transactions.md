@@ -274,7 +274,7 @@ value in `DashMap<i32, Mutex<VecDeque<ProducerBatch>>>`
 
 **Ownership alternates — the Sender's map is NOT the permanent sole owner.** On
 the retry path ownership moves *back* to the accumulator: `Sender.reenqueueBatch`
-(`Sender.java:750-752`) calls `accumulator.reenqueue(..)` then
+(`Sender.java:751-753`) calls `accumulator.reenqueue(..)` then
 `maybeRemoveFromInflightBatches(..)` **without** calling
 `transactionManager.removeInFlightBatch` — unlike the `MESSAGE_TOO_LARGE` split
 path at `:685`, which does. Java depends on that asymmetry and asserts it:
@@ -657,7 +657,7 @@ right thing. **Adding only the drain call to `with_txn_control` is the entire ch
     machinery, and do NOT add a `send_async`-rejecting guard. The drain plus the
     producer's accumulator handling is sufficient.
   - Bindings and their generated docs (the C header text lives in the
-    `#[unsafe(no_mangle)]` rustdoc; `producer.py` and higher layers when they arrive)
+    `#[unsafe(no_mangle)]` rustdoc; the `confluent_kafka.producer` package and higher layers)
     MUST state that async sends which had returned before a control call are drained
     into it (committed on commit, discarded on abort), the same guarantee `flush`/`close`
     give. They may note the synchronous send gives the strongest ordering, but MUST NOT

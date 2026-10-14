@@ -36,7 +36,7 @@ use tokio::sync::{Notify, mpsc, oneshot};
 use crate::common::protocol::Errors;
 use crate::common::requests::ConcreteResponse;
 use crate::common::requests::FetchResponse;
-use crate::common::utils::BufferSupplier;
+use crate::common::utils::internals::BufferSupplier;
 use crate::common::{Error, Node};
 use crate::consumer::internals::AbstractFetch;
 use crate::consumer::internals::ConsumerMetadata;
@@ -156,6 +156,10 @@ pub(crate) struct FetchRequestManager {
     /// the production path installs the real one via
     /// [`Self::set_completion_notify`].
     completion_notify: Arc<Notify>,
+    /// `retry.backoff.ms`: the bound [`RequestManager::maximum_time_to_wait`]
+    /// puts on the application thread's wait while no fetch is in flight.
+    /// Java: `private final long retryBackoffMs` (KAFKA-20854).
+    retry_backoff_ms: i64,
 }
 
 impl FetchRequestManager {
@@ -172,9 +176,10 @@ impl FetchRequestManager {
 
     /// Constructs a `FetchRequestManager` from explicit dependencies.
     ///
-    /// Translates the 9-arg Java constructor. Drops the `LogContext` (we use
+    /// Translates the 10-arg Java constructor. Drops the `LogContext` (we use
     /// the `log` crate). Phase M3 plumbs the `FetchMetricsManager` (dropped by
-    /// Phase 7a); Phase 37 re-introduced `ApiVersions`.
+    /// Phase 7a); Phase 37 re-introduced `ApiVersions`; KAFKA-20854 added
+    /// `retry_backoff_ms`.
     #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManager#FetchRequestManager")]
     pub(crate) fn new(
@@ -187,6 +192,7 @@ impl FetchRequestManager {
         maybe_throw_auth_failure: MaybeAuthFailureFn,
         api_versions: Arc<crate::ApiVersions>,
         metrics_manager: Arc<FetchMetricsManager>,
+        retry_backoff_ms: i64,
     ) -> Self {
         let (pending_completion_tx, pending_completion_rx) = mpsc::unbounded_channel();
         Self {
@@ -205,6 +211,7 @@ impl FetchRequestManager {
             pending_completion_tx,
             pending_completion_rx,
             completion_notify: Arc::new(Notify::new()),
+            retry_backoff_ms,
         }
     }
 
@@ -290,11 +297,7 @@ impl FetchRequestManager {
                     nodes_by_id.insert(node_id, node.clone());
                 }
             }
-            self.abstract_fetch
-                .prepare_close_fetch_session_requests(&nodes_by_id)
-                .into_iter()
-                .filter_map(|(node_id, data)| nodes_by_id.remove(&node_id).map(|n| (node_id, (n, data))))
-                .collect()
+            self.abstract_fetch.prepare_close_fetch_session_requests(&nodes_by_id)
         } else {
             let is_unavailable = self.is_unavailable.clone();
             let maybe_throw_auth_failure = self.maybe_throw_auth_failure.clone();
@@ -303,7 +306,7 @@ impl FetchRequestManager {
                 move |n| is_unavailable(n),
                 move |n| maybe_throw_auth_failure(n),
             ) {
-                Ok(map) => map,
+                Ok(result) => result,
                 Err(e) => {
                     // Java: completes ALL chained pendingFetchRequestFuture
                     // callers exceptionally and returns a "dummy" empty
@@ -326,26 +329,21 @@ impl FetchRequestManager {
             }
         };
 
-        if prepared.is_empty() {
-            // Complete ALL pending acks with Ok(()) and return empty.
-            //
-            // Only wake a consumer blocked in `FetchBuffer::await_wakeup` if
-            // there is genuinely nothing coming. When nodes already have an
-            // in-flight fetch, `prepare_fetch_requests` skipped them — a
-            // response is on the way and will wake the buffer via `add`, so
-            // waking here is wrong: the app's `await_wakeup` would return,
-            // re-trigger `createFetchRequests` (empty again — same in-flight
-            // skip), and wake again, busy-looping. Wait for the in-flight
-            // fetch instead. Only an empty pending-set means no fetch is
-            // outstanding (no fetchable partitions / all paused), in which
-            // case waking avoids a needless wait.
-            //
-            // (Java wakes unconditionally here, but its `poll()` does not
-            // re-issue `createFetchRequests` on every loop iteration the way
-            // the Rust poll loop does, so Java does not spin. The Rust poll
-            // loop ensures a fetch is in flight before blocking, which makes
-            // the unconditional wake a spin — hence this guard.)
-            if self.abstract_fetch.nodes_with_pending_fetch_requests.is_empty() {
+        if prepared.requests().is_empty() {
+            if prepared.can_wake_buffer_if_no_fetch_requests_to_send() {
+                // If there's nothing to fetch because every fetchable partition already has buffered data,
+                // wake up the FetchBuffer so it doesn't needlessly wait for a wakeup that won't come until
+                // the data in the fetch buffer is consumed.
+                //
+                // KAFKA-20854 replaced Java's unconditional wakeup here, and
+                // with it the Rust-only "wake only when nothing is in flight"
+                // guard this site carried: both woke the buffer in states
+                // that only an external event can change (no fetchable
+                // partition, no leader, reconnect backoff, an in-flight
+                // request, a node hosting buffered data), which busy-looped
+                // the application task. The in-flight case is now covered by
+                // `AbstractFetch::remove_pending_fetch_request`, which wakes
+                // the buffer when the request completes, whatever its outcome.
                 self.abstract_fetch.fetch_buffer.wakeup();
             }
             for tx in pending_acks {
@@ -372,6 +370,7 @@ impl FetchRequestManager {
         // loop, and the response body bytes (a `Bytes` buffer inside
         // `FetchResponse`) travel by **ownership** through the channel,
         // never copied (consumer-threading.md §27).
+        let prepared = prepared.into_requests();
         let mut requests: Vec<UnsentRequest> = Vec::with_capacity(prepared.len());
         for (_node_id, (target_node, request_data)) in prepared {
             let builder = self.abstract_fetch.create_fetch_request(&target_node, &request_data);
@@ -531,6 +530,29 @@ impl RequestManager for FetchRequestManager {
         self.poll_internal(current_time_ms, true)
     }
 
+    /// If any request is in flight, its completion will wake the application
+    /// thread regardless of the outcome, so no separate bound is needed.
+    /// Otherwise, the application thread's wait is bounded by
+    /// `retry_backoff_ms` so it can re-evaluate subscription state changes
+    /// promptly.
+    ///
+    /// Translates Java's `maximumTimeToWait(long)` override (KAFKA-20854).
+    /// `nodes_with_pending_fetch_requests` is read as `poll(now)` last left it.
+    /// Java removes a node inside the network poll's response callback; Rust
+    /// removes it when the next `poll(now)` drains the completion, which the
+    /// forwarder's `completion_notify` poke schedules at once. So a node whose
+    /// response landed during this iteration's network poll still reads as in
+    /// flight here for one iteration — harmless, since that drain is what wakes
+    /// the buffer the application task is waiting on.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManager#maximumTimeToWait")]
+    fn maximum_time_to_wait(&self, _current_time_ms: i64) -> i64 {
+        if self.abstract_fetch.nodes_with_pending_fetch_requests.is_empty() {
+            self.retry_backoff_ms
+        } else {
+            i64::MAX
+        }
+    }
+
     fn signal_close(&mut self) {
         // Java's `signalClose` is a no-op for the fetch manager
         // (close-mode wiring is gated on `pollOnClose`).
@@ -555,6 +577,8 @@ impl Drop for FetchRequestManager {
 mod tests {
     use super::*;
     use crate::common::IsolationLevel;
+    /// Java `FetchRequestManagerTest.retryBackoffMs`.
+    const RETRY_BACKOFF_MS: i64 = 100;
     use crate::common::TopicPartition;
     use crate::common::internals::ClusterResourceListeners;
     use crate::consumer::internals::AutoOffsetResetStrategy;
@@ -598,11 +622,12 @@ mod tests {
             subs,
             make_fetch_config(),
             Arc::new(FetchBuffer::new()),
-            Arc::new(crate::common::utils::BufferSupplier::create()),
+            Arc::new(crate::common::utils::internals::BufferSupplier::create()),
             FetchRequestManager::always_available(),
             FetchRequestManager::no_auth_failure(),
             Arc::new(crate::ApiVersions::new()),
             FetchMetricsManager::for_test(),
+            RETRY_BACKOFF_MS,
         )
     }
 
@@ -662,24 +687,42 @@ mod tests {
         );
     }
 
-    /// Counterpart: with NO in-flight fetch and nothing fetchable, `poll`
-    /// DOES wake the buffer so a blocked consumer does not wait needlessly
-    /// (Java's unconditional wake for the genuinely-nothing-to-fetch case).
+    /// Translated from `FetchRequestManagerTest.testNoFetchablePartitionsDoesNotWakeUpBuffer`
+    /// (KAFKA-20854). A bg-loop cycle that finds nothing to fetch because no
+    /// partition is fetchable must NOT wake the buffer: the state only changes
+    /// on an external event, so an eager wakeup would busy-loop the caller.
+    /// This replaces the Rust-only counterpart that asserted the opposite (the
+    /// pre-4.4 "wake when nothing is in flight" guard). Java blocks a thread on
+    /// the buffer and checks it is still alive after 500 ms; the pending-wakeup
+    /// flag says the same thing by value.
     #[tokio::test]
-    async fn test_poll_empty_no_inflight_wakes_buffer() {
+    async fn test_no_fetchable_partitions_does_not_wake_up_buffer() {
         let mut mgr = make_manager();
         let buffer = mgr.abstract_fetch.fetch_buffer.clone();
+
+        // Simulate a network thread cycle that finds nothing to fetch.
         let rx = mgr.create_fetch_requests();
-        let _ = mgr.poll(100);
+        let result = mgr.poll(100);
+        assert_eq!(0, result.unsent_requests.len());
         assert!(rx.await.expect("ack receiver").is_ok());
-        // The buffer was woken → `await_wakeup` returns promptly.
-        let start = Instant::now();
-        buffer.await_wakeup(Duration::from_millis(500)).await;
+
+        // An eager wakeup here would busy-loop the caller.
         assert!(
-            start.elapsed() < Duration::from_millis(100),
-            "await_wakeup blocked ({:?}) — buffer was not woken when nothing is in flight",
-            start.elapsed()
+            !buffer.is_woken_up_for_test(),
+            "Empty fetch result with no fetchable partitions must not wake the thread blocked on the fetch buffer"
         );
+        // ... and a caller blocked on the buffer stays blocked until woken.
+        let blocked = tokio::spawn({
+            let buffer = buffer.clone();
+            async move { buffer.await_wakeup(Duration::from_secs(3_600)).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!blocked.is_finished());
+        buffer.wakeup();
+        tokio::time::timeout(Duration::from_secs(2), blocked)
+            .await
+            .expect("explicit wakeup releases the blocked caller")
+            .unwrap();
     }
 
     /// `create_fetch_requests` and `enqueue_create_fetch_requests` both
@@ -969,7 +1012,10 @@ mod tests {
 /// directly to stay fast and deterministic (these are unit tests, no broker).
 #[cfg(test)]
 mod round_trip {
+    /// Java `FetchRequestManagerTest.retryBackoffMs`.
+    const RETRY_BACKOFF_MS: i64 = 100;
     use crate::common::requests::FetchMetadata;
+    use crate::consumer::internals::{RequestManager, UnsentRequest};
     use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Mutex};
 
@@ -980,7 +1026,8 @@ mod round_trip {
     use crate::common::protocol::{ApiKeys, Errors};
     use crate::common::record::TimestampType;
     use crate::common::record::internal::{
-        MemoryRecords, MemoryRecordsBuilderOptionsBuilder, RecordBatch, SimpleRecord, SimpleRecordOptionsBuilder,
+        ControlRecordType, EndTransactionMarker, MemoryRecords, MemoryRecordsBuilderOptionsBuilder, RecordBatch,
+        SimpleRecord, SimpleRecordOptionsBuilder,
     };
     use crate::common::requests::FetchRequest;
     use crate::common::requests::FetchResponse;
@@ -1264,6 +1311,67 @@ mod round_trip {
         builder.build().buffer().to_vec()
     }
 
+    /// A transactional (non-control) v2 data batch, mirroring Java's
+    /// `appendTransactionalRecords(buffer, pid, baseOffset, records...)`
+    /// (`FetchRequestManagerTest.java:3114-3128`): magic v2, CREATE_TIME,
+    /// `producer_epoch = 0`, `base_sequence = (int) base_offset`,
+    /// `is_transactional = true`, `NO_PARTITION_LEADER_EPOCH`. Each `(key, value)`
+    /// pair is appended at consecutive offsets from `base_offset`; a `None` value
+    /// mirrors Java's null-valued `SimpleRecord`.
+    fn append_transactional_records(base_offset: i64, pid: i64, records: &[(&[u8], Option<&[u8]>)]) -> Vec<u8> {
+        let mut builder = MemoryRecords::builder_with_options(
+            MemoryRecordsBuilderOptionsBuilder::new()
+                .set_initial_capacity(1024)
+                .set_magic(RecordBatch::MAGIC_VALUE_V2)
+                .set_compression(Compression::none().build())
+                .set_timestamp_type(TimestampType::CreateTime)
+                .set_base_offset(base_offset)
+                .set_log_append_time(-1)
+                .set_producer_id(pid)
+                .set_producer_epoch(0)
+                .set_base_sequence(base_offset as i32)
+                .set_is_transactional(true)
+                .set_is_control_batch(false)
+                .set_partition_leader_epoch(RecordBatch::NO_PARTITION_LEADER_EPOCH)
+                .set_write_limit(1024)
+                .build()
+                .expect("MemoryRecordsBuilderOptionsBuilder::build: every mandatory parameter is set above"),
+        );
+        for (i, (key, value)) in records.iter().enumerate() {
+            builder.append_with_offset_bytes(base_offset + i as i64, 0, Some(*key), *value);
+        }
+        builder.build().buffer().to_vec()
+    }
+
+    /// A `COMMIT` end-transaction-marker control batch at `base_offset` for
+    /// `producer_id`, mirroring Java's `commitTransaction(buffer, producerId,
+    /// baseOffset)` (`FetchRequestManagerTest.java:3130-3135`).
+    fn commit_transaction(base_offset: i64, producer_id: i64) -> Vec<u8> {
+        end_txn_marker_batch(base_offset, producer_id, ControlRecordType::Commit)
+    }
+
+    /// An `ABORT` end-transaction-marker control batch, mirroring Java's
+    /// `abortTransaction(buffer, producerId, baseOffset)`
+    /// (`FetchRequestManagerTest.java:3137-3143`). The marker consumes one offset
+    /// (Java returns 1), so callers tracking a running offset advance it by one.
+    fn abort_transaction(base_offset: i64, producer_id: i64) -> Vec<u8> {
+        end_txn_marker_batch(base_offset, producer_id, ControlRecordType::Abort)
+    }
+
+    /// Shared body of `commit_transaction` / `abort_transaction`, mirroring Java's
+    /// `MemoryRecords.writeEndTransactionalMarker(buffer, baseOffset,
+    /// time.milliseconds(), partitionLeaderEpoch = 0, producerId,
+    /// producerEpoch = 0, new EndTransactionMarker(controlType, 0))`. The marker's
+    /// first record key is a real control-type key, which is what
+    /// `CompletedFetch::contains_abort_marker` parses to decide abort vs. commit.
+    fn end_txn_marker_batch(base_offset: i64, producer_id: i64, control_type: ControlRecordType) -> Vec<u8> {
+        let marker = EndTransactionMarker::new(control_type, 0)
+            .expect("COMMIT/ABORT is a valid end-transaction-marker control type");
+        MemoryRecords::with_end_transaction_marker(base_offset, 0, 0, producer_id, 0, &marker)
+            .buffer()
+            .to_vec()
+    }
+
     // ─── rich FetchResponse builder (mirrors Java fullFetchResponse family) ───
 
     /// Builder mirroring Java's `fullFetchResponse` / `fetchResponse` /
@@ -1437,11 +1545,12 @@ mod round_trip {
                 subscriptions.clone(),
                 fetch_config.clone(),
                 fetch_buffer.clone(),
-                Arc::new(crate::common::utils::BufferSupplier::create()),
+                Arc::new(crate::common::utils::internals::BufferSupplier::create()),
                 FetchRequestManager::always_available(),
                 FetchRequestManager::no_auth_failure(),
                 api_versions.clone(),
                 FetchMetricsManager::for_test(),
+                RETRY_BACKOFF_MS,
             );
             let rt = Self {
                 mgr,
@@ -1592,7 +1701,8 @@ mod round_trip {
             let af = self.mgr.abstract_fetch_mut();
             let prepared = af
                 .prepare_fetch_requests(now_ms, |_n| false, |_n| Ok(()))
-                .expect("prepare_fetch_requests should not error in this fixture");
+                .expect("prepare_fetch_requests should not error in this fixture")
+                .into_requests();
             let mut built: HashMap<i32, FetchRequest> = HashMap::new();
             for (node_id, (node, data)) in &prepared {
                 let builder = af.create_fetch_request(node, data);
@@ -1612,10 +1722,26 @@ mod round_trip {
             response: FetchResponse,
             version: i16,
         ) {
+            self.deliver_with_latency(node_id, request_data, response, version, 0);
+        }
+
+        /// [`Self::deliver`] with an explicit `ClientResponse.requestLatencyMs()`.
+        fn deliver_with_latency(
+            &mut self,
+            node_id: i32,
+            request_data: &crate::fetch_session_handler::FetchSessionRequestData,
+            response: FetchResponse,
+            version: i16,
+            request_latency_ms: i64,
+        ) {
             let node = Node::new(node_id, "localhost".to_string(), 1969 + node_id);
-            self.mgr
-                .abstract_fetch_mut()
-                .handle_fetch_success(&node, request_data, response, version, 0);
+            self.mgr.abstract_fetch_mut().handle_fetch_success(
+                &node,
+                request_data,
+                response,
+                version,
+                request_latency_ms,
+            );
         }
 
         /// Delivers a transport-level failure (disconnect) for `node_id`'s
@@ -1765,6 +1891,255 @@ mod round_trip {
         for (i, rec) in recs.iter().enumerate() {
             assert_eq!(1 + i as i64, rec.offset());
         }
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // KAFKA-20854 — buffer wakeups and `maximumTimeToWait`
+    // ════════════════════════════════════════════════════════════════════
+    //
+    // Java blocks a daemon thread in `fetchBuffer.awaitWakeup(...)` and checks
+    // `isAlive()` after a join; these translations read the buffer's pending
+    // wakeup flag instead, which states the same outcome by value. Java's
+    // `sendFetches()` (`createFetchRequests()` + `poll(now)`) is
+    // `RoundTrip::send_fetches`; where a later step must deliver a response
+    // to the request, the request is built through `build_fetch_requests`,
+    // which marks the node in flight exactly as `poll` does.
+
+    impl RoundTrip {
+        /// Java's `sendFetches()`: `createFetchRequests()` then `poll(now)`.
+        /// The returned requests own the response channels, so the caller
+        /// keeps them alive while the fetch must stay in flight.
+        fn send_fetches(&mut self, now_ms: i64) -> Vec<UnsentRequest> {
+            let _ack = self.mgr.create_fetch_requests();
+            self.mgr.poll(now_ms).unsent_requests
+        }
+
+        /// Java's `client.backoff(node, ms)`: every node reads as inside its
+        /// reconnect backoff window while `flag` is set.
+        fn set_unavailable(&mut self, flag: Arc<std::sync::atomic::AtomicBool>) {
+            self.mgr.is_unavailable = Arc::new(move |_| flag.load(std::sync::atomic::Ordering::SeqCst));
+        }
+
+        /// Java's `awaitWakeup(time.timer(0))`: consume any pending wakeup.
+        async fn clear_wakeup(&self) {
+            self.fetch_buffer.await_wakeup(std::time::Duration::ZERO).await;
+            assert!(!self.fetch_buffer.is_woken_up_for_test());
+        }
+    }
+
+    /// Translated from `FetchRequestManagerTest.testEmptyFetchResponseWakesUpBuffer`
+    /// (pre-4.4; its wakeup moved into `removePendingFetchRequest` with
+    /// KAFKA-20854): an empty incremental response still wakes the buffer.
+    #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testEmptyFetchResponseWakesUpBuffer"
+    )]
+    async fn test_empty_fetch_response_wakes_up_buffer() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        let (built, prepared) = rt.build_fetch_requests(0);
+        assert_eq!(1, built.len());
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+        let response = FullFetchResponse::new()
+            .session_id(123)
+            .partition(TOPIC, topic_id, 0, Some(build_records(1, 3, 1)), Errors::None, 100, -1)
+            .build();
+        rt.deliver(*node_id, request_data, response, built[node_id].version());
+        rt.collect_records();
+        rt.clear_wakeup().await;
+
+        // An empty incremental fetch response (same session, no partition data)
+        // must wake the caller blocked on the buffer.
+        let (built, prepared) = rt.build_fetch_requests(0);
+        assert_eq!(1, built.len());
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+        let response = FullFetchResponse::new().session_id(123).build();
+        rt.deliver(*node_id, request_data, response, built[node_id].version());
+        assert!(
+            rt.fetch_buffer.is_woken_up_for_test(),
+            "Empty fetch response did not wake the thread blocked on the fetch buffer"
+        );
+    }
+
+    /// Translated from `FetchRequestManagerTest.testFailedFetchResponseWakesUpBuffer`.
+    #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFailedFetchResponseWakesUpBuffer"
+    )]
+    async fn test_failed_fetch_response_wakes_up_buffer() {
+        let (_topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+        let (built, prepared) = rt.build_fetch_requests(0);
+        assert_eq!(1, built.len());
+        rt.clear_wakeup().await;
+
+        // The response body is irrelevant: it is discarded once the response is
+        // marked as disconnected, which reaches `handleFetchFailure`.
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+        rt.deliver_failure(*node_id, request_data, Error::new(Errors::NetworkError));
+        assert!(
+            rt.fetch_buffer.is_woken_up_for_test(),
+            "Completed fetch request did not wake the thread blocked on the fetch buffer"
+        );
+    }
+
+    /// Translated from `FetchRequestManagerTest.testFetchSessionErrorResponseWakesUpBuffer`.
+    #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchSessionErrorResponseWakesUpBuffer"
+    )]
+    async fn test_fetch_session_error_response_wakes_up_buffer() {
+        let (_topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+        let (built, prepared) = rt.build_fetch_requests(0);
+        assert_eq!(1, built.len());
+        rt.clear_wakeup().await;
+
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+        let mut data = FetchResponseData::new();
+        data.set_error_code(Errors::FetchSessionIdNotFound.code());
+        data.set_session_id(FetchMetadata::INVALID_SESSION_ID);
+        rt.deliver(*node_id, request_data, FetchResponse::new(data), built[node_id].version());
+        assert!(
+            rt.fetch_buffer.is_woken_up_for_test(),
+            "Completed fetch request did not wake the thread blocked on the fetch buffer"
+        );
+    }
+
+    /// Translated from `FetchRequestManagerTest.testMaximumTimeToWaitUnboundedWhenFetchSent`.
+    #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testMaximumTimeToWaitUnboundedWhenFetchSent"
+    )]
+    async fn test_maximum_time_to_wait_unbounded_when_fetch_sent() {
+        let (_topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        let in_flight = rt.send_fetches(0);
+        assert_eq!(1, in_flight.len());
+        assert_eq!(i64::MAX, rt.mgr.maximum_time_to_wait(0));
+    }
+
+    /// Translated from `FetchRequestManagerTest.testMaximumTimeToWaitBoundedWhenNoInflightRequest`.
+    #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testMaximumTimeToWaitBoundedWhenNoInflightRequest"
+    )]
+    async fn test_maximum_time_to_wait_bounded_when_no_inflight_request() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        // Fetch data for tp0, but leave it buffered (unconsumed) so the next
+        // prepare() finds every fetchable partition already buffered. With no
+        // in-flight request, maximumTimeToWait is bounded.
+        let (built, prepared) = rt.build_fetch_requests(0);
+        assert_eq!(1, built.len());
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+        let response = FullFetchResponse::new()
+            .partition(TOPIC, topic_id, 0, Some(build_records(1, 3, 1)), Errors::None, 100, 0)
+            .build();
+        rt.deliver(*node_id, request_data, response, built[node_id].version());
+        assert!(rt.has_completed_fetches());
+        rt.clear_wakeup().await;
+
+        assert_eq!(0, rt.send_fetches(0).len());
+        assert_eq!(RETRY_BACKOFF_MS, rt.mgr.maximum_time_to_wait(0));
+        // Every fetchable partition is buffered: the one case that may wake
+        // the buffer, since consuming that data is progress.
+        assert!(rt.fetch_buffer.is_woken_up_for_test());
+    }
+
+    /// Translated from
+    /// `FetchRequestManagerTest.testMaximumTimeToWaitUnboundedWhenPartitionsSkippedDueToInflight`.
+    #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testMaximumTimeToWaitUnboundedWhenPartitionsSkippedDueToInflight"
+    )]
+    async fn test_maximum_time_to_wait_unbounded_when_partitions_skipped_due_to_inflight() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        // A fetch request is sent successfully; maximumTimeToWait remains unbounded.
+        let (built, prepared) = rt.build_fetch_requests(0);
+        assert_eq!(1, built.len());
+        assert_eq!(i64::MAX, rt.mgr.maximum_time_to_wait(0));
+
+        // The in-flight request blocks the node, so the next prepare() skips
+        // the partition. maximumTimeToWait stays unbounded: the in-flight
+        // request's completion will wake the buffer regardless.
+        rt.clear_wakeup().await;
+        assert_eq!(0, rt.send_fetches(0).len());
+        assert_eq!(i64::MAX, rt.mgr.maximum_time_to_wait(0));
+        assert!(
+            !rt.fetch_buffer.is_woken_up_for_test(),
+            "an in-flight skip must not wake the buffer"
+        );
+
+        // Complete the in-flight request and consume the buffered data.
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+        let response = FullFetchResponse::new()
+            .partition(TOPIC, topic_id, 0, Some(build_records(1, 3, 1)), Errors::None, 100, 0)
+            .build();
+        rt.deliver(*node_id, request_data, response, built[node_id].version());
+        assert_eq!(3, rt.collect_records().count());
+
+        // A new fetch request can now be sent; maximumTimeToWait remains unbounded.
+        let in_flight = rt.send_fetches(0);
+        assert_eq!(1, in_flight.len());
+        assert_eq!(i64::MAX, rt.mgr.maximum_time_to_wait(0));
+    }
+
+    /// Translated from
+    /// `FetchRequestManagerTest.testMaximumTimeToWaitBoundedWhenPartitionsSkippedDueToBackoff`.
+    #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testMaximumTimeToWaitBoundedWhenPartitionsSkippedDueToBackoff"
+    )]
+    async fn test_maximum_time_to_wait_bounded_when_partitions_skipped_due_to_backoff() {
+        let (_topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+        let backoff = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        rt.set_unavailable(Arc::clone(&backoff));
+
+        assert_eq!(0, rt.send_fetches(0).len());
+        assert_eq!(RETRY_BACKOFF_MS, rt.mgr.maximum_time_to_wait(0));
+
+        // Once the backoff clears, a fetch request can be sent and
+        // maximumTimeToWait reverts to unbounded.
+        backoff.store(false, std::sync::atomic::Ordering::SeqCst);
+        let in_flight = rt.send_fetches(500);
+        assert_eq!(1, in_flight.len());
+        assert_eq!(i64::MAX, rt.mgr.maximum_time_to_wait(500));
+    }
+
+    /// Translated from `FetchRequestManagerTest.testPartitionsSkippedDueToBackoffDoesNotWakeUpBuffer`.
+    #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testPartitionsSkippedDueToBackoffDoesNotWakeUpBuffer"
+    )]
+    async fn test_partitions_skipped_due_to_backoff_does_not_wake_up_buffer() {
+        let (_topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+        rt.set_unavailable(Arc::new(std::sync::atomic::AtomicBool::new(true)));
+        rt.clear_wakeup().await;
+
+        assert_eq!(0, rt.send_fetches(0).len());
+        assert!(
+            !rt.fetch_buffer.is_woken_up_for_test(),
+            "Fetch skipped due to reconnect backoff must not wake the thread blocked on the fetch buffer"
+        );
+
+        rt.fetch_buffer.wakeup();
+        assert!(rt.fetch_buffer.is_woken_up_for_test());
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -1929,6 +2304,92 @@ mod round_trip {
         // Position unchanged (still 0, the seek offset).
         assert_eq!(Some(0), rt.position(&tp(0)));
         let _ = topic_id;
+    }
+
+    /// Translated from `FetchRequestManagerTest.testRecordLatencyOnFetchResponseLevelError`
+    /// (KAFKA-20585, c3a830f8d2): latency is recorded on response-level errors
+    /// (e.g. `FETCH_SESSION_TOPIC_ID_ERROR`) since the round trip completed.
+    /// Java verifies `metricsManager.recordLatency(anyString(), anyLong())` on a
+    /// Mockito spy; Rust has no spy, so it asserts the effect on the real
+    /// `fetch-latency` sensor instead: exactly one sample, carrying the
+    /// response's latency. The `FetcherTest` twin exercises the classic
+    /// `Fetcher`, which is out of scope (consumer-threading §20), so it is not
+    /// translated.
+    #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testRecordLatencyOnFetchResponseLevelError"
+    )]
+    fn test_record_latency_on_fetch_response_level_error() {
+        use crate::common::Metric;
+        use crate::common::MetricValue;
+
+        let (_topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        let (built, prepared) = rt.build_fetch_requests(0);
+        assert_eq!(1, built.len());
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+
+        let mut data = FetchResponseData::new();
+        data.set_error_code(Errors::FetchSessionTopicIdError.code());
+        data.set_session_id(FetchMetadata::INVALID_SESSION_ID);
+        data.set_throttle_time_ms(0);
+        rt.deliver_with_latency(*node_id, request_data, FetchResponse::new(data), built[node_id].version(), 42);
+
+        let manager = Arc::clone(&rt.mgr.abstract_fetch().metrics_manager);
+        let metrics = manager.metrics_for_test();
+        let registry = manager.registry_for_test();
+        let value = |template| {
+            let name = metrics.metric_instance_with_key_value(template, &[]).expect("metric instance");
+            match metrics.metric(&name).expect("metric registered").metric_value() {
+                MetricValue::Double(v) => v,
+                other => panic!("expected Double metric value, got {other:?}"),
+            }
+        };
+        assert_eq!(1.0, value(&registry.fetch_request_total), "one latency sample recorded");
+        assert_eq!(42.0, value(&registry.fetch_latency_max));
+        assert_eq!(42.0, value(&registry.fetch_latency_avg));
+    }
+
+    /// Translated from `FetchRequestManagerTest.testFetchResponseWithUnexpectedPartitionIsIgnored`
+    /// (KAFKA-20733, 7c010c7583, as 624ca392ef extended it): only tp0 is
+    /// assigned, and the response also carries tp1, which is not part of the
+    /// fetch session. `FetchSessionHandler` rejects the whole response, so the
+    /// tp0 records are not returned either. The in-flight count is checked
+    /// before and after so the test cannot pass merely because no request was
+    /// ever in flight.
+    #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchResponseWithUnexpectedPartitionIsIgnored"
+    )]
+    fn test_fetch_response_with_unexpected_partition_is_ignored() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        // Only tp0 is assigned and seeked; tp1 is not part of this fetch session.
+        rt.assign_and_seek(&[tp(0)]);
+
+        let (built, prepared) = rt.build_fetch_requests(0);
+        assert_eq!(1, built.len());
+        assert_eq!(1, rt.mgr.abstract_fetch().nodes_with_pending_fetch_requests.len());
+        assert!(!rt.has_completed_fetches());
+
+        // Respond to the in-flight request with a response that includes an
+        // unexpected partition (tp1) that is not part of the fetch session.
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+        let response = FullFetchResponse::new()
+            .session_id(FetchMetadata::INVALID_SESSION_ID)
+            .partition(TOPIC, topic_id, 0, Some(build_records(0, 3, 1)), Errors::None, 100, 0)
+            .partition(TOPIC, topic_id, 1, Some(build_records(0, 3, 1)), Errors::None, 100, 0)
+            .build();
+        rt.deliver(*node_id, request_data, response, built[node_id].version());
+
+        // The in-flight request has completed, but FetchSessionHandler rejected
+        // the whole response because of the unexpected partition (tp1), so
+        // nothing is buffered or returned to the consumer.
+        assert!(rt.mgr.abstract_fetch().nodes_with_pending_fetch_requests.is_empty());
+        assert!(!rt.has_completed_fetches());
+        assert!(rt.collect_records().is_empty());
     }
 
     /// Translated from
@@ -2293,7 +2754,9 @@ mod round_trip {
         let prepared = af
             .prepare_fetch_requests(0, |_n| true, |_n| Ok(()))
             .expect("prepare should not error");
-        assert!(prepared.is_empty(), "blacked-out node must be skipped");
+        assert!(prepared.requests().is_empty(), "blacked-out node must be skipped");
+        // KAFKA-20854: a reconnect-backoff skip must not wake the buffer.
+        assert!(!prepared.can_wake_buffer_if_no_fetch_requests_to_send());
         let _ = topic_id;
     }
 
@@ -3032,9 +3495,10 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testConsumerPositionUpdatedWhenSkippingAbortedTransactions`:
-    /// under READ_COMMITTED an all-aborted batch returns NO records but the
-    /// consumer position still advances past it.
+    /// `FetchRequestManagerTest.testConsumerPositionUpdatedWhenSkippingAbortedTransactions`
+    /// (`FetchRequestManagerTest.java:2951-2985`): under READ_COMMITTED an
+    /// all-aborted transactional data batch plus its ABORT marker returns NO
+    /// records, but the consumer position still advances past both.
     #[test]
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testConsumerPositionUpdatedWhenSkippingAbortedTransactions"
@@ -3044,58 +3508,186 @@ mod round_trip {
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadCommitted, ids);
         rt.assign_and_seek(&[tp(0)]);
 
-        // Aborted transactional batch from pid 1 (offsets 0,1). Aborted list
-        // begins at offset 0.
-        //
-        // NOTE: Java's test also appends an ABORT control marker at offset 2
-        // and asserts the position advances to 3. This port omits the marker and
-        // asserts the position advances past the aborted DATA batch (to 2).
-        //
-        // Until Milestone 11 Phase 8 that omission was forced: a READ_COMMITTED
-        // control batch from an aborted producer returned
-        // `Error::unsupported_version`. **That blocker is gone** —
-        // `ControlRecordType` is translated and `CompletedFetch::contains_abort_marker`
-        // implements Java's branch — so the omission is now only *unwritten*, and
-        // this test plus the three named below are tracked as a follow-up in
-        // PLAN §9.26. The core contract this test asserts — aborted records are
-        // skipped while the position still advances — is unaffected either way.
-        let buf = build_batch_full(0, 2, 1, true, false);
-        let pd = partition_with_aborted_txns(0, buf, vec![(1, 0)], 100, 100);
+        let pid = 1_i64;
+        let val: &[u8] = b"value";
+        let mut buf = Vec::new();
+        // Aborted transactional data batch from pid 1 (offsets 0,1).
+        buf.extend_from_slice(&append_transactional_records(
+            0,
+            pid,
+            &[(b"abort1-1", Some(val)), (b"abort1-2", Some(val))],
+        ));
+        // ABORT control marker at offset 2.
+        buf.extend_from_slice(&abort_transaction(2, pid));
+
+        // The aborted list begins at offset 0.
+        let pd = partition_with_aborted_txns(0, buf, vec![(pid, 0)], 100, 100);
         deliver_single(&mut rt, topic_id, pd);
 
         let recs = rt.collect_records();
+        // We don't return any of the aborted records, but the position still
+        // advances past the aborted data batch AND the ABORT marker (to 3).
         assert!(recs.records_with_partition(&tp(0)).is_empty(), "all aborted -> no records");
-        // Position advanced past the aborted data batch (to 2).
-        assert_eq!(Some(2), rt.position(&tp(0)), "position advances past skipped aborted txn");
+        assert_eq!(
+            Some(3),
+            rt.position(&tp(0)),
+            "position advances past skipped aborted txn and marker"
+        );
     }
 
-    // ── abort-marker transaction tests — OWED, no longer blocked ────────────
-    //
-    // `testMultipleAbortMarkers` (FetchRequestManagerTest.java:2443),
-    // `testReadCommittedAbortMarkerWithNoData` (java:2492), and
-    // `testReadCommittedWithCommittedAndAbortedTransactions` (java:2367) are
-    // still NOT translated. All three require resolving an ABORT/COMMIT control
-    // marker under READ_COMMITTED (Java's `containsAbortMarker` →
-    // `abortedProducerIds.remove(producerId)`, `CompletedFetch.java:210-211`).
-    //
-    // **The production blocker is gone as of Milestone 11 Phase 8.**
-    // `ControlRecordType` is translated (`common/record/control_record_type.rs`)
-    // and `CompletedFetch::contains_abort_marker` implements Java's branch, so a
-    // READ_COMMITTED control batch no longer errors. What is missing is the test
-    // *fixture*: these three need a builder that appends a real control batch
-    // whose first record's key is a marker, which this file's `build_batch_full`
-    // does not produce.
-    //
-    // So the disposition changes from "blocked on missing production surface" to
-    // "owed", and is tracked as PLAN §9.26 with the consumer's own test-parity
-    // work rather than inside a producer-transactions phase. The aborted-DATA-batch
-    // skip path IS implemented and covered by
-    // `test_read_committed_with_compacted_topic` and
-    // `test_consumer_position_updated_when_skipping_aborted_transactions`; the
-    // marker path now has broker-level cover in
-    // `tests/integration/producer_transactions_test.rs`
-    // (`test_aborted_transaction_records_are_discarded`), which is what surfaced
-    // the production gap in the first place.
+    /// Translated from
+    /// `FetchRequestManagerTest.testReadCommittedWithCommittedAndAbortedTransactions`
+    /// (`FetchRequestManagerTest.java:2613-2686`): two interleaved producers whose
+    /// transactions commit and abort in turn under READ_COMMITTED; only the three
+    /// committed records survive the filtering.
+    #[test]
+    fn test_read_committed_with_committed_and_aborted_transactions() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadCommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        let pid1 = 1_i64;
+        let pid2 = 2_i64;
+        let val: &[u8] = b"value";
+        let mut buf = Vec::new();
+        // Producer 1 (eventually committed): offsets 0,1.
+        buf.extend_from_slice(&append_transactional_records(
+            0,
+            pid1,
+            &[(b"commit1-1", Some(val)), (b"commit1-2", Some(val))],
+        ));
+        // Producer 2 (eventually aborted): offset 2.
+        buf.extend_from_slice(&append_transactional_records(2, pid2, &[(b"abort2-1", Some(val))]));
+        // Commit producer 1: marker at offset 3.
+        buf.extend_from_slice(&commit_transaction(3, pid1));
+        // More for producer 2 (eventually aborted): offset 4.
+        buf.extend_from_slice(&append_transactional_records(4, pid2, &[(b"abort2-2", Some(val))]));
+        // Abort producer 2: marker at offset 5 (its transaction began at offset 2).
+        buf.extend_from_slice(&abort_transaction(5, pid2));
+        // New transaction for producer 1 (eventually aborted): offset 6.
+        buf.extend_from_slice(&append_transactional_records(6, pid1, &[(b"abort1-1", Some(val))]));
+        // New transaction for producer 2 (eventually committed): offset 7.
+        buf.extend_from_slice(&append_transactional_records(7, pid2, &[(b"commit2-1", Some(val))]));
+        // More for producer 1 (eventually aborted): offset 8.
+        buf.extend_from_slice(&append_transactional_records(8, pid1, &[(b"abort1-2", Some(val))]));
+        // Abort producer 1: marker at offset 9 (its transaction began at offset 6).
+        buf.extend_from_slice(&abort_transaction(9, pid1));
+        // Commit producer 2: marker at offset 10.
+        buf.extend_from_slice(&commit_transaction(10, pid2));
+
+        let pd = partition_with_aborted_txns(0, buf, vec![(pid2, 2), (pid1, 6)], 100, 100);
+        deliver_single(&mut rt, topic_id, pd);
+
+        let recs = rt.collect_records();
+        let r = recs.records_with_partition(&tp(0));
+        let fetched_keys: HashSet<String> = r
+            .iter()
+            .map(|rec| {
+                let key = rec.key().expect("committed record has a key");
+                String::from_utf8(key.clone()).expect("record key is valid UTF-8")
+            })
+            .collect();
+        assert_eq!(
+            HashSet::from([
+                "commit1-1".to_string(),
+                "commit1-2".to_string(),
+                "commit2-1".to_string(),
+            ]),
+            fetched_keys,
+            "only the committed records survive READ_COMMITTED filtering"
+        );
+    }
+
+    /// Translated from `FetchRequestManagerTest.testMultipleAbortMarkers`
+    /// (`FetchRequestManagerTest.java:2688-2735`): an aborted transaction followed
+    /// by a DUPLICATE abort marker (which must be ignored) and then a committed
+    /// transaction; only the two committed records are returned.
+    #[test]
+    fn test_multiple_abort_markers() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadCommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        let pid = 1_i64;
+        let val: &[u8] = b"value";
+        let mut current_offset: i64 = 0;
+        let mut buf = Vec::new();
+        // Aborted transaction: offsets 0,1.
+        buf.extend_from_slice(&append_transactional_records(
+            current_offset,
+            pid,
+            &[(b"abort1-1", Some(val)), (b"abort1-2", Some(val))],
+        ));
+        current_offset += 2;
+        // Abort marker: offset 2.
+        buf.extend_from_slice(&abort_transaction(current_offset, pid));
+        current_offset += 1;
+        // Duplicate abort marker (must be ignored): offset 3.
+        buf.extend_from_slice(&abort_transaction(current_offset, pid));
+        current_offset += 1;
+        // Committed transaction: offsets 4,5.
+        buf.extend_from_slice(&append_transactional_records(
+            current_offset,
+            pid,
+            &[(b"commit1-1", Some(val)), (b"commit1-2", Some(val))],
+        ));
+        current_offset += 2;
+        // Commit marker: offset 6.
+        buf.extend_from_slice(&commit_transaction(current_offset, pid));
+
+        let pd = partition_with_aborted_txns(0, buf, vec![(pid, 0)], 100, 100);
+        deliver_single(&mut rt, topic_id, pd);
+
+        let recs = rt.collect_records();
+        let r = recs.records_with_partition(&tp(0));
+        assert_eq!(2, r.len(), "only the two committed records are returned");
+        let actually_committed: HashSet<String> = r
+            .iter()
+            .map(|rec| {
+                let key = rec.key().expect("committed record has a key");
+                String::from_utf8(key.clone()).expect("record key is valid UTF-8")
+            })
+            .collect();
+        assert_eq!(
+            HashSet::from(["commit1-1".to_string(), "commit1-2".to_string()]),
+            actually_committed
+        );
+    }
+
+    /// Translated from `FetchRequestManagerTest.testReadCommittedAbortMarkerWithNoData`
+    /// (`FetchRequestManagerTest.java:2737-2775`): an ABORT marker whose
+    /// transactional data is no longer in the log, followed by a committed batch of
+    /// null-valued records; the committed records are returned and the marker with
+    /// no data is skipped.
+    #[test]
+    fn test_read_committed_abort_marker_with_no_data() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadCommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        let pid = 1_i64;
+        let mut buf = Vec::new();
+        // Abort marker whose transaction's data is no longer in the log: offset 5.
+        buf.extend_from_slice(&abort_transaction(5, pid));
+        // Committed records with null values at offsets 6,7,8.
+        buf.extend_from_slice(&append_transactional_records(
+            6,
+            pid,
+            &[(b"6", None), (b"7", None), (b"8", None)],
+        ));
+        // Commit marker: offset 9.
+        buf.extend_from_slice(&commit_transaction(9, pid));
+
+        // The aborted transactions begin at offset 0, which is no longer in the log.
+        let pd = partition_with_aborted_txns(0, buf, vec![(pid, 0)], 100, 100);
+        deliver_single(&mut rt, topic_id, pd);
+
+        let recs = rt.collect_records();
+        let r = recs.records_with_partition(&tp(0));
+        assert_eq!(3, r.len(), "the three committed records are returned");
+        let offsets: Vec<i64> = r.iter().map(|x| x.offset()).collect();
+        assert_eq!(vec![6, 7, 8], offsets);
+    }
 
     /// Translated from `FetchRequestManagerTest.testReadCommittedWithCompactedTopic`:
     /// interleaved committed/aborted transactional batches under READ_COMMITTED
@@ -3155,11 +3747,12 @@ mod round_trip {
             subscriptions.clone(),
             fetch_config.clone(),
             fetch_buffer.clone(),
-            Arc::new(crate::common::utils::BufferSupplier::create()),
+            Arc::new(crate::common::utils::internals::BufferSupplier::create()),
             FetchRequestManager::always_available(),
             FetchRequestManager::no_auth_failure(),
             api_versions.clone(),
             FetchMetricsManager::for_test(),
+            RETRY_BACKOFF_MS,
         );
         let mut rt = RoundTrip {
             mgr,
@@ -3291,11 +3884,12 @@ mod round_trip {
             subscriptions.clone(),
             fetch_config.clone(),
             fetch_buffer.clone(),
-            Arc::new(crate::common::utils::BufferSupplier::create()),
+            Arc::new(crate::common::utils::internals::BufferSupplier::create()),
             FetchRequestManager::always_available(),
             FetchRequestManager::no_auth_failure(),
             api_versions.clone(),
             FetchMetricsManager::for_test(),
+            RETRY_BACKOFF_MS,
         );
         let mut rt = RoundTrip {
             mgr,
@@ -3646,11 +4240,12 @@ mod round_trip {
             subscriptions.clone(),
             fetch_config.clone(),
             fetch_buffer.clone(),
-            Arc::new(crate::common::utils::BufferSupplier::create()),
+            Arc::new(crate::common::utils::internals::BufferSupplier::create()),
             FetchRequestManager::always_available(),
             FetchRequestManager::no_auth_failure(),
             api_versions.clone(),
             FetchMetricsManager::for_test(),
+            RETRY_BACKOFF_MS,
         );
         let mut rt = RoundTrip {
             mgr,

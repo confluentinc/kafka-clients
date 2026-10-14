@@ -29,7 +29,7 @@ use std::collections::{HashMap, HashSet};
 use crate::DeleteGroupsRequestData;
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, CoordinatorType, RequestBuilder, delete_groups_request};
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::LogContext;
 use crate::common::{Error, Node};
 use crate::{kafka_debug, kafka_error};
 

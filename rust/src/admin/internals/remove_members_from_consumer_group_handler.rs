@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, CoordinatorType, RequestBuilder, leave_group_request};
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::LogContext;
 use crate::common::{Error, Node};
 use crate::kafka_debug;
 use crate::leave_group_request_data::MemberIdentity;

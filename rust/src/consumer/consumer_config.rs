@@ -36,6 +36,7 @@ use log::warn;
 
 use crate::common::Error;
 use crate::common::config::config_def::ValidList;
+use crate::common::config::types::Password;
 use crate::common::config::{SaslConfigs, SslConfigs};
 use crate::common::requests::JoinGroupRequest;
 use crate::common::security::auth::SecurityProtocol;
@@ -45,7 +46,7 @@ use crate::{ClientDnsLookup, CommonClientConfigs};
 /// Process-wide counter for deriving a default `client.id`.
 ///
 /// Corresponds to Java's `static AtomicInteger CONSUMER_CLIENT_ID_SEQUENCE`
-/// (`ConsumerConfig.java:393`), which starts at 1. Crate-level (not per-config)
+/// (`ConsumerConfig.java:418`), which starts at 1. Crate-level (not per-config)
 /// to match Java's static scope, so successive consumers in one process get
 /// distinct ids.
 static CONSUMER_CLIENT_ID_SEQUENCE: AtomicI32 = AtomicI32::new(1);
@@ -56,7 +57,13 @@ static CONSUMER_CLIENT_ID_SEQUENCE: AtomicI32 = AtomicI32::new(1);
 /// [Kafka documentation](http://kafka.apache.org/documentation.html#consumerconfigs).
 ///
 /// Corresponds to `org.apache.kafka.clients.consumer.ConsumerConfig`.
-#[derive(Debug)]
+// `Debug` is derived: every secret this struct holds is a `Password` inside
+// `sasl_config` / `ssl_config`, which renders as `[hidden]`. If this struct
+// ever gains a map of the raw user properties (Java's `originals()`), replace
+// the derive with a hand-written `Debug` that renders that map as its key set
+// only, as `ProducerConfig`'s `Debug` does: the map also holds keys this client
+// does not parse, and Java never prints a raw `originals` value.
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfig")]
 pub struct ConsumerConfig {
     // --- Group ---
@@ -136,6 +143,8 @@ pub struct ConsumerConfig {
     pub(crate) retry_backoff_ms: i64,
     /// `retry.backoff.max.ms`
     pub(crate) retry_backoff_max_ms: i64,
+    /// `bootstrap.resolve.timeout.ms` (KIP-909)
+    pub(crate) bootstrap_resolve_timeout_ms: i64,
 
     // --- Timeouts ---
     /// `request.timeout.ms`
@@ -150,6 +159,8 @@ pub struct ConsumerConfig {
     pub(crate) metadata_recovery_strategy: String,
     /// `metadata.recovery.rebootstrap.trigger.ms`
     pub(crate) metadata_recovery_rebootstrap_trigger_ms: i64,
+    /// `metadata.cluster.check.enable` (KIP-1242; `ConsumerConfig.java:723-727`)
+    pub(crate) metadata_cluster_check_enable: bool,
 
     // --- Misc / Behavior ---
     /// `exclude.internal.topics`
@@ -213,7 +224,7 @@ impl Default for ConsumerConfig {
             bootstrap_servers: Vec::new(),
             client_dns_lookup: ClientDnsLookup::UseAllDnsIps,
             client_id: String::new(),
-            client_rack: String::new(),
+            client_rack: Self::DEFAULT_CLIENT_RACK.to_string(),
 
             enable_auto_commit: true,
             auto_commit_interval_ms: 5_000,
@@ -237,6 +248,7 @@ impl Default for ConsumerConfig {
             reconnect_backoff_max_ms: 1_000,
             retry_backoff_ms: 100,
             retry_backoff_max_ms: 1_000,
+            bootstrap_resolve_timeout_ms: CommonClientConfigs::DEFAULT_BOOTSTRAP_RESOLVE_TIMEOUT_MS,
 
             request_timeout_ms: 30_000,
             default_api_timeout_ms: 60_000,
@@ -244,6 +256,7 @@ impl Default for ConsumerConfig {
             metadata_max_age_ms: 5 * 60 * 1000,
             metadata_recovery_strategy: "rebootstrap".to_string(),
             metadata_recovery_rebootstrap_trigger_ms: 5 * 60 * 1000,
+            metadata_cluster_check_enable: true,
 
             exclude_internal_topics: true,
             throw_on_fetch_stable_offset_unsupported: false,
@@ -301,7 +314,9 @@ impl ConsumerConfig {
     /// Config key: `client.id`.
     pub const CLIENT_ID_CONFIG: &'static str = "client.id";
     /// Config key: `client.rack`.
-    pub const CLIENT_RACK_CONFIG: &'static str = "client.rack";
+    pub const CLIENT_RACK_CONFIG: &'static str = crate::CommonClientConfigs::CLIENT_RACK_CONFIG;
+    /// Default value of `client.rack`: no rack (`ConsumerConfig.java:267`).
+    pub const DEFAULT_CLIENT_RACK: &'static str = crate::CommonClientConfigs::DEFAULT_CLIENT_RACK;
 
     /// Config key: `enable.auto.commit`.
     pub const ENABLE_AUTO_COMMIT_CONFIG: &'static str = "enable.auto.commit";
@@ -311,6 +326,54 @@ impl ConsumerConfig {
     /// Config key: `partition.assignment.strategy`.
     pub const PARTITION_ASSIGNMENT_STRATEGY_CONFIG: &'static str = "partition.assignment.strategy";
     /// Config key: `auto.offset.reset`.
+    ///
+    /// What to do when there is no initial offset in Kafka or if the current
+    /// offset does not exist any more on the server (e.g. because that data has
+    /// been deleted):
+    ///
+    /// * `earliest`: automatically reset the offset to the earliest offset
+    /// * `latest`: automatically reset the offset to the latest offset
+    /// * `by_duration:<duration>`: automatically reset the offset to a
+    ///   configured `<duration>` from the current timestamp. `<duration>` must be
+    ///   specified in ISO8601 format (`PnDTnHnMn.nS`). Negative duration is not
+    ///   allowed.
+    /// * `none`: return an error to the consumer if no previous offset is found
+    ///   for the consumer's group
+    /// * anything else: return an error to the consumer.
+    ///
+    /// Note that increasing a topic's partition count while this config is set
+    /// to `latest` may cause silent message loss: producers may begin appending
+    /// records to a newly created partition before the consumer discovers it,
+    /// and `latest` resets the position to the log end offset, skipping any
+    /// records produced during that discovery gap.
+    ///
+    /// To avoid this, prefer `by_duration:<duration>`. When a partition has no
+    /// committed offset, `by_duration` determines the starting position by
+    /// issuing a `ListOffsets` lookup for `now() - duration`. If the target
+    /// timestamp is earlier than the partition's creation time, the lookup
+    /// returns the partition's start offset, ensuring that records produced
+    /// during the discovery window are still consumed. Size the duration to
+    /// cover the worst-case partition-discovery latency for the group protocol
+    /// in use:
+    ///
+    /// * With the `consumer` group protocol (KIP-848), newly assigned
+    ///   partitions are pushed on the next group heartbeat, so a value at least
+    ///   as large as `group.consumer.heartbeat.interval.ms` (server default
+    ///   5000 ms) is sufficient, for example `by_duration:PT5S`.
+    /// * With the `classic` group protocol, new partitions are discovered
+    ///   through periodic metadata refresh and a subsequent rebalance, so the
+    ///   duration must exceed `metadata.max.age.ms` (client default 300000 ms)
+    ///   plus the rebalance time, for example `by_duration:PT6M`.
+    ///
+    /// Consumers with a valid committed offset are unaffected. The reset
+    /// applies only to partitions whose offset is missing or out of range, so
+    /// `by_duration` does not force existing consumers to replay historical
+    /// data on restart.
+    ///
+    /// (Text of Java's `ConsumerConfig.AUTO_OFFSET_RESET_DOC`,
+    /// `ConsumerConfig.java:183-206`, as rewritten by KAFKA-20539. This client
+    /// implements only the `consumer` group protocol; the `classic` item is kept
+    /// because the setting itself is protocol-independent.)
     pub const AUTO_OFFSET_RESET_CONFIG: &'static str = "auto.offset.reset";
 
     /// Config key: `fetch.min.bytes`.
@@ -351,6 +414,10 @@ impl ConsumerConfig {
     pub const RETRY_BACKOFF_MS_CONFIG: &'static str = "retry.backoff.ms";
     /// Config key: `retry.backoff.max.ms`.
     pub const RETRY_BACKOFF_MAX_MS_CONFIG: &'static str = "retry.backoff.max.ms";
+    /// Config key: `bootstrap.resolve.timeout.ms` (KIP-909). See
+    /// [`Self::bootstrap_resolve_timeout_ms`].
+    pub const BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG: &'static str =
+        CommonClientConfigs::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG;
 
     /// Config key: `request.timeout.ms`.
     pub const REQUEST_TIMEOUT_MS_CONFIG: &'static str = "request.timeout.ms";
@@ -422,6 +489,10 @@ impl ConsumerConfig {
     #[doc(alias = "rust-only")]
     pub fn client_id(&self) -> &str {
         &self.client_id
+    }
+    /// `client.rack`, empty when unset ([`Self::DEFAULT_CLIENT_RACK`]).
+    pub(crate) fn client_rack(&self) -> &str {
+        &self.client_rack
     }
     /// `group.id`, if any.
     // typed getter for `group.id`, in place of an AbstractConfig lookup
@@ -531,6 +602,21 @@ impl ConsumerConfig {
     pub fn retry_backoff_max_ms(&self) -> i64 {
         self.retry_backoff_max_ms
     }
+    /// `bootstrap.resolve.timeout.ms` (KIP-909): selects the client's bootstrap
+    /// DNS resolution mode. `0` (the default) resolves `bootstrap.servers`
+    /// synchronously when the consumer is created, and a resolution failure
+    /// fails creation with a config error. A positive value resolves
+    /// asynchronously, retrying for at most this long before every subsequent
+    /// call fails with an unrecoverable
+    /// [`BootstrapResolutionError`](crate::common::errors::BootstrapResolutionError);
+    /// the consumer must then be closed and re-created. Setting a positive
+    /// value enables an evolving feature whose compatibility may be broken in a
+    /// minor release.
+    // typed getter for `bootstrap.resolve.timeout.ms`, in place of an AbstractConfig lookup
+    #[doc(alias = "rust-only")]
+    pub fn bootstrap_resolve_timeout_ms(&self) -> i64 {
+        self.bootstrap_resolve_timeout_ms
+    }
 
     // -------- Fluent setters --------
 
@@ -619,7 +705,7 @@ impl ConsumerConfig {
     /// for its expected type, or fails its validator.
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfig#ConsumerConfig(Map)")]
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
-        // NOTE: 14 of Java's per-field `atLeast(..)` numeric validators
+        // NOTE: 13 of Java's per-field `atLeast(..)` numeric validators
         // (ConsumerConfig.java lines 415-710) are intentionally deferred to
         // Phase 11, when `post_process_parsed_config` is translated. Until
         // that lands, negative / out-of-range values are silently accepted
@@ -642,15 +728,15 @@ impl ConsumerConfig {
         //   - `retry.backoff.max.ms`                          atLeast(0L) (536)
         //   - `request.timeout.ms`                            atLeast(0)  (590)
         //   - `default.api.timeout.ms`                        atLeast(0)  (596)
-        //   - `metadata.recovery.rebootstrap.trigger.ms`      atLeast(0)  (689)
         // The currently-translated validators are `max.poll.records >= 1`,
         // `metrics.num.samples >= 1`, `metrics.sample.window.ms >= 0`,
+        // `metadata.recovery.rebootstrap.trigger.ms >= 0`,
         // and the string-enum keys.
         let mut config = Self::default();
 
-        // `bootstrap.servers` is defined with `NO_DEFAULT_VALUE` (`ConsumerConfig.java:416-418`), so
+        // `bootstrap.servers` is defined with `NO_DEFAULT_VALUE` (`ConsumerConfig.java:441-443`), so
         // `ConfigDef.parseValue` rejects a missing key at parse time
-        // (`ConfigDef.java:537`). It is the first key `ConfigDef` defines, so this
+        // (`ConfigDef.java:539`). It is the first key `ConfigDef` defines, so this
         // check runs before any other value is parsed, as in Java.
         if !props.contains_key(Self::BOOTSTRAP_SERVERS_CONFIG) {
             return Err(Error::config_message(format!(
@@ -662,22 +748,23 @@ impl ConsumerConfig {
         for (key, value) in props {
             match key.as_str() {
                 Self::BOOTSTRAP_SERVERS_CONFIG => {
-                    // `ValidList.anyNonDuplicateValues(false, false)` (`ConsumerConfig.java:419`).
+                    // `ValidList.anyNonDuplicateValues(false, false)` (`ConsumerConfig.java:444`).
                     config.bootstrap_servers = ValidList::parse_any_non_duplicate_values(key, value, false)?;
                 },
                 Self::CLIENT_DNS_LOOKUP_CONFIG => {
                     config.client_dns_lookup = ClientDnsLookup::parse_config_value(value)?;
                 },
                 Self::CLIENT_ID_CONFIG => {
-                    // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:729-731`).
+                    // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:731-733`).
                     config.client_id = value.trim().to_string();
                 },
                 Self::CLIENT_RACK_CONFIG => {
-                    config.client_rack = value.clone();
+                    // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:731-733`).
+                    config.client_rack = value.trim().to_string();
                 },
                 Self::GROUP_ID_CONFIG => {
                     // Trimmed, as `ConfigDef.parseType` trims every `Type.STRING`
-                    // value (`ConfigDef.java:729-731`), so `" "` becomes `""`.
+                    // value (`ConfigDef.java:731-733`), so `" "` becomes `""`.
                     // The empty string is then kept, not coerced to `None`. Java's
                     // `ConfigDef` defines `group.id` as `Type.STRING` with a
                     // `null` default and does not coerce `""` to null, so
@@ -685,7 +772,7 @@ impl ConsumerConfig {
                     // `AsyncKafkaConsumer.initializeGroupMetadata` is what
                     // rejects it — `throw new InvalidGroupIdException("The
                     // configured group.id should not be an empty string or
-                    // whitespace.")` (`AsyncKafkaConsumer.java:747-757`).
+                    // whitespace.")` (`AsyncKafkaConsumer.java:839-844`).
                     // Coercing to `None` here silently turned that hard
                     // configuration error into "no group", so a consumer
                     // configured with an empty `group.id` became a groupless
@@ -693,7 +780,7 @@ impl ConsumerConfig {
                     config.group_id = Some(value.trim().to_string());
                 },
                 Self::GROUP_INSTANCE_ID_CONFIG => {
-                    // `ConfigDef.parseType` trims the value (`ConfigDef.java:729-731`)
+                    // `ConfigDef.parseType` trims the value (`ConfigDef.java:731-733`)
                     // before `NonEmptyString.ensureValid` runs on it (`:1226-1231`).
                     let value = value.trim();
                     if value.is_empty() {
@@ -741,7 +828,7 @@ impl ConsumerConfig {
                 },
                 Self::PARTITION_ASSIGNMENT_STRATEGY_CONFIG => {
                     // Accepted silently per scope §20.
-                    // `ValidList.anyNonDuplicateValues(true, false)` (`ConsumerConfig.java:449`).
+                    // `ValidList.anyNonDuplicateValues(true, false)` (`ConsumerConfig.java:480`).
                     config.partition_assignment_strategy = ValidList::parse_any_non_duplicate_values(key, value, true)?;
                 },
                 Self::AUTO_OFFSET_RESET_CONFIG => {
@@ -795,6 +882,14 @@ impl ConsumerConfig {
                 Self::RETRY_BACKOFF_MAX_MS_CONFIG => {
                     config.retry_backoff_max_ms = parse_i64(key, value)?;
                 },
+                Self::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG => {
+                    // Java `ConsumerConfig` (`:454-459`, KAFKA-20939): `Type.LONG`, `atLeast(0L)`.
+                    let v = parse_i64(key, value)?;
+                    if v < 0 {
+                        return Err(Error::config_name_value_message(key, v, "Value must be at least 0"));
+                    }
+                    config.bootstrap_resolve_timeout_ms = v;
+                },
                 Self::REQUEST_TIMEOUT_MS_CONFIG => {
                     config.request_timeout_ms = parse_i32(key, value)?;
                 },
@@ -812,7 +907,17 @@ impl ConsumerConfig {
                     config.metadata_recovery_strategy = value.clone();
                 },
                 Self::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG => {
-                    config.metadata_recovery_rebootstrap_trigger_ms = parse_i64(key, value)?;
+                    // Java `ConsumerConfig` (`:717-721`):
+                    // `metadata.recovery.rebootstrap.trigger.ms` is `atLeast(0)`.
+                    let v = parse_i64(key, value)?;
+                    if v < 0 {
+                        return Err(Error::config_name_value_message(key, v, "Value must be at least 0"));
+                    }
+                    config.metadata_recovery_rebootstrap_trigger_ms = v;
+                },
+                CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG => {
+                    // Java `ConsumerConfig` (`:723-727`): `Type.BOOLEAN`, default `true`.
+                    config.metadata_cluster_check_enable = parse_bool(key, value)?;
                 },
                 Self::EXCLUDE_INTERNAL_TOPICS_CONFIG => {
                     config.exclude_internal_topics = parse_bool(key, value)?;
@@ -890,13 +995,17 @@ impl ConsumerConfig {
                     config.sasl_config.mechanism = value.clone();
                 },
                 Self::SASL_JAAS_CONFIG => {
-                    config.sasl_config.jaas_config = if value.is_empty() { None } else { Some(value.clone()) };
+                    config.sasl_config.jaas_config = if value.is_empty() {
+                        None
+                    } else {
+                        Some(Password::new(value))
+                    };
                 },
                 key if key.starts_with("ssl.") => {
                     SslConfigs::apply_ssl_config_key(&mut config.ssl_config, key, value)?;
                 },
                 Self::CONFIG_PROVIDERS_CONFIG => {
-                    // `ValidList.anyNonDuplicateValues(true, false)` (`ConsumerConfig.java:707`).
+                    // `ValidList.anyNonDuplicateValues(true, false)` (`ConsumerConfig.java:743`).
                     config.config_providers = ValidList::parse_any_non_duplicate_values(key, value, true)?;
                 },
                 _ => {
@@ -905,7 +1014,7 @@ impl ConsumerConfig {
             }
         }
 
-        // Java runs this from `postProcessParsedConfig` (`ConsumerConfig.java:717`),
+        // Java runs this from `postProcessParsedConfig` (`ConsumerConfig.java:753`),
         // i.e. after every key has been parsed.
         config.maybe_override_client_id()?;
 
@@ -918,7 +1027,7 @@ impl ConsumerConfig {
     /// Derives `client.id` when the user did not set one.
     ///
     /// Translated from `ConsumerConfig.maybeOverrideClientId`
-    /// (`ConsumerConfig.java:723-735`). The derived form is
+    /// (`ConsumerConfig.java:776-788`). The derived form is
     /// `consumer-<group.id>-<group.instance.id>` for a static member, otherwise
     /// `consumer-<group.id>-<n>` from a process-wide counter starting at 1 —
     /// matching Java's `static AtomicInteger CONSUMER_CLIENT_ID_SEQUENCE`. When a
@@ -954,11 +1063,24 @@ fn parse_i64(key: &str, value: &str) -> Result<i64, Error> {
     value.trim().parse::<i64>().map_err(|_| Error::config_name_value(key, value))
 }
 
+/// Parses a string value as `bool`.
+///
+/// Java's `ConfigDef.parseType(BOOLEAN)` (`ConfigDef.java:703-737`) trims the
+/// value, then accepts `equalsIgnoreCase("true")` / `("false")`; anything else
+/// throws `ConfigException(name, value, "Expected value to be either true or
+/// false")`, where `value` is the **original, untrimmed** string.
 fn parse_bool(key: &str, value: &str) -> Result<bool, Error> {
-    match value.trim() {
-        "true" => Ok(true),
-        "false" => Ok(false),
-        _ => Err(Error::config_name_value(key, value)),
+    let trimmed = value.trim();
+    if trimmed.eq_ignore_ascii_case("true") {
+        Ok(true)
+    } else if trimmed.eq_ignore_ascii_case("false") {
+        Ok(false)
+    } else {
+        Err(Error::config_name_value_message(
+            key,
+            value,
+            "Expected value to be either true or false",
+        ))
     }
 }
 
@@ -1011,6 +1133,43 @@ mod tests {
         assert_eq!(c.bootstrap_servers(), &["localhost:9092".to_string()]);
     }
 
+    /// Boolean config values are parsed case-insensitively after trimming, and an
+    /// unparseable value is rejected with Java's message and the original,
+    /// untrimmed value. Mirrors `ConfigDef.parseType(BOOLEAN)`
+    /// (`ConfigDef.java:703-737`): `equalsIgnoreCase("true")` / `("false")`, else
+    /// `ConfigException(name, value, "Expected value to be either true or false")`.
+    #[test]
+    fn test_parse_bool_matches_java_boolean() {
+        let props_with = |raw: &str| {
+            HashMap::from([
+                ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
+                ("enable.auto.commit".to_string(), raw.to_string()),
+            ])
+        };
+
+        // Accepted regardless of case, and after trimming surrounding whitespace.
+        for raw in ["true", "True", "TRUE"] {
+            let c = ConsumerConfig::new(&props_with(raw))
+                .unwrap_or_else(|e| panic!("enable.auto.commit={raw} should be valid: {e:?}"));
+            assert!(c.enable_auto_commit(), "for enable.auto.commit={raw}");
+        }
+        for raw in ["false", "False", " false "] {
+            let c = ConsumerConfig::new(&props_with(raw))
+                .unwrap_or_else(|e| panic!("enable.auto.commit={raw} should be valid: {e:?}"));
+            assert!(!c.enable_auto_commit(), "for enable.auto.commit={raw}");
+        }
+
+        // Rejected: a non-boolean string. Java prints the original (untrimmed) value.
+        let error =
+            ConsumerConfig::new(&props_with("yes")).expect_err("a non-boolean enable.auto.commit must be rejected");
+        assert_eq!(
+            error.message(),
+            "Invalid value yes for configuration enable.auto.commit: Expected value to be either true or false",
+        );
+        assert!(matches!(error, Error::Config(_)), "expected Error::Config, got {error:?}");
+        assert!(error.is_kafka_error());
+    }
+
     /// `metrics.num.samples` is `atLeast(1)` (Java ConsumerConfig). A value
     /// below 1 is rejected with a message asserting the bound.
     #[test]
@@ -1035,6 +1194,76 @@ mod tests {
         let mut props = base_props();
         props.insert("metrics.num.samples".to_string(), "-1".to_string());
         assert!(ConsumerConfig::new(&props).is_err());
+    }
+
+    /// `metadata.cluster.check.enable` (KIP-1242): `Type.BOOLEAN`, default `true`
+    /// (`ConsumerConfig.java:723-727`).
+    #[test]
+    fn test_metadata_cluster_check_enable() {
+        assert!(ConsumerConfig::new(&base_props()).unwrap().metadata_cluster_check_enable);
+
+        let mut props = base_props();
+        props.insert(
+            CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG.to_string(),
+            "false".to_string(),
+        );
+        assert!(!ConsumerConfig::new(&props).unwrap().metadata_cluster_check_enable);
+
+        props.insert(
+            CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG.to_string(),
+            "maybe".to_string(),
+        );
+        assert_eq!(
+            ConsumerConfig::new(&props).unwrap_err().message(),
+            "Invalid value maybe for configuration metadata.cluster.check.enable: Expected value to be either true or false"
+        );
+    }
+
+    /// `metadata.recovery.rebootstrap.trigger.ms` is `atLeast(0)` (Java
+    /// `ConsumerConfig.java:717-721`): 0 is accepted, -1 is rejected with
+    /// Java's `ConfigDef.Range.atLeast` message.
+    #[test]
+    fn test_metadata_recovery_rebootstrap_trigger_ms_validator() {
+        let mut props = base_props();
+        props.insert("metadata.recovery.rebootstrap.trigger.ms".to_string(), "0".to_string());
+        let c = ConsumerConfig::new(&props).unwrap();
+        assert_eq!(c.metadata_recovery_rebootstrap_trigger_ms, 0);
+
+        let mut props = base_props();
+        props.insert("metadata.recovery.rebootstrap.trigger.ms".to_string(), "-1".to_string());
+        let err = ConsumerConfig::new(&props).unwrap_err();
+        let Error::Config(config_error) = err else {
+            panic!("expected a config error, got {err:?}");
+        };
+        assert_eq!(
+            config_error.message(),
+            "Invalid value -1 for configuration metadata.recovery.rebootstrap.trigger.ms: \
+             Value must be at least 0"
+        );
+    }
+
+    /// `bootstrap.resolve.timeout.ms` (KIP-909): `Type.LONG`, default `0`
+    /// (synchronous resolution), `atLeast(0L)` since KAFKA-20939.
+    #[test]
+    fn test_bootstrap_resolve_timeout_ms() {
+        assert_eq!(
+            ConsumerConfig::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG,
+            "bootstrap.resolve.timeout.ms"
+        );
+        let mut props = HashMap::from([("bootstrap.servers".to_string(), "localhost:9092".to_string())]);
+        assert_eq!(ConsumerConfig::new(&props).unwrap().bootstrap_resolve_timeout_ms(), 0);
+
+        props.insert("bootstrap.resolve.timeout.ms".to_string(), "3000".to_string());
+        assert_eq!(ConsumerConfig::new(&props).unwrap().bootstrap_resolve_timeout_ms(), 3000);
+
+        props.insert("bootstrap.resolve.timeout.ms".to_string(), "-1".to_string());
+        match ConsumerConfig::new(&props) {
+            Err(Error::Config(e)) => assert_eq!(
+                e.message(),
+                "Invalid value -1 for configuration bootstrap.resolve.timeout.ms: Value must be at least 0"
+            ),
+            other => panic!("expected a config error, got {other:?}"),
+        }
     }
 
     /// `metrics.sample.window.ms` is `atLeast(0)` (Java ConsumerConfig). A
@@ -1134,7 +1363,7 @@ mod tests {
         assert!(msg.contains("SASL_SSL"), "should list the valid protocol names, got: {msg}");
     }
 
-    /// `bootstrap.servers` has `NO_DEFAULT_VALUE` (`ConsumerConfig.java:416-418`), so a config
+    /// `bootstrap.servers` has `NO_DEFAULT_VALUE` (`ConsumerConfig.java:441-443`), so a config
     /// without it fails at parse time with `ConfigDef.parseValue`'s message.
     #[test]
     fn test_missing_bootstrap_servers_rejected_with_exact_message() {
@@ -1192,6 +1421,58 @@ mod tests {
         assert_eq!(c.sasl_config.resolve_password(), Some("secret"));
     }
 
+    /// `{:?}` of a config built from every `Type.PASSWORD` key the client
+    /// parses (`sasl.jaas.config` and the six SSL keys) renders none of their
+    /// values. The derived `Debug` is safe because the embedded `SaslConfigs`
+    /// and `SslConfigs` hold those values as `Password`s.
+    #[test]
+    fn test_debug_redacts_password_configs() {
+        let secrets = [
+            (
+                "sasl.jaas.config",
+                "org.apache.kafka.common.security.plain.PlainLoginModule required \
+                 username=\"jaas-user\" password=\"jaas-S3cr3t\";",
+            ),
+            ("ssl.truststore.password", "truststore-S3cr3t"),
+            ("ssl.truststore.certificates", "TRUSTSTORE-CERTIFICATES-PEM"),
+            ("ssl.keystore.password", "keystore-S3cr3t"),
+            ("ssl.keystore.key", "KEYSTORE-KEY-PEM"),
+            ("ssl.keystore.certificate.chain", "KEYSTORE-CERTIFICATE-CHAIN-PEM"),
+            ("ssl.key.password", "key-S3cr3t"),
+        ];
+        let mut props: HashMap<String, String> = secrets
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        props.insert("bootstrap.servers".to_string(), "visible-host:9092".to_string());
+        props.insert("group.id".to_string(), "visible-group".to_string());
+        props.insert("sasl.mechanism".to_string(), "PLAIN".to_string());
+        props.insert("ssl.truststore.location".to_string(), "/visible/truststore.pem".to_string());
+        let c = ConsumerConfig::new(&props).unwrap();
+
+        // The secrets did reach the config; they are only hidden from `Debug`.
+        assert_eq!(c.sasl_config.resolve_password(), Some("jaas-S3cr3t"));
+        assert_eq!(c.ssl_config.key_password.as_ref().map(Password::value), Some("key-S3cr3t"));
+
+        for rendered in [format!("{c:?}"), format!("{c:#?}")] {
+            for (key, value) in secrets {
+                assert!(!rendered.contains(value), "{key} leaked: {rendered}");
+            }
+            for fragment in ["jaas-S3cr3t", "jaas-user", "PlainLoginModule", "S3cr3t", "-PEM"] {
+                assert!(!rendered.contains(fragment), "{fragment:?} leaked: {rendered}");
+            }
+            assert_eq!(rendered.matches(Password::HIDDEN).count(), secrets.len(), "{rendered}");
+            for visible in [
+                "visible-host:9092",
+                "visible-group",
+                "\"PLAIN\"",
+                "/visible/truststore.pem",
+            ] {
+                assert!(rendered.contains(visible), "{visible} missing: {rendered}");
+            }
+        }
+    }
+
     /// Empty `sasl.jaas.config` → `None`.
     #[test]
     fn test_sasl_jaas_config_empty_is_none() {
@@ -1226,7 +1507,7 @@ mod tests {
     #[test]
     fn test_builder_selection() {
         use crate::common::network::ChannelBuilders;
-        use crate::common::utils::LogContext;
+        use crate::common::utils::internals::LogContext;
 
         // SASL_PLAINTEXT with PLAIN credentials → Ok (no cert needed).
         let mut props = base_props();
@@ -1278,7 +1559,7 @@ mod tests {
 
     /// Java's `ConfigDef` does not coerce an empty `group.id` to null: it stays
     /// `""` and `AsyncKafkaConsumer.initializeGroupMetadata` rejects it
-    /// (`AsyncKafkaConsumer.java:747-757`). Coercing it to `None` here would
+    /// (`AsyncKafkaConsumer.java:839-844`). Coercing it to `None` here would
     /// turn a hard configuration error into a groupless consumer, which then
     /// fails much later and much less legibly.
     #[test]
@@ -1327,7 +1608,7 @@ mod tests {
     }
 
     /// `bootstrap.servers` is validated with Java's
-    /// `ValidList.anyNonDuplicateValues(false, false)` (`ConsumerConfig.java:419`): an empty
+    /// `ValidList.anyNonDuplicateValues(false, false)` (`ConsumerConfig.java:444`): an empty
     /// element is rejected with `ConfigDef`'s exact message and duplicates are removed
     /// (single-message `ConfigException`, no `Invalid value` prefix). An empty list is rejected too.
     #[test]
@@ -1502,6 +1783,22 @@ mod tests {
         sequence_suffix(config.client_id(), "consumer-test-group-");
         let padded = props_with(&[(ConsumerConfig::CLIENT_ID_CONFIG, " my-consumer ")]);
         assert_eq!(ConsumerConfig::new(&padded).unwrap().client_id(), "my-consumer");
+    }
+
+    /// `client.rack` is a `Type.STRING`, so `ConfigDef.parseType` trims it
+    /// (Critic 96 F3); unset, it is `DEFAULT_CLIENT_RACK`, the empty string.
+    #[test]
+    fn test_client_rack_is_trimmed_and_defaults_to_empty() {
+        assert_eq!("client.rack", ConsumerConfig::CLIENT_RACK_CONFIG);
+        assert_eq!("", ConsumerConfig::DEFAULT_CLIENT_RACK);
+        assert_eq!(
+            ConsumerConfig::DEFAULT_CLIENT_RACK,
+            ConsumerConfig::new(&props_with(&[])).unwrap().client_rack()
+        );
+        let padded = props_with(&[(ConsumerConfig::CLIENT_RACK_CONFIG, " rack-1 ")]);
+        assert_eq!("rack-1", ConsumerConfig::new(&padded).unwrap().client_rack());
+        let blank = props_with(&[(ConsumerConfig::CLIENT_RACK_CONFIG, "  ")]);
+        assert_eq!("", ConsumerConfig::new(&blank).unwrap().client_rack());
     }
 
     /// `group.instance.id` is trimmed before Java's `NonEmptyString` check, so

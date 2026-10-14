@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Logging macros that prepend a [`LogContext`](super::LogContext) prefix.
+//! Logging macros that prepend a [`LogContext`](super::internals::LogContext) prefix.
 //!
 //! These macros wrap the standard [`log`] crate macros and automatically
 //! prepend the `LogContext` prefix to every log message, matching Java's
@@ -24,7 +24,7 @@
 //! # Usage
 //!
 //! ```ignore
-//! use confluent_kafka::common::utils::LogContext;
+//! use confluent_kafka::common::utils::internals::LogContext;
 //!
 //! let ctx = LogContext::new("[Producer clientId=my-producer] ");
 //! kafka_debug!(ctx, "Starting Kafka producer I/O task.");
