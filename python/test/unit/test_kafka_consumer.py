@@ -2287,6 +2287,106 @@ def test_cancelling_an_async_poll_returning_records_seeks_them_back(
     asyncio.run(main())
 
 
+def _interrupting_value_deserializer(raised: BaseException) -> Callable[..., bytes]:
+    """A value deserializer raising ``raised`` on the second record: Ctrl+C (or
+    a cancellation) landing while the poll deserializes its batch."""
+    calls = {"n": 0}
+
+    def value_deserializer(topic: str, data: Any, headers: Any = None) -> bytes:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise raised
+        return bytes(data)
+
+    return value_deserializer
+
+
+def test_ctrl_c_while_a_poll_deserializes_its_records_seeks_them_back(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # Ctrl+C once the poll's completion has arrived, while its deserializers run
+    # on the caller's thread: the poll does not return the records either, and
+    # the core has moved the positions past the whole batch. Each partition is
+    # sought back to its first fetched record before KeyboardInterrupt
+    # propagates, and the next poll returns them, as when Ctrl+C lands in the
+    # wait (AsyncKafkaConsumer.java:940-960 never loses records the positions
+    # moved past).
+    consumer: KafkaConsumer[bytes, bytes] = KafkaConsumer(
+        configs=configs(), value_deserializer=_interrupting_value_deserializer(
+            KeyboardInterrupt()))
+    try:
+        consumer.assign(partitions=[TP0, TP1])
+        core = _FetchingCore(monkeypatch, consumer)
+        with pytest.raises(KeyboardInterrupt):
+            consumer.poll(timeout=30)
+        assert core.seeks == [(TOPIC, 0, 3), (TOPIC, 1, 7)]
+        assert core.positions == {TP0: 3, TP1: 7}
+        assert _fetched(consumer.poll(timeout=30)) == [(0, 3), (0, 4), (1, 7)]
+    finally:
+        consumer.close(option=CloseOptions.timeout(0))
+
+
+@pytest.mark.parametrize("raised", [KeyboardInterrupt, asyncio.CancelledError])
+def test_an_async_poll_interrupted_while_it_deserializes_seeks_its_records_back(
+        raised: type[BaseException], monkeypatch: pytest.MonkeyPatch) -> None:
+    # The async peer: a KeyboardInterrupt or CancelledError raised while the
+    # poll deserializes its batch on the loop awaits the seeks back before it
+    # propagates, and the next poll returns the records.
+    async def main() -> None:
+        consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(
+            configs=configs(), value_deserializer=_interrupting_value_deserializer(raised()))
+        await consumer.assign(partitions=[TP0, TP1])
+        core = _FetchingCore(monkeypatch, consumer)
+        with pytest.raises(raised):
+            await consumer.poll(timeout=30)
+        assert core.seeks == [(TOPIC, 0, 3), (TOPIC, 1, 7)]
+        assert core.positions == {TP0: 3, TP1: 7}
+        assert _fetched(await consumer.poll(timeout=30)) == [(0, 3), (0, 4), (1, 7)]
+        await consumer.close(option=CloseOptions.timeout(0))
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize("raised", [ValueError("bad"), KeyboardInterrupt()],
+                         ids=["value-error", "keyboard-interrupt"])
+def test_a_cancelled_async_poll_keeps_a_coroutine_commit_callback_error_for_the_next_call(
+        raised: BaseException, monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture) -> None:
+    # A coroutine commit callback a blocking ConsumerHandle commit delivered
+    # during the poll raises after its invocation was reported (stood for by
+    # setting the error the consumer then stores), and the poll is cancelled.
+    # The cancelled poll cannot raise it: it keeps it for the next awaited call,
+    # as a poll that returns keeps it. The seeks back do not take it: none is
+    # logged as failed, and every one runs, a KeyboardInterrupt too.
+    async def main() -> None:
+        consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
+        await consumer.assign(partitions=[TP0, TP1])
+        core = _FetchingCore(monkeypatch, consumer)
+        core.release = False
+        poll = asyncio.ensure_future(consumer.poll(timeout=30))
+        await asyncio.sleep(0.2)
+        consumer._callback_error = raised  # type: ignore[attr-defined]
+        core.release = True
+        poll.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await poll
+        assert core.seeks == [(TOPIC, 0, 3), (TOPIC, 1, 7)]
+        assert core.positions == {TP0: 3, TP1: 7}
+        assert "Could not seek" not in caplog.text
+        if isinstance(raised, KeyboardInterrupt):
+            with pytest.raises(KeyboardInterrupt) as interrupted:
+                await consumer.poll(timeout=30)
+            assert interrupted.value is raised
+        else:
+            # Java's maybeWrapAsKafkaException at poll.
+            with pytest.raises(KafkaError) as wrapped:
+                await consumer.poll(timeout=30)
+            assert wrapped.value.__cause__ is raised
+        assert _fetched(await consumer.poll(timeout=30)) == [(0, 3), (0, 4), (1, 7)]
+        await consumer.close(option=CloseOptions.timeout(0))
+
+    asyncio.run(main())
+
+
 class _NotifiedEvent(threading.Event):
     """The consumer's pending-callback event, recording a ``set`` (the notify
     hook's, or a completion's) since ``notified`` was last cleared."""

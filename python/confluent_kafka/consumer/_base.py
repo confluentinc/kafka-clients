@@ -831,7 +831,9 @@ class _ConsumerState:
         return (``abandoned``, ``poll``'s ``_fetched_positions``) first seeks
         each of their partitions back to its first one (``_rewind_sync``): the
         core has moved the positions past them, and a later commit would
-        commit past records the user never received.
+        commit past records the user never received. So does a Ctrl+C while
+        the result is resolved (``poll``'s deserializers run here) before it
+        propagates.
 
         The wake waits for a drain to run to its end, and is sent only if the
         completion has still not arrived: an interrupted drain may have left
@@ -883,7 +885,16 @@ class _ConsumerState:
             free(payload)
             self._rewind_sync(positions)
             raise interrupted
-        return resolve(payload)
+        if abandoned is None:
+            return resolve(payload)
+        try:
+            return resolve(payload)
+        except KeyboardInterrupt:
+            # Ctrl+C while the result is resolved (poll's deserializers run on
+            # this thread): nothing of it is returned, so its records are
+            # sought back as when Ctrl+C lands in the wait.
+            self._rewind_sync(abandoned(payload))
+            raise
 
     async def _run_async(self, submit: Callable[[int, Callable[..., None]], None],
                          resolve: Callable[[tuple[Any, ...]], _T],
@@ -896,7 +907,9 @@ class _ConsumerState:
         its result and re-raises ``CancelledError``, first waking the consumer
         when the operation is ``wakeable``, as ``_run_sync`` does on Ctrl+C,
         and first awaiting the seeks back of the records it does not return
-        (``abandoned``, ``_rewind_async``).
+        (``abandoned``, ``_rewind_async``); so does a ``KeyboardInterrupt`` or
+        ``CancelledError`` raised while the result is resolved (``poll``'s
+        deserializers).
 
         It first raises the exception of a coroutine commit callback an
         earlier ``poll`` kept (``raise_deferred``), wrapped as the call at
@@ -907,7 +920,7 @@ class _ConsumerState:
         the call then raises that exception, wrapped for its ``site``, instead
         of its own result; but ``poll`` (``_AT_POLL``) returns its records, whose
         positions the core has already advanced, and keeps the exception for the
-        next awaited call.
+        next awaited call, as a cancelled call does.
 
         The results of earlier calls left for an event loop that has closed are
         freed first (see :class:`~confluent_kafka._async.Undelivered`)."""
@@ -958,11 +971,24 @@ class _ConsumerState:
             finally:
                 self._async_waiters.pop(waiter, None)
         if cancelled is not None:
+            # The call cannot raise a coroutine commit callback's exception it
+            # delivered: it is kept for the next awaited call, as a poll keeps
+            # it (_finish_async), before the seeks back would take it.
+            self._keep_error(self._take_callback_error())
             positions = abandoned(payload) if abandoned is not None else []
             free(payload)
             await self._rewind_async(positions)
             raise cancelled
-        return self._finish_async(payload, resolve, free, site)
+        if abandoned is None:
+            return self._finish_async(payload, resolve, free, site)
+        try:
+            return self._finish_async(payload, resolve, free, site)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            # Raised while the result is resolved (poll's deserializers run on
+            # the loop): nothing of it is returned, so its records are sought
+            # back as when the wait is cancelled.
+            await self._rewind_async(abandoned(payload))
+            raise
 
     def _finish_async(self, payload: tuple[Any, ...], resolve: Callable[[tuple[Any, ...]], _T],
                       free: Callable[[tuple[Any, ...]], None], site: int) -> _T:
