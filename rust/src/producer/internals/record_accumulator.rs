@@ -827,7 +827,7 @@ impl RecordAccumulator {
         //     `max.block.ms` inside `free.allocate`. Java has no analogue — threads
         //     have no cancellation — so this exit exists only in Rust
         //     (CLAUDE.md §11.6). A lost `appends_in_progress` decrement makes
-        //     `abort_incomplete_batches` never leave its (non-yielding) loop.
+        //     `abort_incomplete_batches` never leave its loop.
         let mut guard = AppendGuard::new(&self.free, &self.appends_in_progress);
 
         self.append_inner(
@@ -6326,36 +6326,6 @@ mod tests {
         assert_eq!(0, fired.load(Ordering::SeqCst), "`append` must not fire the callback itself");
     }
 
-    /// Java brackets the whole of `append` in
-    /// `finally { free.deallocate(buffer); }` (`RecordAccumulator.java:358-361`)
-    /// and nulls `buffer` only once a batch has taken ownership of it
-    /// (`:353-354`), so every exit returns an unused buffer to the pool —
-    /// including the **success** exit of the *first* `synchronized (dq)` block.
-    ///
-    /// That exit holds a live buffer when a sticky-partition switch sends us
-    /// back around the loop *after* the buffer was allocated and the newly
-    /// selected partition turns out to already have a batch with room. This
-    /// test drives exactly that interleaving:
-    ///
-    /// 1. the sticky partition is `0`, with `produced_bytes == sticky_batch_size`
-    ///    banked from an append whose switch was disabled (a non-full last
-    ///    batch), so the switch is still pending;
-    /// 2. `deque(0)`'s last batch is not full but has no room for our record,
-    ///    so the first block returns "no result" without switching partitions;
-    /// 3. the pool is empty, so `free.allocate(...)` parks — and while it is
-    ///    parked `deque(0)` is drained, which makes `allBatchesFull(dq)` true;
-    /// 4. the second block therefore completes the pending switch (to `1`, the
-    ///    only partition with a leader in the cluster the appender sees) and
-    ///    `continue`s;
-    /// 5. on the next iteration the first block's `tryAppend` succeeds, because
-    ///    `deque(1)` has a batch with room — reaching the exit under test with
-    ///    the buffer still in hand.
-    ///
-    /// Dropping that buffer instead of deallocating it is not equivalent:
-    /// `BufferPool::allocate` debits `non_pooled_available_memory` and only
-    /// `deallocate` credits it back (and notifies the next waiter), so every
-    /// occurrence permanently shrinks the pool for the lifetime of the
-    /// producer.
     /// Verifies that a force close completes while an append is blocked on buffer
     /// memory, on both a single-worker and a multi-worker runtime, and that the
     /// blocked append fails with the `BufferPool` error message.
@@ -6365,7 +6335,7 @@ mod tests {
     /// did not terminate. Each runtime runs on a dedicated thread so that a hang is
     /// reported as a test failure.
     #[test]
-    fn test_force_close_with_a_send_waiting_for_memory_finishes_on_one_worker() {
+    fn test_force_close_with_a_send_waiting_for_memory_finishes() {
         for workers in [1usize, 2] {
             let (result_tx, result_rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
@@ -6446,6 +6416,36 @@ mod tests {
         appender.await.unwrap()
     }
 
+    /// Java brackets the whole of `append` in
+    /// `finally { free.deallocate(buffer); }` (`RecordAccumulator.java:358-361`)
+    /// and nulls `buffer` only once a batch has taken ownership of it
+    /// (`:353-354`), so every exit returns an unused buffer to the pool —
+    /// including the **success** exit of the *first* `synchronized (dq)` block.
+    ///
+    /// That exit holds a live buffer when a sticky-partition switch sends us
+    /// back around the loop *after* the buffer was allocated and the newly
+    /// selected partition turns out to already have a batch with room. This
+    /// test drives exactly that interleaving:
+    ///
+    /// 1. the sticky partition is `0`, with `produced_bytes == sticky_batch_size`
+    ///    banked from an append whose switch was disabled (a non-full last
+    ///    batch), so the switch is still pending;
+    /// 2. `deque(0)`'s last batch is not full but has no room for our record,
+    ///    so the first block returns "no result" without switching partitions;
+    /// 3. the pool is empty, so `free.allocate(...)` parks — and while it is
+    ///    parked `deque(0)` is drained, which makes `allBatchesFull(dq)` true;
+    /// 4. the second block therefore completes the pending switch (to `1`, the
+    ///    only partition with a leader in the cluster the appender sees) and
+    ///    `continue`s;
+    /// 5. on the next iteration the first block's `tryAppend` succeeds, because
+    ///    `deque(1)` has a batch with room — reaching the exit under test with
+    ///    the buffer still in hand.
+    ///
+    /// Dropping that buffer instead of deallocating it is not equivalent:
+    /// `BufferPool::allocate` debits `non_pooled_available_memory` and only
+    /// `deallocate` credits it back (and notifies the next waiter), so every
+    /// occurrence permanently shrinks the pool for the lifetime of the
+    /// producer.
     #[tokio::test]
     async fn test_append_returns_the_buffer_when_the_first_block_wins_after_a_partition_switch() {
         let now: i64 = 0;
