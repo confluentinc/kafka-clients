@@ -2089,8 +2089,8 @@ impl<C: KafkaClient> Sender<C> {
         let expired_inflight_batches = self.get_expired_inflight_batches(now);
         let expired_batches = self.accumulator.expired_batches(now);
 
-        self.fail_expired_batches(expired_batches, now, true);
-        self.fail_expired_batches(expired_inflight_batches, now, false);
+        self.fail_expired_batches(expired_batches, now, true, &request_data);
+        self.fail_expired_batches(expired_inflight_batches, now, false, &request_data);
 
         // Calculate poll timeout
         let mut poll_timeout = result.next_ready_check_delay_ms.min(not_ready_timeout);
@@ -2114,7 +2114,13 @@ impl<C: KafkaClient> Sender<C> {
     /// has to be moved into [`Self::batches_awaiting_response`] rather than dropped
     /// at the end of the caller's scope.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#failExpiredBatches")]
-    fn fail_expired_batches(&mut self, expired_batches: Vec<ProducerBatch>, now: i64, deallocate_buffer: bool) {
+    fn fail_expired_batches(
+        &mut self,
+        expired_batches: Vec<ProducerBatch>,
+        now: i64,
+        deallocate_buffer: bool,
+        request_data: &[(i32, Vec<RequestBatchInfo>)],
+    ) {
         if !expired_batches.is_empty() {
             kafka_trace!(self.log_context, "Expired {} batches in accumulator", expired_batches.len());
         }
@@ -2127,12 +2133,19 @@ impl<C: KafkaClient> Sender<C> {
                 now - expired_batch.created_ms
             );
             let error = Error::with_message(Errors::RequestTimedOut, error_message);
-            // An in-flight batch keeps its buffer until its response arrives
-            // (KAFKA-19012). A batch whose response has already been handled is no
-            // longer in flight and no response is left to release its buffer, so it is
-            // released now, as `abortBatches` does for a batch that is not in flight
+            // A batch keeps its buffer while a produce response is still to arrive for it
+            // (KAFKA-19012): its request is in flight, or is in `request_data` and sent
+            // later in this pass. A batch drained in this pass is flagged in flight only
+            // when that request is built, as in Java. A batch whose response has already
+            // been handled has no response left to release its buffer, so it is released
+            // now, as `abortBatches` does for a batch that is not in flight
             // (`RecordAccumulator.java:1160-1167`).
-            let deallocate_buffer = deallocate_buffer || !expired_batch.is_inflight();
+            let awaits_response = expired_batch.is_inflight()
+                || request_data
+                    .iter()
+                    .flat_map(|(_, infos)| infos)
+                    .any(|info| Arc::ptr_eq(&info.identity, &expired_batch.produce_future));
+            let deallocate_buffer = deallocate_buffer || !awaits_response;
             let retain = self.fail_batch_with_error(&mut expired_batch, error, false, deallocate_buffer);
             if let Some(transaction_manager) = self.transaction_manager.clone()
                 && expired_batch.in_retry()
