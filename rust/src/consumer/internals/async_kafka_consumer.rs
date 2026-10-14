@@ -1117,6 +1117,15 @@ impl AsyncConsumerHandleState {
         timeout_msg: impl AsRef<str>,
         enable_wakeup: bool,
     ) -> Result<T, Error> {
+        // Java's `setActiveTask(future)` on a future that is already done
+        // keeps its result and leaves a pending wakeup armed for the next
+        // call (`WakeupTrigger.java` `setActiveTask`), so on entry the result
+        // is looked at before the wakeup. Afterwards the wakeup goes first: it
+        // was not there when the result was last seen missing, and where both
+        // arrived since, the `biased` wait below also prefers it.
+        if let Some(result) = try_take_completion(&mut receiver) {
+            return result;
+        }
         loop {
             if enable_wakeup && let Err(err) = self.wakeup_trigger.maybe_trigger_wakeup() {
                 self.wakeup_trigger.rotate();
@@ -1146,7 +1155,16 @@ impl AsyncConsumerHandleState {
                         Some(tok) => {
                             tokio::select! {
                                 biased;
-                                _ = tok.cancelled() => {},
+                                _ = tok.cancelled() => {
+                                    // The wakeup came while the result was
+                                    // pending: raise it now, ahead of the
+                                    // deadline check. A trigger disabled by
+                                    // close() reports none; keep waiting.
+                                    if let Err(err) = self.wakeup_trigger.maybe_trigger_wakeup() {
+                                        self.wakeup_trigger.rotate();
+                                        return Err(err);
+                                    }
+                                },
                                 res = tokio::time::timeout(Duration::from_millis(wait), recv_fut) => {
                                     match res {
                                         Ok(Ok(Ok(value))) => return Ok(value),
@@ -1651,6 +1669,20 @@ fn return_error_if_group_id_not_defined(group_id: Option<&str>) -> Result<(), Er
     Ok(())
 }
 
+/// Takes an event's result if the background task has already delivered it,
+/// as Java's `future.isDone()` followed by `getResult(future)`. A sender
+/// dropped without a result is reported as the error every completion wait
+/// gives for it. `None` while the result is still pending.
+fn try_take_completion<T>(receiver: &mut tokio::sync::oneshot::Receiver<Result<T, Error>>) -> Option<Result<T, Error>> {
+    match receiver.try_recv() {
+        Ok(result) => Some(result),
+        Err(tokio::sync::oneshot::error::TryRecvError::Closed) => Some(Err(Error::local_illegal_state(
+            "Background task dropped the completion sender without completing it",
+        ))),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
+    }
+}
+
 /// An already-completed commit result, Java's `completedFuture(null)` for
 /// empty explicit offsets, read by `commitSync` as no committed offsets.
 fn completed_commit_result() -> CommitResultReceiver {
@@ -1960,10 +1992,21 @@ impl AsyncCommitState {
         if let Some(mut pending_commit) = awaited.clone() {
             // A deadline-bounded await in short `tokio::time::timeout` slices,
             // so the deadline is driven by the mock-clock-safe `time`.
+            let mut entering = true;
             loop {
+                // Java's `whenComplete` completes `futureToAwait` at once for a
+                // commit already done, before `setActiveTask(futureToAwait)`,
+                // which then keeps the result and leaves a pending wakeup
+                // armed for the next call (`WakeupTrigger.java`): on entry a
+                // done commit wins over the wakeup.
+                if entering && pending_commit.is_done() {
+                    break;
+                }
+                entering = false;
                 // §11: observe a pending wakeup at the top of each iteration
                 // when wakeups are enabled (Java's
-                // `wakeupTrigger.setActiveTask(futureToAwait)`).
+                // `wakeupTrigger.setActiveTask(futureToAwait)`): a wakeup that
+                // came while the commit was pending fails the wait.
                 if enable_wakeup && let Err(err) = wakeup_trigger.maybe_trigger_wakeup() {
                     wakeup_trigger.rotate();
                     return Err(err);
@@ -4312,22 +4355,29 @@ where
     ///                                Predicate<Exception> ignoreErrorEventException)`
     /// (`AsyncKafkaConsumer.java:2271`). Each iteration:
     ///
-    /// 1. Observes any pending wakeup (§11) — if [`Self::wakeup`] has
-    ///    been called the loop returns `Error::Wakeup` and the
-    ///    caller rotates the token.
+    /// 1. Observes the result and any pending wakeup (§11), the result
+    ///    first on entry and the wakeup first afterwards (see
+    ///    `enable_wakeup` below). A wakeup that wins returns
+    ///    `Error::Wakeup` with the token rotated.
     /// 2. Drains the bg-event channel (invokes any pending listener
     ///    callbacks on the caller's task).
-    /// 3. If the completion receiver has resolved, returns the value.
+    /// 3. Returns a result seen in step 1; otherwise observes a wakeup
+    ///    that came during a drain that ran events, then the result.
     /// 4. Otherwise, races a 100ms bounded wait against the receiver
-    ///    AND the wakeup token's cancellation signal.
+    ///    AND the wakeup token's cancellation signal, the token first.
     /// 5. Loops while the absolute `deadline_ms` is not exceeded.
     ///
     /// # `enable_wakeup`
     ///
     /// Mirrors Java's `wakeupTrigger.setActiveTask(future)` /
     /// `clearTask()` discipline: only blocking APIs that Java registers
-    /// the future on observe the wakeup. Close-path callers
-    /// (`leave_group_on_close`,
+    /// the future on observe the wakeup, and whichever of the result and
+    /// the wakeup came first wins. A result already there on entry is
+    /// returned and a pending wakeup is left armed for the next call
+    /// (Java's `setActiveTask` on a done future); a wakeup that arrives
+    /// while the result is pending is raised, also when it arrives while
+    /// the drain runs a rebalance listener and the result follows it.
+    /// Close-path callers (`leave_group_on_close`,
     /// `await_pending_async_commits_and_execute_commit_callbacks` with
     /// `enable_wakeup=false`) pass `false` here so the disabled-wakeups
     /// guarantee from `wakeup_trigger.disable()` is also respected on
@@ -4372,18 +4422,37 @@ where
         skip_assignment_events: bool,
     ) -> Result<T, Error> {
         let mut receiver = receiver;
+        // Java's `setActiveTask(future)` lets whichever came first win
+        // (`WakeupTrigger.java` `setActiveTask` / `wakeup`): a future that is
+        // already done when it is set keeps its result and leaves a pending
+        // wakeup for the next call (`completeExceptionally` on a done future
+        // returns false); a wakeup that arrives while it is pending fails it
+        // with `WakeupException`. The token and the receiver carry no order,
+        // so each observation below checks the one known to be earlier first:
+        // on entry the result (it is "done before set"), afterwards the wakeup
+        // (it was not there when the result was last seen missing). Where
+        // both arrived since the last look, the wakeup wins, as the `biased`
+        // wait does.
+        let mut entering = true;
 
         loop {
-            // Stage 0: observe pending wakeup (§11). Java's pattern is
-            // `wakeupTrigger.setActiveTask(future)` BEFORE the wait — a
-            // concurrent `wakeup()` then completes the future
-            // exceptionally. Our rotating-token equivalent re-checks at
-            // the top of every loop iteration so the `select!` below
-            // sees a freshly-cancelled token when the user calls
-            // `wakeup()` during the wait.
-            if enable_wakeup && let Err(err) = self.wakeup_trigger.maybe_trigger_wakeup() {
-                self.wakeup_trigger.rotate();
-                return Err(err);
+            // Observation before the drain. A result seen here stands even if
+            // a wakeup arrives while the drain runs listeners; it is returned
+            // after the drain, which runs as it always has.
+            let mut ready = if entering {
+                try_take_completion(&mut receiver)
+            } else {
+                None
+            };
+            entering = false;
+            if ready.is_none() {
+                // §11: a pending wakeup with the result still missing fails
+                // the wait; the token is rotated after raising it.
+                if enable_wakeup && let Err(err) = self.wakeup_trigger.maybe_trigger_wakeup() {
+                    self.wakeup_trigger.rotate();
+                    return Err(err);
+                }
+                ready = try_take_completion(&mut receiver);
             }
 
             let had_events = match self
@@ -4404,71 +4473,78 @@ where
             };
 
             // Java line 2282: `if (future.isDone()) return getResult(future)`.
-            match receiver.try_recv() {
-                Ok(Ok(value)) => return Ok(value),
-                Ok(Err(err)) => return Err(err),
-                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    return Err(Error::local_illegal_state(
-                        "Background task dropped the completion sender without completing it",
-                    ));
-                },
-                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
-                    // Java line 2287: if no events were processed this
-                    // tick, do a bounded wait (100ms) for the future or
-                    // for a new bg event.
-                    if !had_events {
-                        let remaining = self.remaining_ms(deadline_ms);
-                        if remaining <= 0 {
-                            return Err(Error::timeout(timeout_msg.as_ref().to_string()));
-                        }
-                        let wait = std::cmp::min(remaining, 100) as u64;
-                        // §11: race the receiver against the wakeup
-                        // token's cancellation so `wakeup()` from
-                        // another task interrupts the wait
-                        // immediately. The token clone is cheap (Arc).
-                        let token = if enable_wakeup {
-                            Some(self.wakeup_trigger.current_token())
-                        } else {
-                            None
-                        };
-                        let recv_fut = &mut receiver;
-                        match token {
-                            Some(tok) => {
-                                tokio::select! {
-                                    biased;
-                                    _ = tok.cancelled() => {
-                                        // Loop top will surface
-                                        // Error::Wakeup via
-                                        // maybe_trigger_wakeup + rotate.
-                                    },
-                                    res = tokio::time::timeout(Duration::from_millis(wait), recv_fut) => {
-                                        match res {
-                                            Ok(Ok(Ok(value))) => return Ok(value),
-                                            Ok(Ok(Err(err))) => return Err(err),
-                                            Ok(Err(_recv_err)) => {
-                                                return Err(Error::local_illegal_state(
-                                                    "Background task dropped the completion sender without completing it",
-                                                ));
-                                            },
-                                            // Java's `swallow TimeoutException` — keep looping.
-                                            Err(_elapsed) => {},
-                                        }
-                                    },
+            if let Some(result) = ready {
+                return result;
+            }
+            // A wakeup that came while the drain ran a listener (§31, a
+            // Rust-only delivery: Java's waits block in `getResult`) came
+            // before any result arriving after it was looked for.
+            if had_events
+                && enable_wakeup
+                && let Err(err) = self.wakeup_trigger.maybe_trigger_wakeup()
+            {
+                self.wakeup_trigger.rotate();
+                return Err(err);
+            }
+            if let Some(result) = try_take_completion(&mut receiver) {
+                return result;
+            }
+
+            // Java line 2287: if no events were processed this tick, do a
+            // bounded wait (100ms) for the future or for a new bg event.
+            if !had_events {
+                let remaining = self.remaining_ms(deadline_ms);
+                if remaining <= 0 {
+                    return Err(Error::timeout(timeout_msg.as_ref().to_string()));
+                }
+                let wait = std::cmp::min(remaining, 100) as u64;
+                // §11: race the receiver against the wakeup token's
+                // cancellation so `wakeup()` from another task interrupts
+                // the wait immediately. The token clone is cheap (Arc).
+                let token = if enable_wakeup {
+                    Some(self.wakeup_trigger.current_token())
+                } else {
+                    None
+                };
+                let recv_fut = &mut receiver;
+                match token {
+                    Some(tok) => {
+                        tokio::select! {
+                            biased;
+                            _ = tok.cancelled() => {
+                                // The wakeup came while the result was
+                                // pending: raise it now, ahead of the deadline
+                                // check. A trigger disabled by close() reports
+                                // none; then keep waiting.
+                                if let Err(err) = self.wakeup_trigger.maybe_trigger_wakeup() {
+                                    self.wakeup_trigger.rotate();
+                                    return Err(err);
                                 }
                             },
-                            None => match tokio::time::timeout(Duration::from_millis(wait), recv_fut).await {
-                                Ok(Ok(Ok(value))) => return Ok(value),
-                                Ok(Ok(Err(err))) => return Err(err),
-                                Ok(Err(_recv_err)) => {
-                                    return Err(Error::local_illegal_state(
-                                        "Background task dropped the completion sender without completing it",
-                                    ));
-                                },
-                                Err(_elapsed) => {},
+                            res = tokio::time::timeout(Duration::from_millis(wait), recv_fut) => {
+                                match res {
+                                    Ok(Ok(result)) => return result,
+                                    Ok(Err(_recv_err)) => {
+                                        return Err(Error::local_illegal_state(
+                                            "Background task dropped the completion sender without completing it",
+                                        ));
+                                    },
+                                    // Java's `swallow TimeoutException` — keep looping.
+                                    Err(_elapsed) => {},
+                                }
                             },
                         }
-                    }
-                },
+                    },
+                    None => match tokio::time::timeout(Duration::from_millis(wait), recv_fut).await {
+                        Ok(Ok(result)) => return result,
+                        Ok(Err(_recv_err)) => {
+                            return Err(Error::local_illegal_state(
+                                "Background task dropped the completion sender without completing it",
+                            ));
+                        },
+                        Err(_elapsed) => {},
+                    },
+                }
             }
 
             // Java line 2299: `while (timer.notExpired())`.
@@ -9133,6 +9209,324 @@ mod tests {
             .expect_err("must wake up before deadline");
         assert!(matches!(err, Error::Wakeup(_)), "expected Wakeup, got {err:?}");
         assert!(!consumer.wakeup_trigger.current_token().is_cancelled());
+    }
+
+    /// Java's `WakeupTrigger.setActiveTask` on a future that is already done
+    /// keeps its result and leaves the wakeup pending
+    /// (`WakeupTriggerTest.testExceptionTriggeredWhenTaskAsynchronouslyCompletedBeforeSet`).
+    /// `commitSync(Map.of())` waits on `CompletableFuture.completedFuture(null)`
+    /// (`AsyncKafkaConsumer.java:1129-1131`, `:1804-1805`), so after a
+    /// `wakeup()` it returns normally and the next wakeable call throws.
+    #[tokio::test]
+    async fn wakeup_before_commit_sync_with_empty_offsets_is_left_for_the_next_call() {
+        let (mut consumer, _handles) = make_test_consumer_with_channels();
+        consumer.wakeup_trigger.wakeup();
+
+        consumer
+            .commit_sync_with_offsets(HashMap::new())
+            .await
+            .expect("an already-completed commit keeps its result");
+        assert!(
+            consumer.wakeup_trigger.current_token().is_cancelled(),
+            "the wakeup must stay pending for the next call"
+        );
+
+        let tp = TopicPartition::new("t".to_string(), 0);
+        let err = consumer
+            .committed_with_timeout(&[tp], Duration::from_secs(5))
+            .await
+            .expect_err("the next wakeable call raises the pending wakeup");
+        assert!(matches!(err, Error::Wakeup(_)), "expected Wakeup, got {err:?}");
+        assert!(!consumer.wakeup_trigger.current_token().is_cancelled());
+    }
+
+    /// The same through a [`ConsumerHandle`], whose waits go through
+    /// `ConsumerHandle::await_completion`.
+    #[tokio::test]
+    async fn handle_wakeup_before_commit_sync_with_empty_offsets_is_left_for_the_next_call() {
+        let (mut consumer, _handles) = make_test_consumer_with_channels();
+        let handle = consumer.handle();
+        handle.wakeup();
+
+        handle
+            .commit_sync_with_offsets(HashMap::new())
+            .await
+            .expect("an already-completed commit keeps its result");
+        assert!(
+            consumer.wakeup_trigger.current_token().is_cancelled(),
+            "the wakeup must stay pending for the next call"
+        );
+
+        let tp = TopicPartition::new("t".to_string(), 0);
+        let err = consumer
+            .committed_with_timeout(&[tp], Duration::from_secs(5))
+            .await
+            .expect_err("the next wakeable call raises the pending wakeup");
+        assert!(matches!(err, Error::Wakeup(_)), "expected Wakeup, got {err:?}");
+    }
+
+    /// `awaitPendingAsyncCommitsAndExecuteCommitCallbacks` completes
+    /// `futureToAwait` at once through `whenComplete` when the last async
+    /// commit is already done, before `setActiveTask(futureToAwait)`
+    /// (`AsyncKafkaConsumer.java:1811-1832`): a pending wakeup does not fail
+    /// the wait and stays for the next call. An empty-offsets `commitAsync`
+    /// leaves exactly such a done commit (`:1129-1131`).
+    #[tokio::test]
+    async fn wakeup_before_commit_sync_waiting_on_a_done_async_commit_is_left_armed() {
+        let (consumer, _handles) = make_test_consumer_with_channels();
+        let handle = consumer.handle();
+        handle
+            .commit_async_offsets(HashMap::new())
+            .await
+            .expect("empty-offsets commit_async");
+        assert!(
+            consumer
+                .commit_state
+                .last_pending_async_commit()
+                .expect("a pending async commit")
+                .is_done(),
+            "precondition: the pending async commit is already done"
+        );
+        handle.wakeup();
+
+        handle
+            .commit_sync_with_offsets(HashMap::new())
+            .await
+            .expect("a done pending commit and a done commit keep their results");
+        assert!(
+            consumer.wakeup_trigger.maybe_trigger_wakeup().is_err(),
+            "the wakeup is still pending"
+        );
+    }
+
+    /// Java's `wakeup()` fails an active future that is not yet done
+    /// (`WakeupTrigger.java` `wakeup`, `ActiveFuture` branch). In Rust a
+    /// rebalance listener may run inside the wait (§31); a `wakeup()` it
+    /// sends before the awaited event completes must still fail the wait,
+    /// although the result has arrived by the time the drain returns.
+    #[tokio::test]
+    async fn wakeup_during_a_listener_before_the_result_fails_the_wait() {
+        use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
+        use crate::consumer::internals::events::CompletableEventHandle;
+        use async_trait::async_trait;
+        use tokio::sync::oneshot;
+
+        struct WakeThenComplete {
+            trigger: WakeupTrigger,
+            handle: std::sync::Mutex<Option<CompletableEventHandle<()>>>,
+        }
+        #[async_trait]
+        impl ConsumerRebalanceListener for WakeThenComplete {
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), Error> {
+                self.trigger.wakeup();
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                // The bg task completes the awaited event after the wakeup.
+                self.handle.lock().unwrap().take().expect("handle").complete(());
+                Ok(())
+            }
+            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+        }
+
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let (handle, receiver, _erased) = CompletableEvent::make_completable_event::<()>(i64::MAX);
+        let listener = Arc::new(WakeThenComplete {
+            trigger: consumer.wakeup_trigger.clone(),
+            handle: std::sync::Mutex::new(Some(handle)),
+        });
+        *consumer.rebalance_listener.lock().unwrap() = Some(listener as Arc<dyn ConsumerRebalanceListener>);
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
+        handles
+            .bg_event_tx
+            .send(BackgroundEventEnvelope {
+                event: BackgroundEvent::PartitionsRemoved {
+                    method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+                    partitions: vec![TopicPartition::new("t".to_string(), 0)],
+                    ack: ack_tx,
+                },
+                enqueued_ms: 0,
+            })
+            .expect("send ok");
+        let deadline = consumer.time.milliseconds() + 5000;
+
+        let err = consumer
+            .process_background_events_until::<()>(receiver, deadline, |_| false, "timeout", true)
+            .await
+            .expect_err("the wakeup came before the result");
+        assert!(matches!(err, Error::Wakeup(_)), "expected Wakeup, got {err:?}");
+        assert!(
+            !consumer.wakeup_trigger.current_token().is_cancelled(),
+            "the raised wakeup is rotated"
+        );
+        ack_rx.await.expect("ack sent").expect("listener ok");
+    }
+
+    /// A result already there when the wait starts wins over a pending
+    /// wakeup, and the wait still drains the background events queued for
+    /// it (§31) before returning the result.
+    #[tokio::test]
+    async fn result_ready_on_entry_wins_over_a_pending_wakeup_and_the_drain_still_runs() {
+        use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
+        use async_trait::async_trait;
+        use std::sync::atomic::AtomicUsize;
+        use tokio::sync::oneshot;
+
+        struct CountingListener {
+            revoked: AtomicUsize,
+        }
+        #[async_trait]
+        impl ConsumerRebalanceListener for CountingListener {
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), Error> {
+                self.revoked.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+        }
+
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let listener = Arc::new(CountingListener { revoked: AtomicUsize::new(0) });
+        *consumer.rebalance_listener.lock().unwrap() =
+            Some(Arc::clone(&listener) as Arc<dyn ConsumerRebalanceListener>);
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
+        handles
+            .bg_event_tx
+            .send(BackgroundEventEnvelope {
+                event: BackgroundEvent::PartitionsRemoved {
+                    method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+                    partitions: vec![TopicPartition::new("t".to_string(), 0)],
+                    ack: ack_tx,
+                },
+                enqueued_ms: 0,
+            })
+            .expect("send ok");
+        let (handle, receiver, _erased) = CompletableEvent::make_completable_event::<i32>(i64::MAX);
+        handle.complete(7);
+        consumer.wakeup_trigger.wakeup();
+        let deadline = consumer.time.milliseconds() + 5000;
+
+        let value = consumer
+            .process_background_events_until::<i32>(receiver, deadline, |_| false, "timeout", true)
+            .await
+            .expect("the result was there before the wait");
+        assert_eq!(value, 7);
+        assert_eq!(listener.revoked.load(Ordering::SeqCst), 1, "the queued callback still ran");
+        ack_rx.await.expect("ack sent").expect("listener ok");
+        assert!(
+            consumer.wakeup_trigger.maybe_trigger_wakeup().is_err(),
+            "the wakeup is still pending"
+        );
+    }
+
+    /// The outcomes a task can have in Java's `WakeupTriggerTest`
+    /// (`complete`, `completeExceptionally`, `cancel`), applied to the
+    /// sending end of the awaited receiver; a dropped sender is Rust's
+    /// cancelled task, which the wait reports as an illegal state.
+    #[derive(Clone, Copy, Debug)]
+    enum TaskOutcome {
+        Completed,
+        Failed,
+        Cancelled,
+    }
+
+    impl TaskOutcome {
+        const ALL: [TaskOutcome; 3] = [TaskOutcome::Completed, TaskOutcome::Failed, TaskOutcome::Cancelled];
+
+        fn apply(self, sender: tokio::sync::oneshot::Sender<Result<(), Error>>) {
+            match self {
+                TaskOutcome::Completed => {
+                    let _ = sender.send(Ok(()));
+                },
+                TaskOutcome::Failed => {
+                    let _ = sender.send(Err(Error::local_illegal_state("Simulated error")));
+                },
+                TaskOutcome::Cancelled => drop(sender),
+            }
+        }
+
+        fn assert_result(self, result: Result<(), Error>) {
+            match (self, result) {
+                (TaskOutcome::Completed, Ok(())) => {},
+                (TaskOutcome::Failed, Err(Error::LocalIllegalState(e))) => assert_eq!(e.message(), "Simulated error"),
+                (TaskOutcome::Cancelled, Err(Error::LocalIllegalState(e))) => assert_eq!(
+                    e.message(),
+                    "Background task dropped the completion sender without completing it"
+                ),
+                (outcome, result) => panic!("{outcome:?}: unexpected result {result:?}"),
+            }
+        }
+    }
+
+    /// Java `testExceptionTriggeredWhenTaskAsynchronouslyCompletedBeforeSet`,
+    /// `...FailedBeforeSet` and `...CancelledBeforeSet`: a task done before
+    /// the wait starts keeps its outcome over an earlier `wakeup()`, which
+    /// stays pending. Both waits are covered: the owning consumer's
+    /// `process_background_events_until` and `ConsumerHandle::await_completion`.
+    #[tokio::test]
+    async fn wakeup_before_a_task_done_before_the_wait_stays_pending() {
+        for outcome in TaskOutcome::ALL {
+            let (mut consumer, _handles) = make_test_consumer_with_channels();
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            outcome.apply(sender);
+            consumer.wakeup_trigger.wakeup();
+            let deadline = consumer.time.milliseconds() + 5000;
+            let result = consumer
+                .process_background_events_until::<()>(receiver, deadline, |_| false, "timeout", true)
+                .await;
+            outcome.assert_result(result);
+            assert!(
+                consumer.wakeup_trigger.maybe_trigger_wakeup().is_err(),
+                "{outcome:?}: wakeup still pending"
+            );
+
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            outcome.apply(sender);
+            let consumer_handle = consumer.handle();
+            let ConsumerHandleInner::Async(state) = &consumer_handle.inner else {
+                panic!("an AsyncKafkaConsumer hands out an async handle");
+            };
+            let result = state.await_completion::<()>(receiver, deadline, "timeout", true).await;
+            outcome.assert_result(result);
+            assert!(
+                consumer.wakeup_trigger.maybe_trigger_wakeup().is_err(),
+                "{outcome:?}: wakeup still pending"
+            );
+        }
+    }
+
+    /// Java `testExceptionTriggeredWhenTaskAsynchronouslyCompleted`,
+    /// `...Failed` and `...Cancelled`: a task that completes during the wait
+    /// returns its outcome, and a `wakeup()` after that stays pending for the
+    /// next call.
+    #[tokio::test]
+    async fn wakeup_after_a_task_done_during_the_wait_stays_pending() {
+        for outcome in TaskOutcome::ALL {
+            let (mut consumer, _handles) = make_test_consumer_with_channels();
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            let completer = tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                outcome.apply(sender);
+            });
+            let deadline = consumer.time.milliseconds() + 5000;
+            let result = consumer
+                .process_background_events_until::<()>(receiver, deadline, |_| false, "timeout", true)
+                .await;
+            completer.await.expect("completer ok");
+            outcome.assert_result(result);
+            consumer.wakeup_trigger.wakeup();
+            assert!(
+                consumer.wakeup_trigger.maybe_trigger_wakeup().is_err(),
+                "{outcome:?}: wakeup pending"
+            );
+        }
     }
 
     /// Issue 14 regression: `position_with_timeout` must propagate
