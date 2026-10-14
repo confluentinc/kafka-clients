@@ -4866,10 +4866,6 @@ where
         // work, exactly as in Java.
         let remaining = self.remaining_ms(poll_deadline_ms);
         let mut poll_timeout_ms = self.maximum_time_to_wait_ms().min(remaining);
-        if poll_timeout_ms <= 0 {
-            // No time left to wait; the caller's loop re-checks the deadline.
-            return Ok(fetch);
-        }
 
         // Java (`AsyncKafkaConsumer.java:1888-1904`): clamp the wait to
         // `retry.backoff.ms` when there are no assigned partitions, or any
@@ -4903,31 +4899,51 @@ where
             }
         }
 
-        // Ensure a fetch is in flight before we block. `await_wakeup` only
-        // wakes when the bg task adds fetched data, so blocking with no fetch
-        // outstanding strands the wait until `maximum_time_to_wait` even
-        // though records may be available at the broker. This happens when
-        // the consumer has just caught up and the prefetch chain
-        // (`poll`-returns-records → `send_prefetches`) did not fire — the
-        // residual latency tail in `design/current/consumer-latency-findings.md`.
-        // `createFetchRequests` is a no-op for any node that already has a
-        // fetch in flight (the in-flight skip in `prepare_fetch_requests`),
-        // so this issues a fetch only when none is outstanding. The issued
-        // fetch long-polls at the broker (`fetch.max.wait.ms`) and its
-        // response wakes us the instant data lands.
-        self.send_prefetches();
+        // Java: `wakeupTrigger.setFetchAction(fetchBuffer)`, which throws
+        // `WakeupException` for a wakeup already pending — also when
+        // `pollTimeout` is 0, since Java has no early return here. So a
+        // `wakeup()` sent while this poll ran its commit callbacks or
+        // rebalance listeners (`checkInflightPoll`) is raised by this poll,
+        // not left armed for the next call when the deadline has passed.
+        // As at the loop top, the token is rotated after raising (§11).
+        if let Err(err) = self.wakeup_trigger.maybe_trigger_wakeup() {
+            self.wakeup_trigger.rotate();
+            return Err(err);
+        }
 
-        // Java: `wakeupTrigger.setFetchAction(fetchBuffer); fetchBuffer
-        // .awaitWakeup(pollTimer);`. The Rust wakeup model (§11) realizes
-        // the `setFetchAction` side by racing the cancellation token instead
-        // of a back-channel: when `wakeup()` cancels the token this arm
-        // wins, the poll() loop top calls `maybe_trigger_wakeup`, and
-        // `Error::Wakeup` is surfaced + the token rotated.
-        let token = self.wakeup_trigger.current_token();
-        tokio::select! {
-            biased;
-            _ = token.cancelled() => {}
-            _ = self.fetch_buffer.await_wakeup(Duration::from_millis(poll_timeout_ms as u64)) => {}
+        // Java's `fetchBuffer.awaitWakeup(pollTimer)` returns at once for a
+        // timer of 0, so with no time left there is nothing to wait for and
+        // no fetch to send ahead of a wait: go straight to the second
+        // `collectFetch()`, as Java does.
+        if poll_timeout_ms > 0 {
+            // Ensure a fetch is in flight before we block. `await_wakeup` only
+            // wakes when the bg task adds fetched data, so blocking with no fetch
+            // outstanding strands the wait until `maximum_time_to_wait` even
+            // though records may be available at the broker. This happens when
+            // the consumer has just caught up and the prefetch chain
+            // (`poll`-returns-records → `send_prefetches`) did not fire — the
+            // residual latency tail in `design/current/consumer-latency-findings.md`.
+            // `createFetchRequests` is a no-op for any node that already has a
+            // fetch in flight (the in-flight skip in `prepare_fetch_requests`),
+            // so this issues a fetch only when none is outstanding. The issued
+            // fetch long-polls at the broker (`fetch.max.wait.ms`) and its
+            // response wakes us the instant data lands.
+            self.send_prefetches();
+
+            // Java: `fetchBuffer.awaitWakeup(pollTimer)`, which a `wakeup()`
+            // with the fetch action set interrupts (`WakeupTrigger.wakeup`
+            // calls `fetchBuffer.wakeup()` and leaves a `WakeupFuture`
+            // pending). The Rust wakeup model (§11) realizes that by racing
+            // the cancellation token instead of a back-channel: when
+            // `wakeup()` cancels the token this arm wins, and the wakeup stays
+            // pending for the poll() loop top, which surfaces `Error::Wakeup`
+            // and rotates the token.
+            let token = self.wakeup_trigger.current_token();
+            tokio::select! {
+                biased;
+                _ = token.cancelled() => {}
+                _ = self.fetch_buffer.await_wakeup(Duration::from_millis(poll_timeout_ms as u64)) => {}
+            }
         }
 
         // Java's second `collectFetch()` — may still be empty on a timeout or
@@ -4949,6 +4965,12 @@ where
     /// if it should return an empty fetch (the reconciliation check has not
     /// completed and there was no time to wait, or the wait timed out).
     ///
+    /// # Errors
+    ///
+    /// `Error::Wakeup` when a `wakeup()` is pending or arrives during the
+    /// wait, as Java's `getResult` throws the `WakeupException` the trigger
+    /// completes the future with.
+    ///
     /// Java:
     /// ```java
     /// if (hasPendingReconciliation && inflightPoll != null && !inflightPoll.isReconciliationCheckComplete()) {
@@ -4964,43 +4986,51 @@ where
     /// ```
     ///
     /// The `wakeupTrigger.setActiveTask` is realized here by racing the
-    /// rotating cancellation token (§11): a concurrent `wakeup()` cancels the
-    /// token, this wait returns, and the poll loop top surfaces
-    /// `Error::Wakeup`. The lost-wakeup race is closed by creating the
+    /// rotating cancellation token (§11): a pending or concurrent `wakeup()`
+    /// cancels the token, this wait returns, and `Error::Wakeup` is raised
+    /// from here with the token rotated, as Java raises it from
+    /// `collectFetch()`. The lost-wakeup race is closed by creating the
     /// `notified()` future BEFORE re-checking the completion flag.
-    async fn wait_reconciliation_check(&self) -> bool {
+    async fn wait_reconciliation_check(&self) -> Result<bool, Error> {
         if !self.has_pending_reconciliation.load(Ordering::Acquire) {
-            return true;
+            return Ok(true);
         }
         let Some(inflight) = self.inflight_poll.as_ref() else {
-            return true;
+            return Ok(true);
         };
         if inflight.state.is_reconciliation_check_complete() {
-            return true;
+            return Ok(true);
         }
         let timeout_ms = inflight.deadline_ms.saturating_sub(self.time.milliseconds());
         if timeout_ms <= 0 {
             // No time to wait and reconciliation check not complete.
-            return false;
+            return Ok(false);
         }
         // Create the notified() future BEFORE the completion re-check to avoid
         // a lost wakeup (create-future-then-check ordering).
         let notified = inflight.state.reconciliation_check_notify().notified();
         if inflight.state.is_reconciliation_check_complete() {
-            return true;
+            return Ok(true);
         }
         let token = self.wakeup_trigger.current_token();
         tokio::select! {
             biased;
             _ = token.cancelled() => {
-                // A concurrent wakeup(); return empty so the poll loop top
-                // surfaces Error::Wakeup and rotates the token (§11).
-                false
+                // Java: `setActiveTask` completes the future with a
+                // `WakeupException`, which `getResult` throws out of
+                // `collectFetch()`. Raise it here and rotate the token, as
+                // the poll loop top does (§11). A trigger disabled by close()
+                // reports no wakeup: then this is an empty fetch.
+                if let Err(err) = self.wakeup_trigger.maybe_trigger_wakeup() {
+                    self.wakeup_trigger.rotate();
+                    return Err(err);
+                }
+                Ok(false)
             }
-            _ = notified => true,
+            _ = notified => Ok(true),
             _ = tokio::time::sleep(Duration::from_millis(timeout_ms as u64)) => {
                 // Java: TimeoutException -> return Fetch.empty().
-                false
+                Ok(false)
             }
         }
     }
@@ -5035,7 +5065,7 @@ where
     /// itself (e.g. `OffsetOutOfRange`, `TopicAuthorizationFailed`).
     async fn collect_fetch(&self) -> Result<ConsumerRecords<K, V>, Error> {
         // Java `:2031-2049`.
-        if !self.wait_reconciliation_check().await {
+        if !self.wait_reconciliation_check().await? {
             return Ok(ConsumerRecords::empty());
         }
 
@@ -8684,7 +8714,7 @@ mod tests {
     async fn wait_reconciliation_check_returns_true_when_no_pending_reconciliation() {
         let (consumer, handles) = make_test_consumer_with_channels();
         // has_pending_reconciliation defaults to false.
-        assert!(consumer.wait_reconciliation_check().await);
+        assert!(consumer.wait_reconciliation_check().await.expect("no wakeup"));
         drop(handles.subscriptions);
     }
 
@@ -8697,7 +8727,7 @@ mod tests {
         let state = Arc::new(AsyncPollState::new());
         state.mark_reconciliation_check_complete();
         consumer.inflight_poll = Some(InflightPoll { deadline_ms: i64::MAX, state });
-        assert!(consumer.wait_reconciliation_check().await);
+        assert!(consumer.wait_reconciliation_check().await.expect("no wakeup"));
         drop(handles.subscriptions);
     }
 
@@ -8718,7 +8748,7 @@ mod tests {
             s.mark_reconciliation_check_complete();
         });
         assert!(
-            consumer.wait_reconciliation_check().await,
+            consumer.wait_reconciliation_check().await.expect("no wakeup"),
             "must proceed once the check completes"
         );
         drop(handles.subscriptions);
@@ -8808,7 +8838,7 @@ mod tests {
         let state = Arc::new(AsyncPollState::new());
         // deadline already in the past (<= now) -> no time to wait.
         consumer.inflight_poll = Some(InflightPoll { deadline_ms: 0, state });
-        assert!(!consumer.wait_reconciliation_check().await);
+        assert!(!consumer.wait_reconciliation_check().await.expect("no wakeup"));
         drop(handles.subscriptions);
     }
 
@@ -8822,12 +8852,18 @@ mod tests {
         consumer.has_pending_reconciliation.store(true, Ordering::Release);
         let state = Arc::new(AsyncPollState::new()); // never completed
         consumer.inflight_poll = Some(InflightPoll { deadline_ms: i64::MAX, state });
-        // A concurrent wakeup cancels the token; the wait returns false so the
-        // poll loop top surfaces Error::Wakeup.
+        // Java's `setActiveTask` completes the check future with a
+        // `WakeupException`, which `getResult` throws out of `collectFetch()`:
+        // the wait raises Error::Wakeup itself and rotates the token.
         consumer.wakeup_trigger.wakeup();
+        let err = tokio::time::timeout(Duration::from_secs(5), consumer.wait_reconciliation_check())
+            .await
+            .expect("wakeup must interrupt the reconciliation-check wait")
+            .expect_err("the wakeup is raised from the wait");
+        assert!(matches!(err, Error::Wakeup(_)), "unexpected err: {err:?}");
         assert!(
-            !consumer.wait_reconciliation_check().await,
-            "wakeup must interrupt the reconciliation-check wait",
+            !consumer.wakeup_trigger.current_token().is_cancelled(),
+            "the token is rotated after raising"
         );
         drop(handles.subscriptions);
     }
@@ -12639,6 +12675,73 @@ mod tests {
         assert_eq!(err.source().expect("cause").message(), "next callback failed");
         assert_eq!(raising.invoked.load(Ordering::SeqCst), 1);
         assert_eq!(next.invoked.load(Ordering::SeqCst), 1);
+    }
+
+    /// A commit callback that calls `wakeup()` after `delay`, as a user's
+    /// callback may.
+    struct WakingCommitCallback {
+        wakeup_trigger: WakeupTrigger,
+        delay: Duration,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::consumer::OffsetCommitCallback for WakingCommitCallback {
+        async fn on_complete(
+            &self,
+            _offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+            _error: Option<&Error>,
+        ) -> Result<(), Error> {
+            if !self.delay.is_zero() {
+                tokio::time::sleep(self.delay).await;
+            }
+            self.wakeup_trigger.wakeup();
+            Ok(())
+        }
+    }
+
+    /// Java's `testWakeupAfterEmptyFetch`, for a poll with no time left when
+    /// the wakeup arrives: a `wakeup()` sent while `checkInflightPoll` runs the
+    /// commit callbacks is raised by that same poll, because `pollForFetches`
+    /// calls `wakeupTrigger.setFetchAction(fetchBuffer)` after an empty
+    /// `collectFetch()` whatever the remaining time
+    /// (`AsyncKafkaConsumer.java:1964-2016`). The next poll does not raise.
+    ///
+    /// Two ways of having no time left: `poll(0)`, and a poll whose deadline
+    /// passes while the callback runs.
+    #[tokio::test]
+    async fn poll_raises_a_wakeup_sent_by_its_callbacks_when_no_time_is_left() {
+        for (timeout, delay) in [
+            (Duration::ZERO, Duration::ZERO),
+            (Duration::from_millis(50), Duration::from_millis(150)),
+        ] {
+            let (mut consumer, _handles) = make_test_consumer_with_channels();
+            let tp = TopicPartition::new("t".to_string(), 0);
+            consumer
+                .subscriptions
+                .lock()
+                .unwrap()
+                .assign_from_user(HashSet::from([tp.clone()]))
+                .unwrap();
+            consumer.offset_commit_callback_invoker.enqueue_user_callback_invocation(
+                Arc::new(WakingCommitCallback { wakeup_trigger: consumer.wakeup_trigger.clone(), delay }),
+                singleton_offsets(tp, 1),
+                None,
+            );
+
+            let err = consumer
+                .poll(timeout)
+                .await
+                .expect_err("the wakeup is raised by the poll whose callback sent it");
+            assert!(matches!(err, Error::Wakeup(_)), "unexpected err for {timeout:?}: {err:?}");
+            assert!(
+                !consumer.wakeup_trigger.current_token().is_cancelled(),
+                "the token is rotated after raising"
+            );
+            consumer
+                .poll(Duration::ZERO)
+                .await
+                .expect("the wakeup was consumed: the next poll does not raise");
+        }
     }
 
     /// Java's `commit()` runs `executeCallbacks()` before adding the event: a
