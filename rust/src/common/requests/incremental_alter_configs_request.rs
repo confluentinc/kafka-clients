@@ -28,7 +28,7 @@ use super::{AbstractRequest, ConcreteResponse, IncrementalAlterConfigsResponse, 
 /// An IncrementalAlterConfigs request.
 ///
 /// Corresponds to `org.apache.kafka.common.requests.IncrementalAlterConfigsRequest`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.IncrementalAlterConfigsRequest")]
 pub struct IncrementalAlterConfigsRequest {
     data: IncrementalAlterConfigsRequestData,
@@ -101,18 +101,50 @@ impl IncrementalAlterConfigsRequest {
         let data = IncrementalAlterConfigsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
     }
+
+    /// Returns a copy of `data` with every config value replaced by
+    /// `"REDACTED"`, for rendering: it is not safe to print all config values.
+    ///
+    /// Mirrors Java's private `maskData`
+    /// (`IncrementalAlterConfigsRequest.java:111-118`), shared, as in Java, by
+    /// the request's `toString()` (`:122-123`) and `Builder.toString()`
+    /// (`:74-75`). Like Java's `setValue("REDACTED")` it replaces a null value
+    /// too. Java returns the copy's `toString()`, and the callers here render
+    /// the copy.
+    fn mask_data(data: &IncrementalAlterConfigsRequestData) -> IncrementalAlterConfigsRequestData {
+        let mut temp_data = data.clone();
+        for resource in &mut temp_data.resources {
+            for config in &mut resource.configs {
+                config.set_value(Some("REDACTED".to_string()));
+            }
+        }
+        temp_data
+    }
 }
 
 impl std::fmt::Display for IncrementalAlterConfigsRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Config values are not printed (they may be sensitive), mirroring
-        // Java's `maskData`.
+        // Mirrors Java's `toString()` (`IncrementalAlterConfigsRequest.java:121-124`),
+        // which renders `maskData(data)`: the data with every config value
+        // replaced by "REDACTED", because "it is not safe to print all config
+        // values" (`:110`).
         write!(
             f,
-            "IncrementalAlterConfigsRequest(version={}, resources={})",
+            "IncrementalAlterConfigsRequest(version={}, data={:?})",
             self.version,
-            self.data.resources.len()
+            Self::mask_data(&self.data)
         )
+    }
+}
+
+/// Renders exactly what the redacting [`Display`](std::fmt::Display) renders.
+///
+/// Java has a single `toString()` (`IncrementalAlterConfigsRequest.java:122-123`);
+/// a derived `Debug` would be a second, unredacted rendering that prints every
+/// config value being altered.
+impl std::fmt::Debug for IncrementalAlterConfigsRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
     }
 }
 
@@ -124,7 +156,7 @@ impl std::fmt::Display for IncrementalAlterConfigsRequest {
 /// in Rust that assembly happens in the admin client (which owns those types)
 /// and this builder only wraps the pre-built data (`common::requests` must not
 /// depend on the `admin` module).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.IncrementalAlterConfigsRequest$Builder")]
 pub struct Builder {
     data: IncrementalAlterConfigsRequestData,
@@ -165,6 +197,25 @@ impl RequestBuilder for Builder {
     }
 }
 
+/// Mirrors Java's `Builder.toString()` (`IncrementalAlterConfigsRequest.java:74-75`),
+/// which returns `maskData(data)`: the data with every config value replaced by
+/// `"REDACTED"`.
+impl std::fmt::Display for Builder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", IncrementalAlterConfigsRequest::mask_data(&self.data))
+    }
+}
+
+/// Renders exactly what the redacting [`Display`](std::fmt::Display) renders.
+///
+/// Java has a single `toString()`; a derived `Debug` would be a second,
+/// unredacted rendering that prints every config value being altered.
+impl std::fmt::Debug for Builder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,6 +238,100 @@ mod tests {
                 .collect(),
         );
         r
+    }
+
+    /// A distinctive secret value for the rendering tests.
+    const SECRET_VALUE: &str = "sasl-jaas-S3cr3t-7a41";
+
+    /// Two resources: a broker config set to [`SECRET_VALUE`] and a topic config
+    /// deleted with a null value.
+    fn data_with_secret() -> IncrementalAlterConfigsRequestData {
+        let mut data = IncrementalAlterConfigsRequestData::new();
+        data.set_resources(vec![
+            resource("0", 4, &[("listener.name.sasl.plain.sasl.jaas.config", Some(SECRET_VALUE), 0)]),
+            resource("orders", 2, &[("retention.ms", None, 1)]),
+        ]);
+        data
+    }
+
+    /// New test, no Java original: the redacting `Display` renders the data
+    /// with every config value replaced by `"REDACTED"`, as Java's `toString()`
+    /// renders `maskData(data)` (`IncrementalAlterConfigsRequest.java:122-123`),
+    /// the null value of the deleted config included, while the resource and
+    /// config names still show.
+    #[test]
+    fn display_redacts_config_values() {
+        let request = IncrementalAlterConfigsRequest::new(data_with_secret(), 1);
+        let rendered = request.to_string();
+        let mut masked = data_with_secret();
+        for resource in &mut masked.resources {
+            for config in &mut resource.configs {
+                config.set_value(Some("REDACTED".to_string()));
+            }
+        }
+        assert_eq!(rendered, format!("IncrementalAlterConfigsRequest(version=1, data={masked:?})"));
+        // Every value is masked, the null one included.
+        assert_eq!(rendered.matches("value: Some(\"REDACTED\")").count(), 2, "{rendered}");
+        // The resource and config names still show.
+        assert!(rendered.contains("resource_name: \"0\""), "{rendered}");
+        assert!(rendered.contains("resource_name: \"orders\""), "{rendered}");
+        assert!(
+            rendered.contains("name: \"listener.name.sasl.plain.sasl.jaas.config\""),
+            "{rendered}"
+        );
+        assert!(rendered.contains("name: \"retention.ms\""), "{rendered}");
+        assert!(!rendered.contains(SECRET_VALUE), "secret leaked: {rendered}");
+    }
+
+    /// New test, no Java original: `Debug` renders exactly what `Display` does
+    /// (Java has a single `toString()`), never a config value.
+    #[test]
+    fn debug_redacts_config_values() {
+        let request = IncrementalAlterConfigsRequest::new(data_with_secret(), 1);
+        assert_eq!(request.data().resources[0].configs[0].value.as_deref(), Some(SECRET_VALUE));
+        for rendered in [format!("{request:?}"), format!("{request:#?}")] {
+            assert_eq!(rendered, request.to_string());
+            assert_eq!(rendered.matches("value: Some(\"REDACTED\")").count(), 2, "{rendered}");
+            assert!(rendered.contains("resource_name: \"orders\""), "{rendered}");
+            assert!(!rendered.contains(SECRET_VALUE), "secret leaked: {rendered}");
+        }
+    }
+
+    /// New test, no Java original: the builder renders as Java's
+    /// `Builder.toString()` does, the data with every config value replaced by
+    /// `"REDACTED"` (`maskData`) — the null value of the deleted config
+    /// included — while the resource and config names still show.
+    #[test]
+    fn builder_display_masks_config_values() {
+        let builder = Builder::with_data(data_with_secret());
+        let rendered = builder.to_string();
+        let mut masked = data_with_secret();
+        for resource in &mut masked.resources {
+            for config in &mut resource.configs {
+                config.set_value(Some("REDACTED".to_string()));
+            }
+        }
+        assert_eq!(rendered, masked.to_string());
+        assert_eq!(rendered.matches("value: Some(\"REDACTED\")").count(), 2, "{rendered}");
+        assert!(
+            rendered.contains("name: \"listener.name.sasl.plain.sasl.jaas.config\""),
+            "{rendered}"
+        );
+        assert!(rendered.contains("resource_name: \"orders\""), "{rendered}");
+        assert!(!rendered.contains(SECRET_VALUE), "secret leaked: {rendered}");
+    }
+
+    /// New test, no Java original: the builder's `Debug` renders exactly what
+    /// its `Display` does, never a config value.
+    #[test]
+    fn builder_debug_masks_config_values() {
+        let builder = Builder::with_data(data_with_secret());
+        assert_eq!(builder.data.resources[0].configs[0].value.as_deref(), Some(SECRET_VALUE));
+        for rendered in [format!("{builder:?}"), format!("{builder:#?}")] {
+            assert_eq!(rendered, builder.to_string());
+            assert!(rendered.contains("resource_name: \"orders\""), "{rendered}");
+            assert!(!rendered.contains(SECRET_VALUE), "secret leaked: {rendered}");
+        }
     }
 
     #[test]

@@ -1,4 +1,4 @@
-# Current Status: Milestone 17 complete — client tracks Apache Kafka 4.4.0 (4.4.0-rc4)
+# Current Status: Milestones 1–17 complete — client tracks Apache Kafka 4.4.0 (4.4.0-rc4)
 
 > **Current state (2026-10-08, Milestone 17 close-out):** the Rust client is up
 > to **Apache Kafka 4.4.0**, built against `4.4.0-rc4` (`1156b2752a`) because
@@ -38,6 +38,23 @@
 > `c/` (see [structure.md](structure.md#top-level)). Crate paths below — `src/…`,
 > `tests/…`, `generator/…`, `xtask/…` — are relative to `rust/`; the bindings
 > formerly under `bindings/python/` and `bindings/c/` are now `python/` and `c/`.
+
+> **Current state (2026-10-12):** Milestone 17 landed secret redaction aligned
+> with Java's `Password` type (`[hidden]`): the `ConfigDef.Type.PASSWORD` fields
+> of `SslConfigs` / `SaslConfigs` and the Rust-only `SaslConfigs` `password` field
+> are typed `Password`; `ProducerConfig` renders its raw `originals` map as keys
+> only; `DelegationToken` and the six SASL / delegation-token wrappers delegate
+> `Debug` to their redacting `Display`; and `UserScramCredentialUpsertion`, which
+> has no `Display` (Java has no `toString()` there), hides its salt and password
+> in a hand-written `Debug`. Its Phase 2 and review rounds fixed the
+> `NetworkClient` disconnect log (`{:?}` → `Display`), the remaining request,
+> builder and admin-config types whose Java `toString()` masks, and three
+> Rust-only options types. Milestone 14 added the
+> `verifiable-clients` crate (`VerifiableProducer` / `VerifiableConsumer`) for
+> ducktape system tests. Milestones 15 (integration-test parity with the Java
+> 4.3.1 suites) and 16 (the Python client interface) came from `master`. See
+> `design/history/MILESTONES.md` for every milestone, and
+> `design/history/Milestone-17-password-redaction/PLAN.md` for Milestone 17.
 
 > **Current state (2026-09-27, re-verified against the tree):** several
 > statements further down this file were true when written and are now
@@ -355,7 +372,7 @@ that file has been removed — see the document inventory note at the end.)
 - `generator/test-messages/`: 3 test JSON specs → `OUT_DIR/test_generated/` (included via `tests/common/mod.rs`)
 - Generated code includes: structs, Message impl, ApiMessage impl, Eq/Hash/Display, builder setters
 - `cargo xtask format`: Formats source code (generated files are already formatted by the generator)
-- `cargo xtask check-generated`: Validates generated code formatting
+- `cargo xtask check-generated`: Validates that `generator/messages/` matches the `kafka` submodule's specs, generated code formatting, and the error-code tables
 - `cargo xtask lint` / `cargo xtask lint-fix`: Clippy with warnings as errors
 
 ## Key Java Source Reference

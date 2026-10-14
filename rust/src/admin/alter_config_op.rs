@@ -70,12 +70,35 @@ impl OpType {
             _ => None,
         }
     }
+
+    /// The name of this constant in Java's `AlterConfigOp.OpType`
+    /// (`AlterConfigOp.java:46-67`). The Java enum does not override
+    /// `toString()`, so `Enum.toString()` returns this name.
+    fn name(&self) -> &'static str {
+        match self {
+            OpType::Set => "SET",
+            OpType::Delete => "DELETE",
+            OpType::Append => "APPEND",
+            OpType::Subtract => "SUBTRACT",
+        }
+    }
+}
+
+/// Renders the Java constant name (`SET`, `DELETE`, ...), as Java's
+/// `Enum.toString()` does.
+impl std::fmt::Display for OpType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name())
+    }
 }
 
 /// A class representing an alter configuration entry containing name, value and
 /// operation type.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.AlterConfigOp`.
+///
+/// The derived `Debug` renders the entry through [`ConfigEntry`]'s `Debug`,
+/// which redacts a sensitive value as Java's `ConfigEntry.toString()` does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[doc(alias = "org.apache.kafka.clients.admin.AlterConfigOp")]
 pub struct AlterConfigOp {
@@ -104,18 +127,19 @@ impl AlterConfigOp {
 }
 
 impl std::fmt::Display for AlterConfigOp {
+    /// Mirrors Java's `toString()` (`AlterConfigOp.java:119-124`), which renders
+    /// the operation type as its Java constant name and the entry through
+    /// `ConfigEntry.toString()`, the redacting rendering.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "AlterConfigOp{{opType={:?}, configEntry={:?}}}",
-            self.op_type, self.config_entry
-        )
+        write!(f, "AlterConfigOp{{opType={}, configEntry={}}}", self.op_type, self.config_entry)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::admin::ConfigEntryOptionsBuilder;
+    use crate::admin::config_entry::ConfigType;
 
     #[test]
     fn op_type_id_round_trip() {
@@ -153,5 +177,95 @@ mod tests {
         let c = AlterConfigOp::new(entry, OpType::Delete);
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    /// A distinctive secret for the redaction tests.
+    const SECRET: &str = "sasl-jaas-S3cr3t-2e96";
+
+    /// A `Set` operation on a sensitive entry holding [`SECRET`].
+    fn sensitive_op() -> AlterConfigOp {
+        let entry = ConfigEntry::with_options(
+            ConfigEntryOptionsBuilder::new()
+                .set_name("listener.name.sasl.plain.sasl.jaas.config".to_string())
+                .set_value(Some(SECRET.to_string()))
+                .set_is_sensitive(true)
+                .set_config_type(Some(ConfigType::Password))
+                .build()
+                .unwrap(),
+        );
+        AlterConfigOp::new(entry, OpType::Set)
+    }
+
+    /// New test, no Java original (Java has no `AlterConfigOpTest`): every
+    /// `OpType` renders its Java constant name, as Java's `Enum.toString()` does
+    /// (`AlterConfigOp.java:46-67`).
+    #[test]
+    fn op_type_display_matches_java_constant_names() {
+        for (op_type, java) in [
+            (OpType::Set, "SET"),
+            (OpType::Delete, "DELETE"),
+            (OpType::Append, "APPEND"),
+            (OpType::Subtract, "SUBTRACT"),
+        ] {
+            assert_eq!(op_type.to_string(), java);
+        }
+    }
+
+    /// New test, no Java original: `Display` is the string Java's `toString()`
+    /// builds (`AlterConfigOp.java:119-124`), which renders the entry through
+    /// `ConfigEntry.toString()`, the redacting rendering.
+    #[test]
+    fn display_redacts_sensitive_value() {
+        let op = sensitive_op();
+        assert_eq!(op.config_entry().value(), Some(SECRET));
+        let rendered = op.to_string();
+        assert_eq!(
+            rendered,
+            "AlterConfigOp{opType=SET, configEntry=ConfigEntry(\
+             name=listener.name.sasl.plain.sasl.jaas.config, value=Redacted, source=UNKNOWN, \
+             isSensitive=true, isReadOnly=false, synonyms=[], type=PASSWORD, documentation=null)}"
+        );
+        assert_eq!(
+            rendered,
+            format!("AlterConfigOp{{opType=SET, configEntry={}}}", op.config_entry())
+        );
+        assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
+    }
+
+    /// New test, no Java original: a non-sensitive `Delete` operation renders
+    /// the value and Java's `DELETE` constant name.
+    #[test]
+    fn display_matches_java_to_string_for_delete() {
+        let op = AlterConfigOp::new(
+            ConfigEntry::new("retention.ms".to_string(), Some("604800000".to_string())),
+            OpType::Delete,
+        );
+        assert_eq!(
+            op.to_string(),
+            "AlterConfigOp{opType=DELETE, configEntry=ConfigEntry(name=retention.ms, \
+             value=604800000, source=UNKNOWN, isSensitive=false, isReadOnly=false, synonyms=[], \
+             type=UNKNOWN, documentation=null)}"
+        );
+    }
+
+    /// New test, no Java original: the derived `Debug` renders the entry through
+    /// its redacting `Debug`, while a non-sensitive value still prints.
+    #[test]
+    fn debug_redacts_sensitive_value() {
+        let op = sensitive_op();
+        for rendered in [format!("{op:?}"), format!("{op:#?}")] {
+            assert!(rendered.starts_with("AlterConfigOp"), "{rendered}");
+            assert!(rendered.contains("op_type: Set"), "{rendered}");
+            assert!(rendered.contains(&op.config_entry().to_string()), "{rendered}");
+            assert!(rendered.contains("value=Redacted"), "{rendered}");
+            assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
+        }
+
+        let plain = AlterConfigOp::new(
+            ConfigEntry::new("retention.ms".to_string(), Some("604800000".to_string())),
+            OpType::Set,
+        );
+        let rendered = format!("{plain:?}");
+        assert!(rendered.contains("value=604800000"), "{rendered}");
     }
 }
