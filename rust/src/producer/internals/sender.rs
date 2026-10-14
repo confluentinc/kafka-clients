@@ -2889,7 +2889,7 @@ impl<C: KafkaClient> Sender<C> {
             sent_batches.push((info.tp, info.identity));
         }
 
-        // Mark the batches sent in this request as in flight (`Sender.java:920`). Java
+        // Mark the batches sent in this request as in flight, as `sendProduceRequest` does. Java
         // sets the flag on the drained batch object itself, wherever it is now held. A
         // batch that reached its delivery timeout earlier in this pass has already been
         // failed and moved from `in_flight_batches` to `batches_awaiting_response`, so
@@ -3018,7 +3018,7 @@ struct RequestBatchInfo {
     /// response can find the batch again.
     ///
     /// Java's `sendProduceRequest` puts the drained batch objects into
-    /// `recordsByPartition` (`Sender.java:918`), so the response reaches a batch even if
+    /// `recordsByPartition`, so the response reaches a batch even if
     /// the delivery-timeout expiry failed it in the same pass. The identity is taken
     /// when the batch is drained for the same reason: by the time the request is sent,
     /// such a batch is no longer in `in_flight_batches`.
@@ -8883,7 +8883,7 @@ mod tests {
     ///
     /// Not a translation of a Java test: no `SenderTest` drains an already-expired batch.
     /// In Java the request callback holds the drained batch objects
-    /// (`recordsByPartition`, `Sender.java:918`), so the response completes the batch
+    /// (`recordsByPartition`), so the response completes the batch
     /// whatever the expiry did; the full pool is returned and the next batch is sent.
     #[tokio::test]
     async fn test_batch_drained_after_its_delivery_timeout_is_completed_by_its_response() {
@@ -8906,6 +8906,11 @@ mod tests {
                 .sum::<usize>(),
             1,
             "the expired batch must be recorded against the request it was sent in"
+        );
+        assert!(
+            ctx.sender.batches_awaiting_response.iter().all(ProducerBatch::is_inflight)
+                && ctx.sender.batches_awaiting_response.len() == 1,
+            "the expired batch is marked in flight once its request is sent"
         );
 
         let response = ctx.produce_response(&tp0, 0, Errors::None, 0);
