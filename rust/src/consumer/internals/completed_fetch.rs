@@ -54,7 +54,7 @@
 //! # READ_COMMITTED
 //!
 //! Fully translated as of Milestone 11 Phase 8. `containsAbortMarker`
-//! (`CompletedFetch.java:352-359`) is [`CompletedFetch::contains_abort_marker`],
+//! (`CompletedFetch.java:381-391`) is [`CompletedFetch::contains_abort_marker`],
 //! which parses the first record of a control batch through
 //! [`ControlRecordType`], and an ABORT marker drops the producer id from
 //! `aborted_producer_ids` before `isBatchAborted` is consulted — Java's order
@@ -224,10 +224,30 @@ pub(crate) struct CompletedFetch {
     /// Last partition-leader epoch we observed (used by Phase 7b's
     /// FetchCollector to update SubscriptionState).
     last_epoch: Option<i32>,
-    /// Whether `drain` has been called.
+    /// Whether `drain` has been called. Java declares it `volatile`
+    /// (KAFKA-15529) because the background thread reads it through
+    /// `FetchBuffer.bufferedPartitions()` while the application thread works on
+    /// the fetch. Here the background task reads it only under the
+    /// [`FetchBuffer`] mutex, and the collector puts the fetch back under that
+    /// mutex after the position update, so a plain `bool` suffices.
     is_consumed: bool,
+    /// Whether iteration reached the end of the records. Set where Java used to
+    /// call `drain()` directly; [`FetchCollector`] drains an exhausted fetch
+    /// only after it has advanced the subscription position, so `is_consumed`
+    /// never reads `true` next to a stale position (KAFKA-15529).
+    ///
+    /// [`FetchCollector`]: super::FetchCollector
+    exhausted: bool,
     /// Whether the cursor has been positioned at the first batch.
     initialized: bool,
+
+    /// Test seam standing in for Java's Mockito `spy(completedFetch)` +
+    /// `doAnswer(...).when(completedFetch).drain()`: runs at every
+    /// [`Self::drain`] call, before the real body, so a test can observe the
+    /// state at the moment of the drain (`FetchCollectorTest
+    /// .testPositionUpdatedBeforeDrainOnExhaustedFetch`).
+    #[cfg(test)]
+    pub(crate) on_drain_for_test: Option<Box<dyn FnMut() + Send>>,
 
     /// DIAGNOSTIC (not in Java): instant this `CompletedFetch` was constructed
     /// on the background task (when the fetch response was received). Logged
@@ -295,7 +315,7 @@ enum RecordSource {
 /// Java's cost too: `compressedIterator` wraps the records in a decompression
 /// stream but reads nothing through it until `RecordIterator`'s constructor
 /// has accepted the count (`DefaultRecordBatch.java:279-297, 579-588`), and
-/// a skipped batch never gets an iterator (`CompletedFetch.java:212-221`).
+/// a skipped batch never gets an iterator (`CompletedFetch.java:217-226`).
 #[derive(Debug)]
 enum PendingRecordSource {
     /// Uncompressed: the records section is `memory_records.buffer()[range]`,
@@ -342,6 +362,9 @@ impl CompletedFetch {
             next_fetch_offset: fetch_offset,
             last_epoch: None,
             is_consumed: false,
+            exhausted: false,
+            #[cfg(test)]
+            on_drain_for_test: None,
             initialized: false,
             // DIAGNOSTIC: stamp construction time only when fetch_diag is on.
             created_at: log::log_enabled!(target: "fetch_diag", log::Level::Info).then(std::time::Instant::now),
@@ -371,6 +394,9 @@ impl CompletedFetch {
             next_fetch_offset: 0,
             last_epoch: None,
             is_consumed: false,
+            exhausted: false,
+            #[cfg(test)]
+            on_drain_for_test: None,
             initialized: false,
             created_at: None,
         }
@@ -419,9 +445,19 @@ impl CompletedFetch {
         self.is_consumed
     }
 
+    /// Returns whether iteration reached the end of the records (KAFKA-15529).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#isExhausted")]
+    pub(crate) fn is_exhausted(&self) -> bool {
+        self.exhausted
+    }
+
     /// Drops iteration state and marks the fetch consumed. Idempotent.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#drain")]
     pub(crate) fn drain(&mut self) {
+        #[cfg(test)]
+        if let Some(hook) = self.on_drain_for_test.as_mut() {
+            hook();
+        }
         if self.is_consumed {
             return;
         }
@@ -534,7 +570,7 @@ impl CompletedFetch {
         //       if (records.isEmpty()) throw new KafkaException(
         //           "Received exception when fetching the next record from ...", e); }
         //   return records;
-        // (`CompletedFetch.java:266-301`). Three effects per arm: cache the
+        // (`CompletedFetch.java:271-306`). Three effects per arm: cache the
         // error, propagate ONLY when nothing was decoded, and — for the broad
         // arm — wrap in the "seek past the record" message with the original as
         // the cause. When records ARE in hand the error is swallowed and the
@@ -579,7 +615,7 @@ impl CompletedFetch {
     }
 
     /// The body of Java's `try` block inside `fetchRecords`
-    /// (`CompletedFetch.java:266-289`).
+    /// (`CompletedFetch.java:271-294`).
     ///
     /// Split out so the caller can apply Java's two `catch` arms once, with
     /// access to the records decoded so far — which is what decides between
@@ -835,9 +871,9 @@ impl CompletedFetch {
     ///
     /// Returns `Ok(true)` if a record is positioned at the cursor and
     /// ready to be read via [`Self::peek_current_record`]. Returns
-    /// `Ok(false)` when iteration is exhausted; in that case the cursor
-    /// is drained and `next_fetch_offset` is advanced to the end of the
-    /// last batch.
+    /// `Ok(false)` when iteration is exhausted; in that case the fetch is
+    /// marked exhausted (not drained: see [`Self::is_exhausted`]) and
+    /// `next_fetch_offset` is advanced to the end of the last batch.
     ///
     /// §27 zero-copy note: the previous version returned an owned
     /// `(DefaultRecord, BatchMetadata)` tuple, which forced a deep clone
@@ -873,7 +909,10 @@ impl CompletedFetch {
                     {
                         self.next_fetch_offset = batch_meta.next_offset;
                     }
-                    self.drain();
+                    // Java (KAFKA-15529, `CompletedFetch.java:200`): mark the
+                    // fetch exhausted; `FetchCollector` drains it after the
+                    // position update.
+                    self.exhausted = true;
                     return Ok(false);
                 }
                 // load_next_batch may have skipped the batch entirely for
@@ -1074,7 +1113,7 @@ impl CompletedFetch {
     /// Whether `batch` is a control batch whose first record is an ABORT marker.
     ///
     /// Translated from `CompletedFetch.containsAbortMarker(RecordBatch)`
-    /// (`CompletedFetch.java:352-359`): non-control batches are `false`, an empty
+    /// (`CompletedFetch.java:381-391`): non-control batches are `false`, an empty
     /// batch is `false`, and otherwise the first record's key is parsed as a
     /// [`ControlRecordType`].
     ///
@@ -1114,7 +1153,7 @@ impl CompletedFetch {
         };
         // Java's `batch.iterator()` reads the control batch on its own, apart from
         // the `streamingIterator` that `load_next_batch` installs afterwards
-        // (`DefaultRecordBatch.java:321-337`, `CompletedFetch.java:221`); so does
+        // (`DefaultRecordBatch.java:321-337`, `CompletedFetch.java:226`); so does
         // this, inflating a compressed control batch here and again at install.
         // The broker writes control batches uncompressed, so in practice neither
         // inflation happens.
@@ -1217,7 +1256,7 @@ impl CompletedFetch {
                 let unread = buffer.get(batch_start..).unwrap_or_default();
                 // A corrupt size or magic propagates as the stream's `CORRUPT_MESSAGE`
                 // error, unwrapped, as Java's `batches.hasNext()` throws it
-                // (`CompletedFetch.java:187`) — it is not "no batch".
+                // (`CompletedFetch.java:192`) — it is not "no batch".
                 let batch_size = match ByteBufferLogInputStream::new(unread, i32::MAX).next_batch_size()? {
                     Some(batch_size) if batch_size <= unread.len() => batch_size,
                     // `batchSize == null || remaining < batchSize` → no batch (`:44-46`):
@@ -1335,7 +1374,7 @@ impl CompletedFetch {
 
             // D3: Java's `RecordIterator` constructor rejects a
             // negative record count (`DefaultRecordBatch.java:584-587`) when
-            // `currentBatch.streamingIterator(...)` builds it (`CompletedFetch.java:221`),
+            // `currentBatch.streamingIterator(...)` builds it (`CompletedFetch.java:226`),
             // unwrapped and after the READ_COMMITTED skip — so an aborted batch is
             // dropped without its count being looked at. Installing it instead would
             // treat the batch as empty. It also comes before the records are
@@ -1423,7 +1462,7 @@ impl From<DeserializationOrigin> for DeserializationErrorOrigin {
 
 /// Build Java's `RecordDeserializationException` for a failed key/value decode.
 ///
-/// Mirrors `newRecordDeserializationException` (`CompletedFetch.java:336-345`),
+/// Mirrors `newRecordDeserializationException` (`CompletedFetch.java:341-350`),
 /// which passes the full record context — origin, partition, offset, timestamp,
 /// timestamp type, raw key and value buffers, and headers — alongside the
 /// message, with the deserializer's exception as the **cause**. Those eight
@@ -1468,7 +1507,7 @@ fn wrap_deserialization_error(
     ))
 }
 
-/// Java's `maybeEnsureValid(batch)` wrapper (`CompletedFetch.java:153-162`):
+/// Java's `maybeEnsureValid(batch)` wrapper (`CompletedFetch.java:158-167`):
 /// `new KafkaException("Record batch for partition " + partition + " at offset " +
 /// batch.baseOffset() + " is invalid, cause: " + e.getMessage())`, a bare
 /// `KafkaException` carrying the cause's message and no cause.
@@ -1518,6 +1557,7 @@ impl std::fmt::Debug for CompletedFetch {
             .field("partition", &self.partition)
             .field("next_fetch_offset", &self.next_fetch_offset)
             .field("is_consumed", &self.is_consumed)
+            .field("exhausted", &self.exhausted)
             .field("initialized", &self.initialized)
             .field("records_read", &self.records_read)
             .field("bytes_read", &self.bytes_read)
@@ -1951,7 +1991,10 @@ mod tests {
             }
             // next_fetch_offset advanced past the last record of the last batch.
             assert_eq!(base_offset + total as i64, cf.next_fetch_offset());
-            assert!(cf.is_consumed());
+            // Exhausted, not drained: `FetchCollector` drains after the position
+            // update (KAFKA-15529).
+            assert!(cf.is_exhausted());
+            assert!(!cf.is_consumed());
         }
     }
 
@@ -2060,7 +2103,7 @@ mod tests {
 
         // The 3 real records decode first, THEN the premature-EOF fault is
         // raised while advancing. Java's `catch (KafkaException e)` swallows it
-        // because `records` is non-empty (`CompletedFetch.java:294-300`) and
+        // because `records` is non-empty (`CompletedFetch.java:299-305`) and
         // returns the prefix; the error is cached and `corruptLastRecord` stays
         // set, so the NEXT call raises. Propagating on this call instead would
         // discard 3 already-decoded records whose positions have advanced.
@@ -2076,7 +2119,7 @@ mod tests {
             .expect_err("the cached premature-EOF fault must surface on the next call");
         // Java: `throw new KafkaException("Received exception when fetching the
         // next record from " + partition + ". If needed, please seek past the
-        // record to continue consumption.", e)` (`CompletedFetch.java:257`).
+        // record to continue consumption.", e)` (`CompletedFetch.java:262`).
         // §2 bars that word from Rust message text, so ours says "an error";
         // the strings are otherwise identical.
         assert_eq!(
@@ -2130,7 +2173,7 @@ mod tests {
                     // Nothing decoded on THIS call, so Java's
                     // `catch (KafkaException e)` propagates — wrapped in the
                     // "seek past the record" message with the real fault as the
-                    // cause (`CompletedFetch.java:294-300`). Java's literal text is
+                    // cause (`CompletedFetch.java:299-305`). Java's literal text is
                     // "Received exception when fetching the next record from ..."
                     // (`:297`); §2 bars that word, so ours says "an error".
                     assert_eq!(
@@ -2604,7 +2647,10 @@ mod tests {
         assert_eq!(2, records.len());
         // After full drain, next offset should equal last record offset + 1 (104+1=105).
         assert_eq!(105, cf.next_fetch_offset());
-        assert!(cf.is_consumed());
+        // Exhausted, not drained: `FetchCollector` drains after the position
+        // update (KAFKA-15529).
+        assert!(cf.is_exhausted());
+        assert!(!cf.is_consumed());
     }
 
     /// Counting deserializer: records how many times it was invoked so a test
@@ -2712,7 +2758,7 @@ mod tests {
     ///
     /// The first call returns batch 1's records: Java's `catch (KafkaException e)`
     /// caches a fault and returns the records already in hand
-    /// (`CompletedFetch.java:294-300`). The second call raises the cached fault
+    /// (`CompletedFetch.java:299-305`). The second call raises the cached fault
     /// wrapped in the "seek past the record" message (`:256-259`).
     fn fault_after_first_batch(buf: Vec<u8>, check_crcs: bool) -> Error {
         let mut cf = new_completed_fetch(0, buf);
@@ -2994,7 +3040,7 @@ mod tests {
     /// The READ_COMMITTED skip comes before the records are inflated too: an
     /// aborted compressed batch is dropped without its stream being read, as
     /// Java never builds an iterator for a batch it skips
-    /// (`CompletedFetch.java:212-221`).
+    /// (`CompletedFetch.java:217-226`).
     #[test]
     fn test_aborted_compressed_batch_is_skipped_without_inflating() {
         let aborted_pid = 42;
@@ -3022,7 +3068,7 @@ mod tests {
 
     /// The cursor lets go of an exhausted batch before it inflates the next, as
     /// Java closes a batch's record stream before taking the next batch
-    /// (`maybeCloseRecordStream()`, `CompletedFetch.java:175-180, 185`), so a
+    /// (`maybeCloseRecordStream()`, `CompletedFetch.java:180-185, 190`), so a
     /// fetch never holds two inflated batches at once. The test keeps its own
     /// reference to the first batch's inflated buffer and makes the second batch
     /// fail to inflate: once that inflate has run, the test's reference must be
@@ -3107,7 +3153,7 @@ mod tests {
 
     /// The same for a control batch's first record, read under READ_COMMITTED by
     /// `contains_abort_marker` (Java's `batchIterator.next()`,
-    /// `CompletedFetch.java:384`).
+    /// `CompletedFetch.java:389`).
     #[test]
     fn test_malformed_control_record_is_reported_by_the_cause_message() {
         let mut buf = control_batch(2, 1, 1000);
@@ -3140,7 +3186,10 @@ mod tests {
             .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
             .expect("a truncated batch is no batch, not an error");
         assert_eq!(vec![0, 1], first.iter().map(ConsumerRecord::offset).collect::<Vec<_>>());
-        assert!(cf.is_consumed());
+        // Exhausted, not drained: `FetchCollector` drains after the position
+        // update (KAFKA-15529).
+        assert!(cf.is_exhausted());
+        assert!(!cf.is_consumed());
         assert_eq!(2, cf.next_fetch_offset(), "the next fetch starts at the truncated batch");
         let rest = cf
             .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)

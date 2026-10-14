@@ -145,8 +145,11 @@ impl RequestBuilder for Builder {
         ApiKeys::DELETE_GROUPS.oldest_version()
     }
 
+    // Java's `super(ApiKeys.DELETE_GROUPS)` resolves to `latestVersion(false)`
+    // (`AbstractRequest.java:46-51`): released versions only
+    // (producer-transactions §12).
     fn latest_allowed_version(&self) -> i16 {
-        ApiKeys::DELETE_GROUPS.latest_version()
+        ApiKeys::DELETE_GROUPS.latest_version_enable_unstable_last_version(false)
     }
 
     fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
@@ -186,6 +189,19 @@ mod tests {
             },
             other => panic!("expected DeleteGroups, got {}", other.api_key().name()),
         }
+    }
+
+    /// The builder's upper bound is Java's `super(ApiKeys.DELETE_GROUPS)`, i.e.
+    /// `latestVersion(false)`: the latest released version, v3 as of 4.4.
+    #[test]
+    fn latest_allowed_version_is_the_latest_released_version() {
+        let builder = Builder::new(DeleteGroupsRequestData::new());
+        assert_eq!(
+            ApiKeys::DELETE_GROUPS.latest_version_enable_unstable_last_version(false),
+            builder.latest_allowed_version()
+        );
+        assert_eq!(3, builder.latest_allowed_version());
+        assert_eq!(0, builder.oldest_allowed_version());
     }
 
     /// `build_version` rejects a version outside the supported range.
@@ -251,5 +267,25 @@ mod tests {
             },
             other => panic!("expected DeleteGroups response, got {}", other.api_key().name()),
         }
+    }
+
+    /// DeleteGroups v3 only adds the per-group `ErrorMessage` to the *response*;
+    /// the request body is unchanged (`DeleteGroupsRequest.json`), so v3 encodes
+    /// exactly like v2:
+    ///   groups_names: compact array len 1 -> 0x02
+    ///     "g": compact string len 1 -> 0x02, then 0x67
+    ///   top-level tagged fields: 0x00
+    #[test]
+    fn serialize_known_byte_vector_v3_same_body_as_v2() {
+        let mut data = DeleteGroupsRequestData::new();
+        data.set_groups_names(vec!["g".to_string()]);
+        let mut builder = Builder::new(data);
+        let mut req = builder.build_version(3).unwrap();
+        let expected: &[u8] = &[
+            0x02, // groups_names compact array len 1 (=n+1)
+            0x02, 0x67, // "g"
+            0x00, // top-level tagged fields
+        ];
+        assert_eq!(req.serialize().unwrap().into_buffer().as_slice(), expected);
     }
 }

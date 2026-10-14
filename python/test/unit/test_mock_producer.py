@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``MockProducerTest.java`` (Apache Kafka 4.3.1), every ``@Test``, in Java order.
+"""``MockProducerTest.java`` (Apache Kafka 4.4.0, unchanged from 4.3.1), every ``@Test``, in Java order.
 
 Java asserts the class of most errors; these tests also assert the message
 ``MockProducer.java`` throws (CLAUDE.md, Python Binding Conventions, Tests and

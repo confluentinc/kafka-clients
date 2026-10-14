@@ -19,6 +19,8 @@
 //! This is an internal trait. It is NOT thread-safe — it is intended to be
 //! used only from the NetworkClient's single-threaded event loop.
 
+use std::net::SocketAddr;
+
 use crate::common::Node;
 use crate::common::requests::MetadataResponse;
 use crate::common::requests::RequestHeader;
@@ -33,6 +35,14 @@ use crate::common::Error;
 /// This is an internal trait. It is NOT thread-safe.
 #[doc(alias = "org.apache.kafka.clients.MetadataUpdater")]
 pub trait MetadataUpdater: Send {
+    /// Gets the current cluster id without blocking.
+    ///
+    /// Returns the cluster id, or `None` if unknown.
+    #[doc(alias = "org.apache.kafka.clients.MetadataUpdater#clusterId")]
+    fn cluster_id(&self) -> Option<String> {
+        None
+    }
+
     /// Gets the current cluster info without blocking.
     #[doc(alias = "org.apache.kafka.clients.MetadataUpdater#fetchNodes")]
     fn fetch_nodes(&self) -> Vec<Node>;
@@ -87,6 +97,22 @@ pub trait MetadataUpdater: Send {
     /// Performs rebootstrap, replacing the existing cluster with the bootstrap cluster.
     #[doc(alias = "org.apache.kafka.clients.MetadataUpdater#rebootstrap")]
     fn rebootstrap(&mut self, _now: i64) {}
+
+    /// Record a permanent bootstrap DNS resolution failure so all API calls see
+    /// the same error (KIP-909).
+    #[doc(alias = "org.apache.kafka.clients.MetadataUpdater#bootstrapFailed")]
+    fn bootstrap_failed(&mut self, _error: Error) {}
+
+    /// Returns `true` if the metadata has been bootstrapped.
+    #[doc(alias = "org.apache.kafka.clients.MetadataUpdater#isBootstrapped")]
+    fn is_bootstrapped(&self) -> bool;
+
+    /// Bootstrap the metadata cache with the given addresses: the
+    /// `(host, address)` pairs of the bootstrap servers, as
+    /// [`ClientUtils::parse_addresses`](crate::ClientUtils::parse_addresses)
+    /// returns them (Java's `List<InetSocketAddress>`).
+    #[doc(alias = "org.apache.kafka.clients.MetadataUpdater#bootstrap")]
+    fn bootstrap(&mut self, addresses: Vec<(String, SocketAddr)>);
 
     /// Close this updater.
     #[doc(alias = "org.apache.kafka.clients.MetadataUpdater#close")]

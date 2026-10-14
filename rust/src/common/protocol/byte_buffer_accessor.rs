@@ -18,7 +18,7 @@
 
 use super::Readable;
 use super::Writable;
-use crate::common::utils::ByteUtils;
+use crate::common::utils::internals::ByteUtils;
 use std::io;
 
 /// A struct that implements both Readable and Writable traits for a byte buffer.

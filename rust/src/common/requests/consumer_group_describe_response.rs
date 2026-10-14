@@ -68,14 +68,6 @@ impl ConsumerGroupDescribeResponse {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
 
-    /// Whether the client should throttle upon receiving this response.
-    ///
-    /// Mirrors the `AbstractResponse` default (`ConsumerGroupDescribeResponse`
-    /// does not override it), which returns `false`.
-    pub fn should_client_throttle(&self, _version: i16) -> bool {
-        false
-    }
-
     /// Returns error counts by [`Errors`], aggregated per described group.
     ///
     /// Mirrors `ConsumerGroupDescribeResponse.errorCounts`.
@@ -165,12 +157,5 @@ mod tests {
         let counts = resp.error_counts();
         assert_eq!(counts.get(&Errors::GroupIdNotFound).copied().unwrap_or(0), 1);
         assert_eq!(counts.get(&Errors::None).copied().unwrap_or(0), 1);
-    }
-
-    #[test]
-    fn test_should_client_throttle_is_false() {
-        let resp = ConsumerGroupDescribeResponse::new(ConsumerGroupDescribeResponseData::new());
-        assert!(!resp.should_client_throttle(0));
-        assert!(!resp.should_client_throttle(1));
     }
 }

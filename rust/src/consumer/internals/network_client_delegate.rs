@@ -35,9 +35,9 @@ use crate::common::protocol::Errors;
 use crate::common::requests::RequestBuilder;
 use crate::common::{Error, Node};
 use crate::consumer::ConsumerConfig;
-use crate::consumer::internals::AsyncConsumerMetrics;
 use crate::consumer::internals::events::BackgroundEvent;
 use crate::consumer::internals::events::BackgroundEventHandler;
+use crate::consumer::internals::metrics::AsyncConsumerMetrics;
 
 /// Result returned from [`super::RequestManager::poll`].
 ///
@@ -381,8 +381,10 @@ impl FutureCompletionHandler {
             self.on_failure(completion_time_ms, Error::new(crate::common::protocol::Errors::NetworkError));
             return;
         }
-        if let Some(msg) = response.version_mismatch() {
-            self.on_failure(completion_time_ms, Error::unsupported_version(msg.to_string()));
+        if let Some(version_mismatch) = response.version_mismatch() {
+            // Java: `onFailure(completionTimeMs, response.versionMismatch())` — the
+            // object, so a crate-private subclass the builder threw survives.
+            self.on_failure(completion_time_ms, Error::UnsupportedVersion(version_mismatch.clone()));
             return;
         }
         self.set_completion_time(completion_time_ms);
@@ -414,7 +416,7 @@ impl FutureCompletionHandler {
         let received_time_ms = response.received_time_ms();
         let disconnected = response.was_disconnected();
         let timed_out = response.was_timed_out();
-        let version_mismatch = response.version_mismatch().map(|s| s.to_string());
+        let version_mismatch = response.version_mismatch().cloned();
         let authentication_error = response.authentication_error().cloned();
         let body = response.take_response_body();
         let owned = ClientResponse::with_timed_out(
@@ -506,6 +508,10 @@ pub(crate) struct NetworkClientDelegate<K: KafkaClient + Send> {
     unsent_requests: VecDeque<UnsentRequest>,
     metadata_error: Option<Error>,
     notify_metadata_errors_via_error_queue: bool,
+    /// Whether the permanent bootstrap failure (KIP-909) was already
+    /// propagated: `Metadata` returns it on every check, but it is reported to
+    /// the application task once. Java's `bootstrapErrorPropagated`.
+    bootstrap_error_propagated: bool,
     /// Async-consumer metrics (`AsyncConsumerMetrics`). `None` until wired
     /// post-construction by the live consumer (M4/M5 setter precedent);
     /// tests leave it unset and the record points become no-ops.
@@ -538,6 +544,7 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
             unsent_requests: VecDeque::new(),
             metadata_error: None,
             notify_metadata_errors_via_error_queue,
+            bootstrap_error_propagated: false,
             async_consumer_metrics: None,
         }
     }
@@ -916,18 +923,89 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     /// or store it locally for `get_and_clear_metadata_error`.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#maybePropagateMetadataError")]
     fn maybe_propagate_metadata_error(&mut self, current_time_ms: i64) {
-        if let Err(err) = self.metadata.maybe_return_any_error() {
-            if self.notify_metadata_errors_via_error_queue {
-                // Best-effort: if the receiver was dropped (consumer
-                // closed), there is nowhere to deliver the error.
-                let _ = self
-                    .background_event_handler
-                    .add(BackgroundEvent::Error { error: err }, current_time_ms);
-            } else {
-                self.metadata_error = Some(err);
-            }
+        match self.metadata.maybe_return_any_error() {
+            Ok(()) => {},
+            Err(err @ Error::BootstrapResolution(_)) => {
+                // Bootstrap failure is permanent and returned on every check by Metadata;
+                // only propagate it to the app task once to avoid flooding the event queue.
+                if self.bootstrap_error_propagated {
+                    return;
+                }
+                self.bootstrap_error_propagated = true;
+                self.propagate_metadata_error(err, current_time_ms);
+            },
+            Err(err) => self.propagate_metadata_error(err, current_time_ms),
         }
     }
+
+    /// Hand a metadata error to the `BackgroundEventHandler` (if
+    /// `notifyMetadataErrorsViaErrorQueue`) or store it for
+    /// `get_and_clear_metadata_error`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#propagateMetadataError")]
+    fn propagate_metadata_error(&mut self, err: Error, current_time_ms: i64) {
+        if self.notify_metadata_errors_via_error_queue {
+            // Best-effort: if the receiver was dropped (consumer
+            // closed), there is nowhere to deliver the error.
+            let _ = self
+                .background_event_handler
+                .add(BackgroundEvent::Error { error: err }, current_time_ms);
+        } else {
+            self.metadata_error = Some(err);
+        }
+    }
+}
+
+/// The fixture of the 4.4 `...DoesNotSpinDuringRealBootstrapDnsResolution`
+/// tests (`CommitRequestManagerTest`, `ConsumerHeartbeatRequestManagerTest`):
+/// a real `NetworkClient` over a `MockSelector` whose bootstrap servers
+/// resolve asynchronously (KIP-909) with `bootstrap_resolve_timeout_ms`, and a
+/// `NetworkClientDelegate` around it. Java's arguments:
+/// `new NetworkClient(selector, metadata, "test-client", Integer.MAX_VALUE, 50,
+/// 1000, 64 * 1024, 64 * 1024, 1000, 5000, 30000, time, false, new
+/// ApiVersions(), logContext, MetadataRecoveryStrategy.NONE,
+/// bootstrapConfiguration, false)`, then
+/// `new NetworkClientDelegate(time, config, logContext, networkClient,
+/// metadata, mock(BackgroundEventHandler.class), false, ...)`.
+#[cfg(test)]
+pub(crate) fn bootstrapping_network_client_delegate_for_test(
+    config: &ConsumerConfig,
+    metadata: Arc<Metadata>,
+    bootstrap_servers: &[String],
+    bootstrap_resolve_timeout_ms: i64,
+) -> NetworkClientDelegate<crate::NetworkClient<crate::common::network::MockSelector, crate::DefaultHostResolver>> {
+    let mut client = crate::NetworkClient::with_metadata_rebootstrap_trigger_ms(
+        crate::common::network::MockSelector::new(),
+        Arc::clone(&metadata),
+        "test-client",
+        usize::MAX,
+        50,
+        1000,
+        64 * 1024,
+        64 * 1024,
+        1000,
+        5000,
+        30000,
+        false,
+        Arc::new(crate::ApiVersions::new()),
+        crate::DefaultHostResolver,
+        i64::MAX,
+        crate::MetadataRecoveryStrategy::None,
+        crate::common::utils::internals::LogContext::empty(),
+    );
+    // The client's clock is the `now` each poll is given (Java's `MockTime`),
+    // so the bootstrap timer runs on the test's model time.
+    client.set_mock_time();
+    client.set_bootstrap_configuration(
+        crate::BootstrapConfiguration::enabled(
+            bootstrap_servers,
+            crate::ClientDnsLookup::UseAllDnsIps,
+            bootstrap_resolve_timeout_ms,
+            config.retry_backoff_ms(),
+        )
+        .expect("valid bootstrap servers"),
+    );
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    NetworkClientDelegate::new(config, client, metadata, Arc::new(BackgroundEventHandler::new(tx)), false)
 }
 
 #[cfg(test)]
@@ -946,6 +1024,41 @@ mod tests {
 
     const GROUP_ID: &str = "group";
     const REQUEST_TIMEOUT_MS: i32 = 5_000;
+
+    /// A version mismatch reaches the request's future as the object the
+    /// `ClientResponse` carries, so a crate-private subclass the builder threw
+    /// (Kafka 4.4's `UnsupportedProtocolFieldException`) survives: Java's
+    /// `onFailure(completionTimeMs, response.versionMismatch())`.
+    #[tokio::test]
+    async fn test_version_mismatch_completes_with_the_carried_error() {
+        use crate::common::internals::UnsupportedProtocolFieldError;
+        use crate::common::protocol::ApiKeys;
+        use crate::common::requests::{RequestHeader, RequestHeaderOptionsBuilder};
+
+        let Error::UnsupportedVersion(mismatch) = UnsupportedProtocolFieldError::with_message("field") else {
+            unreachable!("with_message builds the UnsupportedVersion variant");
+        };
+        let header = RequestHeader::with_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::CONSUMER_GROUP_HEARTBEAT)
+                .set_request_version(0)
+                .set_client_id("c")
+                .set_correlation_id(1)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+        let (handler, rx) = FutureCompletionHandler::new();
+        handler.on_complete(ClientResponse::new(header, None, "0", 0, 0, false, Some(mismatch), None, None));
+        let Err(error) = rx.await.unwrap() else {
+            panic!("a version mismatch must fail the request");
+        };
+        assert!(
+            UnsupportedProtocolFieldError::is_unsupported_protocol_field_error(&error),
+            "{error:?}"
+        );
+        assert_eq!("field", error.message());
+    }
 
     fn mock_node() -> Node {
         Node::new(0, "localhost".to_string(), 99)
@@ -1162,6 +1275,41 @@ mod tests {
             },
             other => panic!("expected BackgroundEvent::Error, got {}", other.type_name()),
         }
+    }
+
+    /// Translated from
+    /// `NetworkClientDelegateTest.testBootstrapResolutionExceptionPropagatedViaErrorEventOnce`
+    /// (KIP-909): the permanent bootstrap failure becomes one
+    /// `BackgroundEvent::Error`, not one per poll, although `Metadata` keeps
+    /// returning it.
+    #[tokio::test(flavor = "current_thread")]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegateTest#testBootstrapResolutionExceptionPropagatedViaErrorEventOnce"
+    )]
+    async fn test_bootstrap_resolution_error_propagated_via_error_event_once() {
+        let time = Arc::new(MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 0, 0));
+        let (mut ncd, meta, mut bg_rx) = new_delegate(Arc::clone(&time), true);
+
+        // Simulate NetworkClient recording a permanent bootstrap failure on the metadata.
+        meta.bootstrap_fatal_error(Error::BootstrapResolution(
+            crate::common::errors::BootstrapResolutionError::new("DNS resolution failed"),
+        ));
+
+        assert!(bg_rx.try_recv().is_err());
+        ncd.poll(0, time.milliseconds(), false).await;
+        let envelope = bg_rx.try_recv().expect("the bootstrap failure is delivered");
+        match envelope.event {
+            BackgroundEvent::Error { error: Error::BootstrapResolution(e) } => {
+                assert_eq!(e.message(), "DNS resolution failed");
+            },
+            other => panic!("expected BackgroundEvent::Error, got {}", other.type_name()),
+        }
+
+        // Subsequent polls must NOT keep flooding the queue with duplicate ErrorEvents,
+        // even though metadata.maybe_return_any_error keeps surfacing the permanent error.
+        ncd.poll(0, time.milliseconds(), false).await;
+        ncd.poll(0, time.milliseconds(), false).await;
+        assert!(bg_rx.try_recv().is_err());
     }
 
     #[test]

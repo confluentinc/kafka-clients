@@ -128,14 +128,6 @@ impl DescribeClientQuotasResponse {
         Ok(Self::new(data, version))
     }
 
-    /// Whether the client should throttle on this response.
-    ///
-    /// Mirrors `DescribeClientQuotasResponse` which does not override
-    /// `AbstractResponse.shouldClientThrottle` (always `false`).
-    pub fn should_client_throttle(&self, _version: i16) -> bool {
-        false
-    }
-
     /// Builds a success response from a map of entities to quota values.
     ///
     /// Mirrors `DescribeClientQuotasResponse.fromQuotaEntities`.
@@ -247,12 +239,5 @@ mod tests {
         let response = DescribeClientQuotasResponse::new(data, 1);
         assert!(response.entities().is_empty());
         assert_eq!(response.error_code(), Errors::InvalidRequest.code());
-    }
-
-    #[test]
-    fn does_not_throttle() {
-        let response = DescribeClientQuotasResponse::new(DescribeClientQuotasResponseData::new(), 1);
-        assert!(!response.should_client_throttle(0));
-        assert!(!response.should_client_throttle(1));
     }
 }

@@ -31,14 +31,15 @@ task may call back into the mock from the thread holding it, and another thread
 waits instead of failing (Java's mock is not thread-safe but serializes).
 ``wakeup()`` only sets its flag, as Java's ``AtomicBoolean``.
 
-``AsyncMockConsumer`` awaits the same body; ``rebalance`` awaits a coroutine
-listener method there, and holds the mock's monitor for its task until it
-returns, as Java's ``synchronized`` ``rebalance`` runs the listener inside it
+``AsyncMockConsumer`` awaits the same body; ``rebalance`` and
+``lose_partitions`` await a coroutine listener method there, and hold the
+mock's monitor for their task until they return, as Java's ``synchronized``
+``rebalance`` and ``losePartitions`` run the listener inside it
 (``_Monitor``). Meanwhile a method that enters Java's monitor, called from
 another task or another thread, raises ``ConcurrentModificationError`` with
 ``KafkaConsumer``'s message *(deviation: Java's caller waits, which a task on
-the rebalance's own loop cannot do without stopping it)*; the rebalance's own
-task (a coroutine listener calling back into its consumer) passes. The methods
+the listener's own loop cannot do without stopping it)*; the holding task (a
+coroutine listener calling back into its consumer) passes. The methods
 Java does not synchronize pass too: ``group_metadata()``, ``last_poll_timeout()``
 and ``current_lag()`` without an end offset; and ``wakeup()``, which Java's mock
 synchronizes, is never refused (CLAUDE.md, Python Binding Conventions, Threads
@@ -57,6 +58,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
+from confluent_kafka._java import java_str
 from confluent_kafka.common.errors.unsupported_version_error import UnsupportedVersionError
 from confluent_kafka.common.errors.wakeup_error import WakeupError
 from confluent_kafka.common.topic_partition import TopicPartition
@@ -120,14 +122,14 @@ def _current_task() -> asyncio.Task[Any] | None:
 
 class _Monitor:
     """The mock's ``synchronized`` monitor: a reentrant lock, and the task an
-    ``AsyncMockConsumer.rebalance`` holds it for while it awaits the listener
-    (``owner``). Entering it from any other task or thread meanwhile raises
+    ``AsyncMockConsumer.rebalance`` or ``lose_partitions`` holds it for while
+    it awaits the listener (``owner``). Entering it from any other task or thread meanwhile raises
     ``ConcurrentModificationError``; the owner, and anyone while there is
     none, enter as the lock lets them.
 
     It has no Java class: Java's monitor belongs to a thread, and every task of
     one loop runs on the same thread, so the ``RLock`` alone cannot tell the
-    rebalance's task from another."""
+    holding task from another."""
 
     __slots__ = ("_lock", "owner")
 
@@ -224,6 +226,53 @@ class MockConsumerCore(Generic[K, V]):
                 result = listener.on_partitions_assigned(set(added))  # type: ignore[func-returns-value]
                 if inspect.isawaitable(result):
                     await result
+        finally:
+            self._lock.owner = previous
+
+    def _lose_partitions_begin(self, partitions_lost: Iterable[TopicPartition]
+                               ) -> tuple[set[TopicPartition], list[TopicPartition]]:
+        """``losePartitions``' first half: the lost partitions, which must all
+        be assigned, and the partitions that remain; the lost partitions'
+        buffered records are cleared."""
+        current_assignment = self._subscriptions.assigned_partitions()
+        lost = set(partitions_lost)
+        not_assigned = [x for x in lost if x not in current_assignment]
+        if not_assigned:
+            raise IllegalStateError(
+                message="Cannot lose partitions that are not currently assigned: "
+                + java_str(not_assigned))
+        for x in lost:
+            self._records.pop(x, None)
+        remaining = [x for x in current_assignment if x not in lost]
+        return lost, remaining
+
+    def _c_lose_partitions(self, partitions_lost: Iterable[TopicPartition]) -> None:
+        """Java's ``losePartitions(Collection)``: the listener's
+        ``on_partitions_lost`` runs on this thread, under the mock's lock, and
+        the call waits for it."""
+        with self._lock:
+            lost, remaining = self._lose_partitions_begin(partitions_lost)
+            listener = self._subscriptions.rebalance_listener()
+            if listener is not None:
+                _no_coroutine(listener.on_partitions_lost(lost),  # type: ignore[func-returns-value]
+                              "rebalance listener")
+            self._subscriptions.assign_from_subscribed(remaining)
+
+    async def _a_lose_partitions(self, partitions_lost: Iterable[TopicPartition]) -> None:
+        """Async ``losePartitions``: a coroutine listener method is awaited, the
+        monitor held for this task throughout (``_Monitor``), as in
+        ``_a_rebalance``."""
+        with self._lock:
+            lost, remaining = self._lose_partitions_begin(partitions_lost)
+            listener = self._subscriptions.rebalance_listener()
+            previous, self._lock.owner = self._lock.owner, _current_task()
+        try:
+            if listener is not None:
+                result = listener.on_partitions_lost(lost)  # type: ignore[func-returns-value]
+                if inspect.isawaitable(result):
+                    await result
+            with self._lock:
+                self._subscriptions.assign_from_subscribed(remaining)
         finally:
             self._lock.owner = previous
 
@@ -423,7 +472,7 @@ class MockConsumerCore(Generic[K, V]):
     def _c_offsets_for_times(self, timestamps_to_search: Mapping[TopicPartition, int]
                            ) -> dict[TopicPartition, OffsetAndTimestamp | None]:
         # Java's mock throws UnsupportedOperationException("Not implemented
-        # yet.") (MockConsumer.java:536), inside its synchronized body.
+        # yet.") (MockConsumer.java:611), inside its synchronized body.
         with self._lock:
             raise UnsupportedVersionError(message="Not implemented yet.")
 

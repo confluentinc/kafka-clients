@@ -31,6 +31,19 @@ pub trait Measurable: Send + Sync {
     /// * `now` - The POSIX time in milliseconds the measurement is being taken
     #[doc(alias = "org.apache.kafka.common.metrics.Measurable#measure")]
     fn measure(&self, config: &MetricConfig, now: i64) -> f64;
+
+    /// The provider's type name, as `KafkaMetric`'s `Display` reports it, or
+    /// `None` for a provider that is a closure.
+    ///
+    /// No Java counterpart (DoD #7): Java's `KafkaMetric.toString` (Kafka 4.4,
+    /// 46ad599a6e) reads `metricValueProvider.getClass().getName()` reflectively
+    /// and omits it when the class `isSynthetic() || isAnonymousClass()` — a
+    /// lambda. Rust has no reflection, so the provider reports it: the default is
+    /// the implementing type's [`std::any::type_name`], and the closure adapters
+    /// answer `None`, as Java's lambdas do.
+    fn type_name(&self) -> Option<&'static str> {
+        Some(std::any::type_name::<Self>())
+    }
 }
 
 /// A [`Measurable`] backed by a closure, mirroring Java's functional-interface
@@ -57,5 +70,10 @@ where
 {
     fn measure(&self, config: &MetricConfig, now: i64) -> f64 {
         (self.0)(config, now)
+    }
+
+    /// A closure is Rust's lambda, which Java's `KafkaMetric.toString` omits.
+    fn type_name(&self) -> Option<&'static str> {
+        None
     }
 }

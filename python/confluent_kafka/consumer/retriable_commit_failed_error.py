@@ -31,7 +31,15 @@ __all__ = ["RetriableCommitFailedError"]
 
 
 class RetriableCommitFailedError(RetriableError):
-    """Java: ``org.apache.kafka.clients.consumer.RetriableCommitFailedException``."""
+    """Exception thrown when an offset commit fails with a retriable error. This
+    exception is generated on the client side upon receiving retriable error
+    codes from the Group Coordinator in a commit response.
+
+    Unlike ``CommitFailedException``, this exception indicates that the commit
+    can be retried. The consumer should attempt to commit the offsets again.
+
+    Java: ``org.apache.kafka.clients.consumer.RetriableCommitFailedException``.
+    """
 
     __module__ = "confluent_kafka.consumer"
 

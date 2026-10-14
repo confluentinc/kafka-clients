@@ -68,6 +68,13 @@ pub struct ProducerConfig {
     /// `client.id` - An id string to pass to the server when making requests.
     pub(crate) client_id: String,
 
+    /// `client.rack` - A rack identifier for this client. This can be any string
+    /// value which indicates where this client is physically located. It
+    /// corresponds with the broker config `broker.rack`. Default:
+    /// [`ProducerConfig::DEFAULT_CLIENT_RACK`] (`""`). Used by the built-in
+    /// partitioner when `partitioner.rack.aware` is enabled (KIP-1123).
+    pub(crate) client_rack: String,
+
     // --- Security ---
     /// `security.protocol` - Protocol used to communicate with brokers.
     /// Default: `SecurityProtocol::Plaintext`.
@@ -93,6 +100,21 @@ pub struct ProducerConfig {
     /// `buffer.memory` - Total bytes of memory the producer can use to buffer records
     /// waiting to be sent. Default: 32 MiB.
     pub(crate) buffer_memory: i64,
+
+    /// `buffer.memory.allocation.strategy` - Controls how the producer allocates memory from
+    /// `buffer.memory` for record batches. The following values are supported:
+    ///
+    /// - `full`: reserves a full `batch.size` up front when a batch is created, regardless of how
+    ///   much data it ends up holding. Pool memory therefore scales with the number of active
+    ///   partitions.
+    /// - `incremental`: allocates memory on demand as records are appended, growing a batch up to
+    ///   `batch.size`. Pool memory therefore scales with the data actually buffered rather than
+    ///   the number of active partitions, allowing larger `batch.size` values (e.g. for
+    ///   high-latency clusters) without reserving `batch.size` for every active partition.
+    ///
+    /// Default: `full`. Internal (Java's `defineInternal`) until the incremental strategy is fully
+    /// implemented. Validated case-insensitively and kept as given; `KafkaProducer` lower-cases it.
+    pub(crate) buffer_memory_allocation_strategy: String,
 
     /// `max.block.ms` - Maximum time `send()` and `partitionsFor()` will block.
     /// Default: 60000 ms.
@@ -154,6 +176,13 @@ pub struct ProducerConfig {
     /// Default: 1000 ms.
     pub(crate) retry_backoff_max_ms: i64,
 
+    /// `bootstrap.resolve.timeout.ms` - Selects the bootstrap DNS resolution
+    /// mode (KIP-909): `0` resolves `bootstrap.servers` synchronously at
+    /// construction; a positive value resolves asynchronously for at most this
+    /// long. Default: 0. See
+    /// [`ProducerConfig::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG`].
+    pub(crate) bootstrap_resolve_timeout_ms: i64,
+
     // --- Socket ---
     /// `send.buffer.bytes` - TCP send buffer size. Default: 131072 (128 KiB).
     pub(crate) send_buffer_bytes: i32,
@@ -180,13 +209,19 @@ pub struct ProducerConfig {
 
     /// `metadata.recovery.strategy` - How the client recovers when none of the
     /// brokers known to it is available. Default: `rebootstrap`
-    /// (`ProducerConfig.java:548-554`).
+    /// (`ProducerConfig.java:595-601`).
     pub(crate) metadata_recovery_strategy: MetadataRecoveryStrategy,
 
     /// `metadata.recovery.rebootstrap.trigger.ms` - How long a client configured
     /// to rebootstrap waits without obtaining metadata before it rebootstraps.
-    /// Default: 300000 ms (`ProducerConfig.java:555-560`).
+    /// Default: 300000 ms (`ProducerConfig.java:602-607`).
     pub(crate) metadata_recovery_rebootstrap_trigger_ms: i64,
+
+    /// `metadata.cluster.check.enable` (KIP-1242) - Whether the client sends the
+    /// cluster id and node id it expects in ApiVersions so the broker can detect
+    /// a misrouted connection; ignored when `metadata.recovery.strategy=none`.
+    /// Default: true (`ProducerConfig.java:608-612`).
+    pub(crate) metadata_cluster_check_enable: bool,
 
     // --- Partitioning ---
     /// `partitioner.adaptive.partitioning.enable` - Adapt to broker performance.
@@ -200,6 +235,18 @@ pub struct ProducerConfig {
     /// `partitioner.ignore.keys` - Ignore record keys for partitioning.
     /// Default: false.
     pub(crate) partitioner_ignore_keys: bool,
+
+    /// `partitioner.rack.aware` - Controls whether the default partitioner is
+    /// rack-aware. This has no effect when a custom partitioner is used.
+    /// Default: false.
+    ///
+    /// When `client.rack` is specified and `partitioner.rack.aware=true`, the
+    /// sticky partition is chosen from partitions with the leader broker in the
+    /// same rack, if at least one is available. If none are available, it falls
+    /// back on selecting from all available partitions (KIP-1123). Enabling it
+    /// with a blank `client.rack` makes the producer constructor fail with
+    /// `"client.rack must be provided if partitioner.rack.aware is enabled"`.
+    pub(crate) partitioner_rack_aware: bool,
 
     /// `partitioner.type` - Selects the partitioning strategy. Default: `None`
     /// (unset), which uses the built-in default partitioner keyed by IEEE CRC-32
@@ -308,12 +355,14 @@ impl Default for ProducerConfig {
             bootstrap_servers: Vec::new(),
             client_dns_lookup: ClientDnsLookup::UseAllDnsIps,
             client_id: String::new(),
+            client_rack: Self::DEFAULT_CLIENT_RACK.to_string(),
             security_protocol: SecurityProtocol::Plaintext,
             sasl_config: SaslConfigs::default(),
             ssl_config: SslConfigs::default(),
             batch_size: 16384,
             linger_ms: 5,
             buffer_memory: 32 * 1024 * 1024,
+            buffer_memory_allocation_strategy: Self::BUFFER_MEMORY_ALLOCATION_STRATEGY_FULL.to_string(),
             max_block_ms: 60 * 1000,
             acks: -1, // "all"
             retries: i32::MAX,
@@ -328,6 +377,7 @@ impl Default for ProducerConfig {
             reconnect_backoff_max_ms: 1000,
             retry_backoff_ms: 100,
             retry_backoff_max_ms: 1000,
+            bootstrap_resolve_timeout_ms: CommonClientConfigs::DEFAULT_BOOTSTRAP_RESOLVE_TIMEOUT_MS,
             send_buffer_bytes: 128 * 1024,
             receive_buffer_bytes: 32 * 1024,
             socket_connection_setup_timeout_ms: 10_000,
@@ -336,9 +386,11 @@ impl Default for ProducerConfig {
             metadata_max_idle_ms: 5 * 60 * 1000,
             metadata_recovery_strategy: MetadataRecoveryStrategy::Rebootstrap,
             metadata_recovery_rebootstrap_trigger_ms: 300 * 1000,
+            metadata_cluster_check_enable: true,
             partitioner_adaptive_partitioning_enable: true,
             partitioner_availability_timeout_ms: 0,
             partitioner_ignore_keys: false,
+            partitioner_rack_aware: false,
             partitioner_type: None,
             partitioner: None,
             transactional_id: None,
@@ -365,12 +417,25 @@ impl ProducerConfig {
     pub const CLIENT_DNS_LOOKUP_CONFIG: &'static str = CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG;
     /// Config key: `client.id`
     pub const CLIENT_ID_CONFIG: &'static str = "client.id";
+    /// Config key: `client.rack`
+    pub const CLIENT_RACK_CONFIG: &'static str = CommonClientConfigs::CLIENT_RACK_CONFIG;
+    /// Default value of `client.rack`: no rack.
+    pub const DEFAULT_CLIENT_RACK: &'static str = CommonClientConfigs::DEFAULT_CLIENT_RACK;
     /// Config key: `batch.size`
     pub const BATCH_SIZE_CONFIG: &'static str = "batch.size";
     /// Config key: `linger.ms`
     pub const LINGER_MS_CONFIG: &'static str = "linger.ms";
     /// Config key: `buffer.memory`
     pub const BUFFER_MEMORY_CONFIG: &'static str = "buffer.memory";
+    /// Config key: `buffer.memory.allocation.strategy` (KIP-1332). Internal until the incremental
+    /// strategy is fully implemented.
+    pub const BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG: &'static str = "buffer.memory.allocation.strategy";
+    /// `buffer.memory.allocation.strategy` value: reserve a full `batch.size` per batch up front
+    /// (the default).
+    pub const BUFFER_MEMORY_ALLOCATION_STRATEGY_FULL: &'static str = "full";
+    /// `buffer.memory.allocation.strategy` value: allocate memory on demand as records are
+    /// appended.
+    pub const BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL: &'static str = "incremental";
     /// Config key: `max.block.ms`
     pub const MAX_BLOCK_MS_CONFIG: &'static str = "max.block.ms";
     /// Config key: `acks`
@@ -399,6 +464,21 @@ impl ProducerConfig {
     pub const RETRY_BACKOFF_MS_CONFIG: &'static str = "retry.backoff.ms";
     /// Config key: `retry.backoff.max.ms`
     pub const RETRY_BACKOFF_MAX_MS_CONFIG: &'static str = "retry.backoff.max.ms";
+    /// Config key: `bootstrap.resolve.timeout.ms` (KIP-909)
+    ///
+    /// Selects the client's bootstrap DNS resolution mode. When set to `0` (the
+    /// default), DNS is resolved synchronously during client construction; any
+    /// failure surfaces as a config error and no client instance is created.
+    /// When set to a positive value, DNS is resolved asynchronously and this is
+    /// the maximum amount of time the client will spend retrying resolution
+    /// before failing with an unrecoverable
+    /// [`BootstrapResolutionError`](crate::common::errors::BootstrapResolutionError)
+    /// from subsequent API calls (the client must then be closed and re-created
+    /// after fixing the underlying DNS or `bootstrap.servers` configuration
+    /// issue). Setting this config to a positive value enables an evolving
+    /// feature whose compatibility may be broken in a minor release.
+    pub const BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG: &'static str =
+        CommonClientConfigs::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG;
     /// Config key: `send.buffer.bytes`
     pub const SEND_BUFFER_CONFIG: &'static str = "send.buffer.bytes";
     /// Config key: `receive.buffer.bytes`
@@ -419,6 +499,8 @@ impl ProducerConfig {
     pub const PARTITIONER_AVAILABILITY_TIMEOUT_MS_CONFIG: &'static str = "partitioner.availability.timeout.ms";
     /// Config key: `partitioner.ignore.keys`
     pub const PARTITIONER_IGNORE_KEYS_CONFIG: &'static str = "partitioner.ignore.keys";
+    /// Config key: `partitioner.rack.aware`
+    pub const PARTITIONER_RACK_AWARE_CONFIG: &'static str = "partitioner.rack.aware";
     /// Config key: `partitioner.type`
     pub const PARTITIONER_TYPE_CONFIG: &'static str = "partitioner.type";
     /// Accepted `partitioner.type` value selecting the CRC-32 key hash
@@ -468,9 +550,9 @@ impl ProducerConfig {
         // computed. Clone it up front, before `maybe_override_client_id` runs.
         let mut config = Self { originals: props.clone(), ..Default::default() };
 
-        // `bootstrap.servers` is defined with `NO_DEFAULT_VALUE` (`ProducerConfig.java:376-378`), so
+        // `bootstrap.servers` is defined with `NO_DEFAULT_VALUE` (`ProducerConfig.java:407-409`), so
         // `ConfigDef.parseValue` rejects a missing key at parse time
-        // (`ConfigDef.java:537`). It is the first key `ConfigDef` defines, so this
+        // (`ConfigDef.java:539`). It is the first key `ConfigDef` defines, so this
         // check runs before any other value is parsed, as in Java.
         if !props.contains_key(Self::BOOTSTRAP_SERVERS_CONFIG) {
             return Err(Error::config_message(format!(
@@ -482,19 +564,23 @@ impl ProducerConfig {
         for (key, value) in props {
             match key.as_str() {
                 Self::BOOTSTRAP_SERVERS_CONFIG => {
-                    // `ValidList.anyNonDuplicateValues(false, false)` (`ProducerConfig.java:379`).
+                    // `ValidList.anyNonDuplicateValues(false, false)` (`ProducerConfig.java:410`).
                     config.bootstrap_servers = ValidList::parse_any_non_duplicate_values(key, value, false)?;
                 },
                 Self::CLIENT_DNS_LOOKUP_CONFIG => {
                     config.client_dns_lookup = ClientDnsLookup::parse_config_value(value)?;
                 },
                 Self::CLIENT_ID_CONFIG => {
-                    // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:729-731`).
+                    // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:731-733`).
                     config.client_id = value.trim().to_string();
+                },
+                Self::CLIENT_RACK_CONFIG => {
+                    // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:731-733`).
+                    config.client_rack = value.trim().to_string();
                 },
                 // The `at_least` bounds below are the `ConfigDef` validators of
                 // Java's `ProducerConfig` `define(...)` chain
-                // (`ProducerConfig.java:386-530`): `atLeast(0)` unless noted.
+                // (`ProducerConfig.java:416-577`): `atLeast(0)` unless noted.
                 Self::BATCH_SIZE_CONFIG => {
                     config.batch_size = Self::at_least(key, Self::parse_i32(key, value)?, 0)?;
                 },
@@ -504,12 +590,28 @@ impl ProducerConfig {
                 Self::BUFFER_MEMORY_CONFIG => {
                     config.buffer_memory = Self::at_least(key, Self::parse_i64(key, value)?, 0)?;
                 },
+                Self::BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG => {
+                    // Java: `ConfigDef.CaseInsensitiveValidString.in(FULL, INCREMENTAL)`
+                    // (`ProducerConfig.java:422-428`). `ConfigDef.parseType` trims every
+                    // `Type.STRING` value (`ConfigDef.java:731-733`).
+                    let strategy = value.trim();
+                    if !strategy.eq_ignore_ascii_case(Self::BUFFER_MEMORY_ALLOCATION_STRATEGY_FULL)
+                        && !strategy.eq_ignore_ascii_case(Self::BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL)
+                    {
+                        return Err(Error::config_name_value_message(
+                            key,
+                            strategy,
+                            "String must be one of (case insensitive): FULL, INCREMENTAL",
+                        ));
+                    }
+                    config.buffer_memory_allocation_strategy = strategy.to_string();
+                },
                 Self::MAX_BLOCK_MS_CONFIG => {
                     config.max_block_ms = Self::at_least(key, Self::parse_i64(key, value)?, 0)?;
                 },
                 Self::ACKS_CONFIG => {
-                    // `in("all", "-1", "0", "1")` (`ProducerConfig.java:391-394`):
-                    // `ConfigDef.ValidString.ensureValid` (`ConfigDef.java:1114`)
+                    // `in("all", "-1", "0", "1")` (`ProducerConfig.java:430-435`):
+                    // `ConfigDef.ValidString.ensureValid` (`ConfigDef.java:1116`)
                     // matches the trimmed value exactly (case-sensitive) before
                     // `parseAcks` runs, so ` all ` is accepted, `ALL`/`2` are not,
                     // and the error prints the trimmed value.
@@ -546,10 +648,10 @@ impl ProducerConfig {
                 },
                 Self::COMPRESSION_TYPE_CONFIG => {
                     // Java never reaches `CompressionType.forName` for a bad
-                    // property: `ProducerConfig.java:397` declares the key with
+                    // property: `ProducerConfig.java:436` declares the key with
                     // `in(Utils.enumOptions(CompressionType.class))`, so
                     // `ConfigDef.ValidString.ensureValid` rejects it first with a
-                    // `ConfigException` (`ConfigDef.java:1103`). Letting
+                    // `ConfigException` (`ConfigDef.java:1116`). Letting
                     // `for_name`'s `IllegalArgumentException` escape here would put
                     // the error outside the `KafkaException` hierarchy, unlike every
                     // other key in this `match`.
@@ -576,6 +678,14 @@ impl ProducerConfig {
                 Self::RETRY_BACKOFF_MAX_MS_CONFIG => {
                     config.retry_backoff_max_ms = Self::at_least(key, Self::parse_i64(key, value)?, 0)?;
                 },
+                Self::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG => {
+                    // Java `ProducerConfig` (`:471-476`, KAFKA-20939): `Type.LONG`, `atLeast(0L)`.
+                    let v = Self::parse_i64(key, value)?;
+                    if v < 0 {
+                        return Err(Error::config_name_value_message(key, v, "Value must be at least 0"));
+                    }
+                    config.bootstrap_resolve_timeout_ms = v;
+                },
                 Self::SEND_BUFFER_CONFIG => {
                     // `atLeast(CommonClientConfigs.SEND_BUFFER_LOWER_BOUND)`, -1.
                     config.send_buffer_bytes = Self::at_least(key, Self::parse_i32(key, value)?, -1)?;
@@ -593,18 +703,22 @@ impl ProducerConfig {
                 },
                 Self::METADATA_RECOVERY_STRATEGY_CONFIG => {
                     // Java: `ConfigDef.CaseInsensitiveValidString.in("none", "rebootstrap")`
-                    // (`ProducerConfig.java:551`).
+                    // (`ProducerConfig.java:598-599`).
                     config.metadata_recovery_strategy =
                         MetadataRecoveryStrategy::for_name(value).map_err(|_| Error::config_name_value(key, value))?;
                 },
                 Self::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG => {
-                    // Java `ProducerConfig` (`:555-558`):
+                    // Java `ProducerConfig` (`:602-605`):
                     // `metadata.recovery.rebootstrap.trigger.ms` is `atLeast(0)`.
                     let v = Self::parse_i64(key, value)?;
                     if v < 0 {
                         return Err(Error::config_name_value_message(key, v, "Value must be at least 0"));
                     }
                     config.metadata_recovery_rebootstrap_trigger_ms = v;
+                },
+                CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG => {
+                    // Java `ProducerConfig` (`:608-612`): `Type.BOOLEAN`, default `true`.
+                    config.metadata_cluster_check_enable = Self::parse_bool(key, value)?;
                 },
                 Self::PARTITIONER_ADAPTIVE_PARTITIONING_ENABLE_CONFIG => {
                     config.partitioner_adaptive_partitioning_enable = Self::parse_bool(key, value)?;
@@ -614,6 +728,9 @@ impl ProducerConfig {
                 },
                 Self::PARTITIONER_IGNORE_KEYS_CONFIG => {
                     config.partitioner_ignore_keys = Self::parse_bool(key, value)?;
+                },
+                Self::PARTITIONER_RACK_AWARE_CONFIG => {
+                    config.partitioner_rack_aware = Self::parse_bool(key, value)?;
                 },
                 Self::PARTITIONER_TYPE_CONFIG => {
                     // Only the built-in partitioner types are accepted. The two
@@ -640,8 +757,8 @@ impl ProducerConfig {
                     config.partitioner_type = Some(value.to_string());
                 },
                 Self::TRANSACTIONAL_ID_CONFIG => {
-                    // `new ConfigDef.NonEmptyString()` (`ProducerConfig.java:537-540`
-                    // → `ConfigDef.java:1223-1231`) on the trimmed value
+                    // `new ConfigDef.NonEmptyString()` (`ProducerConfig.java:584-587`
+                    // → `ConfigDef.java:1225-1233`) on the trimmed value
                     // (`ConfigDef.parseType` trims a `STRING`): an empty or blank id
                     // is rejected, not read as "no transactional id", and the error
                     // prints the trimmed (empty) value; ` my-txn ` is stored as
@@ -762,7 +879,7 @@ impl ProducerConfig {
     ///
     /// This is the Rust stand-in for Java's
     /// `config.getConfiguredInstance(PARTITIONER_CLASS_CONFIG, Partitioner.class,
-    /// ...)` (`KafkaProducer.java:382-385`), which reflectively loads and
+    /// ...)` (`KafkaProducer.java:389-392`), which reflectively loads and
     /// instantiates the named class. Rust has no reflection, so only the
     /// built-in names resolve here:
     ///
@@ -814,7 +931,7 @@ impl ProducerConfig {
     /// Java names a class, which the producer instantiates by reflection; here
     /// the partitioner itself is the value. [`KafkaProducer::new`](crate::producer::KafkaProducer::new)
     /// `configure`s it with the user configs plus the resolved `client.id`, as
-    /// Java does (`KafkaProducer.java:381-388`), and closes it on `close`. As
+    /// Java does (`KafkaProducer.java:388-395`), and closes it on `close`. As
     /// with any configured partitioner, adaptive partitioning is then disabled.
     /// The producer built from this config takes ownership of the partitioner.
     ///
@@ -946,12 +1063,12 @@ impl ProducerConfig {
     }
 
     /// The `in("all", "-1", "0", "1")` validator of `acks`
-    /// (`ProducerConfig.java:391-394`).
+    /// (`ProducerConfig.java:430-435`).
     const ACKS_VALID_STRINGS: [&'static str; 4] = ["all", "-1", "0", "1"];
 
     /// Java's `ConfigDef.Range.atLeast(min)`: a `value` below `min` is rejected
     /// with `ConfigException(name, value, "Value must be at least " + min)`
-    /// (`ConfigDef.java:1011`).
+    /// (`ConfigDef.java:1013`).
     fn at_least<T: PartialOrd + std::fmt::Display>(key: &str, value: T, min: T) -> Result<T, Error> {
         if value < min {
             return Err(Error::config_name_value_message(
@@ -975,7 +1092,7 @@ impl ProducerConfig {
 
     /// Parses a string value as `bool`.
     ///
-    /// Java's `ConfigDef.parseType(BOOLEAN)` (`ConfigDef.java:701-735`) trims the
+    /// Java's `ConfigDef.parseType(BOOLEAN)` (`ConfigDef.java:703-737`) trims the
     /// value, then accepts `equalsIgnoreCase("true")` / `("false")`; anything else
     /// throws `ConfigException(name, value, "Expected value to be either true or
     /// false")`, where `value` is the **original, untrimmed** string.
@@ -997,7 +1114,7 @@ impl ProducerConfig {
     /// Parses the acks string, converting "all" to -1.
     ///
     /// Java's `parseAcks` catches `NumberFormatException` and throws
-    /// `ConfigException` (`ProducerConfig.java:653-659`). `ConfigException extends
+    /// `ConfigException` (`ProducerConfig.java:705-711`). `ConfigException extends
     /// KafkaException`, so the error must stay inside the `KafkaException`
     /// hierarchy: returning a `String` here erased the class at the boundary and
     /// left the caller free to pick the wrong one.
@@ -1059,6 +1176,8 @@ mod tests {
         assert!(config.partitioner_adaptive_partitioning_enable);
         assert_eq!(config.partitioner_availability_timeout_ms, 0);
         assert!(!config.partitioner_ignore_keys);
+        assert!(!config.partitioner_rack_aware);
+        assert_eq!(config.client_rack, "");
         assert!(config.partitioner_type.is_none());
         // The default (unset) key hash is CRC-32 (librdkafka parity), NOT the
         // Java-client murmur2 default.
@@ -1073,8 +1192,8 @@ mod tests {
     }
 
     /// `metadata.recovery.strategy` is a case-insensitive `none` / `rebootstrap`
-    /// string (`ProducerConfig.java:548-554`) and
-    /// `metadata.recovery.rebootstrap.trigger.ms` a long (`:555-560`). Before
+    /// string (`ProducerConfig.java:595-601`) and
+    /// `metadata.recovery.rebootstrap.trigger.ms` a long (`:602-607`). Before
     /// these keys were parsed the producer silently ignored them and never
     /// rebootstrapped (`ClientRebootstrapTest.testProducerRebootstrap`).
     #[test]
@@ -1124,7 +1243,7 @@ mod tests {
     }
 
     /// `metadata.recovery.rebootstrap.trigger.ms` is `atLeast(0)` (Java
-    /// `ProducerConfig.java:555-558`): 0 is accepted, -1 is rejected with
+    /// `ProducerConfig.java:602-605`): 0 is accepted, -1 is rejected with
     /// Java's `ConfigDef.Range.atLeast` message.
     #[test]
     fn test_metadata_recovery_rebootstrap_trigger_ms_validator() {
@@ -1143,6 +1262,56 @@ mod tests {
             config_error.message(),
             "Invalid value -1 for configuration metadata.recovery.rebootstrap.trigger.ms: \
              Value must be at least 0"
+        );
+    }
+
+    /// `metadata.cluster.check.enable` (KIP-1242): `Type.BOOLEAN`, default `true`
+    /// (`ProducerConfig.java:608-612`).
+    #[test]
+    fn test_metadata_cluster_check_enable() {
+        let c = ProducerConfig::new(&base_props()).unwrap();
+        assert!(c.metadata_cluster_check_enable);
+
+        let mut props = base_props();
+        props.insert(
+            CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG.to_string(),
+            "false".to_string(),
+        );
+        assert!(!ProducerConfig::new(&props).unwrap().metadata_cluster_check_enable);
+
+        props.insert(
+            CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG.to_string(),
+            "maybe".to_string(),
+        );
+        assert_eq!(
+            ProducerConfig::new(&props).unwrap_err().message(),
+            "Invalid value maybe for configuration metadata.cluster.check.enable: Expected value to be either true or false"
+        );
+    }
+
+    /// `bootstrap.resolve.timeout.ms` (KIP-909): `Type.LONG`, default `0`
+    /// (synchronous resolution), `atLeast(0L)` since KAFKA-20939.
+    #[test]
+    fn test_bootstrap_resolve_timeout_ms() {
+        assert_eq!(
+            ProducerConfig::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG,
+            "bootstrap.resolve.timeout.ms"
+        );
+        let c = ProducerConfig::new(&base_props()).unwrap();
+        assert_eq!(c.bootstrap_resolve_timeout_ms, 0);
+
+        let mut props = base_props();
+        props.insert("bootstrap.resolve.timeout.ms".to_string(), "3000".to_string());
+        assert_eq!(ProducerConfig::new(&props).unwrap().bootstrap_resolve_timeout_ms, 3000);
+
+        props.insert("bootstrap.resolve.timeout.ms".to_string(), "-1".to_string());
+        let err = ProducerConfig::new(&props).unwrap_err();
+        let Error::Config(config_error) = err else {
+            panic!("expected a config error, got {err:?}");
+        };
+        assert_eq!(
+            config_error.message(),
+            "Invalid value -1 for configuration bootstrap.resolve.timeout.ms: Value must be at least 0"
         );
     }
 
@@ -1232,7 +1401,7 @@ mod tests {
         assert!(!config.enable_idempotence);
     }
 
-    /// `bootstrap.servers` has `NO_DEFAULT_VALUE` (`ProducerConfig.java:376-378`), so a config
+    /// `bootstrap.servers` has `NO_DEFAULT_VALUE` (`ProducerConfig.java:407-409`), so a config
     /// without it fails at parse time with `ConfigDef.parseValue`'s message.
     #[test]
     fn test_missing_bootstrap_servers_rejected_with_exact_message() {
@@ -1351,7 +1520,7 @@ mod tests {
     /// [`resolve_partitioner`](ProducerConfig::resolve_partitioner) returns a
     /// built-in [`RoundRobinPartitioner`] instance for the simple name — the
     /// Rust stand-in for Java's reflective `getConfiguredInstance` of
-    /// `partitioner.class` (`KafkaProducer.java:382-385`).
+    /// `partitioner.class` (`KafkaProducer.java:389-392`).
     #[test]
     fn test_resolve_partitioner_round_robin_simple_name() {
         let mut props = base_props();
@@ -1435,8 +1604,8 @@ mod tests {
         let config = ProducerConfig::new(&props_with(&[("transactional.id", " my-txn ")])).unwrap();
         assert_eq!(config.transactional_id, Some("my-txn".to_string()));
 
-        // Java's `ConfigDef.NonEmptyString` validator (`ProducerConfig.java:537-540`
-        // → `ConfigDef.java:1223-1231`) rejects an empty string; a whitespace-only
+        // Java's `ConfigDef.NonEmptyString` validator (`ProducerConfig.java:584-587`
+        // → `ConfigDef.java:1225-1233`) rejects an empty string; a whitespace-only
         // id trims to empty and is rejected the same way. The error prints the
         // trimmed (empty) value, so "Invalid value " is followed by two spaces.
         for raw in ["", "   "] {
@@ -1461,12 +1630,12 @@ mod tests {
         assert_eq!(ProducerConfig::new(&base_props()).unwrap().transactional_id, None);
     }
 
-    /// Java's `ProducerConfig` `ConfigDef` validators (`ProducerConfig.java:386-530`):
+    /// Java's `ProducerConfig` `ConfigDef` validators (`ProducerConfig.java:416-577`):
     /// each bound rejects the value just below it with `ConfigDef.Range.atLeast`'s
     /// message and accepts the bound itself.
     #[test]
     fn test_config_def_range_validators() {
-        let cases: [(&str, i64); 19] = [
+        let cases: [(&str, i64); 20] = [
             ("batch.size", 0),
             ("linger.ms", 0),
             ("buffer.memory", 0),
@@ -1480,6 +1649,7 @@ mod tests {
             ("reconnect.backoff.max.ms", 0),
             ("retry.backoff.ms", 0),
             ("retry.backoff.max.ms", 0),
+            ("bootstrap.resolve.timeout.ms", 0),
             ("send.buffer.bytes", -1),
             ("receive.buffer.bytes", -1),
             ("metadata.max.age.ms", 0),
@@ -1507,7 +1677,7 @@ mod tests {
 
     /// `acks` accepts exactly `all`, `-1`, `0`, `1` (after trimming) and rejects
     /// anything else, mirroring Java's `ConfigDef.ValidString.in("all", "-1",
-    /// "0", "1")` (`ProducerConfig.java:391-394`, `ConfigDef.java:1114`), which
+    /// "0", "1")` (`ProducerConfig.java:430-435`, `ConfigDef.java:1116`), which
     /// runs before `parseAcks`. The error names the trimmed value because the
     /// validator runs on the parsed (trimmed) value; the check is exact-match, so
     /// `ALL` and `2` are rejected while a padded ` all ` is accepted.
@@ -1539,7 +1709,7 @@ mod tests {
         assert_eq!(ProducerConfig::parse_acks("1").unwrap(), 1);
 
         // Java's `parseAcks` catches `NumberFormatException` and throws
-        // `ConfigException` (`ProducerConfig.java:653-659`), so the class matters
+        // `ConfigException` (`ProducerConfig.java:705-711`), so the class matters
         // as much as the message: `ConfigException extends KafkaException`, and a
         // caller validating a config map with `is_kafka_error()` must see it.
         let error = ProducerConfig::parse_acks("invalid").expect_err("a non-numeric acks is a config error");
@@ -1551,7 +1721,7 @@ mod tests {
     /// Boolean config values are parsed case-insensitively after trimming, and an
     /// unparseable value is rejected with Java's message and the original,
     /// untrimmed value. Mirrors `ConfigDef.parseType(BOOLEAN)`
-    /// (`ConfigDef.java:701-735`): `equalsIgnoreCase("true")` / `("false")`, else
+    /// (`ConfigDef.java:703-737`): `equalsIgnoreCase("true")` / `("false")`, else
     /// `ConfigException(name, value, "Expected value to be either true or false")`.
     #[test]
     fn test_parse_bool_matches_java_boolean() {
@@ -1582,10 +1752,10 @@ mod tests {
     /// `is_kafka_error()`, matching `ConfigException extends KafkaException`.
     ///
     /// The six sites are the `acks` `ConfigDef.ValidString` validator
-    /// (`ProducerConfig.java:391-394` → `ConfigDef.java:1114`, which runs before
-    /// Java's `parseAcks` at `:657`) and the five throws in
-    /// `postProcessAndValidateIdempotenceConfigs` (`:603`, `:612`, `:621`, `:635`,
-    /// `:645`). They all used to be `IllegalArgumentException`, which sits
+    /// (`ProducerConfig.java:430-435` → `ConfigDef.java:1116`, which runs before
+    /// Java's `parseAcks` at `:709`) and the five throws in
+    /// `postProcessAndValidateIdempotenceConfigs` (`:655`, `:664`, `:673`, `:687`,
+    /// `:697`). They all used to be `IllegalArgumentException`, which sits
     /// *beside* `KafkaException` rather than below it, so `is_kafka_error()`
     /// answered `false` and a bad `acks` slipped past a caller that a bad
     /// `linger.ms` did not.
@@ -1683,11 +1853,68 @@ mod tests {
         );
     }
 
+    /// Translated from `ProducerConfigTest.testDefaultBufferMemoryAllocationStrategy`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfigTest#testDefaultBufferMemoryAllocationStrategy")]
+    fn test_default_buffer_memory_allocation_strategy() {
+        let producer_config = ProducerConfig::new(&base_props()).unwrap();
+        assert_eq!(
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_FULL,
+            producer_config.buffer_memory_allocation_strategy
+        );
+    }
+
+    /// Translated from `ProducerConfigTest.testValidBufferMemoryAllocationStrategy`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfigTest#testValidBufferMemoryAllocationStrategy")]
+    fn test_valid_buffer_memory_allocation_strategy() {
+        let mut props = base_props();
+        props.insert(
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG.to_string(),
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL.to_string(),
+        );
+        let producer_config = ProducerConfig::new(&props).unwrap();
+        assert_eq!(
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL,
+            producer_config.buffer_memory_allocation_strategy
+        );
+
+        // Rust-only: `CaseInsensitiveValidString` accepts any case, and the value is kept as given.
+        props.insert(
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG.to_string(),
+            "INCREMENTAL".to_string(),
+        );
+        assert_eq!(
+            "INCREMENTAL",
+            ProducerConfig::new(&props).unwrap().buffer_memory_allocation_strategy
+        );
+    }
+
+    /// Translated from `ProducerConfigTest.testInvalidBufferMemoryAllocationStrategy`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfigTest#testInvalidBufferMemoryAllocationStrategy")]
+    fn test_invalid_buffer_memory_allocation_strategy() {
+        let mut props = base_props();
+        props.insert(
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG.to_string(),
+            "abc".to_string(),
+        );
+        let err = ProducerConfig::new(&props).unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "expected Error::Config, got {err:?}");
+        assert!(err.message().contains(ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG));
+        // Rust-only: the whole `CaseInsensitiveValidString` message.
+        assert_eq!(
+            err.message(),
+            "Invalid value abc for configuration buffer.memory.allocation.strategy: \
+             String must be one of (case insensitive): FULL, INCREMENTAL"
+        );
+    }
+
     /// An unrecognised `compression.type` is a `ConfigException`, not the
     /// `IllegalArgumentException` `CompressionType.forName` would raise: Java
     /// validates the key with `in(Utils.enumOptions(CompressionType.class))`
-    /// (`ProducerConfig.java:397`), so `ConfigDef.ValidString.ensureValid`
-    /// (`ConfigDef.java:1103`) rejects the value before the enum lookup runs.
+    /// (`ProducerConfig.java:436`), so `ConfigDef.ValidString.ensureValid`
+    /// (`ConfigDef.java:1116`) rejects the value before the enum lookup runs.
     #[test]
     fn test_invalid_compression_type_is_a_config_error() {
         let mut props = base_props();
@@ -1771,6 +1998,33 @@ mod tests {
     /// Java's `KafkaProducerTest.baseProperties()`.
     fn base_properties() -> HashMap<String, String> {
         HashMap::from([("bootstrap.servers".to_string(), "localhost:9999".to_string())])
+    }
+
+    /// KIP-1123 (KAFKA-19193): `partitioner.rack.aware` is a `Type.BOOLEAN` and the
+    /// producer's `client.rack` a `Type.STRING` (trimmed by `ConfigDef.parseType`),
+    /// defined with the keys and defaults Java's `ProducerConfig` gives them.
+    #[test]
+    fn test_partitioner_rack_aware_and_client_rack() {
+        assert_eq!(ProducerConfig::PARTITIONER_RACK_AWARE_CONFIG, "partitioner.rack.aware");
+        assert_eq!(ProducerConfig::CLIENT_RACK_CONFIG, "client.rack");
+        assert_eq!(ProducerConfig::CLIENT_RACK_CONFIG, CommonClientConfigs::CLIENT_RACK_CONFIG);
+        assert_eq!(ProducerConfig::DEFAULT_CLIENT_RACK, "");
+
+        let mut props = base_props();
+        props.insert("partitioner.rack.aware".to_string(), "true".to_string());
+        props.insert("client.rack".to_string(), " rack0 ".to_string());
+        let config = ProducerConfig::new(&props).expect("valid config");
+        assert!(config.partitioner_rack_aware);
+        assert_eq!(config.client_rack, "rack0");
+
+        let mut props = base_props();
+        props.insert("partitioner.rack.aware".to_string(), "yes".to_string());
+        let err = ProducerConfig::new(&props).unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "got {err:?}");
+        assert_eq!(
+            err.message(),
+            "Invalid value yes for configuration partitioner.rack.aware: Expected value to be either true or false"
+        );
     }
 
     fn props_with(extra: &[(&str, &str)]) -> HashMap<String, String> {
@@ -2030,7 +2284,7 @@ mod tests {
 
     /// `ConfigDef.parseType` trims `client.id`. The producer keys generation
     /// on the key being present in the originals, not on emptiness
-    /// (`ProducerConfig.java:581-583`), so a blank explicit id stays empty,
+    /// (`ProducerConfig.java:633-635`), so a blank explicit id stays empty,
     /// as in Java. The consumer and admin client generate one instead.
     #[test]
     fn test_explicit_client_id_is_trimmed() {
@@ -2085,7 +2339,7 @@ mod tests {
     }
 
     /// `bootstrap.servers` is validated with Java's
-    /// `ValidList.anyNonDuplicateValues(false, false)` (`ProducerConfig.java:379`): an empty
+    /// `ValidList.anyNonDuplicateValues(false, false)` (`ProducerConfig.java:410`): an empty
     /// element is rejected with `ConfigDef`'s exact message and duplicates are removed
     /// (single-message `ConfigException`, no `Invalid value` prefix). An empty list is rejected too.
     #[test]
