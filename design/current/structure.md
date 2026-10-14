@@ -352,7 +352,7 @@ pipeline over a single owned buffer — read them in that order.*
 ## ffi/ and bindings
 
 ```
-rust/src/ffi/           # feature-gated: --features ffi; 265 files, 2299 exported symbols
+rust/src/ffi/           # feature-gated: --features ffi; 269 files, 2353 exported symbols
 ├── mod.rs              # module docs: the C conventions as implemented
 ├── common.rs           # kafka_common_Error_t, kafka_common_Error_e, init_default_logger
 ├── error_predicates.rs # generated: 167 kafka_common_Error_is_*_error predicates

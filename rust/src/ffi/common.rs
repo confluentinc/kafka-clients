@@ -27,13 +27,13 @@
 //!   generated into `error_predicates.rs`. `kafka_common_*` is shared verbatim
 //!   between FFI surfaces — a second definition would make cbindgen emit a
 //!   duplicate type.
-//! - The dispatcher-thread abstraction ([`CompletionJob`],
-//!   [`spawn_dispatcher`], [`enqueue_or_run_inline`]) and the void-returning
-//!   operation callback machinery ([`OperationCallbackFn`],
-//!   [`OperationCompletion`], [`OperationCallbackTarget`]) the clients still
-//!   run their `_async` variants on. They are superseded by the per-client
-//!   callbacks vector in [`callback_queue`](crate::ffi::callback_queue) and go
-//!   away as each client moves to its `_cb` variants.
+//! - The `out_err` slot (CLAUDE.md §4): [`FailValue`], [`deliver_value`] /
+//!   [`deliver_unit`], [`fail_with`], and the panic boundary every export runs
+//!   in ([`ffi_guard_or`], the `deliver_panic*` family), so a body's failure
+//!   value and a panic's cannot diverge. Completions go through the per-client
+//!   callbacks vector in [`callback_queue`](crate::ffi::callback_queue).
+//! - The `destroy` hand-off off a runtime thread ([`in_tokio_runtime`],
+//!   [`spawn_teardown`]), since `Runtime::block_on` panics there.
 //! - The default logger initialization helper ([`init_default_logger`]).
 //!
 //! # Feature Gate

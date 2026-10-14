@@ -1,5 +1,19 @@
 # Current Status: Milestones 1–17 complete — client tracks Apache Kafka 4.4.0 (4.4.0-rc4)
 
+> **Current state (2026-10-14, `esabellico/c_ffi_interface_uniformed`):** master
+> `c3a02e2e7` (Milestone 17, password redaction, the negative-length and
+> destroy fixes) is merged into the `out_err` C FFI. Master's new public API has
+> its C bindings in the branch's shape (`kafka_admin_Admin_unregister_controller`
+> + `UnregisterControllerOptions_t` / `Result_t`,
+> `MockAdminClient_set_using_raft_controller`, `MockConsumer_lose_partitions` /
+> `_cb`, the four new error classes). Master's lifetime fixes are carried over:
+> admin destroy fails the RPCs still waiting ("The AdminClient thread has
+> exited."), consumer destroy wakes a waiting poll, and a destroy called inside a
+> Tokio runtime hands off to a teardown thread. Error codes: `-1..=136` from the
+> broker, `BOOTSTRAP_RESOLUTION` keeps master's -29 and `LOCAL_CALLBACK` moves to
+> -30. `src/ffi/` is 269 files and 2353 exports, 172 of them generated error
+> predicates; `common::Error` has 167 variants.
+
 > **Current state (2026-10-08, Milestone 17 close-out):** the Rust client is up
 > to **Apache Kafka 4.4.0**, built against `4.4.0-rc4` (`1156b2752a`) because
 > 4.4.0 final was not yet tagged (the bump steps for final are in
