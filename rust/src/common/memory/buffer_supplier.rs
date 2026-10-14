@@ -14,7 +14,8 @@
 
 //! Decompression-buffer reuse pool used by the consumer fetch path.
 //!
-//! Translated from `org.apache.kafka.common.utils.BufferSupplier`.
+//! Translated from `org.apache.kafka.common.utils.internals.BufferSupplier` (moved there
+//! from `common.utils` in Kafka 4.4, KAFKA-20297 `4ae78a36ac`).
 //!
 //! In Java this is an `AutoCloseable` abstract class with two concrete
 //! implementations:
@@ -48,7 +49,7 @@ use std::sync::Mutex;
 /// allocating large scratch buffers (e.g. LZ4 decompression buffers) across
 /// many small record batches.
 ///
-/// Corresponds to `org.apache.kafka.common.utils.BufferSupplier`.
+/// Corresponds to `org.apache.kafka.common.utils.internals.BufferSupplier`.
 #[derive(Debug)]
 pub(crate) struct BufferSupplier {
     mode: Mode,

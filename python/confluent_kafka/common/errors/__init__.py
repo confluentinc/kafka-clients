@@ -26,10 +26,12 @@ from .application_recoverable_error import ApplicationRecoverableError as Applic
 from .authentication_error import AuthenticationError as AuthenticationError
 from .authorization_error import AuthorizationError as AuthorizationError
 from .authorizer_not_ready_error import AuthorizerNotReadyError as AuthorizerNotReadyError
+from .bootstrap_resolution_error import BootstrapResolutionError as BootstrapResolutionError
 from .broker_id_not_registered_error import BrokerIdNotRegisteredError as BrokerIdNotRegisteredError
 from .broker_not_available_error import BrokerNotAvailableError as BrokerNotAvailableError
 from .cluster_authorization_error import ClusterAuthorizationError as ClusterAuthorizationError
 from .concurrent_transactions_error import ConcurrentTransactionsError as ConcurrentTransactionsError
+from .controller_id_not_registered_error import ControllerIdNotRegisteredError as ControllerIdNotRegisteredError
 from .controller_moved_error import ControllerMovedError as ControllerMovedError
 from .coordinator_load_in_progress_error import CoordinatorLoadInProgressError as CoordinatorLoadInProgressError
 from .coordinator_not_available_error import CoordinatorNotAvailableError as CoordinatorNotAvailableError
@@ -54,6 +56,7 @@ from .fenced_state_epoch_error import FencedStateEpochError as FencedStateEpochE
 from .fetch_session_id_not_found_error import FetchSessionIdNotFoundError as FetchSessionIdNotFoundError
 from .fetch_session_topic_id_error import FetchSessionTopicIdError as FetchSessionTopicIdError
 from .group_authorization_error import GroupAuthorizationError as GroupAuthorizationError
+from .group_deletion_failed_error import GroupDeletionFailedError as GroupDeletionFailedError
 from .group_id_not_found_error import GroupIdNotFoundError as GroupIdNotFoundError
 from .group_max_size_reached_error import GroupMaxSizeReachedError as GroupMaxSizeReachedError
 from .group_not_empty_error import GroupNotEmptyError as GroupNotEmptyError
@@ -138,6 +141,7 @@ from .stale_broker_epoch_error import StaleBrokerEpochError as StaleBrokerEpochE
 from .stale_member_epoch_error import StaleMemberEpochError as StaleMemberEpochError
 from .streams_invalid_topology_epoch_error import StreamsInvalidTopologyEpochError as StreamsInvalidTopologyEpochError
 from .streams_invalid_topology_error import StreamsInvalidTopologyError as StreamsInvalidTopologyError
+from .streams_topology_description_update_failed_error import StreamsTopologyDescriptionUpdateFailedError as StreamsTopologyDescriptionUpdateFailedError
 from .streams_topology_fenced_error import StreamsTopologyFencedError as StreamsTopologyFencedError
 from .telemetry_too_large_error import TelemetryTooLargeError as TelemetryTooLargeError
 from .throttling_quota_exceeded_error import ThrottlingQuotaExceededError as ThrottlingQuotaExceededError
@@ -177,10 +181,12 @@ __all__ = [
     "AuthenticationError",
     "AuthorizationError",
     "AuthorizerNotReadyError",
+    "BootstrapResolutionError",
     "BrokerIdNotRegisteredError",
     "BrokerNotAvailableError",
     "ClusterAuthorizationError",
     "ConcurrentTransactionsError",
+    "ControllerIdNotRegisteredError",
     "ControllerMovedError",
     "CoordinatorLoadInProgressError",
     "CoordinatorNotAvailableError",
@@ -205,6 +211,7 @@ __all__ = [
     "FetchSessionIdNotFoundError",
     "FetchSessionTopicIdError",
     "GroupAuthorizationError",
+    "GroupDeletionFailedError",
     "GroupIdNotFoundError",
     "GroupMaxSizeReachedError",
     "GroupNotEmptyError",
@@ -289,6 +296,7 @@ __all__ = [
     "StaleMemberEpochError",
     "StreamsInvalidTopologyEpochError",
     "StreamsInvalidTopologyError",
+    "StreamsTopologyDescriptionUpdateFailedError",
     "StreamsTopologyFencedError",
     "TelemetryTooLargeError",
     "ThrottlingQuotaExceededError",

@@ -24,6 +24,7 @@ use crate::common::Uuid;
 use crate::common::protocol::MessageUtil;
 use crate::common::protocol::types::RawTaggedField;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors, Message, ObjectSerializationCache};
+use crate::common::utils::internals::ByteUtils;
 
 // Re-export generated types
 use crate::AddOffsetsToTxnRequestData;
@@ -397,6 +398,108 @@ fn test_simple_message() {
     test_all_message_round_trips_from_version(2, &message);
 }
 
+/// Encodes a raw tagged-field section: the declared count, then `(tag, size)` pairs
+/// with no payload (Java `MessageTest.rawTaggedFieldsSection`).
+fn raw_tagged_fields_section(declared_count: u32, tags_and_sizes: &[u32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(64);
+    ByteUtils::write_unsigned_varint(declared_count, &mut bytes).unwrap();
+    for pair in tags_and_sizes.chunks(2) {
+        ByteUtils::write_unsigned_varint(pair[0], &mut bytes).unwrap();
+        ByteUtils::write_unsigned_varint(pair[1], &mut bytes).unwrap();
+    }
+    bytes
+}
+
+/// Serializes an empty `SimpleExampleMessageData` and swaps its (empty) trailing
+/// tagged-field section for `tagged_fields_section` (Java
+/// `MessageTest.messageWithTaggedFieldsSection`).
+fn message_with_tagged_fields_section(version: i16, tagged_fields_section: &[u8]) -> ByteBufferAccessor {
+    let mut message = SimpleExampleMessageData::new();
+    let mut cache = ObjectSerializationCache::new();
+    let size = message.size(&mut cache, version).unwrap();
+    let mut prefix = ByteBufferAccessor::new(Vec::with_capacity(size as usize));
+    Message::write(&mut message, &mut prefix, &cache, version).unwrap();
+    let mut bytes = prefix.into_buffer();
+    assert_eq!(Some(0u8), bytes.pop(), "expected an empty tagged-fields section to replace");
+    bytes.extend_from_slice(tagged_fields_section);
+    ByteBufferAccessor::new(bytes)
+}
+
+#[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testTaggedFieldCountRejectedWhenLargerThanRemainingBytes")]
+fn test_tagged_field_count_rejected_when_larger_than_remaining_bytes() {
+    let version: i16 = 1;
+    let mut buf = message_with_tagged_fields_section(version, &raw_tagged_fields_section(1_000_000, &[]));
+    let mut message = SimpleExampleMessageData::new();
+    let e = Message::read(&mut message, &mut buf, version).unwrap_err();
+    assert!(
+        e.to_string().contains("tagged fields"),
+        "Expected a bounded-count rejection, but got: {e}"
+    );
+    // Rust-side pin of the exact text: the count is checked before the loop, against
+    // the bytes left after the count itself (none here).
+    assert_eq!(
+        "Tried to read 1000000 tagged fields, but there are only 0 bytes remaining.",
+        e.to_string()
+    );
+}
+
+#[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testTaggedFieldCountRejectedWhenExceedingHardCap")]
+fn test_tagged_field_count_rejected_when_exceeding_hard_cap() {
+    let version: i16 = 1;
+    let declared_count = MessageUtil::MAX_TAGGED_FIELD_COUNT + 1;
+    let mut section = raw_tagged_fields_section(declared_count as u32, &[]);
+    // Padding so the remaining-bytes guard alone would let the count through.
+    section.resize(section.len() + declared_count as usize, 0);
+    let mut buf = message_with_tagged_fields_section(version, &section);
+    let mut message = SimpleExampleMessageData::new();
+    let e = Message::read(&mut message, &mut buf, version).unwrap_err();
+    assert!(
+        e.to_string().contains("exceeds the maximum allowed count"),
+        "Expected a hard-cap rejection, but got: {e}"
+    );
+    assert_eq!(
+        "Tried to read 10001 tagged fields, which exceeds the maximum allowed count of 10000.",
+        e.to_string()
+    );
+}
+
+/// Java's string reader rejects a declared length above `0x7fff` before reading
+/// (`MessageDataGenerator.java:653-657`, "string field X had invalid length N"). The
+/// buffer really holds the declared bytes, so only that guard can reject it.
+#[test]
+fn test_tagged_string_longer_than_0x7fff_is_rejected() {
+    let version: i16 = 1;
+    let length: u32 = 0x8000;
+    let mut string_bytes = Vec::new();
+    ByteUtils::write_unsigned_varint(length + 1, &mut string_bytes).unwrap();
+    string_bytes.resize(string_bytes.len() + length as usize, b'a');
+    // One tagged field: `myString` (tag 4), whose payload is the compact string.
+    let mut section = raw_tagged_fields_section(1, &[4, string_bytes.len() as u32]);
+    section.extend_from_slice(&string_bytes);
+    let mut buf = message_with_tagged_fields_section(version, &section);
+    let mut message = SimpleExampleMessageData::new();
+    let e = Message::read(&mut message, &mut buf, version).unwrap_err();
+    assert_eq!("string field myString had invalid length 32768", e.to_string());
+}
+
+/// A tagged struct's declared size is checked against the remaining bytes before
+/// anything is allocated for it, as Java reads it in place from the buffer.
+#[test]
+fn test_tagged_struct_size_beyond_remaining_bytes_is_rejected() {
+    let version: i16 = 2;
+    // One tagged field: `myTaggedStruct` (tag 8), declaring 1 GB with nothing after it.
+    let section = raw_tagged_fields_section(1, &[8, 1_000_000_000]);
+    let mut buf = message_with_tagged_fields_section(version, &section);
+    let mut message = SimpleExampleMessageData::new();
+    let e = Message::read(&mut message, &mut buf, version).unwrap_err();
+    assert_eq!(
+        "Error reading byte array of 1000000000 byte(s): only 0 byte(s) available",
+        e.to_string()
+    );
+}
+
 #[test]
 #[doc(alias = "org.apache.kafka.common.message.MessageTest#testLongTaggedString")]
 fn test_long_tagged_string() {
@@ -637,10 +740,14 @@ fn test_message_versions() {
     use crate::StreamsGroupDescribeResponseData;
     use crate::StreamsGroupHeartbeatRequestData;
     use crate::StreamsGroupHeartbeatResponseData;
+    use crate::StreamsGroupTopologyDescriptionUpdateRequestData;
+    use crate::StreamsGroupTopologyDescriptionUpdateResponseData;
     use crate::SyncGroupResponseData;
     use crate::TxnOffsetCommitResponseData;
     use crate::UnregisterBrokerRequestData;
     use crate::UnregisterBrokerResponseData;
+    use crate::UnregisterControllerRequestData;
+    use crate::UnregisterControllerResponseData;
     use crate::UpdateFeaturesRequestData;
     use crate::UpdateFeaturesResponseData;
     use crate::UpdateRaftVoterRequestData;
@@ -955,6 +1062,16 @@ fn test_message_versions() {
         ApiKeys::DELETE_SHARE_GROUP_OFFSETS,
         DeleteShareGroupOffsetsRequestData,
         DeleteShareGroupOffsetsResponseData
+    );
+    assert_message_version!(
+        ApiKeys::STREAMS_GROUP_TOPOLOGY_DESCRIPTION_UPDATE,
+        StreamsGroupTopologyDescriptionUpdateRequestData,
+        StreamsGroupTopologyDescriptionUpdateResponseData
+    );
+    assert_message_version!(
+        ApiKeys::UNREGISTER_CONTROLLER,
+        UnregisterControllerRequestData,
+        UnregisterControllerResponseData
     );
 }
 
@@ -1329,91 +1446,70 @@ fn test_offset_commit_response_versions() {
     }
 }
 
+/// Translated from `MessageTest.testTxnOffsetCommitRequestVersions`
+/// (`@ApiKeyVersionsSource(apiKey = TXN_OFFSET_COMMIT)`, so every version).
+///
+/// Each version's message sets only fields that version carries: group metadata
+/// from v3, the leader epoch from v2, the topic name below v6 and the topic id
+/// from v6 (KIP-1319), so the round trip is exact.
 #[test]
 #[doc(alias = "org.apache.kafka.common.message.MessageTest#testTxnOffsetCommitRequestVersions")]
 fn test_txn_offset_commit_request_versions() {
-    let group_id = "groupId";
-    let topic_name = "topic";
-    let metadata = "metadata";
-    let txn_id = "transactionalId";
-    let producer_id: i64 = 25;
-    let producer_epoch: i16 = 10;
-    let instance_id = "instance";
-    let member_id = "member";
-    let generation_id: i32 = 1;
-    let partition: i32 = 2;
-    let offset: i64 = 100;
-
-    test_all_message_round_trips(
-        TxnOffsetCommitRequestData::new()
-            .set_group_id(group_id.to_string())
-            .set_transactional_id(txn_id.to_string())
-            .set_producer_id(producer_id)
-            .set_producer_epoch(producer_epoch)
-            .set_topics(vec![
-                TxnOffsetCommitRequestTopic::new()
-                    .set_name(topic_name.to_string())
-                    .set_partitions(vec![
-                        TxnOffsetCommitRequestPartition::new()
-                            .set_partition_index(partition)
-                            .set_committed_metadata(Some(metadata.to_string()))
-                            .set_committed_offset(offset)
-                            .clone(),
-                    ])
-                    .clone(),
-            ]),
-    );
-
     for version in ApiKeys::TXN_OFFSET_COMMIT.oldest_version()..=ApiKeys::TXN_OFFSET_COMMIT.latest_version() {
-        let mut request_data = TxnOffsetCommitRequestData::new()
-            .set_group_id(group_id.to_string())
-            .set_transactional_id(txn_id.to_string())
-            .set_producer_id(producer_id)
-            .set_producer_epoch(producer_epoch)
-            .set_group_instance_id(Some(instance_id.to_string()))
-            .set_member_id(member_id.to_string())
-            .set_generation_id(generation_id)
+        let mut request = TxnOffsetCommitRequestData::new()
+            .set_group_id("groupId".to_string())
+            .set_transactional_id("transactionalId".to_string())
+            .set_producer_id(25)
+            .set_producer_epoch(10)
+            .set_member_id(if version >= 3 { "member" } else { "" }.to_string())
+            .set_generation_id_or_member_epoch(if version >= 3 { 1 } else { -1 })
+            .set_group_instance_id(if version >= 3 {
+                Some("instance".to_string())
+            } else {
+                None
+            })
             .set_topics(vec![
                 TxnOffsetCommitRequestTopic::new()
-                    .set_name(topic_name.to_string())
+                    .set_topic_id(if version >= 6 {
+                        Uuid::random_uuid()
+                    } else {
+                        Uuid::zero()
+                    })
+                    .set_name(if version < 6 { "topic" } else { "" }.to_string())
                     .set_partitions(vec![
                         TxnOffsetCommitRequestPartition::new()
-                            .set_partition_index(partition)
-                            .set_committed_leader_epoch(10)
-                            .set_committed_metadata(Some(metadata.to_string()))
-                            .set_committed_offset(offset)
+                            .set_partition_index(2)
+                            .set_committed_leader_epoch(if version >= 2 { 10 } else { -1 })
+                            .set_committed_metadata(Some("metadata".to_string()))
+                            .set_committed_offset(100)
                             .clone(),
                     ])
                     .clone(),
             ])
             .clone();
 
-        if version < 2 {
-            request_data.topics_mut()[0].partitions_mut()[0].set_committed_leader_epoch(-1);
-        }
-
-        if version < 3 {
-            // Java test asserts UnsupportedVersionException for versions < 3
-            // because groupInstanceId/memberId/generationId fields don't exist in those versions.
-            // Our generator doesn't produce per-field version validation errors,
-            // so we skip the UVE assertions and test with default values instead.
-            request_data.set_group_instance_id(None);
-            request_data.set_member_id(String::new());
-            request_data.set_generation_id(-1);
-        }
-
-        test_all_message_round_trips_from_version(version, &request_data);
+        let expected = request.clone();
+        test_byte_buffer_round_trip(version, &mut request, &expected);
     }
 }
 
+/// Translated from `MessageTest.testTxnOffsetCommitResponseVersions`
+/// (`@ApiKeyVersionsSource(apiKey = TXN_OFFSET_COMMIT)`): the topic name below v6,
+/// the topic id from v6 (KIP-1319).
 #[test]
 #[doc(alias = "org.apache.kafka.common.message.MessageTest#testTxnOffsetCommitResponseVersions")]
 fn test_txn_offset_commit_response_versions() {
-    test_all_message_round_trips(
-        TxnOffsetCommitResponseData::new()
+    for version in ApiKeys::TXN_OFFSET_COMMIT.oldest_version()..=ApiKeys::TXN_OFFSET_COMMIT.latest_version() {
+        let mut response = TxnOffsetCommitResponseData::new()
+            .set_throttle_time_ms(20)
             .set_topics(vec![
                 TxnOffsetCommitResponseTopic::new()
-                    .set_name("topic".to_string())
+                    .set_topic_id(if version >= 6 {
+                        Uuid::random_uuid()
+                    } else {
+                        Uuid::zero()
+                    })
+                    .set_name(if version < 6 { "topic" } else { "" }.to_string())
                     .set_partitions(vec![
                         TxnOffsetCommitResponsePartition::new()
                             .set_partition_index(1)
@@ -1422,8 +1518,11 @@ fn test_txn_offset_commit_response_versions() {
                     ])
                     .clone(),
             ])
-            .set_throttle_time_ms(20),
-    );
+            .clone();
+
+        let expected = response.clone();
+        test_byte_buffer_round_trip(version, &mut response, &expected);
+    }
 }
 
 #[test]

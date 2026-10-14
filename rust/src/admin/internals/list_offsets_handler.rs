@@ -28,7 +28,7 @@ use crate::common::requests::{
     ConcreteResponse, ListOffsetsRequest, ListOffsetsRequestBuilderOptionsBuilder, ListOffsetsResponse, RequestBuilder,
     list_offsets_request,
 };
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::LogContext;
 use crate::common::{Error, Node, TopicPartition};
 use crate::kafka_debug;
 use crate::list_offsets_request_data::{ListOffsetsPartition, ListOffsetsTopic};

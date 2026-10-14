@@ -27,7 +27,7 @@ use bytes::Bytes;
 use std::io;
 
 use super::Readable;
-use crate::common::utils::ByteUtils;
+use crate::common::utils::internals::ByteUtils;
 
 /// A [`Readable`] over a [`bytes::Bytes`] buffer with position tracking.
 ///

@@ -226,7 +226,7 @@ def run_sync(submit: Callable[[Callable[..., None]], None]) -> None:
 def force_close(c_producer: int) -> None:
     """Java's ``sender.forceClose()`` and the ``ioThread.join()`` after it,
     for a ``close()`` an interrupt stopped (``KafkaProducer.close(Duration,
-    boolean)``, KafkaProducer.java:1419-1437: the interrupt is kept and the
+    boolean)``, KafkaProducer.java:1506-1524: the interrupt is kept and the
     close proceeds to force-close and join). A close with a zero timeout fails
     the records still pending, which also ends the send thread's metadata
     waits; a second Ctrl+C meanwhile is dropped, as Java keeps only the first
@@ -437,7 +437,7 @@ class _ProducerState:
 
 def check_group_metadata(group_metadata: ConsumerGroupMetadata | None) -> None:
     """The null arm of Java's ``throwIfInvalidGroupMetadata``
-    (KafkaProducer.java:1491-1498), which the core cannot receive; the
+    (KafkaProducer.java:1578-1585), which the core cannot receive; the
     generation / member id arm is the core's."""
     if group_metadata is None:
         raise IllegalArgumentError(message=NULL_GROUP_METADATA_MESSAGE)

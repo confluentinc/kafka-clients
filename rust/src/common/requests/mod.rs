@@ -140,7 +140,7 @@ mod sasl_handshake_response;
 mod send_builder;
 mod transaction_result;
 pub mod txn_offset_commit_request;
-mod txn_offset_commit_response;
+pub mod txn_offset_commit_response;
 
 pub use abstract_request::{AbstractRequest, RequestBuilder};
 pub use abstract_response::{AbstractResponse, ConcreteResponse};
@@ -148,6 +148,8 @@ pub use add_offsets_to_txn_request::AddOffsetsToTxnRequest;
 pub use add_offsets_to_txn_response::AddOffsetsToTxnResponse;
 pub use add_partitions_to_txn_request::AddPartitionsToTxnRequest;
 pub use add_partitions_to_txn_response::AddPartitionsToTxnResponse;
+pub mod unregister_controller_request;
+mod unregister_controller_response;
 pub mod update_features_request;
 mod update_features_response;
 pub mod write_txn_markers_request;
@@ -267,11 +269,10 @@ pub use sasl_handshake_request::SaslHandshakeRequest;
 pub use sasl_handshake_response::SaslHandshakeResponse;
 pub use send_builder::SendBuilder;
 pub use transaction_result::TransactionResult;
-pub use txn_offset_commit_request::{
-    CommittedOffset, TxnOffsetCommitRequest, TxnOffsetCommitRequestBuilderOptions,
-    TxnOffsetCommitRequestBuilderOptionsBuilder,
-};
+pub use txn_offset_commit_request::{CommittedOffset, TxnOffsetCommitRequest};
 pub use txn_offset_commit_response::TxnOffsetCommitResponse;
+pub use unregister_controller_request::UnregisterControllerRequest;
+pub use unregister_controller_response::UnregisterControllerResponse;
 pub use update_features_request::{FeatureUpdateItem, UpdateFeaturesRequest};
 pub use update_features_response::UpdateFeaturesResponse;
 pub use write_txn_markers_request::WriteTxnMarkersRequest;

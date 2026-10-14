@@ -32,6 +32,17 @@ impl Utils {
         number & 0x7fff_ffff
     }
 
+    /// Whether `string` is `None`, empty, or made only of whitespace.
+    ///
+    /// Translated from `org.apache.kafka.common.utils.Utils.isBlank`
+    /// (`str == null || str.trim().isEmpty()`). Java's `String.trim` strips every
+    /// leading and trailing character up to U+0020, control characters included,
+    /// so that is the set trimmed here rather than Rust's Unicode whitespace.
+    #[doc(alias = "org.apache.kafka.common.utils.Utils#isBlank")]
+    pub fn is_blank(string: Option<&str>) -> bool {
+        string.is_none_or(|s| s.trim_matches(|c: char| c <= ' ').is_empty())
+    }
+
     /// Packs a set of bit indices (`0..=31`) into a 32-bit field, setting bit `b`
     /// for each byte `b` in the set.
     ///
@@ -66,17 +77,6 @@ impl Utils {
             itr >>= 1;
         }
         result
-    }
-
-    /// Returns whether `str` is `None`, empty, or only characters Java's
-    /// `String.trim()` strips (every code point up to and including U+0020).
-    ///
-    /// Translated from `org.apache.kafka.common.utils.Utils.isBlank`
-    /// (`str == null || str.trim().isEmpty()`). `str::trim` is not used: it
-    /// strips Unicode `White_Space`, a different set (it keeps U+0001..U+0008
-    /// and strips U+00A0), where Java's `trim` strips exactly `<= ' '`.
-    pub fn is_blank(str: Option<&str>) -> bool {
-        str.is_none_or(|s| s.chars().all(|c| c <= ' '))
     }
 
     /// Generates a 32-bit murmur2 hash from a byte slice.
@@ -134,17 +134,22 @@ impl Utils {
 mod tests {
     use super::*;
 
-    /// `Utils.isBlank`: null, empty and all-`<= ' '` strings are blank; any
-    /// character above U+0020 (including U+00A0, which Rust's `trim` strips)
-    /// makes the string non-blank.
+    /// Translated from `UtilsTest.testIsBlank`, plus the characters Java's `trim`
+    /// strips that Rust's Unicode-whitespace `trim` treats differently.
     #[test]
-    fn is_blank_matches_java_trim() {
+    #[doc(alias = "org.apache.kafka.common.utils.UtilsTest#testIsBlank")]
+    fn test_is_blank() {
         assert!(Utils::is_blank(None));
         assert!(Utils::is_blank(Some("")));
-        assert!(Utils::is_blank(Some("   ")));
-        assert!(Utils::is_blank(Some(" \t\n\r\u{1} ")));
-        assert!(!Utils::is_blank(Some(" a ")));
+        assert!(Utils::is_blank(Some(" ")));
+        assert!(!Utils::is_blank(Some("bob")));
+        assert!(!Utils::is_blank(Some(" bob ")));
+
+        // Java's `trim` strips every char <= U+0020 (here NUL and US) ...
+        assert!(Utils::is_blank(Some("\u{0}\t\n\u{1f}")));
+        // ... and not U+00A0 / U+3000, which Rust's `trim` would strip.
         assert!(!Utils::is_blank(Some("\u{a0}")));
+        assert!(!Utils::is_blank(Some("\u{3000}")));
     }
 
     #[test]

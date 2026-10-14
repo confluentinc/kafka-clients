@@ -244,7 +244,7 @@ test-integration-python-native: build-grpc-native-python
 test-integration-c-native: build-grpc-native-c
 	$(MAKE) -C rust test-integration-grpc-c-native
 
-# Skips the same three transaction tests as test-integration-dotnet
+# Skips the same .NET-only tests as test-integration-dotnet
 # (DOTNET_GRPC_SKIPS, see rust/Makefile).
 test-integration-dotnet-native: build-grpc-native-dotnet
 	$(MAKE) -C rust test-integration-grpc-dotnet-native

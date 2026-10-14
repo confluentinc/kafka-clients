@@ -38,7 +38,7 @@ use crate::common::network::SaslChannelBuilder;
 use crate::common::network::SslChannelBuilder;
 use crate::common::security::auth::SecurityProtocol;
 use crate::common::security::ssl::SslFactory;
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::LogContext;
 
 /// Translates the Java static-utility class `org.apache.kafka.common.network.ChannelBuilders`,
 /// which has no instance state, so it becomes a unit struct hosting its

@@ -139,7 +139,7 @@ class MockProducerCore(Generic[K, V]):
         self._producer_fenced = False
         self._sent_offsets = False
         self._commit_count = 0
-        # Java's public mutable exception fields (MockProducer.java:79-96).
+        # Java's public mutable exception fields (MockProducer.java:81-98).
         self._init_transaction_exception: RuntimeError | None = None
         self._begin_transaction_exception: RuntimeError | None = None
         self._send_offsets_to_transaction_exception: RuntimeError | None = None

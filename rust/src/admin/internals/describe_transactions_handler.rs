@@ -24,7 +24,7 @@ use crate::admin::TransactionDescription;
 use crate::admin::TransactionState;
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, CoordinatorType, RequestBuilder, describe_transactions_request};
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::LogContext;
 use crate::common::{Error, Node, TopicPartition};
 use crate::{kafka_debug, kafka_warn};
 
