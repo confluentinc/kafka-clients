@@ -393,9 +393,10 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
     """Async twin of grpc_server.ConsumerService, driving AsyncKafkaConsumer.
 
     Methods Java waits in are coroutines and are awaited (seek included: it
-    waits on the background thread, which may run a rebalance listener); the
-    others (assignment/subscription/paused/commit_nowait/wakeup) are plain
-    methods, called directly."""
+    waits on the background thread, which may run a rebalance listener;
+    commit_nowait included: Java's commitAsync waits for the offsets to commit);
+    the others (assignment/subscription/paused/wakeup) are plain methods,
+    called directly."""
 
     def __init__(self, group_metadata):
         self._consumers = {}
@@ -491,11 +492,10 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         return await self._run_status(request.consumer_id, do)
 
     async def CommitAsync(self, request, context):
-        # commit_nowait (Java's commitAsync) does not wait, so it is a plain def,
-        # called directly. The callback runs inside a later poll/commit/close; a
+        # commit_nowait (Java's commitAsync) waits until the commit is sent, not
+        # for its result: the callback runs inside a later poll/commit/close; a
         # listener callback the core delivers while the commit waits for its
-        # offsets runs on this loop (an async def one in a task the next awaited
-        # call waits for).
+        # offsets runs on this loop, inside the call.
         consumer = self._get(request.consumer_id)
         if consumer is None:
             return pb.StatusResponse(error=self._unknown_consumer(request.consumer_id))
@@ -505,10 +505,10 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         try:
             offsets = _proto_offsets_to_dict(request.offsets)
             if offsets:
-                consumer.commit_nowait(offsets=offsets,
-                                       callback=callback or ignore_commit_completion)
+                await consumer.commit_nowait(offsets=offsets,
+                                             callback=callback or ignore_commit_completion)
             else:
-                consumer.commit_nowait(callback=callback)
+                await consumer.commit_nowait(callback=callback)
             return pb.StatusResponse()
         except KafkaError as e:
             return self._status_err(e)

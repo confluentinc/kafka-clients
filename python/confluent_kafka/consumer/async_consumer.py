@@ -17,19 +17,15 @@ Binding Conventions, Class family).
 
 The same methods, in the same order. A method is ``async def`` iff the entry
 point it calls has a ``_cb`` completion form in the FFI header:
-``subscribe``, ``assign``, ``unsubscribe``, ``poll``, ``commit``, ``seek``,
-``seek_to_beginning`` / ``seek_to_end``, ``position``, ``committed``,
-``partitions_for``, ``list_topics``, ``pause`` / ``resume``,
-``offsets_for_times``, ``beginning_offsets`` / ``end_offsets`` and ``close``;
-every other method is a plain ``def`` (``assignment()``, ``subscription()``,
-``commit_nowait()``, ``metrics()``, ``paused()``, ``current_lag()``,
+``subscribe``, ``assign``, ``unsubscribe``, ``poll``, ``commit``,
+``commit_nowait``, ``seek``, ``seek_to_beginning`` / ``seek_to_end``,
+``position``, ``committed``, ``partitions_for``, ``list_topics``, ``pause`` /
+``resume``, ``offsets_for_times``, ``beginning_offsets`` / ``end_offsets`` and
+``close``; every other method is a plain ``def`` (``assignment()``,
+``subscription()``, ``metrics()``, ``paused()``, ``current_lag()``,
 ``group_metadata()``, ``wakeup()``). A waiting method awaits the entry point's
 ``_cb`` form, running the queued callbacks on the event loop; the listener runs
 there and may be ``async def``.
-A coroutine listener method that ``commit_nowait()`` delivers is awaited in a
-task that holds the consumer until it ends: meanwhile ``group_metadata()``
-and ``current_lag()`` raise ``ConcurrentModificationError`` (see
-``commit_nowait``).
 
 Not generated: :class:`Consumer`'s omissions.
 """
@@ -48,7 +44,7 @@ from confluent_kafka._async import await_to_end
 from confluent_kafka.concurrent_modification_error import ConcurrentModificationError
 
 from ._base import (
-    _AT_CLOSE, _AT_LATER, _AT_POLL, _ConsumerState, blank_null_topics, close_args,
+    _AT_CLOSE, _AT_POLL, _ConsumerState, blank_null_topics, close_args,
     poll_timeout_ms,
 )
 from ._conversions import offsets_to_spec, tp_to_spec
@@ -143,57 +139,50 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         await self._a_commit(offsets)
 
     @overload
-    def commit_nowait(self, *, callback: OffsetCommitCallback
-                      | Callable[[dict[TopicPartition, OffsetAndMetadata] | None,
-                                  Exception | None], Awaitable[None]]
-                      | None = None) -> None: ...
+    async def commit_nowait(self, *, callback: OffsetCommitCallback
+                            | Callable[[dict[TopicPartition, OffsetAndMetadata] | None,
+                                        Exception | None], Awaitable[None]]
+                            | None = None) -> None: ...
     @overload
-    def commit_nowait(self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata],
-                      callback: OffsetCommitCallback
-                      | Callable[[dict[TopicPartition, OffsetAndMetadata] | None,
-                                  Exception | None], Awaitable[None]]
-                      | None) -> None: ...
+    async def commit_nowait(self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata],
+                            callback: OffsetCommitCallback
+                            | Callable[[dict[TopicPartition, OffsetAndMetadata] | None,
+                                        Exception | None], Awaitable[None]]
+                            | None) -> None: ...
 
     @java_forms(*COMMIT_NOWAIT_FORMS)
-    def commit_nowait(self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata] | None = None,
-                      callback: OffsetCommitCallback
-                      | Callable[[dict[TopicPartition, OffsetAndMetadata] | None,
-                                  Exception | None], Awaitable[None]]
-                      | None = UNSET) -> None:
-        """See :meth:`Consumer.commit_nowait` (Java's ``commitAsync``, which
-        does not wait: a plain ``def``). The callback runs on the event loop,
-        inside a later call on this consumer.
+    async def commit_nowait(self, *,
+                            offsets: Mapping[TopicPartition, OffsetAndMetadata] | None = None,
+                            callback: OffsetCommitCallback
+                            | Callable[[dict[TopicPartition, OffsetAndMetadata] | None,
+                                        Exception | None], Awaitable[None]]
+                            | None = UNSET) -> None:
+        """See :meth:`Consumer.commit_nowait` (Java's ``commitAsync``).
+
+        It is ``async def`` because its entry point,
+        ``kafka_consumer_Consumer_commit_async``, completes through its ``_cb``
+        form: like Java's ``commitAsync``, which first runs the queued commit
+        callbacks and then waits for the background thread to take the offsets
+        to commit (``offsetsReady``), the call waits until the commit is sent,
+        not for its result, which goes to the callback inside a later call on
+        this consumer. A failure of the call itself (``InvalidGroupIdError``, a
+        timeout waiting for the offsets, the exception of a queued commit
+        callback it runs) is raised from it, as Java's ``commitAsync`` throws
+        it. While it waits, the core may deliver a queued listener callback
+        (``consumer-threading.md`` §31), which runs on the event loop inside
+        this call; an ``async def`` method is awaited there before it returns.
 
         The callback may be ``async def``: it is awaited on the event loop,
         inside the call that delivers it (``poll()``, ``commit()``,
-        ``close()``, …), which returns only after it ended. Callbacks still
-        start one at a time in the order the commits complete, each after the
-        previous one ended. An exception it raises, ``CancelledError``
-        included, propagates out of the call that delivers it, as for a plain
-        callback (see :meth:`Consumer.commit_nowait`). On the synchronous
-        ``Consumer`` an ``async def`` callback is rejected: its coroutine is
-        closed, not awaited, and the delivering call raises ``TypeError``.
-        ``AsyncMockConsumer`` awaits it after this call returns (Java's mock
-        runs the callback inside ``commitAsync``), before its next awaited call
-        goes on, which raises the exception it raised (a deferred error).
-        On ``AsyncKafkaConsumer`` one delivered inside a ``commit()`` that
-        another callback issued, which blocks the loop, is awaited once that
-        commit returned (*deviation*: Java runs it inside that commit): the
-        delivering call raises its exception once it ended, wrapped as that
-        call wraps a callback's; a ``poll()`` returns its records first, and
-        its next awaited call raises it.
-
-        While the commit waits for its offsets, the core may deliver a queued
-        listener callback (``consumer-threading.md`` §31). A plain method runs
-        inside this call; an ``async def`` one cannot be awaited inside a plain
-        ``def``, so the rest of the commit then continues in a task on this
-        loop, the listener awaited there, and the next awaited call on the
-        consumer waits for it (and raises its failure). Until that task ends,
-        ``assignment()`` / ``subscription()`` / ``paused()`` read through the
-        core's ``ConsumerHandle``, a further ``commit_nowait()`` follows it,
-        ``metrics()`` answers (Java's takes no ``acquire()``), and
-        ``group_metadata()`` / ``current_lag()``, which the handle lacks, raise
-        ``ConcurrentModificationError``.
+        ``commit_nowait()``, ``close()``, …), which returns only after it ended.
+        Callbacks still start one at a time in the order the commits complete,
+        each after the previous one ended. An exception it raises,
+        ``CancelledError`` included, propagates out of the call that delivers
+        it, as for a plain callback (see :meth:`Consumer.commit_nowait`). On the
+        synchronous ``Consumer`` an ``async def`` callback is rejected: its
+        coroutine is closed, not awaited, and the delivering call raises
+        ``TypeError``. ``AsyncMockConsumer`` awaits it inside this call, as
+        Java's mock runs the callback inside ``commitAsync``.
 
         Called from inside a callback this consumer delivers, it commits through
         the core's ``ConsumerHandle`` and first runs the commit callbacks queued
@@ -201,9 +190,12 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         does; it blocks the event loop meanwhile, so an ``async def`` callback
         among them is scheduled there and awaited after this call returns, by
         the call delivering the outer callback, and the callbacks after it may
-        start before it ends (*deviation*). ``await commit()`` from inside a
+        start before it ends (*deviation*: Java runs it to its end inside this
+        call): the delivering call raises its exception once it ended, wrapped
+        as that call wraps a callback's; a ``poll()`` returns its records first,
+        and its next awaited call raises it. ``await commit()`` from inside a
         callback does the same."""
-        self._c_commit_nowait(offsets, callback)
+        await self._a_commit_nowait(offsets, callback)
 
     @overload
     async def seek(self, *, partition: TopicPartition, offset: int) -> None: ...
@@ -282,12 +274,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         return self._c_current_lag(topic_partition)
 
     def group_metadata(self) -> ConsumerGroupMetadata:
-        """See :meth:`Consumer.group_metadata`.
-
-        While a ``commit_nowait()`` still finishes in a task (a coroutine listener
-        it delivered is being awaited), this raises ``ConcurrentModificationError``:
-        that commit holds the consumer, and the core's ``ConsumerHandle`` has no
-        ``groupMetadata``."""
+        """See :meth:`Consumer.group_metadata`."""
         return self._c_group_metadata()
 
     async def close(self, *, option: CloseOptions | None = None) -> None:
@@ -350,7 +337,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         for partition, offset in result.rewind:
             try:
                 await self._run_async(*self._seek_spec(partition, offset, None),
-                                      after_commit_nowait=False)
+                                      raise_deferred=False)
             except Exception:  # noqa: BLE001 - the deserialization error matters
                 _LOG.exception("Could not seek %s back to offset %d", partition, offset)
         if result.error is not None and result.records.is_empty():
@@ -436,30 +423,41 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         if self._is_closed():
             return
         timeout_ms, operation = close_args(option)
-        # A commit_nowait() still awaiting its listener finishes first; its
-        # failure, or a deferred error, is raised once the consumer is closed
-        # (a callback's exception in Java's "Failed to close kafka consumer").
-        deferred: Exception | None = None
-        if not self._in_callback():
-            try:
-                await self._await_commit_continuation(_AT_CLOSE)
-            except Exception as exc:  # noqa: BLE001 - raised after the close
-                deferred = exc
+        # A deferred error (a coroutine commit callback's exception a poll kept,
+        # see _finish_async) is raised once the consumer is closed, as Java's
+        # close() raises a callback's exception: wrapped in "Failed to close
+        # kafka consumer", a KeyboardInterrupt as it is (_raise_at). It is the
+        # first exception, so it wins over a failure of the close itself.
+        deferred = None if self._in_callback() else self._take_deferred_error()
         # A call left on a closed event loop does not hold the consumer.
         self._release_abandoned()
-        if not self._begin_close():
+        try:
+            began = self._begin_close()
+        except BaseException:
+            self._keep_error(deferred)
+            raise
+        if not began:
+            self._keep_error(deferred)
             return
         try:
-            await self._run_async(*self._close_spec(timeout_ms, operation), site=_AT_CLOSE)
+            await self._run_async(*self._close_spec(timeout_ms, operation),
+                                  raise_deferred=False, site=_AT_CLOSE)
         except ConcurrentModificationError:
+            # Still open: the deferred error is the next awaited call's again.
             self._abort_close()
+            self._keep_error(deferred)
+            raise
+        except Exception:
+            await self._finish_close_off_loop()
+            if deferred is not None:
+                self._raise_at(deferred, _AT_CLOSE)
             raise
         except BaseException:
             await self._finish_close_off_loop()
             raise
         await self._finish_close_off_loop()
         if deferred is not None:
-            raise deferred
+            self._raise_at(deferred, _AT_CLOSE)
 
     # ---- coroutine callbacks (listener methods, commit callbacks) -----------
     def _defer_callback(self, awaitable: Awaitable[object], callback_id: int) -> bool:
@@ -469,8 +467,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         the exception it raised, ``CancelledError`` included, as a foreign
         callback error owning it, which the delivering call raises
         (``_raise_error``). The call delivering it waits for the task before going on
-        (``_wait_on_loop``, or ``_commit_nowait_on_loop``'s hand-off), and the
-        core waits for the report before it delivers the next callback, so the
+        (``_wait_on_loop``), and the core waits for the report before it delivers the next callback, so the
         callback still runs inside that call, callbacks start in the order the
         core delivers them, and the rebalance does not advance before a
         listener returns (``consumer-threading.md`` §31). The task is created
@@ -521,15 +518,14 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         return True
 
     # ---- commit_nowait (Java's commitAsync) on the event loop ----------------
-    def _c_commit_nowait(self, offsets: Any, callback: Callable[..., object] | None) -> None:
-        """``commit_nowait()`` on the loop's thread (see ``commit_nowait``).
+    async def _a_commit_nowait(self, offsets: Any, callback: Callable[..., object] | None) -> None:
+        """``commit_nowait()`` on the event loop (see ``commit_nowait``).
 
-        Inside a callback, it is ``Consumer``'s. Otherwise it submits the
-        ``_cb`` form and waits on this thread, running the queued callbacks
-        (``_commit_nowait_on_loop``); a coroutine listener method they deliver
-        hands the rest of the commit to a task on the loop. While a previous
-        ``commit_nowait()`` still finishes in a task, this one follows it in
-        another (``_follow_commit_nowait``)."""
+        Inside a callback, it is ``Consumer``'s, through the ConsumerHandle.
+        Otherwise it awaits the ``_cb`` form's completion (``_run_async``), the
+        same completion the synchronous ``Consumer`` waits on, running the queued
+        callbacks on the loop and awaiting a coroutine one there; its failure is
+        raised as it is, as Java's ``commitAsync`` throws it."""
         if self._in_callback():
             _ConsumerState._c_commit_nowait(self, offsets, callback)
             return
@@ -537,104 +533,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
             spec = None if offsets is None else offsets_to_spec(offsets)
             adapter = self._wrap_commit_callback(
                 callback, empty_offsets=offsets is not None and not offsets)
-        if self._commit_in_flight():
-            self._follow_commit_nowait(spec, adapter)
-            return
-        self._commit_nowait_on_loop(spec, adapter)
-
-    def _commit_nowait_on_loop(self, spec: Any, adapter: Any) -> None:
-        """Wait on this thread for the commit's completion, running the queued
-        callbacks, in 100 ms slices so a ``KeyboardInterrupt`` is delivered; a
-        coroutine listener method or commit callback they deliver (a task
-        ``_defer_callback`` created) hands the rest to a task on the loop
-        (``_continue_commit_nowait``), which then holds the use."""
-        submit, resolve, free = self._commit_nowait_spec(spec, adapter)
-        box: list[tuple[Any, ...]] = []
-        event = self._pending_event
-
-        def cb(*payload: Any) -> None:
-            box.append(payload)
-            event.set()
-
-        use = self._use()
-        h = use.__enter__()
-        handed_off = False
-        interrupted: KeyboardInterrupt | None = None
-        try:
-            event.clear()
-            self._drain(h)
-            submit(h, cb)
-            while True:
-                try:
-                    if self._listener_tasks and interrupted is None:
-                        loop = asyncio.get_running_loop()  # it created the tasks
-                        self._commit_continuation = loop.create_task(
-                            self._continue_commit_nowait(use, h, box, resolve, free))
-                        handed_off = True
-                        return
-                    if box:
-                        break
-                    event.wait(0.1)
-                    event.clear()
-                    self._drain(h)
-                except KeyboardInterrupt as exc:
-                    if interrupted is None:
-                        interrupted = exc
-                        _lib.Consumer_wakeup(h)
-        finally:
-            if not handed_off:
-                use.release()
-        payload = box[0]
-        if interrupted is not None:
-            free(payload)
-            raise interrupted
-        resolve(payload)
-
-    async def _continue_commit_nowait(self, use: Any, h: int, box: list[tuple[Any, ...]],
-                                      resolve: Any, free: Any) -> None:
-        """The rest of a ``commit_nowait()`` whose coroutine listener is awaited
-        on this loop: wait for the commit's completion on the loop
-        (``_wait_on_loop``, which awaits the listener first), and keep the
-        commit's failure for the next awaited call. Cancelled, it wakes the
-        consumer and still waits for the completion, so the use is not released
-        while the FFI call runs."""
-        loop = asyncio.get_running_loop()
-        pending = asyncio.Event()
-        waiter = (loop, pending)
-        self._async_waiters[waiter] = use
-        try:
-            cancelled = await self._wait_on_loop(h, lambda: bool(box), pending)
-            payload = box[0]
-            if cancelled is not None:
-                free(payload)
-                raise cancelled
-            self._finish_async(payload, resolve, free, _AT_LATER)
-        finally:
-            self._async_waiters.pop(waiter, None)
-            use.release()
-
-    def _follow_commit_nowait(self, spec: Any, adapter: Any) -> None:
-        """A ``commit_nowait()`` while the previous one still finishes in a task:
-        a task running this one after it, its failure kept for the next awaited
-        call."""
-        previous = self._commit_continuation
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            # Not on the loop that holds the consumer: another thread.
-            raise ConcurrentModificationError(
-                message="KafkaConsumer is not safe for multi-threaded access.") from None
-
-        async def follow() -> None:
-            if previous is not None:
-                await asyncio.wait({previous})
-            try:
-                await self._run_async(*self._commit_nowait_spec(spec, adapter),
-                                      after_commit_nowait=False, site=_AT_LATER)
-            except Exception as exc:  # noqa: BLE001 - raised by the next awaited call
-                self._keep_error(exc, from_callback=False)
-
-        self._commit_continuation = loop.create_task(follow())
+        await self._run_async(*self._commit_nowait_spec(spec, adapter))
 
     async def _finish_close_off_loop(self) -> None:
         """``_finish_close`` waits for the uses in flight and joins the core's

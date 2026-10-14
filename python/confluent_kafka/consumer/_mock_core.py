@@ -32,16 +32,12 @@ task may call back into the mock from the thread holding it, and another thread
 waits instead of failing (Java's mock is not thread-safe but serializes).
 ``wakeup()`` only sets its flag, as Java's ``AtomicBoolean``.
 
-``AsyncMockConsumer`` awaits the same body. An ``async def`` commit callback
-Java's mock would run inside ``commitAsync`` is awaited in a task on the loop,
-the callbacks one at a time in commit order, and each awaited method first
-waits for them (``_defer_commit_callback``). The exception one raises cannot
-propagate out of ``commit_nowait()``, as Java's would, since that call has
-returned: it is a deferred error, raised by the next awaited call once the
-callbacks ended (``close()`` closes the mock first). ``rebalance`` awaits a coroutine
-listener method there, and holds the mock's monitor for its task until it
-returns, as Java's ``synchronized`` ``rebalance`` runs the listener inside it
-(``_Monitor``). Meanwhile a method that enters Java's monitor, called from
+``AsyncMockConsumer`` awaits the same body. ``commit_nowait()`` awaits an
+``async def`` commit callback inside the call, as Java's mock runs the callback
+inside ``commitAsync``, and the exception it raises propagates out of it, as
+Java's would; ``rebalance`` awaits a coroutine listener method. Each holds the
+mock's monitor for its task until the awaited callback returns, as Java's
+``synchronized`` method runs the callback inside it (``_Monitor``). Meanwhile a method that enters Java's monitor, called from
 another task or another thread, raises ``ConcurrentModificationError`` with
 ``KafkaConsumer``'s message *(deviation: Java's caller waits, which a task on
 the rebalance's own loop cannot do without stopping it)*; the rebalance's own
@@ -177,14 +173,6 @@ class MockConsumerCore(Generic[K, V]):
         self._committed_offsets: dict[TopicPartition, OffsetAndMetadata] = {}
         self._last_poll_timeout: float | None = None
         self._max_poll_records = _LONG_MAX
-        # AsyncMockConsumer: the tasks running the commit callbacks deferred to
-        # the loop, each after the previous one (the tail), which the next
-        # awaited call waits for.
-        self._commit_callback_tasks: set[asyncio.Task[None]] = set()
-        self._commit_callback_tail: asyncio.Task[None] | None = None
-        # AsyncMockConsumer: the exceptions those callbacks raised, oldest
-        # first, each raised by one later awaited call (a deferred error).
-        self._commit_callback_errors: deque[BaseException] = deque()
 
     # ---- the interface methods ----------------------------------------------
     def _c_assignment(self) -> set[TopicPartition]:
@@ -221,9 +209,7 @@ class MockConsumerCore(Generic[K, V]):
 
     async def _a_rebalance(self, new_assignment: Iterable[TopicPartition]) -> None:
         """Async ``rebalance``: a coroutine listener method is awaited, the
-        monitor held for this task throughout (``_Monitor``), once the deferred
-        commit callbacks ended."""
-        await self._await_commit_callbacks()
+        monitor held for this task throughout (``_Monitor``)."""
         with self._lock:
             new_list, added, removed = self._rebalance_begin(new_assignment)
             listener = self._subscriptions.rebalance_listener()
@@ -335,61 +321,23 @@ class MockConsumerCore(Generic[K, V]):
         assert position is not None  # a valid position after _update_fetch_position
         return position
 
+    def _commit_async_body(self, offsets: Mapping[TopicPartition, OffsetAndMetadata],
+                           callback: Callable[..., object] | None) -> object:
+        """Java's ``commitAsync(Map, OffsetCommitCallback)``, under the mock's
+        lock: the callback runs inline, on this thread, and an exception it
+        raises propagates; what it returned (``None`` without a callback)."""
+        self._ensure_not_closed()
+        self._committed_offsets.update(offsets)
+        if callback is None:
+            return None
+        return callback(dict(offsets), None)
+
     def _c_commit_async(self, offsets: Mapping[TopicPartition, OffsetAndMetadata],
                       callback: Callable[..., object] | None) -> None:
-        """Java's ``commitAsync(Map, OffsetCommitCallback)``: the callback runs
-        inline, on this thread; an exception it raises propagates.
-
-        On ``AsyncMockConsumer`` an ``async def`` callback is awaited in a task
-        on the loop instead, and while such a task is pending a later callback
-        queues behind it, so callbacks start in commit order
-        (``_defer_commit_callback``)."""
+        """Java's ``commitAsync(Map, OffsetCommitCallback)`` (see
+        ``_commit_async_body``); a coroutine callback is rejected."""
         with self._lock:
-            self._ensure_not_closed()
-            self._committed_offsets.update(offsets)
-            if callback is None:
-                return
-            committed = dict(offsets)
-            if self._commit_callbacks_pending() and self._defer_commit_callback(
-                    lambda: callback(committed, None)):
-                return
-            result = callback(committed, None)
-            if inspect.isawaitable(result) and self._defer_commit_callback(lambda: result):
-                return
-            _no_coroutine(result, "OffsetCommitCallback", self._COROUTINE_REQUIRES)
-
-    # What a synchronous mock's coroutine callback lacks (see _no_coroutine).
-    _COROUTINE_REQUIRES = "an AsyncMockConsumer"
-
-    def _commit_callbacks_pending(self) -> bool:
-        """Whether a commit callback deferred to the loop has not ended yet."""
-        return bool(self._commit_callback_tasks)
-
-    def _defer_commit_callback(self, start: Callable[[], object]) -> bool:
-        """Run a commit callback (``start()``, awaiting what it returns) in a
-        task on the running loop, after the previous deferred one ended;
-        whether it was deferred. Only ``AsyncMockConsumer`` defers."""
-        return False
-
-    async def _await_commit_callbacks(self, *, raise_error: bool = True) -> None:
-        """Wait for the deferred commit callbacks, ahead of an awaited call
-        (``AsyncMockConsumer``), then raise the oldest exception one of them
-        raised and no call has raised yet, unless ``raise_error`` is false: Java's
-        mock raises it from ``commitAsync``, which has returned here, so it is a
-        deferred error. A callback's own call back into the mock does not wait
-        for itself."""
-        if _current_task() in self._commit_callback_tasks:
-            return
-        while self._commit_callback_tasks:
-            await asyncio.wait(set(self._commit_callback_tasks))
-        if raise_error:
-            self._raise_commit_callback_error()
-
-    def _raise_commit_callback_error(self) -> None:
-        """Raise the oldest exception a deferred commit callback raised, if any
-        (see ``_await_commit_callbacks``)."""
-        if self._commit_callback_errors:
-            raise self._commit_callback_errors.popleft()
+            _no_coroutine(self._commit_async_body(offsets, callback), "OffsetCommitCallback")
 
     def _c_commit(self, offsets: Mapping[TopicPartition, OffsetAndMetadata] | None) -> None:
         """Java's ``commitSync()`` / ``commitSync(Map)``."""
@@ -537,88 +485,88 @@ class MockConsumerCore(Generic[K, V]):
     # ---- the async peer's waiting methods: the same body ----------------------
     async def _a_subscribe_topics(self, topics: Iterable[str],
                                   callback: ConsumerRebalanceListener | None) -> None:
-        await self._await_commit_callbacks()
         self._c_subscribe_topics(topics, callback)
 
     async def _a_subscribe_pattern(self, pattern: SubscriptionPattern | None,
                                    callback: ConsumerRebalanceListener | None) -> None:
-        await self._await_commit_callbacks()
         self._c_subscribe_pattern(pattern, callback)
 
     async def _a_assign(self, partitions: Iterable[TopicPartition]) -> None:
-        await self._await_commit_callbacks()
         self._c_assign(partitions)
 
     async def _a_unsubscribe(self) -> None:
-        await self._await_commit_callbacks()
         self._c_unsubscribe()
 
     async def _a_poll(self, timeout: Duration) -> ConsumerRecords[K, V]:
-        await self._await_commit_callbacks()
         return self._c_poll(timeout)
 
     async def _a_commit(self, offsets: Mapping[TopicPartition, OffsetAndMetadata] | None) -> None:
-        await self._await_commit_callbacks()
         self._c_commit(offsets)
 
     async def _a_seek(self, partition: TopicPartition, offset: int | None,
                       offset_and_metadata: OffsetAndMetadata | None) -> None:
-        await self._await_commit_callbacks()
         self._c_seek(partition, offset, offset_and_metadata)
 
     async def _a_seek_to_beginning(self, partitions: Iterable[TopicPartition]) -> None:
-        await self._await_commit_callbacks()
         self._c_seek_to_beginning(partitions)
 
     async def _a_seek_to_end(self, partitions: Iterable[TopicPartition]) -> None:
-        await self._await_commit_callbacks()
         self._c_seek_to_end(partitions)
 
     async def _a_position(self, partition: TopicPartition) -> int:
-        await self._await_commit_callbacks()
         return self._c_position(partition)
 
     async def _a_committed(self, partitions: Iterable[TopicPartition]
                            ) -> dict[TopicPartition, OffsetAndMetadata | None]:
-        await self._await_commit_callbacks()
         return self._c_committed(partitions)
 
     async def _a_partitions_for(self, topic: str) -> list[PartitionInfo]:
-        await self._await_commit_callbacks()
         return self._c_partitions_for(topic)
 
     async def _a_list_topics(self) -> dict[str, list[PartitionInfo]]:
-        await self._await_commit_callbacks()
         return self._c_list_topics()
 
     async def _a_pause(self, partitions: Iterable[TopicPartition]) -> None:
-        await self._await_commit_callbacks()
         self._c_pause(partitions)
 
     async def _a_resume(self, partitions: Iterable[TopicPartition]) -> None:
-        await self._await_commit_callbacks()
         self._c_resume(partitions)
 
     async def _a_offsets_for_times(self, timestamps_to_search: Mapping[TopicPartition, int]
                                    ) -> dict[TopicPartition, OffsetAndTimestamp | None]:
-        await self._await_commit_callbacks()
         return self._c_offsets_for_times(timestamps_to_search)
 
     async def _a_beginning_offsets(self, partitions: Iterable[TopicPartition]
                                    ) -> dict[TopicPartition, int]:
-        await self._await_commit_callbacks()
         return self._c_beginning_offsets(partitions)
 
     async def _a_end_offsets(self, partitions: Iterable[TopicPartition]
                              ) -> dict[TopicPartition, int]:
-        await self._await_commit_callbacks()
         return self._c_end_offsets(partitions)
 
+    async def _a_commit_nowait(self, offsets: Mapping[TopicPartition, OffsetAndMetadata] | None,
+                               callback: Callable[..., object] | None) -> None:
+        """Async ``commitAsync()`` / ``commitAsync(callback)`` /
+        ``commitAsync(offsets, callback)``: Java's body, an ``async def``
+        callback awaited inside this call, as Java's mock runs the callback
+        inside ``commitAsync``, and the monitor held for this task until it
+        returns (``_Monitor``); an exception it raises, ``CancelledError``
+        included, propagates."""
+        with self._lock:
+            if offsets is None:
+                self._ensure_not_closed()
+                offsets = self._subscriptions.all_consumed()
+            result = self._commit_async_body(offsets, callback)
+            if not inspect.isawaitable(result):
+                return
+            previous, self._lock.owner = self._lock.owner, _current_task()
+        try:
+            await result
+        finally:
+            self._lock.owner = previous
+
     async def _a_close(self, option: CloseOptions | None) -> None:
-        # The mock closes before a deferred callback error is raised.
-        await self._await_commit_callbacks(raise_error=False)
         self._c_close(option)
-        self._raise_commit_callback_error()
 
     # ---- the Java mock's own methods ------------------------------------------
     def add_record(self, *, record: ConsumerRecord[K, V]) -> None:

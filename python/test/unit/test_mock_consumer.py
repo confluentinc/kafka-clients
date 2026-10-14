@@ -851,7 +851,7 @@ def test_async_mock_mirrors_the_sync_surface() -> None:
         consumer.add_record(record=rec)
         assert list(await consumer.poll(timeout=0)) == [rec]
         assert await consumer.position(partition=partition) == 1
-        consumer.commit_nowait()
+        await consumer.commit_nowait()
         assert await consumer.committed(partitions=[partition]) == {
             partition: OffsetAndMetadata(offset=1, leader_epoch=None, metadata="")}
         await consumer.pause(partitions=[partition])

@@ -15,17 +15,14 @@
 """``AsyncMockConsumer``: the asyncio peer of :class:`MockConsumer`, with the
 same constructor and the same mock methods (CLAUDE.md, Python Binding
 Conventions, Class family). ``rebalance`` is ``async def``: Java's waits on the
-listener it runs, which may be ``async def`` here and is awaited. A
-``commit_nowait()`` callback may be ``async def`` too: Java's mock runs the
-callback inside ``commitAsync``, which a plain ``def`` cannot await, so it is
-awaited in a task on the loop, and the next awaited call waits for it, as on
-``AsyncKafkaConsumer``."""
+listener it runs, which may be ``async def`` here and is awaited.
+``commit_nowait()`` is ``async def`` too, as on ``AsyncKafkaConsumer``: its
+callback may be ``async def``, and it is awaited inside the call, as Java's mock
+runs the callback inside ``commitAsync``."""
 
 from __future__ import annotations
 
-import asyncio
-import inspect
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 from ._mock_core import MockConsumerCore
@@ -61,36 +58,3 @@ class AsyncMockConsumer(MockConsumerCore[K, V], AsyncConsumer[K, V], Generic[K, 
         waits for the synchronized rebalance)*; the listener's own calls back
         into the consumer pass, and so does ``wakeup()``."""
         await self._a_rebalance(new_assignment)
-
-    # ---- coroutine commit callbacks -------------------------------------------
-    _COROUTINE_REQUIRES = "a running event loop"
-
-    def _defer_commit_callback(self, start: Callable[[], object]) -> bool:
-        """Run a commit callback in a task on the running loop: ``start()``
-        calls it, and what it returns is awaited when awaitable. The task waits
-        for the previously deferred one first, so the callbacks start in commit
-        order, each after the previous one ended. An exception the callback
-        raises, ``CancelledError`` included, is kept: the ``commit_nowait()``
-        Java's mock would raise it from has returned, so the next awaited call,
-        which waits for the task, raises it (``_await_commit_callbacks``)."""
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return False
-        previous = self._commit_callback_tail
-
-        async def run() -> None:
-            if previous is not None and not previous.done():
-                await asyncio.wait({previous})
-            try:
-                result = start()
-                if inspect.isawaitable(result):
-                    await result
-            except BaseException as exc:  # noqa: BLE001 - raised by the next awaited call
-                self._commit_callback_errors.append(exc)
-
-        task = loop.create_task(run())
-        self._commit_callback_tail = task
-        self._commit_callback_tasks.add(task)
-        task.add_done_callback(self._commit_callback_tasks.discard)
-        return True

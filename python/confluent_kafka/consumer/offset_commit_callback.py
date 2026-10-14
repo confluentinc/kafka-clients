@@ -29,9 +29,9 @@ The callback runs on the caller's thread, inside the call that delivers it
 on the thread calling ``poll()`` (Threads and callbacks). An exception it
 raises propagates out of that call, as Java's ``onComplete`` is called without
 a ``try`` (``poll()`` wraps it in a ``KafkaError`` unless it is one); the
-callbacks queued behind it run inside a later call. ``AsyncMockConsumer``
-raises the exception of an ``async def`` callback from its next awaited call,
-since the ``commit_nowait()`` Java's mock raises it from has returned.
+callbacks queued behind it run inside a later call. ``MockConsumer`` and
+``AsyncMockConsumer`` run it inside ``commit_nowait()``, as Java's mock does,
+which raises its exception.
 
 On ``AsyncKafkaConsumer`` and ``AsyncMockConsumer`` the callback passed to
 ``commit_nowait()`` may also be ``async def`` (rule 3, as for a listener

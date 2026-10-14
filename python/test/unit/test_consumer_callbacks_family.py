@@ -143,8 +143,8 @@ def test_async_mock_callback_runs_inline_on_the_loop() -> None:
             offset_reset_strategy="earliest")
         await consumer.assign(partitions=[TP])
         seen: list[Any] = []
-        consumer.commit_nowait(offsets={TP: OffsetAndMetadata(offset=3, metadata="m")},
-                               callback=lambda o, e: seen.append((o, e, threading.get_ident())))
+        await consumer.commit_nowait(offsets={TP: OffsetAndMetadata(offset=3, metadata="m")},
+                                     callback=lambda o, e: seen.append((o, e, threading.get_ident())))
         assert seen == [({TP: OffsetAndMetadata(offset=3, metadata="m")}, None,
                          threading.get_ident())]
         await consumer.close()
@@ -201,9 +201,14 @@ def test_async_coroutine_callback_is_awaited_before_the_delivering_call_returns(
             await released.wait()
             seen.append(("end", exception))
 
-        consumer.commit_nowait(offsets={TP: OffsetAndMetadata(offset=1)} if
-                               isinstance(consumer, AsyncMockConsumer) else {},
-                               callback=callback)
+        await consumer.commit_nowait(offsets={TP: OffsetAndMetadata(offset=1)} if
+                                     isinstance(consumer, AsyncMockConsumer) else {},
+                                     callback=callback)
+        if isinstance(consumer, AsyncMockConsumer):
+            # Java's mock runs the callback inside commitAsync.
+            assert seen == [("start", threading.get_ident()), ("end", None)]
+        else:
+            assert seen == []
         await deliver(consumer, call)
         assert seen == [("start", threading.get_ident()), ("end", None)]
         if call != "close":
@@ -231,9 +236,9 @@ def test_async_coroutine_callbacks_run_one_after_another(make: Any) -> None:
         offsets: dict[TopicPartition, OffsetAndMetadata] = (
             {TP: OffsetAndMetadata(offset=1)} if isinstance(consumer, AsyncMockConsumer) else {})
         # The first sleeps longest: the second still starts only after it ended.
-        consumer.commit_nowait(offsets=offsets, callback=callback("first", 0.1))
-        consumer.commit_nowait(offsets=offsets, callback=callback("second", 0.0))
-        consumer.commit_nowait(offsets=offsets, callback=plain)
+        await consumer.commit_nowait(offsets=offsets, callback=callback("first", 0.1))
+        await consumer.commit_nowait(offsets=offsets, callback=callback("second", 0.0))
+        await consumer.commit_nowait(offsets=offsets, callback=plain)
         await consumer.commit(offsets={})
         assert events == ["start first", "end first", "start second", "end second", "plain"]
         await consumer.close(option=CloseOptions.timeout(5))
@@ -253,8 +258,8 @@ def test_async_core_delivers_the_next_callback_only_after_the_coroutine_reported
             await asyncio.sleep(0.1)  # time for the core to deliver the next one
             queued_meanwhile.append(_lib.Consumer__execute_callbacks(consumer._h))
 
-        consumer.commit_nowait(offsets={}, callback=first)
-        consumer.commit_nowait(offsets={}, callback=lambda o, e: None)
+        await consumer.commit_nowait(offsets={}, callback=first)
+        await consumer.commit_nowait(offsets={}, callback=lambda o, e: None)
         await consumer.commit(offsets={})
         assert queued_meanwhile == [0]
         await consumer.close(option=CloseOptions.timeout(5))
@@ -272,9 +277,9 @@ class CallbackError(ValueError):
 def test_async_raising_coroutine_callback_propagates(make: Any, raised: BaseException) -> None:
     # Java's onComplete is called without a try: the exception propagates out
     # of the call that runs it. AsyncKafkaConsumer awaits the coroutine inside
-    # that call and reports the exception to the core, which raises it from the
-    # call; AsyncMockConsumer awaits it after commit_nowait() returned, so the
-    # next awaited call raises it (a deferred error).
+    # the call that delivers it and reports the exception to the core, which
+    # raises it from that call; AsyncMockConsumer awaits it inside
+    # commit_nowait(), as Java's mock runs it inside commitAsync.
     async def main() -> None:
         consumer = await make()
 
@@ -282,11 +287,14 @@ def test_async_raising_coroutine_callback_propagates(make: Any, raised: BaseExce
             await asyncio.sleep(0)
             raise raised
 
-        consumer.commit_nowait(offsets={TP: OffsetAndMetadata(offset=1)} if
-                               isinstance(consumer, AsyncMockConsumer) else {},
-                               callback=callback)
-        with pytest.raises(type(raised)) as e:
-            await consumer.commit(offsets={})
+        if isinstance(consumer, AsyncMockConsumer):
+            with pytest.raises(type(raised)) as e:
+                await consumer.commit_nowait(offsets={TP: OffsetAndMetadata(offset=1)},
+                                             callback=callback)
+        else:
+            await consumer.commit_nowait(offsets={}, callback=callback)
+            with pytest.raises(type(raised)) as e:
+                await consumer.commit(offsets={})
         assert e.value is raised
         # Raised once: the consumer goes on.
         await consumer.commit(offsets={})
@@ -307,10 +315,10 @@ def test_async_plain_raising_callback_propagates(make: Any) -> None:
         if isinstance(consumer, AsyncMockConsumer):
             # Java's mock runs it inside commitAsync.
             with pytest.raises(CallbackError) as e:
-                consumer.commit_nowait(offsets={TP: OffsetAndMetadata(offset=1)},
-                                       callback=callback)
+                await consumer.commit_nowait(offsets={TP: OffsetAndMetadata(offset=1)},
+                                             callback=callback)
         else:
-            consumer.commit_nowait(offsets={}, callback=callback)
+            await consumer.commit_nowait(offsets={}, callback=callback)
             with pytest.raises(CallbackError) as e:
                 await consumer.commit(offsets={})
         assert e.value is raised
@@ -319,19 +327,25 @@ def test_async_plain_raising_callback_propagates(make: Any) -> None:
     asyncio.run(main())
 
 
-def test_async_mock_close_raises_a_deferred_callback_error_once_closed() -> None:
+def test_async_mock_commit_nowait_awaits_a_coroutine_callback_inside_the_call() -> None:
+    # Java's MockConsumer.commitAsync runs the callback inline: the call returns
+    # only after the coroutine ended, and a later close() raises nothing.
     async def main() -> None:
         consumer = await async_mock_consumer()
-        raised = CallbackError("bad")
+        events: list[str] = []
+        released = asyncio.Event()
 
         async def callback(offsets: Any, exception: Any) -> None:
-            await asyncio.sleep(0)
-            raise raised
+            events.append("start")
+            asyncio.get_running_loop().call_later(0.05, released.set)
+            await released.wait()
+            events.append("end")
 
-        consumer.commit_nowait(offsets={TP: OffsetAndMetadata(offset=1)}, callback=callback)
-        with pytest.raises(CallbackError) as e:
-            await consumer.close(option=CloseOptions.timeout(5))
-        assert e.value is raised
+        await consumer.commit_nowait(offsets={TP: OffsetAndMetadata(offset=1)},
+                                     callback=callback)
+        events.append("returned")
+        assert events == ["start", "end", "returned"]
+        await consumer.close(option=CloseOptions.timeout(5))
         assert consumer.closed()
 
     asyncio.run(main())
@@ -354,11 +368,11 @@ def test_async_kafka_consumer_raising_coroutine_callback_inside_a_nested_commit(
 
         async def first(offsets: Any, exception: Any) -> None:
             await asyncio.sleep(0)
-            consumer.commit_nowait(offsets={}, callback=raising)
+            await consumer.commit_nowait(offsets={}, callback=raising)
             await consumer.commit(offsets={})
             events.append("first end")
 
-        consumer.commit_nowait(offsets={}, callback=first)
+        await consumer.commit_nowait(offsets={}, callback=first)
         with pytest.raises(CallbackError) as e:
             await asyncio.wait_for(consumer.commit(offsets={}), 10)
         assert e.value is raised
@@ -389,7 +403,7 @@ def test_async_kafka_consumer_close_wraps_a_raising_commit_callback(
             await asyncio.sleep(0)
             raise raised
 
-        consumer.commit_nowait(offsets={}, callback=awaited if coroutine else plain)
+        await consumer.commit_nowait(offsets={}, callback=awaited if coroutine else plain)
         with pytest.raises(KafkaError) as e:
             await consumer.close(option=CloseOptions.timeout(5))
         assert type(e.value) is KafkaError
@@ -421,11 +435,11 @@ def test_async_kafka_consumer_poll_returns_its_records_before_a_deferred_callbac
 
         async def first(offsets: Any, exception: Any) -> None:
             await asyncio.sleep(0)
-            consumer.commit_nowait(offsets={}, callback=raising)
+            await consumer.commit_nowait(offsets={}, callback=raising)
             await consumer.commit(offsets={})
             events.append("first end")
 
-        consumer.commit_nowait(offsets={}, callback=first)
+        await consumer.commit_nowait(offsets={}, callback=first)
         records = await asyncio.wait_for(consumer.poll(timeout=0), 10)
         assert records.is_empty()
         assert events == ["first end", "raising"]
@@ -465,13 +479,13 @@ def test_async_coroutine_callback_calls_back_into_the_consumer(make: Any) -> Non
         async def callback(offsets: Any, exception: Any) -> None:
             await asyncio.sleep(0)
             seen.append(consumer.assignment())
-            consumer.commit_nowait(offsets={}, callback=None)
+            await consumer.commit_nowait(offsets={}, callback=None)
             await consumer.pause(partitions=[TP])
             seen.append(consumer.paused())
 
-        consumer.commit_nowait(offsets={TP: OffsetAndMetadata(offset=1)} if
-                               isinstance(consumer, AsyncMockConsumer) else {},
-                               callback=callback)
+        await consumer.commit_nowait(offsets={TP: OffsetAndMetadata(offset=1)} if
+                                     isinstance(consumer, AsyncMockConsumer) else {},
+                                     callback=callback)
         await consumer.commit(offsets={})
         assert seen == [{TP}, {TP}]
         await consumer.close(option=CloseOptions.timeout(5))
@@ -559,16 +573,17 @@ def test_async_kafka_consumer_commit_inside_a_coroutine_callback_runs_the_queued
         async def first(offsets: Any, exception: Any) -> None:
             await asyncio.sleep(0)
             events.append("first")
-            consumer.commit_nowait(offsets={}, callback=queued_plain if queued == "plain"
-                                   else queued_coroutine)
+            await consumer.commit_nowait(offsets={}, callback=queued_plain if queued == "plain"
+                                         else queued_coroutine)
             events.append("queued it")
             if nested == "commit_nowait":
-                consumer.commit_nowait(offsets={}, callback=lambda o, e: events.append("nested"))
+                await consumer.commit_nowait(offsets={},
+                                             callback=lambda o, e: events.append("nested"))
             else:
                 await consumer.commit(offsets={})
             events.append("first end")
 
-        consumer.commit_nowait(offsets={}, callback=first)
+        await consumer.commit_nowait(offsets={}, callback=first)
         await asyncio.wait_for(consumer.commit(offsets={}), 10)
         await asyncio.wait_for(consumer.commit(offsets={}), 10)
         if queued == "plain":
@@ -592,15 +607,13 @@ def test_async_mock_commit_nowait_inside_a_coroutine_callback_runs_its_callback(
         async def first(o: Any, e: Any) -> None:
             await asyncio.sleep(0)
             events.append("first")
-            consumer.commit_nowait(offsets={TP: OffsetAndMetadata(offset=2)},
-                                   callback=lambda o, e: events.append("nested"))
+            await consumer.commit_nowait(offsets={TP: OffsetAndMetadata(offset=2)},
+                                         callback=lambda o, e: events.append("nested"))
             events.append("first end")
 
-        consumer.commit_nowait(offsets={TP: OffsetAndMetadata(offset=1)}, callback=first)
-        await consumer.commit(offsets={})
-        # Callbacks start one at a time in commit order: the nested one waits
-        # for the coroutine one still running (AsyncMockConsumer.commit_nowait).
-        assert events == ["first", "first end", "nested"]
+        await consumer.commit_nowait(offsets={TP: OffsetAndMetadata(offset=1)}, callback=first)
+        # Java's mock runs commitAsync's callback inline, the nested one too.
+        assert events == ["first", "nested", "first end"]
         assert await consumer.committed(partitions=[TP]) == {TP: OffsetAndMetadata(offset=2)}
         await consumer.close(option=CloseOptions.timeout(5))
 

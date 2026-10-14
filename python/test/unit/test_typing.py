@@ -303,9 +303,14 @@ def _consumer_family_types(c: object = None) -> None:
         assert_type(await ac.position(partition=tp), int)
         assert_type(ac.assignment(), "set[TopicPartition]")
         assert_type(ac.current_lag(topic_partition=tp), "int | None")
-        ac.commit_nowait(callback=callback)
-        ac.commit_nowait(callback=async_callback)
-        ac.commit_nowait(offsets={tp: OffsetAndMetadata(offset=5)}, callback=async_callback)
+        # commit_nowait is async def on the async peers: awaited, it yields None.
+        assert_type(await ac.commit_nowait(), None)
+        assert_type(await ac.commit_nowait(callback=callback), None)
+        assert_type(await ac.commit_nowait(callback=async_callback), None)
+        assert_type(await ac.commit_nowait(offsets={tp: OffsetAndMetadata(offset=5)},
+                                           callback=async_callback), None)
+        assert_type(await ac.commit_nowait(offsets={tp: OffsetAndMetadata(offset=5)},
+                                           callback=None), None)
         await ac.commit()
         await ac.seek(partition=tp, offset=5)
         await ac.close(option=CloseOptions.timeout(1.0))
@@ -313,9 +318,10 @@ def _consumer_family_types(c: object = None) -> None:
         assert_type(await abase.poll(timeout=0), "ConsumerRecords[str, bytes]")
         am: AsyncMockConsumer[int, int] = AsyncMockConsumer(offset_reset_strategy="latest")
         await am.rebalance(new_assignment=[tp])
-        am.commit_nowait(callback=async_callback)
-        am.commit_nowait(offsets={tp: OffsetAndMetadata(offset=5)}, callback=async_callback)
-        abase.commit_nowait(callback=async_callback)
+        assert_type(await am.commit_nowait(callback=async_callback), None)
+        assert_type(await am.commit_nowait(offsets={tp: OffsetAndMetadata(offset=5)},
+                                           callback=async_callback), None)
+        assert_type(await abase.commit_nowait(callback=async_callback), None)
         assert_type(await am.poll(timeout=0), "ConsumerRecords[int, int]")
 
     del _async

@@ -70,9 +70,11 @@ MOCK_METHODS = [
 ]
 
 # The methods whose entry point has an _async completion form in the FFI header
-# (Class family): not current_lag, although Java's waits (addAndGet).
-WAITING = {"subscribe", "assign", "unsubscribe", "poll", "commit", "seek", "seek_to_beginning",
-           "seek_to_end", "position", "committed", "partitions_for", "list_topics", "pause",
+# (Class family): not current_lag, although Java's waits (addAndGet); commit_nowait
+# is, as its entry point completes through _cb and Java's commitAsync waits for
+# the commit's offsetsReady.
+WAITING = {"subscribe", "assign", "unsubscribe", "poll", "commit", "commit_nowait", "seek",
+           "seek_to_beginning", "seek_to_end", "position", "committed", "partitions_for", "list_topics", "pause",
            "resume", "offsets_for_times", "beginning_offsets", "end_offsets", "close",
            "__aenter__", "__aexit__"}
 
@@ -299,7 +301,7 @@ def test_the_async_classes_check_the_same_forms() -> None:
             await c.seek(partition=TP)
         assert str(e.value) == SEEK_MESSAGE + "(partition)"
         with pytest.raises(IllegalArgumentError) as e:
-            c.commit_nowait(offsets={})
+            await c.commit_nowait(offsets={})
         assert str(e.value) == COMMIT_NOWAIT_MESSAGE + "(offsets)"
         with pytest.raises(TypeError):
             await c.close(timeout=1)  # type: ignore[call-arg]

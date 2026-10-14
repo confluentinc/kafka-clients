@@ -1268,10 +1268,63 @@ def test_async_commit_callback_runs_on_the_event_loop() -> None:
         consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
         await consumer.assign(partitions=[TP0])
         seen: list[int] = []
-        consumer.commit_nowait(offsets={}, callback=lambda o, e: seen.append(
+        await consumer.commit_nowait(offsets={}, callback=lambda o, e: seen.append(
             threading.get_ident()))
         await consumer.commit(offsets={})
         assert seen == [threading.get_ident()]
+        await consumer.close(option=CloseOptions.timeout(0))
+
+    asyncio.run(main())
+
+
+# Java's commitAsync throws its own failures (throwIfGroupIdNotDefined, the
+# offsetsReady wait, a queued callback executeCallbacks runs) from the call: on
+# the async consumer they raise from `await commit_nowait()`, and close() does
+# not raise them again.
+def test_async_commit_nowait_raises_its_own_error_and_close_does_not() -> None:
+    async def main() -> None:
+        consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs(None))
+        await consumer.assign(partitions=[TP0])
+        with pytest.raises(InvalidGroupIdError) as e:
+            await consumer.commit_nowait()
+        assert str(e.value) == NO_GROUP_ID
+        with pytest.raises(InvalidGroupIdError) as e:
+            await consumer.commit_nowait(offsets={TP0: OffsetAndMetadata(offset=1)},
+                                         callback=lambda o, e: None)
+        assert str(e.value) == NO_GROUP_ID
+        await consumer.close(option=CloseOptions.timeout(0))
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize("coroutine", [False, True], ids=["plain", "coroutine"])
+def test_async_a_raising_commit_callback_propagates_from_commit_nowait(coroutine: bool) -> None:
+    raised = CommitCallbackError("callback boom")
+    events: list[str] = []
+
+    def plain(offsets: Any, exception: Any) -> None:
+        events.append("boom")
+        raise raised
+
+    async def awaited(offsets: Any, exception: Any) -> None:
+        await asyncio.sleep(0)
+        events.append("boom")
+        raise raised
+
+    async def main() -> None:
+        consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
+        await consumer.assign(partitions=[TP0])
+        # An empty commit completes at once: its callback is queued for the
+        # next call, whose executeCallbacks runs it.
+        await consumer.commit_nowait(offsets={}, callback=awaited if coroutine else plain)
+        assert events == []
+        with pytest.raises(CommitCallbackError) as e:
+            await consumer.commit_nowait(offsets={}, callback=None)
+        assert e.value is raised
+        assert events == ["boom"]
+        # The consumer goes on, and close() does not raise it again.
+        await consumer.commit(offsets={})
+        assert events == ["boom"]
         await consumer.close(option=CloseOptions.timeout(0))
 
     asyncio.run(main())

@@ -54,8 +54,11 @@ Each async client lives in the same module as its sync peer, `Async`-prefixed
 (`AsyncKafkaProducer`, `AsyncKafkaConsumer`). A method is `async def` on the
 async class iff Java waits in it (on the background thread, the network, or a
 rebalance listener it runs); the others (`assignment()`, `subscription()`,
-`metrics()`, `group_metadata()`, `commit_nowait()`, `wakeup()`) stay plain
-`def` on both.
+`metrics()`, `group_metadata()`, `wakeup()`) stay plain `def` on both.
+`commit_nowait()` is `async def` on the async consumers, since Java's
+`commitAsync` waits for the background thread to take the offsets to commit:
+`await consumer.commit_nowait(callback=cb)` returns once the commit is sent,
+raising the call's own failure, and `cb` gets the result later.
 
 ## Producer
 

@@ -159,12 +159,10 @@ _LOCAL_CALLBACK = -29
 # client wrapped it (commit, commit_nowait, subscribe, ...); poll's
 # maybeWrapAsKafkaException, which leaves a KafkaException unwrapped; close's
 # new KafkaException("Failed to close kafka consumer", e), which wraps every
-# exception but an InterruptException. _AT_LATER raises nothing: the error is
-# kept for the next awaited call (a commit_nowait() finishing in a task).
+# exception but an InterruptException.
 _AT_CALL = 0
 _AT_POLL = 1
 _AT_CLOSE = 2
-_AT_LATER = 3
 
 # Java's AsyncKafkaConsumer.close() message.
 CLOSE_FAILED_MESSAGE = "Failed to close kafka consumer"
@@ -395,13 +393,10 @@ class _ConsumerState:
         # AsyncConsumer: the tasks awaiting a coroutine listener method, which
         # the delivering call waits for before it returns.
         self._listener_tasks: set[asyncio.Task[None]] = set()
-        # AsyncConsumer.commit_nowait(): the task finishing a commit whose
-        # coroutine listener is awaited on the loop, and its failure, raised by
-        # the next awaited call (_keep_error); whether it is a callback's
-        # exception, which that call wraps as Java's call would (_raise_at).
-        self._commit_continuation: asyncio.Task[None] | None = None
+        # AsyncConsumer: a coroutine commit callback's exception a poll could
+        # not raise without losing its records, raised by the next awaited call
+        # (_keep_error, _raise_deferred_error).
         self._deferred_error: BaseException | None = None
-        self._deferred_from_callback = False
         # AsyncConsumer: the exception a coroutine commit callback raised after
         # its invocation was reported (see _take_callback_error).
         self._callback_error: BaseException | None = None
@@ -547,12 +542,6 @@ class _ConsumerState:
     def _exit_callback(token: contextvars.Token[frozenset[int]]) -> None:
         _IN_CALLBACK.reset(token)
 
-    def _inside_own_call(self) -> bool:
-        """Whether a call on this consumer holds its FFI guard for this context:
-        a callback it is delivering, or a ``commit_nowait()`` still finishing on
-        the loop; a read then goes through the ConsumerHandle."""
-        return self._in_callback() or self._commit_in_flight()
-
     def _handle(self) -> int:
         """The core's guard-free ``ConsumerHandle`` (created lazily)."""
         with self._lifecycle:
@@ -649,8 +638,8 @@ class _ConsumerState:
         """The exception a coroutine commit callback raised after its
         invocation was already reported to the core (``AsyncConsumer``'s
         ``_defer_callback`` inside a blocking ConsumerHandle commit), cleared;
-        the delivering call raises it once it has ended, or keeps it for the
-        next awaited call (``_finish_async``)."""
+        the delivering call raises it once it has ended, or, a ``poll``, keeps
+        it for the next awaited call (``_finish_async``)."""
         error, self._callback_error = self._callback_error, None
         return error
 
@@ -703,8 +692,8 @@ class _ConsumerState:
 
     @staticmethod
     def _raise_at(error: BaseException, site: int) -> NoReturn:
-        """Raise a callback's exception the core never saw (a deferred error,
-        see ``_take_callback_error`` and ``_keep_error``) as the call at
+        """Raise a callback's exception the core never saw (see
+        ``_take_callback_error`` and ``_keep_error``) as the call at
         ``site`` raises one it delivered (``_raise_error``): a
         ``KeyboardInterrupt`` as it is (Java's ``InterruptException``); at
         ``poll`` Java's ``maybeWrapAsKafkaException`` (a ``KafkaError`` as it
@@ -719,20 +708,25 @@ class _ConsumerState:
             raise KafkaError(message=CLOSE_FAILED_MESSAGE, cause=error) from error
         raise error
 
-    def _keep_error(self, error: BaseException, *, from_callback: bool) -> None:
-        """Keep a failure no call could raise for the next awaited call
-        (``_await_commit_continuation``), unless an older one is kept: Java's
-        first exception wins. ``from_callback``: it is a callback's exception,
-        which that call wraps as it would wrap one it delivered (``_raise_at``)."""
-        if self._deferred_error is None:
+    def _keep_error(self, error: BaseException | None) -> None:
+        """Keep a coroutine commit callback's exception a ``poll`` could not
+        raise for the next awaited call (``_raise_deferred_error``), unless an
+        older one is kept: Java's first exception wins. ``None`` keeps nothing."""
+        if error is not None and self._deferred_error is None:
             self._deferred_error = error
-            self._deferred_from_callback = from_callback
 
-    @staticmethod
-    def _reports_a_callback_error(error: int) -> bool:
-        """Whether a BORROWED error handle reports a callback's exception, in
-        its cause chain."""
-        return bool(error) and _lib.KafkaError_callback_exception(error) is not None
+    def _take_deferred_error(self) -> BaseException | None:
+        """The kept exception (``_keep_error``), cleared."""
+        error, self._deferred_error = self._deferred_error, None
+        return error
+
+    def _raise_deferred_error(self, site: int) -> None:
+        """Raise the kept exception, if any (``_keep_error``), as the call at
+        ``site`` raises a callback's exception it delivers (``_raise_at``), as
+        Java raises it from the call running the callback."""
+        error = self._take_deferred_error()
+        if error is not None:
+            self._raise_at(error, site)
 
     def _wrap_commit_callback(self, callback: Callable[..., object] | None, *,
                               empty_offsets: bool = False
@@ -845,31 +839,29 @@ class _ConsumerState:
     async def _run_async(self, submit: Callable[[int, Callable[..., None]], None],
                          resolve: Callable[[tuple[Any, ...]], _T],
                          free: Callable[[tuple[Any, ...]], None], *,
-                         after_commit_nowait: bool = True, site: int = _AT_CALL) -> _T:
+                         raise_deferred: bool = True, site: int = _AT_CALL) -> _T:
         """Async peer of ``_run_sync``: awaits the completion on the event loop,
         running the queued callbacks on the loop, and awaiting a coroutine
         listener there. Cancelling the awaiting task wakes the consumer, lets
         the call end, frees its result and re-raises ``CancelledError``.
 
-        It first lets a ``commit_nowait()`` still awaiting a coroutine listener
-        finish (``after_commit_nowait``), and raises that commit's failure, or
-        a deferred error an earlier call kept, wrapped as the call at ``site``
-        wraps a callback's exception (``_raise_at``).
+        It first raises the exception of a coroutine commit callback an
+        earlier ``poll`` kept (``raise_deferred``), wrapped as the call at
+        ``site`` wraps a callback's exception (``_raise_deferred_error``).
 
         A coroutine commit callback a blocking ConsumerHandle commit delivered
         during the call may raise after the call ended (``_take_callback_error``):
         the call then raises that exception, wrapped for its ``site``, instead
         of its own result; but ``poll`` (``_AT_POLL``) returns its records, whose
         positions the core has already advanced, and keeps the exception for the
-        next awaited call, and ``_AT_LATER`` keeps it, or the call's own failure,
-        and returns ``None``.
+        next awaited call.
 
         The results of earlier calls left for an event loop that has closed are
         freed first (see :class:`~confluent_kafka._async.Undelivered`)."""
         self._undelivered.free_closed()
         self._release_abandoned()
-        if after_commit_nowait and not self._in_callback():
-            await self._await_commit_continuation(site)
+        if raise_deferred and not self._in_callback():
+            self._raise_deferred_error(site)
         self._refuse_inside_callback()
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[tuple[Any, ...]] = loop.create_future()
@@ -907,24 +899,11 @@ class _ConsumerState:
         ``resolve(payload)``, unless a coroutine commit callback raised after
         its invocation was reported."""
         callback_error = self._take_callback_error()
-        if site == _AT_LATER:
-            # A void call (a commit_nowait() finishing in a task): nothing is
-            # raised, its failure is kept.
-            if callback_error is not None:
-                free(payload)
-                self._keep_error(callback_error, from_callback=True)
-                return cast(_T, None)
-            from_callback = self._reports_a_callback_error(payload[0])
-            try:
-                return resolve(payload)
-            except Exception as exc:  # noqa: BLE001 - raised by the next awaited call
-                self._keep_error(exc, from_callback=from_callback)
-                return cast(_T, None)
         if callback_error is not None:
             if site == _AT_POLL:
                 # Never lose the fetched records: the core has advanced the
                 # positions past them.
-                self._keep_error(callback_error, from_callback=True)
+                self._keep_error(callback_error)
             else:
                 free(payload)
                 self._raise_at(callback_error, site)
@@ -951,31 +930,6 @@ class _ConsumerState:
                 if cancelled is None:
                     cancelled = exc
                     _lib.Consumer_wakeup(h)
-
-    async def _await_commit_continuation(self, site: int = _AT_CALL) -> None:
-        """Wait for the ``commit_nowait()`` still awaiting a coroutine listener
-        (``AsyncConsumer``), then raise its failure, or a deferred error an
-        earlier call kept (``_keep_error``), as Java raises a listener's error
-        from the next call that runs it; a callback's exception is wrapped as
-        the call at ``site`` wraps one it delivers (``_raise_at``)."""
-        task = self._commit_continuation
-        if task is not None:
-            if not task.done():
-                await asyncio.wait({task})
-            if self._commit_continuation is task:
-                self._commit_continuation = None
-        error, self._deferred_error = self._deferred_error, None
-        from_callback, self._deferred_from_callback = self._deferred_from_callback, False
-        if error is not None:
-            if from_callback:
-                self._raise_at(error, site)
-            raise error
-
-    def _commit_in_flight(self) -> bool:
-        """Whether a ``commit_nowait()`` is still finishing on the loop, holding
-        the consumer (``AsyncConsumer``)."""
-        task = self._commit_continuation
-        return task is not None and not task.done()
 
     # ---- payload handlers ---------------------------------------------------
     def _resolve_void(self, payload: tuple[Any, ...]) -> None:
@@ -1111,19 +1065,19 @@ class _ConsumerState:
 
     def _c_assignment(self) -> set[TopicPartition]:
         with self._use() as h:
-            raw = (_lib.ConsumerHandle_assignment(self._handle()) if self._inside_own_call()
+            raw = (_lib.ConsumerHandle_assignment(self._handle()) if self._in_callback()
                    else self._read(_lib.Consumer_assignment(h)))
         return {TopicPartition(topic=t, partition=p) for (t, p) in raw}
 
     def _c_subscription(self) -> set[str]:
         with self._use() as h:
-            raw = (_lib.ConsumerHandle_subscription(self._handle()) if self._inside_own_call()
+            raw = (_lib.ConsumerHandle_subscription(self._handle()) if self._in_callback()
                    else self._read(_lib.Consumer_subscription(h)))
         return set(raw)
 
     def _c_paused(self) -> set[TopicPartition]:
         with self._use() as h:
-            raw = (_lib.ConsumerHandle_paused(self._handle()) if self._inside_own_call()
+            raw = (_lib.ConsumerHandle_paused(self._handle()) if self._in_callback()
                    else self._read(_lib.Consumer_paused(h)))
         return {TopicPartition(topic=t, partition=p) for (t, p) in raw}
 

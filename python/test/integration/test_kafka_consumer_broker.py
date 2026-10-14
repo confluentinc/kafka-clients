@@ -287,8 +287,8 @@ def test_async_commit_callback_runs_on_the_event_loop(kafka_broker: Any) -> None
         try:
             await consumer.assign(partitions=[tp])
             assert await _poll_until_async(consumer, lambda v: len(v) >= 1) == ["a"]
-            consumer.commit_nowait(offsets={tp: OffsetAndMetadata(offset=1)},
-                                   callback=lambda o, e: seen.append(threading.get_ident()))
+            await consumer.commit_nowait(offsets={tp: OffsetAndMetadata(offset=1)},
+                                         callback=lambda o, e: seen.append(threading.get_ident()))
             await consumer.commit()  # waits for the pending async commit
             assert seen == [threading.get_ident()]
         finally:
@@ -502,10 +502,27 @@ def test_async_commit_nowait_during_a_rebalance_runs_the_listener_on_the_loop(
     topic = _rebalance_topic(kafka_broker)
     configs = _configs(kafka_broker, **{"max.poll.records": "5"})
     events: list[tuple[str, int, int]] = []
-    state: dict[str, Any] = {"after_revoke": 0}
+    # "running" counts the coroutine listener methods begun and not yet ended;
+    # "in_commit" is set while an `await commit_nowait()` is in progress and
+    # "during_commit" counts the listener methods it delivered.
+    state: dict[str, Any] = {"after_revoke": 0, "running": 0, "in_commit": False,
+                             "during_commit": 0}
 
     async def main() -> None:
         consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs)
+
+        async def awaited(name: str, partitions: set[TopicPartition]) -> None:
+            state["running"] += 1
+            if state["in_commit"]:
+                state["during_commit"] += 1
+            try:
+                await asyncio.sleep(0.05)
+                if name == "revoked":
+                    # A reentrant call from the listener still works.
+                    consumer.assignment()
+                record(name, partitions)
+            finally:
+                state["running"] -= 1
 
         def record(name: str, partitions: set[TopicPartition]) -> None:
             events.append((name, len(partitions), threading.get_ident()))
@@ -520,15 +537,11 @@ def test_async_commit_nowait_during_a_rebalance_runs_the_listener_on_the_loop(
         class Coroutine(ConsumerRebalanceListener):
             async def on_partitions_revoked(  # type: ignore[override]
                     self, partitions: set[TopicPartition]) -> None:
-                await asyncio.sleep(0.01)
-                # A reentrant call from the listener still works.
-                consumer.assignment()
-                record("revoked", partitions)
+                await awaited("revoked", partitions)
 
             async def on_partitions_assigned(  # type: ignore[override]
                     self, partitions: set[TopicPartition]) -> None:
-                await asyncio.sleep(0.01)
-                record("assigned", partitions)
+                await awaited("assigned", partitions)
 
         member: _Member | None = None
         try:
@@ -539,7 +552,15 @@ def test_async_commit_nowait_during_a_rebalance_runs_the_listener_on_the_loop(
                 assert time.monotonic() < deadline, f"no progress: {events}"
                 if not (await consumer.poll(timeout=0.5)).is_empty():
                     await asyncio.sleep(0.05)
-                    consumer.commit_nowait()
+                    # commit_nowait waits for its offsets as Java's commitAsync
+                    # does, delivering the listener methods that wait drains:
+                    # each one is awaited before the call returns.
+                    state["in_commit"] = True
+                    try:
+                        await consumer.commit_nowait()
+                    finally:
+                        state["in_commit"] = False
+                    assert state["running"] == 0, "a listener outlived commit_nowait"
                 if member is None and any(e[:2] == ("assigned", 4) for e in events):
                     member = _Member(configs, topic)
                 if any(event[0] == "revoked" for event in events):
@@ -762,13 +783,13 @@ def test_async_poll_returns_its_records_before_a_deferred_commit_callback_error(
 
         async def first(offsets: Any, exception: Any) -> None:
             await asyncio.sleep(0)
-            consumer.commit_nowait(offsets={}, callback=raising)
+            await consumer.commit_nowait(offsets={}, callback=raising)
             await consumer.commit(offsets={})
             events.append("first end")
 
         try:
             await consumer.assign(partitions=[tp])
-            consumer.commit_nowait(offsets={}, callback=first)
+            await consumer.commit_nowait(offsets={}, callback=first)
             # The poll delivering the callbacks returns, with what it fetched.
             values = [r.value() for r in await consumer.poll(timeout=10)]
             assert events == ["first end", "raising"]
