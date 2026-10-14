@@ -907,7 +907,8 @@ unsafe fn producer_static_ref(ptr: usize) -> ProducerStaticRef {
             // `into_inner`); extending the borrow to `'static` is sound under this
             // function's `# Safety` (a live, not yet destroyed handle), and every use is
             // bounded by the caller's keep-alive — a task registered via
-            // `reserve_pending_task` that `destroy` joins before dropping `kind`, or
+            // `reserve_pending_task` or the submission task, both of which `destroy`
+            // joins before dropping `kind`, or
             // `with_txn_control`'s synchronous `block_on` inside a C call — as documented
             // on `ProducerStaticRef`. The `kind` guard protects only this lookup and is
             // dropped on return, so no lock is held across the callers' `.await`s.
@@ -920,7 +921,8 @@ unsafe fn producer_static_ref(ptr: usize) -> ProducerStaticRef {
             // `into_inner`); extending the borrow to `'static` is sound under this
             // function's `# Safety` (a live, not yet destroyed handle), and every use is
             // bounded by the caller's keep-alive — a task registered via
-            // `reserve_pending_task` that `destroy` joins before dropping `kind`, or
+            // `reserve_pending_task` or the submission task, both of which `destroy`
+            // joins before dropping `kind`, or
             // `with_txn_control`'s synchronous `block_on` inside a C call — as documented
             // on `ProducerStaticRef`. The `kind` guard protects only this lookup and is
             // dropped on return.
@@ -7712,7 +7714,7 @@ mod tests {
         assert_eq!(
             0,
             commit.errors.load(std::sync::atomic::Ordering::Acquire),
-            "the commit must run after the sends ahead of it were handed over"
+            "the commit queued behind the sends must succeed"
         );
     }
 
