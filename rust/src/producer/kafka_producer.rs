@@ -5147,7 +5147,7 @@ mod tests {
         // Simulate the sender completing all batches by aborting them.
         // abort() calls complete_future_and_fire_callbacks which calls
         // produce_future.set() and produce_future.done(), unblocking flush.
-        accumulator.abort_incomplete_batches();
+        accumulator.abort_incomplete_batches().await;
 
         // Now all futures should be done (abort marks ProduceRequestResults as done)
         for f in &futures {
@@ -6675,7 +6675,7 @@ mod tests {
             // The record still sits in the accumulator carrying the callback; the
             // accumulator fires it exactly once when the batch is aborted (as the
             // Sender's abort/close path would).
-            ctx.accumulator.abort_incomplete_batches();
+            ctx.accumulator.abort_incomplete_batches().await;
             (count_after_send, count.load(Ordering::SeqCst))
         });
 

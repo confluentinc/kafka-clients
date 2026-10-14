@@ -981,7 +981,7 @@ impl<C: KafkaClient> Sender<C> {
                 }
             }
             kafka_debug!(self.log_context, "Aborting incomplete batches due to forced shutdown");
-            self.accumulator.abort_incomplete_batches();
+            self.accumulator.abort_incomplete_batches().await;
             // `abortIncompleteBatches` covers drained batches in Java because
             // `abortBatches` walks `incomplete.copyAll()`; here the accumulator can only
             // reach its own deques, so the Sender aborts its share with the same reason
