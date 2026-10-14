@@ -152,6 +152,7 @@ import pytest
 from confluent_kafka import (
     ConcurrentModificationError, IllegalArgumentError, IllegalStateError, NullPointerError,
 )
+from confluent_kafka._errors import UNKNOWN_SERVER_ERROR
 from confluent_kafka.common import KafkaError, TopicPartition
 from confluent_kafka.common.config import ConfigError
 from confluent_kafka.common.errors import BootstrapResolutionError
@@ -162,7 +163,7 @@ from confluent_kafka.consumer import (
     AsyncKafkaConsumer, CloseOptions, ConsumerRebalanceListener, KafkaConsumer,
     OffsetAndMetadata, SubscriptionPattern,
 )
-from confluent_kafka.consumer._base import poll_timeout_ms
+from confluent_kafka.consumer._base import _PENDING_ASSIGNED, poll_timeout_ms
 
 WAIT = 10.0
 TOPIC = "test"
@@ -1286,6 +1287,151 @@ def test_async_commit_callback_runs_on_the_event_loop() -> None:
         await consumer.commit(offsets={})
         assert seen == [threading.get_ident()]
         await consumer.close(option=CloseOptions.timeout(0))
+
+    asyncio.run(main())
+
+
+# ---------------------------------------------------------------------------
+# An entry taken from the caller-thread queue is acked once, whatever is raised
+# ---------------------------------------------------------------------------
+# A stand-in entry handle: the faked queue calls never hand it to the core.
+ENTRY = 0x5EED
+WRAPPED = "User rebalance callback throws an error"
+
+
+class FakeQueue:
+    """Stands in for the C calls on the caller-thread queue: hands out one
+    ``onPartitionsAssigned`` entry for ``TP0``, and records each ack as
+    ``(entry, code, message)`` of its error, both ``None`` for none (the error
+    handle is freed)."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.acks: list[tuple[int, int | None, str | None]] = []
+        entries = [ENTRY]
+        monkeypatch.setattr(_lib, "Consumer_next_pending_callback",
+                            lambda h: entries.pop() if entries else None)
+        monkeypatch.setattr(_lib, "PendingCallback_method", lambda pending: _PENDING_ASSIGNED)
+        monkeypatch.setattr(_lib, "PendingCallback_partitions", lambda pending: [(TOPIC, 0)])
+
+        def ack(pending: int, error: int) -> None:
+            code = message = None
+            if error:
+                code, message = _lib.KafkaError_code(error), _lib.KafkaError_message(error)
+                _lib.KafkaError_destroy(error)
+            self.acks.append((pending, code, message))
+
+        monkeypatch.setattr(_lib, "Consumer_ack_pending_callback", ack)
+
+
+def interrupt_first_error(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Makes the first error handle built raise ``KeyboardInterrupt``, as a
+    Ctrl+C landing while a listener's failure is reported; returns the
+    messages of every attempt."""
+    real = _lib.KafkaError_new
+    messages: list[str] = []
+
+    def new(code: int, message: str) -> int:
+        messages.append(message)
+        if len(messages) == 1:
+            raise KeyboardInterrupt
+        handle: int = real(code, message)
+        return handle
+
+    monkeypatch.setattr(_lib, "KafkaError_new", new)
+    return messages
+
+
+class AssignedRecorder(ConsumerRebalanceListener):
+    """Records each ``on_partitions_assigned`` call, then raises ``failure``."""
+
+    def __init__(self, failure: BaseException | None = None) -> None:
+        self.assigned: list[set[TopicPartition]] = []
+        self.failure = failure
+
+    def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
+        self.assigned.append(set(partitions))
+        if self.failure is not None:
+            raise self.failure
+
+
+def test_ctrl_c_before_the_listener_runs_still_acks_its_entry_as_failed() -> None:
+    # Ctrl+C landing while the entry's partitions are converted, before the
+    # listener runs, fails the entry rather than leaving it unacked: the call
+    # parked on it, and destroy, would wait for good. The interrupt is re-raised.
+    listener = AssignedRecorder()
+    with new_consumer() as consumer:
+        consumer.subscribe(topics=[TOPIC], callback=listener)
+        with pytest.MonkeyPatch.context() as m:
+            queue = FakeQueue(m)
+
+            def interrupted(pending: int) -> list[tuple[str, int]]:
+                raise KeyboardInterrupt
+
+            m.setattr(_lib, "PendingCallback_partitions", interrupted)
+            with pytest.raises(KeyboardInterrupt):
+                consumer._drain_pending(consumer._h, [])  # noqa: SLF001
+    assert listener.assigned == []
+    assert queue.acks == [(ENTRY, UNKNOWN_SERVER_ERROR, "")]
+
+
+def test_ctrl_c_while_a_listener_failure_is_reported_still_acks_its_entry_as_failed() -> None:
+    # Ctrl+C while the listener's failure is reported to the core: the entry
+    # still fails, with Java's wrapper message.
+    listener = AssignedRecorder(failure=RuntimeError("boom"))
+    with new_consumer() as consumer:
+        consumer.subscribe(topics=[TOPIC], callback=listener)
+        with pytest.MonkeyPatch.context() as m:
+            queue = FakeQueue(m)
+            attempts = interrupt_first_error(m)
+            with pytest.raises(KeyboardInterrupt):
+                consumer._drain_pending(consumer._h, [])  # noqa: SLF001
+    assert listener.assigned == [{TP0}]
+    assert attempts == [WRAPPED, WRAPPED]
+    assert queue.acks == [(ENTRY, UNKNOWN_SERVER_ERROR, WRAPPED)]
+
+
+def test_ctrl_c_as_the_listener_window_closes_still_acks_its_entry() -> None:
+    # Ctrl+C right after the listener returned, as the callback window closes:
+    # the entry is acked all the same, as failed, and the interrupt re-raised.
+    listener = AssignedRecorder()
+    with new_consumer() as consumer:
+        consumer.subscribe(topics=[TOPIC], callback=listener)
+        with pytest.MonkeyPatch.context() as m:
+            queue = FakeQueue(m)
+            close_window = consumer._exit_callback  # noqa: SLF001
+
+            def exit_callback(token: Any) -> None:
+                close_window(token)
+                raise KeyboardInterrupt
+
+            m.setattr(consumer, "_exit_callback", exit_callback)
+            with pytest.raises(KeyboardInterrupt):
+                consumer._drain_pending(consumer._h, [])  # noqa: SLF001
+    assert listener.assigned == [{TP0}]
+    assert queue.acks == [(ENTRY, UNKNOWN_SERVER_ERROR, "")]
+
+
+def test_ctrl_c_while_a_coroutine_listener_failure_is_reported_still_acks_its_entry() -> None:
+    # The entry a drain hands over to be awaited on the loop is acked by the
+    # awaiting side whatever is raised there: under asyncio.run a first Ctrl+C
+    # cancels the listener, and a second one raises KeyboardInterrupt while that
+    # cancellation is reported.
+    async def main() -> None:
+        consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
+        try:
+            async def on_partitions_assigned() -> None:
+                raise asyncio.CancelledError
+
+            with pytest.MonkeyPatch.context() as m:
+                queue = FakeQueue(m)
+                attempts = interrupt_first_error(m)
+                with pytest.raises(KeyboardInterrupt):
+                    await consumer._await_listener(  # noqa: SLF001
+                        ENTRY, on_partitions_assigned(), [])
+            assert attempts == ["", WRAPPED]
+            assert queue.acks == [(ENTRY, UNKNOWN_SERVER_ERROR, WRAPPED)]
+        finally:
+            await consumer.close(option=CloseOptions.timeout(0))
 
     asyncio.run(main())
 

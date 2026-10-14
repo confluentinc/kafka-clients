@@ -39,9 +39,9 @@ pub(crate) enum ConsumerRebalanceListenerMethodName {
     // Java names it in the `ConsumerRebalanceListenerCallbackCompletedEvent`
     // that `AsyncKafkaConsumer.applyNewAssignment` sends back when applying an
     // assignment fails. Rust acks a `PartitionsAssigned` event through its
-    // oneshot instead (consumer-threading.md §31), so outside tests the
-    // variant is only matched, never built.
-    #[cfg_attr(not(test), expect(dead_code))]
+    // oneshot instead (consumer-threading.md §31), so the core only matches the
+    // variant; only tests and the C FFI's caller-thread listener build it.
+    #[cfg_attr(not(any(test, feature = "ffi")), expect(dead_code))]
     OnPartitionsAssigned,
     /// Corresponds to `ConsumerRebalanceListener::on_partitions_lost`.
     OnPartitionsLost,
