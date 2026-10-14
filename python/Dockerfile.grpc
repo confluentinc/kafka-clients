@@ -31,10 +31,11 @@ WORKDIR /workspace
 
 # Recreate the project layout that setup.py expects: setup.py lives at
 # python/ and computes project_root = ../rust/, looking for the
-# Rust header at rust/target/include/confluent_kafka.h and the shared lib
-# under rust/target/release/.
+# Rust header at rust/target/include/ and the shared lib under
+# rust/target/release/. The extension includes confluent_kafka_bindings.h, the
+# header of `_err` twins for language bindings, not the C users' header.
 COPY rust/target/release/libconfluent_kafka.so /workspace/rust/target/release/libconfluent_kafka.so
-COPY rust/target/include/confluent_kafka.h /workspace/rust/target/include/confluent_kafka.h
+COPY rust/target/include/confluent_kafka_bindings.h /workspace/rust/target/include/confluent_kafka_bindings.h
 COPY python/_confluentkafka.c /workspace/python/_confluentkafka.c
 COPY python/setup.py /workspace/python/setup.py
 COPY python/pyproject.toml /workspace/python/pyproject.toml

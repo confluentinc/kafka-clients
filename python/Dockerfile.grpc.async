@@ -36,7 +36,7 @@ RUN apt-get update && \
 WORKDIR /workspace
 
 COPY rust/target/release/libconfluent_kafka.so /workspace/rust/target/release/libconfluent_kafka.so
-COPY rust/target/include/confluent_kafka.h /workspace/rust/target/include/confluent_kafka.h
+COPY rust/target/include/confluent_kafka_bindings.h /workspace/rust/target/include/confluent_kafka_bindings.h
 COPY python/_confluentkafka.c /workspace/python/_confluentkafka.c
 COPY python/setup.py /workspace/python/setup.py
 COPY python/pyproject.toml /workspace/python/pyproject.toml

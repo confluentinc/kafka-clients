@@ -65,12 +65,14 @@ test-unit: build
 typecheck:
 	python -m mypy --strict confluent_kafka test/unit/test_typing.py
 
-# Static checks (test/static): the Py_BuildValue / PyArg_Parse* /
-# PyObject_CallFunction format-arity scan of _confluentkafka.c. A format one
-# unit short of its argument list compiles silently and reads a garbage pointer
-# at run time, and for every admin RPC that Java's MockAdminClient leaves
-# unsupported the affected drain's success path is unreachable from the test
-# suite, so this defect class must be caught statically. They read source files
+# Static checks (test/static): the check that _confluentkafka.c reaches the C
+# API only through the `_err` twins of confluent_kafka_bindings.h, and the
+# Py_BuildValue / PyArg_Parse* / PyObject_CallFunction format-arity scan of
+# _confluentkafka.c. A format one unit short of its argument list compiles
+# silently and reads a garbage pointer at run time, and for every admin RPC
+# that Java's MockAdminClient leaves unsupported the affected drain's success
+# path is unreachable from the test suite, so this defect class must be caught
+# statically. They read source files
 # only, so they need neither the Rust library nor the C extension built.
 check-static:
 	python -m pytest test/static -v
