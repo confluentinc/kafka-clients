@@ -393,9 +393,10 @@ impl AdminClassHandle {
     /// still fires exactly once.
     fn teardown(self) {
         let Self { client, runtime, mock } = self;
-        // The `_cb` tasks first: they are the two `close` twins, each bounded by
-        // its own timeout, so a `close_with_timeout_cb` the caller started keeps
-        // its grace period instead of being cut short by the close below.
+        // The `_cb` tasks first: they are the two `close` twins, bounded by the
+        // timeout given, or for `close_cb` by the pending calls' own deadlines,
+        // as Java's `close()` is; so a `close_with_timeout_cb` the caller
+        // started keeps its grace period instead of being cut short below.
         loop {
             let tasks: Vec<JoinHandle<()>> =
                 std::mem::take(&mut *client.tasks.lock().unwrap_or_else(PoisonError::into_inner));

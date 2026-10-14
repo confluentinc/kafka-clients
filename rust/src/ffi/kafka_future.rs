@@ -51,8 +51,10 @@
 //! destroyed before the future completed". A `get_cb` after that invokes the
 //! callback inline, the same way, as for a future with no client. A blocking
 //! `get` still waiting when the client is destroyed returns the same way once
-//! the destroy has stopped the client's background work, and a `get` after
-//! that returns at once.
+//! the destroy has stopped the client's background work and run its last
+//! completions, and a `get` after that returns at once. While the destroy
+//! stops the client's runtime, a `get_with_timeout` waits without its
+//! timeout, since the runtime's timers stop with it.
 
 // FFI type names follow the kafka_<TypeName>_<method> convention with PascalCase
 // type names, which intentionally differs from Rust's snake_case convention.
@@ -265,15 +267,21 @@ impl FutureInner {
         let deadline = timeout.map(|timeout| Instant::now() + timeout);
         loop {
             queue.execute();
+            let stopping = queue.is_client_stopping();
             let step = block_on(runtime, async {
-                let remaining = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
-                // Every branch is cancellation-safe: the stop is a latch, `get` only waits for the
-                // shared completion, and a push that races `pushed` leaves its permit behind. The
-                // stop comes first, so a wait the runtime's shutdown wakes is not polled into its
-                // stopped timer.
+                let remaining = match stopping {
+                    true => None,
+                    false => deadline.map(|deadline| deadline.saturating_duration_since(Instant::now())),
+                };
+                // Every branch is cancellation-safe: the stop signals are latches, `get` only waits
+                // for the shared completion, and a push that races `pushed` leaves its permit
+                // behind. Once the client is stopping its runtime's timers stop too, so the wait
+                // drops its timeout: the stopping branch comes before the timed wait, so a wait the
+                // shutdown wakes goes round untimed instead of polling its stopped timer.
                 tokio::select! {
                     biased;
                     () = queue.client_stopped() => Some(self.resolve_now()),
+                    () = queue.client_stopping(), if !stopping => None,
                     result = self.resolve_future(remaining) => Some(result),
                     () = queue.pushed() => None,
                 }
@@ -289,18 +297,32 @@ impl FutureInner {
     /// ([`Self::resolve_now`]): a client whose `_destroy` had to cancel its
     /// background task where it stood (an admin client inside a TCP connect
     /// that outlasted the destroy's join) leaves its futures pending forever.
+    /// While the client is stopping
+    /// ([`CallbackQueue::mark_client_stopping`]) its runtime's timers stop,
+    /// so the wait goes on without its timeout.
     async fn resolve_until_stopped(
         &self,
         queue: &CallbackQueue,
         timeout: Option<Duration>,
     ) -> Result<Arc<FfiValue>, Error> {
-        // Both branches are cancellation-safe: the stop is a latch, and `get` only waits for the
-        // shared completion. The stop comes first, so a wait the runtime's shutdown wakes is not
-        // polled into its stopped timer.
+        // Every branch is cancellation-safe: the stop signals are latches, and `get` only waits
+        // for the shared completion. The stop signals come first, so a wait the runtime's
+        // shutdown wakes is not polled into its stopped timer.
+        let timed = async {
+            tokio::select! {
+                biased;
+                () = queue.client_stopped() => Some(self.resolve_now()),
+                () = queue.client_stopping() => None,
+                result = self.resolve_future(timeout) => Some(result),
+            }
+        };
+        if let Some(result) = timed.await {
+            return result;
+        }
         tokio::select! {
             biased;
             () = queue.client_stopped() => self.resolve_now(),
-            result = self.resolve_future(timeout) => result,
+            result = self.resolve_future(None) => result,
         }
     }
 

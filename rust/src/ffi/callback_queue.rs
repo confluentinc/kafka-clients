@@ -89,6 +89,11 @@ pub(crate) struct CallbackQueue {
     /// Set by [`close`](Self::close), read and written under `pending`'s
     /// lock so a push is either queued before the close or run inline after.
     closed: AtomicBool,
+    /// Cancelled by [`mark_client_stopping`](Self::mark_client_stopping)
+    /// before a client's `_destroy` stops its runtime, whose timers then stop
+    /// too: a blocking `KafkaFuture_get` with a timeout drops its timer and
+    /// waits on (see `ffi::kafka_future`).
+    client_stopping: CancellationToken,
     /// Cancelled by [`mark_client_stopped`](Self::mark_client_stopped) once
     /// the client's background work is gone, so nothing will complete a
     /// future of it any more: a blocking `KafkaFuture_get` waiting on one
@@ -150,6 +155,7 @@ impl CallbackQueue {
             running: Mutex::new(()),
             owner: Mutex::new(None),
             closed: AtomicBool::new(false),
+            client_stopping: CancellationToken::new(),
             client_stopped: CancellationToken::new(),
         }
     }
@@ -180,15 +186,9 @@ impl CallbackQueue {
     /// completion. The only such completion is a `KafkaFuture_get_cb` on a
     /// future that outlived its client: it runs on the thread calling
     /// `get_cb`.
-    ///
-    /// A closed queue's client is stopped too
-    /// ([`mark_client_stopped`](Self::mark_client_stopped)).
     pub(crate) fn close(&self) {
-        {
-            let _pending = lock(&self.pending);
-            self.closed.store(true, Ordering::Relaxed);
-        }
-        self.client_stopped.cancel();
+        let _pending = lock(&self.pending);
+        self.closed.store(true, Ordering::Relaxed);
     }
 
     /// Whether [`close`](Self::close) ran.
@@ -197,20 +197,41 @@ impl CallbackQueue {
         self.closed.load(Ordering::Relaxed)
     }
 
-    /// Records that the client's background work is gone, for a client's
-    /// `_destroy` about to stop its runtime: every future of the client that
-    /// will ever complete has, so a blocking `KafkaFuture_get` still waiting
-    /// on one answers what the future holds now, and a later one does not
-    /// wait. Called before the runtime stops, so the waiting thread wakes on
-    /// this rather than on the runtime's timers shutting down.
+    /// Records that a client's `_destroy` is about to stop the client's
+    /// runtime, and so its timers: a blocking `KafkaFuture_get` with a
+    /// timeout drops its timer and waits on, without one, until the client is
+    /// [stopped](Self::mark_client_stopped). Called before the runtime
+    /// stops, so the waiting thread wakes on this rather than on the timers
+    /// shutting down.
+    pub(crate) fn mark_client_stopping(&self) {
+        self.client_stopping.cancel();
+    }
+
+    /// Records that the client's background work is gone and its last
+    /// completions have run, for a client's `_destroy`: every future of the
+    /// client that will ever complete has, so a blocking `KafkaFuture_get`
+    /// still waiting on one answers what the future holds now, and a later
+    /// one does not wait. Implies [stopping](Self::mark_client_stopping).
     pub(crate) fn mark_client_stopped(&self) {
+        self.client_stopping.cancel();
         self.client_stopped.cancel();
     }
 
-    /// Whether [`mark_client_stopped`](Self::mark_client_stopped) (or
-    /// [`close`](Self::close)) ran.
+    /// Whether [`mark_client_stopping`](Self::mark_client_stopping) (or
+    /// [`mark_client_stopped`](Self::mark_client_stopped)) ran.
+    pub(crate) fn is_client_stopping(&self) -> bool {
+        self.client_stopping.is_cancelled()
+    }
+
+    /// Whether [`mark_client_stopped`](Self::mark_client_stopped) ran.
     pub(crate) fn is_client_stopped(&self) -> bool {
         self.client_stopped.is_cancelled()
+    }
+
+    /// Resolves once the client is stopping
+    /// ([`mark_client_stopping`](Self::mark_client_stopping)); cancellation-safe.
+    pub(crate) async fn client_stopping(&self) {
+        self.client_stopping.cancelled().await;
     }
 
     /// Resolves once the client is stopped
