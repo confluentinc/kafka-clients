@@ -4640,19 +4640,23 @@ mod tests {
     }
 
     /// `new` gives the producer's metadata the `retry.backoff.ms` / `retry.backoff.max.ms`
-    /// refresh backoff, as Java's constructor does (`KafkaProducer.java:456-457`), not the
-    /// `reconnect.backoff.*` values that only the `NetworkClient` takes.
+    /// refresh backoff, as Java's constructor does, not the `reconnect.backoff.*` values
+    /// that only the `NetworkClient` takes.
     ///
-    /// Not a translation of a Java test. Each backoff has its initial value equal to its
-    /// maximum, so `ExponentialBackoff` returns exactly the configured value with no jitter,
-    /// and right after a failed refresh `time_to_allow_update` is that backoff. The
-    /// producer is closed first, so the Sender task cannot record a refresh of its own
-    /// while the metadata is read.
+    /// Not a translation of a Java test. After one failed refresh the backoff is
+    /// `retry.backoff.ms`, and after repeated failures it reaches `retry.backoff.max.ms`,
+    /// each within `ExponentialBackoff`'s jitter and never above the maximum. The maximum
+    /// differs from its default, and neither range overlaps the `reconnect.backoff.*`
+    /// values, so each bound shows which config is used. The producer is closed first, so
+    /// the Sender task cannot record a refresh of its own while the metadata is read.
     #[tokio::test]
     async fn test_metadata_refresh_backoff_follows_retry_backoff() {
+        const RETRY_BACKOFF_MS: i64 = 100;
+        const RETRY_BACKOFF_MAX_MS: i64 = 2000;
+        let jitter = crate::CommonClientConfigs::RETRY_BACKOFF_JITTER;
         let props = guard_props(&[
-            ("retry.backoff.ms", "1000"),
-            ("retry.backoff.max.ms", "1000"),
+            ("retry.backoff.ms", &RETRY_BACKOFF_MS.to_string()),
+            ("retry.backoff.max.ms", &RETRY_BACKOFF_MAX_MS.to_string()),
             ("reconnect.backoff.ms", "50"),
             ("reconnect.backoff.max.ms", "50"),
         ]);
@@ -4664,10 +4668,24 @@ mod tests {
 
         let now = SystemTime.milliseconds();
         producer.metadata.failed_update(now);
-        assert_eq!(
-            1000,
-            producer.metadata.time_to_allow_update(now),
-            "the metadata refresh backoff must be retry.backoff.ms"
+        let initial = producer.metadata.time_to_allow_update(now);
+        let initial_range =
+            (RETRY_BACKOFF_MS as f64 * (1.0 - jitter)) as i64..=(RETRY_BACKOFF_MS as f64 * (1.0 + jitter)) as i64;
+        assert!(
+            initial_range.contains(&initial),
+            "the first refresh backoff must be retry.backoff.ms with jitter, got {initial}"
+        );
+
+        // `RETRY_BACKOFF_EXP_BASE` doubles the backoff per failure, so ten failures take it
+        // well past the maximum.
+        for _ in 0..10 {
+            producer.metadata.failed_update(now);
+        }
+        let capped = producer.metadata.time_to_allow_update(now);
+        let capped_range = (RETRY_BACKOFF_MAX_MS as f64 * (1.0 - jitter)) as i64..=RETRY_BACKOFF_MAX_MS;
+        assert!(
+            capped_range.contains(&capped),
+            "repeated failures must back off up to retry.backoff.max.ms, got {capped}"
         );
     }
 
