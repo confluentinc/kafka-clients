@@ -60,6 +60,7 @@ import contextvars
 import inspect
 import math
 import threading
+import time
 import weakref
 from collections.abc import Awaitable, Callable, Iterable, Iterator
 from datetime import timedelta
@@ -800,14 +801,21 @@ class _ConsumerState:
 
     def _run_sync(self, submit: Callable[[int, Callable[..., None]], None],
                   resolve: Callable[[tuple[Any, ...]], _T],
-                  free: Callable[[tuple[Any, ...]], None], wakeable: bool) -> _T:
+                  free: Callable[[tuple[Any, ...]], None], wake_until: float) -> _T:
         """Submit a ``_cb`` FFI operation (``submit(handle, cb)``) and wait for
         its completion on this thread, running the queued callbacks meanwhile,
         in 100 ms slices so a ``KeyboardInterrupt`` is delivered. Ctrl+C lets
         the call end, frees its result and re-raises ``KeyboardInterrupt``;
-        when the operation is one Java's ``wakeup()`` interrupts
-        (``wakeable``, see ``_void_spec``) it first wakes the consumer once,
-        so the call ends sooner."""
+        while the operation can still consume a wakeup (before ``wake_until``,
+        see ``_void_spec``) it first wakes the consumer once, so the call ends
+        sooner.
+
+        The wake waits for a drain to run to its end, and is sent only if the
+        completion has still not arrived: an interrupted drain may have left
+        it queued, or it may have run just before the interrupt. A wakeup the
+        core operation no longer consumes would stay armed, and the next
+        wakeable call would raise ``WakeupError`` although ``wakeup()`` was
+        never called."""
         self._refuse_inside_callback()
         box: list[tuple[Any, ...]] = []
         event = self._pending_event
@@ -817,6 +825,7 @@ class _ConsumerState:
             event.set()
 
         interrupted: KeyboardInterrupt | None = None
+        wake_due = False
         with self._use() as h:
             # What an earlier call left queued runs first, so the notify of this
             # call's completion is not lost behind it.
@@ -825,14 +834,19 @@ class _ConsumerState:
             submit(h, cb)
             while not box:
                 try:
+                    if wake_due:
+                        self._drain(h)
+                        wake_due = False
+                        if not box and time.monotonic() < wake_until:
+                            _lib.Consumer_wakeup(h)
+                        continue
                     event.wait(0.1)
                     event.clear()
                     self._drain(h)
                 except KeyboardInterrupt as exc:
                     if interrupted is None:
                         interrupted = exc
-                        if wakeable:
-                            _lib.Consumer_wakeup(h)
+                        wake_due = True
         payload = box[0]
         if interrupted is not None:
             free(payload)
@@ -841,13 +855,14 @@ class _ConsumerState:
 
     async def _run_async(self, submit: Callable[[int, Callable[..., None]], None],
                          resolve: Callable[[tuple[Any, ...]], _T],
-                         free: Callable[[tuple[Any, ...]], None], wakeable: bool, *,
+                         free: Callable[[tuple[Any, ...]], None], wake_until: float, *,
                          raise_deferred: bool = True, site: int = _AT_CALL) -> _T:
         """Async peer of ``_run_sync``: awaits the completion on the event loop,
         running the queued callbacks on the loop, and awaiting a coroutine
         listener there. Cancelling the awaiting task lets the call end, frees
         its result and re-raises ``CancelledError``, first waking the consumer
-        when the operation is ``wakeable``, as ``_run_sync`` does on Ctrl+C.
+        while the operation can still consume a wakeup (``wake_until``), as
+        ``_run_sync`` does on Ctrl+C.
 
         It first raises the exception of a coroutine commit callback an
         earlier ``poll`` kept (``raise_deferred``), wrapped as the call at
@@ -872,12 +887,17 @@ class _ConsumerState:
         pending = asyncio.Event()
         waiter = (loop, pending)
 
+        arrived: list[bool] = []
+
         def deliver(payload: tuple[Any, ...]) -> None:
             if not fut.done():
                 fut.set_result(payload)
             pending.set()
 
         def cb(*payload: Any) -> None:
+            # The completion has arrived: ``fut`` gets it one loop iteration
+            # later (``hand_over``), a wakeup now would find no operation.
+            arrived.append(True)
             self._undelivered.hand_over(loop, deliver, payload, free)
 
         use = self._use()
@@ -888,7 +908,8 @@ class _ConsumerState:
                 # this call's completion is not lost behind it.
                 self._drain(h)
                 submit(h, cb)
-                cancelled = await self._wait_on_loop(h, fut.done, pending, wakeable)
+                cancelled = await self._wait_on_loop(h, fut.done, lambda: bool(arrived),
+                                                     pending, wake_until)
             finally:
                 self._async_waiters.pop(waiter, None)
         payload = fut.result()
@@ -914,17 +935,42 @@ class _ConsumerState:
         return resolve(payload)
 
     async def _wait_on_loop(self, h: int, done: Callable[[], bool],
-                            pending: asyncio.Event,
-                            wakeable: bool) -> asyncio.CancelledError | None:
+                            arrived: Callable[[], bool], pending: asyncio.Event,
+                            wake_until: float) -> asyncio.CancelledError | None:
         """Wait on the loop until ``done()``, running the queued callbacks each
         time the notify sets ``pending``, and awaiting the coroutine listener
         methods they defer before going on. The first cancellation is returned
-        once the call has ended; it wakes the consumer if ``wakeable``."""
+        once the call has ended; it wakes the consumer while the operation can
+        still consume a wakeup (before ``wake_until``), and only if its
+        completion has not ``arrived()``. A wakeup the core operation no longer
+        consumes would stay armed, and the next wakeable call would raise
+        ``WakeupError`` although ``wakeup()`` was never called.
+
+        A cancellation while a deferred callback is awaited wakes at once: the
+        core operation that delivered it waits for its report, and checks for a
+        wakeup after it (Java's ``poll`` loop, ``commitSync``'s
+        ``setActiveTask`` after the commit callbacks), unless the ``poll``
+        timeout has expired meanwhile. Any other cancellation first drains: the
+        completion may already be queued, and a wake sent then would find no
+        operation to end."""
         cancelled: asyncio.CancelledError | None = None
+        wake_due = False
+
+        def wake() -> None:
+            if not arrived() and time.monotonic() < wake_until:
+                _lib.Consumer_wakeup(h)
+
         while True:
+            awaiting_callbacks = False
             try:
                 if self._listener_tasks:
+                    awaiting_callbacks = True
                     await asyncio.wait(set(self._listener_tasks))
+                    continue
+                if wake_due:
+                    wake_due = False
+                    self._drain(h)
+                    wake()
                     continue
                 if done():
                     return cancelled
@@ -934,8 +980,10 @@ class _ConsumerState:
             except asyncio.CancelledError as exc:
                 if cancelled is None:
                     cancelled = exc
-                    if wakeable:
-                        _lib.Consumer_wakeup(h)
+                    if awaiting_callbacks:
+                        wake()
+                    else:
+                        wake_due = True
 
     # ---- payload handlers ---------------------------------------------------
     def _resolve_void(self, payload: tuple[Any, ...]) -> None:
@@ -963,7 +1011,7 @@ class _ConsumerState:
         if payload[1]:
             _lib.KafkaError_destroy(payload[1])
 
-    # ---- operation specs: (submit, resolve, free, wakeable) -----------------
+    # ---- operation specs: (submit, resolve, free, wake_until) ---------------
     # ``wakeable``: the core operation is one Java's ``wakeup()`` interrupts,
     # because ``AsyncKafkaConsumer`` registers its future with the
     # ``WakeupTrigger`` (``poll``, ``commitSync``, ``position``, ``committed``,
@@ -973,37 +1021,52 @@ class _ConsumerState:
     # wakeup, so waking the consumer during it would not end it sooner and would
     # leave the wakeup armed: the next wakeable call would raise ``WakeupError``
     # although the user never called ``wakeup()``.
-    def _void_spec(self, fn: Callable[..., None], *args: Any,
-                   wakeable: bool = False) -> tuple[Any, Any, Any, bool]:
-        return (lambda h, cb: fn(h, *args, cb), self._resolve_void, self._free_void, wakeable)
+    #
+    # ``deadline``: the ``time.monotonic()`` time after which a wakeable
+    # operation no longer consumes a wakeup. Only ``poll`` has one: once its
+    # timeout has expired, Java's loop (``AsyncKafkaConsumer.java:942-966``)
+    # ends after the fetch wait without reaching ``maybeTriggerWakeup`` again,
+    # so a wakeup sent then, for instance while a commit callback the poll
+    # delivers runs, would stay armed; and the poll ends without one.
+    # ``wake_until`` is the deadline, or ``-inf`` for a call that is not
+    # wakeable.
+    def _void_spec(self, fn: Callable[..., None], *args: Any, wakeable: bool = False,
+                   deadline: float = math.inf) -> tuple[Any, Any, Any, float]:
+        return (lambda h, cb: fn(h, *args, cb), self._resolve_void, self._free_void,
+                deadline if wakeable else -math.inf)
 
     def _value_spec(self, fn: Callable[..., None], convert: Callable[[Any], Any],
-                    *args: Any, wakeable: bool = False) -> tuple[Any, Any, Any, bool]:
+                    *args: Any, wakeable: bool = False,
+                    deadline: float = math.inf) -> tuple[Any, Any, Any, float]:
         return (lambda h, cb: fn(h, *args, cb), self._resolve_value(convert), self._free_value,
-                wakeable)
+                deadline if wakeable else -math.inf)
 
-    def _poll_spec(self, timeout_ms: int) -> tuple[Any, Any, Any, bool]:
+    def _poll_spec(self, timeout_ms: int) -> tuple[Any, Any, Any, float]:
         def convert(records: Any) -> Deserialized:
             # The native batch owns the fetched bytes; the deserializers run on
             # this thread over memoryviews into it (consumer-threading.md §27).
             return deserialize_batch(records, key_deserializer=self._key_deserializer,
                                      value_deserializer=self._value_deserializer)
 
-        return self._value_spec(_lib.Consumer_poll_cb, convert, timeout_ms, wakeable=True)
+        # The core's own deadline is taken later, at its poll entry: this one
+        # ends no later than it.
+        deadline = time.monotonic() + timeout_ms / 1000
+        return self._value_spec(_lib.Consumer_poll_cb, convert, timeout_ms, wakeable=True,
+                                deadline=deadline)
 
     def _subscribe_topics_spec(self, topics: list[str],
                                listener: ConsumerRebalanceListener | None
-                               ) -> tuple[Any, Any, Any, bool]:
+                               ) -> tuple[Any, Any, Any, float]:
         return self._void_spec(_lib.Consumer_subscribe_cb, topics,
                                self._listener_adapter(listener))
 
     def _subscribe_pattern_spec(self, pattern: str, listener: ConsumerRebalanceListener | None
-                                ) -> tuple[Any, Any, Any, bool]:
+                                ) -> tuple[Any, Any, Any, float]:
         return self._void_spec(_lib.Consumer_subscribe_pattern_cb, pattern,
                                self._listener_adapter(listener))
 
     def _seek_spec(self, partition: TopicPartition, offset: int | None,
-                   offset_and_metadata: OffsetAndMetadata | None) -> tuple[Any, Any, Any, bool]:
+                   offset_and_metadata: OffsetAndMetadata | None) -> tuple[Any, Any, Any, float]:
         if offset_and_metadata is not None:
             epoch = offset_and_metadata.leader_epoch()
             return self._void_spec(
@@ -1013,21 +1076,21 @@ class _ConsumerState:
         return self._void_spec(_lib.Consumer_seek_cb, partition.topic(),
                                partition.partition(), offset)
 
-    def _commit_spec(self, offsets: Any) -> tuple[Any, Any, Any, bool]:
+    def _commit_spec(self, offsets: Any) -> tuple[Any, Any, Any, float]:
         spec = None if offsets is None else offsets_to_spec(offsets)
         return self._void_spec(_lib.Consumer_commit_sync_cb, spec, _NO_TIMEOUT, wakeable=True)
 
-    def _commit_nowait_spec(self, spec: Any, adapter: Any) -> tuple[Any, Any, Any, bool]:
+    def _commit_nowait_spec(self, spec: Any, adapter: Any) -> tuple[Any, Any, Any, float]:
         # Not wakeable: Java's commitAsync waits for its offsets through
         # ConsumerUtils.getResult, without the WakeupTrigger
         # (AsyncKafkaConsumer.java:1126-1140), so it never throws WakeupException.
         return self._void_spec(_lib.Consumer_commit_async_cb, spec, adapter)
 
-    def _position_spec(self, partition: TopicPartition) -> tuple[Any, Any, Any, bool]:
+    def _position_spec(self, partition: TopicPartition) -> tuple[Any, Any, Any, float]:
         return self._value_spec(_lib.Consumer_position_cb, int, partition.topic(),
                                 partition.partition(), _NO_TIMEOUT, wakeable=True)
 
-    def _committed_spec(self, partitions: list[TopicPartition]) -> tuple[Any, Any, Any, bool]:
+    def _committed_spec(self, partitions: list[TopicPartition]) -> tuple[Any, Any, Any, float]:
         def convert(raw: Any) -> dict[TopicPartition, OffsetAndMetadata | None]:
             result = to_offset_map(raw or {})
             # Java maps a partition without a committed offset to null.
@@ -1039,7 +1102,7 @@ class _ConsumerState:
                                 _NO_TIMEOUT, wakeable=True)
 
     def _offsets_for_times_spec(self, timestamps_to_search: dict[TopicPartition, int]
-                                ) -> tuple[Any, Any, Any, bool]:
+                                ) -> tuple[Any, Any, Any, float]:
         def convert(raw: Any) -> dict[TopicPartition, OffsetAndTimestamp | None]:
             result = to_offset_and_timestamp_map(raw or {})
             # Java maps a partition without an offset for its timestamp to null.
@@ -1051,27 +1114,27 @@ class _ConsumerState:
                                 timestamps_to_spec(timestamps_to_search), _NO_TIMEOUT)
 
     def _long_offsets_spec(self, fn: Callable[..., None], partitions: list[TopicPartition]
-                           ) -> tuple[Any, Any, Any, bool]:
+                           ) -> tuple[Any, Any, Any, float]:
         return self._value_spec(fn, lambda raw: to_long_map(raw or {}), tp_to_spec(partitions),
                                 _NO_TIMEOUT)
 
-    def _partitions_for_spec(self, topic: str) -> tuple[Any, Any, Any, bool]:
+    def _partitions_for_spec(self, topic: str) -> tuple[Any, Any, Any, float]:
         return self._value_spec(_lib.Consumer_partitions_for_cb,
                                 lambda raw: to_partition_info_list(raw or []), topic, _NO_TIMEOUT,
                                 wakeable=True)
 
-    def _list_topics_spec(self) -> tuple[Any, Any, Any, bool]:
+    def _list_topics_spec(self) -> tuple[Any, Any, Any, float]:
         return self._value_spec(_lib.Consumer_list_topics_cb,
                                 lambda raw: to_topics_map(raw or {}), _NO_TIMEOUT, wakeable=True)
 
-    def _close_spec(self, timeout_ms: int, operation_code: int) -> tuple[Any, Any, Any, bool]:
+    def _close_spec(self, timeout_ms: int, operation_code: int) -> tuple[Any, Any, Any, float]:
         def resolve(payload: tuple[Any, ...]) -> None:
             if payload[0]:
                 self._raise_error(payload[0], _AT_CLOSE)
 
         # Not wakeable: Java's close disables the wakeups.
         return (lambda h, cb: _lib.Consumer_close_cb(h, timeout_ms, operation_code, cb),
-                resolve, self._free_void, False)
+                resolve, self._free_void, -math.inf)
 
     # ---- calls that do not wait (both families) ---------------------------
     @staticmethod
