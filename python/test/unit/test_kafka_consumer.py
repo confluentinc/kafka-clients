@@ -149,8 +149,8 @@ from confluent_kafka.common.errors import InvalidGroupIdError, UnsupportedVersio
 from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
 from confluent_kafka.common.serialization import string_deserializer
 from confluent_kafka.consumer import (
-    AsyncKafkaConsumer, CloseOptions, ConsumerRebalanceListener, KafkaConsumer,
-    OffsetAndMetadata, SubscriptionPattern,
+    AsyncKafkaConsumer, CloseOptions, CommitFailedError, ConsumerRebalanceListener,
+    KafkaConsumer, OffsetAndMetadata, SubscriptionPattern,
 )
 from confluent_kafka.consumer._base import poll_timeout_ms
 
@@ -1210,10 +1210,13 @@ def test_a_raising_commit_callback_propagates_from_a_commit_inside_a_callback() 
         assert len(seen) == 1 and seen[0] is raised
 
 
-def test_close_wraps_a_raising_commit_callback() -> None:
+@pytest.mark.parametrize("raised", [CommitCallbackError("callback boom"), CommitFailedError()],
+                         ids=["value-error", "kafka-error"])
+def test_close_wraps_a_raising_commit_callback(raised: BaseException) -> None:
     # Java's close(): the error of awaitPendingAsyncCommitsAndExecuteCommitCallbacks
-    # is kept and thrown as KafkaException("Failed to close kafka consumer", e).
-    raised = CommitCallbackError("callback boom")
+    # is kept and thrown as KafkaException("Failed to close kafka consumer", e),
+    # a KafkaException too (AsyncKafkaConsumer.java:1669-1675; unlike poll's
+    # maybeWrapAsKafkaException, which leaves one unwrapped).
     events: list[str] = []
     consumer = new_consumer(**{"enable.auto.commit": False})
     consumer.assign(partitions=[TP0])
@@ -1224,6 +1227,20 @@ def test_close_wraps_a_raising_commit_callback() -> None:
     assert str(e.value) == "Failed to close kafka consumer"
     assert e.value.__cause__ is raised
     # Closed all the same.
+    with pytest.raises(IllegalStateError):
+        consumer.assignment()
+
+
+def test_close_raises_a_keyboard_interrupt_of_a_commit_callback_as_it_is() -> None:
+    # Java's close() throws an InterruptException as it is.
+    raised = KeyboardInterrupt()
+    events: list[str] = []
+    consumer = new_consumer(**{"enable.auto.commit": False})
+    consumer.assign(partitions=[TP0])
+    queue_a_raising_commit_callback(consumer, raised, events)
+    with pytest.raises(KeyboardInterrupt) as e:
+        consumer.close(option=CloseOptions.timeout(timedelta(seconds=5)))
+    assert e.value is raised
     with pytest.raises(IllegalStateError):
         consumer.assignment()
 

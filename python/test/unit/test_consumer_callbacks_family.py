@@ -31,10 +31,12 @@ from typing import Any, cast
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 import pytest
 
-from confluent_kafka.common import TopicPartition
+from confluent_kafka import IllegalStateError
+from confluent_kafka.common import KafkaError, TopicPartition
 from confluent_kafka.consumer import (
-    AsyncConsumer, AsyncKafkaConsumer, AsyncMockConsumer, CloseOptions, Consumer,
-    ConsumerRebalanceListener, ConsumerRecord, KafkaConsumer, MockConsumer, OffsetAndMetadata,
+    AsyncConsumer, AsyncKafkaConsumer, AsyncMockConsumer, CloseOptions, CommitFailedError,
+    Consumer, ConsumerRebalanceListener, ConsumerRecord, KafkaConsumer, MockConsumer,
+    OffsetAndMetadata,
 )
 
 TP = TopicPartition(topic="t", partition=0)
@@ -362,6 +364,93 @@ def test_async_kafka_consumer_raising_coroutine_callback_inside_a_nested_commit(
         assert e.value is raised
         assert events == ["first end", "raising"]
         await asyncio.wait_for(consumer.commit(offsets={}), 10)
+        await consumer.close(option=CloseOptions.timeout(5))
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize("coroutine", [False, True], ids=["plain", "coroutine"])
+@pytest.mark.parametrize("raised", [CallbackError("bad"), CommitFailedError()],
+                         ids=["value-error", "kafka-error"])
+def test_async_kafka_consumer_close_wraps_a_raising_commit_callback(
+        raised: BaseException, coroutine: bool) -> None:
+    # Java's close() wraps the callback's exception, a KafkaException too, in
+    # KafkaException("Failed to close kafka consumer", e)
+    # (AsyncKafkaConsumer.java:1669-1675).
+    async def main() -> None:
+        consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(
+            configs={**CONFIGS, "enable.auto.commit": False})
+        await consumer.assign(partitions=[TP])
+
+        def plain(offsets: Any, exception: Any) -> None:
+            raise raised
+
+        async def awaited(offsets: Any, exception: Any) -> None:
+            await asyncio.sleep(0)
+            raise raised
+
+        consumer.commit_nowait(offsets={}, callback=awaited if coroutine else plain)
+        with pytest.raises(KafkaError) as e:
+            await consumer.close(option=CloseOptions.timeout(5))
+        assert type(e.value) is KafkaError
+        assert str(e.value) == "Failed to close kafka consumer"
+        assert e.value.__cause__ is raised
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize("following", ["poll", "commit", "close"])
+def test_async_kafka_consumer_poll_returns_its_records_before_a_deferred_callback_error(
+        following: str) -> None:
+    # A coroutine commit callback delivered inside a blocking ConsumerHandle
+    # commit, itself inside a callback poll delivered, raises once that commit
+    # returned: poll still returns its records (the core advanced the positions
+    # past them), and the next awaited call raises the exception, wrapped as that
+    # call wraps a callback's (poll: Java's maybeWrapAsKafkaException; close:
+    # "Failed to close kafka consumer"; commit: as it is). The broker-backed
+    # counterpart, with records, is in test/integration.
+    async def main() -> None:
+        consumer = await async_kafka_consumer()
+        raised = CallbackError("bad")
+        events: list[str] = []
+
+        async def raising(offsets: Any, exception: Any) -> None:
+            await asyncio.sleep(0)
+            events.append("raising")
+            raise raised
+
+        async def first(offsets: Any, exception: Any) -> None:
+            await asyncio.sleep(0)
+            consumer.commit_nowait(offsets={}, callback=raising)
+            await consumer.commit(offsets={})
+            events.append("first end")
+
+        consumer.commit_nowait(offsets={}, callback=first)
+        records = await asyncio.wait_for(consumer.poll(timeout=0), 10)
+        assert records.is_empty()
+        assert events == ["first end", "raising"]
+        if following == "poll":
+            with pytest.raises(KafkaError) as wrapped:
+                await asyncio.wait_for(consumer.poll(timeout=0), 10)
+            assert type(wrapped.value) is KafkaError
+            assert str(wrapped.value) == f"{__name__}.CallbackError: bad"
+            assert wrapped.value.__cause__ is raised
+        elif following == "commit":
+            with pytest.raises(CallbackError) as e:
+                await asyncio.wait_for(consumer.commit(offsets={}), 10)
+            assert e.value is raised
+        else:
+            with pytest.raises(KafkaError) as wrapped:
+                await consumer.close(option=CloseOptions.timeout(5))
+            assert type(wrapped.value) is KafkaError
+            assert str(wrapped.value) == "Failed to close kafka consumer"
+            assert wrapped.value.__cause__ is raised
+            # Closed all the same.
+            with pytest.raises(IllegalStateError):
+                consumer.assignment()
+            return
+        # Raised once: the consumer goes on.
+        await asyncio.wait_for(consumer.poll(timeout=0), 10)
         await consumer.close(option=CloseOptions.timeout(5))
 
     asyncio.run(main())

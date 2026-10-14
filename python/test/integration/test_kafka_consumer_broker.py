@@ -26,7 +26,9 @@
   (``testSecondPollWithDeserializationErrorThrowsRecordDeserializationException``);
 - ``commit_nowait()`` while a rebalance is delivered, the async notify, a
   listener's exception as Java raises it (``testRebalanceException``'s
-  consumer-protocol counterpart), a failed commit's callback;
+  consumer-protocol counterpart) and as ``close()`` wraps it, a failed commit's
+  callback, a deferred commit-callback error not losing the records ``poll()``
+  fetched;
 - the ``KafkaConsumerTest`` cases Java scripts through a ``MockClient``, with the
   broker's answers standing for the prepared responses:
   ``testMissingOffsetNoResetPolicy``, ``testResetToCommittedOffset``,
@@ -702,6 +704,87 @@ def test_async_listener_error_is_wrapped_as_java_does(kafka_broker: Any) -> None
                     assert str(error) == "User rebalance callback throws an error"
                     assert error.__cause__ is raised
                     return
+        finally:
+            await consumer.close(option=CloseOptions.timeout(0))
+
+    asyncio.run(main())
+
+
+def test_close_wraps_a_listener_kafka_error(kafka_broker: Any) -> None:
+    # Java's close() wraps runRebalanceCallbacksOnClose's exception, a
+    # KafkaException too, in KafkaException("Failed to close kafka consumer", e)
+    # (AsyncKafkaConsumer.java:1669-1675), where poll raises it as it is.
+    topic = _topic(kafka_broker, [])
+    raised = _MyCommitFailed(message="revoke boom")
+
+    class Raising(ConsumerRebalanceListener):
+        def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+            if partitions:
+                raise raised
+
+    consumer: KafkaConsumer[bytes, bytes] = KafkaConsumer(configs=_configs(kafka_broker))
+    consumer.subscribe(topics=[topic], callback=Raising())
+    deadline = time.monotonic() + DEADLINE
+    while not consumer.assignment():
+        assert time.monotonic() < deadline, "the consumer never got its assignment"
+        consumer.poll(timeout=0.5)
+    with pytest.raises(KafkaError) as e:
+        consumer.close(option=CloseOptions.timeout(10))
+    assert type(e.value) is KafkaError
+    assert str(e.value) == "Failed to close kafka consumer"
+    assert e.value.__cause__ is raised
+
+
+def test_async_poll_returns_its_records_before_a_deferred_commit_callback_error(
+        kafka_broker: Any) -> None:
+    # A coroutine commit callback delivered inside a blocking ConsumerHandle
+    # commit, itself inside a callback poll delivered, raises once that commit
+    # returned (a deferred error): the poll still returns the records it fetched,
+    # whose positions the core advanced, and the next awaited call raises the
+    # exception, as poll wraps a callback's (maybeWrapAsKafkaException).
+    topic = _topic(kafka_broker, ["a", "b"])
+    tp = TopicPartition(topic=topic, partition=0)
+
+    class CallbackError(ValueError):
+        pass
+
+    raised = CallbackError("deferred boom")
+
+    async def main() -> None:
+        consumer: AsyncKafkaConsumer[bytes, str] = AsyncKafkaConsumer(
+            configs=_configs(kafka_broker), value_deserializer=string_deserializer())
+        events: list[str] = []
+
+        async def raising(offsets: Any, exception: Any) -> None:
+            await asyncio.sleep(0)
+            events.append("raising")
+            raise raised
+
+        async def first(offsets: Any, exception: Any) -> None:
+            await asyncio.sleep(0)
+            consumer.commit_nowait(offsets={}, callback=raising)
+            await consumer.commit(offsets={})
+            events.append("first end")
+
+        try:
+            await consumer.assign(partitions=[tp])
+            consumer.commit_nowait(offsets={}, callback=first)
+            # The poll delivering the callbacks returns, with what it fetched.
+            values = [r.value() for r in await consumer.poll(timeout=10)]
+            assert events == ["first end", "raising"]
+            errors: list[KafkaError] = []
+            deadline = time.monotonic() + DEADLINE
+            while len(values) < 2 or not errors:
+                assert time.monotonic() < deadline, "timed out polling"
+                try:
+                    values.extend(r.value() for r in await consumer.poll(timeout=0.5))
+                except KafkaError as exc:
+                    errors.append(exc)
+            # No record lost, the error raised once.
+            assert values == ["a", "b"]
+            assert len(errors) == 1
+            assert type(errors[0]) is KafkaError
+            assert errors[0].__cause__ is raised
         finally:
             await consumer.close(option=CloseOptions.timeout(0))
 

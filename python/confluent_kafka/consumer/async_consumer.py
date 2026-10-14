@@ -47,7 +47,10 @@ from confluent_kafka._args import UNSET, java_forms
 from confluent_kafka._async import await_to_end
 from confluent_kafka.concurrent_modification_error import ConcurrentModificationError
 
-from ._base import _ConsumerState, blank_null_topics, close_args, poll_timeout_ms
+from ._base import (
+    _AT_CLOSE, _AT_LATER, _AT_POLL, _ConsumerState, blank_null_topics, close_args,
+    poll_timeout_ms,
+)
 from ._conversions import offsets_to_spec, tp_to_spec
 from .close_options import CloseOptions
 from .consumer import COMMIT_NOWAIT_FORMS, SEEK_FORMS, SUBSCRIBE_FORMS
@@ -173,6 +176,12 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         ``AsyncMockConsumer`` awaits it after this call returns (Java's mock
         runs the callback inside ``commitAsync``), before its next awaited call
         goes on, which raises the exception it raised (a deferred error).
+        On ``AsyncKafkaConsumer`` one delivered inside a ``commit()`` that
+        another callback issued, which blocks the loop, is awaited once that
+        commit returned (*deviation*: Java runs it inside that commit): the
+        delivering call raises its exception once it ended, wrapped as that
+        call wraps a callback's; a ``poll()`` returns its records first, and
+        its next awaited call raises it.
 
         While the commit waits for its offsets, the core may deliver a queued
         listener callback (``consumer-threading.md`` §31). A plain method runs
@@ -335,10 +344,13 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         # The closed check first, then Java's Timer check (Order).
         self._check_open()
         timeout_ms = poll_timeout_ms(timeout)
-        result: Deserialized = await self._run_async(*self._poll_spec(timeout_ms))
+        # A deferred error the poll keeps (see _run_async) is not raised by the
+        # seeks back: the records go to the user first.
+        result: Deserialized = await self._run_async(*self._poll_spec(timeout_ms), site=_AT_POLL)
         for partition, offset in result.rewind:
             try:
-                await self._run_async(*self._seek_spec(partition, offset, None))
+                await self._run_async(*self._seek_spec(partition, offset, None),
+                                      after_commit_nowait=False)
             except Exception:  # noqa: BLE001 - the deserialization error matters
                 _LOG.exception("Could not seek %s back to offset %d", partition, offset)
         if result.error is not None and result.records.is_empty():
@@ -425,11 +437,12 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
             return
         timeout_ms, operation = close_args(option)
         # A commit_nowait() still awaiting its listener finishes first; its
-        # failure is raised once the consumer is closed.
+        # failure, or a deferred error, is raised once the consumer is closed
+        # (a callback's exception in Java's "Failed to close kafka consumer").
         deferred: Exception | None = None
         if not self._in_callback():
             try:
-                await self._await_commit_continuation()
+                await self._await_commit_continuation(_AT_CLOSE)
             except Exception as exc:  # noqa: BLE001 - raised after the close
                 deferred = exc
         # A call left on a closed event loop does not hold the consumer.
@@ -437,7 +450,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         if not self._begin_close():
             return
         try:
-            await self._run_async(*self._close_spec(timeout_ms, operation))
+            await self._run_async(*self._close_spec(timeout_ms, operation), site=_AT_CLOSE)
         except ConcurrentModificationError:
             self._abort_close()
             raise
@@ -471,8 +484,11 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         reported to the core at once, and the task only awaits it; the callbacks
         after it may start before it ends, and the delivering call still waits
         for it, then raises the exception it raised, instead of its own result
-        (``_take_callback_error``) -- a deferred error (*deviation*: Java runs
-        it to its end inside that commit, which raises the exception)."""
+        (``_take_callback_error``), wrapped as that call wraps a callback's
+        exception -- a deferred error (*deviation*: Java runs it to its end
+        inside that commit, which raises the exception). A ``poll`` returns its
+        records instead, as the core has advanced the positions past them, and
+        the next awaited call raises the exception (``_run_async``)."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -592,15 +608,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
             if cancelled is not None:
                 free(payload)
                 raise cancelled
-            callback_error = self._take_callback_error()
-            if callback_error is not None:
-                free(payload)
-                self._deferred_error = callback_error
-                return
-            try:
-                resolve(payload)
-            except Exception as exc:  # noqa: BLE001 - raised by the next awaited call
-                self._deferred_error = exc
+            self._finish_async(payload, resolve, free, _AT_LATER)
         finally:
             self._async_waiters.pop(waiter, None)
             use.release()
@@ -622,10 +630,9 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
                 await asyncio.wait({previous})
             try:
                 await self._run_async(*self._commit_nowait_spec(spec, adapter),
-                                      after_commit_nowait=False)
+                                      after_commit_nowait=False, site=_AT_LATER)
             except Exception as exc:  # noqa: BLE001 - raised by the next awaited call
-                if self._deferred_error is None:
-                    self._deferred_error = exc
+                self._keep_error(exc, from_callback=False)
 
         self._commit_continuation = loop.create_task(follow())
 

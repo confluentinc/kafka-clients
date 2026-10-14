@@ -251,9 +251,11 @@ class Consumer(Generic[K, V], _ConsumerState):
         An exception the ``callback`` raises propagates out of the call that
         delivers it, as Java's ``onComplete`` is called without a ``try``:
         ``poll()`` raises it wrapped in a ``KafkaError`` (unless it is one, as
-        Java's ``maybeWrapAsKafkaException``), ``commit()``,
-        ``commit_nowait()`` and ``close()`` raise the very exception; the
-        callbacks queued behind it run inside a later call.
+        Java's ``maybeWrapAsKafkaException``), ``close()`` wrapped in the
+        ``KafkaError`` "Failed to close kafka consumer" (unless it is a
+        ``KeyboardInterrupt``, as Java's ``close`` wraps every exception but an
+        ``InterruptException``), ``commit()`` and ``commit_nowait()`` raise the
+        very exception; the callbacks queued behind it run inside a later call.
 
         The ``callback`` is a plain function here: an ``async def`` one is
         rejected when it is delivered, its coroutine closed, not awaited, and
