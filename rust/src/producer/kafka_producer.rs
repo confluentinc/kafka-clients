@@ -2676,6 +2676,15 @@ impl<K, V> KafkaProducer<K, V> {
         self.wakeup.notify_one();
     }
 
+    /// Whether no close has started on this producer.
+    ///
+    /// Every close path clears `running` in [`Self::initiate_close`]. `Drop` uses this to
+    /// warn about a producer that was not closed, and the C binding's `destroy` to close
+    /// such a producer without closing one a second time.
+    pub(crate) fn is_running(&self) -> bool {
+        self.running.load(Ordering::Acquire)
+    }
+
     /// Force-close the sender, aborting all pending batches.
     fn force_close(&self) {
         self.force_close.store(true, Ordering::Release);
@@ -2954,7 +2963,7 @@ where
 
 impl<K, V> Drop for KafkaProducer<K, V> {
     fn drop(&mut self) {
-        if self.running.load(Ordering::Acquire) {
+        if self.is_running() {
             kafka_warn!(
                 self.log_context,
                 "KafkaProducer was not closed before being dropped. Call close() to avoid resource leaks."
@@ -5138,7 +5147,7 @@ mod tests {
         // Simulate the sender completing all batches by aborting them.
         // abort() calls complete_future_and_fire_callbacks which calls
         // produce_future.set() and produce_future.done(), unblocking flush.
-        accumulator.abort_incomplete_batches();
+        accumulator.abort_incomplete_batches().await;
 
         // Now all futures should be done (abort marks ProduceRequestResults as done)
         for f in &futures {
@@ -6666,7 +6675,7 @@ mod tests {
             // The record still sits in the accumulator carrying the callback; the
             // accumulator fires it exactly once when the batch is aborted (as the
             // Sender's abort/close path would).
-            ctx.accumulator.abort_incomplete_batches();
+            ctx.accumulator.abort_incomplete_batches().await;
             (count_after_send, count.load(Ordering::SeqCst))
         });
 

@@ -1032,11 +1032,9 @@ class ProducerServiceImpl final : public ProducerService::Service {
       return grpc::Status::OK;
     }
     kafka_common_Error_t* err = nullptr;
-    // close() flushes, so the *Rust* side of every outstanding delivery
-    // callback has run by the time this returns — i.e. its C callback has been
-    // enqueued on the dispatcher. It does not guarantee the dispatcher has run
-    // that job, so a GetCallbackLog issued immediately after Close may still be
-    // one entry behind; see CallbackLog's comment.
+    // close() flushes and returns only after the dispatcher has run every
+    // delivery callback it queued, so a GetCallbackLog issued after Close sees
+    // all of them.
     kafka_producer_Producer_close(producer, &err);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
