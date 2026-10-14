@@ -54,20 +54,22 @@
 //! once each wait only for their own topic's metadata (up to `max.block.ms`), and
 //! a close started while a send waits for metadata proceeds, wakes that wait and
 //! fails the send as closed while in progress, as Java's `doSend` does.
-//! [`kafka_producer_Producer_send_async`] and
-//! [`kafka_producer_Producer_send_batch_async`] touch no shared mutex at all,
-//! just an unbounded channel drained by the submission task.
+//! [`kafka_producer_Producer_send_batch_async`] touches no shared mutex at all,
+//! just an unbounded channel drained by the submission task, and
+//! [`kafka_producer_Producer_send_async`] holds `kind` only to borrow the producer
+//! for its fast path (below).
 //!
 //! The submission channel is unbounded, so the async pair never blocks the caller.
 //! [`kafka_producer_Producer_send_async`] first hands the record to the producer on
 //! the *caller's* thread, which is where Java's `send()` appends it, and returns
-//! **null** when the producer could take it at once — the common case, with no
-//! queue, no task and no handle allocated. Only a record the producer cannot take
-//! at once (no metadata for the topic yet, `buffer.memory` exhausted) goes on the
-//! submission queue, and for that record the call returns a per-record acceptance
-//! handle ([`kafka_producer_SendAccepted_t`]) that is settled once the producer has
-//! answered — Java's `send()` return point — so a binding waits *there*, in its own
-//! interruptible way, for exactly as long as Java's `send()` would have blocked.
+//! `0` when the producer could take it at once — the common case, with no queue
+//! and no task. Only a record the producer cannot take at once (no metadata for
+//! the topic yet, `buffer.memory` exhausted) goes on the submission queue; for
+//! that record the call returns `1`, and the *acceptance callback* the caller
+//! passed ([`kafka_producer_Producer_send_accepted_callback_t`]) is invoked once
+//! the producer has answered — Java's `send()` return point — so a binding waits
+//! *there*, in its own interruptible way, for exactly as long as Java's `send()`
+//! would have blocked.
 //! Such a record waits up to `max.block.ms` on a task of its own ([`send_waiter`]),
 //! not on the submission task, so N callers waiting at the same time wait
 //! concurrently — as N Java threads blocked in `send()` do — and a record that
@@ -80,11 +82,11 @@
 //! record waiting inside the producer — Java's `flush()` / `commitTransaction()` do
 //! not wait for another thread's blocked `send()` either — and `close` fails it the
 //! way Java's `close()` does ("Producer closed while allocating memory" / "Producer
-//! closed while send in progress"), the refusal arriving on its acceptance handle.
-//! A handle also carries the producer's *refusal* where Java's `send()` throws
-//! (closed producer, transaction state): a record refused on the caller's thread
-//! comes back on an already-settled handle, so the binding reads the error off it
-//! and raises it from its `send`. The fast path holds the `kind` mutex only to
+//! closed while send in progress"), the refusal arriving on the acceptance
+//! callback. The producer's *refusal* where Java's `send()` throws (closed
+//! producer, transaction state) is what the call itself reports for a record
+//! refused on the caller's thread: `-1`, with the error in `out_error`, so the
+//! binding raises it from its `send`. The fast path holds the `kind` mutex only to
 //! borrow the producer, never across the send itself, so it is not serialized
 //! behind a blocking [`kafka_producer_Producer_send`] waiting on metadata. (Sends
 //! racing on other threads are not ordered against each other; the same boundary
@@ -790,10 +792,10 @@ struct RecordBatchCallbackTarget {
 // SAFETY: see `RecordCallbackTarget`.
 unsafe impl Send for RecordBatchCallbackTarget {}
 
-/// Callback fired once a record [`kafka_producer_Producer_send_async`] returned a
-/// handle for has been settled by the producer — Java's `send()` return point.
-/// Registered through [`kafka_producer_SendAccepted_get_async`]; invoked exactly
-/// once, on the dispatcher thread, as `callback(error, callback_pending, user_data)`.
+/// Acceptance callback of [`kafka_producer_Producer_send_async`], for a record the
+/// call **queued** (returned `1`): invoked exactly once, on the dispatcher thread,
+/// as `callback(error, callback_pending, user_data)` once the producer has settled
+/// the record — Java's `send()` return point.
 ///
 /// `error` is null when the producer **accepted** the record: it is in a batch (or
 /// was resolved with a failed future, Java's synchronous `ApiException` path) and
@@ -803,27 +805,21 @@ unsafe impl Send for RecordBatchCallbackTarget {}
 /// then says whether the record's delivery callback still fires (or already fired)
 /// despite the refusal: Java 4.x throws some transaction-state errors *after* the
 /// record was appended, so the batch still completes it. When it is `false` the
-/// delivery callback never fires and `user_data` is the caller's to release.
-pub type kafka_producer_SendAccepted_callback_t =
+/// delivery callback never fires and its `user_data` is the caller's to release.
+///
+/// [`kafka_producer_Producer_send_async`] spells this signature out inline as
+/// `Option<unsafe extern "C" fn(*mut kafka_common_Error_t, bool, *mut c_void)>`
+/// (a nullable function pointer) rather than naming this alias: cbindgen only
+/// recognizes `Option<...>` as a nullable function pointer when the bare `fn`
+/// type is written literally, and emits an un-compilable `Option<...>` for an
+/// aliased one. The C signature is identical either way — this typedef is the
+/// name C callers should use.
+pub type kafka_producer_Producer_send_accepted_callback_t =
     unsafe extern "C" fn(*mut kafka_common_Error_t, bool, *mut std::ffi::c_void);
 
-/// Opaque handle to one record's "settled by the producer" signal.
-///
-/// `send_async` returns one of these for a record it could not hand over on the
-/// caller's thread — queued, or refused there — and the caller waits on it (or
-/// registers a callback) until the producer has answered for the record: accepted,
-/// or refused with the error Java's `send()` would have thrown. See
-/// [`kafka_producer_SendAccepted_callback_t`] for the outcome,
-/// [`kafka_producer_SendAccepted_take_error`] and
-/// [`kafka_producer_SendAccepted_callback_pending`] for reading it off the handle.
-/// Internally wraps an `Arc<AcceptState>`.
-#[repr(C)]
-pub struct kafka_producer_SendAccepted_t {
-    _private: [u8; 0],
-}
-
+/// The acceptance callback a queued `send_async` was given, with its `user_data`.
 struct AcceptWaiter {
-    callback: kafka_producer_SendAccepted_callback_t,
+    callback: kafka_producer_Producer_send_accepted_callback_t,
     user_data: *mut std::ffi::c_void,
 }
 // SAFETY: see `RecordCallbackTarget`.
@@ -831,7 +827,7 @@ unsafe impl Send for AcceptWaiter {}
 
 /// Owned acceptance payload handed to the dispatcher thread: the registered
 /// [`AcceptWaiter`] plus the outcome it is told (see
-/// [`kafka_producer_SendAccepted_callback_t`]).
+/// [`kafka_producer_Producer_send_accepted_callback_t`]).
 struct AcceptCompletion {
     waiter: AcceptWaiter,
     error: *mut kafka_common_Error_t,
@@ -844,108 +840,77 @@ impl AcceptCompletion {
     /// Must be called exactly once, on the dispatcher thread.
     unsafe fn fire(self) {
         // SAFETY: `self.waiter.callback`/`self.waiter.user_data` are the pair the C caller
-        // registered through `kafka_producer_SendAccepted_get_async`, and `self.error` is a
-        // fresh `box_error` handle (or null) whose ownership transfers to the callee.
-        // Consuming `self` makes this the single invocation for this acceptance, on the
-        // dispatcher thread per this method's `# Safety` (or inline on the completing
-        // thread once the dispatcher has exited, per `enqueue_or_run_inline`); the C user
-        // is responsible for the thread-safety of `user_data`.
+        // passed to `kafka_producer_Producer_send_async`, and `self.error` is a fresh
+        // `box_error` handle (or null) whose ownership transfers to the callee. Consuming
+        // `self` makes this the single invocation for this acceptance, on the dispatcher
+        // thread per this method's `# Safety` (or inline on the completing thread once the
+        // dispatcher has exited, per `enqueue_or_run_inline`); the C user is responsible
+        // for the thread-safety of `user_data`.
         unsafe { (self.waiter.callback)(self.error, self.callback_pending, self.waiter.user_data) }
     }
 }
 
-#[derive(Default)]
-struct AcceptInner {
-    completed: bool,
-    waiter: Option<AcceptWaiter>,
-    /// The producer's refusal, when it answered `send` with `Err`; `None` once
-    /// accepted — or once [`kafka_producer_SendAccepted_take_error`] took it.
-    error: Option<Error>,
-    /// Whether the record's delivery callback still fires despite the refusal
-    /// (see [`kafka_producer_SendAccepted_callback_t`]).
-    callback_pending: bool,
-}
-
-/// Shared between the handle returned to the caller and the guard travelling with
-/// the queued send. Completed exactly once, right after the producer's `send`
-/// returns (Ok or Err) -- Java's `send()` return point -- on the submission task
-/// or the per-record waiter it spawned, or when the request is dropped unprocessed
-/// (producer torn down). A record refused on the caller's own thread gets a handle
-/// completed before `send_async` returns it.
-#[derive(Default)]
-struct AcceptState {
-    inner: std::sync::Mutex<AcceptInner>,
-    cv: std::sync::Condvar,
-}
-
-impl AcceptState {
-    /// Settles the signal with the producer's answer: `error` is `None` for an
-    /// accepted record, `Some` for a refusal (with `callback_pending` as the typedef
-    /// documents). A no-op once settled. The registered callback, if any, is given
-    /// its own owned copy of the error; the state keeps one for `take_error`.
-    fn complete(
-        &self,
-        completion_tx: &std::sync::mpsc::Sender<CompletionJob>,
-        error: Option<Error>,
-        callback_pending: bool,
-    ) {
-        let completion = {
-            let mut inner = self.inner.lock().unwrap();
-            if inner.completed {
-                return;
-            }
-            inner.completed = true;
-            inner.callback_pending = callback_pending;
-            let completion = inner.waiter.take().map(|waiter| AcceptCompletion {
-                waiter,
-                error: error.as_ref().map(|e| box_error(e.clone())).unwrap_or(std::ptr::null_mut()),
-                callback_pending,
-            });
-            inner.error = error;
-            self.cv.notify_all();
-            completion
-        };
-        if let Some(completion) = completion {
-            // SAFETY: `AcceptCompletion::fire` requires exactly one call on the dispatcher
-            // thread: `completion` is moved into this `FnOnce` job, which
-            // `enqueue_or_run_inline` runs exactly once (on the dispatcher thread, or inline
-            // once it has exited). The waiter was taken out of `inner` under the lock, so
-            // no other job can fire it.
-            let job: CompletionJob = Box::new(move || unsafe { completion.fire() });
-            enqueue_or_run_inline(completion_tx, job);
-        }
-    }
-}
-
-/// Settles the acceptance signal exactly once: [`AcceptGuard::accept`] when the
-/// producer took the record, [`AcceptGuard::reject`] when it refused it, and —
-/// should neither have run — `Drop` reports the record as dropped unprocessed, so
-/// every path (Ok, Err, torn-down producer) releases a waiting caller.
+/// Answers a queued record's acceptance exactly once — [`AcceptGuard::accept`] when
+/// the producer took the record, [`AcceptGuard::reject`] when it refused it, and,
+/// should neither have run, `Drop` reports the record as dropped unprocessed — so
+/// every path (Ok, Err, torn-down producer) releases a caller waiting on the
+/// acceptance callback it gave [`kafka_producer_Producer_send_async`]. The answer
+/// is given right after the producer's `send` returns (Ok or Err) — Java's
+/// `send()` return point — on the submission task or the per-record waiter it
+/// spawned. With no callback registered (`send_batch_async`, or `send_async` given
+/// a null one) there is nobody to answer and every method is a no-op; such a
+/// record's refusal travels through its delivery callback instead
+/// (`SendRequest::refusal_via_callback`).
 struct AcceptGuard {
-    state: std::sync::Arc<AcceptState>,
+    /// The registered callback; taken once answered, so `Drop` knows it was.
+    waiter: Option<AcceptWaiter>,
     completion_tx: std::sync::mpsc::Sender<CompletionJob>,
-    settled: bool,
 }
 impl AcceptGuard {
-    fn new(state: std::sync::Arc<AcceptState>, completion_tx: std::sync::mpsc::Sender<CompletionJob>) -> Self {
-        Self { state, completion_tx, settled: false }
+    fn new(waiter: Option<AcceptWaiter>, completion_tx: std::sync::mpsc::Sender<CompletionJob>) -> Self {
+        Self { waiter, completion_tx }
     }
     /// The producer took the record: it is in a batch, or was resolved with a
     /// failed future (Java's synchronous `ApiException` path, which also fires the
     /// delivery callback). Either way the delivery callback reports on it.
     fn accept(mut self) {
-        self.settled = true;
-        self.state.complete(&self.completion_tx, None, false);
+        self.answer(None, false);
     }
     /// The producer answered `send` with `Err` — where Java's `send()` throws.
     fn reject(mut self, error: Error, callback_pending: bool) {
-        self.settled = true;
-        self.state.complete(&self.completion_tx, Some(error), callback_pending);
+        self.answer(Some(error), callback_pending);
+    }
+    /// Takes the callback back unanswered: for a request that never reached the
+    /// submission channel, whose caller is told synchronously instead.
+    fn disarm(mut self) {
+        self.waiter = None;
+    }
+    /// Fires the registered callback, if any, exactly once — on the dispatcher
+    /// thread, or inline once it has exited — with the producer's answer: `error`
+    /// is `None` for an accepted record, `Some` for a refusal (with
+    /// `callback_pending` as [`kafka_producer_Producer_send_accepted_callback_t`]
+    /// documents).
+    fn answer(&mut self, error: Option<Error>, callback_pending: bool) {
+        let Some(waiter) = self.waiter.take() else {
+            return;
+        };
+        let completion = AcceptCompletion {
+            waiter,
+            error: error.map(box_error).unwrap_or(std::ptr::null_mut()),
+            callback_pending,
+        };
+        // SAFETY: `AcceptCompletion::fire` requires exactly one call on the dispatcher
+        // thread: `completion` is moved into this `FnOnce` job, which
+        // `enqueue_or_run_inline` runs exactly once (on the dispatcher thread, or inline
+        // once it has exited). The waiter was taken out of `self`, so no later call —
+        // `Drop` included — can fire it again.
+        let job: CompletionJob = Box::new(move || unsafe { completion.fire() });
+        enqueue_or_run_inline(&self.completion_tx, job);
     }
 }
 impl Drop for AcceptGuard {
     fn drop(&mut self) {
-        if self.settled {
+        if self.waiter.is_none() {
             return;
         }
         // Dropped unprocessed: the producer was torn down with the record still on
@@ -953,8 +918,7 @@ impl Drop for AcceptGuard {
         // and no delivery callback was ever built, so the caller must learn that
         // here — reporting it as accepted would leave them waiting on a callback
         // that never comes.
-        self.state.complete(
-            &self.completion_tx,
+        self.answer(
             Some(Error::local_illegal_state(
                 "producer is closed; the record queued by send_async was dropped without being produced",
             )),
@@ -1081,11 +1045,12 @@ fn make_record_callback(
 struct SendRequest {
     record: ProducerRecord<&'static [u8], &'static [u8]>,
     target: RecordCallbackTarget,
-    /// Settles the caller's acceptance handle (see `AcceptGuard`).
+    /// Answers the caller's acceptance callback (see `AcceptGuard`).
     accepted: AcceptGuard,
-    /// `send_batch_async` sets this: its records have no acceptance consumer, so a
-    /// refusal that `send_async` would report on the acceptance handle is delivered
-    /// through the delivery callback instead — the only report a batch caller has.
+    /// Set for a record with no acceptance callback — every `send_batch_async`
+    /// record, and a `send_async` given a null one: a refusal that would otherwise
+    /// be reported through the acceptance callback is delivered through the
+    /// delivery callback instead — the only report such a caller has.
     refusal_via_callback: bool,
 }
 
@@ -1099,13 +1064,13 @@ struct SendSettlement {
     refusal_via_callback: bool,
 }
 impl SendSettlement {
-    /// `Ok`: the producer took the record — the acceptance handle says so and the
+    /// `Ok`: the producer took the record — the acceptance callback says so and the
     /// delivery callback reports the rest. `Err`: the producer refused it, where
-    /// Java's `send()` throws; the refusal travels on the acceptance handle together
+    /// Java's `send()` throws; the refusal reaches the acceptance callback together
     /// with whether the delivery callback still fires ([`CallbackState::is_consumed`])
-    /// — or, for `send_batch_async`, whose acceptance nobody reads, through a fresh
-    /// delivery callback when the original was dropped unfired, so the caller's one
-    /// report still arrives and `user_data` is released exactly once.
+    /// — or, for a record with no acceptance callback (`refusal_via_callback`),
+    /// through a fresh delivery callback when the original was dropped unfired, so
+    /// the caller's one report still arrives and `user_data` is released exactly once.
     fn settle(self, result: Result<(), Error>, completion_tx: &std::sync::mpsc::Sender<CompletionJob>) {
         match result {
             Ok(()) => self.accepted.accept(),
@@ -1308,7 +1273,8 @@ impl Drop for WaiterRegistration<'_> {
 /// for it — it is a `send()` in progress, which Java's `flush()` and
 /// `commitTransaction()` do not wait for either — and `close` ends its wait through
 /// the producer's own close, with the refusal Java's `send()` throws then
-/// ("Producer closed while send in progress"), settled on the acceptance handle.
+/// ("Producer closed while send in progress"), reported through the acceptance
+/// callback.
 ///
 /// A per-record spawn, but on the slow path only: the fast path —
 /// [`kafka_producer_Producer_send_async`] appending on the caller's own thread —
@@ -2586,6 +2552,35 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch(
     unsafe { send_batch_inner(producer, records, count, out_futures, out_errors) }
 }
 
+/// Reports a [`kafka_producer_Producer_send_async`] record the producer did not
+/// take — refused on the caller's thread, failed validation, or a torn-down
+/// producer — through the call's out-parameters: `*out_error` gets the owned
+/// error, `*out_callback_pending` whether the record's delivery callback still
+/// fires for it. Returns `-1`, the call's "not taken" code.
+///
+/// # Safety
+///
+/// `out_error` and `out_callback_pending` must each be null or valid for one write.
+unsafe fn report_not_taken(
+    out_error: *mut *mut kafka_common_Error_t,
+    out_callback_pending: *mut bool,
+    error: Error,
+    callback_pending: bool,
+) -> i32 {
+    if !out_error.is_null() {
+        // SAFETY: `out_error` is non-null (checked above) and, per this function's `#
+        // Safety`, valid for one write; exactly one element is written, a fresh `box_error`
+        // handle the caller owns.
+        unsafe { *out_error = box_error(error) };
+    }
+    if !out_callback_pending.is_null() {
+        // SAFETY: `out_callback_pending` is non-null (checked above) and, per this function's
+        // `# Safety`, valid for one write; exactly one element is written.
+        unsafe { *out_callback_pending = callback_pending };
+    }
+    -1
+}
+
 /// Sends a single record without ever blocking the caller for `max.block.ms`,
 /// invoking `callback` on completion.
 ///
@@ -2599,37 +2594,41 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch(
 /// buffer memory when `buffer.memory` is exhausted) is it queued for the
 /// producer's submission task instead, so this never waits.
 ///
-/// # Return value — null, or the acceptance handle
+/// # Return value — `0` taken, `1` queued, `-1` not taken
 ///
-/// - **Null with `*out_error` null** — the producer took the record at once: it
-///   is in a batch (or was resolved with a failed future, Java's synchronous
+/// - **`0` — taken.** The producer took the record at once, on this thread: it is
+///   in a batch (or was resolved with a failed future, Java's synchronous
 ///   `ApiException` path) and `callback` **will** fire exactly once with its
-///   outcome. Nothing was queued and no handle was allocated: the common case,
-///   and the fast path.
-/// - **Null with `*out_error` set** — a synchronous validation error (null
-///   topic / bad key/value length / invalid record), or the producer has already
-///   been torn down. `callback` is **not** invoked and never will be, so
-///   `user_data` stays the caller's.
-/// - **A [`kafka_producer_SendAccepted_t`]** — the record's "settled by the
-///   producer" signal, Java's `send()` return point, in one of two states.
-///   *Pending*: the record had to be queued; the submission task hands it to the
-///   producer — at once if it can by then, otherwise on a wait of up to
-///   `max.block.ms` that runs on a task of the record's own, so records waiting
-///   at the same time wait concurrently and a record that needs no wait is not
-///   held behind one that does — and then settles the handle with the producer's
-///   answer: **accepted**, or **refused** with the error Java's `send()` would
-///   have thrown. *Already settled with a refusal*: the producer refused the
-///   record on this thread, where Java's `send()` throws (closed producer,
-///   transaction state, ...). Either way, wait on it with
-///   [`kafka_producer_SendAccepted_wait_timeout`] or register a callback with
-///   [`kafka_producer_SendAccepted_get_async`] (which reports a settled handle
-///   instead of storing the callback); read a refusal with
-///   [`kafka_producer_SendAccepted_take_error`] and
-///   [`kafka_producer_SendAccepted_callback_pending`]; free it with
-///   [`kafka_producer_SendAccepted_destroy`] (the signal lives on with the queued
-///   send, so a registered callback still fires). This is how a binding
-///   reproduces Java's blocking `send()` — waiting only where Java would have,
-///   and raising what it throws — without parking a native thread inside the FFI.
+///   outcome. Nothing was queued and `accepted` is never invoked: the common
+///   case, and the fast path.
+/// - **`1` — queued.** The record had to be queued, where Java's `send()` would
+///   now block. The submission task hands it to the producer — at once if it can
+///   by then, otherwise on a wait of up to `max.block.ms` that runs on a task of
+///   the record's own, so records waiting at the same time wait concurrently and
+///   a record that needs no wait is not held behind one that does — and then
+///   reports the producer's answer through `accepted`, invoked exactly once, on
+///   the dispatcher thread, with `accepted_user_data`: **accepted** (null error;
+///   `callback` reports the delivery), or **refused** with the error Java's
+///   `send()` would have thrown, plus whether `callback` still fires regardless
+///   ([`kafka_producer_Producer_send_accepted_callback_t`]). This is how a
+///   binding reproduces Java's blocking `send()` — waiting only where Java would
+///   have, and raising what it throws — without parking a native thread inside
+///   the FFI. `accepted` may be null: the record is then reported through
+///   `callback` alone, a refusal included (delivered as the callback's error, as
+///   [`kafka_producer_Producer_send_batch_async`] delivers one), so `user_data`
+///   is still released exactly once.
+/// - **`-1` — not taken**, with `*out_error` set to an owned error the caller
+///   frees: the producer **refused** the record on this thread, where Java's
+///   `send()` throws (closed producer, transaction state, ...); or a synchronous
+///   validation error (null producer / null topic / bad key/value length /
+///   invalid record); or the producer has already been torn down. `accepted` is
+///   **not** invoked. `*out_callback_pending` says whether `callback` still fires
+///   for the record: `true` only for a refusal after the record had reached a
+///   batch (Java 4.x throws some transaction-state errors after the append), when
+///   the batch still completes it exactly once; `false` otherwise, and `callback`
+///   then never fires, so `user_data` stays the caller's. It is written `false`
+///   for `0` and `1` as well. Either out-parameter may be null when the caller
+///   does not need it.
 ///
 /// Records other callers have queued or waiting do not hold this call up: the
 /// record is handed over on this thread regardless, as one Java thread's `send()`
@@ -2640,10 +2639,10 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch(
 /// function here has.)
 ///
 /// `callback` is invoked on the producer's dedicated dispatcher thread for every
-/// **accepted** record. For a *refused* one it is not invoked — the refusal is on
-/// the acceptance handle and `user_data` stays the caller's — unless the handle
-/// reports `callback_pending`: the producer refused the record after it had
-/// reached a batch (Java 4.x throws some transaction-state errors after the
+/// **accepted** record. For a *refused* one it is not invoked — the refusal is
+/// reported through `accepted` or `out_error`, and `user_data` stays the caller's
+/// — unless `callback_pending` is reported: the producer refused the record after
+/// it had reached a batch (Java 4.x throws some transaction-state errors after the
 /// append), so the callback still fires once with the record's outcome. On
 /// success, `metadata` is non-null and `error` is null. On failure, `error` is
 /// always non-null and `metadata` **may also be non-null**, carrying `-1` in
@@ -2660,27 +2659,25 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch(
 /// non-null handle and must free each with the matching `*_destroy`, testing them
 /// independently rather than in an `if`/`else`.
 ///
-/// `out_error` reports only synchronous validation errors (null producer / null
-/// topic / bad key/value length), in which case `callback` is **not** invoked and
-/// no handle is returned. A caught panic is reported the same way: `*out_error`
-/// receives a `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE` error (with a null
-/// `out_error` it is only logged), the return is null, and it is never reported
-/// through `callback` or a handle. The two panics reachable here both come after
-/// the record left this function's hands, so a record reported this way may still
-/// be delivered: one inside the producer's own append on the fast path, after
-/// which the record's fate is the producer's (if it was taken, `callback` still
-/// fires for it, exactly once); the other after the hand-off on the slow path,
-/// where tokio's `UnboundedSender::send` queues the request and then wakes the
-/// receiver, so the record stays queued, is still sent and `callback` still fires
-/// for it, exactly once — though no handle is returned for it.
+/// A caught panic is reported as `-1` too: `*out_error` receives a
+/// `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE` error (with a null `out_error` it
+/// is only logged), `*out_callback_pending` is left unwritten, and the panic is
+/// never reported through `callback` or `accepted`. The two panics reachable here
+/// both come after the record left this function's hands, so a record reported
+/// this way may still be delivered: one inside the producer's own append on the
+/// fast path, after which the record's fate is the producer's (if it was taken,
+/// `callback` still fires for it, exactly once); the other after the hand-off on
+/// the slow path, where tokio's `UnboundedSender::send` queues the request and
+/// then wakes the receiver, so the record stays queued, is still sent, and
+/// `accepted` and `callback` still fire for it, exactly once each.
 ///
 /// # Zero-copy / lifetime contract
 ///
 /// The `key` and `value` buffers are **not** copied. A record the producer took
 /// on this thread consumed them before the call returned — as with
-/// [`kafka_producer_Producer_send`] — so for a null return they need only stay
-/// valid for the duration of the call. A record this returns a handle for borrows
-/// them until the handle settles, accepted or refused; keeping them valid until
+/// [`kafka_producer_Producer_send`] — so for a `0` return they need only stay
+/// valid for the duration of the call. A queued record (`1`) borrows them until
+/// `accepted` reports it, accepted or refused; keeping them valid until
 /// `callback` fires, as a caller naturally does, satisfies that, and a refusal
 /// with `callback_pending` false releases them (and `user_data`) at once. The
 /// headers are **copied** into the record during the call (as every send function
@@ -2692,11 +2689,17 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch(
 /// - `producer` must be a valid handle.
 /// - `topic` must be a valid C string.
 /// - `key`/`value` must be valid for `key_len`/`value_len` bytes when `>= 0`,
-///   and, when a handle is returned, remain valid until it settles.
+///   and, for a queued record (`1`), remain valid until `accepted` reports it.
 /// - `headers`, when `header_count > 0`, must point to `header_count` valid
 ///   [`kafka_common_header_Header_t`] entries, each with a valid NUL-terminated
 ///   `key` and a `value` valid for `value_len` bytes when `value_len >= 0`; null
 ///   with `header_count <= 0` means no headers.
+/// - `accepted`, when non-null, is invoked at most once, with `accepted_user_data`,
+///   on the producer's dispatcher thread (or inline, once the dispatcher has
+///   exited at teardown); the C user is responsible for the thread-safety of
+///   `accepted_user_data`.
+/// - `out_error` and `out_callback_pending` must each be null or valid for one
+///   write.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_send_async(
@@ -2712,43 +2715,36 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
     header_count: i32,
     callback: kafka_producer_Producer_send_callback_t,
     user_data: *mut std::ffi::c_void,
+    accepted: Option<unsafe extern "C" fn(*mut kafka_common_Error_t, bool, *mut std::ffi::c_void)>,
+    accepted_user_data: *mut std::ffi::c_void,
     out_error: *mut *mut kafka_common_Error_t,
-) -> *mut kafka_producer_SendAccepted_t {
+    out_callback_pending: *mut bool,
+) -> i32 {
     if producer.is_null() || topic.is_null() {
-        if !out_error.is_null() {
-            // SAFETY: `out_error` is non-null (checked above) and, per the `out_error`
-            // contract this function inherits from `kafka_producer_Producer_send`'s `#
-            // Parameters`, a pointer where an error handle will be written on failure or
-            // null if the caller does not need error details; exactly one element is
-            // written, a fresh `box_error` handle the caller owns.
-            unsafe { *out_error = box_error(Error::new(Errors::InvalidRequest)) };
-        }
-        return std::ptr::null_mut();
+        // SAFETY: per this function's `# Safety`, `out_error` and `out_callback_pending` are
+        // each null or valid for one write, which is all `report_not_taken` requires.
+        return unsafe { report_not_taken(out_error, out_callback_pending, Error::new(Errors::InvalidRequest), false) };
     }
 
     // Borrow key/value into caller memory, lifetime-extended to 'static under
     // the documented contract: consumed during the call, or — for a queued
-    // record — kept valid by the caller until the returned handle settles.
+    // record — kept valid by the caller until `accepted` reports it.
     let key_slice: Option<&'static [u8]> = if key_len >= 0 {
         if key.is_null() {
-            if !out_error.is_null() {
-                // SAFETY: `out_error` is non-null (checked above) and, per the `out_error`
-                // contract this function inherits from `kafka_producer_Producer_send`'s `#
-                // Parameters`, a pointer where an error handle will be written on failure
-                // or null if the caller does not need error details; exactly one element is
-                // written, a fresh `box_error` handle the caller owns.
-                unsafe { *out_error = box_error(Error::new(Errors::InvalidRequest)) };
-            }
-            return std::ptr::null_mut();
+            // SAFETY: per this function's `# Safety`, `out_error` and `out_callback_pending`
+            // are each null or valid for one write, which is all `report_not_taken` requires.
+            return unsafe {
+                report_not_taken(out_error, out_callback_pending, Error::new(Errors::InvalidRequest), false)
+            };
         }
         // SAFETY: This branch is reached only when `key_len >= 0` (so `key_len as usize` is
         // the non-negative length) and `key` is non-null (checked above); per this
-        // function's `# Safety`, `key` is then valid for `key_len` bytes and remains valid
-        // until `callback` is invoked. The `'static` lifetime is a cast of exactly that
-        // contract: the slice is moved into the `SendRequest` and read once, when the
-        // submission task hands the record to `producer.send`, which copies the bytes into
-        // the batch before the delivery callback can fire; on the early-return paths below
-        // the slice is dropped unread.
+        // function's `# Safety`, `key` is then valid for `key_len` bytes and, for a queued
+        // record, remains valid until `accepted` reports it. The `'static` lifetime is a
+        // cast of exactly that contract: the slice is moved into the `SendRequest` and read
+        // once, when the submission task hands the record to `producer.send`, which copies
+        // the bytes into the batch before the record is reported; on the early-return paths
+        // below the slice is dropped unread.
         Some(unsafe { std::slice::from_raw_parts(key, key_len as usize) })
     } else {
         None
@@ -2756,24 +2752,20 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
 
     let value_slice: Option<&'static [u8]> = if value_len >= 0 {
         if value.is_null() {
-            if !out_error.is_null() {
-                // SAFETY: `out_error` is non-null (checked above) and, per the `out_error`
-                // contract this function inherits from `kafka_producer_Producer_send`'s `#
-                // Parameters`, a pointer where an error handle will be written on failure
-                // or null if the caller does not need error details; exactly one element is
-                // written, a fresh `box_error` handle the caller owns.
-                unsafe { *out_error = box_error(Error::new(Errors::InvalidRequest)) };
-            }
-            return std::ptr::null_mut();
+            // SAFETY: per this function's `# Safety`, `out_error` and `out_callback_pending`
+            // are each null or valid for one write, which is all `report_not_taken` requires.
+            return unsafe {
+                report_not_taken(out_error, out_callback_pending, Error::new(Errors::InvalidRequest), false)
+            };
         }
         // SAFETY: This branch is reached only when `value_len >= 0` (so `value_len as
         // usize` is the non-negative length) and `value` is non-null (checked above); per
-        // this function's `# Safety`, `value` is then valid for `value_len` bytes and
-        // remains valid until `callback` is invoked. The `'static` lifetime is a cast of
-        // exactly that contract: the slice is moved into the `SendRequest` and read once,
-        // when the submission task hands the record to `producer.send`, which copies the
-        // bytes into the batch before the delivery callback can fire; on the early-return
-        // paths below the slice is dropped unread.
+        // this function's `# Safety`, `value` is then valid for `value_len` bytes and, for a
+        // queued record, remains valid until `accepted` reports it. The `'static` lifetime
+        // is a cast of exactly that contract: the slice is moved into the `SendRequest` and
+        // read once, when the submission task hands the record to `producer.send`, which
+        // copies the bytes into the batch before the record is reported; on the
+        // early-return paths below the slice is dropped unread.
         Some(unsafe { std::slice::from_raw_parts(value, value_len as usize) })
     } else {
         None
@@ -2813,17 +2805,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
     };
     let record = match build_record() {
         Ok(r) => r,
-        Err(e) => {
-            if !out_error.is_null() {
-                // SAFETY: `out_error` is non-null (checked above) and, per the `out_error`
-                // contract this function inherits from `kafka_producer_Producer_send`'s `#
-                // Parameters`, a pointer where an error handle will be written on failure
-                // or null if the caller does not need error details; exactly one element is
-                // written, a fresh `box_error` handle the caller owns.
-                unsafe { *out_error = box_error(e) };
-            }
-            return std::ptr::null_mut();
-        },
+        // SAFETY: per this function's `# Safety`, `out_error` and `out_callback_pending` are
+        // each null or valid for one write, which is all `report_not_taken` requires.
+        Err(e) => return unsafe { report_not_taken(out_error, out_callback_pending, e, false) },
     };
 
     // SAFETY: `producer` is non-null (checked above) and, per this function's `# Safety`, a
@@ -2833,12 +2817,18 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
     // — the request sent on `submit_tx` carries no reference into the handle.
     let handle = unsafe { producer_handle(producer) };
     if !out_error.is_null() {
-        // SAFETY: `out_error` is non-null (checked above) and, per the `out_error` contract
-        // this function inherits from `kafka_producer_Producer_send`'s `# Parameters`, a
-        // pointer where an error handle will be written on failure or null if the caller
-        // does not need error details; exactly one element is written (null: the paths
-        // below report through the return value, not `out_error`).
+        // SAFETY: `out_error` is non-null (checked above) and, per this function's `# Safety`,
+        // valid for one write; exactly one element is written here (null: the `0` and `1`
+        // returns below report no error, and a later refusal overwrites it in
+        // `report_not_taken`).
         unsafe { *out_error = std::ptr::null_mut() };
+    }
+    if !out_callback_pending.is_null() {
+        // SAFETY: `out_callback_pending` is non-null (checked above) and, per this function's
+        // `# Safety`, valid for one write; exactly one element is written here (`false`: the
+        // `0` and `1` returns below report no refusal, and a later refusal overwrites it in
+        // `report_not_taken`).
+        unsafe { *out_callback_pending = false };
     }
 
     // Fast path: hand the record to the producer on this thread, where Java's
@@ -2860,8 +2850,8 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
     let refusal = match unsafe { producer_static_ref(producer as usize) } {
         ProducerStaticRef::Kafka(kp) => match runtime_handle.block_on(kp.try_send(record, Some(cb))) {
             // Taken: the callback reports the delivery, so neither the future nor
-            // a handle is needed — there is nothing left to wait for.
-            Ok(TrySendOutcome::Accepted(_future)) => return std::ptr::null_mut(),
+            // an acceptance is needed — there is nothing left to wait for.
+            Ok(TrySendOutcome::Accepted(_future)) => return 0,
             // Would block: nothing happened. Dropping the un-invoked callback fires
             // nothing and frees nothing (`make_record_callback`'s closure allocates
             // its handles only when it runs), so `user_data` is still the caller's
@@ -2889,7 +2879,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
                     ProducerRecord::with_options(options).map_err(|e| Error::local_illegal_argument(e.message()))
                 }) {
                 Ok(owned) => match runtime_handle.block_on(mp.send_with_callback(owned, Some(cb))) {
-                    Ok(_) => return std::ptr::null_mut(),
+                    Ok(_) => return 0,
                     Err(e) => Some(e),
                 },
                 // Cannot fail — the record was just built from the same parts — but
@@ -2903,223 +2893,67 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
         },
     };
 
-    // Refused on this thread — where Java's `send()` throws. The refusal reaches
-    // the caller the way a queued record's does, on an acceptance handle, only
-    // this one is settled before it is returned; `callback_pending` says whether a
-    // batch still owns the record's delivery callback (see `CallbackState`).
+    // Refused on this thread — where Java's `send()` throws. Reported synchronously,
+    // through `out_error`, not through `accepted`, which is for a queued record;
+    // `callback_pending` says whether a batch still owns the record's delivery
+    // callback (see `CallbackState`).
     if let Some(error) = refusal {
-        let callback_pending = state.is_consumed();
-        let accepted = std::sync::Arc::new(AcceptState::default());
-        accepted.complete(&handle.completion_tx, Some(error), callback_pending);
-        return Box::into_raw(Box::new(accepted)) as *mut kafka_producer_SendAccepted_t;
+        // SAFETY: per this function's `# Safety`, `out_error` and `out_callback_pending` are
+        // each null or valid for one write, which is all `report_not_taken` requires.
+        return unsafe { report_not_taken(out_error, out_callback_pending, error, state.is_consumed()) };
     }
 
     // Slow path: where Java's `send()` would now block, queue the record for the
-    // submission task instead and give the caller the handle to wait on. The
-    // attempt above consumed the record, so it is rebuilt from the same inputs —
-    // a topic `String`, paid on this path only — and that cannot fail, the inputs
-    // having been validated once already.
+    // submission task instead; the producer's answer reaches the caller through
+    // `accepted`. The attempt above consumed the record, so it is rebuilt from the
+    // same inputs — a topic `String`, paid on this path only — and that cannot
+    // fail, the inputs having been validated once already.
     let record = match build_record() {
         Ok(r) => r,
-        Err(e) => {
-            if !out_error.is_null() {
-                // SAFETY: `out_error` is non-null (checked above) and, per the `out_error`
-                // contract this function inherits from `kafka_producer_Producer_send`'s `#
-                // Parameters`, a pointer where an error handle will be written on failure
-                // or null if the caller does not need error details; exactly one element is
-                // written, a fresh `box_error` handle the caller owns.
-                unsafe { *out_error = box_error(e) };
-            }
-            return std::ptr::null_mut();
-        },
+        // SAFETY: per this function's `# Safety`, `out_error` and `out_callback_pending` are
+        // each null or valid for one write, which is all `report_not_taken` requires.
+        Err(e) => return unsafe { report_not_taken(out_error, out_callback_pending, e, false) },
     };
     // Carry the target, not a pre-built callback: the submission task builds the
-    // callback with the record's bookkeeping (see `SendRequest`).
-    let accepted = std::sync::Arc::new(AcceptState::default());
+    // callback with the record's bookkeeping (see `SendRequest`). Without an
+    // acceptance callback nobody is told of a refusal, so it is delivered through
+    // the delivery callback instead, as for `send_batch_async`
+    // (`refusal_via_callback`).
+    let waiter = accepted.map(|callback| AcceptWaiter { callback, user_data: accepted_user_data });
+    let refusal_via_callback = waiter.is_none();
     let request = SubmitRequest::Send(SendRequest {
         record,
         target,
-        accepted: AcceptGuard::new(std::sync::Arc::clone(&accepted), handle.completion_tx.clone()),
-        refusal_via_callback: false,
+        accepted: AcceptGuard::new(waiter, handle.completion_tx.clone()),
+        refusal_via_callback,
     });
 
     // Count the send before it is visible on the channel, so a concurrent
     // flush/close drain can never observe a depth lower than reality.
     handle.queued_sends.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-    if handle.submit_tx.send(request).is_err() {
+    if let Err(tokio::sync::mpsc::error::SendError(request)) = handle.submit_tx.send(request) {
         handle.queued_sends.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-        // Submission task gone (producer torn down): report synchronously. No
-        // callback was built for the queued record, so nothing fires.
-        if !out_error.is_null() {
-            // SAFETY: `out_error` is non-null (checked above) and, per the `out_error`
-            // contract this function inherits from `kafka_producer_Producer_send`'s `#
-            // Parameters`, a pointer where an error handle will be written on failure or
-            // null if the caller does not need error details; exactly one element is
-            // written, a fresh `box_error` handle the caller owns.
-            unsafe { *out_error = box_error(Error::local_illegal_state("producer is closed")) };
+        // Submission task gone (producer torn down): report synchronously. The
+        // request never reached the channel, so its guard is disarmed rather than
+        // dropped unanswered — a drop would report through `accepted` as well —
+        // and no delivery callback was built for the record, so nothing fires.
+        if let SubmitRequest::Send(send) = request {
+            send.accepted.disarm();
         }
-        return std::ptr::null_mut();
+        // SAFETY: per this function's `# Safety`, `out_error` and `out_callback_pending` are
+        // each null or valid for one write, which is all `report_not_taken` requires.
+        return unsafe {
+            report_not_taken(
+                out_error,
+                out_callback_pending,
+                Error::local_illegal_state("producer is closed"),
+                false,
+            )
+        };
     }
 
-    // The caller waits on this handle until the producer has settled the record.
-    Box::into_raw(Box::new(accepted)) as *mut kafka_producer_SendAccepted_t
-}
-
-/// Blocks until the producer has settled the record behind `accepted` — accepted
-/// it, or refused it (see [`kafka_producer_SendAccepted_take_error`]) — or
-/// `timeout_ms` elapses. Returns `true` once settled. Meant to be called in short
-/// slices so the caller can check for signals between them.
-///
-/// A caught panic reports `true` (settled): the outcome is then read off the
-/// handle, where [`kafka_producer_SendAccepted_take_error`] reports the panic as an
-/// error.
-///
-/// # Safety
-///
-/// `accepted` must be a valid handle, or null (reports `true`: there is nothing to
-/// wait for).
-#[ffi_guard(fallback = true)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_producer_SendAccepted_wait_timeout(
-    accepted: *mut kafka_producer_SendAccepted_t,
-    timeout_ms: i64,
-) -> bool {
-    if accepted.is_null() {
-        return true;
-    }
-    // SAFETY: `accepted` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle: the pointer `kafka_producer_Producer_send_async` leaked with
-    // `Box::into_raw(Box<Arc<AcceptState>>)` and not yet destroyed. The shared reference
-    // lives only for this call, during which the C caller keeps the handle alive.
-    let state = unsafe { &*(accepted as *const std::sync::Arc<AcceptState>) };
-    let inner = state.inner.lock().unwrap();
-    if inner.completed {
-        return true;
-    }
-    let (guard, _) = state
-        .cv
-        .wait_timeout_while(inner, std::time::Duration::from_millis(timeout_ms.max(0) as u64), |i| {
-            !i.completed
-        })
-        .unwrap();
-    guard.completed
-}
-
-/// Registers `callback` to fire exactly once, on the dispatcher thread, when the
-/// producer settles the record — see [`kafka_producer_SendAccepted_callback_t`] for
-/// what it is told. Returns `true` if the record already was settled (callback not
-/// stored): read the outcome off the handle then, with
-/// [`kafka_producer_SendAccepted_take_error`] and
-/// [`kafka_producer_SendAccepted_callback_pending`].
-///
-/// A caught panic reports `true` without storing `callback`: the outcome is then
-/// read off the handle, where [`kafka_producer_SendAccepted_take_error`] reports the
-/// panic as an error.
-///
-/// # Safety
-///
-/// `accepted` must be a valid handle, or null (reports `true`). `callback` is
-/// invoked at most once, with `user_data`, on the producer's dispatcher thread.
-#[ffi_guard(fallback = true)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_producer_SendAccepted_get_async(
-    accepted: *mut kafka_producer_SendAccepted_t,
-    callback: kafka_producer_SendAccepted_callback_t,
-    user_data: *mut std::ffi::c_void,
-) -> bool {
-    if accepted.is_null() {
-        return true;
-    }
-    // SAFETY: `accepted` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle: the pointer `kafka_producer_Producer_send_async` leaked with
-    // `Box::into_raw(Box<Arc<AcceptState>>)` and not yet destroyed. The shared reference
-    // lives only for this call, during which the C caller keeps the handle alive.
-    let state = unsafe { &*(accepted as *const std::sync::Arc<AcceptState>) };
-    let mut inner = state.inner.lock().unwrap();
-    if inner.completed {
-        return true;
-    }
-    inner.waiter = Some(AcceptWaiter { callback, user_data });
-    false
-}
-
-/// Takes the producer's refusal out of a settled handle: an owned error the caller
-/// must free — the error Java's `send()` would have thrown — or null when the
-/// record was accepted, is not settled yet, or the refusal was already taken. Pair
-/// it with [`kafka_producer_SendAccepted_callback_pending`] to know whether the
-/// delivery callback (and with it the release of its `user_data`) is still coming.
-///
-/// A caught panic is returned as an owned `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE`
-/// error the caller frees like any other.
-///
-/// # Safety
-///
-/// `accepted` must be a valid handle, or null (reports null).
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_producer_SendAccepted_take_error(
-    accepted: *mut kafka_producer_SendAccepted_t,
-) -> *mut kafka_common_Error_t {
-    if accepted.is_null() {
-        return std::ptr::null_mut();
-    }
-    // SAFETY: `accepted` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle: the pointer `kafka_producer_Producer_send_async` leaked with
-    // `Box::into_raw(Box<Arc<AcceptState>>)` and not yet destroyed. The shared reference
-    // lives only for this call, during which the C caller keeps the handle alive.
-    let state = unsafe { &*(accepted as *const std::sync::Arc<AcceptState>) };
-    let mut inner = state.inner.lock().unwrap();
-    inner.error.take().map(box_error).unwrap_or(std::ptr::null_mut())
-}
-
-/// Whether the delivery callback of a **refused** record still fires (or already
-/// fired): `true` when the producer refused it after it had reached a batch —
-/// Java 4.x's post-append throw — so `user_data` is still owed to that callback;
-/// `false` otherwise, including for an accepted or not yet settled record.
-///
-/// A caught panic reports `true`, the conservative answer: `false` would tell the
-/// caller to release `user_data` that a later callback might still use.
-///
-/// # Safety
-///
-/// `accepted` must be a valid handle, or null (reports `false`).
-#[ffi_guard(fallback = true)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_producer_SendAccepted_callback_pending(
-    accepted: *mut kafka_producer_SendAccepted_t,
-) -> bool {
-    if accepted.is_null() {
-        return false;
-    }
-    // SAFETY: `accepted` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle: the pointer `kafka_producer_Producer_send_async` leaked with
-    // `Box::into_raw(Box<Arc<AcceptState>>)` and not yet destroyed. The shared reference
-    // lives only for this call, during which the C caller keeps the handle alive.
-    let state = unsafe { &*(accepted as *const std::sync::Arc<AcceptState>) };
-    let inner = state.inner.lock().unwrap();
-    inner.completed && inner.callback_pending
-}
-
-/// Frees the handle. The acceptance state lives on with the queued send until it
-/// completes, so a registered callback still fires.
-///
-/// A caught panic is only logged.
-///
-/// # Safety
-///
-/// `accepted` must be a valid handle, or null (no-op). After this call the pointer
-/// is invalid and must not be used.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_producer_SendAccepted_destroy(accepted: *mut kafka_producer_SendAccepted_t) {
-    if !accepted.is_null() {
-        // SAFETY: `accepted` is non-null (checked above) and, per this function's `# Safety`,
-        // a valid handle leaked by `kafka_producer_Producer_send_async` with
-        // `Box::into_raw(Box<Arc<AcceptState>>)`; the same `# Safety` declares it invalid
-        // after this call, so this is the single, final use. Only the `Arc` is freed: the
-        // state lives on with the queued send's `AcceptGuard` until it completes.
-        unsafe { drop(Box::from_raw(accepted as *mut std::sync::Arc<AcceptState>)) };
-    }
+    // Queued: `accepted` reports the producer's answer once it has one.
+    1
 }
 
 /// **Test-only hook.** Pauses (`paused == true`) or resumes the producer's
@@ -3332,13 +3166,13 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch_async(
         };
         // Carry the target, not a pre-built callback: the submission task builds
         // the callback with the record's bookkeeping (see `SendRequest`). Batch
-        // callers get no acceptance handle — the guard settles a state nobody reads
+        // callers register no acceptance callback — the guard has nobody to answer
         // — so a refusal by the producer is delivered through the delivery callback
         // instead (`refusal_via_callback`), the one report they have.
         let request = SubmitRequest::Send(SendRequest {
             record,
             target: RecordCallbackTarget { callback, user_data },
-            accepted: AcceptGuard::new(std::sync::Arc::new(AcceptState::default()), handle.completion_tx.clone()),
+            accepted: AcceptGuard::new(None, handle.completion_tx.clone()),
             refusal_via_callback: true,
         });
 
@@ -4662,7 +4496,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for(
 /// One the producer could not take at once and that is still waiting (metadata
 /// for its topic, buffer memory) is failed instead, as Java's `close()` fails a
 /// `send()` blocked there ("Producer closed while send in progress"): its
-/// acceptance handle reports the refusal, with no delivery callback to come.
+/// acceptance callback reports the refusal, with no delivery callback to come.
 ///
 /// # Parameters
 ///
@@ -7246,7 +7080,7 @@ mod tests {
         // dispatcher); `err` is a local written exactly once. The mock lock is taken and
         // dropped before the producer is destroyed.
         unsafe {
-            let accepted = kafka_producer_Producer_send_async(
+            let code = kafka_producer_Producer_send_async(
                 producer,
                 topic.as_ptr(),
                 -1,
@@ -7259,10 +7093,13 @@ mod tests {
                 2,
                 capture_record_result,
                 captured.as_user_data(),
+                None,
+                std::ptr::null_mut(),
                 &mut err,
+                std::ptr::null_mut(),
             );
             assert_success(err);
-            assert!(accepted.is_null(), "the mock takes the record at once");
+            assert_eq!(code, 0, "the mock takes the record at once");
 
             // Inspect the mock's stored record: headers preserved (order + null),
             // value is None (tombstone).
@@ -7304,19 +7141,22 @@ mod tests {
     // hands the producer: keeping it alive models a batch owning it, dropping it
     // models the early-return paths.
 
-    /// Wraps an `AcceptState` as the C handle `send_async` returns, so the C
-    /// getters can be exercised on a state settled in-process.
-    fn accept_handle(state: &std::sync::Arc<AcceptState>) -> *mut kafka_producer_SendAccepted_t {
-        Box::into_raw(Box::new(std::sync::Arc::clone(state))) as *mut kafka_producer_SendAccepted_t
+    /// An [`AcceptWaiter`] reporting to `captured` through `capture_acceptance`, as
+    /// `send_async` builds one from the `accepted` callback and `accepted_user_data`
+    /// it is given, so a guard's answer can be exercised on a settlement made
+    /// in-process.
+    fn acceptance_waiter(captured: &CapturedAcceptance) -> Option<AcceptWaiter> {
+        Some(AcceptWaiter { callback: capture_acceptance, user_data: captured.as_user_data() })
     }
 
-    /// `send_async`: a refusal with the callback dropped unfired travels on the
-    /// acceptance handle alone — no delivery callback fires, `callback_pending` is
-    /// false, and the error can be taken off the handle exactly once.
+    /// `send_async`: a refusal with the callback dropped unfired reaches the
+    /// acceptance callback alone — it fires exactly once, with the error and
+    /// `callback_pending` false — and no delivery callback fires.
     #[test]
-    fn test_refusal_travels_on_the_acceptance_handle_when_the_callback_was_dropped() {
+    fn test_refusal_reaches_the_acceptance_callback_when_the_delivery_callback_was_dropped() {
         let (tx, dispatcher) = common::spawn_dispatcher("test-refusal-acceptance");
         let captured = CapturedRecordResult::new();
+        let acceptance = CapturedAcceptance::new();
         let target = RecordCallbackTarget { callback: capture_record_result, user_data: captured.as_user_data() };
         let state = std::sync::Arc::new(CallbackState::default());
         let callback = make_record_callback(target, tx.clone(), std::sync::Arc::clone(&state));
@@ -7324,34 +7164,25 @@ mod tests {
         drop(callback);
         assert!(!state.is_consumed(), "dropped unfired: nothing will report on the record");
 
-        let accept = std::sync::Arc::new(AcceptState::default());
         SendSettlement {
-            accepted: AcceptGuard::new(std::sync::Arc::clone(&accept), tx.clone()),
+            accepted: AcceptGuard::new(acceptance_waiter(&acceptance), tx.clone()),
             state,
             target,
             refusal_via_callback: false,
         }
         .settle(Err(Error::local_illegal_state("MockProducer is already closed.")), &tx);
 
-        let handle = accept_handle(&accept);
-        // SAFETY: `handle` is the live handle `accept_handle` just leaked over the
-        // `Arc<AcceptState>` settled above; it is read through the C getters and destroyed
-        // exactly once, at the end of this block.
-        unsafe {
-            assert!(kafka_producer_SendAccepted_wait_timeout(handle, 0), "settled at once");
-            assert!(!kafka_producer_SendAccepted_callback_pending(handle), "no callback is owed");
-            assert_eq!(
-                take_error_message(kafka_producer_SendAccepted_take_error(handle)),
-                "MockProducer is already closed."
-            );
-            assert!(
-                kafka_producer_SendAccepted_take_error(handle).is_null(),
-                "the refusal is taken once"
-            );
-            kafka_producer_SendAccepted_destroy(handle);
-        }
         drop(tx);
         dispatcher.join().expect("dispatcher thread joins");
+        assert_eq!(acceptance.fired(), 1, "the acceptance callback fires exactly once");
+        assert_eq!(
+            acceptance.message.lock().unwrap().as_deref(),
+            Some("MockProducer is already closed.")
+        );
+        assert!(
+            !acceptance.callback_pending.load(std::sync::atomic::Ordering::Acquire),
+            "no callback is owed"
+        );
         assert_eq!(captured.fired(), 0, "the delivery callback never fires for a refused record");
     }
 
@@ -7429,49 +7260,39 @@ mod tests {
     }
 
     /// `send_async`, Java 4.x's post-append throw: the callback is still owned by
-    /// a batch when `send` returns `Err`, so the refusal travels on the acceptance
-    /// handle with `callback_pending` — nothing is re-fired — and the batch fires
+    /// a batch when `send` returns `Err`, so the refusal reaches the acceptance
+    /// callback with `callback_pending` — nothing is re-fired — and the batch fires
     /// the callback later, exactly once in total.
     #[test]
     fn test_refusal_after_the_append_leaves_the_batch_to_fire_the_callback_once() {
         let (tx, dispatcher) = common::spawn_dispatcher("test-refusal-post-append");
         let captured = CapturedRecordResult::new();
+        let acceptance = CapturedAcceptance::new();
         let target = RecordCallbackTarget { callback: capture_record_result, user_data: captured.as_user_data() };
         let state = std::sync::Arc::new(CallbackState::default());
         // Kept alive: the batch owns it.
         let batch_copy = make_record_callback(target, tx.clone(), std::sync::Arc::clone(&state));
         assert!(state.is_consumed(), "alive in a batch: it will still report");
 
-        let accept = std::sync::Arc::new(AcceptState::default());
         SendSettlement {
-            accepted: AcceptGuard::new(std::sync::Arc::clone(&accept), tx.clone()),
+            accepted: AcceptGuard::new(acceptance_waiter(&acceptance), tx.clone()),
             state,
             target,
             refusal_via_callback: false,
         }
         .settle(Err(Error::local_illegal_state("no open transaction")), &tx);
 
-        let handle = accept_handle(&accept);
-        // SAFETY: `handle` is the live handle `accept_handle` just leaked over the
-        // `Arc<AcceptState>` settled above; it is read through the C getters and destroyed
-        // exactly once, at the end of this block.
-        unsafe {
-            assert!(kafka_producer_SendAccepted_wait_timeout(handle, 0));
-            assert!(
-                kafka_producer_SendAccepted_callback_pending(handle),
-                "the batch still owes the callback"
-            );
-            assert_eq!(
-                take_error_message(kafka_producer_SendAccepted_take_error(handle)),
-                "no open transaction"
-            );
-            kafka_producer_SendAccepted_destroy(handle);
-        }
         // The batch fires it later, on abort/close.
         let aborted = Error::transaction_aborted();
         batch_copy(None, Some(&aborted));
         drop(tx);
         dispatcher.join().expect("dispatcher thread joins");
+        assert_eq!(acceptance.fired(), 1, "the acceptance callback fires exactly once");
+        assert_eq!(acceptance.message.lock().unwrap().as_deref(), Some("no open transaction"));
+        assert!(
+            acceptance.callback_pending.load(std::sync::atomic::Ordering::Acquire),
+            "the batch still owes the callback"
+        );
         assert_eq!(
             captured.fired(),
             1,
@@ -7480,7 +7301,7 @@ mod tests {
         assert_eq!(captured.message.lock().unwrap().as_deref(), Some(aborted.message()));
     }
 
-    /// `send_batch_async`, whose acceptance nobody reads: a refusal with the
+    /// `send_batch_async`, which registers no acceptance callback: a refusal with the
     /// callback dropped unfired is delivered through a fresh delivery callback —
     /// the batch caller's one report — so `user_data` is released exactly once.
     #[test]
@@ -7491,9 +7312,8 @@ mod tests {
         let state = std::sync::Arc::new(CallbackState::default());
         drop(make_record_callback(target, tx.clone(), std::sync::Arc::clone(&state)));
 
-        let accept = std::sync::Arc::new(AcceptState::default());
         SendSettlement {
-            accepted: AcceptGuard::new(std::sync::Arc::clone(&accept), tx.clone()),
+            accepted: AcceptGuard::new(None, tx.clone()),
             state,
             target,
             refusal_via_callback: true,
@@ -7523,9 +7343,8 @@ mod tests {
         let state = std::sync::Arc::new(CallbackState::default());
         let batch_copy = make_record_callback(target, tx.clone(), std::sync::Arc::clone(&state));
 
-        let accept = std::sync::Arc::new(AcceptState::default());
         SendSettlement {
-            accepted: AcceptGuard::new(std::sync::Arc::clone(&accept), tx.clone()),
+            accepted: AcceptGuard::new(None, tx.clone()),
             state,
             target,
             refusal_via_callback: true,
@@ -7544,21 +7363,31 @@ mod tests {
     #[test]
     fn test_accept_guard_dropped_unsettled_reports_the_record_as_dropped() {
         let (tx, dispatcher) = common::spawn_dispatcher("test-accept-guard-drop");
-        let accept = std::sync::Arc::new(AcceptState::default());
-        drop(AcceptGuard::new(std::sync::Arc::clone(&accept), tx.clone()));
-        let handle = accept_handle(&accept);
-        // SAFETY: `handle` is the live handle `accept_handle` just leaked over the
-        // `Arc<AcceptState>` settled above; it is read through the C getters and destroyed
-        // exactly once, at the end of this block.
-        unsafe {
-            assert!(kafka_producer_SendAccepted_wait_timeout(handle, 0));
-            assert!(!kafka_producer_SendAccepted_callback_pending(handle));
-            let message = take_error_message(kafka_producer_SendAccepted_take_error(handle));
-            assert!(message.contains("dropped without being produced"), "{message}");
-            kafka_producer_SendAccepted_destroy(handle);
-        }
+        let acceptance = CapturedAcceptance::new();
+        drop(AcceptGuard::new(acceptance_waiter(&acceptance), tx.clone()));
         drop(tx);
         dispatcher.join().expect("dispatcher thread joins");
+        assert_eq!(acceptance.fired(), 1, "the acceptance callback fires exactly once");
+        assert!(!acceptance.callback_pending.load(std::sync::atomic::Ordering::Acquire));
+        let message = acceptance.message.lock().unwrap().clone().expect("reported as a refusal");
+        assert!(message.contains("dropped without being produced"), "{message}");
+    }
+
+    /// A guard with no acceptance callback to answer (`send_batch_async`, or
+    /// `send_async` given a null `accepted`) fires nothing however it is settled,
+    /// and neither does a disarmed one — the request never reached the channel and
+    /// the caller was told synchronously — so a refusal is never reported twice.
+    #[test]
+    fn test_accept_guard_disarmed_or_without_a_callback_fires_nothing() {
+        let (tx, dispatcher) = common::spawn_dispatcher("test-accept-guard-silent");
+        let acceptance = CapturedAcceptance::new();
+        AcceptGuard::new(acceptance_waiter(&acceptance), tx.clone()).disarm();
+        drop(AcceptGuard::new(None, tx.clone()));
+        AcceptGuard::new(None, tx.clone()).accept();
+        AcceptGuard::new(None, tx.clone()).reject(Error::local_illegal_state("no open transaction"), false);
+        drop(tx);
+        dispatcher.join().expect("dispatcher thread joins");
+        assert_eq!(acceptance.fired(), 0, "a disarmed guard reports nothing");
     }
 
     /// `SendWaiters::wait_until_empty`, the join `destroy` relies on: it resolves
@@ -7699,22 +7528,29 @@ mod tests {
         panic!("timed out waiting for the submission queue to drain");
     }
 
-    /// `send_async(producer, "topic", value)` with the capture callback; no key.
-    /// Returns what the call did — null when the producer took the record at once,
-    /// the acceptance handle otherwise — asserting only that `out_error` is null.
+    /// `send_async(producer, "topic", value)` with the capture callback; no key,
+    /// and `capture_acceptance` reporting to `acceptance` when one is given.
+    /// Returns the call's code — `0` when the producer took the record at once,
+    /// `1` when it queued it — asserting that the record was not refused:
+    /// `out_error` null, `out_callback_pending` written `false`.
     unsafe fn send_async_value(
         producer: *mut kafka_producer_Producer_t,
         topic: &CString,
         value: &[u8],
         captured: &CapturedRecordResult,
-    ) -> *mut kafka_producer_SendAccepted_t {
+        acceptance: Option<&CapturedAcceptance>,
+    ) -> i32 {
         let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+        let mut callback_pending = true;
+        let accepted: Option<kafka_producer_Producer_send_accepted_callback_t> =
+            acceptance.map(|_| capture_acceptance as kafka_producer_Producer_send_accepted_callback_t);
         // SAFETY: `producer` is a live handle per this helper's contract (the calling test's
         // own, not yet destroyed); `topic` is a valid C string outliving the call; `value`
         // is valid for its length and the caller keeps it alive until the record's callback
-        // fires (or its handle settles); `captured` outlives that callback; `err` is a local
-        // the call writes exactly once.
-        let accepted = unsafe {
+        // fires (or its acceptance is reported); `captured` and `acceptance` outlive the
+        // callbacks that reach them; `err` and `callback_pending` are locals the call writes
+        // exactly once.
+        let code = unsafe {
             kafka_producer_Producer_send_async(
                 producer,
                 topic.as_ptr(),
@@ -7728,13 +7564,18 @@ mod tests {
                 0,
                 capture_record_result,
                 captured.as_user_data(),
+                accepted,
+                acceptance.map_or(std::ptr::null_mut(), CapturedAcceptance::as_user_data),
                 &mut err,
+                &mut callback_pending,
             )
         };
         // SAFETY: `err` is the out-parameter the call just wrote (null, or an owned error
         // handle), consumed exactly once here.
         unsafe { assert_success(err) };
-        accepted
+        assert_ne!(code, -1, "the producer did not refuse the record");
+        assert!(!callback_pending, "written false for a record taken or queued");
+        code
     }
 
     /// Parks one record on the submission task: `send_batch_async` always queues
@@ -7777,7 +7618,7 @@ mod tests {
         }
     }
 
-    /// What one acceptance callback ([`kafka_producer_SendAccepted_callback_t`])
+    /// What one acceptance callback ([`kafka_producer_Producer_send_accepted_callback_t`])
     /// reported, passed as its `user_data`.
     struct CapturedAcceptance {
         fired: std::sync::atomic::AtomicUsize,
@@ -7820,7 +7661,7 @@ mod tests {
         let captured = unsafe { &*(user_data as *const CapturedAcceptance) };
         if !error.is_null() {
             // SAFETY: `error` is non-null (checked above) and, per
-            // `kafka_producer_SendAccepted_callback_t`, an owned handle the callee must free:
+            // `kafka_producer_Producer_send_accepted_callback_t`, an owned handle the callee must free:
             // `take_error_message` copies its message and destroys it exactly once.
             *captured.message.lock().unwrap() = Some(unsafe { take_error_message(error) });
         }
@@ -7864,23 +7705,24 @@ mod tests {
 
     /// The fast path: a producer that can take the record at once takes it on the
     /// caller's thread — where Java's `send()` appends it — and `send_async`
-    /// returns null: no handle, nothing queued. The callback then fires exactly
-    /// once with the metadata, the same delivery report a queued record gets.
+    /// returns `0`: nothing queued, no acceptance to report. The callback then
+    /// fires exactly once with the metadata, the same delivery report a queued
+    /// record gets.
     #[test]
-    fn test_send_async_takes_the_record_at_once_without_a_handle() {
+    fn test_send_async_takes_the_record_at_once() {
         let producer = kafka_producer_MockProducer_new(true);
         let topic = CString::new("topic").unwrap();
         let captured = CapturedRecordResult::new();
         // SAFETY: the producer handle is the one this test creates and destroys exactly once,
         // at the end of the block; `topic` and the value bytes are locals that outlive every
-        // call borrowing them (a queued record's bytes until its callback fires or its handle
-        // settles); each capture passed as `user_data` outlives the callbacks that reach it,
+        // call borrowing them (a queued record's bytes until its callback fires or its acceptance
+        // is reported); each capture passed as `user_data` outlives the callbacks that reach it,
         // since `kafka_producer_Producer_destroy` joins the submission task, the per-record
-        // waiters and the dispatcher's pending jobs before this frame ends; every handle
-        // returned is destroyed exactly once.
+        // waiters and the dispatcher's pending jobs before this frame ends; every error
+        // handle returned is destroyed exactly once.
         unsafe {
-            let accepted = send_async_value(producer, &topic, b"value", &captured);
-            assert!(accepted.is_null(), "a record taken at once needs no acceptance handle");
+            let code = send_async_value(producer, &topic, b"value", &captured, None);
+            assert_eq!(code, 0, "a record taken at once is reported by the call itself");
             assert_eq!(
                 kafka_producer_MockProducer_history_count(producer as *const _),
                 1,
@@ -7907,7 +7749,7 @@ mod tests {
     /// The fast path is tried regardless of what other callers have queued — as
     /// one Java thread's `send()` is not held up by another's wait for metadata.
     /// While a record is still parked on the submission task, `send_async` hands
-    /// its own record over at once: null, callback fired, history grown; the
+    /// its own record over at once: `0`, callback fired, history grown; the
     /// parked record follows when the task resumes.
     #[test]
     fn test_send_async_is_not_held_behind_a_queued_record() {
@@ -7917,16 +7759,16 @@ mod tests {
         let sent = CapturedRecordResult::new();
         // SAFETY: the producer handle is the one this test creates and destroys exactly once,
         // at the end of the block; `topic` and the value bytes are locals that outlive every
-        // call borrowing them (a queued record's bytes until its callback fires or its handle
-        // settles); each capture passed as `user_data` outlives the callbacks that reach it,
+        // call borrowing them (a queued record's bytes until its callback fires or its acceptance
+        // is reported); each capture passed as `user_data` outlives the callbacks that reach it,
         // since `kafka_producer_Producer_destroy` joins the submission task, the per-record
-        // waiters and the dispatcher's pending jobs before this frame ends; every handle
-        // returned is destroyed exactly once.
+        // waiters and the dispatcher's pending jobs before this frame ends; every error
+        // handle returned is destroyed exactly once.
         unsafe {
             park_batch_record(producer, &topic, b"parked", &parked);
 
-            let accepted = send_async_value(producer, &topic, b"second", &sent);
-            assert!(accepted.is_null(), "taken at once, not queued behind the parked record");
+            let code = send_async_value(producer, &topic, b"second", &sent, None);
+            assert_eq!(code, 0, "taken at once, not queued behind the parked record");
             wait_for_record_fired(&sent);
             assert_eq!(parked.fired(), 0, "the parked record is still parked");
             assert_eq!(kafka_producer_MockProducer_history_count(producer as *const _), 1);
@@ -7944,51 +7786,55 @@ mod tests {
     }
 
     /// A producer that refuses the record on the caller's thread — where Java's
-    /// `send()` throws — hands the refusal back on an acceptance handle that is
-    /// already settled: `wait_timeout` returns at once, `take_error` hands the
-    /// refusal over once, `callback_pending` is false, and `get_async` reports the
-    /// settled state instead of storing its callback. A binding raises it from its
-    /// `send`. The delivery callback never fires, so `user_data` stays the
-    /// caller's. A closed mock is the simplest such refusal; it drops the callback
-    /// before any batch sees it, hence `callback_pending` false.
+    /// `send()` throws — is reported by the call itself: `-1`, the refusal in
+    /// `out_error`, `callback_pending` false, and `accepted` never invoked. A
+    /// binding raises it from its `send`. The delivery callback never fires, so
+    /// `user_data` stays the caller's. A closed mock is the simplest such refusal;
+    /// it drops the callback before any batch sees it, hence `callback_pending`
+    /// false.
     #[test]
-    fn test_send_async_on_a_closed_producer_refuses_on_a_settled_handle() {
+    fn test_send_async_on_a_closed_producer_refuses_synchronously() {
         let producer = kafka_producer_MockProducer_new(true);
         let topic = CString::new("topic").unwrap();
+        let value = b"value";
         let captured = CapturedRecordResult::new();
         let acceptance = CapturedAcceptance::new();
         // SAFETY: the producer handle is the one this test creates and destroys exactly once,
         // at the end of the block; `topic` and the value bytes are locals that outlive every
-        // call borrowing them (a queued record's bytes until its callback fires or its handle
-        // settles); each capture passed as `user_data` outlives the callbacks that reach it,
+        // call borrowing them (a queued record's bytes until its callback fires or its acceptance
+        // is reported); each capture passed as `user_data` outlives the callbacks that reach it,
         // since `kafka_producer_Producer_destroy` joins the submission task, the per-record
-        // waiters and the dispatcher's pending jobs before this frame ends; every handle
-        // returned is destroyed exactly once.
+        // waiters and the dispatcher's pending jobs before this frame ends; every error
+        // handle returned is destroyed exactly once.
         unsafe {
             let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
             kafka_producer_Producer_close(producer, &mut err);
             assert_success(err);
 
-            let accepted = send_async_value(producer, &topic, b"value", &captured);
-            assert!(!accepted.is_null(), "a refused record gets a handle carrying the refusal");
-            assert!(
-                kafka_producer_SendAccepted_wait_timeout(accepted, 0),
-                "settled before send_async returned"
+            let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+            let mut callback_pending = true;
+            let code = kafka_producer_Producer_send_async(
+                producer,
+                topic.as_ptr(),
+                -1,
+                -1,
+                std::ptr::null(),
+                -1,
+                value.as_ptr(),
+                value.len() as i32,
+                std::ptr::null(),
+                0,
+                capture_record_result,
+                captured.as_user_data(),
+                Some(capture_acceptance),
+                acceptance.as_user_data(),
+                &mut err,
+                &mut callback_pending,
             );
-            assert!(!kafka_producer_SendAccepted_callback_pending(accepted));
-            assert_eq!(
-                take_error_message(kafka_producer_SendAccepted_take_error(accepted)),
-                "MockProducer is already closed."
-            );
-            assert!(
-                kafka_producer_SendAccepted_take_error(accepted).is_null(),
-                "the refusal is taken once"
-            );
-            assert!(
-                kafka_producer_SendAccepted_get_async(accepted, capture_acceptance, acceptance.as_user_data()),
-                "already settled: the callback is not stored"
-            );
-            kafka_producer_SendAccepted_destroy(accepted);
+            assert_eq!(code, -1, "refused before send_async returned");
+            assert!(!err.is_null(), "the refusal is in out_error");
+            assert_eq!(take_error_message(err), "MockProducer is already closed.");
+            assert!(!callback_pending, "the callback was dropped before any batch saw it");
             let handle = producer_handle(producer);
             assert_eq!(
                 handle.queued_sends.load(std::sync::atomic::Ordering::Acquire),
@@ -7999,28 +7845,30 @@ mod tests {
             kafka_producer_Producer_destroy(producer);
         }
         assert_eq!(captured.fired(), 0, "a refused record never reaches the delivery callback");
-        assert_eq!(acceptance.fired(), 0, "nor was the acceptance callback stored");
+        assert_eq!(acceptance.fired(), 0, "nor is the acceptance callback invoked for it");
     }
 
-    /// Synchronous validation failures are null with `out_error` set and the
-    /// callback never invoked — the same contract as every other send's
-    /// validation path, so a binding can raise before it has registered anything.
+    /// Synchronous validation failures are `-1` with `out_error` set,
+    /// `out_callback_pending` false and neither callback invoked — the same
+    /// contract as every other send's validation path, so a binding can raise
+    /// before it has registered anything.
     #[test]
-    fn test_send_async_validation_errors_report_error_without_a_handle_or_callback() {
+    fn test_send_async_validation_errors_report_the_error_without_a_callback() {
         let producer = kafka_producer_MockProducer_new(true);
         let topic = CString::new("topic").unwrap();
         let captured = CapturedRecordResult::new();
         // SAFETY: the producer handle is the one this test creates and destroys exactly once,
         // at the end of the block; `topic` and the value bytes are locals that outlive every
-        // call borrowing them (a queued record's bytes until its callback fires or its handle
-        // settles); each capture passed as `user_data` outlives the callbacks that reach it,
+        // call borrowing them (a queued record's bytes until its callback fires or its acceptance
+        // is reported); each capture passed as `user_data` outlives the callbacks that reach it,
         // since `kafka_producer_Producer_destroy` joins the submission task, the per-record
-        // waiters and the dispatcher's pending jobs before this frame ends; every handle
-        // returned is destroyed exactly once. The null `producer`, null `topic` and null key/value pointers are passed deliberately, where the function documents them as synchronously reported errors.
+        // waiters and the dispatcher's pending jobs before this frame ends; every error
+        // handle returned is destroyed exactly once. The null `producer`, null `topic` and null key/value pointers are passed deliberately, where the function documents them as synchronously reported errors.
         unsafe {
             // Null producer.
             let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
-            let accepted = kafka_producer_Producer_send_async(
+            let mut callback_pending = true;
+            let code = kafka_producer_Producer_send_async(
                 std::ptr::null_mut(),
                 topic.as_ptr(),
                 -1,
@@ -8033,9 +7881,13 @@ mod tests {
                 0,
                 capture_record_result,
                 captured.as_user_data(),
+                None,
+                std::ptr::null_mut(),
                 &mut err,
+                &mut callback_pending,
             );
-            assert!(accepted.is_null());
+            assert_eq!(code, -1);
+            assert!(!callback_pending, "no callback was registered for the record");
             assert_eq!(
                 assert_error(err),
                 kafka_common_ErrorCode_t::kafka_common_ErrorCode_INVALID_REQUEST
@@ -8043,7 +7895,7 @@ mod tests {
 
             // Null topic.
             let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
-            let accepted = kafka_producer_Producer_send_async(
+            let code = kafka_producer_Producer_send_async(
                 producer,
                 std::ptr::null(),
                 -1,
@@ -8056,9 +7908,12 @@ mod tests {
                 0,
                 capture_record_result,
                 captured.as_user_data(),
+                None,
+                std::ptr::null_mut(),
                 &mut err,
+                std::ptr::null_mut(),
             );
-            assert!(accepted.is_null());
+            assert_eq!(code, -1);
             assert_eq!(
                 assert_error(err),
                 kafka_common_ErrorCode_t::kafka_common_ErrorCode_INVALID_REQUEST
@@ -8066,7 +7921,7 @@ mod tests {
 
             // A key length without a key buffer.
             let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
-            let accepted = kafka_producer_Producer_send_async(
+            let code = kafka_producer_Producer_send_async(
                 producer,
                 topic.as_ptr(),
                 -1,
@@ -8079,16 +7934,19 @@ mod tests {
                 0,
                 capture_record_result,
                 captured.as_user_data(),
+                None,
+                std::ptr::null_mut(),
                 &mut err,
+                std::ptr::null_mut(),
             );
-            assert!(accepted.is_null());
+            assert_eq!(code, -1);
             assert_eq!(
                 assert_error(err),
                 kafka_common_ErrorCode_t::kafka_common_ErrorCode_INVALID_REQUEST
             );
 
-            // A null `out_error` is honoured too: null alone reports it.
-            let accepted = kafka_producer_Producer_send_async(
+            // A null `out_error` is honoured too: `-1` alone reports it.
+            let code = kafka_producer_Producer_send_async(
                 producer,
                 topic.as_ptr(),
                 -1,
@@ -8101,9 +7959,12 @@ mod tests {
                 0,
                 capture_record_result,
                 captured.as_user_data(),
+                None,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
                 std::ptr::null_mut(),
             );
-            assert!(accepted.is_null());
+            assert_eq!(code, -1);
 
             kafka_producer_Producer_destroy(producer);
         }
@@ -8113,51 +7974,42 @@ mod tests {
     /// The real producer's first would-block point: with no broker to answer the
     /// metadata request, a `KafkaProducer` has no partitions for the topic, so the
     /// fast path yields at once (not `max.block.ms` later) and the record goes on
-    /// the queue — a pending handle, a waiter of its own, no callback yet. The wait
-    /// then ends as Java's `send()` would: the metadata timeout is an
-    /// `ApiException`, so the handle settles as accepted and the callback fires
-    /// with the error.
+    /// the queue — `1`, a waiter of its own, no callback yet. The wait then ends
+    /// as Java's `send()` would: the metadata timeout is an `ApiException`, so the
+    /// record is reported accepted and the callback fires with the error.
     #[test]
     fn test_send_async_queues_a_record_the_producer_cannot_take_at_once() {
         let topic = CString::new("topic").unwrap();
         let captured = CapturedRecordResult::new();
+        let acceptance = CapturedAcceptance::new();
         // SAFETY: the producer handle is the one this test creates and destroys exactly once,
         // at the end of the block; `topic` and the value bytes are locals that outlive every
-        // call borrowing them (a queued record's bytes until its callback fires or its handle
-        // settles); each capture passed as `user_data` outlives the callbacks that reach it,
+        // call borrowing them (a queued record's bytes until its callback fires or its acceptance
+        // is reported); each capture passed as `user_data` outlives the callbacks that reach it,
         // since `kafka_producer_Producer_destroy` joins the submission task, the per-record
-        // waiters and the dispatcher's pending jobs before this frame ends; every handle
-        // returned is destroyed exactly once. `handle` is read only while the producer is alive.
+        // waiters and the dispatcher's pending jobs before this frame ends; every error
+        // handle returned is destroyed exactly once. `handle` is read only while the producer is alive.
         unsafe {
             let producer = broker_less_kafka_producer("1000");
             let handle = producer_handle(producer);
 
             let started = std::time::Instant::now();
-            let accepted = send_async_value(producer, &topic, b"value", &captured);
-            assert!(!accepted.is_null(), "a record the producer cannot take at once gets a handle");
+            let code = send_async_value(producer, &topic, b"value", &captured, Some(&acceptance));
+            assert_eq!(code, 1, "a record the producer cannot take at once is queued");
             assert!(
                 started.elapsed() < std::time::Duration::from_millis(500),
                 "send_async must return at once, not after max.block.ms: {:?}",
                 started.elapsed()
             );
-            assert!(
-                !kafka_producer_SendAccepted_wait_timeout(accepted, 0),
-                "pending: the producer has not answered yet"
-            );
+            assert_eq!(acceptance.fired(), 0, "pending: the producer has not answered yet");
             assert_eq!(handle.queued_sends.load(std::sync::atomic::Ordering::Acquire), 1);
             wait_for_live_waiters(handle, 1);
             assert_eq!(captured.fired(), 0, "no callback before the producer has answered");
 
             // Java's `send()` returns normally from the metadata timeout.
-            assert!(
-                kafka_producer_SendAccepted_wait_timeout(accepted, 5000),
-                "settled once the record's wait ended"
-            );
-            assert!(
-                kafka_producer_SendAccepted_take_error(accepted).is_null(),
-                "accepted, not refused"
-            );
-            kafka_producer_SendAccepted_destroy(accepted);
+            acceptance.wait_fired();
+            assert_eq!(*acceptance.message.lock().unwrap(), None, "accepted, not refused");
+            assert!(!acceptance.callback_pending.load(std::sync::atomic::Ordering::Acquire));
             wait_for_record_fired(&captured);
             wait_for_live_waiters(handle, 0);
             assert_eq!(handle.queued_sends.load(std::sync::atomic::Ordering::Acquire), 0);
@@ -8167,6 +8019,7 @@ mod tests {
             assert_success(err);
             kafka_producer_Producer_destroy(producer);
         }
+        assert_eq!(acceptance.fired(), 1, "the acceptance callback fires exactly once");
         assert_eq!(captured.fired(), 1);
         let message = captured
             .message
@@ -8177,20 +8030,20 @@ mod tests {
         assert!(message.contains("not present in metadata"), "{message}");
     }
 
-    /// `get_async` on a not-yet-settled handle stores the callback (returns
-    /// `false`) and fires it once when the producer settles the record: with a null
-    /// error for an accepted one, with the refusal for a refused one. The handle
-    /// may be destroyed meanwhile — the signal lives on with the queued send.
+    /// The acceptance callback of a queued record (`1`) fires exactly once, when
+    /// the producer has answered: with a null error for an accepted record, with
+    /// the refusal — and whether the delivery callback still fires — for a refused
+    /// one.
     #[test]
-    fn test_send_accepted_get_async_reports_acceptance_and_refusal() {
+    fn test_send_async_reports_acceptance_and_refusal_through_the_callback() {
         let topic = CString::new("topic").unwrap();
         // SAFETY: the producer handle is the one this test creates and destroys exactly once,
         // at the end of the block; `topic` and the value bytes are locals that outlive every
-        // call borrowing them (a queued record's bytes until its callback fires or its handle
-        // settles); each capture passed as `user_data` outlives the callbacks that reach it,
+        // call borrowing them (a queued record's bytes until its callback fires or its acceptance
+        // is reported); each capture passed as `user_data` outlives the callbacks that reach it,
         // since `kafka_producer_Producer_destroy` joins the submission task, the per-record
-        // waiters and the dispatcher's pending jobs before this frame ends; every handle
-        // returned is destroyed exactly once. Each acceptance capture outlives its callback (`wait_fired`).
+        // waiters and the dispatcher's pending jobs before this frame ends; every error
+        // handle returned is destroyed exactly once. Each acceptance capture outlives its callback (`wait_fired`).
         unsafe {
             // Accepted: the record's wait for metadata ends in Java's `ApiException`
             // — a failed future and the callback fired with the error, `send()`
@@ -8198,13 +8051,8 @@ mod tests {
             let delivered = CapturedRecordResult::new();
             let acceptance = CapturedAcceptance::new();
             let producer = broker_less_kafka_producer("500");
-            let accepted = send_async_value(producer, &topic, b"value", &delivered);
-            assert!(!accepted.is_null(), "queued: the metadata is not there yet");
-            assert!(
-                !kafka_producer_SendAccepted_get_async(accepted, capture_acceptance, acceptance.as_user_data()),
-                "not settled yet: the callback is stored"
-            );
-            kafka_producer_SendAccepted_destroy(accepted);
+            let code = send_async_value(producer, &topic, b"value", &delivered, Some(&acceptance));
+            assert_eq!(code, 1, "queued: the metadata is not there yet");
             acceptance.wait_fired();
             assert_eq!(*acceptance.message.lock().unwrap(), None, "accepted: no error");
             assert!(!acceptance.callback_pending.load(std::sync::atomic::Ordering::Acquire));
@@ -8223,14 +8071,8 @@ mod tests {
             let refusal = CapturedAcceptance::new();
             let producer = broker_less_kafka_producer("10000");
             let handle = producer_handle(producer);
-            let accepted = send_async_value(producer, &topic, b"value", &refused);
-            assert!(!accepted.is_null());
-            assert!(!kafka_producer_SendAccepted_get_async(
-                accepted,
-                capture_acceptance,
-                refusal.as_user_data()
-            ));
-            kafka_producer_SendAccepted_destroy(accepted);
+            let code = send_async_value(producer, &topic, b"value", &refused, Some(&refusal));
+            assert_eq!(code, 1, "queued: the metadata is not there yet");
             wait_for_live_waiters(handle, 1);
             let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
             kafka_producer_Producer_close(producer, &mut err);
@@ -8250,7 +8092,7 @@ mod tests {
     /// threads blocked in `send()` do — not one after another on the submission
     /// task. With no broker, two `send_async` records each wait the full
     /// `max.block.ms` for metadata, and both are done after *one* such wait. Both
-    /// acceptances settle as accepted — the metadata timeout is an `ApiException`:
+    /// records are reported accepted — the metadata timeout is an `ApiException`:
     /// a failed future and the callback fired with the error, Java's `send()`
     /// returning normally — and both callbacks fire.
     #[test]
@@ -8258,29 +8100,26 @@ mod tests {
         let topic = CString::new("topic").unwrap();
         let first = CapturedRecordResult::new();
         let second = CapturedRecordResult::new();
+        let accepted_first = CapturedAcceptance::new();
+        let accepted_second = CapturedAcceptance::new();
         // SAFETY: the producer handle is the one this test creates and destroys exactly once,
         // at the end of the block; `topic` and the value bytes are locals that outlive every
-        // call borrowing them (a queued record's bytes until its callback fires or its handle
-        // settles); each capture passed as `user_data` outlives the callbacks that reach it,
+        // call borrowing them (a queued record's bytes until its callback fires or its acceptance
+        // is reported); each capture passed as `user_data` outlives the callbacks that reach it,
         // since `kafka_producer_Producer_destroy` joins the submission task, the per-record
-        // waiters and the dispatcher's pending jobs before this frame ends; every handle
-        // returned is destroyed exactly once.
+        // waiters and the dispatcher's pending jobs before this frame ends; every error
+        // handle returned is destroyed exactly once.
         unsafe {
             let producer = broker_less_kafka_producer("1000");
             let started = std::time::Instant::now();
-            let accepted_first = send_async_value(producer, &topic, b"first", &first);
-            let accepted_second = send_async_value(producer, &topic, b"second", &second);
-            assert!(!accepted_first.is_null() && !accepted_second.is_null(), "both queued");
-            assert!(kafka_producer_SendAccepted_wait_timeout(accepted_first, 5000));
-            assert!(kafka_producer_SendAccepted_wait_timeout(accepted_second, 5000));
-            assert!(
-                kafka_producer_SendAccepted_take_error(accepted_first).is_null(),
-                "accepted, not refused"
-            );
-            assert!(
-                kafka_producer_SendAccepted_take_error(accepted_second).is_null(),
-                "accepted, not refused"
-            );
+            let code_first = send_async_value(producer, &topic, b"first", &first, Some(&accepted_first));
+            let code_second = send_async_value(producer, &topic, b"second", &second, Some(&accepted_second));
+            assert_eq!(code_first, 1, "queued");
+            assert_eq!(code_second, 1, "queued");
+            accepted_first.wait_fired();
+            accepted_second.wait_fired();
+            assert_eq!(*accepted_first.message.lock().unwrap(), None, "accepted, not refused");
+            assert_eq!(*accepted_second.message.lock().unwrap(), None, "accepted, not refused");
             wait_for_record_fired(&first);
             wait_for_record_fired(&second);
             let elapsed = started.elapsed();
@@ -8288,8 +8127,6 @@ mod tests {
                 elapsed < std::time::Duration::from_millis(1900),
                 "two waits of max.block.ms=1000 must overlap, not stack: {elapsed:?}"
             );
-            kafka_producer_SendAccepted_destroy(accepted_first);
-            kafka_producer_SendAccepted_destroy(accepted_second);
 
             let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
             kafka_producer_Producer_close(producer, &mut err);
@@ -8320,17 +8157,16 @@ mod tests {
         let queued = CapturedRecordResult::new();
         // SAFETY: the producer handle is the one this test creates and destroys exactly once,
         // at the end of the block; `topic` and the value bytes are locals that outlive every
-        // call borrowing them (a queued record's bytes until its callback fires or its handle
-        // settles); each capture passed as `user_data` outlives the callbacks that reach it,
+        // call borrowing them (a queued record's bytes until its callback fires or its acceptance
+        // is reported); each capture passed as `user_data` outlives the callbacks that reach it,
         // since `kafka_producer_Producer_destroy` joins the submission task, the per-record
-        // waiters and the dispatcher's pending jobs before this frame ends; every handle
-        // returned is destroyed exactly once. `handle` is read only while the producer is alive.
+        // waiters and the dispatcher's pending jobs before this frame ends; every error
+        // handle returned is destroyed exactly once. `handle` is read only while the producer is alive.
         unsafe {
             let producer = broker_less_kafka_producer("2000");
             let handle = producer_handle(producer);
-            let accepted = send_async_value(producer, &topic, b"value", &queued);
-            assert!(!accepted.is_null(), "queued: the metadata is not there yet");
-            kafka_producer_SendAccepted_destroy(accepted);
+            let code = send_async_value(producer, &topic, b"value", &queued, None);
+            assert_eq!(code, 1, "queued: the metadata is not there yet");
             // Until the record is on a waiter of its own.
             wait_for_live_waiters(handle, 1);
 
@@ -8372,8 +8208,9 @@ mod tests {
     /// already waiting inside the producer: Java's `close()` fails a `send()`
     /// blocked on metadata ("Producer closed while send in progress") rather than
     /// waiting for it, and so does the producer's own `close()` here. The refusal
-    /// is not an `ApiException`, so it reaches the caller on the acceptance handle
-    /// — where Java's `send()` throws — and the delivery callback never fires.
+    /// is not an `ApiException`, so it reaches the caller through the acceptance
+    /// callback — where Java's `send()` throws — and the delivery callback never
+    /// fires.
     ///
     /// Which of Java's two closed-producer refusals it is depends on how far the
     /// record's `send()` had got when the close began, a race Java has too: the
@@ -8384,19 +8221,20 @@ mod tests {
     fn test_close_fails_a_record_still_waiting_for_metadata() {
         let topic = CString::new("topic").unwrap();
         let queued = CapturedRecordResult::new();
+        let acceptance = CapturedAcceptance::new();
         // SAFETY: the producer handle is the one this test creates and destroys exactly once,
         // at the end of the block; `topic` and the value bytes are locals that outlive every
-        // call borrowing them (a queued record's bytes until its callback fires or its handle
-        // settles); each capture passed as `user_data` outlives the callbacks that reach it,
+        // call borrowing them (a queued record's bytes until its callback fires or its acceptance
+        // is reported); each capture passed as `user_data` outlives the callbacks that reach it,
         // since `kafka_producer_Producer_destroy` joins the submission task, the per-record
-        // waiters and the dispatcher's pending jobs before this frame ends; every handle
-        // returned is destroyed exactly once. `handle` is read only while the producer is alive.
+        // waiters and the dispatcher's pending jobs before this frame ends; every error
+        // handle returned is destroyed exactly once. `handle` is read only while the producer is alive.
         unsafe {
             // Long enough that a close waiting for the record would show.
             let producer = broker_less_kafka_producer("10000");
             let handle = producer_handle(producer);
-            let accepted = send_async_value(producer, &topic, b"value", &queued);
-            assert!(!accepted.is_null(), "queued: the metadata is not there yet");
+            let code = send_async_value(producer, &topic, b"value", &queued, Some(&acceptance));
+            assert_eq!(code, 1, "queued: the metadata is not there yet");
             wait_for_live_waiters(handle, 1);
 
             let started = std::time::Instant::now();
@@ -8410,22 +8248,55 @@ mod tests {
             );
 
             // The producer's close ended the record's wait with Java's refusal.
-            assert!(
-                kafka_producer_SendAccepted_wait_timeout(accepted, 5000),
-                "the acceptance settles once the producer has closed"
-            );
-            let message = take_error_message(kafka_producer_SendAccepted_take_error(accepted));
+            acceptance.wait_fired();
+            let message = acceptance.message.lock().unwrap().clone().expect("refused by the close");
             assert!(is_closed_producer_refusal(&message), "{message}");
             assert!(
-                !kafka_producer_SendAccepted_callback_pending(accepted),
+                !acceptance.callback_pending.load(std::sync::atomic::Ordering::Acquire),
                 "the record was never appended, so no delivery callback is coming"
             );
-            kafka_producer_SendAccepted_destroy(accepted);
             wait_for_live_waiters(handle, 0);
 
             kafka_producer_Producer_destroy(producer);
         }
+        assert_eq!(acceptance.fired(), 1, "the acceptance callback fires exactly once");
         assert_eq!(queued.fired(), 0, "a refused record never reaches the delivery callback");
+    }
+
+    /// `send_async` with a null `accepted`: nobody is told of a refusal through an
+    /// acceptance callback, so a queued record the producer refuses is reported
+    /// through the delivery callback instead — as `send_batch_async` reports one —
+    /// and `user_data` is still released exactly once.
+    #[test]
+    fn test_send_async_without_an_acceptance_callback_refuses_through_the_delivery_callback() {
+        let topic = CString::new("topic").unwrap();
+        let queued = CapturedRecordResult::new();
+        // SAFETY: the producer handle is the one this test creates and destroys exactly once,
+        // at the end of the block; `topic` and the value bytes are locals that outlive every
+        // call borrowing them (a queued record's bytes until its callback fires or its acceptance
+        // is reported); each capture passed as `user_data` outlives the callbacks that reach it,
+        // since `kafka_producer_Producer_destroy` joins the submission task, the per-record
+        // waiters and the dispatcher's pending jobs before this frame ends; every error
+        // handle returned is destroyed exactly once. `handle` is read only while the producer is alive.
+        unsafe {
+            let producer = broker_less_kafka_producer("10000");
+            let handle = producer_handle(producer);
+            let code = send_async_value(producer, &topic, b"value", &queued, None);
+            assert_eq!(code, 1, "queued: the metadata is not there yet");
+            wait_for_live_waiters(handle, 1);
+
+            let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+            kafka_producer_Producer_close(producer, &mut err);
+            assert_success(err);
+
+            // The refusal has only the delivery callback to travel on.
+            wait_for_record_fired(&queued);
+            wait_for_live_waiters(handle, 0);
+            kafka_producer_Producer_destroy(producer);
+        }
+        assert_eq!(queued.fired(), 1, "the refusal reaches the delivery callback, exactly once");
+        let message = queued.message.lock().unwrap().clone().expect("refused by the close");
+        assert!(is_closed_producer_refusal(&message), "{message}");
     }
 
     /// A negative `count` must fail rather than be clamped. Clamping would give an
@@ -9725,8 +9596,9 @@ mod tests {
         // `topic` C string and a `value` valid for `value_len` bytes until the callback
         // fires: `producer` is the `ProducerHandle` this test leaked via `Box::into_raw`
         // (laid out as `build_producer_handle` builds one), `topic` an owned `CString`,
-        // `value` a static byte literal, `&mut out_error` a writable local, and
-        // `count_send_callback`/`user_data` a pair pointing at the local `invocations`. The
+        // `value` a static byte literal, `&mut out_error` a writable local, `accepted` and
+        // `out_callback_pending` null (both allowed), and `count_send_callback`/`user_data` a
+        // pair pointing at the local `invocations`. The
         // only reaches into the handle are the `&'static`s from `producer_handle` and
         // `producer_static_ref` (the fast path's attempt), both used within the call; the
         // queued request is drained and dropped by the test itself before the handle is
@@ -9745,7 +9617,10 @@ mod tests {
                 0,
                 count_send_callback,
                 user_data,
+                None,
+                std::ptr::null_mut(),
                 &mut out_error,
+                std::ptr::null_mut(),
             )
         };
         assert!(!out_error.is_null(), "a caught panic must be stored in out_error");

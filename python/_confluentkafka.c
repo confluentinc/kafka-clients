@@ -836,22 +836,23 @@ static PyObject* py_KafkaProducer_new(PyObject* self, PyObject* args) {
 // `kafka_producer_Producer_send_async`.
 //
 // Rust first hands the record to the producer on this thread — where Java's
-// send() appends it — and returns NULL when the producer took it at once: the
-// common case, with nothing queued and no handle allocated. Only where Java's
+// send() appends it — and returns 0 when the producer took it at once: the
+// common case, with nothing queued and nothing allocated. Only where Java's
 // send() would block (metadata for the topic, buffer memory) does Rust queue the
-// record on its submission queue and return an acceptance handle; the Rust
-// submission task then hands it to the producer — on a task of the record's own
-// when that means waiting up to max.block.ms, so concurrent callers wait
-// concurrently — and settles the record: accepted, or refused where Java's
-// send() throws (closed producer, transaction state, ...). While it waits it is
-// a send() in progress, treated as Java treats one: flush/close and the
-// transaction ops hand over what is still queued but do not wait for it, and
-// close fails it ("Producer closed while send in progress") — a refusal like any
-// other, raised from that send. A record the producer refuses on this thread
-// comes back on an already-settled handle. The queue never turns a record away:
-// each Python caller is parked on its own record's acceptance instead, so the
-// number of records queued or waiting is bounded by the number of concurrent
-// callers.
+// record on its submission queue and return 1; the Rust submission task then
+// hands it to the producer — on a task of the record's own when that means
+// waiting up to max.block.ms, so concurrent callers wait concurrently — and
+// reports the producer's answer through the acceptance callback given to the
+// call: accepted, or refused where Java's send() throws (closed producer,
+// transaction state, ...). While it waits it is a send() in progress, treated as
+// Java treats one: flush/close and the transaction ops hand over what is still
+// queued but do not wait for it, and close fails it ("Producer closed while send
+// in progress") — a refusal like any other, raised from that send. A record the
+// producer refuses on this thread is reported by the call itself: -1, the error
+// in out_error, the acceptance callback never invoked. The queue never turns a
+// record away: each Python caller is parked on its own record's acceptance
+// instead, so the number of records queued or waiting is bounded by the number
+// of concurrent callers.
 //
 // The Rust call runs with the GIL released, like the other producer entry
 // points. An application thread flooding send() would otherwise never yield the
@@ -912,59 +913,39 @@ static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
     if (ud == NULL) {
         return NULL;
     }
+    // The acceptance callback gets a reference of its own to the pin, which it
+    // may have to release; taken before the call so the callback can never run
+    // short of it, and given back below when the call reports that it is not
+    // going to be invoked.
+    Py_INCREF(ud);
 
     ProducerRecordObject* record = (ProducerRecordObject*)record_obj;
     kafka_producer_ProducerRecord_t* rs = &record->record_struct;
     kafka_common_Error_t* err = NULL;
-    kafka_producer_SendAccepted_t* acc;
+    bool callback_pending = false;
+    int32_t rc;
     Py_BEGIN_ALLOW_THREADS
-    acc = kafka_producer_Producer_send_async(
+    rc = kafka_producer_Producer_send_async(
         producer->producer,
         rs->topic, rs->partition, rs->timestamp,
         rs->key, rs->key_len, rs->value, rs->value_len,
         rs->headers, rs->header_count,
-        send_direct_trampoline, ud, &err);
+        send_direct_trampoline, ud, accepted_trampoline, ud, &err, &callback_pending);
     Py_END_ALLOW_THREADS
 
-    if (err != NULL) {                 // validation failure: the callback will NOT fire
-        Py_DECREF(ud);
-        return PyLong_FromVoidPtr(err);  // raised by the Python side
-    }
-    if (acc == NULL) {                 // taken at once: the callback will fire
-        Py_RETURN_TRUE;
-    }
-
-    // Queued, or refused on this thread. The acceptance callback gets a
-    // reference of its own to the pin, which it may have to release; taken
-    // before the registration so the callback can never run short of it.
-    Py_INCREF(ud);
-    bool already;
-    kafka_common_Error_t* refusal = NULL;
-    bool callback_pending = false;
-    Py_BEGIN_ALLOW_THREADS
-    already = kafka_producer_SendAccepted_get_async(acc, accepted_trampoline, ud);
-    if (already) {
-        // Already settled (the callback was not stored): read the answer off
-        // the handle.
-        refusal = kafka_producer_SendAccepted_take_error(acc);
-        callback_pending = kafka_producer_SendAccepted_callback_pending(acc);
-    }
-    // The handle is only a view on the acceptance state, which lives on with
-    // the queued send: a registered callback still fires.
-    kafka_producer_SendAccepted_destroy(acc);
-    Py_END_ALLOW_THREADS
-    if (!already) {
-        // Settled later: accepted_trampoline fires exactly once with the answer.
+    if (rc == 1) {
+        // Queued: accepted_trampoline fires exactly once with the answer.
         Py_RETURN_NONE;
     }
-    Py_DECREF(ud);                     // the reference taken for the callback
-    if (refusal == NULL) {
+    Py_DECREF(ud);                     // the acceptance callback is not invoked
+    if (rc == 0) {                     // taken at once: the delivery callback will fire
         Py_RETURN_TRUE;
     }
+    // Refused on this thread, or a validation failure: raised by the Python side.
     if (!callback_pending) {
-        Py_DECREF(ud);                 // refused unseen by any batch: the callback will NOT fire
+        Py_DECREF(ud);                 // no delivery callback coming: the pin is released here
     }
-    return PyLong_FromVoidPtr(refusal);
+    return PyLong_FromVoidPtr(err);
 }
 
 // Fires once when the producer has settled a record Producer_send queued (from
