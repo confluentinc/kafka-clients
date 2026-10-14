@@ -82,7 +82,8 @@ Suggestions for changes are possible through the process highlighted in [agent-r
       is NOT Java's `KafkaException`: the handle wraps the whole flat `Error` enum and it allows to map other exceptions that aren't subclasses of `KafkaException`.
       (§12.3). Java's `KafkaException` maps to the embedded `common::KafkaError`
       struct, which never crosses the boundary on its own.
-    - Fallible functions return `kafka_common_Error_t *` (`NULL` on success) and deliver their value through trailing `out_<name>` parameters; the caller owns the returned error and the delivered value.
+    - Fallible functions return their value (or `void`) and take a trailing `kafka_common_Error_t **out_err`, never NULL, with `*out_err` NULL on entry; on failure they store an owned error there and return NULL / 0 / -1, so the caller tests `*out_err`, not the value. The caller owns the error and the returned value. Interface method pointers that can fail take the same shape.
+    - Language bindings include only `confluent_kafka_bindings.h`: it declares the fallible and `_cb` functions under their own names and every other function only as its `_err` twin, which takes the same trailing `out_err` and stores a caught panic there.
     - the word "exception" MUST never appear in C API and ffi code, except in comments about the Java client.
     - Classes that aren't public in Rust crate MUST NOT have C bindings.
     - Predicates on `Error` keep their Rust name behind the type prefix:
