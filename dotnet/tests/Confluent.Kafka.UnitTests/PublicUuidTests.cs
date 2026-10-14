@@ -100,7 +100,7 @@ public sealed class PublicUuidTests
     /// <summary>
     /// The three conditions Java's <c>fromString</c> rejects. The two length conditions
     /// carry Java's own messages verbatim, <b>including Java's bound of 24</b>
-    /// (<c>Uuid.java:131</c>) rather than the canonical 22 — see
+    /// (<c>Uuid.java:135</c>) rather than the canonical 22 — see
     /// <see cref="Parse_AcceptsThePaddedFormJavaAccepts"/> for why the two extra
     /// characters are not slack.
     /// </summary>
@@ -110,7 +110,7 @@ public sealed class PublicUuidTests
         Assert.Equal("value", Assert.Throws<ArgumentNullException>(() => Uuid.Parse(null!)).ParamName);
 
         // 25 characters — past Java's own bound, so Java reports it as too long, quoting
-        // the first 24 (Uuid.java:132-133).
+        // the first 24 (Uuid.java:136-137).
         string twentyFive = new string('A', 25);
         ArgumentException tooLong = Assert.Throws<ArgumentException>(() => Uuid.Parse(twentyFive));
         Assert.StartsWith(
@@ -253,7 +253,7 @@ public sealed class PublicUuidTests
     }
 
     /// <summary>
-    /// Java's reserved constants (<c>Uuid.java:37-52</c>): <c>ONE_UUID</c> is
+    /// Java's reserved constants (<c>Uuid.java:41-56</c>): <c>ONE_UUID</c> is
     /// <c>(0, 1)</c>, <c>METADATA_TOPIC_ID</c> <b>is</b> <c>ONE_UUID</c>, and
     /// <c>RESERVED</c> holds exactly <c>ZERO_UUID</c> and <c>ONE_UUID</c> — read-only, so a
     /// caller cannot un-reserve one by casting.
@@ -316,7 +316,7 @@ public sealed class PublicUuidTests
     }
 
     /// <summary>
-    /// ⚠ <b>Signed, as Java compares</b> (<c>Uuid.java:154-167</c>): a <c>long</c> with the
+    /// ⚠ <b>Signed, as Java compares</b> (<c>Uuid.java:158-171</c>): a <c>long</c> with the
     /// high bit set is <em>negative</em>, so it sorts before <see cref="Uuid.Zero"/>. An
     /// unsigned comparison — the natural reading of "128-bit value" — would put
     /// <c>long.MinValue</c> last instead. The return values are Java's exact
@@ -366,19 +366,21 @@ public sealed class PublicUuidTests
     }
 
     /// <summary>
-    /// <see cref="Uuid.RandomUuid()"/> over many draws: never reserved, never
-    /// <c>'-'</c>-leading, and always Java's <c>UUID.randomUUID()</c> layout — version
-    /// nibble <c>4</c> and the IETF variant bits <c>10</c>.
+    /// <see cref="Uuid.RandomUuid()"/> over many draws: never reserved, never containing
+    /// <c>'-'</c> (Java's <c>toString().contains("-")</c>, KAFKA-20072, Kafka 4.4), and
+    /// always Java's <c>UUID.randomUUID()</c> layout — version nibble <c>4</c> and the IETF
+    /// variant bits <c>10</c>.
     /// </summary>
     /// <remarks>
-    /// This also discriminates the <em>wiring</em> between the public method and the seam:
-    /// one raw version-4 draw in 64 prints with a leading <c>'-'</c> (the first six bits are
-    /// fully random), so a public method that bypassed the seam's loop would fail the
-    /// <c>'-'</c> assertion within 1000 draws with probability
-    /// <c>1 - (63/64)^1000 &gt; 0.9999998</c>.
+    /// This also discriminates the <em>wiring</em> between the public method and the seam,
+    /// and the pre-4.4 leading-only rule: a raw version-4 draw contains a <c>'-'</c> about
+    /// 30% of the time (19 of its 22 characters are fully random, one more is <c>'-'</c> one
+    /// time in 16, and the version and padding characters never are), so a public method
+    /// that bypassed the loop, or kept the leading-only check, would fail the assertion
+    /// within 1000 draws all but certainly (the chance of passing is below 10^-150).
     /// </remarks>
     [Fact]
-    public void RandomUuid_IsVersion4_NeverReserved_AndNeverDashLeading()
+    public void RandomUuid_IsVersion4_NeverReserved_AndNeverContainsADash()
     {
         HashSet<Uuid> seen = new HashSet<Uuid>();
         for (int i = 0; i < 1000; i++)
@@ -386,7 +388,7 @@ public sealed class PublicUuidTests
             Uuid uuid = Uuid.RandomUuid();
 
             Assert.DoesNotContain(uuid, Uuid.Reserved);
-            Assert.NotEqual('-', uuid.ToString()[0]);
+            Assert.DoesNotContain("-", uuid.ToString(), StringComparison.Ordinal);
             Assert.Equal(4L, (uuid.MostSignificantBits >> 12) & 0xF);
             Assert.Equal(2UL, (ulong)uuid.LeastSignificantBits >> 62);
             Assert.True(seen.Add(uuid), "a random 122-bit draw repeated");
@@ -395,18 +397,23 @@ public sealed class PublicUuidTests
 
     /// <summary>
     /// Java's loop, through the seam the public method uses: the source is drawn until a
-    /// candidate is neither reserved nor <c>'-'</c>-leading. <c>0xF8…</c> encodes to a
+    /// candidate is neither reserved nor contains <c>'-'</c>. <c>0xF8…</c> encodes to a
     /// leading <c>'-'</c> (its first six bits are <c>111110</c>, index 62 of the URL-safe
-    /// alphabet). All four candidates are consumed, and the fourth is returned.
+    /// alphabet), and <c>0x03E0…</c> to a <c>'-'</c> in second place, which only Kafka 4.4's
+    /// rule rejects (KAFKA-20072). All five candidates are consumed, and the fifth is returned.
     /// </summary>
     [Fact]
-    public void RandomUuid_Seam_SkipsReservedAndDashLeadingCandidates()
+    public void RandomUuid_Seam_SkipsReservedAndDashContainingCandidates()
     {
         Uuid dashLeading = new Uuid(unchecked((long)0xF800000000000000UL), 1L);
+        Uuid dashInside = new Uuid(0x03E0000000000000L, 1L);
         Uuid valid = new Uuid(0x0123456789ABCDEFL, 0x1122334455667788L);
         Assert.Equal('-', dashLeading.ToString()[0]);
+        Assert.Equal("A-AAAAAAAAAAAAAAAAAAAQ", dashInside.ToString());
+        Assert.DoesNotContain("-", valid.ToString(), StringComparison.Ordinal);
 
-        Queue<Uuid> candidates = new Queue<Uuid>(new[] { Uuid.Zero, Uuid.One, dashLeading, valid });
+        Queue<Uuid> candidates = new Queue<Uuid>(
+            new[] { Uuid.Zero, Uuid.One, dashLeading, dashInside, valid });
 
         Uuid chosen = Uuid.RandomUuid(candidates.Dequeue);
 

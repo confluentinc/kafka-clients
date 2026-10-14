@@ -7,6 +7,15 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
 
 Newest first.
 
+- **Milestone 17 / Phase 3 — ".NET: merge master #232 (Apache Kafka 4.4), then `LosePartitions` and the Uuid dash rule": DONE (2026-10-14); not pushed. No N (done directly, without the Actor / Critic loop). Mode A.** Branch `prashah_dev_dotnet_binding`, base `daf58aec` (= `origin/prashah_dev_dotnet_binding`, PR #196). Three commits:
+  - `6870fa6e` — merge of master `6ecca154` (#232). #232's C ABI change is additive only (6 functions, 1 callback typedef, error codes 134/135/136 and -29); no function the binding imports changed. The commit message lists the conflict resolutions and two clashes that merged without a marker (a duplicate `Utils::is_blank`, and a `node.rs` test that expected the old `Node` Display text).
+  - `b50d487d` — `MockConsumer.LosePartitions` / `AsyncMockConsumer.LosePartitions`, Java 4.4's `MockConsumer.losePartitions` (KAFKA-20575), over the existing `kafka_consumer_MockConsumer_lose_partitions`. The broker-free driver for `OnPartitionsLost`. Java's five `MockConsumerTest` tests are translated, plus async-mock, dedup, listener-throws, `ConsumerRebalanceListenerBase` default and null-argument tests. The stale "the mock never fires lost" comments are updated.
+  - This commit — `Uuid.RandomUuid` now rejects a `'-'` anywhere, as Java 4.4's `toString().contains("-")` does (KAFKA-20072); before, only a leading one. The `Uuid.java` line citations are moved to the 4.4 source.
+  - **Not done — tracked gap.** `UnregisterController` (KAFKA-20395, #232) is not in the .NET admin client. Its three multi-language tests are skipped for .NET (`--skip test_unregister_controller` in `DOTNET_GRPC_SKIPS`, `rust/Makefile`; the comment there lists what to add before removing it). `MockAdminClient.SetUsingRaftController` is left for the same follow-up, since only `unregisterController` reads it.
+  - **Gates.** `make verify` green on the merged tree, and the pre-commit hook (`make verify-sandbox`) green on each commit. Unit tests 3807 on net8.0 and net10.0; soak 165. Mutation checks: `LosePartitions` routed to `rebalance` fails 9 of the 10 new tests (the null-argument test is the one that passes); the old leading-only Uuid check fails both `RandomUuid` tests. Native gRPC arms not run locally.
+  - **Next unused dotnet N stays 96.**
+  - **Not pushed.** The user pushes with `git push-external`.
+
 - **Milestone 15 / Phase 14 — "split the .NET Admin client into a sync and an async flavour": DONE (2026-10-11); not pushed. N=95. Mode A (no Mode B).** Branch `prashah_dev_dotnet_binding`, base `2d73a746` (= `origin/prashah_dev_dotnet_binding`, PR #196). The commits are not squashed:
   - Plan `29c78576`. S1 `cca34729`. S2 `70a68577`. S3a `3af5532b` `d6566235`. S3b `a6f09dde` `72c801c0`. S4 `fbe72c47` `ef96b747` `6fba2aa6`. Q5 `2730fc93` (the checkpoint rulings in the plan).
   - S5a `b868682f` `b7ea260b` `f4c4cd1f`. S5b `e716d3b9` `7e2daecf`. S5c `221ef160` `3f17adc9`. S5d `95188252` `d3b739b1`. S5e `f802dee0` `6d31a881`. S5f `f2bfc9fd` `a617eb5a` `19cd4d23`. S5g `ac61d1ae` `98167351`.

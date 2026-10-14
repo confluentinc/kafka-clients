@@ -39,7 +39,7 @@ namespace Confluent.Kafka;
 /// <c>Confluent.Kafka.Admin</c>.
 /// </para>
 /// <para>
-/// Ordered as Java orders it (<c>Comparable&lt;Uuid&gt;</c>, <c>Uuid.java:154-167</c>):
+/// Ordered as Java orders it (<c>Comparable&lt;Uuid&gt;</c>, <c>Uuid.java:158-171</c>):
 /// the two halves compared as <b>signed</b> 64-bit values, most significant first.
 /// </para>
 /// </remarks>
@@ -49,7 +49,7 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
     private const int ByteCount = 16;
 
     /// <summary>
-    /// Java's own "too long" bound — <c>str.length() &gt; 24</c> (<c>Uuid.java:131</c>).
+    /// Java's own "too long" bound — <c>str.length() &gt; 24</c> (<c>Uuid.java:135</c>).
     /// The canonical form is 22 unpadded characters, but the extra two are Java's
     /// tolerance for the <b>padded</b> 24-character form, which
     /// <c>Base64.getUrlDecoder()</c> decodes to exactly 16 bytes and <c>fromString</c>
@@ -89,13 +89,13 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
 
     /// <summary>
     /// A reserved identifier, <c>(0, 1)</c> — Java's <c>Uuid.ONE_UUID</c>
-    /// (<c>Uuid.java:37</c>). <see cref="RandomUuid()"/> never returns it.
+    /// (<c>Uuid.java:41</c>). <see cref="RandomUuid()"/> never returns it.
     /// </summary>
     public static Uuid One => new Uuid(0L, 1L);
 
     /// <summary>
     /// The id of the metadata topic in KRaft mode — Java's <c>Uuid.METADATA_TOPIC_ID</c>,
-    /// which is <see cref="One"/> (<c>Uuid.java:42</c>). <see cref="RandomUuid()"/> never
+    /// which is <see cref="One"/> (<c>Uuid.java:46</c>). <see cref="RandomUuid()"/> never
     /// returns it.
     /// </summary>
     public static Uuid MetadataTopicId => One;
@@ -103,7 +103,7 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
     /// <summary>
     /// The identifiers <see cref="RandomUuid()"/> never returns — exactly
     /// <see cref="Zero"/> and <see cref="One"/> — Java's <c>Uuid.RESERVED</c>
-    /// (<c>Uuid.java:52</c>).
+    /// (<c>Uuid.java:56</c>).
     /// </summary>
     /// <remarks>
     /// Java's type is <c>Set&lt;Uuid&gt;</c>; <c>IReadOnlySet&lt;T&gt;</c> post-dates
@@ -142,7 +142,7 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
     /// <paramref name="value"/> is rejected, for one of:
     /// <list type="bullet">
     /// <item><description>
-    /// longer than 24 characters (Java's own bound, <c>Uuid.java:131</c>) — <b>same
+    /// longer than 24 characters (Java's own bound, <c>Uuid.java:135</c>) — <b>same
     /// message</b> as Java;
     /// </description></item>
     /// <item><description>
@@ -262,15 +262,16 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
     }
 
     /// <summary>
-    /// A random version-4 identifier that is neither reserved nor prints with a leading
-    /// <c>'-'</c> — Java's <c>Uuid.randomUuid()</c> (<c>Uuid.java:71-82</c>).
+    /// A random version-4 identifier that is neither reserved nor prints with a <c>'-'</c>
+    /// anywhere in it — Java's <c>Uuid.randomUuid()</c> (<c>Uuid.java:75-86</c>).
     /// </summary>
     /// <remarks>
     /// <para>
     /// Java's loop, literally: draw a version-4, IETF-variant UUID (the same kind
     /// <c>java.util.UUID.randomUUID()</c> produces, from a cryptographically strong source),
-    /// and draw again while it is in <see cref="Reserved"/> or its text form starts with
-    /// <c>'-'</c>. The second condition is why a Kafka topic id never looks like a
+    /// and draw again while it is in <see cref="Reserved"/> or its text form contains
+    /// <c>'-'</c>. Since Kafka 4.4 (KAFKA-20072) the second condition rejects a <c>'-'</c>
+    /// anywhere; before, it rejected only a leading one, so that an id never looked like a
     /// command-line flag.
     /// </para>
     /// <para>
@@ -284,7 +285,7 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
 
     /// <summary>
     /// Compares two identifiers exactly as Java's <c>compareTo</c> does
-    /// (<c>Uuid.java:154-167</c>): <see cref="MostSignificantBits"/> first, then
+    /// (<c>Uuid.java:158-171</c>): <see cref="MostSignificantBits"/> first, then
     /// <see cref="LeastSignificantBits"/>, each as a <b>signed</b> <see cref="long"/> — so an
     /// identifier whose high bit is set sorts <em>before</em> <see cref="Zero"/>.
     /// </summary>
@@ -338,14 +339,14 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
     /// <param name="unsafeRandomUuid">
     /// Java's <c>unsafeRandomUuid()</c>: yields one candidate per call, reserved or not.
     /// </param>
-    /// <returns>The first candidate that is neither reserved nor <c>'-'</c>-leading.</returns>
+    /// <returns>The first candidate that is neither reserved nor contains <c>'-'</c>.</returns>
     internal static Uuid RandomUuid(Func<Uuid> unsafeRandomUuid)
     {
         Uuid uuid = unsafeRandomUuid();
 
-        // `ToString()[0] == '-'` is Java's `toString().startsWith("-")`: the text form is
-        // always 22 characters, so index 0 exists.
-        while (s_reserved.Contains(uuid) || uuid.ToString()[0] == '-')
+        // `IndexOf('-') >= 0` is Java's `toString().contains("-")` (KAFKA-20072, Kafka 4.4);
+        // netstandard2.0 has no `string.Contains(char)`.
+        while (s_reserved.Contains(uuid) || uuid.ToString().IndexOf('-') >= 0)
         {
             uuid = unsafeRandomUuid();
         }
@@ -370,8 +371,8 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
     }
 
     /// <summary>
-    /// Java's <c>unsafeRandomUuid()</c> (<c>Uuid.java:66-69</c>): one version-4 candidate,
-    /// which may still be reserved or <c>'-'</c>-leading.
+    /// Java's <c>unsafeRandomUuid()</c> (<c>Uuid.java:70-73</c>): one version-4 candidate,
+    /// which may still be reserved or contain <c>'-'</c>.
     /// </summary>
     private static Uuid UnsafeRandomUuid()
     {
