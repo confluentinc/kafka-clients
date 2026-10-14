@@ -24,6 +24,9 @@
 // `dead_code` is expected where a module is a utility library shared by separate
 // integration test crates, so rustc can't see the cross-crate usage.
 #[cfg(feature = "integration-tests")]
+#[expect(dead_code)]
+pub mod broker_control;
+#[cfg(feature = "integration-tests")]
 pub mod cluster_config;
 #[cfg(feature = "integration-tests")]
 pub mod cluster_pool;
@@ -59,8 +62,10 @@ pub mod backend_factory;
 // Fully used only once `multilanguage-tests` adds the gRPC backends.
 #[cfg_attr(not(feature = "multilanguage-tests"), expect(dead_code))]
 pub mod callback_log;
+#[cfg(feature = "integration-tests")]
+pub mod consumer_assignment_poller;
 
-// Error-code constants generated from `kafka_common_ErrorCode_t`
+// Error-code constants generated from `kafka_common_Error_e`
 // (`cargo xtask generate-error-codes`). The harness decodes a proto
 // `Error` by its code and cannot use the enum itself: `src/ffi` is behind
 // the `ffi` feature, which the multilanguage test targets do not enable.
