@@ -261,6 +261,10 @@ impl ChunkedRecordAccumulator {
         // immediately before.
         let mut non_blocking_memory_allocation_denied = false;
 
+        // The partition chosen on the latest pass, which Java's callbacks hold from
+        // `setPartition` on, so a failure before this pass chooses again reports it.
+        let mut chosen_partition = partition;
+
         loop {
             if let Err(error) = base.return_if_no_more_retries_allowed(
                 first_pass,
@@ -268,7 +272,7 @@ impl ChunkedRecordAccumulator {
                 non_blocking_memory_allocation_denied,
                 topic,
             ) {
-                return Err(AppendFailure::boxed(error, callback.take()));
+                return Err(AppendFailure::boxed(error, callback.take(), chosen_partition));
             }
             first_pass = false;
             non_blocking_memory_allocation_denied = false;
@@ -279,6 +283,7 @@ impl ChunkedRecordAccumulator {
                 partition
             };
             // Java's `setPartition(callbacks, effectivePartition)`: see `RecordAccumulator::append`.
+            chosen_partition = effective_partition;
 
             let append_result;
             // The batch the extension gap was sized against, set exactly when the result is
@@ -338,7 +343,7 @@ impl ChunkedRecordAccumulator {
                         effective_partition,
                     )
                     .await
-                    .map_err(|error| AppendFailure::boxed(error, callback.take()))?;
+                    .map_err(|error| AppendFailure::boxed(error, callback.take(), effective_partition))?;
                 let Some(extension_chunks) = extension_chunks else {
                     // Pool exhausted, so no chunks are held. allocate_extension_chunks has already
                     // decided whether to close the open batch; retry either way, bounded by
@@ -384,7 +389,7 @@ impl ChunkedRecordAccumulator {
                             // metrics.
                             self.chunked_free.record_buffer_exhausted();
                         }
-                        return Err(AppendFailure::boxed(error, callback.take()));
+                        return Err(AppendFailure::boxed(error, callback.take(), effective_partition));
                     },
                 };
                 let stream = ChunkedByteBufferOutputStream::new(
@@ -392,7 +397,7 @@ impl ChunkedRecordAccumulator {
                     self.chunked_free.poolable_size(),
                     Some(Arc::clone(&self.chunked_free)),
                 )
-                .map_err(|error| AppendFailure::boxed(error, callback.take()))?;
+                .map_err(|error| AppendFailure::boxed(error, callback.take(), effective_partition))?;
                 guard.new_batch = Some(NewBatchBuffer { stream, first_append_size: new_batch_size });
             }
 
@@ -425,7 +430,7 @@ impl ChunkedRecordAccumulator {
                             // guard so the `finally` returns them, as Java's caller still holds
                             // its list when `addBuffers` throws.
                             guard.extension_chunks = Some(extension_chunks);
-                            return Err(AppendFailure::boxed(error, callback.take()));
+                            return Err(AppendFailure::boxed(error, callback.take(), effective_partition));
                         }
                         let (retry_result, returned_callback) = self.try_append(
                             timestamp,
@@ -466,6 +471,7 @@ impl ChunkedRecordAccumulator {
                     return Err(AppendFailure::boxed(
                         Error::local_illegal_state("needsNewBatch path reached without an allocated buffer stream"),
                         callback.take(),
+                        effective_partition,
                     ));
                 }
                 // Reuse the new-batch size estimate as the write-limit basis. (Java's `TODO:
@@ -521,6 +527,7 @@ impl ChunkedRecordAccumulator {
                     return Err(AppendFailure::boxed(
                         Error::local_illegal_state("appendNewBatch must not return a needsNewBatch result"),
                         returned_callback,
+                        effective_partition,
                     ));
                 }
                 if result.needs_buffer_extension() {
@@ -643,7 +650,7 @@ impl ChunkedRecordAccumulator {
         now_ms: i64,
     ) -> Result<(RecordAppendResult, Option<Callback>), Box<AppendFailure>> {
         if self.base.closed.load(Ordering::Relaxed) {
-            return Err(RecordAccumulator::closed_while_send_in_progress(callback));
+            return Err(RecordAccumulator::closed_while_send_in_progress(callback, partition));
         }
         // Split batches in an incremental deque are plain ProducerBatch (heap-backed,
         // grow-on-demand) and never need chunk extension, so the check only applies to chunked
@@ -1530,6 +1537,57 @@ mod tests {
             "the dropped record must be counted once, not once per failed acquire"
         );
         accum.base().close();
+    }
+
+    /// When the producer chooses the partition, a buffer-exhaustion failure reports the
+    /// partition `append` chose, not `UNKNOWN_PARTITION`.
+    ///
+    /// Java's `append` passes the chosen partition to `AppendCallbacks.setPartition` before it
+    /// waits for memory, and `doSend` builds the callback's metadata from
+    /// `appendCallbacks.topicPartition()`. Not a translation of a Java test; the incremental
+    /// counterpart of `test_buffer_exhaustion_reports_the_partition_chosen_by_the_partitioner`.
+    ///
+    /// The second record overflows the open batch's only chunk and finds the pool empty, so
+    /// its extension is denied and the batch is closed. With no time left to block, the retry
+    /// fails at the deadline check, before the next pass chooses a partition again. With time
+    /// left, the retry fails in the blocking allocation for a new batch.
+    #[tokio::test]
+    async fn test_buffer_exhaustion_reports_the_partition_chosen_by_the_partitioner() {
+        for (max_time_to_block, failure_point) in [(0, "the retry deadline check"), (50, "the new-batch allocation")] {
+            let fx = fixture();
+            let chunk_size = 256;
+            // Pool holds exactly one chunk, which the first record takes.
+            let accum = fx.accumulator(8192, chunk_size, chunk_size as i64);
+            fx.append_to(&accum, RecordMetadata::UNKNOWN_PARTITION, &[0u8; 150], 0)
+                .await
+                .unwrap();
+
+            // The cluster has one partition, so the built-in partitioner can only choose
+            // `PARTITION1`.
+            let failure = accum
+                .append(
+                    TOPIC,
+                    RecordMetadata::UNKNOWN_PARTITION,
+                    0,
+                    Some(KEY),
+                    Some(&[0u8; 150]),
+                    &[],
+                    None,
+                    max_time_to_block,
+                    fx.time.milliseconds(),
+                    &fx.cluster,
+                )
+                .await
+                .err()
+                .unwrap();
+            assert!(
+                matches!(failure.error, Error::ProducerBufferExhausted(_)),
+                "{failure_point}: {:?}",
+                failure.error
+            );
+            assert_eq!(PARTITION1, failure.partition, "a failure at {failure_point}");
+            accum.base().close();
+        }
     }
 
     /// Test that chunks are returned to the pool only at batch completion (deallocate), never at
@@ -2740,6 +2798,7 @@ mod tests {
             1000,
             120_000,
             PartitionerConfig::default(),
+            Arc::clone(&fx.time) as Arc<dyn Time>,
             Arc::new(BufferPool::new_for_test(32 * 1024 * 1024, 1024 * 1024)),
             None,
         );
