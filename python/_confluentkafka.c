@@ -2207,15 +2207,18 @@ static void release_py_object(void* opaque) {
 }
 
 // A foreign callback error for an exception object: its str() as the message,
-// for the client's logs, and the object itself as the opaque pointer. The error
-// owns one reference to the object, released by `release_py_object` when its
-// last copy drops, so the object lives while any handle to the error (or to an
-// error whose cause it is) does, and `KafkaError_callback_exception` reads it
-// back. The GIL must be held.
+// for the client's logs (the core logs a producer callback's one), or its type's
+// name when that is empty (a bare `CancelledError`), as Java's toString() is the
+// class name for a null message; and the object itself as the opaque pointer.
+// The error owns one reference to the object, released by `release_py_object`
+// when its last copy drops, so the object lives while any handle to the error
+// (or to an error whose cause it is) does, and `KafkaError_callback_exception`
+// reads it back. The GIL must be held.
 static kafka_common_Error_t* callback_error_from_py(PyObject* exc) {
     PyObject* text = PyObject_Str(exc);
     const char* msg = text ? PyUnicode_AsUTF8(text) : NULL;
     if (msg == NULL) PyErr_Clear();
+    if (msg != NULL && msg[0] == '\0') msg = Py_TYPE(exc)->tp_name;
     Py_INCREF(exc);
     kafka_common_Error_t* err = kafka_common_Error_local_callback(msg ? msg : "callback raised an exception",
                                                                   (void*)exc, release_py_object);

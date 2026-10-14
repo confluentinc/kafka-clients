@@ -859,8 +859,19 @@ async def test_a_rethrown_async_send_runs_its_callback_once_if_the_record_comple
         await p.close(timeout=0)
 
 
-def test_callbacks_run_in_completion_order_and_a_raising_one_is_logged(
-        caplog: pytest.LogCaptureFixture) -> None:
+def _core_callback_errors(capfd: pytest.CaptureFixture[str]) -> list[str]:
+    """The core's log lines for a raising send() callback, from stderr, the
+    record prefix of its default log backend left out."""
+    return [line.split("] ", 1)[1] for line in capfd.readouterr().err.splitlines()
+            if "Error executing user-provided callback" in line]
+
+
+def test_callbacks_run_in_completion_order_and_a_raising_one_is_reported(
+        caplog: pytest.LogCaptureFixture, capfd: pytest.CaptureFixture[str]) -> None:
+    # Java logs a throwing onCompletion with its exception and fails nothing
+    # (ProducerBatch.completeFutureAndFireCallbacks, ProducerBatch.java:318-320).
+    # Python reports it to the core, which logs it once with Java's message and
+    # the exception's text; Python logs nothing.
     order: list[int] = []
     all_done = threading.Event()
 
@@ -873,15 +884,58 @@ def test_callbacks_run_in_completion_order_and_a_raising_one_is_logged(
                 raise RuntimeError("callback blew up")
         return cb
 
-    with caplog.at_level(logging.ERROR, logger="confluent_kafka.producer"):
+    capfd.readouterr()
+    with caplog.at_level(logging.DEBUG, logger="confluent_kafka"):
         with KafkaProducer(configs=UNREACHABLE) as p:
             futures = [p.send(record=RECORD, callback=make(i)) for i in range(4)]
             assert all_done.wait(30)
             for f in futures:
                 assert isinstance(f.exception(timeout=30), KafkaTimeoutError)
     assert order == [0, 1, 2, 3]
-    assert [r.getMessage() for r in caplog.records if r.name == "confluent_kafka.producer"] == [
-        "Error executing user-provided callback on message for topic-partition 'topic--1'"]
+    assert _core_callback_errors(capfd) == [f"{CALLBACK_ERROR}: LocalCallbackError: callback blew up"]
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_a_raising_callback_of_a_record_rejected_before_the_accumulator_is_logged_once(
+        monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+        capfd: pytest.CaptureFixture[str], asynchronous: bool) -> None:
+    # A record the Rust send() rejects before the accumulator has no delivery
+    # callback, so Python completes it itself and its callback's exception has
+    # no core report to go to: Python logs it, once, with the message the core
+    # logs a reported one with.
+    p: Any = AsyncKafkaProducer(configs=UNREACHABLE) if asynchronous else KafkaProducer(
+        configs=UNREACHABLE)
+    captured = _fake_queued_send(monkeypatch)
+    raised = RuntimeError("callback blew up")
+
+    def callback(md: RecordMetadata, e: Exception | None) -> None:
+        raise raised
+
+    capfd.readouterr()
+    try:
+        with caplog.at_level(logging.ERROR, logger="confluent_kafka.producer"):
+            f = (await p.send(record=RECORD, callback=callback) if asynchronous
+                 else p.send(record=RECORD, callback=callback))
+            captured["resolve"](_lib.KafkaError_new(IllegalStateError._ffi_id,
+                                                    _NOT_IN_A_TRANSACTION))
+            if asynchronous:
+                with pytest.raises(IllegalStateError):
+                    await asyncio.wait_for(f, 5)
+            else:
+                assert type(f.exception(timeout=5)) is IllegalStateError
+    finally:
+        monkeypatch.undo()
+        p._futures.clear()  # noqa: SLF001 (a failure above must not hang close())
+        if asynchronous:
+            await p.close(timeout=0)
+        else:
+            p.close(timeout=0)
+    records = [r for r in caplog.records if r.name == "confluent_kafka.producer"]
+    assert [r.getMessage() for r in records] == [CALLBACK_ERROR]
+    assert records[0].exc_info is not None
+    assert records[0].exc_info[1] is raised
+    assert _core_callback_errors(capfd) == []
 
 
 def test_flush_waits_for_the_records_sent_before_it() -> None:
@@ -2025,21 +2079,36 @@ async def test_async_def_callbacks_run_one_at_a_time_in_completion_order() -> No
         await p.close()
 
 
-async def test_a_raising_async_def_callback_is_logged_and_fails_nothing(
-        caplog: pytest.LogCaptureFixture) -> None:
+@pytest.mark.parametrize(("kind", "text"), [
+    ("plain", "callback blew up"),
+    ("async def", "async callback blew up"),
+    # A bare CancelledError has an empty str(): its type's name is the text,
+    # as Java's toString() is the class name for a null message.
+    ("cancelled", "CancelledError"),
+])
+async def test_a_raising_callback_on_the_async_producer_is_reported_and_fails_nothing(
+        caplog: pytest.LogCaptureFixture, capfd: pytest.CaptureFixture[str], kind: str,
+        text: str) -> None:
     # A throwing onCompletion is logged (ProducerBatch.completeFutureAndFireCallbacks)
-    # and reported to the core as the callback's error, which fails nothing:
-    # the future keeps the record's own outcome and the next callback runs.
-    caplog.set_level(logging.ERROR, logger="confluent_kafka.producer")
+    # and fails nothing: the future keeps the record's own outcome and the next
+    # callback runs. Python reports the exception to the core, which logs it
+    # once; Python logs nothing.
     seen: list[str] = []
 
-    async def callback(md: RecordMetadata, e: Exception | None) -> None:
+    def plain(md: RecordMetadata, e: Exception | None) -> None:
+        raise RuntimeError("callback blew up")
+
+    async def async_def(md: RecordMetadata, e: Exception | None) -> None:
         await asyncio.sleep(0)
+        if kind == "cancelled":
+            raise asyncio.CancelledError
         raise RuntimeError("async callback blew up")
 
+    capfd.readouterr()
+    caplog.set_level(logging.DEBUG, logger="confluent_kafka")
     p = AsyncKafkaProducer(configs=UNREACHABLE)
     try:
-        f = await p.send(record=RECORD, callback=callback)
+        f = await p.send(record=RECORD, callback=plain if kind == "plain" else async_def)
         g = await p.send(record=RECORD, callback=lambda md, e: seen.append("next"))
         for future in (f, g):
             with pytest.raises(KafkaTimeoutError):
@@ -2048,10 +2117,8 @@ async def test_a_raising_async_def_callback_is_logged_and_fails_nothing(
         assert seen == ["next"]
     finally:
         await p.close()
-    records = [r for r in caplog.records if r.name == "confluent_kafka.producer"]
-    assert [r.getMessage() for r in records] == [CALLBACK_ERROR]
-    assert records[0].exc_info is not None
-    assert str(records[0].exc_info[1]) == "async callback blew up"
+    assert _core_callback_errors(capfd) == [f"{CALLBACK_ERROR}: LocalCallbackError: {text}"]
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
 
 
 async def test_flush_in_an_async_def_callback_raises_javas_error() -> None:
@@ -2073,24 +2140,25 @@ async def test_flush_in_an_async_def_callback_raises_javas_error() -> None:
         await p.close()
 
 
-def test_a_coroutine_callback_on_the_sync_producer_is_closed_and_logged(
-        caplog: pytest.LogCaptureFixture) -> None:
+def test_a_coroutine_callback_on_the_sync_producer_is_closed_and_reported(
+        caplog: pytest.LogCaptureFixture, capfd: pytest.CaptureFixture[str]) -> None:
     # Only an asyncio producer awaits an `async def` callback: the sync one
-    # closes the coroutine and logs a TypeError, as for a raising callback.
+    # closes the coroutine and reports a TypeError, as for a raising callback,
+    # which the core logs.
     ran: list[bool] = []
 
     async def callback(md: RecordMetadata, e: Exception | None) -> None:
         ran.append(True)
 
-    with caplog.at_level(logging.ERROR, logger="confluent_kafka.producer"):
+    capfd.readouterr()
+    with caplog.at_level(logging.DEBUG, logger="confluent_kafka"):
         with KafkaProducer(configs=UNREACHABLE) as p:
             f = p.send(record=RECORD, callback=callback)  # type: ignore[arg-type]
             assert isinstance(f.exception(timeout=30), KafkaTimeoutError)
-    records = [r for r in caplog.records if r.name == "confluent_kafka.producer"]
-    assert [r.getMessage() for r in records] == [CALLBACK_ERROR]
-    assert records[0].exc_info is not None
-    assert isinstance(records[0].exc_info[1], TypeError)
-    assert str(records[0].exc_info[1]) == "a coroutine send() callback requires an AsyncProducer"
+    assert _core_callback_errors(capfd) == [
+        f"{CALLBACK_ERROR}: LocalCallbackError: "
+        "a coroutine send() callback requires an AsyncProducer"]
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
     assert ran == []
 
 
@@ -2386,18 +2454,144 @@ def test_mock_callback_runs_on_the_caller_before_the_future_completes() -> None:
     assert f.result().offset() == 0 and f.result().timestamp() == -1
 
 
-def test_mock_raising_callback_is_logged(caplog: pytest.LogCaptureFixture) -> None:
-    p = MockProducer()
+def test_mock_raising_callback_propagates_from_the_completing_call() -> None:
+    # Java's MockProducer.Completion.complete calls onCompletion with no
+    # try/catch, before result.done() (MockProducer.java:640-650): the
+    # exception propagates out of the call that completed the record, the
+    # record's future never completes, and the completions behind it stay
+    # queued.
+    raised = RuntimeError("callback blew up")
 
     def boom(md: RecordMetadata, e: Exception | None) -> None:
-        raise RuntimeError("callback blew up")
+        raise raised
 
+    p = MockProducer()
     f = p.send(record=RECORD, callback=boom)
-    with caplog.at_level(logging.ERROR, logger="confluent_kafka.producer"):
-        assert p.complete_next()
-    assert f.result().offset() == 0
-    assert [r.getMessage() for r in caplog.records] == [
-        "Error executing user-provided callback on message for topic-partition 'topic-0'"]
+    g = p.send(record=RECORD)
+    with pytest.raises(RuntimeError) as info:
+        p.complete_next()
+    assert info.value is raised
+    assert not f.done() and not g.done()
+    assert p.complete_next()
+    assert g.result().offset() == 1
+
+    h = p.send(record=RECORD, callback=boom)
+    with pytest.raises(RuntimeError) as info:
+        p.error_next(e=KafkaError(message="failed"))
+    assert info.value is raised
+    assert not h.done()
+
+    i = p.send(record=RECORD, callback=boom)
+    j = p.send(record=RECORD)
+    with pytest.raises(RuntimeError) as info:
+        p.flush()
+    assert info.value is raised
+    assert not i.done() and not j.done()
+    p.flush()
+    assert j.result().offset() == 4
+
+    auto = MockProducer(auto_complete=True, partitioner=None, key_serializer=None,
+                        value_serializer=None)
+    with pytest.raises(RuntimeError) as info:
+        auto.send(record=RECORD, callback=boom)
+    assert info.value is raised
+    assert auto.history() == [RECORD]
+
+    txn = MockProducer()
+    txn.init_transactions()
+    txn.begin_transaction()
+    txn.send(record=RECORD, callback=boom)
+    with pytest.raises(RuntimeError) as info:
+        txn.commit_transaction()
+    assert info.value is raised
+    assert not txn.transaction_committed() and txn.transaction_in_flight()
+
+
+def test_mock_coroutine_callback_raises_a_type_error() -> None:
+    # The sync mock cannot await an `async def` callback: its coroutine is
+    # closed and a TypeError raised from the completing call.
+    ran: list[bool] = []
+
+    async def callback(md: RecordMetadata, e: Exception | None) -> None:
+        ran.append(True)
+
+    p = MockProducer()
+    f = p.send(record=RECORD, callback=callback)  # type: ignore[arg-type]
+    with pytest.raises(TypeError) as info:
+        p.complete_next()
+    assert str(info.value) == "a coroutine send() callback requires an AsyncProducer"
+    assert not f.done() and ran == []
+
+
+async def test_async_mock_raising_callback_propagates_from_the_completing_call() -> None:
+    raised = RuntimeError("callback blew up")
+
+    def boom(md: RecordMetadata, e: Exception | None) -> None:
+        raise raised
+
+    auto = AsyncMockProducer(auto_complete=True, partitioner=None, key_serializer=None,
+                             value_serializer=None)
+    with pytest.raises(RuntimeError) as info:
+        await auto.send(record=RECORD, callback=boom)
+    assert info.value is raised
+    assert auto.history() == [RECORD]
+
+    p = AsyncMockProducer()
+    f = await p.send(record=RECORD, callback=boom)
+    with pytest.raises(RuntimeError) as info:
+        p.complete_next()
+    assert info.value is raised
+    assert not f.done()
+    await p.flush()  # nothing deferred
+    await p.close()
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_async_mock_raising_async_def_callback_is_a_deferred_error(
+        cancelled: bool) -> None:
+    # The completing call has returned when an awaited callback raises: its
+    # exception, CancelledError included, is raised by the next awaited call of
+    # the mock, once, and the record's future never completes.
+    raised: BaseException = (asyncio.CancelledError() if cancelled
+                             else RuntimeError("async callback blew up"))
+
+    async def boom(md: RecordMetadata, e: Exception | None) -> None:
+        await asyncio.sleep(0)
+        raise raised
+
+    p = AsyncMockProducer()
+    f = await p.send(record=RECORD, callback=boom)
+    assert p.complete_next()
+    with pytest.raises(type(raised)) as info:
+        await p.flush()
+    assert info.value is raised
+    assert not f.done()
+    await p.flush()
+
+    g = await p.send(record=RECORD, callback=boom)
+    assert p.complete_next()
+    await _until(lambda: p._mock_callback_errors)  # noqa: SLF001
+    with pytest.raises(type(raised)) as info:
+        await p.send(record=RECORD)
+    assert info.value is raised
+    assert not g.done()
+    await p.close()
+
+
+async def test_async_mock_close_raises_a_deferred_callback_error_once_closed() -> None:
+    raised = RuntimeError("async callback blew up")
+
+    async def boom(md: RecordMetadata, e: Exception | None) -> None:
+        await asyncio.sleep(0)
+        raise raised
+
+    p = AsyncMockProducer()
+    await p.send(record=RECORD, callback=boom)
+    assert p.complete_next()
+    with pytest.raises(RuntimeError) as info:
+        await p.close()
+    assert info.value is raised
+    assert p.closed()
 
 
 def test_mock_error_next_with_none_completes_successfully() -> None:

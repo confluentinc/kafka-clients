@@ -87,7 +87,14 @@ from ._base import (
     wait_futures,
     wait_sliced,
 )
-from ._send import MetadataTuple, completion_to_python, failure_metadata, in_callback, invoke_callback
+from ._send import (
+    MetadataTuple,
+    completion_to_python,
+    failure_metadata,
+    in_callback,
+    invoke_callback,
+    log_unreported_callback_error,
+)
 from .record_metadata import RecordMetadata
 
 if TYPE_CHECKING:
@@ -335,10 +342,14 @@ class Producer(Generic[K, V], _ProducerState):
         The ``callback`` runs on the producer's background completion thread,
         never on the calling thread, after the record completes and before its
         future does. Callbacks for records being sent to the same partition are
-        guaranteed to execute in order. A raising callback is logged. It should
-        be reasonably fast, or it will delay the completion of other records.
-        An ``async def`` callback cannot be awaited there: its coroutine is
-        closed and a ``TypeError`` is logged (``AsyncProducer`` awaits it).
+        guaranteed to execute in order. A raising callback fails nothing: its
+        exception is reported to the core, which logs it once with Java's
+        message, "Error executing user-provided callback on message for
+        topic-partition '<topic>-<partition>'", and the exception's text. It
+        should be reasonably fast, or it will delay the completion of other
+        records. An ``async def`` callback cannot be awaited there: its
+        coroutine is closed and a ``TypeError`` is reported the same way
+        (``AsyncProducer`` awaits it).
 
         When used as part of a transaction, it is not necessary to define a
         callback or check the result of the future in order to detect errors
@@ -436,7 +447,13 @@ class Producer(Generic[K, V], _ProducerState):
                     # completion: send() does not return it.
                     rethrown = exception
                 else:
-                    complete(failure_metadata(topic, partition), exception)
+                    # No delivery callback reports this completion, so an
+                    # exception the callback raises has no core report to go
+                    # to: it is logged here instead (see _send).
+                    metadata = failure_metadata(topic, partition)
+                    failure = complete(metadata, exception)
+                    if failure is not None:
+                        log_unreported_callback_error(metadata, failure)
             handed_over.set()
 
         # A close() that began since the check above (the serializers ran in

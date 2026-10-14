@@ -21,18 +21,21 @@ runs as ``on_completion(metadata, error, callback_id)``: the metadata's fields
 as a tuple (``None`` when there is none), the BORROWED error handle as an int
 (0 for none) and the id the callback reports under. :func:`completion_to_python`
 turns them into the public objects once per completion; :func:`invoke_callback`
-runs the user's ``Callback`` (CLAUDE.md, Python Binding Conventions, Threads and
-callbacks).
+runs the user's ``Callback`` for the FFI-backed producers and
+:func:`call_callback` for the mocks (CLAUDE.md, Python Binding Conventions,
+Threads and callbacks).
 
 The C API completes the record's future, and lets ``flush()``, the
 transaction-end calls and ``close()`` return, only once the callback reported
 (``kafka_producer_Producer__set_callback_result``), as Java fires the callbacks
 before ``produceFuture.done()``. ``on_completion`` reports by returning: ``None``
 for a callback that returned, or raising the exception it raised, which the C
-extension reports as the callback's error (the core logs it and fails nothing,
-as Java logs a throwing ``onCompletion``). It returns ``True`` when the report
-comes later, from ``_lib.Producer__set_callback_result``: the asyncio producer's
-callback that runs on another event loop, or is an ``async def``.
+extension reports as the callback's error. Python does not log that exception:
+the core logs it, once, with Java's message (``ProducerBatch.completeFutureAndFireCallbacks``,
+``ProducerBatch.java:318-320``) and the exception's text, and fails nothing. It
+returns ``True`` when the report comes later, from
+``_lib.Producer__set_callback_result``: the asyncio producer's callback that
+runs on another event loop, or is an ``async def``.
 """
 
 from __future__ import annotations
@@ -50,15 +53,10 @@ from .record_metadata import RecordMetadata
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-__all__ = ["CALLBACK_ERROR_MESSAGE", "MetadataTuple", "completion_to_python", "failure_metadata",
-           "in_callback", "invoke_callback", "log_callback_error", "run_callback"]
+__all__ = ["MetadataTuple", "call_callback", "completion_to_python", "failure_metadata",
+           "in_callback", "invoke_callback", "log_unreported_callback_error", "run_callback"]
 
 _LOG = logging.getLogger("confluent_kafka.producer")
-
-#: What Java's ``ProducerBatch.completeFutureAndFireCallbacks`` logs for a
-#: throwing callback, formatted with the record's topic-partition.
-CALLBACK_ERROR_MESSAGE = ("Error executing user-provided callback on message for "
-                          "topic-partition '%s'")
 
 # A coroutine callback given to the synchronous producer.
 _COROUTINE_CALLBACK_MESSAGE = "a coroutine send() callback requires an AsyncProducer"
@@ -123,40 +121,50 @@ def run_callback(producer: object, callback: Callable[..., object],
         _callback_scope.producer = previous
 
 
-def log_callback_error(metadata: RecordMetadata, error: BaseException) -> None:
-    """Log a callback's exception as Java's
-    ``ProducerBatch.completeFutureAndFireCallbacks`` does."""
-    _LOG.error(CALLBACK_ERROR_MESSAGE, f"{metadata.topic()}-{metadata.partition()}",
-               exc_info=error)
+def call_callback(producer: object, callback: Callable[..., object] | None,
+                  metadata: RecordMetadata, exception: Exception | None) -> None:
+    """Run the user's ``Callback`` for one completion, synchronously, raising
+    what it raised, as Java's ``MockProducer.Completion.complete`` calls
+    ``onCompletion`` with no try/catch. A callback returning an awaitable (an
+    ``async def``) cannot be awaited here: the awaitable is closed and a
+    ``TypeError`` raised, as the synchronous consumer does for a coroutine
+    listener."""
+    if callback is None:
+        return
+    result = run_callback(producer, callback, metadata, exception)
+    if inspect.isawaitable(result):
+        close = getattr(result, "close", None)
+        if callable(close):
+            close()
+        raise TypeError(_COROUTINE_CALLBACK_MESSAGE)
 
 
 def invoke_callback(producer: object, callback: Callable[..., object] | None,
                     metadata: RecordMetadata, exception: Exception | None) -> Exception | None:
-    """Run the user's ``Callback`` for one completion, synchronously, and
-    return the exception it raised, if any.
+    """:func:`call_callback`, returning the exception the callback raised, if
+    any, instead of raising it.
 
-    The exception is logged as Java's ``ProducerBatch.completeFutureAndFireCallbacks``
-    logs it, and handed back rather than raised: the caller is the producer's
-    completion thread or the event loop, which reports it to the core (see the
-    module docstring), and the next callback must still run. A callback
-    returning an awaitable (an ``async def``) cannot be awaited here: the
-    awaitable is closed and a ``TypeError`` is logged and returned, as the
-    synchronous consumer does for a coroutine listener.
+    The caller is the producer's completion thread, which reports it to the
+    core (see the module docstring), and the next callback must still run. It
+    is not logged here: the core logs it once, as Java's
+    ``ProducerBatch.completeFutureAndFireCallbacks`` does.
     """
-    if callback is None:
-        return None
-    error: Exception | None = None
     try:
-        result = run_callback(producer, callback, metadata, exception)
-        if inspect.isawaitable(result):
-            close = getattr(result, "close", None)
-            if callable(close):
-                close()
-            raise TypeError(_COROUTINE_CALLBACK_MESSAGE)
+        call_callback(producer, callback, metadata, exception)
     except Exception as exc:  # noqa: BLE001 - a user callback must not escape
-        error = exc
-        log_callback_error(metadata, exc)
-    return error
+        return exc
+    return None
+
+
+def log_unreported_callback_error(metadata: RecordMetadata, error: BaseException) -> None:
+    """Log a callback's exception that has no core report to go to, with the
+    message the core logs a reported one with (Java's
+    ``ProducerBatch.completeFutureAndFireCallbacks``): the callback of a
+    completion the core does not deliver, a record the Rust ``send()`` rejected
+    before the accumulator, which Python completes itself (the callback id 0).
+    Every other callback's exception is reported, and only the core logs it."""
+    _LOG.error("Error executing user-provided callback on message for topic-partition '%s'",
+               f"{metadata.topic()}-{metadata.partition()}", exc_info=error)
 
 
 def in_callback(producer: object) -> bool:

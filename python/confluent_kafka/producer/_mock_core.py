@@ -24,6 +24,14 @@ waits), the setters of its public mutable exception fields, and the bodies of
 the interface methods, which each class wraps with its own ``def`` /
 ``async def``. Java's ``synchronized`` methods take one reentrant lock.
 
+A completion's callback runs in the call that completes the record (``send()``
+with ``auto_complete``, ``complete_next()``, ``error_next()``, ``flush()`` and
+the transaction-end calls that flush) and an exception it raises propagates out
+of that call, as Java's ``Completion.complete`` calls ``onCompletion`` with no
+try/catch (``MockProducer.java:640-650``). Then, as in Java, the record's future
+never completes, since ``result.done()`` follows the callback, and the
+completions queued behind it stay queued.
+
 Left out with what they serve (Class family, Dropped): ``disableTelemetry``,
 ``injectTimeoutException``, ``setClientInstanceId`` (state of
 ``clientInstanceId``) and ``addedMetrics`` (state of
@@ -45,7 +53,7 @@ from confluent_kafka.illegal_argument_error import IllegalArgumentError
 from confluent_kafka.illegal_state_error import IllegalStateError
 from confluent_kafka.null_pointer_error import NullPointerError
 
-from ._send import invoke_callback
+from ._send import call_callback
 from .record_metadata import RecordMetadata
 
 if TYPE_CHECKING:
@@ -385,8 +393,10 @@ class MockProducerCore(Generic[K, V]):
               e: RuntimeError | None, future: Any, settle: Callable[[], None]) -> None:
         """Run a completion's callback, then ``settle`` its future, as Java's
         ``Completion.complete`` does; ``AsyncMockProducer`` awaits an ``async
-        def`` callback first."""
-        invoke_callback(self, callback, metadata, e)
+        def`` callback first. An exception the callback raises propagates and
+        the future is left pending, as Java's ``result.done()`` is never
+        reached (see the module docstring)."""
+        call_callback(self, callback, metadata, e)
         settle()
 
     def _send(self, record: ProducerRecord[K, V], callback: Callable[..., object] | None,

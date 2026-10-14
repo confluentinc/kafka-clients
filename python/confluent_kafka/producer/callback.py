@@ -23,8 +23,10 @@ A callback interface that the user can implement to allow code to execute when
 the request is complete. This callback will generally execute in the background
 I/O thread so it should be fast: on ``KafkaProducer`` it runs on the producer's
 background completion thread, on ``AsyncKafkaProducer`` on the event loop, one
-at a time in completion order; an exception it raises is logged, not propagated
-(Threads and callbacks). The record's future completes, and ``flush()``, the
+at a time in completion order; an exception it raises is not propagated: the
+core logs it once, with Java's message and the exception's text (Threads and
+callbacks). On ``MockProducer`` and ``AsyncMockProducer`` it runs in the call
+that completes the record and propagates out of it, as from Java's mock. The record's future completes, and ``flush()``, the
 transaction-end calls and ``close()`` return, only after the callbacks of the
 records they cover returned, as Java fires the callbacks before completing the
 future. By rule 3 the asyncio producers also accept an ``async def`` callback,

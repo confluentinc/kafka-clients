@@ -85,7 +85,7 @@ from ._send import (
     MetadataTuple,
     completion_to_python,
     failure_metadata,
-    log_callback_error,
+    log_unreported_callback_error,
     run_callback,
 )
 from .record_metadata import RecordMetadata
@@ -295,14 +295,13 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         """Run ``item``'s callback on ``loop``'s thread: ``(True, None)`` when
         it is an ``async def``, whose task now finishes the completion (see
         :meth:`_await_callback`), else ``(False, the exception it raised)``,
-        logged with Java's message."""
+        which the caller reports to the core (see ``_send``)."""
         _future, callback, metadata, exception, _callback_id = item
         if callback is None:
             return False, None
         try:
             result = run_callback(self, callback, metadata, exception)
         except Exception as exc:  # noqa: BLE001 - reported to the core
-            log_callback_error(metadata, exc)
             return False, exc
         if inspect.isawaitable(result):
             self._await_callback(loop, item, result)
@@ -322,9 +321,9 @@ class AsyncProducer(Generic[K, V], _ProducerState):
     def _await_callback(self, loop: asyncio.AbstractEventLoop, item: _Pending,
                         awaitable: Awaitable[object]) -> None:
         """Await an ``async def`` callback in a task on ``loop`` (by rule 3),
-        the loop staying busy meanwhile: once it ends, its exception
-        (``CancelledError`` included) is logged, the callback reported, the
-        future completed, and the loop's next completion run."""
+        the loop staying busy meanwhile: once it ends, the callback is
+        reported with its exception (``CancelledError`` included), which the
+        core logs, the future completed, and the loop's next completion run."""
         producer_id = id(self)
 
         async def run() -> None:
@@ -351,20 +350,24 @@ class AsyncProducer(Generic[K, V], _ProducerState):
             else:
                 failure = task.exception()
             future, _callback, metadata, exception, callback_id = item
-            if failure is not None:
-                log_callback_error(metadata, failure)
-            self._report(callback_id, failure)
+            self._report(callback_id, failure, metadata)
             _settle(future, metadata, exception)
             self._complete_pending(loop)
 
         task.add_done_callback(done)
 
-    def _report(self, callback_id: int, failure: BaseException | None) -> None:
+    def _report(self, callback_id: int, failure: BaseException | None,
+                metadata: RecordMetadata | None = None) -> None:
         """Report a callback to the C API (``Producer__set_callback_result``),
-        with the exception it raised, if any. Under the lifecycle lock and only
-        while the handle is alive: :meth:`_destroy` sets ``_destroyed`` under it
-        before it frees the handle, which completes what is left unreported."""
+        with the exception it raised, if any, which the core logs. Under the
+        lifecycle lock and only while the handle is alive: :meth:`_destroy` sets
+        ``_destroyed`` under it before it frees the handle, which completes what
+        is left unreported. A completion the core does not deliver (the callback
+        id 0) has no report: an exception its callback raised is logged here
+        instead (see ``_send``)."""
         if not callback_id:
+            if failure is not None and metadata is not None:
+                log_unreported_callback_error(metadata, failure)
             return
         with self._lifecycle:
             if self._destroyed or not self._c_producer:
@@ -437,7 +440,9 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         for it too. Awaiting, from inside such a callback, the future of a
         record that completes after it never returns, that record's callback
         waiting behind this one (Java's blocking ``get()`` in a callback). A
-        raising callback, ``async def`` or not, is logged. A record that completes
+        raising callback, ``async def`` or not (``CancelledError`` included),
+        fails nothing: its exception is reported to the core, which logs it
+        once with Java's message and the exception's text. A record that completes
         after its event loop has closed is dropped with a warning on the
         ``confluent_kafka.producer`` logger: its callback does not run (or an
         awaited one does not finish) and its future does not complete."""
@@ -493,8 +498,12 @@ class AsyncProducer(Generic[K, V], _ProducerState):
                     rethrown = exception
                 else:
                     # Nothing to report: the delivery callback does not run
-                    # for this record (an exception it raised is logged).
-                    complete(failure_metadata(topic, partition), exception, 0)
+                    # for this record, so an exception its callback raised is
+                    # logged here (see _report).
+                    metadata = failure_metadata(topic, partition)
+                    outcome = complete(metadata, exception, 0)
+                    if isinstance(outcome, BaseException):
+                        log_unreported_callback_error(metadata, outcome)
             if waiting and not loop.is_closed():
                 try:
                     loop.call_soon_threadsafe(_set_result, handed_over)
@@ -541,7 +550,7 @@ class AsyncProducer(Generic[K, V], _ProducerState):
             if deferred:
                 return
             future, _callback, metadata, exception, callback_id = item
-            self._report(callback_id, failure)
+            self._report(callback_id, failure, metadata)
             _settle(future, metadata, exception)
 
     async def flush(self) -> None:
