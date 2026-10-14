@@ -31,6 +31,7 @@
 
 use crate::common::Error;
 use crate::common::config::config_def::ValidList;
+use crate::common::config::types::Password;
 
 // ---------------------------------------------------------------------------
 // Config key constants (matching Java SslConfigs constant values)
@@ -123,6 +124,9 @@ impl SslConfigs {
 ///
 /// Java defaults to JKS keystores; Rust/rustls works natively with PEM,
 /// so `truststore_type` and `keystore_type` default to `"PEM"`.
+///
+/// Every field whose key Java defines as `ConfigDef.Type.PASSWORD` is a
+/// `Password`, so the derived `Debug` renders each of them as `[hidden]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.config.SslConfigs")]
@@ -132,12 +136,15 @@ pub struct SslConfigs {
     pub(crate) truststore_location: Option<String>,
 
     /// Password for the trust store file.
-    /// Corresponds to `ssl.truststore.password`.
-    pub(crate) truststore_password: Option<String>,
+    /// Corresponds to `ssl.truststore.password`, which Java defines as
+    /// `Type.PASSWORD` (`SslConfigs.java:140`).
+    pub(crate) truststore_password: Option<Password>,
 
     /// Trusted certificates in PEM format (alternative to `truststore_location`).
-    /// Corresponds to `ssl.truststore.certificates`.
-    pub(crate) truststore_certificates: Option<String>,
+    /// Corresponds to `ssl.truststore.certificates`. The certificates are
+    /// public, but Java defines the key as `Type.PASSWORD`
+    /// (`SslConfigs.java:137`) and hides them, so this client does too.
+    pub(crate) truststore_certificates: Option<Password>,
 
     /// Trust store format: `"JKS"`, `"PKCS12"`, or `"PEM"`.
     /// Corresponds to `ssl.truststore.type`. Default: `"PEM"`.
@@ -148,24 +155,29 @@ pub struct SslConfigs {
     pub(crate) keystore_location: Option<String>,
 
     /// Password for the key store file.
-    /// Corresponds to `ssl.keystore.password`.
-    pub(crate) keystore_password: Option<String>,
+    /// Corresponds to `ssl.keystore.password`, which Java defines as
+    /// `Type.PASSWORD` (`SslConfigs.java:133`).
+    pub(crate) keystore_password: Option<Password>,
 
     /// Private key in PEM format (alternative to `keystore_location`).
-    /// Corresponds to `ssl.keystore.key`.
-    pub(crate) keystore_key: Option<String>,
+    /// Corresponds to `ssl.keystore.key`, which Java defines as
+    /// `Type.PASSWORD` (`SslConfigs.java:135`).
+    pub(crate) keystore_key: Option<Password>,
 
     /// Certificate chain in PEM format (alternative to `keystore_location`).
-    /// Corresponds to `ssl.keystore.certificate.chain`.
-    pub(crate) keystore_certificate_chain: Option<String>,
+    /// Corresponds to `ssl.keystore.certificate.chain`. The certificates are
+    /// public, but Java defines the key as `Type.PASSWORD`
+    /// (`SslConfigs.java:136`) and hides them, so this client does too.
+    pub(crate) keystore_certificate_chain: Option<Password>,
 
     /// Key store format: `"JKS"`, `"PKCS12"`, or `"PEM"`.
     /// Corresponds to `ssl.keystore.type`. Default: `"PEM"`.
     pub(crate) keystore_type: String,
 
     /// Password for the private key.
-    /// Corresponds to `ssl.key.password`.
-    pub(crate) key_password: Option<String>,
+    /// Corresponds to `ssl.key.password`, which Java defines as
+    /// `Type.PASSWORD` (`SslConfigs.java:134`).
+    pub(crate) key_password: Option<Password>,
 
     /// Endpoint identification algorithm for hostname verification.
     /// `"https"` enables hostname verification (default). Empty string disables it.
@@ -213,6 +225,9 @@ impl SslConfigs {
     /// The caller is responsible for matching the `"ssl."` prefix before calling
     /// this; `key` is the full Java config key (e.g. `"ssl.truststore.location"`).
     ///
+    /// Values of the six keys Java defines as `Type.PASSWORD`
+    /// (`SslConfigs.java:133-137`, `:140`) are wrapped in a [`Password`].
+    ///
     /// # Errors
     ///
     /// [`Error::Config`] if `ssl.enabled.protocols` or `ssl.cipher.suites`
@@ -224,10 +239,10 @@ impl SslConfigs {
                 ssl.truststore_location = Some(value.to_string());
             },
             SslConfigs::SSL_TRUSTSTORE_PASSWORD_CONFIG => {
-                ssl.truststore_password = Some(value.to_string());
+                ssl.truststore_password = Some(Password::new(value));
             },
             SslConfigs::SSL_TRUSTSTORE_CERTIFICATES_CONFIG => {
-                ssl.truststore_certificates = Some(value.to_string());
+                ssl.truststore_certificates = Some(Password::new(value));
             },
             SslConfigs::SSL_TRUSTSTORE_TYPE_CONFIG => {
                 ssl.truststore_type = value.to_string();
@@ -236,19 +251,19 @@ impl SslConfigs {
                 ssl.keystore_location = Some(value.to_string());
             },
             SslConfigs::SSL_KEYSTORE_PASSWORD_CONFIG => {
-                ssl.keystore_password = Some(value.to_string());
+                ssl.keystore_password = Some(Password::new(value));
             },
             SslConfigs::SSL_KEYSTORE_KEY_CONFIG => {
-                ssl.keystore_key = Some(value.to_string());
+                ssl.keystore_key = Some(Password::new(value));
             },
             SslConfigs::SSL_KEYSTORE_CERTIFICATE_CHAIN_CONFIG => {
-                ssl.keystore_certificate_chain = Some(value.to_string());
+                ssl.keystore_certificate_chain = Some(Password::new(value));
             },
             SslConfigs::SSL_KEYSTORE_TYPE_CONFIG => {
                 ssl.keystore_type = value.to_string();
             },
             SslConfigs::SSL_KEY_PASSWORD_CONFIG => {
-                ssl.key_password = Some(value.to_string());
+                ssl.key_password = Some(Password::new(value));
             },
             SslConfigs::SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG => {
                 ssl.endpoint_identification_algorithm = value.to_string();
@@ -323,18 +338,18 @@ mod tests {
     fn test_custom_config() {
         let config = SslConfigs {
             truststore_location: Some("/path/to/truststore.pem".to_owned()),
-            truststore_password: Some("changeit".to_owned()),
+            truststore_password: Some(Password::new("changeit")),
             keystore_location: Some("/path/to/keystore.pem".to_owned()),
-            keystore_password: Some("secret".to_owned()),
-            keystore_key: Some("-----BEGIN PRIVATE KEY-----\n...".to_owned()),
-            keystore_certificate_chain: Some("-----BEGIN CERTIFICATE-----\n...".to_owned()),
+            keystore_password: Some(Password::new("secret")),
+            keystore_key: Some(Password::new("-----BEGIN PRIVATE KEY-----\n...")),
+            keystore_certificate_chain: Some(Password::new("-----BEGIN CERTIFICATE-----\n...")),
             keystore_type: "PKCS12".to_owned(),
-            key_password: Some("keypass".to_owned()),
+            key_password: Some(Password::new("keypass")),
             endpoint_identification_algorithm: String::new(),
             ..SslConfigs::default()
         };
         assert_eq!(config.truststore_location.as_deref(), Some("/path/to/truststore.pem"));
-        assert_eq!(config.truststore_password.as_deref(), Some("changeit"));
+        assert_eq!(config.truststore_password.as_ref().map(Password::value), Some("changeit"));
         assert_eq!(config.keystore_type, "PKCS12");
         assert_eq!(config.endpoint_identification_algorithm, "");
         // Inherited from default
@@ -424,15 +439,24 @@ mod tests {
             .unwrap();
 
         assert_eq!(ssl.truststore_location.as_deref(), Some("/ts.pem"));
-        assert_eq!(ssl.truststore_password.as_deref(), Some("ts-pass"));
-        assert_eq!(ssl.truststore_certificates.as_deref(), Some("-----BEGIN CERTIFICATE-----"));
+        assert_eq!(ssl.truststore_password.as_ref().map(Password::value), Some("ts-pass"));
+        assert_eq!(
+            ssl.truststore_certificates.as_ref().map(Password::value),
+            Some("-----BEGIN CERTIFICATE-----")
+        );
         assert_eq!(ssl.truststore_type, "PKCS12");
         assert_eq!(ssl.keystore_location.as_deref(), Some("/ks.pem"));
-        assert_eq!(ssl.keystore_password.as_deref(), Some("ks-pass"));
-        assert_eq!(ssl.keystore_key.as_deref(), Some("-----BEGIN PRIVATE KEY-----"));
-        assert_eq!(ssl.keystore_certificate_chain.as_deref(), Some("-----BEGIN CERTIFICATE-----"));
+        assert_eq!(ssl.keystore_password.as_ref().map(Password::value), Some("ks-pass"));
+        assert_eq!(
+            ssl.keystore_key.as_ref().map(Password::value),
+            Some("-----BEGIN PRIVATE KEY-----")
+        );
+        assert_eq!(
+            ssl.keystore_certificate_chain.as_ref().map(Password::value),
+            Some("-----BEGIN CERTIFICATE-----")
+        );
         assert_eq!(ssl.keystore_type, "JKS");
-        assert_eq!(ssl.key_password.as_deref(), Some("key-pass"));
+        assert_eq!(ssl.key_password.as_ref().map(Password::value), Some("key-pass"));
         assert_eq!(ssl.endpoint_identification_algorithm, "");
         assert_eq!(ssl.enabled_protocols, vec!["TLSv1.2", "TLSv1.3"]);
     }
@@ -506,5 +530,57 @@ mod tests {
         let mut ssl = SslConfigs::default();
         SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_CIPHER_SUITES_CONFIG, "A, B").unwrap();
         SslConfigs::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_CIPHER_SUITES_CONFIG, "A,A").unwrap();
+    }
+
+    /// `{:?}` hides the six `Type.PASSWORD` fields and keeps the others.
+    #[test]
+    fn test_debug_redacts_password_fields() {
+        let config = SslConfigs {
+            truststore_location: Some("/etc/kafka/visible-truststore.pem".to_owned()),
+            truststore_password: Some(Password::new("truststore-S3cr3t")),
+            truststore_certificates: Some(Password::new("TRUSTSTORE-CERTIFICATES-PEM")),
+            keystore_location: Some("/etc/kafka/visible-keystore.pem".to_owned()),
+            keystore_password: Some(Password::new("keystore-S3cr3t")),
+            keystore_key: Some(Password::new("-----BEGIN PRIVATE KEY-----KEYSTORE-KEY-PEM")),
+            keystore_certificate_chain: Some(Password::new("KEYSTORE-CERTIFICATE-CHAIN-PEM")),
+            keystore_type: "PKCS12".to_owned(),
+            key_password: Some(Password::new("key-S3cr3t")),
+            ..SslConfigs::default()
+        };
+
+        for rendered in [format!("{config:?}"), format!("{config:#?}")] {
+            for secret in [
+                "truststore-S3cr3t",
+                "TRUSTSTORE-CERTIFICATES-PEM",
+                "keystore-S3cr3t",
+                "PRIVATE KEY",
+                "KEYSTORE-KEY-PEM",
+                "KEYSTORE-CERTIFICATE-CHAIN-PEM",
+                "key-S3cr3t",
+            ] {
+                assert!(!rendered.contains(secret), "{secret:?} leaked: {rendered}");
+            }
+            assert_eq!(rendered.matches(Password::HIDDEN).count(), 6, "{rendered}");
+            assert!(rendered.contains("/etc/kafka/visible-truststore.pem"), "{rendered}");
+            assert!(rendered.contains("/etc/kafka/visible-keystore.pem"), "{rendered}");
+            assert!(rendered.contains("\"PKCS12\""), "{rendered}");
+        }
+        let rendered = format!("{config:?}");
+        for field in [
+            "truststore_password",
+            "truststore_certificates",
+            "keystore_password",
+            "keystore_key",
+            "keystore_certificate_chain",
+            "key_password",
+        ] {
+            let hidden = format!("{field}: Some([hidden])");
+            assert!(rendered.contains(&hidden), "{hidden} missing: {rendered}");
+        }
+        assert!(
+            rendered.contains("truststore_location: Some(\"/etc/kafka/visible-truststore.pem\")"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("keystore_type: \"PKCS12\""), "{rendered}");
     }
 }
