@@ -40,7 +40,8 @@
 //! one. A function with an `out_error` parameter also stores an error describing
 //! the panic there. A function that reports ordinary failures through a
 //! completion callback reports the panic through that callback instead, exactly
-//! once, unless its documentation says that a synchronous failure does not
+//! once (once per requested key, for an admin function whose callback fires per
+//! key), unless its documentation says that a synchronous failure does not
 //! invoke the callback. Such a function reports the panic as a synchronous
 //! failure, through its return value and `out_error` where it has one, and the
 //! guard itself does not invoke the callback. If such a panic is raised after
@@ -49,7 +50,9 @@
 //! do not release `user_data` yourself: the callback, or the
 //! `user_data_destroy` hook where there is one, releases it when it runs. The
 //! error's code is `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE` and its message
-//! begins `Rust panic caught at the FFI boundary in <function>`.
+//! begins `Rust panic caught at the FFI boundary in <function>`. Where
+//! reporting a panic could repeat a callback that has already fired, the
+//! process aborts instead, as the function's documentation says.
 //!
 //! A panic is a bug in this library and may leave the handle it happened on in
 //! an inconsistent state: destroy that handle and create a new one. Later calls
