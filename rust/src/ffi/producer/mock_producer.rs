@@ -1505,4 +1505,28 @@ mod tests {
             let _ = kafka_string_destroy;
         }
     }
+
+    /// A destroy inside a tokio runtime, where `teardown`'s `block_on` would
+    /// panic, returns at once and tears the handle down on its own thread: the
+    /// queued `close_cb` completion fires there, once.
+    #[test]
+    fn destroy_inside_a_tokio_runtime_tears_down_on_its_own_thread() {
+        use crate::ffi::common::teardown_probe::{Fired, on_fired};
+        use crate::ffi::producer::kafka_producer_Producer_close_cb;
+        let fired = Fired::new();
+        let mock = kafka_producer_MockProducer_with_auto_complete(1);
+        // SAFETY: Test code: the mock is live until it is destroyed, once, inside the runtime;
+        // `fired` outlives the completion it waits for.
+        unsafe {
+            kafka_producer_Producer_close_cb(
+                kafka_producer_MockProducer__as_Producer(mock),
+                on_fired,
+                fired.as_opaque(),
+            );
+            let mock = mock as usize;
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+            runtime.block_on(async move { kafka_producer_MockProducer_destroy(mock as *mut _) });
+        }
+        assert_eq!(fired.wait(), (Some("kafka-producer-destroy".to_string()), true));
+    }
 }

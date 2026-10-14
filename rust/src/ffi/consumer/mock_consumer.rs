@@ -1563,4 +1563,30 @@ mod tests {
             kafka_consumer_MockConsumer_destroy(mock);
         }
     }
+
+    /// A destroy inside a tokio runtime, where `teardown`'s `block_on` would
+    /// panic, returns at once and tears the handle down on its own thread: the
+    /// queued `close_cb` completion fires there, once.
+    #[test]
+    fn destroy_inside_a_tokio_runtime_tears_down_on_its_own_thread() {
+        use crate::ffi::common::teardown_probe::{Fired, on_fired};
+        use crate::ffi::consumer::kafka_consumer_Consumer_close_cb;
+        let fired = Fired::new();
+        // SAFETY: Test code: the strategy is a NUL-terminated literal and `e` the valid slot `ok`
+        // hands in.
+        let mock = ok(|e| unsafe { kafka_consumer_MockConsumer_new(c"earliest".as_ptr(), e) });
+        // SAFETY: Test code: the mock is live until it is destroyed, once, inside the runtime;
+        // `fired` outlives the completion it waits for.
+        unsafe {
+            kafka_consumer_Consumer_close_cb(
+                kafka_consumer_MockConsumer__as_Consumer(mock),
+                on_fired,
+                fired.as_opaque(),
+            );
+            let mock = mock as usize;
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+            runtime.block_on(async move { kafka_consumer_MockConsumer_destroy(mock as *mut _) });
+        }
+        assert_eq!(fired.wait(), (Some("kafka-consumer-destroy".to_string()), true));
+    }
 }

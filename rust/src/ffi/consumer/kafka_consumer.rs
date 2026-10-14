@@ -228,4 +228,107 @@ mod tests {
         });
         assert!(result.is_err());
     }
+
+    /// What the `poll_cb` completion fired with: `(is_wakeup_error, message)`,
+    /// or `None` for records.
+    type Fired = std::sync::Mutex<Vec<Option<(i8, String)>>>;
+
+    unsafe extern "C" fn record_poll(
+        value: *mut crate::ffi::consumer::consumer_records::kafka_consumer_ConsumerRecords_t,
+        error: *mut kafka_common_Error_t,
+        opaque: *mut std::ffi::c_void,
+    ) {
+        use crate::ffi::common::{kafka_common_Error_destroy, kafka_common_Error_message};
+        use crate::ffi::consumer::consumer_records::kafka_consumer_ConsumerRecords_destroy;
+        use crate::ffi::error_predicates::kafka_common_Error_is_wakeup_error;
+        // SAFETY: Test code: `opaque` is the `Fired` the test keeps alive until the completion
+        // fired; a completion owns the records or error handle it receives.
+        unsafe {
+            let fired = &*(opaque as *const Fired);
+            if error.is_null() {
+                kafka_consumer_ConsumerRecords_destroy(value);
+                fired.lock().unwrap().push(None);
+            } else {
+                let message = std::ffi::CStr::from_ptr(kafka_common_Error_message(error))
+                    .to_string_lossy()
+                    .into_owned();
+                fired
+                    .lock()
+                    .unwrap()
+                    .push(Some((kafka_common_Error_is_wakeup_error(error), message)));
+                kafka_common_Error_destroy(error);
+            }
+        }
+    }
+
+    /// Destroying a consumer while a `poll_cb` with a long timeout waits on an
+    /// unreachable broker wakes the poll up instead of waiting the timeout out:
+    /// the completion fires once, with the `WakeupError` Java's `poll` throws
+    /// after `wakeup()`.
+    #[test]
+    fn destroy_wakes_a_waiting_poll_cb_up() {
+        use crate::ffi::common::topic_partition::{
+            kafka_common_TopicPartition_destroy, kafka_common_TopicPartition_new,
+        };
+        use crate::ffi::consumer::consumer_config::{
+            kafka_consumer_ConsumerConfig_destroy, kafka_consumer_ConsumerConfig_new,
+        };
+        use crate::ffi::consumer::{
+            kafka_consumer_Consumer__execute_callbacks, kafka_consumer_Consumer_assign,
+            kafka_consumer_Consumer_destroy, kafka_consumer_Consumer_poll_cb,
+        };
+        use crate::ffi::util::{
+            kafka_List_add, kafka_List_destroy, kafka_List_new, kafka_Map_destroy, kafka_Map_new, kafka_Map_put,
+        };
+        // SAFETY: Test code: every map, list, config, partition and consumer handle is live until
+        // it is destroyed once below; `err` is a valid slot pointing at null before each call;
+        // `fired` outlives the destroy, which fires the completion.
+        unsafe {
+            let props = kafka_Map_new();
+            for (key, value) in [
+                (c"bootstrap.servers", c"127.0.0.1:1"),
+                (c"group.id", c"destroy-wakes-poll"),
+                (c"group.protocol", c"consumer"),
+            ] {
+                kafka_Map_put(
+                    props,
+                    key.as_ptr() as *mut std::ffi::c_void,
+                    value.as_ptr() as *mut std::ffi::c_void,
+                );
+            }
+            let mut err = std::ptr::null_mut();
+            let config = kafka_consumer_ConsumerConfig_new(props, &mut err);
+            assert!(err.is_null());
+            kafka_Map_destroy(props);
+            let consumer =
+                kafka_consumer_KafkaConsumer_new(config, std::ptr::null_mut(), std::ptr::null_mut(), &mut err);
+            assert!(err.is_null());
+            kafka_consumer_ConsumerConfig_destroy(config);
+
+            let partitions = kafka_List_new();
+            let tp = kafka_common_TopicPartition_new(c"t".as_ptr(), 0);
+            kafka_List_add(partitions, tp as *mut std::ffi::c_void);
+            kafka_consumer_Consumer_assign(consumer, partitions, &mut err);
+            assert!(err.is_null());
+            kafka_List_destroy(partitions);
+            kafka_common_TopicPartition_destroy(tp);
+
+            let fired = Fired::default();
+            kafka_consumer_Consumer_poll_cb(
+                consumer,
+                60_000,
+                record_poll,
+                &fired as *const Fired as *mut std::ffi::c_void,
+            );
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            kafka_consumer_Consumer__execute_callbacks(consumer);
+            assert!(fired.lock().unwrap().is_empty(), "still polling");
+
+            let started = std::time::Instant::now();
+            kafka_consumer_Consumer_destroy(consumer);
+            let elapsed = started.elapsed();
+            assert!(elapsed < std::time::Duration::from_secs(10), "destroy took {elapsed:?}");
+            assert_eq!(*fired.lock().unwrap(), [Some((1, "WakeupTrigger fired".to_string()))]);
+        }
+    }
 }

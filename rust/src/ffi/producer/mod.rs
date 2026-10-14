@@ -124,6 +124,11 @@
 //! `close` the producer: as in Rust, a `KafkaProducer` dropped without
 //! `close` is force-closed with a warning, so a caller that wants a graceful
 //! shutdown calls `close` first.
+//!
+//! Called inside a tokio runtime (on a worker thread, or inside a
+//! `block_on`), where it cannot wait, `_destroy` returns at once and all of
+//! this happens on a new thread, the pending callbacks included. If that
+//! thread cannot be started, the handle is leaked and an error logged.
 
 #![expect(non_camel_case_types)]
 
@@ -158,8 +163,8 @@ use crate::ffi::common::partition_info::{box_partition_info, kafka_common_Partit
 use crate::ffi::common::store_error;
 use crate::ffi::common::topic_partition::topic_partition_ref;
 use crate::ffi::common::{
-    box_error, catch_task_panic, deliver_panic, deliver_panic_value, init_default_logger, kafka_common_Error_t,
-    spawn_callback_task, take_error,
+    box_error, catch_task_panic, deliver_panic, deliver_panic_value, in_tokio_runtime, init_default_logger,
+    kafka_common_Error_t, spawn_callback_task, spawn_teardown, take_error,
 };
 use crate::ffi::consumer::{
     group_metadata_ref, kafka_consumer_ConsumerGroupMetadata_t, kafka_consumer_OffsetAndMetadata_t,
@@ -640,6 +645,34 @@ where
         &self.client as *const Arc<Client> as *const kafka_producer_Producer_t
     }
 
+    /// Tears the handle down ([`Self::teardown`]) on the calling thread, or,
+    /// called inside a tokio runtime, where `teardown`'s `block_on` would
+    /// panic, on a new thread, returning at once (see [`spawn_teardown`]);
+    /// the pending callbacks then fire on that thread.
+    pub(crate) fn destroy(self: Box<Self>) {
+        if in_tokio_runtime() {
+            /// # Safety
+            ///
+            /// `handle` must be the `Box::into_raw` of a `ProducerHandle<P>`
+            /// whose only teardown this is.
+            unsafe fn teardown<P>(handle: usize)
+            where
+                P: DynProducer<GenericValue, GenericValue> + 'static,
+            {
+                // SAFETY: Per this function's `# Safety`, `handle` is the `Box::into_raw` of a
+                // `ProducerHandle<P>` torn down only here, so taking it back frees it exactly once.
+                unsafe { Box::from_raw(handle as *mut ProducerHandle<P>) }.teardown();
+            }
+            // SAFETY: `teardown`'s `# Safety` holds: the address is the `Box::into_raw` of this
+            // `ProducerHandle<P>`, just taken, and this is its only teardown, since the box is
+            // consumed here. `teardown` waits with `block_on`, which is sound on the new thread,
+            // outside any runtime.
+            unsafe { spawn_teardown("kafka-producer-destroy", Box::into_raw(self) as usize, teardown::<P>) };
+        } else {
+            self.teardown();
+        }
+    }
+
     /// Awaits every task spawned by a `_cb` call, then stops the submission
     /// task and awaits it, fires the pending callbacks and drops the producer
     /// (see the module docs), then stops the runtime and fires the completions
@@ -669,7 +702,7 @@ where
     // The box is load-bearing: the view points into it, and the callbacks
     // `destroy` runs report through the view until it returns.
     #[expect(clippy::boxed_local)]
-    pub(crate) fn destroy(self: Box<Self>) {
+    fn teardown(self: Box<Self>) {
         // Moved out of the box field by field, so `client`, which the view
         // points at, stays in place until the box is freed at the end.
         let producer = self.producer;
