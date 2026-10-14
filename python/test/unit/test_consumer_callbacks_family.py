@@ -180,12 +180,15 @@ async def deliver(consumer: AsyncConsumer[Any, Any], call: str) -> None:
         await consumer.poll(timeout=0)
     elif call == "commit":
         await consumer.commit(offsets={})
+    elif call == "commit_nowait":
+        # Java's commitAsync runs the queued callbacks first (executeCallbacks).
+        await consumer.commit_nowait(offsets={}, callback=None)
     else:
         await consumer.close(option=CloseOptions.timeout(5))
 
 
 @pytest.mark.parametrize("make", ASYNC_MAKERS)
-@pytest.mark.parametrize("call", ["poll", "commit", "close"])
+@pytest.mark.parametrize("call", ["poll", "commit", "commit_nowait", "close"])
 def test_async_coroutine_callback_is_awaited_before_the_delivering_call_returns(
         make: Any, call: str) -> None:
     async def main() -> None:
@@ -696,18 +699,18 @@ def async_ffi_mock() -> AsyncKafkaConsumer[bytes, bytes]:
     return cast("AsyncKafkaConsumer[bytes, bytes]", ffi_mock_backed(consumer))
 
 
-def rebalance_spec(consumer: Any) -> tuple[Any, Any, Any]:
+def rebalance_spec(consumer: Any) -> tuple[Any, Any, Any, bool]:
     """Drive ``MockConsumer.rebalance([TP])`` as a waiting call, collecting the
     garbage before the error is read back, so only the error keeps the
     listener's exception alive."""
-    submit, resolve, free = consumer._void_spec(_lib.MockConsumer_rebalance_cb,
-                                                [(TP.topic(), TP.partition())])
+    submit, resolve, free, wakeable = consumer._void_spec(_lib.MockConsumer_rebalance_cb,
+                                                          [(TP.topic(), TP.partition())])
 
     def collected_then_resolved(payload: tuple[Any, ...]) -> None:
         gc.collect()
         resolve(payload)
 
-    return submit, collected_then_resolved, free
+    return submit, collected_then_resolved, free, wakeable
 
 
 class ListenerError(ValueError):

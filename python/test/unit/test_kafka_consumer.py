@@ -126,6 +126,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import inspect
 import math
 import os
 import signal
@@ -149,8 +150,8 @@ from confluent_kafka.common.errors import InvalidGroupIdError, UnsupportedVersio
 from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
 from confluent_kafka.common.serialization import string_deserializer
 from confluent_kafka.consumer import (
-    AsyncKafkaConsumer, CloseOptions, CommitFailedError, ConsumerRebalanceListener,
-    KafkaConsumer, OffsetAndMetadata, SubscriptionPattern,
+    AsyncConsumer, AsyncKafkaConsumer, AsyncMockConsumer, CloseOptions, CommitFailedError,
+    ConsumerRebalanceListener, KafkaConsumer, OffsetAndMetadata, SubscriptionPattern,
 )
 from confluent_kafka.consumer._base import poll_timeout_ms
 
@@ -1282,11 +1283,20 @@ def test_async_commit_callback_runs_on_the_event_loop() -> None:
 # the async consumer they raise from `await commit_nowait()`, and close() does
 # not raise them again.
 def test_async_commit_nowait_raises_its_own_error_and_close_does_not() -> None:
+    # Java's commitAsync waits for its offsets (ConsumerUtils.getResult(
+    # commitEvent.offsetsReady(), ...), AsyncKafkaConsumer.java:1136): on the
+    # async consumers commit_nowait is a coroutine, and its error comes out of
+    # the await, not out of the call that creates it.
+    for cls in (AsyncConsumer, AsyncKafkaConsumer, AsyncMockConsumer):
+        assert inspect.iscoroutinefunction(cls.commit_nowait), cls
+
     async def main() -> None:
         consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs(None))
         await consumer.assign(partitions=[TP0])
+        call = consumer.commit_nowait()
+        assert inspect.iscoroutine(call)
         with pytest.raises(InvalidGroupIdError) as e:
-            await consumer.commit_nowait()
+            await call
         assert str(e.value) == NO_GROUP_ID
         with pytest.raises(InvalidGroupIdError) as e:
             await consumer.commit_nowait(offsets={TP0: OffsetAndMetadata(offset=1)},
@@ -1501,6 +1511,57 @@ def test_cancelling_an_async_poll_wakes_the_consumer_and_lets_it_end() -> None:
     asyncio.run(main())
 
 
+def test_cancelling_an_async_commit_nowait_leaves_no_wakeup_armed(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # Only the calls Java's wakeup() interrupts (poll, commitSync, position,
+    # committed, partitionsFor, listTopics) are woken on cancellation. Any other
+    # one never consumes a wakeup (commitAsync waits through
+    # ConsumerUtils.getResult without the WakeupTrigger,
+    # AsyncKafkaConsumer.java:1126-1140): waking it would leave the wakeup armed,
+    # and the next poll would raise WakeupError although wakeup() was never
+    # called. The call is cancelled deterministically while it awaits a
+    # coroutine commit callback an empty commit queued, which it delivers first
+    # (Java's commitAsync runs executeCallbacks). The other calls Java cannot
+    # wake do not deliver commit callbacks; their flag is checked by
+    # test_only_the_calls_java_wakes_are_woken.
+    wakeups: list[int] = []
+    real_wakeup = _lib.Consumer_wakeup
+
+    def counting_wakeup(h: int) -> None:
+        wakeups.append(h)
+        real_wakeup(h)
+
+    monkeypatch.setattr(_lib, "Consumer_wakeup", counting_wakeup)
+
+    async def main() -> None:
+        consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
+        await consumer.assign(partitions=[TP0])
+        started = asyncio.Event()
+        release = asyncio.Event()
+        ended: list[bool] = []
+
+        async def slow(offsets: Any, exception: Any) -> None:
+            started.set()
+            await release.wait()
+            ended.append(True)
+
+        await consumer.commit_nowait(offsets={}, callback=slow)
+        running = asyncio.ensure_future(consumer.commit_nowait(offsets={}, callback=None))
+        await started.wait()
+        running.cancel()
+        asyncio.get_running_loop().call_later(0.05, release.set)
+        with pytest.raises(asyncio.CancelledError):
+            await running
+        # The call waited for the callback it delivered, and did not wake.
+        assert ended == [True]
+        assert wakeups == []
+        assert (await consumer.poll(timeout=0)).is_empty()
+        await consumer.commit(offsets={})
+        await consumer.close(option=CloseOptions.timeout(0))
+
+    asyncio.run(main())
+
+
 def test_an_async_result_its_closing_loop_refuses_is_freed(
         hold_completion: Any, freed_errors: list[int], stopped_loop: Any,
         capfd: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1707,6 +1768,91 @@ def test_sync_consumer_never_calls_a_blocking_entry_point(
                      lambda: consumer.list_topics()):
             with pytest.raises(KafkaTimeoutError):
                 call()
+    finally:
+        consumer.close(option=CloseOptions.timeout(0))
+
+
+def test_only_the_calls_java_wakes_are_woken() -> None:
+    # The operation specs shared by KafkaConsumer and AsyncKafkaConsumer: Ctrl+C
+    # or a cancellation wakes the consumer only during an operation whose future
+    # Java's AsyncKafkaConsumer registers with the WakeupTrigger (poll,
+    # commitSync, position, committed, partitionsFor, listTopics).
+    with new_consumer() as consumer:
+        c: Any = consumer
+        specs = {
+            "poll": c._poll_spec(0),
+            "commit": c._commit_spec(None),
+            "position": c._position_spec(TP0),
+            "committed": c._committed_spec([TP0]),
+            "partitions_for": c._partitions_for_spec(TOPIC),
+            "list_topics": c._list_topics_spec(),
+            "commit_nowait": c._commit_nowait_spec(None, None),
+            "subscribe_topics": c._subscribe_topics_spec([TOPIC], None),
+            "subscribe_pattern": c._subscribe_pattern_spec("t.*", None),
+            "seek": c._seek_spec(TP0, 0, None),
+            "seek_with_metadata": c._seek_spec(TP0, None, OffsetAndMetadata(offset=0)),
+            "assign_and_partition_ops": c._void_spec(_lib.Consumer_assign_cb, []),
+            "unsubscribe": c._void_spec(_lib.Consumer_unsubscribe_cb),
+            "offsets_for_times": c._offsets_for_times_spec({}),
+            "beginning_offsets": c._long_offsets_spec(_lib.Consumer_beginning_offsets_cb, []),
+            "close": c._close_spec(0, 0),
+        }
+        woken = {name for name, (_, _, _, wakeable) in specs.items() if wakeable}
+        assert woken == {"poll", "commit", "position", "committed", "partitions_for",
+                         "list_topics"}
+
+
+class _InterruptedOnce(threading.Event):
+    """The consumer's pending-callback event: once ``armed``, its next ``wait``
+    raises ``KeyboardInterrupt``, where Ctrl+C lands in ``_run_sync``'s wait."""
+
+    armed = False
+
+    def wait(self, timeout: float | None = None) -> bool:
+        if self.armed:
+            self.armed = False
+            raise KeyboardInterrupt
+        return super().wait(timeout)
+
+
+@pytest.mark.parametrize("call", ["poll", "commit_nowait", "seek", "pause"])
+def test_ctrl_c_wakes_only_a_call_java_can_wake(
+        call: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Ctrl+C during a waiting call lets the call end and re-raises
+    # KeyboardInterrupt. The consumer wakes itself first only for a call Java's
+    # wakeup() interrupts, here poll, which then ends at once. A call that never
+    # consumes a wakeup, such as commitAsync (ConsumerUtils.getResult without
+    # the WakeupTrigger, AsyncKafkaConsumer.java:1126-1140), is not woken: the
+    # wakeup would stay armed and the next poll would raise WakeupError.
+    wakeups: list[int] = []
+    real_wakeup = _lib.Consumer_wakeup
+
+    def counting_wakeup(h: int) -> None:
+        wakeups.append(h)
+        real_wakeup(h)
+
+    monkeypatch.setattr(_lib, "Consumer_wakeup", counting_wakeup)
+    consumer = new_consumer()
+    event = _InterruptedOnce()
+    consumer._pending_event = event  # type: ignore[attr-defined]
+    try:
+        consumer.assign(partitions=[TP0])
+        event.armed = True
+        start = time.monotonic()
+        with pytest.raises(KeyboardInterrupt):
+            if call == "poll":
+                consumer.poll(timeout=30)
+            elif call == "commit_nowait":
+                consumer.commit_nowait(offsets={}, callback=None)
+            elif call == "seek":
+                consumer.seek(partition=TP0, offset=0)
+            else:
+                consumer.pause(partitions=[TP0])
+        assert time.monotonic() - start < 5
+        assert not event.armed
+        assert len(wakeups) == (1 if call == "poll" else 0)
+        assert consumer.poll(timeout=0).is_empty()
+        consumer.commit(offsets={})
     finally:
         consumer.close(option=CloseOptions.timeout(0))
 
