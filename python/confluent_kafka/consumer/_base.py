@@ -1130,9 +1130,15 @@ class _ConsumerState:
         A call ``ending`` on Ctrl+C or cancellation is never submitted again.
 
         Submitting again repeats the operation from the start: the core raised
-        ``WakeupError`` before it waited, so a commit's offsets are committed
-        again (the first commit still completes, as Java's woken
-        ``commitSync``'s does) and a lookup is sent again."""
+        ``WakeupError`` before the operation's result, and before any callback
+        or interceptor it runs for it. A lookup is sent again. A commit has
+        taken its offsets by then: its wakeup is checked only after the
+        offsets-ready wait, as Java's ``commitSync`` registers it
+        (``AsyncKafkaConsumer.java:1136-1138``, ``:1801-1804``), at the wait
+        for the pending async commits (before their callbacks run) or for its
+        own result (before ``onCommit``). Its offsets are committed again, the
+        same ones since nothing is polled in between, and the first commit
+        still completes, as Java's woken ``commitSync``'s does."""
         if not wakeable:
             return False
         error = payload[-1] if payload else 0
