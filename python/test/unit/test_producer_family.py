@@ -2358,8 +2358,11 @@ def test_an_operation_result_its_closing_loop_refuses_is_freed(
     # instead of the RuntimeError reaching the C trampoline, which printed it
     # and left the result's handles allocated.
     p = AsyncKafkaProducer(configs=UNREACHABLE)
-    held = hold_completion("Producer_begin_transaction_cb")
+    # begin_transaction() fails at once: submitted once the loop has stopped, so
+    # its completion is pumped on a helper thread, never on the stopped loop.
+    held = hold_completion("Producer_begin_transaction_cb", submit_later=True)
     stopped_loop.start(p.begin_transaction())
+    held.submit()
     assert held.submitted.is_set()
     loop = stopped_loop.loop
     loop.close()
@@ -2383,8 +2386,10 @@ def test_an_operation_result_left_for_a_closed_loop_is_freed_by_the_next_call(
     # closes, which discards the queued delivery: the next operation of the
     # producer, from another loop, frees it.
     p = AsyncKafkaProducer(configs=UNREACHABLE)
-    held = hold_completion("Producer_begin_transaction_cb")
+    # As above: submitted once the loop has stopped.
+    held = hold_completion("Producer_begin_transaction_cb", submit_later=True)
     stopped_loop.start(p.begin_transaction())
+    held.submit()
     held.release.set()
     assert held.delivered.wait(30)
     stopped_loop.loop.close()
