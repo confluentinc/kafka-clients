@@ -188,9 +188,10 @@ enum ProducerKind {
     /// 1. The sender background task (spawned by `with_config`) has a runtime to run on.
     /// 2. Async trait methods (`send`, `flush`, `close`) are driven via `runtime.block_on()`.
     ///
-    /// Drop order is left-to-right: the producer is dropped first (its `Drop`
-    /// impl calls `force_close()`), then the runtime is dropped (blocking until
-    /// the sender task exits).
+    /// Dropping a `Runtime` cancels its tasks instead of waiting for them, and the
+    /// producer's `Drop` only signals its sender task to stop. So the sender task must
+    /// have finished before this value is dropped: `kafka_producer_Producer_destroy`
+    /// closes the producer first, which waits for it.
     Kafka(Box<KafkaProducer<Vec<u8>, Vec<u8>>>, tokio::runtime::Runtime),
 }
 
@@ -862,13 +863,20 @@ enum SubmitRequest {
     Barrier {
         ack: Option<tokio::sync::oneshot::Sender<()>>,
     },
+    /// Ends the submission task. Sent once, by `destroy`.
+    ///
+    /// On receiving it the task closes the channel to new requests, processes the
+    /// requests already queued, and then returns. `destroy` sends this marker
+    /// instead of dropping `submit_tx` so that the handle stays intact while the
+    /// task is still running.
+    Shutdown,
 }
 
 /// A lifetime-extended reference to the inner producer, obtained from the
-/// leaked producer handle. Sound while the handle is alive: every task that
-/// calls [`producer_static_ref`] registers its `JoinHandle` via
-/// [`reserve_pending_task`], and `destroy` joins all of them before dropping
-/// the producer.
+/// leaked producer handle. Sound while the handle is alive: `destroy` joins every
+/// task that calls [`producer_static_ref`] before it drops the producer. The
+/// submission task is tracked in [`ProducerHandle::submission_task`]; every other
+/// task is registered through [`reserve_pending_task`].
 enum ProducerStaticRef {
     Kafka(&'static KafkaProducer<Vec<u8>, Vec<u8>>),
     Mock(&'static MockProducer<Vec<u8>, Vec<u8>>),
@@ -884,9 +892,10 @@ unsafe fn producer_static_ref(ptr: usize) -> ProducerStaticRef {
     // leaked by `build_producer_handle` (via `Box::into_raw`) and not yet destroyed, so the
     // dereference is of a valid, aligned allocation. The `&ProducerHandle` is used only
     // within this function, to lock `kind`; the callers bound the lifetime of what they
-    // derive from it — `submission_loop`, `flush_or_close_async`, `partitions_for_async`
-    // and `with_txn_control_async` run in tasks registered via `reserve_pending_task` that
-    // `destroy` joins before freeing the handle, and `with_txn_control` uses it
+    // derive from it — `submission_loop` (tracked in `ProducerHandle::submission_task`) and
+    // `flush_or_close_async`, `partitions_for_async` and `with_txn_control_async` (registered
+    // through `reserve_pending_task`) run in tasks that `destroy` joins before freeing the
+    // handle, and `with_txn_control` uses it
     // synchronously inside a C call during which the C caller keeps the handle alive.
     let handle = unsafe { &*(ptr as *const ProducerHandle) };
     let guard = handle.kind.lock().unwrap();
@@ -898,7 +907,8 @@ unsafe fn producer_static_ref(ptr: usize) -> ProducerStaticRef {
             // `into_inner`); extending the borrow to `'static` is sound under this
             // function's `# Safety` (a live, not yet destroyed handle), and every use is
             // bounded by the caller's keep-alive — a task registered via
-            // `reserve_pending_task` that `destroy` joins before dropping `kind`, or
+            // `reserve_pending_task` or the submission task, both of which `destroy`
+            // joins before dropping `kind`, or
             // `with_txn_control`'s synchronous `block_on` inside a C call — as documented
             // on `ProducerStaticRef`. The `kind` guard protects only this lookup and is
             // dropped on return, so no lock is held across the callers' `.await`s.
@@ -911,7 +921,8 @@ unsafe fn producer_static_ref(ptr: usize) -> ProducerStaticRef {
             // `into_inner`); extending the borrow to `'static` is sound under this
             // function's `# Safety` (a live, not yet destroyed handle), and every use is
             // bounded by the caller's keep-alive — a task registered via
-            // `reserve_pending_task` that `destroy` joins before dropping `kind`, or
+            // `reserve_pending_task` or the submission task, both of which `destroy`
+            // joins before dropping `kind`, or
             // `with_txn_control`'s synchronous `block_on` inside a C call — as documented
             // on `ProducerStaticRef`. The `kind` guard protects only this lookup and is
             // dropped on return.
@@ -969,9 +980,17 @@ async fn submission_loop(ptr: usize, mut rx: tokio::sync::mpsc::UnboundedReceive
                 }
                 continue;
             },
+            SubmitRequest::Shutdown => {
+                // `destroy` is in progress. After `close`, new requests are refused
+                // but `recv` still yields the requests already queued, then `None`,
+                // which ends the loop. Every record queued before `destroy` is
+                // therefore handed to the producer and its callback is invoked.
+                rx.close();
+                continue;
+            },
         };
         // SAFETY: the handle outlives the submission task — `destroy` joins this
-        // task (registered via `reserve_pending_task`) before dropping the
+        // task (tracked in `ProducerHandle::submission_task`) before dropping the
         // producer it borrows from. Reached on the send path only, exactly where
         // `producer_static_ref(ptr)` below already dereferences the same handle.
         let handle = unsafe { &*(ptr as *const ProducerHandle) };
@@ -997,7 +1016,7 @@ async fn submission_loop(ptr: usize, mut rx: tokio::sync::mpsc::UnboundedReceive
         // before the `.await` below (CLAUDE.md §11.6).
         // SAFETY: `ptr` is the same live leaked `*const ProducerHandle` as `handle` above,
         // so `producer_static_ref`'s `# Safety` (a live, not yet destroyed handle) holds
-        // for the same reason: this task is registered via `reserve_pending_task` and
+        // for the same reason: this task is tracked in `ProducerHandle::submission_task` and
         // `destroy` joins it before dropping the producer. `producer_static_ref` takes and
         // releases the `kind` lock internally, so no guard is held across the
         // `kp.send`/`mp.send_with_callback` `.await`s below, and the extended
@@ -1049,15 +1068,24 @@ struct ProducerHandle {
     completion_tx: std::sync::mpsc::Sender<CompletionJob>,
     /// Sender for the non-blocking send submission channel.
     submit_tx: tokio::sync::mpsc::UnboundedSender<SubmitRequest>,
-    /// Dispatcher thread join handle; taken and joined on destroy.
+    /// Dispatcher thread join handle; taken on destroy.
     dispatcher: Mutex<Option<std::thread::JoinHandle<()>>>,
-    /// Join handles for every task spawned on this producer's runtime that
-    /// reaches into the producer via [`producer_static_ref`]: the long-lived
-    /// submission task, plus one short-lived task per `flush_async` /
-    /// `close_async` / `partitions_for_async` / transaction-control `_async`
-    /// call. `destroy` joins all of these *before* dropping the producer, since
-    /// each holds a raw `&'static` reference into it that must not outlive its
-    /// memory.
+    /// Id of the dispatcher thread, so that `flush`, `close` and `destroy` do not wait
+    /// for the dispatcher when called from one of its callbacks. `None` only in tests
+    /// that build a handle without a dispatcher.
+    dispatcher_thread: Option<std::thread::ThreadId>,
+    /// Join handle of the long-lived submission task ([`submission_loop`]).
+    ///
+    /// Held separately from [`pending_tasks`](Self::pending_tasks) because `destroy`
+    /// must join it last: the short-lived tasks may wait on it to drain the queue,
+    /// and it returns only after `destroy` sends [`SubmitRequest::Shutdown`].
+    submission_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Join handles for the short-lived tasks spawned on this producer's runtime
+    /// that reach into the producer via [`producer_static_ref`]: one per
+    /// `flush_async` / `close_async` / `partitions_for_async` /
+    /// transaction-control `_async` call. `destroy` joins these, and then the
+    /// submission task, *before* dropping the producer, since each holds a raw
+    /// `&'static` reference into it that must not outlive its memory.
     pending_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// Transaction-control mutual-exclusion flag. `true` while one of the five
     /// transaction-control functions is executing. See the module-level
@@ -1105,6 +1133,7 @@ fn reserve_pending_task(handle: &ProducerHandle) -> std::sync::MutexGuard<'_, Ve
 /// dispatcher thread and the submission task, and returns the leaked C handle.
 fn build_producer_handle(kind: ProducerKind) -> *mut kafka_producer_Producer_t {
     let (completion_tx, dispatcher) = common::spawn_dispatcher("kafka-producer-callback-dispatcher");
+    let dispatcher_thread = Some(dispatcher.thread().id());
     let (submit_tx, submit_rx) = tokio::sync::mpsc::unbounded_channel::<SubmitRequest>();
 
     let rt_handle = kind.runtime().handle().clone();
@@ -1114,6 +1143,8 @@ fn build_producer_handle(kind: ProducerKind) -> *mut kafka_producer_Producer_t {
         completion_tx,
         submit_tx,
         dispatcher: Mutex::new(Some(dispatcher)),
+        dispatcher_thread,
+        submission_task: Mutex::new(None),
         pending_tasks: Mutex::new(Vec::new()),
         txn_control_busy: std::sync::atomic::AtomicBool::new(false),
         queued_sends: std::sync::atomic::AtomicUsize::new(0),
@@ -1127,12 +1158,11 @@ fn build_producer_handle(kind: ProducerKind) -> *mut kafka_producer_Producer_t {
     // SAFETY: `ptr` was just produced by `Box::into_raw(handle)`, so it is non-null,
     // aligned and points at a live `ProducerHandle` that nothing else references yet (the
     // submission task is spawned only afterwards and the pointer reaches C only on return);
-    // the shared reference is used solely for this `reserve_pending_task` call, and the
-    // `pending` guard derived from it is dropped before the function returns.
-    let mut pending = reserve_pending_task(unsafe { &*ptr });
-    let task = rt_handle.spawn(submission_loop(ptr as usize, submit_rx));
-    pending.push(task);
-    drop(pending);
+    // the shared reference is used solely to store the task in `submission_task`, and the
+    // `slot` guard derived from it is dropped before the function returns.
+    let mut slot = unsafe { &*ptr }.submission_task.lock().unwrap();
+    *slot = Some(rt_handle.spawn(submission_loop(ptr as usize, submit_rx)));
+    drop(slot);
 
     ptr as *mut kafka_producer_Producer_t
 }
@@ -1458,64 +1488,106 @@ pub unsafe extern "C" fn kafka_producer_Producer_destroy(producer: *mut kafka_pr
     if producer.is_null() {
         return;
     }
-    // SAFETY: `producer` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a producer constructor, i.e. the pointer `build_producer_handle`
-    // leaked with `Box::into_raw(Box<ProducerHandle>)`; the same `# Safety` declares the
-    // pointer invalid after this call, so this `Box::from_raw` is the single, final use.
-    // The destructuring below drops `submit_tx` and joins every task registered in
-    // `pending_tasks` before dropping `kind`, so no `&'static` reference derived from this
-    // allocation outlives it.
-    let handle = unsafe { Box::from_raw(producer as *mut ProducerHandle) };
-    let ProducerHandle {
-        kind,
-        completion_tx,
-        submit_tx,
-        dispatcher,
-        pending_tasks,
-        // No teardown obligation: the flag is a plain atomic and the counter only
-        // meant "queued sends outstanding", which drop(submit_tx) below drains.
-        txn_control_busy: _,
-        queued_sends: _,
-    } = *handle;
-
-    // 1. Stop accepting new sends; the submission task's `recv()` returns `None`
-    //    and the task ends.
-    drop(submit_tx);
-    // 2. Wait for every task that reaches into the producer to actually finish.
-    //    Each one may still be mid-`.await` on the producer (see
-    //    `producer_static_ref`'s callers: `submission_loop`,
-    //    `flush_or_close_async`, `partitions_for_async`), holding a raw
-    //    `&'static` reference into it. Dropping `kind` (next step) frees that
-    //    memory, so we must join here first or risk a use-after-free race.
+    // 1. Join every task that reads through the handle while the handle is still
+    //    intact. These tasks hold the handle's raw address and access
+    //    `queued_sends`, `completion_tx` and `submit_tx` directly, and the producer
+    //    through `producer_static_ref` (`submission_loop`, `flush_or_close_async`,
+    //    `partitions_for_async`, `with_txn_control_async`). No field may be moved
+    //    out of the handle, and nothing may be freed, until all of them have
+    //    returned, so only shared references are taken here.
     //
-    //    Both locks are read poison-tolerantly. A lock is poisoned only by a panic
+    //    The short-lived tasks are joined first, while the submission task is
+    //    still running, because each of them may wait on it to drain the queue
+    //    (`drain_submitted_sends_await`). `Shutdown` then lets the submission task
+    //    finish the sends queued ahead of it and return, and it is joined last.
+    //
+    //    Every lock is read poison-tolerantly. A lock is poisoned only by a panic
     //    that `#[ffi_guard]` caught, after which the C header tells the caller to
     //    destroy the handle, so this is the one call that must still work on a
     //    poisoned handle. Reading poison as "no tasks", or panicking on `kind`,
     //    would skip the join and free the producer under a task still using it.
-    let tasks = pending_tasks.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let kind = kind.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if !tasks.is_empty() {
-        kind.runtime().block_on(async {
+    {
+        // SAFETY: `producer` is non-null (checked above) and, per this function's `#
+        // Safety`, a valid handle from a producer constructor, which is what
+        // `producer_handle` requires. The `&'static ProducerHandle` is confined to this
+        // block, which ends after every task that reads through the same address has been
+        // joined and before `Box::from_raw` below reclaims the allocation.
+        let live = unsafe { producer_handle(producer) };
+        let tasks = std::mem::take(&mut *live.pending_tasks.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+        let submission_task = live
+            .submission_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        // The `kind` guard is a temporary released at the end of this statement, so it is
+        // not held while the tasks below take the same lock.
+        let runtime = live
+            .kind
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .runtime()
+            .handle()
+            .clone();
+        runtime.block_on(async {
             for task in tasks {
+                let _ = task.await;
+            }
+            // An error means the submission task has already returned, so there is
+            // nothing left for it to process.
+            let _ = live.submit_tx.send(SubmitRequest::Shutdown);
+            if let Some(task) = submission_task {
                 let _ = task.await;
             }
         });
     }
-    // 3. Drop the producer and its runtime. The producer's `Drop` force-closes;
-    //    dropping the runtime waits for any other remaining tasks. Any
-    //    in-flight record callbacks fire here and enqueue jobs onto the
-    //    still-open completion channel (the clones live inside those callbacks).
+
+    // SAFETY: `producer` is non-null (checked above) and, per this function's `# Safety`, a
+    // valid handle from a producer constructor, i.e. the pointer `build_producer_handle`
+    // leaked with `Box::into_raw(Box<ProducerHandle>)`; the same `# Safety` declares the
+    // pointer invalid after this call, so this `Box::from_raw` is the single, final use.
+    // Every task that read through this address has been joined above, and `live`, the
+    // only reference derived from it here, is out of scope, so the allocation is unshared.
+    let handle = unsafe { Box::from_raw(producer as *mut ProducerHandle) };
+    let ProducerHandle {
+        kind,
+        completion_tx,
+        dispatcher,
+        dispatcher_thread,
+        // Nothing left to tear down: every task has been joined, so the channel sender,
+        // the join-handle slots, the flag and the counter have no remaining users.
+        submit_tx: _,
+        submission_task: _,
+        pending_tasks: _,
+        txn_control_busy: _,
+        queued_sends: _,
+    } = *handle;
+    let kind = kind.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    // 2. Close a `KafkaProducer` the caller did not close, as Java's `close(Duration.ZERO)`
+    //    does: force-close the sender task and wait for it to finish. The task fails every
+    //    record still buffered with "Producer is closed forcefully.", which completes the
+    //    record's future and enqueues its callback onto the still-open completion channel.
+    //    The producer's `Drop` cannot do this: it only signals the task, and dropping the
+    //    runtime cancels the task instead of waiting for it, so those records would never
+    //    complete. A producer the caller already closed is not closed again, which would
+    //    close its partitioner a second time. A `MockProducer` is left as it is: Java's
+    //    `MockProducer.close` also leaves its incomplete sends pending.
+    if let ProducerKind::Kafka(producer, runtime) = &kind
+        && producer.is_running()
+    {
+        let _ = runtime.block_on(producer.close_with_timeout(std::time::Duration::ZERO));
+    }
+
+    // 3. Drop the producer and its runtime. No task is left that still owes a record its
+    //    completion: the FFI tasks were joined in step 1 and the sender task in step 2.
     drop(kind);
-    // 4. Close the completion channel; the dispatcher drains remaining jobs
-    //    (firing their callbacks) and then exits. Join it.
-    //
-    // NOTE: every live future handle (`FfiFuture`) and in-flight callback holds
-    // a clone of `completion_tx`. The dispatcher exits only once all clones are
-    // gone, so joining here would hang if the caller destroys the producer
-    // while futures/callbacks are still outstanding (a contract violation, but
-    // we must not deadlock). We therefore detach the dispatcher: dropping our
-    // sender lets it exit as soon as the remaining clones are released.
+    // 4. Wait for the dispatcher to run the callbacks queued so far, including the ones
+    //    step 2 queued, as Java's `close` returns only after they have run.
+    common::wait_for_queued_completions(&completion_tx, dispatcher_thread);
+    // 5. Detach the dispatcher rather than join it. Every live future handle
+    //    (`FfiFuture`) holds a clone of `completion_tx`, and the dispatcher exits only
+    //    once all clones are gone, so a join would hang while the caller still holds a
+    //    future. Dropping this sender lets it exit as soon as the last clone is released.
     drop(completion_tx);
     drop(dispatcher.into_inner().unwrap_or(None));
 }
@@ -3405,6 +3477,10 @@ pub unsafe extern "C" fn kafka_producer_Producer_flush(
         ProducerKind::Mock(mock, _) => rt.block_on(mock.flush()),
         ProducerKind::Kafka(kafka, _) => rt.block_on(kafka.flush()),
     };
+    drop(guard);
+    // Java's `flush` returns after the flushed records' callbacks have run. Here they
+    // run on the dispatcher thread, so wait for it, without holding the `kind` lock.
+    common::wait_for_queued_completions(&handle.completion_tx, handle.dispatcher_thread);
     if !out_error.is_null() {
         // SAFETY: `out_error` is non-null (checked above) and, per this function's `#
         // Parameters`, a pointer where an error handle will be written on failure or null
@@ -3968,6 +4044,11 @@ unsafe fn close_sync(
             None => rt.block_on(kafka.close()),
         },
     };
+    drop(guard);
+    // Java's `close` returns after the callbacks of the records it completed or failed
+    // have run. Here they run on the dispatcher thread, so wait for it, without holding
+    // the `kind` lock.
+    common::wait_for_queued_completions(&handle.completion_tx, handle.dispatcher_thread);
     if !out_error.is_null() {
         // SAFETY: `out_error` is non-null (checked above) and, per this function's `#
         // Parameters`, a pointer where an error handle will be written on failure or null
@@ -6573,6 +6654,8 @@ mod tests {
             completion_tx,
             submit_tx,
             dispatcher: Mutex::new(None),
+            dispatcher_thread: None,
+            submission_task: Mutex::new(None),
             pending_tasks: Mutex::new(Vec::new()),
             txn_control_busy: std::sync::atomic::AtomicBool::new(false),
             queued_sends: std::sync::atomic::AtomicUsize::new(1),
@@ -7481,6 +7564,659 @@ mod tests {
         }
     }
 
+    /// Invocation and error counts recorded by `count_txn_callback`.
+    struct TxnCallbackCounts {
+        calls: std::sync::atomic::AtomicUsize,
+        errors: std::sync::atomic::AtomicUsize,
+    }
+
+    /// A transaction-control callback that records each invocation, and each error, in the
+    /// `TxnCallbackCounts` passed as `user_data`, and frees the error handle as a C caller
+    /// must.
+    ///
+    /// # Safety
+    ///
+    /// Called by the library through `kafka_producer_Producer_commit_transaction_callback_t`:
+    /// `error` must be null or an owned handle (destroyed here) and `user_data` the
+    /// `&TxnCallbackCounts` the test passed, alive past the producer's teardown.
+    unsafe extern "C" fn count_txn_callback(error: *mut kafka_common_Error_t, user_data: *mut std::ffi::c_void) {
+        // SAFETY: `user_data` is the `&TxnCallbackCounts` pointer the test passes together
+        // with this callback, leaked so it outlives the dispatcher; only shared, atomic
+        // access is taken.
+        let counts = unsafe { &*(user_data as *const TxnCallbackCounts) };
+        if !error.is_null() {
+            counts.errors.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            // SAFETY: `error` is non-null (checked above) and, per the callback's contract,
+            // a freshly built error handle the callee owns; this is its single destroy.
+            unsafe { kafka_common_Error_destroy(error) };
+        }
+        counts.calls.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    /// Queues `count` records with `send_async`, each completing through
+    /// `count_send_callback` with `invocations` as its `user_data`.
+    fn queue_async_sends(
+        producer: *mut kafka_producer_Producer_t,
+        count: usize,
+        invocations: &'static std::sync::atomic::AtomicUsize,
+    ) {
+        static VALUE: &[u8] = b"value";
+        let topic = CString::new("topic").unwrap();
+        let user_data = invocations as *const std::sync::atomic::AtomicUsize as *mut std::ffi::c_void;
+        for _ in 0..count {
+            let mut out_error: *mut kafka_common_Error_t = std::ptr::null_mut();
+            // SAFETY: `kafka_producer_Producer_send_async` requires a valid handle, a valid
+            // `topic` C string and a `value` valid for `value_len` bytes until the callback
+            // fires: `producer` is a live handle the caller owns, `topic` an owned `CString`
+            // alive for the call, `VALUE` a static, `&mut out_error` a writable local, and
+            // `count_send_callback`/`user_data` a matching pair over the caller's leaked
+            // counter.
+            unsafe {
+                kafka_producer_Producer_send_async(
+                    producer,
+                    topic.as_ptr(),
+                    -1,
+                    -1,
+                    std::ptr::null(),
+                    -1,
+                    VALUE.as_ptr(),
+                    VALUE.len() as i32,
+                    count_send_callback,
+                    user_data,
+                    &mut out_error,
+                )
+            };
+            assert!(out_error.is_null(), "queueing an async send must succeed");
+        }
+    }
+
+    /// Waits up to ten seconds for `counter` to reach `expected` and returns its final value.
+    fn wait_for_count(counter: &std::sync::atomic::AtomicUsize, expected: usize) -> usize {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while counter.load(std::sync::atomic::Ordering::Acquire) < expected && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        counter.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// `destroy` hands every record still queued by `send_async` to the producer, so each
+    /// record's callback is invoked.
+    ///
+    /// Regression test: `destroy` used to move the handle's fields out before joining the
+    /// submission task, which then locked the moved `kind` mutex through the stale handle
+    /// address. That is undefined behaviour; on macOS the lock failed with `EINVAL`, the
+    /// task panicked, and the remaining records were dropped without their callbacks.
+    #[test]
+    fn test_destroy_hands_over_every_queued_async_send() {
+        const SENDS: usize = 200;
+        let invocations: &'static std::sync::atomic::AtomicUsize =
+            Box::leak(Box::new(std::sync::atomic::AtomicUsize::new(0)));
+        let producer = kafka_producer_MockProducer_new(true);
+        queue_async_sends(producer, SENDS, invocations);
+        // SAFETY: `producer` is the live handle `kafka_producer_MockProducer_new` returned,
+        // with sends still queued on its submission task (the case under test); this single
+        // destroy is the final use of the pointer.
+        unsafe { kafka_producer_Producer_destroy(producer) };
+        assert_eq!(
+            SENDS,
+            wait_for_count(invocations, SENDS),
+            "every send queued before destroy must report through its callback"
+        );
+    }
+
+    /// A `commit_transaction_async` queued behind `send_async` records still runs when
+    /// `destroy` is called, after those records have been handed to the producer, as the
+    /// drain in `with_txn_control_async` requires (`producer-transactions.md` §13).
+    ///
+    /// Regression test: `destroy` used to hang here. It joined the commit and submission
+    /// tasks only after moving the handle's fields out, so those tasks were left waiting
+    /// on queue state read through the stale handle, and the join never completed.
+    #[test]
+    fn test_destroy_runs_a_queued_commit_after_the_sends_before_it() {
+        const SENDS: usize = 200;
+        let invocations: &'static std::sync::atomic::AtomicUsize =
+            Box::leak(Box::new(std::sync::atomic::AtomicUsize::new(0)));
+        let commit: &'static TxnCallbackCounts = Box::leak(Box::new(TxnCallbackCounts {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            errors: std::sync::atomic::AtomicUsize::new(0),
+        }));
+        let producer = kafka_producer_MockProducer_new(true);
+        // SAFETY: `producer` is the live handle `kafka_producer_MockProducer_new` returned;
+        // both calls only read it and return a null error or an owned one, which
+        // `assert_success` destroys.
+        unsafe {
+            assert_success(kafka_producer_Producer_init_transactions(producer));
+            assert_success(kafka_producer_Producer_begin_transaction(producer));
+        }
+        queue_async_sends(producer, SENDS, invocations);
+        // SAFETY: `producer` is the live handle created above; `count_txn_callback` and
+        // `commit` are a matching callback/`user_data` pair, `commit` leaked so it outlives
+        // the dispatcher.
+        unsafe {
+            kafka_producer_Producer_commit_transaction_async(
+                producer,
+                count_txn_callback,
+                commit as *const TxnCallbackCounts as *mut std::ffi::c_void,
+            )
+        };
+        // SAFETY: `producer` is the live handle created above, with sends and a commit
+        // still queued (the case under test); this single destroy is the final use.
+        unsafe { kafka_producer_Producer_destroy(producer) };
+        assert_eq!(
+            SENDS,
+            wait_for_count(invocations, SENDS),
+            "every send queued before destroy must report through its callback"
+        );
+        assert_eq!(1, wait_for_count(&commit.calls, 1), "the commit callback must fire once");
+        assert_eq!(
+            0,
+            commit.errors.load(std::sync::atomic::Ordering::Acquire),
+            "the commit queued behind the sends must succeed"
+        );
+    }
+
+    /// `test_destroy_hands_over_every_queued_async_send` on a `KafkaProducer`, whose sends
+    /// block in the submission task. With no broker reachable, each send waits up to
+    /// `max.block.ms` for metadata and then fails; `destroy` must wait for all of them, so
+    /// that each one reports its failure through its callback.
+    #[test]
+    fn test_destroy_hands_over_every_queued_async_send_on_a_kafka_producer() {
+        const SENDS: usize = 20;
+        let invocations: &'static std::sync::atomic::AtomicUsize =
+            Box::leak(Box::new(std::sync::atomic::AtomicUsize::new(0)));
+        // Port 1 has no broker, so every metadata wait times out after `max.block.ms`.
+        let keys_and_values = [
+            CString::new("bootstrap.servers").unwrap(),
+            CString::new("127.0.0.1:1").unwrap(),
+            CString::new("max.block.ms").unwrap(),
+            CString::new("50").unwrap(),
+        ];
+        let mut configs: Vec<*const c_char> = keys_and_values.iter().map(|c| c.as_ptr()).collect();
+        configs.push(std::ptr::null());
+        // SAFETY: `kafka_producer_ProducerProperties_from_configs` requires null or a
+        // NULL-terminated array of valid C strings: `configs` points at the owned `CString`s
+        // in `keys_and_values`, alive for the call, and ends in null.
+        let props = unsafe { kafka_producer_ProducerProperties_from_configs(configs.as_ptr()) };
+        let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+        // SAFETY: `props` is the non-null handle `from_configs` returned for two well-formed
+        // pairs and `&mut err` a writable local; `assert_success` consumes `err`, `props` is
+        // destroyed once (the producer does not retain it), and the producer is destroyed
+        // once below.
+        let producer = unsafe {
+            let producer = kafka_producer_KafkaProducer_new(props, &mut err);
+            assert_success(err);
+            kafka_producer_ProducerProperties_destroy(props);
+            producer
+        };
+        assert!(!producer.is_null());
+        queue_async_sends(producer, SENDS, invocations);
+        // SAFETY: `producer` is the live handle created above, with sends still queued or
+        // blocked in the submission task (the case under test); this single destroy is the
+        // final use of the pointer.
+        unsafe { kafka_producer_Producer_destroy(producer) };
+        assert_eq!(
+            SENDS,
+            wait_for_count(invocations, SENDS),
+            "every send queued before destroy must report through its callback"
+        );
+    }
+
+    /// The single topic `start_buffering_broker` serves, the one `queue_async_sends` uses.
+    const BUFFERING_BROKER_TOPIC: &str = "topic";
+
+    /// Starts a broker stand-in on a free local port and returns its `host:port`.
+    ///
+    /// It answers `ApiVersions`, and `Metadata` with one partition of
+    /// [`BUFFERING_BROKER_TOPIC`] led by itself, and leaves every other request
+    /// unanswered. A producer pointed at it therefore accepts records into its
+    /// accumulator but never completes them. Each connection is served on its own
+    /// thread until the client disconnects.
+    fn start_buffering_broker() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { return };
+                std::thread::spawn(move || serve_buffering_broker_connection(stream, port));
+            }
+        });
+        format!("127.0.0.1:{port}")
+    }
+
+    /// Serves one client connection of `start_buffering_broker`, whose listener is on
+    /// `port`, until the client disconnects.
+    fn serve_buffering_broker_connection(mut stream: std::net::TcpStream, port: u16) {
+        use crate::api_message_type::ListenerType;
+        use crate::common::Node;
+        use crate::common::protocol::{ApiKeys, ByteBufferAccessor};
+        use crate::common::requests::{
+            ApiVersionsResponse, ConcreteResponse, PartitionMetadata, RequestHeader, RequestTestUtils, TopicMetadata,
+        };
+        use std::io::{Read, Write};
+
+        loop {
+            let mut size = [0u8; 4];
+            if stream.read_exact(&mut size).is_err() {
+                return;
+            }
+            let mut request = vec![0u8; i32::from_be_bytes(size) as usize];
+            if stream.read_exact(&mut request).is_err() {
+                return;
+            }
+            let header = RequestHeader::parse(&mut ByteBufferAccessor::new(request)).unwrap();
+            let version = header.api_version();
+            let mut response = if *header.api_key() == ApiKeys::API_VERSIONS {
+                ConcreteResponse::ApiVersions(ApiVersionsResponse::default_api_versions_response(ListenerType::Broker))
+            } else if *header.api_key() == ApiKeys::METADATA {
+                let partition = PartitionMetadata {
+                    error: Errors::None,
+                    topic_partition: TopicPartition::new(BUFFERING_BROKER_TOPIC.to_string(), 0),
+                    leader_id: Some(0),
+                    leader_epoch: Some(0),
+                    replica_ids: vec![0],
+                    in_sync_replica_ids: vec![0],
+                    offline_replica_ids: Vec::new(),
+                };
+                let topic =
+                    TopicMetadata::new(Errors::None, BUFFERING_BROKER_TOPIC.to_string(), false, vec![partition]);
+                ConcreteResponse::Metadata(RequestTestUtils::metadata_response_with_version(
+                    &[Node::new(0, "127.0.0.1".to_string(), i32::from(port))],
+                    Some("buffering-broker"),
+                    0,
+                    vec![topic],
+                    version,
+                ))
+            } else {
+                continue;
+            };
+            let body = response
+                .serialize_with_header(&header.to_response_header(), version)
+                .unwrap()
+                .into_buffer();
+            let written = stream
+                .write_all(&(body.len() as i32).to_be_bytes())
+                .and_then(|()| stream.write_all(&body));
+            if written.is_err() {
+                return;
+            }
+        }
+    }
+
+    /// Calls `kafka_common_KafkaFuture_RecordMetadata_get` on `future` from another thread
+    /// and returns its error handle, or `None` if `get` has not returned within ten seconds.
+    /// The thread of a `get` that never returns is left running.
+    fn get_error_within_ten_seconds(
+        future: *mut kafka_common_KafkaFuture_RecordMetadata_t,
+    ) -> Option<*mut kafka_common_Error_t> {
+        // Raw pointers are not `Send`; the addresses are passed as integers instead.
+        let future = future as usize;
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut error: *mut kafka_common_Error_t = std::ptr::null_mut();
+            // SAFETY: `future` is the address of a live future handle the caller owns and
+            // destroys only after this returns, and `&mut error` is a writable local.
+            let metadata = unsafe {
+                kafka_common_KafkaFuture_RecordMetadata_get(
+                    future as *mut kafka_common_KafkaFuture_RecordMetadata_t,
+                    &mut error,
+                )
+            };
+            assert!(metadata.is_null(), "a record no broker acknowledged must not succeed");
+            let _ = result_tx.send(error as usize);
+        });
+        result_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .ok()
+            .map(|error| error as *mut kafka_common_Error_t)
+    }
+
+    /// `destroy` on a `KafkaProducer` the caller did not close fails every record still
+    /// buffered in the accumulator, as Java's `close(Duration.ZERO)` does: each future
+    /// completes with Java's "Producer is closed forcefully." error and each callback fires.
+    ///
+    /// Regression test: `destroy` used to drop the producer, whose `Drop` only signals the
+    /// sender task, and then the runtime, which cancels that task. Whether the task failed
+    /// the buffered batches first was a race; when it lost, no callback fired and `get`
+    /// waited forever. It lost about one round in five, so the test runs twenty rounds.
+    #[test]
+    fn test_destroy_without_close_fails_every_buffered_record() {
+        const ROUNDS: usize = 20;
+        let bootstrap = start_buffering_broker();
+        for round in 0..ROUNDS {
+            destroy_unclosed_producer_with_buffered_records(&bootstrap, round);
+        }
+    }
+
+    /// One round of `test_destroy_without_close_fails_every_buffered_record` against the
+    /// `start_buffering_broker` at `bootstrap`.
+    fn destroy_unclosed_producer_with_buffered_records(bootstrap: &str, round: usize) {
+        const SENDS: usize = 20;
+        let invocations: &'static std::sync::atomic::AtomicUsize =
+            Box::leak(Box::new(std::sync::atomic::AtomicUsize::new(0)));
+        // A long `linger.ms` keeps every record in the accumulator until `destroy`.
+        let keys_and_values = [
+            CString::new("bootstrap.servers").unwrap(),
+            CString::new(bootstrap).unwrap(),
+            CString::new("linger.ms").unwrap(),
+            CString::new("60000").unwrap(),
+        ];
+        let mut configs: Vec<*const c_char> = keys_and_values.iter().map(|c| c.as_ptr()).collect();
+        configs.push(std::ptr::null());
+        // SAFETY: `kafka_producer_ProducerProperties_from_configs` requires null or a
+        // NULL-terminated array of valid C strings: `configs` points at the owned `CString`s
+        // in `keys_and_values`, alive for the call, and ends in null.
+        let props = unsafe { kafka_producer_ProducerProperties_from_configs(configs.as_ptr()) };
+        let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+        // SAFETY: `props` is the non-null handle `from_configs` returned for two well-formed
+        // pairs and `&mut err` a writable local; `assert_success` consumes `err`, `props` is
+        // destroyed once (the producer does not retain it), and the producer is destroyed
+        // once below.
+        let producer = unsafe {
+            let producer = kafka_producer_KafkaProducer_new(props, &mut err);
+            assert_success(err);
+            kafka_producer_ProducerProperties_destroy(props);
+            producer
+        };
+        assert!(!producer.is_null());
+
+        let topic = CString::new(BUFFERING_BROKER_TOPIC).unwrap();
+        let value = b"value";
+        let futures: Vec<_> = (0..SENDS)
+            .map(|_| {
+                let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+                // SAFETY: `producer` is the live handle created above, `topic` an owned
+                // `CString` and `value` a local array, both alive for the call (the
+                // synchronous send copies them into the batch before returning), and
+                // `&mut err` a writable local that `assert_success` consumes.
+                unsafe {
+                    let future = kafka_producer_Producer_send(
+                        producer,
+                        topic.as_ptr(),
+                        -1,
+                        -1,
+                        std::ptr::null(),
+                        -1,
+                        value.as_ptr(),
+                        value.len() as i32,
+                        &mut err,
+                    );
+                    assert_success(err);
+                    future
+                }
+            })
+            .collect();
+        queue_async_sends(producer, SENDS, invocations);
+
+        // SAFETY: `producer` is the live handle created above, never closed and with
+        // records still buffered (the case under test); this single destroy is the final
+        // use of the pointer.
+        unsafe { kafka_producer_Producer_destroy(producer) };
+
+        assert_eq!(
+            SENDS,
+            wait_for_count(invocations, SENDS),
+            "round {round}: every record buffered at destroy must report through its callback"
+        );
+        for future in futures {
+            let error = get_error_within_ten_seconds(future)
+                .unwrap_or_else(|| panic!("round {round}: get on a buffered record must return, not wait forever"));
+            assert!(!error.is_null(), "round {round}: a record buffered at destroy must fail");
+            // SAFETY: `error` is the non-null, owned error handle `get` returned; the message
+            // is copied out before its single destroy. `future` is the live handle the send
+            // returned, destroyed once after `get` has returned.
+            unsafe {
+                let message = CStr::from_ptr(kafka_common_Error_message(error)).to_string_lossy().into_owned();
+                kafka_common_Error_destroy(error);
+                kafka_common_KafkaFuture_RecordMetadata_destroy(future);
+                assert_eq!("Producer is closed forcefully.", message, "round {round}");
+            }
+        }
+    }
+
+    /// Like `count_send_callback`, but sleeps first, so that a call that returns without
+    /// waiting for the queued callbacks sees a count that is too low.
+    ///
+    /// # Safety
+    ///
+    /// As for `count_send_callback`.
+    unsafe extern "C" fn slow_count_send_callback(
+        metadata: *mut kafka_producer_RecordMetadata_t,
+        error: *mut kafka_common_Error_t,
+        user_data: *mut std::ffi::c_void,
+    ) {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        // SAFETY: this callback's contract is `count_send_callback`'s, and its arguments are
+        // forwarded unchanged.
+        unsafe { count_send_callback(metadata, error, user_data) }
+    }
+
+    /// Sends `count` records to [`BUFFERING_BROKER_TOPIC`] with `send_with_callback`, each
+    /// completing through `slow_count_send_callback` over `invocations`.
+    fn send_with_slow_callbacks(
+        producer: *mut kafka_producer_Producer_t,
+        count: usize,
+        invocations: &'static std::sync::atomic::AtomicUsize,
+    ) {
+        let topic = CString::new(BUFFERING_BROKER_TOPIC).unwrap();
+        let value = b"value";
+        let user_data = invocations as *const std::sync::atomic::AtomicUsize as *mut std::ffi::c_void;
+        for _ in 0..count {
+            let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+            // SAFETY: `producer` is a live handle the caller owns, `topic` an owned `CString`
+            // and `value` a local array, both alive for the call (the synchronous send
+            // consumes them before returning), `slow_count_send_callback`/`user_data` a
+            // matching pair over the caller's leaked counter, and `&mut err` a writable local
+            // that `assert_success` consumes. The returned future is destroyed once; the
+            // record's callback does not depend on it.
+            unsafe {
+                let future = kafka_producer_Producer_send_with_callback(
+                    producer,
+                    topic.as_ptr(),
+                    -1,
+                    -1,
+                    std::ptr::null(),
+                    -1,
+                    value.as_ptr(),
+                    value.len() as i32,
+                    slow_count_send_callback,
+                    user_data,
+                    &mut err,
+                );
+                assert_success(err);
+                kafka_common_KafkaFuture_RecordMetadata_destroy(future);
+            }
+        }
+    }
+
+    /// `flush` returns only after the callbacks of the records it completed have run, as
+    /// Java's `flush` does.
+    ///
+    /// Regression test: the callbacks were queued on the dispatcher thread and `flush`
+    /// returned before it had run any of them.
+    #[test]
+    fn test_flush_returns_after_the_callbacks_have_run() {
+        const SENDS: usize = 50;
+        let invocations: &'static std::sync::atomic::AtomicUsize =
+            Box::leak(Box::new(std::sync::atomic::AtomicUsize::new(0)));
+        let producer = kafka_producer_MockProducer_new(false);
+        send_with_slow_callbacks(producer, SENDS, invocations);
+
+        let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+        // SAFETY: `producer` is the live handle created above and `&mut err` a writable local
+        // that `assert_success` consumes.
+        unsafe {
+            kafka_producer_Producer_flush(producer, &mut err);
+            assert_success(err);
+        }
+        assert_eq!(
+            SENDS,
+            invocations.load(std::sync::atomic::Ordering::Acquire),
+            "every callback must have run when flush returns"
+        );
+        // SAFETY: `producer` is the live handle created above; this destroy is its final use.
+        unsafe { kafka_producer_Producer_destroy(producer) };
+    }
+
+    /// What [`flush_from_callback`] records: the producer it flushes, and how many of its
+    /// flushes returned and how many of those failed.
+    struct FlushFromCallback {
+        producer: std::sync::atomic::AtomicPtr<kafka_producer_Producer_t>,
+        flushes: std::sync::atomic::AtomicUsize,
+        errors: std::sync::atomic::AtomicUsize,
+    }
+
+    /// A send callback that flushes the producer it was sent on, from the dispatcher thread.
+    unsafe extern "C" fn flush_from_callback(
+        metadata: *mut kafka_producer_RecordMetadata_t,
+        error: *mut kafka_common_Error_t,
+        user_data: *mut std::ffi::c_void,
+    ) {
+        // SAFETY: `user_data` is the leaked `FlushFromCallback` the test passes with this
+        // callback; only shared, atomic access is taken.
+        let state = unsafe { &*(user_data as *const FlushFromCallback) };
+        let mut flush_error: *mut kafka_common_Error_t = std::ptr::null_mut();
+        // SAFETY: `state.producer` is the live handle the test created; the test destroys it
+        // only after this callback has run. `&mut flush_error` is a writable local.
+        unsafe {
+            kafka_producer_Producer_flush(state.producer.load(std::sync::atomic::Ordering::Acquire), &mut flush_error)
+        };
+        if !flush_error.is_null() {
+            state.errors.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            // SAFETY: `flush_error` is non-null (checked above) and owned by this caller.
+            unsafe { kafka_common_Error_destroy(flush_error) };
+        }
+        state.flushes.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if !metadata.is_null() {
+            // SAFETY: as in `count_send_callback`, `metadata` is owned by this callback.
+            unsafe { kafka_producer_RecordMetadata_destroy(metadata) };
+        }
+        if !error.is_null() {
+            // SAFETY: as in `count_send_callback`, `error` is owned by this callback.
+            unsafe { kafka_common_Error_destroy(error) };
+        }
+    }
+
+    /// `flush` called from a delivery callback returns without waiting for the queued
+    /// callbacks, since it runs on the dispatcher thread that would have to run them.
+    ///
+    /// Regression test: waiting there would deadlock the dispatcher thread on itself.
+    #[test]
+    fn test_flush_from_a_callback_does_not_wait_for_the_callbacks() {
+        let state: &'static FlushFromCallback = Box::leak(Box::new(FlushFromCallback {
+            producer: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+            flushes: std::sync::atomic::AtomicUsize::new(0),
+            errors: std::sync::atomic::AtomicUsize::new(0),
+        }));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        // A dedicated thread, so that a deadlock is reported as a test failure.
+        std::thread::spawn(move || {
+            let producer = kafka_producer_MockProducer_new(false);
+            state.producer.store(producer, std::sync::atomic::Ordering::Release);
+            let topic = CString::new(BUFFERING_BROKER_TOPIC).unwrap();
+            let value = b"value";
+            let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+            // SAFETY: `producer` is the live handle created above, `topic` and `value` are
+            // alive for the call, `flush_from_callback`/`state` are a matching pair over a
+            // leaked value, and `&mut err` a writable local that `assert_success` consumes.
+            // The returned future is destroyed once.
+            unsafe {
+                let future = kafka_producer_Producer_send_with_callback(
+                    producer,
+                    topic.as_ptr(),
+                    -1,
+                    -1,
+                    std::ptr::null(),
+                    -1,
+                    value.as_ptr(),
+                    value.len() as i32,
+                    flush_from_callback,
+                    state as *const FlushFromCallback as *mut std::ffi::c_void,
+                    &mut err,
+                );
+                assert_success(err);
+                kafka_common_KafkaFuture_RecordMetadata_destroy(future);
+                // Completes the record, so its callback runs and flushes again.
+                kafka_producer_Producer_flush(producer, &mut err);
+                assert_success(err);
+            }
+            let _ = done_tx.send(producer as usize);
+        });
+        let producer = done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("flush must not deadlock when a callback flushes")
+            as *mut kafka_producer_Producer_t;
+        assert_eq!(
+            1,
+            state.flushes.load(std::sync::atomic::Ordering::Acquire),
+            "the callback must have run"
+        );
+        assert_eq!(0, state.errors.load(std::sync::atomic::Ordering::Acquire));
+        // SAFETY: `producer` is the live handle created on the thread above, which no longer
+        // uses it; this destroy is its final use.
+        unsafe { kafka_producer_Producer_destroy(producer) };
+    }
+
+    /// `close` and `destroy` return only after the callbacks of the records they failed have
+    /// run, as Java's `close` does.
+    ///
+    /// Regression test: the callbacks were queued on the dispatcher thread, and `close` and
+    /// `destroy` returned before it had run any of them.
+    #[test]
+    fn test_close_and_destroy_return_after_the_callbacks_have_run() {
+        const SENDS: usize = 20;
+        let bootstrap = start_buffering_broker();
+        for close_first in [true, false] {
+            let invocations: &'static std::sync::atomic::AtomicUsize =
+                Box::leak(Box::new(std::sync::atomic::AtomicUsize::new(0)));
+            // A long `linger.ms` keeps every record in the accumulator until the close.
+            let keys_and_values = [
+                CString::new("bootstrap.servers").unwrap(),
+                CString::new(bootstrap.as_str()).unwrap(),
+                CString::new("linger.ms").unwrap(),
+                CString::new("60000").unwrap(),
+            ];
+            let mut configs: Vec<*const c_char> = keys_and_values.iter().map(|c| c.as_ptr()).collect();
+            configs.push(std::ptr::null());
+            let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+            // SAFETY: `configs` is a NULL-terminated array of the owned `CString`s in
+            // `keys_and_values`, alive for the call; `props` is the handle `from_configs`
+            // returned, destroyed once (the producer does not retain it); `&mut err` is a
+            // writable local that `assert_success` consumes.
+            let producer = unsafe {
+                let props = kafka_producer_ProducerProperties_from_configs(configs.as_ptr());
+                let producer = kafka_producer_KafkaProducer_new(props, &mut err);
+                assert_success(err);
+                kafka_producer_ProducerProperties_destroy(props);
+                producer
+            };
+            assert!(!producer.is_null());
+            send_with_slow_callbacks(producer, SENDS, invocations);
+
+            if close_first {
+                let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+                // SAFETY: `producer` is the live handle created above and `&mut err` a
+                // writable local that `assert_success` consumes.
+                unsafe {
+                    kafka_producer_Producer_close_with_timeout(producer, 0, &mut err);
+                    assert_success(err);
+                }
+                assert_eq!(
+                    SENDS,
+                    invocations.load(std::sync::atomic::Ordering::Acquire),
+                    "every callback must have run when close returns"
+                );
+            }
+            // SAFETY: `producer` is the live handle created above; this destroy is its final
+            // use.
+            unsafe { kafka_producer_Producer_destroy(producer) };
+            assert_eq!(
+                SENDS,
+                invocations.load(std::sync::atomic::Ordering::Acquire),
+                "every callback must have run when destroy returns (close first: {close_first})"
+            );
+        }
+    }
+
     /// `send_with_callback` keeps the plain guard (§6 note 8), because its docs say
     /// a synchronous failure does not invoke the callback. A caught panic — here
     /// from the `kind` lock an earlier panic poisoned — is such a failure: null,
@@ -7643,6 +8379,8 @@ mod tests {
             completion_tx,
             submit_tx,
             dispatcher: Mutex::new(None),
+            dispatcher_thread: None,
+            submission_task: Mutex::new(None),
             pending_tasks: Mutex::new(Vec::new()),
             txn_control_busy: std::sync::atomic::AtomicBool::new(false),
             queued_sends: std::sync::atomic::AtomicUsize::new(0),
