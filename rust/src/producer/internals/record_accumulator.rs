@@ -604,8 +604,9 @@ impl RecordAccumulator {
     }
 
     /// Test-only convenience constructor that supplies a fresh reporter-less
-    /// [`Metrics`] registry, the `producer-metrics` group and the system clock, mirroring
-    /// Java's tests passing `new Metrics()`. Java has no metrics-less production
+    /// [`Metrics`] registry and the `producer-metrics` group, mirroring Java's tests
+    /// passing `new Metrics()`. The caller supplies the clock, which `append` reads after
+    /// it allocates a buffer. Java has no metrics-less production
     /// constructor.
     #[cfg(test)]
     #[expect(clippy::too_many_arguments)]
@@ -2988,8 +2989,9 @@ mod tests {
         )
     }
 
-    /// Java's `MockTime` for the tests that pass explicit `now` values, started at 0 and
-    /// never advanced.
+    /// Java's `MockTime`, started at 0. `append` reads it after allocating a buffer, so a
+    /// test that appends at a later time advances this clock to that time, as Java's tests
+    /// `time.sleep` the clock they gave the accumulator.
     fn mock_time() -> Arc<MockTime> {
         Arc::new(MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 0, 0))
     }
@@ -3000,6 +3002,18 @@ mod tests {
         compression: Compression,
         linger_ms: i32,
     ) -> RecordAccumulator {
+        create_test_accumulator_with_time(batch_size, total_size, compression, linger_ms, mock_time())
+    }
+
+    /// [`create_test_accumulator`] with the test's own clock, for a test that advances
+    /// time between appends.
+    fn create_test_accumulator_with_time(
+        batch_size: i32,
+        total_size: i64,
+        compression: Compression,
+        linger_ms: i32,
+        time: Arc<MockTime>,
+    ) -> RecordAccumulator {
         let pool = Arc::new(BufferPool::new_for_test(total_size, batch_size as usize));
         RecordAccumulator::new_for_test(
             batch_size,
@@ -3009,7 +3023,7 @@ mod tests {
             1000,  // retry_backoff_max_ms
             30000, // delivery_timeout_ms
             PartitionerConfig::default(),
-            mock_time(),
+            time,
             pool,
             None,
         )
@@ -3595,13 +3609,15 @@ mod tests {
         let batch_size = 1025;
         let n1 = node1();
         let n2 = node2();
-        let now: i64 = 0;
+        let time = mock_time();
+        let now = time.milliseconds();
 
-        let accum = create_test_accumulator(
+        let accum = create_test_accumulator_with_time(
             batch_size + RecordBatch::RECORD_BATCH_OVERHEAD as i32,
             10 * batch_size as i64,
             Compression::none().build(),
             linger_ms,
+            Arc::clone(&time),
         );
 
         let k = key();
@@ -3628,6 +3644,7 @@ mod tests {
 
         // Add partition on node2 only, at time = linger_ms / 2.
         let half_linger = linger_ms as i64 / 2;
+        time.sleep(half_linger);
         for _ in 0..appends {
             accum
                 .append(TOPIC, 2, 0, Some(&k), Some(&v), &[], None, 0, now + half_linger, &cluster)
@@ -3875,13 +3892,15 @@ mod tests {
         let linger_ms = 500;
         let batch_size = 1025;
         let n1 = node1();
-        let now: i64 = 0;
+        let time = mock_time();
+        let now = time.milliseconds();
 
-        let accum = create_test_accumulator(
+        let accum = create_test_accumulator_with_time(
             batch_size + RecordBatch::RECORD_BATCH_OVERHEAD as i32,
             10 * batch_size as i64,
             Compression::none().build(),
             linger_ms,
+            Arc::clone(&time),
         );
         let metadata = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0)), (1, Some(0))]);
         let cluster = metadata.cluster().clone();
@@ -3898,7 +3917,8 @@ mod tests {
         assert!(drained.is_empty());
 
         // Advance clock and send one batch out.
-        let now_after_linger = now + linger_ms as i64 + 1;
+        time.sleep(linger_ms as i64 + 1);
+        let now_after_linger = time.milliseconds();
         let ready_nodes = accum.ready(&metadata, now_after_linger).ready_nodes;
         let drained = accum.drain(&metadata, &ready_nodes, i32::MAX, now_after_linger).expect("drain");
         assert_eq!(1, drained.len(), "A batch did not drain after linger");
@@ -3908,7 +3928,8 @@ mod tests {
             .append(TOPIC, 1, 0, Some(&k), Some(&v), &[], None, 0, now_after_linger, &cluster)
             .await
             .unwrap();
-        let now_advanced = now_after_linger + linger_ms as i64 * 4;
+        time.sleep(linger_ms as i64 * 4);
+        let now_advanced = time.milliseconds();
 
         // Now drain and check that accumulator picked up the drained batch.
         let ready_nodes = accum.ready(&metadata, now_advanced).ready_nodes;
@@ -3924,7 +3945,8 @@ mod tests {
         let rtt = 1000i64;
         let delivery_timeout_ms = 3200;
         let n1 = node1();
-        let mut now: i64 = 0;
+        let time = mock_time();
+        let mut now = time.milliseconds();
 
         let batch_size = 1025;
 
@@ -3940,7 +3962,7 @@ mod tests {
             1000,
             delivery_timeout_ms,
             PartitionerConfig::default(),
-            mock_time(),
+            Arc::clone(&time) as Arc<dyn Time>,
             pool,
             None,
         );
@@ -3957,12 +3979,14 @@ mod tests {
                 .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
                 .await
                 .unwrap();
-            now += linger_ms as i64;
+            time.sleep(linger_ms as i64);
+            now = time.milliseconds();
             let ready_nodes = accum.ready(&metadata, now).ready_nodes;
             assert!(ready_nodes.contains(&n1), "Our partition's leader should be ready");
             let drained = accum.drain(&metadata, &ready_nodes, i32::MAX, now).expect("drain");
             assert_eq!(1, drained.get(&n1.id()).unwrap().len(), "There should be only one batch.");
-            now += rtt;
+            time.sleep(rtt);
+            now = time.milliseconds();
             let batch = drained.into_values().next().unwrap().into_iter().next().unwrap();
             accum.reenqueue(batch, now).expect("reenqueue");
 
@@ -3974,7 +3998,8 @@ mod tests {
             }
 
             // test expiration
-            now += delivery_timeout_ms as i64 - rtt;
+            time.sleep(delivery_timeout_ms as i64 - rtt);
+            now = time.milliseconds();
             accum
                 .drain(&metadata, &HashSet::from([n1.clone()]), i32::MAX, now)
                 .expect("drain");
@@ -4997,13 +5022,20 @@ mod tests {
         let n1 = node1();
         let n2 = node2();
 
-        let accum = create_test_accumulator(batch_size, total_size, Compression::none().build(), 10);
+        let time = mock_time();
+        let accum = create_test_accumulator_with_time(
+            batch_size,
+            total_size,
+            Compression::none().build(),
+            10,
+            Arc::clone(&time),
+        );
         let metadata = make_metadata_snapshot(&[n1, n2], TOPIC, &[(0, Some(0)), (1, Some(0)), (2, Some(1))]);
         let cluster = metadata.cluster().clone();
 
         let v = vec![0u8; val_size];
 
-        let mut now: i64 = 0;
+        let mut now = time.milliseconds();
         for _ in 0..10 {
             // Produce about 2/3 of the batch size
             let rec_count = batch_size as usize * 2 / 3 / val_size;
@@ -5026,7 +5058,8 @@ mod tests {
             }
 
             // Advance the time to make the batch ready (matches Java's time.sleep(10))
-            now += 10;
+            time.sleep(10);
+            now = time.milliseconds();
 
             // We should have one batch ready.
             let nodes = accum.ready(&metadata, now).ready_nodes;
@@ -6061,7 +6094,7 @@ mod tests {
 
     /// A batch created after `append` waited for buffer memory takes its creation time
     /// from the clock after the wait. Java's `append` reads `time.milliseconds()` again
-    /// once `free.allocate` returns (`RecordAccumulator.java:334-337`).
+    /// once `free.allocate` returns.
     ///
     /// Not a translation of a Java test: `RecordAccumulatorTest` has no test for this
     /// refresh. With the time from before the wait, the batch looked older than it was
