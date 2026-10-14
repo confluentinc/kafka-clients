@@ -100,6 +100,16 @@ static kafka_common_Error_t* interpreter_finalizing_error(const char* what) {
     return ffi_built(kafka_common_Error_local_callback_err(msg, NULL, NULL, &ffi_err), &ffi_err);
 }
 
+// Frees `e`, when it is not NULL, without the GIL: for the error a report
+// returned on a path that holds no GIL (gil_ensure_unless_finalizing gave 0),
+// where nothing can be raised or written. A panic while freeing it leaks the
+// error reporting that panic, as in ffi_error_object.
+static void ffi_discard_without_gil(kafka_common_Error_t* e) {
+    kafka_common_Error_t *ffi_err = NULL;
+    if (e == NULL) return;
+    (void)(kafka_common_Error_destroy_err(e, &ffi_err), ffi_take(&ffi_err));
+}
+
 // The Python error for the owned error `e`: `confluent_kafka._errors.
 // from_ffi_error`, which builds the class of its FFI id with its payload and
 // cause chain. NULL with the conversion's own exception set when it fails.
@@ -942,7 +952,7 @@ static void producer_on_completion(void* self_,
     PyGILState_STATE g;
     if (!gil_ensure_unless_finalizing(&g)) {
         // `ctx` is leaked with the rest; the report still releases the waits.
-        ffi_unraisable((kafka_producer_Producer__set_callback_result_err(ctx->producer, callback_id, NULL,
+        ffi_discard_without_gil((kafka_producer_Producer__set_callback_result_err(ctx->producer, callback_id, NULL,
             interpreter_finalizing_error("delivery callback"), &ffi_err), ffi_take(&ffi_err)));
         return;
     }
@@ -3798,7 +3808,7 @@ static void listener_fire(const char* method, void* self_, const kafka_List_t* p
     PyGILState_STATE g;
     if (!gil_ensure_unless_finalizing(&g)) {
         // The listener did not run, so the rebalance fails as if it had raised.
-        ffi_unraisable((kafka_consumer_Consumer__set_callback_result_err(ctx->consumer, callback_id, NULL,
+        ffi_discard_without_gil((kafka_consumer_Consumer__set_callback_result_err(ctx->consumer, callback_id, NULL,
             interpreter_finalizing_error("rebalance listener"), &ffi_err), ffi_take(&ffi_err)));
         return;
     }
@@ -3878,7 +3888,7 @@ static void commit_on_complete(void* self_, const kafka_Map_t* offsets,
     if (!gil_ensure_unless_finalizing(&g)) {
         // `ctx` is leaked with the rest; the callback did not run, so the
         // delivering call fails as if it had raised.
-        ffi_unraisable((kafka_consumer_Consumer__set_callback_result_err(ctx->consumer, callback_id, NULL,
+        ffi_discard_without_gil((kafka_consumer_Consumer__set_callback_result_err(ctx->consumer, callback_id, NULL,
             interpreter_finalizing_error("commit callback"), &ffi_err), ffi_take(&ffi_err)));
         return;
     }

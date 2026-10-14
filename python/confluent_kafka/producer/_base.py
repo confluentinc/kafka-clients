@@ -544,7 +544,7 @@ class _ProducerState:
 
 def check_group_metadata(group_metadata: ConsumerGroupMetadata | None) -> None:
     """The null arm of Java's ``throwIfInvalidGroupMetadata``
-    (KafkaProducer.java:1491-1498), which the core cannot receive; the
+    (KafkaProducer.java:1578-1585), which the core cannot receive; the
     generation / member id arm is the core's."""
     if group_metadata is None:
         raise IllegalArgumentError(message=NULL_GROUP_METADATA_MESSAGE)

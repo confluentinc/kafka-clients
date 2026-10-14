@@ -1582,12 +1582,19 @@ def test_sync_send_offsets_to_transaction_never_calls_its_blocking_entry_point(
         # Non-empty offsets: Java's empty map is a no-op on an idempotent producer
         # (see test_send_offsets_to_transaction_checks_group_metadata_first).
         # They make Java 4.4 await the offsets' topic metadata (awaitTopicMetadata,
-        # KafkaProducer.java:800-805) before ensureTransactional, so the unreachable
-        # cluster times the call out first, through the completion it waits on.
+        # KafkaProducer.java:800-805) before ensureTransactional. Both outcomes are
+        # Java-faithful, as in the C twin (test_kafka_producer.c): the unreachable
+        # cluster times the wait out, or the sender's lazy bootstrap lands after the
+        # wait took the metadata version (Metadata.java:309 bumps it), ending the
+        # wait early, and ensureTransactional rejects the call. Either way the
+        # error comes through the completion the call waits on.
         offsets = {TopicPartition(topic=TOPIC, partition=0): OffsetAndMetadata(offset=1)}
-        with pytest.raises(KafkaTimeoutError) as err:
+        with pytest.raises((KafkaTimeoutError, IllegalStateError)) as err:
             p.send_offsets_to_transaction(offsets=offsets, group_metadata=group_metadata)
-        assert str(err.value) == "Failed to update metadata after 100 ms."
+        if isinstance(err.value, KafkaTimeoutError):
+            assert str(err.value) == "Failed to update metadata after 100 ms."
+        else:
+            assert str(err.value) == NOT_TRANSACTIONAL
 
 
 def test_sigint_while_waiting_lets_the_operation_finish_then_reraises() -> None:
