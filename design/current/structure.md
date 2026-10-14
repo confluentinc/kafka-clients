@@ -355,7 +355,7 @@ pipeline over a single owned buffer — read them in that order.*
 rust/src/ffi/           # feature-gated: --features ffi; 269 files, 2353 exported symbols
 ├── mod.rs              # module docs: the C conventions as implemented
 ├── common.rs           # kafka_common_Error_t, kafka_common_Error_e, init_default_logger
-├── error_predicates.rs # generated: 167 kafka_common_Error_is_*_error predicates
+├── error_predicates.rs # generated: 172 kafka_common_Error_is_*_error predicates
 ├── util.rs             # kafka_List_t, kafka_Map_t, kafka_Bytes_t, kafka_string_destroy (14)
 ├── kafka_future.rs     # kafka_common_KafkaFuture_t (13)
 ├── callback_queue.rs   # CallbackQueue behind <Client>__execute_callbacks / __set_callbacks_notify
