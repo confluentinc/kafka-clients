@@ -26,22 +26,52 @@
 //! }
 //! ```
 //!
-//! into
+//! into three functions:
 //!
 //! ```text
 //! #[unsafe(no_mangle)]
 //! pub unsafe extern "C" fn kafka_x_X_new(config: *const C, out_new: *mut *mut kafka_x_X_t) -> *mut kafka_common_Error_t {
-//!     crate::ffi::common::ffi_guard_or("kafka_x_X_new", ON_PANIC, move || { BODY })
+//!     crate::ffi::common::ffi_guard_or("kafka_x_X_new", ON_PANIC, move || __ffi_body_kafka_x_X_new(config, out_new))
+//! }
+//!
+//! fn __ffi_body_kafka_x_X_new(config: *const C, out_new: *mut *mut kafka_x_X_t) -> *mut kafka_common_Error_t {
+//!     BODY
+//! }
+//!
+//! #[doc(hidden)]
+//! #[unsafe(no_mangle)]
+//! pub unsafe extern "C" fn kafka_x_X_new_err(config: *const C, out_new: *mut *mut kafka_x_X_t) -> *mut kafka_common_Error_t {
+//!     crate::ffi::common::ffi_guard_or("kafka_x_X_new_err", crate::ffi::common::box_error, move || __ffi_body_kafka_x_X_new(config, out_new))
 //! }
 //! ```
 //!
 //! `ffi_guard_or` runs the body under `std::panic::catch_unwind`. On a panic it
 //! turns the payload into a `crate::common::Error` and hands it to the
-//! `ON_PANIC` closure, whose value the entry point returns. The body itself is
-//! not touched: every parameter of a C entry point is a pointer, a number, a
-//! by-value `repr(C)` struct of those or a function pointer, so the `move`
-//! closure copies them and `return` inside the body still returns the entry
-//! point's value.
+//! `ON_PANIC` closure, whose value the entry point returns. The body is moved,
+//! unchanged, into a private Rust-ABI function both exports call, so `return`
+//! inside it still returns the entry point's value. That function is safe, as
+//! the closure the body used to run in was a safe context: every unsafe
+//! operation in it keeps its own `unsafe` block and `// SAFETY:` comment. Every
+//! parameter of a C entry point is a pointer, a number, a by-value `repr(C)`
+//! struct of those or a function pointer, so the `move` closure copies them.
+//!
+//! # The `_err` twin
+//!
+//! `<name>_err` is the entry point for language bindings, declared only in
+//! `confluent_kafka_bindings.h`, which `build.rs` derives from the C header by
+//! the same rule: it reports every failure, a caught panic included, as the
+//! `kafka_common_Error_t *` it returns, null on success. By return type:
+//!
+//! | entry point | twin |
+//! |---|---|
+//! | `*mut kafka_common_Error_t f(args)` | same signature and behaviour |
+//! | `T f(args)`, any other `T` | `*mut kafka_common_Error_t f_err(args, out_result: *mut T)`: writes `*out_result` only when it returns null, and is `unsafe` |
+//! | `f(args)`, no value | `*mut kafka_common_Error_t f_err(args)`: null, or the caught panic |
+//! | any, with `on_panic` | the same `on_panic` reports the panic, and the twin returns null (with `T`, it writes what `on_panic` returned) |
+//!
+//! `fallback` affects only the entry point. A twin of an entry point without
+//! `#[no_mangle]` (a guarded function in a unit test) is a plain Rust function
+//! that the tests call to reach the twin's panic path.
 //!
 //! The error is reported through the return value only. A fallible entry point
 //! returns `kafka_common_Error_t *` (null on success), so a caught panic is that
@@ -86,7 +116,8 @@
 //! # Hardcoded paths
 //!
 //! The expansion names `crate::ffi::common::ffi_guard_or`,
-//! `crate::ffi::common::box_error`, `crate::ffi::common::kafka_common_Error_e`,
+//! `crate::ffi::common::box_error`, `crate::ffi::common::kafka_common_Error_t`,
+//! `crate::ffi::common::kafka_common_Error_e`,
 //! `crate::ffi::util::kafka_Bytes_t` and `crate::common::Error`. That is
 //! deliberate: the attribute exists only for the `confluent_kafka` crate's own
 //! `ffi` module, where those items live, and a procedural macro has no other
@@ -96,10 +127,12 @@
 //! # Placement
 //!
 //! Doc comments, then `#[ffi_guard...]`, then `#[unsafe(no_mangle)]`, so the
-//! attribute sees and re-emits `no_mangle`. cbindgen reads the unexpanded
-//! source and ignores this attribute, which is why the generated C header does
-//! not change; a unit test in `src/ffi/mod.rs` requires every
-//! `#[unsafe(no_mangle)]` in `src/ffi/` to be preceded by it.
+//! attribute sees and re-emits `no_mangle`, on the entry point and on its twin.
+//! cbindgen reads the unexpanded source and ignores this attribute, so it sees
+//! neither the body function nor the twin: `confluent_kafka.h` declares the
+//! entry points alone, and `build.rs` writes the twins into
+//! `confluent_kafka_bindings.h` itself. A unit test in `src/ffi/mod.rs` requires
+//! every `#[unsafe(no_mangle)]` in `src/ffi/` to be preceded by this attribute.
 //!
 //! # Example
 //!
@@ -109,6 +142,10 @@
 //! # mod common { pub struct Error; }
 //! # mod ffi {
 //! #     pub mod common {
+//! #         pub struct kafka_common_Error_t;
+//! #         pub fn box_error(_: crate::common::Error) -> *mut kafka_common_Error_t {
+//! #             Box::into_raw(Box::new(kafka_common_Error_t))
+//! #         }
 //! #         pub fn ffi_guard_or<R>(
 //! #             _: &'static str,
 //! #             _: impl FnOnce(crate::common::Error) -> R,
@@ -126,6 +163,11 @@
 //! }
 //! # fn main() {
 //! assert_eq!(answer(), 42);
+//! // The twin delivers the value through `out_result` and returns null.
+//! let mut value = 0;
+//! // SAFETY: `value` is valid for one write.
+//! assert!(unsafe { answer_err(&mut value) }.is_null());
+//! assert_eq!(value, 42);
 //! # }
 //! ```
 //!
@@ -135,6 +177,10 @@
 //! # mod common { pub struct Error; }
 //! # mod ffi {
 //! #     pub mod common {
+//! #         pub struct kafka_common_Error_t;
+//! #         pub fn box_error(_: crate::common::Error) -> *mut kafka_common_Error_t {
+//! #             Box::into_raw(Box::new(kafka_common_Error_t))
+//! #         }
 //! #         pub fn ffi_guard_or<R>(
 //! #             _: &'static str,
 //! #             _: impl FnOnce(crate::common::Error) -> R,
@@ -159,6 +205,10 @@
 //! # mod common { pub struct Error; }
 //! # mod ffi {
 //! #     pub mod common {
+//! #         pub struct kafka_common_Error_t;
+//! #         pub fn box_error(_: crate::common::Error) -> *mut kafka_common_Error_t {
+//! #             Box::into_raw(Box::new(kafka_common_Error_t))
+//! #         }
 //! #         pub fn ffi_guard_or<R>(
 //! #             _: &'static str,
 //! #             _: impl FnOnce(crate::common::Error) -> R,
@@ -185,9 +235,9 @@
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
-use quote::{ToTokens, quote};
+use quote::{ToTokens, format_ident, quote};
 use syn::parse::{Parse, ParseStream};
-use syn::{AttrStyle, Expr, ExprClosure, Ident, ItemFn, ReturnType, Signature, Token, Type};
+use syn::{AttrStyle, Expr, ExprClosure, FnArg, Ident, ItemFn, Pat, ReturnType, Signature, Token, Type};
 
 /// Guards an `extern "C"` entry point against a Rust panic unwinding into its
 /// caller; see the [crate documentation](crate) for the expansion, the derived
@@ -259,27 +309,252 @@ impl Parse for GuardArgs {
 fn expand(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
     let args: GuardArgs = syn::parse2(attr)?;
     let function: ItemFn = syn::parse2(item)?;
+    let explicit_on_panic = args.on_panic.is_some();
     let on_panic = match args.on_panic {
         Some(closure) => closure.into_token_stream(),
         None => generated_on_panic(&function.sig, args.fallback)?,
     };
     // syn files a body's inner attributes (`#![...]`) under the function's
-    // attributes; they have to go back inside the new body.
+    // attributes; they have to go back inside the body.
     let (inner_attrs, outer_attrs): (Vec<_>, Vec<_>) = function
         .attrs
         .iter()
         .partition(|attr| matches!(attr.style, AttrStyle::Inner(_)));
+    // A `#[cfg]` that removes the entry point removes its body and twin too.
+    let cfg_attrs: Vec<_> = outer_attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("cfg") || attr.path().is_ident("cfg_attr"))
+        .collect();
+    let no_mangle = outer_attrs.iter().find(|attr| is_no_mangle(attr));
+
     let name = function.sig.ident.to_string();
+    let body_name = format_ident!("__ffi_body_{}", name);
+    let twin_name = format_ident!("{}_err", name);
+    let twin_str = twin_name.to_string();
     let vis = &function.vis;
-    let sig = &function.sig;
-    let block = &function.block;
+    let params = forwarded_params(&function.sig)?;
+    let call = quote!(#body_name(#(#params),*));
+
+    // The body, written once and shared by the entry point and its twin. It is
+    // a safe Rust-ABI function, as the closure it used to be was a safe
+    // context: every unsafe operation in it keeps its own `unsafe` block.
+    let mut body_sig = function.sig.clone();
+    body_sig.ident = body_name.clone();
+    body_sig.abi = None;
+    body_sig.unsafety = None;
+    // rustc exempts a `#[no_mangle]` function from `non_snake_case`, not the
+    // body it no longer carries.
+    let body_case = (!is_snake_case(&name)).then(|| quote!(#[expect(non_snake_case)]));
+    // clippy exempts an `extern "C"` function from `too_many_arguments` (its
+    // arity is the C API's), not its Rust-ABI body. 7 is clippy's default
+    // `too-many-arguments-threshold`, which `clippy.toml` keeps.
+    let body_arity = (params.len() > 7).then(|| quote!(#[expect(clippy::too_many_arguments)]));
+    let stmts = &function.block.stmts;
+
+    // The entry point and the twin take the parameters by value only, so a
+    // `mut` binding stays on the body, which is where it is used.
+    let mut sig = function.sig.clone();
+    strip_bindings(&mut sig);
+
+    let error = quote!(crate::ffi::common::kafka_common_Error_t);
+    let shape = return_shape(&function.sig);
+    let out_type = match (&shape, &function.sig.output) {
+        (ReturnShape::Value, ReturnType::Type(_, ty)) => Some(ty.as_ref().clone()),
+        _ => None,
+    };
+    // The generated `unsafe { out_result.write(value) }` is the twin's one
+    // unsafe operation of its own. It is sound because the twin is an
+    // `unsafe fn` whose `# Safety` section (`twin_doc`) makes the caller
+    // guarantee `out_result` is valid for one write; it runs only after the
+    // body returned, so a panic leaves `*out_result` unwritten. clippy does
+    // not check `// SAFETY:` comments in macro output, hence this note here.
+    let twin_body = match (explicit_on_panic, &shape) {
+        // The entry point reports a panic through its own channel (a `_cb`
+        // completion): the twin keeps it and has no error of its own.
+        (true, ReturnShape::Void) => quote! {
+            crate::ffi::common::ffi_guard_or(#twin_str, #on_panic, move || #call);
+            ::core::ptr::null_mut()
+        },
+        (true, ReturnShape::Error) => quote! {
+            crate::ffi::common::ffi_guard_or(#twin_str, #on_panic, move || #call)
+        },
+        (true, ReturnShape::Value) => quote! {
+            let value = crate::ffi::common::ffi_guard_or(#twin_str, #on_panic, move || #call);
+            unsafe { out_result.write(value) };
+            ::core::ptr::null_mut()
+        },
+        (false, ReturnShape::Void) => quote! {
+            crate::ffi::common::ffi_guard_or(#twin_str, crate::ffi::common::box_error, move || {
+                #call;
+                ::core::ptr::null_mut()
+            })
+        },
+        (false, ReturnShape::Error) => quote! {
+            crate::ffi::common::ffi_guard_or(#twin_str, crate::ffi::common::box_error, move || #call)
+        },
+        (false, ReturnShape::Value) => quote! {
+            crate::ffi::common::ffi_guard_or(#twin_str, crate::ffi::common::box_error, move || {
+                let value = #call;
+                unsafe { out_result.write(value) };
+                ::core::ptr::null_mut()
+            })
+        },
+    };
+    let mut twin_sig = sig.clone();
+    twin_sig.ident = twin_name.clone();
+    if let Some(ty) = &out_type {
+        twin_sig.inputs.push(syn::parse_quote!(out_result: *mut #ty));
+        twin_sig.unsafety = Some(Default::default());
+    }
+    twin_sig.output = syn::parse_quote!(-> *mut #error);
+    let twin_doc = twin_doc(&name, &shape, explicit_on_panic, twin_sig.unsafety.is_some());
+    // A twin without `#[no_mangle]` (a guarded function in a unit test) is
+    // reachable only from Rust; the anonymous constant keeps `dead_code` quiet
+    // when no test calls it.
+    let keep_alive = no_mangle
+        .is_none()
+        .then(|| quote!(#(#cfg_attrs)* const _: () = { let _ = #twin_name; };));
+
     Ok(quote! {
         #(#outer_attrs)*
         #vis #sig {
-            #(#inner_attrs)*
-            crate::ffi::common::ffi_guard_or(#name, #on_panic, move || #block)
+            crate::ffi::common::ffi_guard_or(#name, #on_panic, move || #call)
         }
+
+        #(#cfg_attrs)*
+        #body_case
+        #body_arity
+        #body_sig {
+            #(#inner_attrs)*
+            #(#stmts)*
+        }
+
+        #(#cfg_attrs)*
+        #(#[doc = #twin_doc])*
+        #[doc(hidden)]
+        #no_mangle
+        #vis #twin_sig {
+            #twin_body
+        }
+
+        #keep_alive
     })
+}
+
+/// How the twin delivers what the entry point returns.
+enum ReturnShape {
+    /// `()`: nothing to deliver.
+    Void,
+    /// `*mut kafka_common_Error_t`: the twin returns it as is.
+    Error,
+    /// Any other type: delivered through `out_result`.
+    Value,
+}
+
+fn return_shape(sig: &Signature) -> ReturnShape {
+    match &sig.output {
+        ReturnType::Default => ReturnShape::Void,
+        ReturnType::Type(_, ty) => match ty.as_ref() {
+            Type::Tuple(tuple) if tuple.elems.is_empty() => ReturnShape::Void,
+            Type::Ptr(ptr) if ptr.mutability.is_some() && is_error_handle(&ptr.elem) => ReturnShape::Error,
+            _ => ReturnShape::Value,
+        },
+    }
+}
+
+/// The `#[doc]` lines of `<name>_err`.
+fn twin_doc(name: &str, shape: &ReturnShape, explicit_on_panic: bool, is_unsafe: bool) -> Vec<String> {
+    let mut lines = vec![format!(
+        " The `_err` twin of [`{name}`], declared in `confluent_kafka_bindings.h`."
+    )];
+    lines.push(String::new());
+    lines.push(
+        match (explicit_on_panic, shape) {
+            (true, ReturnShape::Value) => {
+                " It reports a caught panic the way the entry point does, writes the entry point's value to \
+                 `out_result` and returns null."
+            },
+            (true, _) => {
+                " It reports a caught panic the way the entry point does, and returns what it returns, null for `void`."
+            },
+            (false, ReturnShape::Void) => " It returns null, or the panic it caught.",
+            (false, ReturnShape::Error) => " It returns what the entry point returns, a caught panic included.",
+            (false, ReturnShape::Value) => {
+                " It writes the entry point's value to `out_result` and returns null, or returns the panic it \
+                 caught and leaves `out_result` unwritten."
+            },
+        }
+        .to_owned(),
+    );
+    if is_unsafe {
+        lines.push(String::new());
+        lines.push(" # Safety".to_owned());
+        lines.push(String::new());
+        lines.push(format!(
+            " The caller upholds what [`{name}`] requires, and `out_result`, when present, is valid for one write."
+        ));
+    }
+    lines
+}
+
+/// rustc's `non_snake_case` test: after trimming leading and trailing `_`, no
+/// uppercase letter and no `__`. Mirrored exactly, so the `#[expect]` on the
+/// body is always fulfilled.
+fn is_snake_case(ident: &str) -> bool {
+    let mut allow_underscore = true;
+    ident.trim_matches('_').chars().all(|c| match c {
+        '_' if !allow_underscore => false,
+        '_' => {
+            allow_underscore = false;
+            true
+        },
+        c if !c.is_uppercase() => {
+            allow_underscore = true;
+            true
+        },
+        _ => false,
+    })
+}
+
+/// Whether `attr` is `#[no_mangle]` or `#[unsafe(no_mangle)]`.
+fn is_no_mangle(attr: &syn::Attribute) -> bool {
+    match &attr.meta {
+        syn::Meta::Path(path) => path.is_ident("no_mangle"),
+        syn::Meta::List(list) => list.path.is_ident("unsafe") && list.tokens.to_string() == "no_mangle",
+        syn::Meta::NameValue(_) => false,
+    }
+}
+
+/// The parameter names, which the entry point and the twin pass to the body.
+fn forwarded_params(sig: &Signature) -> syn::Result<Vec<Ident>> {
+    sig.inputs
+        .iter()
+        .map(|input| match input {
+            FnArg::Typed(typed) => match typed.pat.as_ref() {
+                Pat::Ident(pat) if pat.subpat.is_none() => Ok(pat.ident.clone()),
+                pat => Err(syn::Error::new_spanned(
+                    pat,
+                    format!(
+                        "`#[ffi_guard]` forwards the parameters of `{}` by name: give this one a plain name",
+                        sig.ident
+                    ),
+                )),
+            },
+            FnArg::Receiver(receiver) => Err(syn::Error::new_spanned(receiver, "`#[ffi_guard]` takes no `self`")),
+        })
+        .collect()
+}
+
+/// Drops `mut` and `ref` from `sig`'s parameter bindings.
+fn strip_bindings(sig: &mut Signature) {
+    for input in &mut sig.inputs {
+        if let FnArg::Typed(typed) = input
+            && let Pat::Ident(pat) = typed.pat.as_mut()
+        {
+            pat.mutability = None;
+            pat.by_ref = None;
+        }
+    }
 }
 
 /// The on-panic closure derived from the signature (D2), with `fallback`
@@ -397,6 +672,12 @@ mod tests {
         generated_on_panic(&function.sig, None).unwrap().to_string()
     }
 
+    /// The `#[doc]` lines of a twin, as tokens.
+    fn doc_of(name: &str, shape: ReturnShape, explicit_on_panic: bool, is_unsafe: bool) -> TokenStream2 {
+        let lines = twin_doc(name, &shape, explicit_on_panic, is_unsafe);
+        quote!(#(#[doc = #lines])*)
+    }
+
     #[test]
     fn test_expansion_wraps_body_and_keeps_attributes_in_order() {
         let expanded = expand_str(
@@ -408,6 +689,7 @@ mod tests {
             },
         )
         .unwrap();
+        let doc = doc_of("kafka_x_get", ReturnShape::Value, false, true);
         let expected = quote! {
             #[doc = r" Docs."]
             #[unsafe(no_mangle)]
@@ -415,8 +697,24 @@ mod tests {
                 crate::ffi::common::ffi_guard_or(
                     "kafka_x_get",
                     move |_: crate::common::Error| -> i32 { -1 },
-                    move || { 7 }
+                    move || __ffi_body_kafka_x_get(handle)
                 )
+            }
+
+            fn __ffi_body_kafka_x_get(handle: *const u8) -> i32 { 7 }
+
+            #doc
+            #[doc(hidden)]
+            #[unsafe(no_mangle)]
+            pub unsafe extern "C" fn kafka_x_get_err(
+                handle: *const u8,
+                out_result: *mut i32
+            ) -> *mut crate::ffi::common::kafka_common_Error_t {
+                crate::ffi::common::ffi_guard_or("kafka_x_get_err", crate::ffi::common::box_error, move || {
+                    let value = __ffi_body_kafka_x_get(handle);
+                    unsafe { out_result.write(value) };
+                    ::core::ptr::null_mut()
+                })
             }
         };
         assert_eq!(expanded, expected.to_string());
@@ -434,17 +732,151 @@ mod tests {
             },
         )
         .unwrap();
+        let doc = doc_of("kafka_x_run", ReturnShape::Void, false, false);
+        // Without `#[no_mangle]` the twin is a Rust function only, kept alive
+        // for `dead_code` by the anonymous constant.
         let expected = quote! {
             extern "C" fn kafka_x_run() {
-                #![allow(unused_variables)]
                 crate::ffi::common::ffi_guard_or(
                     "kafka_x_run",
                     move |_: crate::common::Error| {},
-                    move || { let x = 1; }
+                    move || __ffi_body_kafka_x_run()
+                )
+            }
+
+            fn __ffi_body_kafka_x_run() {
+                #![allow(unused_variables)]
+                let x = 1;
+            }
+
+            #doc
+            #[doc(hidden)]
+            extern "C" fn kafka_x_run_err() -> *mut crate::ffi::common::kafka_common_Error_t {
+                crate::ffi::common::ffi_guard_or("kafka_x_run_err", crate::ffi::common::box_error, move || {
+                    __ffi_body_kafka_x_run();
+                    ::core::ptr::null_mut()
+                })
+            }
+
+            const _: () = { let _ = kafka_x_run_err; };
+        };
+        assert_eq!(expanded, expected.to_string());
+    }
+
+    #[test]
+    fn test_error_returning_twin_keeps_the_signature() {
+        let expanded = expand_str(
+            TokenStream2::new(),
+            quote! {
+                #[unsafe(no_mangle)]
+                pub extern "C" fn kafka_x_X_close(self_: *mut X) -> *mut kafka_common_Error_t { body() }
+            },
+        )
+        .unwrap();
+        let doc = doc_of("kafka_x_X_close", ReturnShape::Error, false, false);
+        let expected = quote! {
+            #[unsafe(no_mangle)]
+            pub extern "C" fn kafka_x_X_close(self_: *mut X) -> *mut kafka_common_Error_t {
+                crate::ffi::common::ffi_guard_or(
+                    "kafka_x_X_close",
+                    move |__ffi_guard_error: crate::common::Error| -> *mut kafka_common_Error_t {
+                        crate::ffi::common::box_error(__ffi_guard_error)
+                    },
+                    move || __ffi_body_kafka_x_X_close(self_)
+                )
+            }
+
+            #[expect(non_snake_case)]
+            fn __ffi_body_kafka_x_X_close(self_: *mut X) -> *mut kafka_common_Error_t { body() }
+
+            #doc
+            #[doc(hidden)]
+            #[unsafe(no_mangle)]
+            pub extern "C" fn kafka_x_X_close_err(self_: *mut X) -> *mut crate::ffi::common::kafka_common_Error_t {
+                crate::ffi::common::ffi_guard_or(
+                    "kafka_x_X_close_err",
+                    crate::ffi::common::box_error,
+                    move || __ffi_body_kafka_x_X_close(self_)
                 )
             }
         };
         assert_eq!(expanded, expected.to_string());
+    }
+
+    #[test]
+    fn test_cfg_attributes_follow_the_body_and_the_twin() {
+        let expanded = expand_str(
+            TokenStream2::new(),
+            quote! {
+                #[cfg(test)]
+                #[unsafe(no_mangle)]
+                extern "C" fn f() {}
+            },
+        )
+        .unwrap();
+        // The entry point, its body and its twin each carry it.
+        assert_eq!(expanded.matches("# [cfg (test)]").count(), 3, "{expanded}");
+        // `no_mangle` is the entry point's and the twin's only.
+        assert_eq!(expanded.matches("no_mangle").count(), 2, "{expanded}");
+    }
+
+    #[test]
+    fn test_parameter_bindings_stay_on_the_body() {
+        let expanded = expand_str(
+            TokenStream2::new(),
+            quote! {
+                extern "C" fn f(mut n: i32, r#type: i32) {}
+            },
+        )
+        .unwrap();
+        assert!(expanded.contains("extern \"C\" fn f (n : i32 , r#type : i32)"), "{expanded}");
+        assert!(expanded.contains("fn __ffi_body_f (mut n : i32 , r#type : i32)"), "{expanded}");
+        assert!(
+            expanded.contains("extern \"C\" fn f_err (n : i32 , r#type : i32)"),
+            "{expanded}"
+        );
+        assert!(expanded.contains("__ffi_body_f (n , r#type)"), "{expanded}");
+    }
+
+    #[test]
+    fn test_body_lints_mirror_the_exemptions_of_the_entry_point() {
+        // rustc's `non_snake_case` and clippy's `too_many_arguments` exempt the
+        // `#[no_mangle] extern "C"` entry point, not its Rust-ABI body.
+        let eight = quote!(
+            extern "C" fn f(a: i8, b: i8, c: i8, d: i8, e: i8, f: i8, g: i8, h: i8) {}
+        );
+        let seven = quote!(
+            extern "C" fn f(a: i8, b: i8, c: i8, d: i8, e: i8, f: i8, g: i8) {}
+        );
+        let lint = "# [expect (clippy :: too_many_arguments)]";
+        assert_eq!(expand_str(TokenStream2::new(), eight).unwrap().matches(lint).count(), 1);
+        assert_eq!(expand_str(TokenStream2::new(), seven).unwrap().matches(lint).count(), 0);
+        let lint = "# [expect (non_snake_case)]";
+        for (name, expected) in [
+            ("kafka_x_X_new", 1),
+            ("kafka_x_y_new", 0),
+            ("kafka_x_Y__enum", 1),
+            ("kafka_x_y__enum", 1),
+            ("__kafka_x_", 0),
+        ] {
+            let ident = Ident::new(name, Span::call_site());
+            let expanded = expand_str(TokenStream2::new(), quote!(extern "C" fn #ident() {})).unwrap();
+            assert_eq!(expanded.matches(lint).count(), expected, "for {name}");
+        }
+    }
+
+    #[test]
+    fn test_parameters_need_a_plain_name() {
+        assert_eq!(
+            expand_str(
+                TokenStream2::new(),
+                quote!(
+                    extern "C" fn kafka_x_pair((a, b): (i32, i32)) {}
+                )
+            )
+            .unwrap_err(),
+            "`#[ffi_guard]` forwards the parameters of `kafka_x_pair` by name: give this one a plain name"
+        );
     }
 
     #[test]
@@ -617,11 +1049,11 @@ mod tests {
                 crate::ffi::common::ffi_guard_or(
                     "kafka_common_IsolationLevel_id",
                     move |_: crate::common::Error| -> i8 { -1 },
-                    move || { 1 }
+                    move || __ffi_body_kafka_common_IsolationLevel_id(self_)
                 )
             }
         };
-        assert_eq!(expanded, expected.to_string());
+        assert!(expanded.starts_with(&expected.to_string()), "{expanded}");
     }
 
     #[test]
@@ -661,14 +1093,34 @@ mod tests {
             ),
         )
         .unwrap();
+        let doc = doc_of("f", ReturnShape::Value, false, true);
+        // The twin reports the panic and ignores `fallback`; it is `unsafe`,
+        // the entry point not, for its `out_result`.
         let expected = quote! {
             extern "C" fn f(out_value: *mut u8) -> u8 {
                 crate::ffi::common::ffi_guard_or(
                     "f",
                     move |_: crate::common::Error| -> u8 { 42 },
-                    move || { 1 }
+                    move || __ffi_body_f(out_value)
                 )
             }
+
+            fn __ffi_body_f(out_value: *mut u8) -> u8 { 1 }
+
+            #doc
+            #[doc(hidden)]
+            unsafe extern "C" fn f_err(
+                out_value: *mut u8,
+                out_result: *mut u8
+            ) -> *mut crate::ffi::common::kafka_common_Error_t {
+                crate::ffi::common::ffi_guard_or("f_err", crate::ffi::common::box_error, move || {
+                    let value = __ffi_body_f(out_value);
+                    unsafe { out_result.write(value) };
+                    ::core::ptr::null_mut()
+                })
+            }
+
+            const _: () = { let _ = f_err; };
         };
         assert_eq!(expanded, expected.to_string());
     }
@@ -682,16 +1134,71 @@ mod tests {
             ),
         )
         .unwrap();
+        let doc = doc_of("f", ReturnShape::Void, true, false);
+        // The twin reports the panic through the same closure and returns null.
         let expected = quote! {
             extern "C" fn f(self_: *const X, cb: Cb, opaque: *mut c_void) {
                 crate::ffi::common::ffi_guard_or(
                     "f",
                     |err| deliver(cb, opaque, Err(err)),
-                    move || {}
+                    move || __ffi_body_f(self_, cb, opaque)
                 )
             }
+
+            fn __ffi_body_f(self_: *const X, cb: Cb, opaque: *mut c_void) {}
+
+            #doc
+            #[doc(hidden)]
+            extern "C" fn f_err(
+                self_: *const X,
+                cb: Cb,
+                opaque: *mut c_void
+            ) -> *mut crate::ffi::common::kafka_common_Error_t {
+                crate::ffi::common::ffi_guard_or(
+                    "f_err",
+                    |err| deliver(cb, opaque, Err(err)),
+                    move || __ffi_body_f(self_, cb, opaque)
+                );
+                ::core::ptr::null_mut()
+            }
+
+            const _: () = { let _ = f_err; };
         };
         assert_eq!(expanded, expected.to_string());
+    }
+
+    #[test]
+    fn test_on_panic_value_twin_writes_what_on_panic_returns() {
+        let expanded = expand_str(
+            quote!(on_panic = |err| seen(err)),
+            quote!(
+                extern "C" fn f() -> i32 {
+                    1
+                }
+            ),
+        )
+        .unwrap();
+        let doc = doc_of("f", ReturnShape::Value, true, true);
+        let twin = quote! {
+            #doc
+            #[doc(hidden)]
+            unsafe extern "C" fn f_err(out_result: *mut i32) -> *mut crate::ffi::common::kafka_common_Error_t {
+                let value = crate::ffi::common::ffi_guard_or("f_err", |err| seen(err), move || __ffi_body_f());
+                unsafe { out_result.write(value) };
+                ::core::ptr::null_mut()
+            }
+        };
+        assert!(expanded.contains(&twin.to_string()), "{expanded}");
+    }
+
+    #[test]
+    fn test_is_snake_case_mirrors_rustc() {
+        for name in ["f", "kafka_x_y", "_kafka_", "__kafka__", "a1_b2"] {
+            assert!(is_snake_case(name), "{name}");
+        }
+        for name in ["kafka_x_Y", "kafka_x__enum", "A", "a__b_"] {
+            assert!(!is_snake_case(name), "{name}");
+        }
     }
 
     #[test]

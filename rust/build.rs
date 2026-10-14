@@ -137,12 +137,123 @@ fn main() {
         // The header is the C API: a binding compiled against a stale one
         // fails at link time with no hint of why, so a cbindgen failure fails
         // the build here instead.
-        let bindings = cbindgen::Builder::new()
+        let mut bindings = cbindgen::Builder::new()
             .with_crate(&crate_dir)
             .with_config(config)
             .generate()
             .unwrap_or_else(|e| panic!("cbindgen failed to generate the C header: {e}"));
         bindings.write_to_file(&header_path);
         eprintln!("C header generated: {}", header_path.display());
+
+        // The same bindings with every function replaced by the `_err` twin
+        // `#[ffi_guard]` (crate `ffi-macros`) emits beside it. cbindgen reads
+        // the unexpanded source and never sees the twins, so they are derived
+        // here from the functions it parsed, by the rule the macro follows.
+        let bindings_path = Path::new(&crate_dir).join("target/include/confluent_kafka_bindings.h");
+        bindings_header::to_err_twins(&mut bindings);
+        bindings.write_to_file(&bindings_path);
+        eprintln!("C header generated: {}", bindings_path.display());
+    }
+}
+
+/// `confluent_kafka_bindings.h`: `confluent_kafka.h` with every function `f`
+/// replaced by its `_err` twin.
+#[cfg(feature = "ffi")]
+mod bindings_header {
+    use cbindgen::Bindings;
+    use cbindgen::ir::{Function, FunctionArgument, Path, PrimitiveType, Type};
+
+    /// Printed above the include guard, in place of `cbindgen.toml`'s `header`.
+    const PREAMBLE: &str = r#"/*
+ * The C API for language bindings.
+ *
+ * This header declares the types of confluent_kafka.h and, for each of its
+ * functions f, the twin f_err, which reports every failure, a caught Rust
+ * panic included, as the kafka_common_Error_t * it returns (NULL on success).
+ * A twin has the documentation and the preconditions of f:
+ *   - kafka_common_Error_t *f(args): f_err has the same signature and
+ *     behaviour;
+ *   - T f(args), for any other T: kafka_common_Error_t *f_err(args,
+ *     T *out_result) writes f's value to *out_result only when it returns
+ *     NULL;
+ *   - void f(args): kafka_common_Error_t *f_err(args);
+ *   - void f_cb(args, cb, opaque): kafka_common_Error_t *f_cb_err(args, cb,
+ *     opaque) returns NULL. As for f_cb, its completion reports every
+ *     outcome exactly once, a caught panic included, whether the panic
+ *     happens on the calling thread or later on the task running the
+ *     operation. A completion with no error parameter
+ *     (kafka_admin_Admin_close_cb_err,
+ *     kafka_admin_Admin_close_with_timeout_cb_err,
+ *     kafka_producer_Callback_on_completion_cb_err) fires with opaque alone,
+ *     the panic showing only in the log.
+ * A caught panic has the code kafka_common_Error_LOCAL_ILLEGAL_STATE and a
+ * message beginning "Rust panic caught at the FFI boundary in f_err". The
+ * caller owns a returned error.
+ *
+ * A panic is a bug in this library and may leave the handle it happened on in
+ * an inconsistent state: destroy that handle and create a new one. Later calls
+ * on it can keep failing, because a poisoned lock is never cleared; its
+ * _destroy_err still frees it and runs its pending callbacks, each exactly
+ * once.
+ *
+ * Include either this header or confluent_kafka.h, never both: they declare
+ * the same types. C programs use confluent_kafka.h, whose functions return
+ * their values directly.
+ */"#;
+
+    /// Replaces every function of `bindings` by its twin and gives the header
+    /// its own include guard and preamble.
+    pub(super) fn to_err_twins(bindings: &mut Bindings) {
+        let error = bindings
+            .functions
+            .iter()
+            .map(|function| &function.ret)
+            .find(|ret| is_error_handle(ret))
+            .cloned()
+            .expect("the C API has a function returning kafka_common_Error_t *");
+        for function in &mut bindings.functions {
+            to_err_twin(function, &error);
+        }
+        bindings.config.include_guard = Some("CONFLUENT_KAFKA_BINDINGS_H".to_owned());
+        bindings.config.header = Some(PREAMBLE.to_owned());
+    }
+
+    /// `function` -> `<name>_err`, by the rule of `ffi-macros`' twin.
+    fn to_err_twin(function: &mut Function, error: &Type) {
+        let name = function.path.name().to_owned();
+        let twin = format!("{name}_err");
+        let ret = std::mem::replace(&mut function.ret, error.clone());
+        let note = if name.ends_with("_cb") {
+            // Exactly the exports whose `#[ffi_guard]` takes `on_panic`
+            // (`test_on_panic_exports_are_the_cb_exports` in `src/ffi/mod.rs`).
+            format!(
+                "The `_err` twin of `{name}`: it returns NULL, and the completion reports every outcome, a caught panic included, as for `{name}`."
+            )
+        } else if is_error_handle(&ret) {
+            format!("The `_err` twin of `{name}`, with the same contract.")
+        } else if matches!(ret, Type::Primitive(PrimitiveType::Void)) {
+            format!("The `_err` twin of `{name}`: it returns NULL, or the panic it caught.")
+        } else {
+            function.args.push(FunctionArgument {
+                name: Some("out_result".to_owned()),
+                ty: Type::Ptr { ty: Box::new(ret), is_const: false, is_nullable: false, is_ref: false },
+                array_length: None,
+            });
+            format!(
+                "The `_err` twin of `{name}`: it writes the value `{name}` returns to `*out_result` and returns NULL, or returns the panic it caught and leaves `*out_result` unwritten."
+            )
+        };
+        function.path = Path::new(twin);
+        let doc = &mut function.documentation.doc_comment;
+        if !doc.is_empty() {
+            doc.push(String::new());
+        }
+        doc.push(format!(" {note}"));
+    }
+
+    /// Whether `ty` is `kafka_common_Error_t *`.
+    fn is_error_handle(ty: &Type) -> bool {
+        matches!(ty, Type::Ptr { ty, is_const: false, .. }
+            if matches!(ty.as_ref(), Type::Path(path) if path.export_name() == "kafka_common_Error_t"))
     }
 }
