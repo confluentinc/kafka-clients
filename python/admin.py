@@ -258,6 +258,9 @@ class ConfigEntry:
         self.synonyms = list(synonyms)
 
     def __repr__(self):
+        # Mirrors Java's `toString`: a sensitive value prints as "Redacted", even a null one.
+        if self.is_sensitive:
+            return f"ConfigEntry(name={self.name!r}, value=Redacted)"
         return f"ConfigEntry(name={self.name!r}, value={self.value!r})"
 
 
@@ -1069,8 +1072,8 @@ class DelegationToken:
         self.hmac_as_base64_string = str(hmac_as_base64_string)
 
     def __repr__(self):
-        return (f"DelegationToken(token_info={self.token_info!r}, "
-                f"hmac_as_base64_string={self.hmac_as_base64_string!r})")
+        # Mirrors Java's `toString`, which masks the HMAC but prints the token id.
+        return f"DelegationToken(token_info={self.token_info!r}, hmac=[*******])"
 
 
 class UpgradeType:

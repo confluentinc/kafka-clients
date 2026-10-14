@@ -213,7 +213,7 @@ fn build_root_cert_store(ssl_config: &SslConfigs) -> io::Result<RootCertStore> {
             })?;
         }
     } else if let Some(ref pem_data) = ssl_config.truststore_certificates {
-        let certs = CertificateDer::pem_slice_iter(pem_data.as_bytes())
+        let certs = CertificateDer::pem_slice_iter(pem_data.value().as_bytes())
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| {
                 io::Error::new(
@@ -251,7 +251,7 @@ fn load_client_identity(
 ) -> io::Result<Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>> {
     // Check for inline PEM cert chain + key
     let certs = if let Some(ref chain_pem) = ssl_config.keystore_certificate_chain {
-        let certs = CertificateDer::pem_slice_iter(chain_pem.as_bytes())
+        let certs = CertificateDer::pem_slice_iter(chain_pem.value().as_bytes())
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| {
                 io::Error::new(
@@ -293,7 +293,7 @@ fn load_client_identity(
         // the same shape the old `rustls_pemfile::private_key` returned — so a PEM
         // with no key section stays `Ok(None)` and produces the "No private key
         // found" message below rather than a parse error.
-        let key = PrivateKeyDer::pem_slice_iter(key_pem.as_bytes())
+        let key = PrivateKeyDer::pem_slice_iter(key_pem.value().as_bytes())
             .next()
             .transpose()
             .map_err(|e| {
@@ -464,6 +464,7 @@ impl ServerCertVerifier for NoHostnameVerifier {
 mod tests {
     use super::*;
     use crate::common::config::SslConfigs;
+    use crate::common::config::types::Password;
 
     /// Self-signed CA certificate for testing (generated with openssl).
     const TEST_CA_CERT: &str = "\
@@ -548,7 +549,10 @@ B2V9lhUZNk+pRjtJw9unpXsM
 
     #[test]
     fn test_build_with_inline_truststore() {
-        let config = SslConfigs { truststore_certificates: Some(TEST_CA_CERT.to_string()), ..SslConfigs::default() };
+        let config = SslConfigs {
+            truststore_certificates: Some(Password::new(TEST_CA_CERT)),
+            ..SslConfigs::default()
+        };
         let factory = SslFactory::new(&config).unwrap();
         assert!(factory.hostname_verification());
     }
@@ -575,9 +579,9 @@ B2V9lhUZNk+pRjtJw9unpXsM
     #[test]
     fn test_build_with_client_cert() {
         let config = SslConfigs {
-            truststore_certificates: Some(TEST_CA_CERT.to_string()),
-            keystore_certificate_chain: Some(TEST_CLIENT_CERT.to_string()),
-            keystore_key: Some(TEST_CLIENT_KEY.to_string()),
+            truststore_certificates: Some(Password::new(TEST_CA_CERT)),
+            keystore_certificate_chain: Some(Password::new(TEST_CLIENT_CERT)),
+            keystore_key: Some(Password::new(TEST_CLIENT_KEY)),
             ..SslConfigs::default()
         };
         let factory = SslFactory::new(&config);
@@ -672,7 +676,7 @@ B2V9lhUZNk+pRjtJw9unpXsM
     #[test]
     fn test_invalid_pem_truststore() {
         let config = SslConfigs {
-            truststore_certificates: Some("not a valid PEM".to_string()),
+            truststore_certificates: Some(Password::new("not a valid PEM")),
             ..SslConfigs::default()
         };
         let result = SslFactory::new(&config);
@@ -686,7 +690,7 @@ B2V9lhUZNk+pRjtJw9unpXsM
     #[test]
     fn test_cert_without_key_error() {
         let config = SslConfigs {
-            keystore_certificate_chain: Some(TEST_CLIENT_CERT.to_string()),
+            keystore_certificate_chain: Some(Password::new(TEST_CLIENT_CERT)),
             // No key provided
             ..SslConfigs::default()
         };
@@ -799,7 +803,7 @@ uviKbp188irqAMaMg47Y9WVEjN8mjQM5ag==
         // result), so it exercises the `map_err` branch rather than the
         // `is_empty()` branch.
         let malformed = "-----BEGIN CERTIFICATE-----\nMIIC+jCCAeKgAwIBAgIUH4OJqMpyw6s1/MSNeTBVyyZ3tAww\n";
-        let config = SslConfigs { truststore_certificates: Some(malformed.to_string()), ..SslConfigs::default() };
+        let config = SslConfigs { truststore_certificates: Some(Password::new(malformed)), ..SslConfigs::default() };
         let err = SslFactory::new(&config).unwrap_err().to_string();
         // Our prefix is byte-identical to the pre-migration message; only the
         // interpolated suffix is library-owned text, now sourced from
@@ -820,8 +824,8 @@ uviKbp188irqAMaMg47Y9WVEjN8mjQM5ag==
         // and produce our exact "No private key found" message — the `Ok(None)`
         // path that `.next().transpose()` preserves (not a parse error).
         let config = SslConfigs {
-            keystore_certificate_chain: Some(TEST_CLIENT_CERT.to_string()),
-            keystore_key: Some(TEST_CLIENT_CERT.to_string()),
+            keystore_certificate_chain: Some(Password::new(TEST_CLIENT_CERT)),
+            keystore_key: Some(Password::new(TEST_CLIENT_CERT)),
             ..SslConfigs::default()
         };
         let err = load_client_identity(&config).unwrap_err();
@@ -836,8 +840,8 @@ uviKbp188irqAMaMg47Y9WVEjN8mjQM5ag==
         // against the cert chain, so any cert works as the chain.
         let load = |key_pem: &str| -> PrivateKeyDer<'static> {
             let config = SslConfigs {
-                keystore_certificate_chain: Some(TEST_CLIENT_CERT.to_string()),
-                keystore_key: Some(key_pem.to_string()),
+                keystore_certificate_chain: Some(Password::new(TEST_CLIENT_CERT)),
+                keystore_key: Some(Password::new(key_pem)),
                 ..SslConfigs::default()
             };
             let (_certs, key) = load_client_identity(&config).unwrap().unwrap();
