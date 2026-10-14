@@ -25,7 +25,7 @@ header: "rust/target/include/confluent_kafka.h\n(cbindgen, feature ffi; checked 
 ffi: "rust/src/ffi/ — one file per Java class under common/, producer/, consumer/, admin/\n+ util.rs (kafka_List_t, kafka_Map_t, kafka_Bytes_t), kafka_future.rs, callback_queue.rs" {
   style.fill: "#fff7e6"
 
-  sync: "blocking entry point (one per Rust method)\nruntime.block_on(api(...)) for an async fn\nfallible: returns *mut kafka_common_Error_t (NULL = ok),\nvalue through trailing out_<name>"
+  sync: "blocking entry point (one per Rust method)\nruntime.block_on(api(...)) for an async fn\nfallible: returns its value and takes\na trailing kafka_common_Error_t **out_err"
   cb: "_cb twin (only for an async Rust fn)\nspawn on the client's runtime;\ncompletion -> CallbackQueue -> <Client>__execute_callbacks()\n-> <fn>_cb_t(value, error, opaque) on the pumping thread"
   iface: "interfaces (traits C implements)\n<Interface>_new(void *self, <method>_fn_t ...)\nasync method (and the producer Callback) -> callback_id + <Client>__set_callback_result\nclass handles bridge with <Class>__as_<Interface>()"
 }

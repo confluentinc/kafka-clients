@@ -11,9 +11,11 @@ the multilanguage tests.
   `../rust/target/release/` or `../rust/target/debug/`.
 - **Naming:** symbols keep the Java namespace, without `clients`:
   `org.apache.kafka.clients.producer.KafkaProducer` →
-  `kafka_producer_KafkaProducer_t`. Fallible functions return a
-  `kafka_common_Error_t *` (`NULL` on success) and deliver their value through
-  a trailing `out_<name>` parameter. Blocking operations come twice: the
+  `kafka_producer_KafkaProducer_t`. Fallible functions return their value and
+  take a trailing `kafka_common_Error_t **out_err`, which must point to NULL on
+  entry; on failure they store an owned error there (free it with
+  `kafka_common_Error_destroy`) and return NULL, 0 or -1, so test `*out_err`,
+  not the value. Blocking operations come twice: the
   blocking function and a `*_cb` variant that takes a `*_cb_t` plus an opaque
   pointer and returns at once. No Rust thread ever runs a C callback: `_cb`
   completions and delivery callbacks are queued on the client, and

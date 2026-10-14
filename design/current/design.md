@@ -1036,11 +1036,19 @@ shape of every public Rust item from its signature and compares it with the
 `#[unsafe(no_mangle)]` exports; `xtask/ffi-baseline.txt` holds the five
 by-design gaps, all closure parameters whose C shape the lint cannot derive):
 
-- **Error slot.** A fallible function returns `*mut kafka_common_Error_t`
-  (null = success) and delivers its value through a trailing `out_<name>`
-  parameter. Errors are classified with the predicates, never by code
-  comparison; payload-carrying errors expose a view type such as
-  `kafka_common_ResourceNotFoundError_t`.
+- **Error slot.** A fallible function returns its value (or `void`) and takes
+  a trailing `kafka_common_Error_t **out_err`: not NULL, `*out_err` NULL on
+  entry (GLib's `GError` rule, unchecked like every precondition). On failure
+  it stores an owned error there and returns its type's failure value (NULL,
+  a NULL `kafka_Bytes_t`, 0 for `int8_t`, -1 for the other integers); the
+  caller tests `*out_err`, never the value, since NULL and -1 can be answers.
+  The value and the error come from one helper, `deliver` / `deliver_unit` in
+  `src/ffi/common.rs`, over the `FailValue` trait, so a body's failure value
+  and a panic's cannot diverge. The interface method pointers the caller
+  implements (serializer, deserializer, `Headers` add/remove,
+  `KafkaFuture_BaseFunction_apply`) take the same shape. Errors are
+  classified with the predicates, never by code comparison; payload-carrying
+  errors expose a view type such as `kafka_common_ResourceNotFoundError_t`.
 - **One entry point per Rust method, named like the Rust method**
   (`subscribe_with_topics`, `describe_topics_with_topic_names_options`,
   `AdminClient_create`); `*OptionsBuilder` types get `_new` / `set_*` /
@@ -1104,9 +1112,10 @@ by-design gaps, all closure parameters whose C shape the lint cannot derive):
 - **Panics never cross the boundary.** Every export carries `#[ffi_guard]`
   (proc-macro crate `rust/ffi-macros`), which wraps the body in
   `catch_unwind`; `ffi::tests::test_every_exported_function_is_guarded` fails on
-  an unguarded export. A fallible function returns the panic as a
+  an unguarded export. A fallible function stores the panic in `*out_err` as a
   `LOCAL_ILLEGAL_STATE` error whose message begins "Rust panic caught at the FFI
-  boundary in <function>", its `out_<name>` parameters unwritten; any other
+  boundary in <function>" and returns its failure value, as on any other
+  failure (`fallback` is a compile error there); any other
   function returns its return type's failure value (NULL, 0 or -1, NaN,
   `UNKNOWN_SERVER_ERROR`, a NULL `kafka_Bytes_t`), or, where that value is a
   valid answer in the Java domain, the explicit `fallback` its documentation
@@ -1128,25 +1137,26 @@ by-design gaps, all closure parameters whose C shape the lint cannot derive):
   language bindings.** A failure value that is also a valid answer is
   acceptable to a C programmer, but a binding must raise whenever Rust
   panicked, without turning every Java precondition throw into a `Result`. So
-  `#[ffi_guard]` also emits, for every export `f`, a twin `f_err` that reports
-  every failure as the `kafka_common_Error_t *` it returns (NULL on success),
-  and `rust/build.rs` writes the second header from the same cbindgen IR with
-  each function renamed to its twin. `confluent_kafka.h` is unchanged:
+  `#[ffi_guard]` also emits a twin `f_err` for every export `f` that is neither
+  fallible nor a `_cb`, and `rust/build.rs` writes the second header from the
+  same cbindgen IR, declaring each such function only as its twin.
+  `confluent_kafka.h` declares no twin:
 
-  | `f` | `f_err` |
+  | `f` in `confluent_kafka.h` | in `confluent_kafka_bindings.h` |
   |---|---|
-  | `kafka_common_Error_t *f(args)` | the same signature and behaviour |
-  | `T f(args)`, any other `T` | `kafka_common_Error_t *f_err(args, T *out_result)`, writing `*out_result` only when it returns NULL |
-  | `void f(args)` | `kafka_common_Error_t *f_err(args)`: NULL, or the caught panic |
-  | a `_cb` function | NULL; the completion stays the channel for every outcome, a caught panic included |
+  | fallible, `T f(args, kafka_common_Error_t **out_err)` | `f` itself, no twin |
+  | a `_cb` function | `f` itself, no twin: the completion is the channel for every outcome, a caught panic included |
+  | any other `T f(args)`, `void` included | only `T f_err(args, kafka_common_Error_t **out_err)`: on a caught panic it stores the error in `*out_err` and returns `f`'s panic value (NULL for an error factory, whose value is itself an error), otherwise what `f` returns |
 
-  A twin has `f`'s documentation and preconditions; a caught panic is
-  `LOCAL_ILLEGAL_STATE`, its message naming the twin, and `fallback` does not
-  apply. A program includes one header, never both. Function-pointer typedefs
-  are the same in both, since the caller implements them.
-  `ffi::tests::test_bindings_header_declares_the_twin_of_every_export` pins both
-  headers against the exports, and `c/tests/test_bindings_header.c` compiles
-  against the bindings header alone. The twins grow the library by about 6%.
+  A twin has `f`'s documentation and preconditions, and `out_err` the contract
+  above; a caught panic is `LOCAL_ILLEGAL_STATE`, its message naming the twin,
+  and `fallback` does not apply. A program includes one header, never both.
+  Function-pointer typedefs are the same in both, since the caller implements
+  them. `ffi::tests::test_bindings_header_declares_the_twin_of_every_export`
+  and `test_fallible_declarations_end_in_out_err` pin both headers against the
+  exports, `c/tests/test_bindings_header.c` compiles against the bindings
+  header alone, and `python/tools/ffi_twins.py` fails the Python extension on
+  any C API name the bindings header does not declare.
 - **Every `unsafe` block states why it is sound.** Clippy's
   `undocumented_unsafe_blocks` and `unnecessary_safety_comment` are denied
   (`rust/Cargo.toml`), so each block and `unsafe impl` carries a `// SAFETY:`

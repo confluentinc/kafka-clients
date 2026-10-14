@@ -21,7 +21,7 @@
 //! ```text
 //! #[ffi_guard]
 //! #[unsafe(no_mangle)]
-//! pub unsafe extern "C" fn kafka_x_X_new(config: *const C, out_new: *mut *mut kafka_x_X_t) -> *mut kafka_common_Error_t {
+//! pub unsafe extern "C" fn kafka_x_X_name(self_: *const kafka_x_X_t) -> *const c_char {
 //!     BODY
 //! }
 //! ```
