@@ -1578,7 +1578,7 @@ async fn reap_failed_attempt(suffix: &str) {
     };
     let ids: Vec<&str> = ids.split_whitespace().collect();
     if !ids.is_empty() {
-        let mut args = vec!["rm", "-f"];
+        let mut args = vec!["rm", "-f", "-v"];
         args.extend(&ids);
         match docker_cli(&args).await {
             Ok(_) => eprintln!(
@@ -1757,7 +1757,7 @@ mod tests {
             let name_filter = format!("name={}", self.suffix);
             if let Some(out) = docker(&["ps", "-aq", "--filter", &name_filter]) {
                 for id in String::from_utf8_lossy(&out.stdout).split_whitespace() {
-                    let _ = docker(&["rm", "-f", id]);
+                    let _ = docker(&["rm", "-f", "-v", id]);
                 }
             }
             let _ = docker(&["network", "rm", &attempt_network_name(&self.suffix)]);
