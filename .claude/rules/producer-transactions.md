@@ -274,7 +274,7 @@ value in `DashMap<i32, Mutex<VecDeque<ProducerBatch>>>`
 
 **Ownership alternates — the Sender's map is NOT the permanent sole owner.** On
 the retry path ownership moves *back* to the accumulator: `Sender.reenqueueBatch`
-(`Sender.java:750-752`) calls `accumulator.reenqueue(..)` then
+(`Sender.java:751-753`) calls `accumulator.reenqueue(..)` then
 `maybeRemoveFromInflightBatches(..)` **without** calling
 `transactionManager.removeInFlightBatch` — unlike the `MESSAGE_TOO_LARGE` split
 path at `:685`, which does. Java depends on that asymmetry and asserts it:

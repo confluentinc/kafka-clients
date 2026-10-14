@@ -30,7 +30,7 @@ __all__ = ["SerializationError"]
 
 
 class SerializationError(KafkaError):
-    """Any exception during serialization in the producer
+    """Any exception during serialization or deserialization.
 
     Java: ``org.apache.kafka.common.errors.SerializationException``.
     """

@@ -87,7 +87,7 @@ use crate::ffi::callback_queue::{CallbackJob, SendPtr};
 use crate::ffi::common::errors::local_callback_error::kafka_common_LocalCallbackError_release_fn_t;
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, kafka_List_t, list_strings};
-// The 163 enumerators are spelled out in full (see
+// The 167 enumerators are spelled out in full (see
 // [`kafka_common_Error_e`]), so this glob keeps the match arms in
 // `error_code_of` readable without repeating the type name on each one.
 use kafka_common_Error_e::*;
@@ -1402,11 +1402,11 @@ pub(crate) unsafe fn take_error(error: *mut kafka_common_Error_t) -> Option<Erro
 ///
 /// # Injectivity and ABI
 ///
-/// The 163 values are pairwise distinct — the code alone identifies the class,
+/// The 167 values are pairwise distinct — the code alone identifies the class,
 /// which is what lets a C caller use it as its sole discriminator. The
 /// negatives are ABI once published: a new class **appends at the most-negative
 /// end**, because inserting one mid-list would silently renumber every class
-/// after it. A table test pins all 27 literally so a renumbering cannot pass.
+/// after it. A table test pins all 29 literally so a renumbering cannot pass.
 // Implementation notes for Rust readers, kept out of the generated header.
 //
 // **Why the negatives live here and not in `common::protocol::Errors`.**
@@ -1446,7 +1446,7 @@ pub(crate) unsafe fn take_error(error: *mut kafka_common_Error_t) -> Option<Erro
 // typedef, so `config.style` is not respected" (`ir/enumeration.rs`). The ABI
 // is identical: a fieldless `#[repr(C)]` enum takes the target C ABI's default
 // enum size, which is `int` on every target Rust supports, and a C enum
-// spanning -28..=133 is `int` too. Naming the enum in the typedef is what lets
+// spanning -30..=136 is `int` too. Naming the enum in the typedef is what lets
 // a C or C++ caller switch on the real type and get the compiler's
 // exhaustiveness warning.
 #[repr(C)]
@@ -1589,6 +1589,9 @@ pub enum kafka_common_Error_e {
     kafka_common_Error_STREAMS_INVALID_TOPOLOGY_EPOCH = 131,
     kafka_common_Error_STREAMS_TOPOLOGY_FENCED = 132,
     kafka_common_Error_SHARE_SESSION_LIMIT_REACHED = 133,
+    kafka_common_Error_GROUP_DELETION_FAILED = 134,
+    kafka_common_Error_STREAMS_TOPOLOGY_DESCRIPTION_UPDATE_FAILED = 135,
+    kafka_common_Error_CONTROLLER_ID_NOT_REGISTERED = 136,
 
     // Classes Java gives no code of their own: Rust-local negatives,
     // grouped by origin. These are ABI — new classes append at the
@@ -1624,8 +1627,11 @@ pub enum kafka_common_Error_e {
     kafka_common_Error_RECORD_DESERIALIZATION = -27,
     // Code owned by a superclass (`BufferExhaustedException extends TimeoutException`).
     kafka_common_Error_PRODUCER_BUFFER_EXHAUSTED = -28,
+    // `common` client-side class added after the groups above were published
+    // (KIP-909); appended here because the negatives are ABI.
+    kafka_common_Error_BOOTSTRAP_RESOLUTION = -29,
     // A binding's foreign callback error (no Java class).
-    kafka_common_Error_LOCAL_CALLBACK = -29,
+    kafka_common_Error_LOCAL_CALLBACK = -30,
 }
 
 /// The [`kafka_common_Error_e`] of the class that owns a protocol code.
@@ -1688,11 +1694,13 @@ pub(crate) fn error_code_of(error: &Error) -> kafka_common_Error_e {
         Error::Authentication(_) => kafka_common_Error_AUTHENTICATION,
         Error::Authorization(_) => kafka_common_Error_AUTHORIZATION,
         Error::AuthorizerNotReady(_) => kafka_common_Error_AUTHORIZER_NOT_READY,
+        Error::BootstrapResolution(_) => kafka_common_Error_BOOTSTRAP_RESOLUTION,
         Error::BrokerIdNotRegistered(_) => kafka_common_Error_BROKER_ID_NOT_REGISTERED,
         Error::BrokerNotAvailable(_) => kafka_common_Error_BROKER_NOT_AVAILABLE,
         Error::ProducerBufferExhausted(_) => kafka_common_Error_PRODUCER_BUFFER_EXHAUSTED,
         Error::ClusterAuthorization(_) => kafka_common_Error_CLUSTER_AUTHORIZATION_FAILED,
         Error::ConcurrentTransactions(_) => kafka_common_Error_CONCURRENT_TRANSACTIONS,
+        Error::ControllerIdNotRegistered(_) => kafka_common_Error_CONTROLLER_ID_NOT_REGISTERED,
         Error::ControllerMoved(_) => kafka_common_Error_STALE_CONTROLLER_EPOCH,
         Error::CoordinatorLoadInProgress(_) => kafka_common_Error_COORDINATOR_LOAD_IN_PROGRESS,
         Error::CoordinatorNotAvailable(_) => kafka_common_Error_COORDINATOR_NOT_AVAILABLE,
@@ -1718,6 +1726,7 @@ pub(crate) fn error_code_of(error: &Error) -> kafka_common_Error_e {
         Error::FetchSessionIdNotFound(_) => kafka_common_Error_FETCH_SESSION_ID_NOT_FOUND,
         Error::FetchSessionTopicId(_) => kafka_common_Error_FETCH_SESSION_TOPIC_ID_ERROR,
         Error::GroupAuthorization(_) => kafka_common_Error_GROUP_AUTHORIZATION_FAILED,
+        Error::GroupDeletionFailed(_) => kafka_common_Error_GROUP_DELETION_FAILED,
         Error::GroupIdNotFound(_) => kafka_common_Error_GROUP_ID_NOT_FOUND,
         Error::GroupMaxSizeReached(_) => kafka_common_Error_GROUP_MAX_SIZE_REACHED,
         Error::GroupNotEmpty(_) => kafka_common_Error_NON_EMPTY_GROUP,
@@ -1809,6 +1818,9 @@ pub(crate) fn error_code_of(error: &Error) -> kafka_common_Error_e {
         Error::StaleMemberEpoch(_) => kafka_common_Error_STALE_MEMBER_EPOCH,
         Error::StreamsInvalidTopology(_) => kafka_common_Error_STREAMS_INVALID_TOPOLOGY,
         Error::StreamsInvalidTopologyEpoch(_) => kafka_common_Error_STREAMS_INVALID_TOPOLOGY_EPOCH,
+        Error::StreamsTopologyDescriptionUpdateFailed(_) => {
+            kafka_common_Error_STREAMS_TOPOLOGY_DESCRIPTION_UPDATE_FAILED
+        },
         Error::StreamsTopologyFenced(_) => kafka_common_Error_STREAMS_TOPOLOGY_FENCED,
         Error::TelemetryTooLarge(_) => kafka_common_Error_TELEMETRY_TOO_LARGE,
         Error::ThrottlingQuotaExceeded(_) => kafka_common_Error_THROTTLING_QUOTA_EXCEEDED,
@@ -2008,8 +2020,8 @@ mod tests {
     use crate::common::KafkaError;
     use crate::common::error::ErrorName;
     use crate::common::errors::{
-        ApiError, AuthenticationError, AuthorizationError, AuthorizerNotReadyError, DisconnectError, InterruptError,
-        InvalidOffsetError, SslAuthenticationError,
+        ApiError, AuthenticationError, AuthorizationError, AuthorizerNotReadyError, BootstrapResolutionError,
+        DisconnectError, InterruptError, InvalidOffsetError, SslAuthenticationError,
     };
     use crate::common::metrics::QuotaViolationError;
     use crate::common::network::InvalidReceiveError;
@@ -2027,9 +2039,9 @@ mod tests {
     /// Java's lowest and highest `Errors` codes — the full range `Errors::for_code`
     /// resolves to a named constant.
     const FIRST_CODE: i16 = -1;
-    const LAST_CODE: i16 = 133;
+    const LAST_CODE: i16 = Errors::MAX_CODE;
 
-    /// The 28 classes that own no Java code, each paired with the enumerator it
+    /// The 29 classes that own no Java code, each paired with the enumerator it
     /// must map to and that enumerator's literal value.
     ///
     /// Both halves matter. The instance checks that `error_code_of`'s arm points
@@ -2140,11 +2152,17 @@ mod tests {
             ),
             // -28: code owned by a superclass.
             (Error::buffer_exhausted("m"), kafka_common_Error_PRODUCER_BUFFER_EXHAUSTED, -28),
-            // -29: a binding's foreign callback error.
+            // -29: `common` client-side class appended after publication.
+            (
+                Error::BootstrapResolution(BootstrapResolutionError::new("m")),
+                kafka_common_Error_BOOTSTRAP_RESOLUTION,
+                -29,
+            ),
+            // -30: a binding's foreign callback error.
             (
                 Error::local_callback("m", std::ptr::null_mut()),
                 kafka_common_Error_LOCAL_CALLBACK,
-                -29,
+                -30,
             ),
         ]
     }
@@ -2220,7 +2238,7 @@ mod tests {
                 },
             }
         }
-        assert_eq!(owned, 134, "expected 134 classes to own a Java code");
+        assert_eq!(owned, 137, "expected 137 classes to own a Java code");
 
         // `Error::KafkaError` is the one variant whose code is not a constant: it
         // stores an `Errors`, so it reports whatever that value owns.
@@ -2240,7 +2258,7 @@ mod tests {
         );
     }
 
-    /// The 163 values are pairwise distinct, so the code alone identifies the
+    /// The 167 values are pairwise distinct, so the code alone identifies the
     /// class. A C caller has no other discriminator, and the gRPC test harness
     /// derives the error type from this value — a collision would silently
     /// misclassify one of the two classes involved.
@@ -2269,10 +2287,10 @@ mod tests {
             }
         }
 
-        assert_eq!(seen.len(), 163, "expected 163 distinct error codes");
+        assert_eq!(seen.len(), 167, "expected 167 distinct error codes");
     }
 
-    /// One instance of each of the 163 error classes: the owner of every Java code,
+    /// One instance of each of the 167 error classes: the owner of every Java code,
     /// the client-side classes, and the bare `KafkaException`, which reports
     /// `UNKNOWN_SERVER_ERROR` rather than a code of its own. The codes are pairwise
     /// distinct ([`ffi_error_code_values_are_injective`]), so no class appears twice.
@@ -2341,7 +2359,7 @@ mod tests {
             .into_iter()
             .map(|error| (class_predicate(ErrorName::name(&error)), box_error(error)))
             .collect();
-        assert_eq!(errors.len(), 163, "expected one error per class");
+        assert_eq!(errors.len(), 167, "expected one error per class");
 
         let owners: HashSet<&str> = errors.iter().map(|(own, _)| own.as_str()).collect();
         assert_eq!(owners.len(), errors.len(), "two classes share a predicate name");
@@ -2401,7 +2419,7 @@ mod tests {
     #[test]
     fn ffi_error_code_client_side_negatives_are_stable() {
         let classes = client_side_classes();
-        assert_eq!(classes.len(), 28, "expected 28 classes with no Java code");
+        assert_eq!(classes.len(), 29, "expected 29 classes with no Java code");
 
         for (error, expected, value) in classes {
             assert_eq!(expected as i32, value, "{expected:?} moved off its published value");

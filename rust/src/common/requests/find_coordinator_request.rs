@@ -23,6 +23,8 @@
 
 use std::io;
 
+use crate::common::internals::UnsupportedProtocolFieldErrorOptionsBuilder;
+
 use crate::FindCoordinatorRequestData;
 use crate::FindCoordinatorResponseData;
 use crate::common::Node;
@@ -243,13 +245,12 @@ impl RequestBuilder for Builder {
     fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         // Mirrors `FindCoordinatorRequest.Builder.build(short version)`.
         if version < 1 && self.data.key_type == CoordinatorType::Transaction.id() {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!(
-                    "Cannot create a v{version} FindCoordinator request because we require features \
-                     supported only in 2 or later."
-                ),
-            ));
+            return Err(UnsupportedProtocolFieldErrorOptionsBuilder::new()
+                .set_field_or_value(CoordinatorType::Transaction.name())
+                .set_api_key_name(&ApiKeys::FIND_COORDINATOR.to_string())
+                .set_api_version(version)
+                .set_lowest_supported_version(2)
+                .into_io_error());
         }
 
         let mut data = self.data.clone();
@@ -305,8 +306,10 @@ mod tests {
         data.set_key("txn-id".to_string());
         let mut builder = Builder::new(data);
         let err = builder.build_version(0).expect_err("v0 transaction key must be rejected");
-        let msg = err.to_string();
-        assert!(msg.contains("Cannot create a v0 FindCoordinator request"), "got: {msg}");
+        crate::common::internals::assert_unsupported_protocol_field(
+            &err,
+            "The cluster does not support [TRANSACTION] in FIND_COORDINATOR API version 0. Upgrade the cluster to FIND_COORDINATOR API version >= 2 to enable [TRANSACTION].",
+        );
     }
 
     /// Verifies that a pre-v4 request with multiple coordinator keys is

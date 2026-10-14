@@ -83,3 +83,18 @@ class MockConsumer(MockConsumerCore[K, V], Consumer[K, V], Generic[K, V]):
         ``new_assignment``, then ``on_partitions_assigned`` runs with the
         partitions added, on this thread; the buffered records are cleared."""
         self._c_rebalance(new_assignment)
+
+    def lose_partitions(self, *, partitions_lost: Iterable[TopicPartition]) -> None:
+        """Simulates a partition loss event: calls the listener's
+        ``on_partitions_lost`` for the specified partitions, on this thread,
+        and removes them from the current assignment. Unlike
+        :meth:`rebalance`, which calls ``on_partitions_revoked``, this models
+        the case where the consumer loses partitions without a graceful revoke.
+
+        Only records belonging to the lost partitions are cleared; records for
+        retained partitions are unaffected.
+
+        ``partitions_lost`` are the partitions to lose; all must be currently
+        assigned, else ``IllegalStateError`` is raised.
+        """
+        self._c_lose_partitions(partitions_lost)

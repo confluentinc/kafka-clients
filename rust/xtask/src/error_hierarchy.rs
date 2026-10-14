@@ -14,7 +14,7 @@
 
 //! Generate the Python exception hierarchy for the `confluent_kafka` binding.
 //!
-//! Reads the Java exception sources (Apache Kafka 4.3.1, under `kafka/`) and
+//! Reads the Java exception sources (Apache Kafka 4.4.0, under `kafka/`) and
 //! emits one Python class per Java exception class the FFI enum
 //! `kafka_common_Error_e` names, plus Java's abstract bases, the base
 //! `KafkaException` and the Java built-in exceptions of the Types table, each as
@@ -45,7 +45,7 @@ use std::path::{Path, PathBuf};
 
 use crate::java_parse::{self, CallKind, Ctor, Expr, Factory, GetterBody, JavaClass, Param, Visibility};
 
-/// Root of the Java source tree (Apache Kafka 4.3.1), relative to the repo root.
+/// Root of the Java source tree (Apache Kafka 4.4.0), relative to the repo root.
 const JAVA_ROOT: &str = "kafka/clients/src/main/java";
 
 /// The FFI enum whose id constants the Python classes carry as `_ffi_id`.
@@ -87,6 +87,11 @@ const EXCLUSIONS: &[&str] = &[
     "org.apache.kafka.clients.consumer.internals.ShareInFlightBatchException",
     // Internal network-layer signalling, not a public client error.
     "org.apache.kafka.common.network.DelayedResponseAuthenticationException",
+    // `common.internals` (Kafka 4.4): the core models it as a kind of
+    // `Error::UnsupportedVersion` (`common::internals::UnsupportedProtocolFieldError`,
+    // crate-private) with no FFI id of its own, so it crosses as
+    // `UnsupportedVersionError`, its Java superclass.
+    "org.apache.kafka.common.internals.UnsupportedProtocolFieldException",
     // OAuth Bearer security-mechanism plugin errors — not the public client surface.
     "org.apache.kafka.common.security.oauthbearer.JwtRetrieverException",
     "org.apache.kafka.common.security.oauthbearer.JwtValidatorException",
@@ -107,7 +112,7 @@ const EXCLUSIONS: &[&str] = &[
 const RUST_ONLY_IDS: &[&str] = &["LOCAL_CALLBACK"];
 
 /// `(ffi_id_constant, java_class_fqn)` — one row per concrete (non-abstract) Java
-/// exception class, i.e. one row per FFI id (all 162 enum ids except `NONE`, which
+/// exception class, i.e. one row per FFI id (all 166 enum ids except `NONE`, which
 /// is the no-error sentinel; `UNKNOWN_SERVER_ERROR` is `UnknownServerException`).
 /// This is the reviewed correspondence between the two vocabularies (see the
 /// module doc); everything else the generator derives from the Java source.
@@ -118,6 +123,10 @@ const BRIDGE: &[(&str, &str)] = &[
     (
         "AUTHORIZER_NOT_READY",
         "org.apache.kafka.common.errors.AuthorizerNotReadyException",
+    ),
+    (
+        "BOOTSTRAP_RESOLUTION",
+        "org.apache.kafka.common.errors.BootstrapResolutionException",
     ),
     (
         "BROKER_ID_NOT_REGISTERED",
@@ -155,6 +164,10 @@ const BRIDGE: &[(&str, &str)] = &[
     (
         "CONSUMER_RETRIABLE_COMMIT_FAILED",
         "org.apache.kafka.clients.consumer.RetriableCommitFailedException",
+    ),
+    (
+        "CONTROLLER_ID_NOT_REGISTERED",
+        "org.apache.kafka.common.errors.ControllerIdNotRegisteredException",
     ),
     (
         "COORDINATOR_LOAD_IN_PROGRESS",
@@ -240,6 +253,10 @@ const BRIDGE: &[(&str, &str)] = &[
     (
         "GROUP_AUTHORIZATION_FAILED",
         "org.apache.kafka.common.errors.GroupAuthorizationException",
+    ),
+    (
+        "GROUP_DELETION_FAILED",
+        "org.apache.kafka.common.errors.GroupDeletionFailedException",
     ),
     ("GROUP_ID_NOT_FOUND", "org.apache.kafka.common.errors.GroupIdNotFoundException"),
     (
@@ -491,6 +508,10 @@ const BRIDGE: &[(&str, &str)] = &[
     (
         "STREAMS_INVALID_TOPOLOGY",
         "org.apache.kafka.common.errors.StreamsInvalidTopologyException",
+    ),
+    (
+        "STREAMS_TOPOLOGY_DESCRIPTION_UPDATE_FAILED",
+        "org.apache.kafka.common.errors.StreamsTopologyDescriptionUpdateFailedException",
     ),
     (
         "STREAMS_TOPOLOGY_FENCED",
@@ -1128,7 +1149,9 @@ impl Graph<'_> {
                 let vals: Vec<PyVal> = args.iter().map(|a| self.translate(a, env)).collect::<anyhow::Result<_>>()?;
                 let n: Vec<&str> = name.iter().map(String::as_str).collect();
                 match (n.as_slice(), vals.as_slice()) {
-                    (["Collections", "emptySet"], []) => PyVal::constant("set()", Some("Set"), "()"),
+                    // `Set.of()` with no elements is `emptySet()`'s equivalent; Kafka 4.4's
+                    // `TopicAuthorizationException(String)` passes it.
+                    (["Collections", "emptySet"] | ["Set", "of"], []) => PyVal::constant("set()", Some("Set"), "()"),
                     (["Collections", "emptyList"], []) => PyVal::constant("[]", Some("List"), "()"),
                     (["Collections", "emptyMap"], []) => PyVal::constant("{}", Some("Map"), "None"),
                     (["Collections", "singleton"], [x]) => {
@@ -3237,11 +3260,11 @@ mod tests {
     #[test]
     fn graph_builds_and_cross_checks() {
         let classes = build_graph(&repo_root()).expect("graph must build and cross-check");
-        // 161 FFI ids (one class each) + 5 abstract + KafkaException + 2 id-less built-ins.
-        assert_eq!(classes.len(), 169);
+        // 165 FFI ids (one class each) + 5 abstract + KafkaException + 2 id-less built-ins.
+        assert_eq!(classes.len(), 173);
         assert_eq!(classes.values().filter(|c| c.is_abstract).count(), 5);
         let with_id = classes.values().filter(|c| c.ffi_id.is_some()).count();
-        assert_eq!(with_id, 162, "161 bridge classes plus the base's UNKNOWN_SERVER_ERROR");
+        assert_eq!(with_id, 166, "165 bridge classes plus the base's UNKNOWN_SERVER_ERROR");
         for c in classes.values() {
             assert_eq!(c.is_abstract, c.ffi_id.is_none() && !c.is_jdk, "{}", c.java_fqn);
         }

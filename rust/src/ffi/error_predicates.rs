@@ -632,6 +632,35 @@ pub unsafe extern "C" fn kafka_common_Error_is_authorizer_not_ready_error(error:
 }
 
 /// Whether this error's Java class is, or extends,
+/// `org.apache.kafka.common.errors.BootstrapResolutionException`.
+///
+/// Mirrors `Error::is_bootstrap_resolution_error`.
+///
+/// # Parameters
+///
+/// - `error`: Non-null error handle.
+///
+/// # Returns
+///
+/// `1` if the predicate holds, `0` if not or if the handle is null.
+///
+/// # Safety
+///
+/// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_is_bootstrap_resolution_error(error: *const kafka_common_Error_t) -> i8 {
+    if error.is_null() {
+        return 0;
+    }
+    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
+    // valid error handle: an owned one from `box_error`, not yet destroyed, or a borrowed one
+    // whose owner is still alive, so it points at a live `ErrorInner`, as `error_ref` requires.
+    // The borrow lasts only for this call, while the caller keeps the handle alive.
+    i8::from(unsafe { error_ref(error) }.error.is_bootstrap_resolution_error())
+}
+
+/// Whether this error's Java class is, or extends,
 /// `org.apache.kafka.common.errors.BrokerIdNotRegisteredException`.
 ///
 /// Mirrors `Error::is_broker_id_not_registered_error`.
@@ -778,6 +807,37 @@ pub unsafe extern "C" fn kafka_common_Error_is_concurrent_transactions_error(err
     // whose owner is still alive, so it points at a live `ErrorInner`, as `error_ref` requires.
     // The borrow lasts only for this call, while the caller keeps the handle alive.
     i8::from(unsafe { error_ref(error) }.error.is_concurrent_transactions_error())
+}
+
+/// Whether this error's Java class is, or extends,
+/// `org.apache.kafka.common.errors.ControllerIdNotRegisteredException`.
+///
+/// Mirrors `Error::is_controller_id_not_registered_error`.
+///
+/// # Parameters
+///
+/// - `error`: Non-null error handle.
+///
+/// # Returns
+///
+/// `1` if the predicate holds, `0` if not or if the handle is null.
+///
+/// # Safety
+///
+/// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_is_controller_id_not_registered_error(
+    error: *const kafka_common_Error_t,
+) -> i8 {
+    if error.is_null() {
+        return 0;
+    }
+    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
+    // valid error handle: an owned one from `box_error`, not yet destroyed, or a borrowed one
+    // whose owner is still alive, so it points at a live `ErrorInner`, as `error_ref` requires.
+    // The borrow lasts only for this call, while the caller keeps the handle alive.
+    i8::from(unsafe { error_ref(error) }.error.is_controller_id_not_registered_error())
 }
 
 /// Whether this error's Java class is, or extends,
@@ -1523,6 +1583,35 @@ pub unsafe extern "C" fn kafka_common_Error_is_group_authorization_error(error: 
     // whose owner is still alive, so it points at a live `ErrorInner`, as `error_ref` requires.
     // The borrow lasts only for this call, while the caller keeps the handle alive.
     i8::from(unsafe { error_ref(error) }.error.is_group_authorization_error())
+}
+
+/// Whether this error's Java class is, or extends,
+/// `org.apache.kafka.common.errors.GroupDeletionFailedException`.
+///
+/// Mirrors `Error::is_group_deletion_failed_error`.
+///
+/// # Parameters
+///
+/// - `error`: Non-null error handle.
+///
+/// # Returns
+///
+/// `1` if the predicate holds, `0` if not or if the handle is null.
+///
+/// # Safety
+///
+/// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_is_group_deletion_failed_error(error: *const kafka_common_Error_t) -> i8 {
+    if error.is_null() {
+        return 0;
+    }
+    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
+    // valid error handle: an owned one from `box_error`, not yet destroyed, or a borrowed one
+    // whose owner is still alive, so it points at a live `ErrorInner`, as `error_ref` requires.
+    // The borrow lasts only for this call, while the caller keeps the handle alive.
+    i8::from(unsafe { error_ref(error) }.error.is_group_deletion_failed_error())
 }
 
 /// Whether this error's Java class is, or extends,
@@ -4062,6 +4151,41 @@ pub unsafe extern "C" fn kafka_common_Error_is_streams_invalid_topology_epoch_er
 }
 
 /// Whether this error's Java class is, or extends,
+/// `org.apache.kafka.common.errors.StreamsTopologyDescriptionUpdateFailedException`.
+///
+/// Mirrors `Error::is_streams_topology_description_update_failed_error`.
+///
+/// # Parameters
+///
+/// - `error`: Non-null error handle.
+///
+/// # Returns
+///
+/// `1` if the predicate holds, `0` if not or if the handle is null.
+///
+/// # Safety
+///
+/// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_is_streams_topology_description_update_failed_error(
+    error: *const kafka_common_Error_t,
+) -> i8 {
+    if error.is_null() {
+        return 0;
+    }
+    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
+    // valid error handle: an owned one from `box_error`, not yet destroyed, or a borrowed one
+    // whose owner is still alive, so it points at a live `ErrorInner`, as `error_ref` requires.
+    // The borrow lasts only for this call, while the caller keeps the handle alive.
+    i8::from(
+        unsafe { error_ref(error) }
+            .error
+            .is_streams_topology_description_update_failed_error(),
+    )
+}
+
+/// Whether this error's Java class is, or extends,
 /// `org.apache.kafka.common.errors.StreamsTopologyFencedException`.
 ///
 /// Mirrors `Error::is_streams_topology_fenced_error`.
@@ -4893,8 +5017,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_unsupported_sasl_mechanism_error(
     i8::from(unsafe { error_ref(error) }.error.is_unsupported_sasl_mechanism_error())
 }
 
-/// Whether this error's Java class is, or extends,
-/// `org.apache.kafka.common.errors.UnsupportedVersionException`.
+/// Whether this error's Java class extends `UnsupportedVersionException` (CLAUDE.md §12.4).
 ///
 /// Mirrors `Error::is_unsupported_version_error`.
 ///
@@ -5030,6 +5153,10 @@ pub(crate) const PREDICATES: &[(&str, unsafe extern "C" fn(*const kafka_common_E
         kafka_common_Error_is_authorizer_not_ready_error,
     ),
     (
+        "is_bootstrap_resolution_error",
+        kafka_common_Error_is_bootstrap_resolution_error,
+    ),
+    (
         "is_broker_id_not_registered_error",
         kafka_common_Error_is_broker_id_not_registered_error,
     ),
@@ -5048,6 +5175,10 @@ pub(crate) const PREDICATES: &[(&str, unsafe extern "C" fn(*const kafka_common_E
     (
         "is_concurrent_transactions_error",
         kafka_common_Error_is_concurrent_transactions_error,
+    ),
+    (
+        "is_controller_id_not_registered_error",
+        kafka_common_Error_is_controller_id_not_registered_error,
     ),
     ("is_controller_moved_error", kafka_common_Error_is_controller_moved_error),
     (
@@ -5113,6 +5244,10 @@ pub(crate) const PREDICATES: &[(&str, unsafe extern "C" fn(*const kafka_common_E
         kafka_common_Error_is_fetch_session_topic_id_error,
     ),
     ("is_group_authorization_error", kafka_common_Error_is_group_authorization_error),
+    (
+        "is_group_deletion_failed_error",
+        kafka_common_Error_is_group_deletion_failed_error,
+    ),
     ("is_group_id_not_found_error", kafka_common_Error_is_group_id_not_found_error),
     (
         "is_group_max_size_reached_error",
@@ -5333,6 +5468,10 @@ pub(crate) const PREDICATES: &[(&str, unsafe extern "C" fn(*const kafka_common_E
     (
         "is_streams_invalid_topology_epoch_error",
         kafka_common_Error_is_streams_invalid_topology_epoch_error,
+    ),
+    (
+        "is_streams_topology_description_update_failed_error",
+        kafka_common_Error_is_streams_topology_description_update_failed_error,
     ),
     (
         "is_streams_topology_fenced_error",

@@ -50,6 +50,32 @@ public class JavaE2E {
         } catch (Exception e) { }
         return 0.0;
     }
+    /* Interval process CPU%: utime+stime delta from /proc/self/stat over the
+     * wall-clock delta, as a percent of one core (may exceed 100 on multi-core
+     * work). Same method as the producer harness's Metrics.CPUBucket. */
+    static long prevTicks = -1; static long prevNanos;
+    static final double USER_HZ = 100.0; // Linux clock ticks per second
+    static long readBusyTicks() {
+        try (BufferedReader r = new BufferedReader(new FileReader("/proc/self/stat"))) {
+            String s = r.readLine();
+            // comm (field 2) is parenthesized and may contain spaces; parse
+            // after the last ')'. utime/stime are fields 14/15, i.e. indices
+            // 11/12 of the whitespace-split remainder.
+            int rp = s.lastIndexOf(')');
+            String[] f = s.substring(rp + 2).split("\\s+");
+            return Long.parseLong(f[11]) + Long.parseLong(f[12]);
+        } catch (Exception e) { return 0; }
+    }
+    static double sampleCpuPct() {
+        long ticks = readBusyTicks(); long nowNs = System.nanoTime();
+        double pct = 0.0;
+        if (prevTicks >= 0) {
+            double dt = (nowNs - prevNanos) / 1e9;
+            if (dt > 0) pct = ((ticks - prevTicks) / USER_HZ) / dt * 100.0;
+        }
+        prevTicks = ticks; prevNanos = nowNs;
+        return pct;
+    }
 
     public static void main(String[] a) throws Exception {
         String bootstrap = "localhost:9092", topic = "bench", proto = "consumer", cfg = null, gid = null;
@@ -83,6 +109,7 @@ public class JavaE2E {
         long seen = 0, measured = 0, measureStart = 0, deadline = 0, ivStart = 0; int ivIdx = 0;
         boolean warm = false;
         double rssSum = 0, rssMin = Double.MAX_VALUE, rssMax = 0; long rssN = 0;
+        double cpuSum = 0, cpuMin = Double.MAX_VALUE, cpuMax = 0; long cpuN = 0;
         try (KafkaConsumer<byte[], byte[]> c = new KafkaConsumer<>(p)) {
             c.subscribe(Collections.singletonList(topic));
             System.out.println("subscribed; waiting for assignment/records...");
@@ -94,6 +121,7 @@ public class JavaE2E {
                     if (!warm) {
                         if (++seen >= warmup) { warm = true; measureStart = System.currentTimeMillis();
                             deadline = measureStart + durationMs; ivStart = measureStart;
+                            sampleCpuPct(); // prime the CPU baseline at measure start
                             System.out.printf("warmup complete (%d msgs); measuring %ds now%n", warmup, durationS); }
                         continue;
                     }
@@ -106,9 +134,11 @@ public class JavaE2E {
                     double es = (now - ivStart) / 1000.0, thr = es > 0 ? icnt / es : 0;
                     double rss = readRssMb();
                     rssSum += rss; if (rss < rssMin) rssMin = rss; if (rss > rssMax) rssMax = rss; rssN++;
-                    System.out.printf("[interval %d] t=%6.1fs msgs=%7d thr=%9.0f msg/s avg=%6.2f p50=%d p99=%d p999=%d max=%d ms rss=%.1fMB%n",
+                    double cpu = sampleCpuPct();
+                    cpuSum += cpu; if (cpu < cpuMin) cpuMin = cpu; if (cpu > cpuMax) cpuMax = cpu; cpuN++;
+                    System.out.printf("[interval %d] t=%6.1fs msgs=%7d thr=%9.0f msg/s avg=%6.2f p50=%d p99=%d p999=%d max=%d ms cpu=%5.1f%% rss=%.1fMB%n",
                         ivIdx, (now - measureStart) / 1000.0, icnt, thr, icnt == 0 ? 0.0 : (double) isum / icnt,
-                        pct(iB, icnt, 50), pct(iB, icnt, 99), pct(iB, icnt, 99.9), imax == Long.MIN_VALUE ? 0 : imax, rss);
+                        pct(iB, icnt, 50), pct(iB, icnt, 99), pct(iB, icnt, 99.9), imax == Long.MIN_VALUE ? 0 : imax, cpu, rss);
                     resetIv(); ivStart = System.currentTimeMillis(); ivIdx++;
                 }
                 if (warm && System.currentTimeMillis() >= deadline) break;
@@ -118,6 +148,7 @@ public class JavaE2E {
         double thrMsg = durS > 0 ? measured / durS : 0, thrMiB = durS > 0 ? (totalBytes / 1048576.0) / durS : 0;
         double sdv = sd(B, cnt, sum);
         double rssAvg = rssN > 0 ? rssSum / rssN : 0.0; if (rssN == 0) rssMin = 0.0;
+        double cpuAvg = cpuN > 0 ? cpuSum / cpuN : 0.0; if (cpuN == 0) cpuMin = 0.0;
         System.out.println("======================================================================");
         System.out.println("SUMMARY - Java kafka-clients (KIP-848=" + proto + ", warmup " + warmup + " excluded)");
         System.out.printf("Measured messages: %d%n", cnt);
@@ -126,10 +157,11 @@ public class JavaE2E {
         System.out.printf("E2E latency (ms):  min=%d avg=%.2f stddev=%.2f p50=%d p90=%d p95=%d p99=%d p99.9=%d max=%d%n",
             cnt == 0 ? 0 : min, cnt == 0 ? 0.0 : (double) sum / cnt, sdv, pct(B, cnt, 50), pct(B, cnt, 90),
             pct(B, cnt, 95), pct(B, cnt, 99), pct(B, cnt, 99.9), cnt == 0 ? 0 : max);
+        System.out.printf("CPU (%% one core):  avg=%.1f min=%.1f max=%.1f (%d samples)%n", cpuAvg, cpuMin, cpuMax, cpuN);
         System.out.printf("RSS (MB, current): avg=%.1f min=%.1f max=%.1f (%d samples)%n", rssAvg, rssMin, rssMax, rssN);
-        System.out.printf("{\"client\":\"java\",\"protocol\":\"%s\",\"messages\":%d,\"duration_s\":%.2f,\"throughput_msg_s\":%.2f,\"throughput_mib_s\":%.2f,\"lat_min_ms\":%d,\"lat_avg_ms\":%.2f,\"lat_stddev_ms\":%.2f,\"lat_p50_ms\":%d,\"lat_p90_ms\":%d,\"lat_p95_ms\":%d,\"lat_p99_ms\":%d,\"lat_p999_ms\":%d,\"lat_max_ms\":%d,\"rss_avg_mb\":%.1f,\"rss_min_mb\":%.1f,\"rss_max_mb\":%.1f}%n",
+        System.out.printf("{\"client\":\"java\",\"protocol\":\"%s\",\"messages\":%d,\"duration_s\":%.2f,\"throughput_msg_s\":%.2f,\"throughput_mib_s\":%.2f,\"lat_min_ms\":%d,\"lat_avg_ms\":%.2f,\"lat_stddev_ms\":%.2f,\"lat_p50_ms\":%d,\"lat_p90_ms\":%d,\"lat_p95_ms\":%d,\"lat_p99_ms\":%d,\"lat_p999_ms\":%d,\"lat_max_ms\":%d,\"cpu_avg_pct\":%.1f,\"cpu_min_pct\":%.1f,\"cpu_max_pct\":%.1f,\"rss_avg_mb\":%.1f,\"rss_min_mb\":%.1f,\"rss_max_mb\":%.1f}%n",
             proto, cnt, durS, thrMsg, thrMiB, cnt == 0 ? 0 : min, cnt == 0 ? 0.0 : (double) sum / cnt, sdv,
             pct(B, cnt, 50), pct(B, cnt, 90), pct(B, cnt, 95), pct(B, cnt, 99), pct(B, cnt, 99.9), cnt == 0 ? 0 : max,
-            rssAvg, rssMin, rssMax);
+            cpuAvg, cpuMin, cpuMax, rssAvg, rssMin, rssMax);
     }
 }

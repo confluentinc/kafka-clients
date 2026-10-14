@@ -14,11 +14,11 @@
 
 """``AsyncMockConsumer``: the asyncio peer of :class:`MockConsumer`, with the
 same constructor and the same mock methods (CLAUDE.md, Python Binding
-Conventions, Class family). ``rebalance`` is ``async def``: Java's waits on the
-listener it runs, which may be ``async def`` here and is awaited.
-``commit_nowait()`` is ``async def`` too, as on ``AsyncKafkaConsumer``: its
-callback may be ``async def``, and it is awaited inside the call, as Java's mock
-runs the callback inside ``commitAsync``."""
+Conventions, Class family). ``rebalance`` and ``lose_partitions`` are
+``async def``: Java's wait on the listener they run, which may be ``async def``
+here and is awaited. ``commit_nowait()`` is ``async def`` too, as on
+``AsyncKafkaConsumer``: its callback may be ``async def``, and it is awaited
+inside the call, as Java's mock runs the callback inside ``commitAsync``."""
 
 from __future__ import annotations
 
@@ -58,3 +58,11 @@ class AsyncMockConsumer(MockConsumerCore[K, V], AsyncConsumer[K, V], Generic[K, 
         waits for the synchronized rebalance)*; the listener's own calls back
         into the consumer pass, and so does ``wakeup()``."""
         await self._a_rebalance(new_assignment)
+
+    async def lose_partitions(self, *, partitions_lost: Iterable[TopicPartition]) -> None:
+        """See :meth:`MockConsumer.lose_partitions`; like :meth:`rebalance`, a
+        coroutine ``on_partitions_lost`` is awaited, and until the call returns
+        a call from another task or thread raises
+        ``ConcurrentModificationError`` *(deviation: Java's caller waits for
+        the synchronized losePartitions)*."""
+        await self._a_lose_partitions(partitions_lost)

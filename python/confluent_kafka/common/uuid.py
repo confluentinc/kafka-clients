@@ -122,9 +122,9 @@ class Uuid:
     def random_uuid() -> Uuid:
         """Static factory to retrieve a type 4 (pseudo randomly generated) UUID.
         This will not generate a UUID equal to 0, 1, or one whose string
-        representation starts with a dash ("-")."""
+        representation contains a dash ("-")."""
         candidate = Uuid._unsafe_random_uuid()
-        while candidate in Uuid.RESERVED or str(candidate).startswith("-"):
+        while candidate in Uuid.RESERVED or "-" in str(candidate):
             candidate = Uuid._unsafe_random_uuid()
         return candidate
 

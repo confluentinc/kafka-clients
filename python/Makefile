@@ -23,7 +23,7 @@ CFLAGS_EXTRA ?= $(CFLAGS_NATIVE)
 # `check-static` and `test-soak`, expects the Rust library already built under
 # $(RUST_PROJECT_ROOT)/target/$(PROFILE): the root Makefile orders that.
 .PHONY: init build test test-unit typecheck check-static test-soak test-integration test-performance \
-	consumer-perf-test producer-perf-test grpc-image grpc-image-async grpc-native clean
+	consumer-perf-test producer-perf-test transactional-producer-perf-test grpc-image grpc-image-async grpc-native clean
 
 # Development dependencies, for a fresh clone (the root `init`).
 init:
@@ -147,6 +147,16 @@ consumer-perf-test: build
 producer-perf-test: build
 	@(if [ "$${CLIENT_VERSION:-3}" = "2" ]; then py=$(LIBRDKAFKA_PYTHON); else py=python; fi; \
 	  LIBRDKAFKA_PYTHON=$(LIBRDKAFKA_PYTHON) $$py test/performance/producer_performance_test.py)
+
+# Env-driven transactional producer performance benchmark (standalone). Same
+# env-var contract as `producer-perf-test` plus the transaction knobs
+# (RECORDS_PER_TRANSACTION, ABORT_RATE, NUM_TRANSACTIONAL_PRODUCERS,
+# TRANSACTIONAL_ID, TXN_MODE, SOURCE_TOPIC). CLIENT_VERSION selects the backend
+# as for producer-perf-test. Keep in sync with the other transactional producer
+# performance tests.
+transactional-producer-perf-test: build
+	@(if [ "$${CLIENT_VERSION:-3}" = "2" ]; then py=$(LIBRDKAFKA_PYTHON); else py=python; fi; \
+	  LIBRDKAFKA_PYTHON=$(LIBRDKAFKA_PYTHON) $$py test/performance/transactional_producer_performance_test.py)
 
 # Python gRPC server image for the multilang test harness. Context is the repo
 # root; requires libconfluent_kafka.so already built in rust/target/release/.

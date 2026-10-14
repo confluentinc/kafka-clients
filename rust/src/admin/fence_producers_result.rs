@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use crate::common::utils::ProducerIdAndEpoch;
+use crate::common::utils::internals::ProducerIdAndEpoch;
 use crate::common::{Error, KafkaFuture};
 
 /// The result of `Admin::fence_producers`.

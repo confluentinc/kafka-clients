@@ -73,6 +73,7 @@ by path — no reinstall).
   is 3.9.6 and CANNOT import it. Run the shim runner with
   **`/opt/homebrew/bin/python3.12`**.
 - gRPC servers: only `py_compile` locally (Docker-generated pb2 stubs are
-  uncommitted); real validation is the Docker multilanguage harness (avoid — it
-  has wedged this machine).
-- Related: [[commit-hook-timeout]] (use `git commit --no-verify`).
+  uncommitted); real validation is the Docker multilanguage harness (avoid
+  running it locally: it can wedge Docker).
+- Related: [[commit-hook-timeout]] (run the commit in the background; never `--no-verify`
+  without the user's OK).

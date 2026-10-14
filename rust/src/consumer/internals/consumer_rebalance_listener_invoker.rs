@@ -94,7 +94,7 @@ pub(crate) struct ConsumerRebalanceListenerInvoker {
     /// Java: `RebalanceCallbackMetricsManager metricsManager`. `None` until
     /// the consumer wires it (tests may leave it unset). When present,
     /// per-callback latency is recorded on success.
-    metrics_manager: Option<RebalanceCallbackMetricsManager>,
+    metrics_manager: Option<Arc<RebalanceCallbackMetricsManager>>,
     /// Java: `Time time`. The metrics clock used to time callbacks. Defaults
     /// to `SystemTime`; the consumer overrides it to share the metrics clock
     /// when it wires up `metrics_manager`.
@@ -117,7 +117,7 @@ impl ConsumerRebalanceListenerInvoker {
     /// callbacks. Java passes both into the constructor; we set them
     /// post-construction so existing call sites/tests that don't exercise
     /// metrics keep the no-arg `new`.
-    pub(crate) fn set_metrics(&mut self, metrics_manager: RebalanceCallbackMetricsManager, time: Arc<dyn Time>) {
+    pub(crate) fn set_metrics(&mut self, metrics_manager: Arc<RebalanceCallbackMetricsManager>, time: Arc<dyn Time>) {
         self.metrics_manager = Some(metrics_manager);
         self.time = time;
     }
@@ -542,7 +542,7 @@ mod tests {
         let lost_avg = manager.partition_lost_latency_avg.clone();
 
         let mut invoker = ConsumerRebalanceListenerInvoker::new(make_subs());
-        invoker.set_metrics(manager, Arc::clone(&time) as Arc<dyn Time>);
+        invoker.set_metrics(Arc::new(manager), Arc::clone(&time) as Arc<dyn Time>);
 
         let assigned_listener: Arc<dyn ConsumerRebalanceListener> =
             Arc::new(SleepingListener { time: Arc::clone(&time), sleep_ms: 7 });
@@ -579,7 +579,7 @@ mod tests {
         let assign_avg = manager.partition_assign_latency_avg.clone();
 
         let mut invoker = ConsumerRebalanceListenerInvoker::new(make_subs());
-        invoker.set_metrics(manager, Arc::clone(&time) as Arc<dyn Time>);
+        invoker.set_metrics(Arc::new(manager), Arc::clone(&time) as Arc<dyn Time>);
 
         let failing: Arc<dyn ConsumerRebalanceListener> = Arc::new(FailingListener { err_msg: "kaboom" });
         invoker.invoke_partitions_assigned(&failing, &[]).await.expect_err("must err");
