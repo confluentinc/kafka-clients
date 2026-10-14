@@ -134,10 +134,11 @@ pub(crate) fn panic_error(fn_name: &str, payload: &(dyn Any + Send)) -> Error {
 /// woken, and a failed wake is `expect("failed to wake I/O driver")`
 /// (`runtime/io/driver.rs:260`, tokio 1.52.0). Unwinding from there would fire
 /// the callback from `on_panic` while the queued task fires it too, and would
-/// skip the producer's `pending_tasks` registration after the spawn, which
-/// `destroy` relies on. So the process aborts, as every panic at the boundary
-/// did before `#[ffi_guard]`: the OS refused to wake the runtime. See §4 item 6
-/// of `design/current/appsec-7665-4521-ffi-panic-guard.md`.
+/// skip the task's registration after the spawn (`pending_tasks` in the
+/// producer and consumer, `pending_closes` / `pending_calls` in the admin),
+/// which `destroy` relies on. So the process aborts, as every
+/// panic at the boundary did before `#[ffi_guard]`: the OS refused to wake the
+/// runtime. See §4 item 6 of `design/current/appsec-7665-4521-ffi-panic-guard.md`.
 ///
 /// No Java counterpart: Java has no C boundary.
 pub(crate) fn spawn_callback_task<F>(runtime: &tokio::runtime::Handle, task: F) -> tokio::task::JoinHandle<F::Output>
@@ -2788,6 +2789,81 @@ where
     result_rx.await.expect("dispatch_and_wait job dropped without sending a result")
 }
 
+/// Whether the calling thread is inside a tokio runtime: a worker thread, or a
+/// thread inside some runtime's `block_on`. A `destroy` that must wait for a
+/// handle's tasks cannot do it there, since `Runtime::block_on` panics. The
+/// check is conservative: it is also true on a blocking-pool thread, where
+/// waiting would be allowed, and handing off there only costs a thread.
+///
+/// No Java counterpart: Java has no C boundary.
+pub(crate) fn in_tokio_runtime() -> bool {
+    tokio::runtime::Handle::try_current().is_ok()
+}
+
+/// Whether the calling thread is the dispatcher thread whose join handle
+/// `dispatcher` holds, i.e. whether the call is running inside a C callback that
+/// dispatcher fired. A `destroy` there must not wait for the handle's tasks: a
+/// task may be waiting on this very thread ([`dispatch_and_wait`]).
+///
+/// No Java counterpart: Java has no C boundary.
+pub(crate) fn is_dispatcher_thread(dispatcher: &std::sync::Mutex<Option<std::thread::JoinHandle<()>>>) -> bool {
+    let current = std::thread::current().id();
+    // Poison-tolerant: `destroy` is the one call that must still work on a handle
+    // poisoned by a panic `#[ffi_guard]` caught.
+    dispatcher
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(|join| join.thread().id() == current)
+}
+
+/// Runs `teardown(handle)` on a new thread named `name`, for a `destroy` called
+/// where it must not wait: on the handle's dispatcher thread, or inside a tokio
+/// runtime. `destroy` then returns at once, and the wait and the free happen on
+/// that thread.
+///
+/// The handle travels as an address, so a failed spawn drops nothing. It is
+/// logged and the handle is leaked: still in use by its tasks, leaking it is
+/// safe where freeing it would not be.
+///
+/// No Java counterpart: Java has no C boundary.
+///
+/// # Safety
+///
+/// Calling `teardown(handle)` once, on a newly spawned thread, must be sound, and
+/// this must be the handle's only teardown.
+pub(crate) unsafe fn spawn_teardown(name: &str, handle: usize, teardown: unsafe fn(usize)) {
+    // SAFETY: this function's `# Safety` is the one `spawn_teardown_with` requires, and
+    // `Builder::spawn` either runs the body once on the thread it starts or returns an
+    // error without running it. Dropping the `JoinHandle` detaches that thread.
+    unsafe { spawn_teardown_with(name, handle, teardown, |builder, body| builder.spawn(body).map(drop)) }
+}
+
+/// [`spawn_teardown`] with the thread start passed in as `spawn`, so a test can
+/// make it fail.
+///
+/// # Safety
+///
+/// As for [`spawn_teardown`]. `spawn` must either run the body it is given once,
+/// on the thread it starts from the builder it is given, or return an error
+/// without running it.
+unsafe fn spawn_teardown_with(
+    name: &str,
+    handle: usize,
+    teardown: unsafe fn(usize),
+    spawn: impl FnOnce(std::thread::Builder, Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
+) {
+    let body: Box<dyn FnOnce() + Send> = Box::new(move || {
+        // SAFETY: per this function's `# Safety`, `teardown(handle)` is sound to call
+        // once on a newly spawned thread, and this is its only call: the closure is
+        // `FnOnce`, and `spawn` runs it at most once, on the thread it starts.
+        unsafe { teardown(handle) }
+    });
+    if let Err(e) = spawn(std::thread::Builder::new().name(name.to_string()), body) {
+        log::error!("leaking a destroyed handle: could not spawn the {name} thread to free it: {e}");
+    }
+}
+
 /// Canonical operation callback signature (not exported). A null `error` means
 /// success. The public per-method typedefs alias this shape.
 pub(crate) type OperationCallbackFn = unsafe extern "C" fn(*mut kafka_common_Error_t, *mut std::ffi::c_void);
@@ -4485,6 +4561,29 @@ mod tests {
         assert_eq!(code, kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE);
         // No `out_error` store is generated around an explicit closure.
         assert!(out_error.is_null());
+    }
+
+    /// A teardown thread that cannot be started leaks the handle rather than freeing
+    /// it: `teardown` runs neither on that thread nor inline on the caller's, which
+    /// handed it off because waiting there is not allowed.
+    #[test]
+    fn spawn_teardown_leaks_the_handle_when_the_thread_cannot_start() {
+        static TEARDOWNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        unsafe fn count_teardown(_: usize) {
+            TEARDOWNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        // SAFETY: Test code: `count_teardown` only counts its calls and never reads the
+        // address, so any number of calls on any thread would be sound.
+        unsafe {
+            spawn_teardown_with("kafka-test-destroy", 0x10, count_teardown, |_, _| {
+                Err(std::io::Error::other("thread limit reached"))
+            })
+        };
+        assert_eq!(
+            TEARDOWNS.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a failed spawn must free nothing"
+        );
     }
 
     #[test]

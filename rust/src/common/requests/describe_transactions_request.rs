@@ -188,4 +188,28 @@ mod tests {
         ];
         assert_eq!(bytes.into_buffer().as_slice(), expected);
     }
+
+    /// A message flexible in every version takes the generator's all-compact branch,
+    /// which is generated separately from the mixed branch `DescribeGroupsRequest` pins.
+    /// A compact length is the string length plus one, so 0 is a null element, which
+    /// Java rejects — it reads the length as `readUnsignedVarint() - 1` = -1
+    /// (`MessageDataGenerator.java:602`, `:613-617`). Field-by-field:
+    ///   transactional_ids: compact array len 1 + 1  -> 02
+    ///     element: compact string len 0 (null)      -> 00 (or 01, an empty string, for the boundary)
+    ///   _tagged_fields                              -> 00
+    #[test]
+    fn parse_rejects_compact_null_transactional_id() {
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(vec![0x02, 0x00, 0x00]);
+        let error = DescribeTransactionsRequest::parse(&mut readable, 0).expect_err("a null element must not parse");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            "non-nullable field transactionalIds element was serialized as null"
+        );
+
+        // One is the boundary: an empty transactional id is a valid, non-null element.
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(vec![0x02, 0x01, 0x00]);
+        let parsed = DescribeTransactionsRequest::parse(&mut readable, 0).unwrap();
+        assert_eq!(parsed.data().transactional_ids, vec![String::new()]);
+    }
 }
