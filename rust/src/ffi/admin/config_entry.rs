@@ -213,6 +213,22 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSource__enum(
     source_enum_of(unsafe { config_source_value_of(self_) })
 }
 
+/// `ConfigSource.toString()`: the Java constant name, as an owned string freed with
+/// `kafka_string_destroy`.
+///
+/// # Safety
+///
+/// `self_` must be a singleton returned by this module.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSource_to_string(
+    self_: *const kafka_admin_ConfigEntry_ConfigSource_t,
+) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `config_source_value_of` requires.
+    into_c_string(&unsafe { config_source_value_of(self_) }.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // ConfigEntry.ConfigType
 // ---------------------------------------------------------------------------
@@ -374,6 +390,22 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigType__enum(
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `config_type_value_of` requires.
     type_enum_of(unsafe { config_type_value_of(self_) })
+}
+
+/// `ConfigType.toString()`: the Java constant name, as an owned string freed with
+/// `kafka_string_destroy`.
+///
+/// # Safety
+///
+/// `self_` must be a singleton returned by this module.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigType_to_string(
+    self_: *const kafka_admin_ConfigEntry_ConfigType_t,
+) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `config_type_value_of` requires.
+    into_c_string(&unsafe { config_type_value_of(self_) }.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -1205,17 +1237,24 @@ mod tests {
     fn source_and_type_singletons_match_their_enumerators() {
         // SAFETY: Test code: each `handle` is the singleton `config_source_singleton` or
         // `config_type_singleton` returned, a pointer into the static `SOURCES` or `TYPES`, so
-        // it is a singleton of this module for the value and `__enum` functions read here.
+        // it is a singleton of this module for the value, `__enum` and `_to_string` functions
+        // read here; each string `_to_string` returns is owned and freed once, after it is read.
         unsafe {
             for (index, &source) in SOURCES.iter().enumerate() {
                 let handle = config_source_singleton(source);
                 assert_eq!(config_source_value_of(handle), source);
                 assert_eq!(kafka_admin_ConfigEntry_ConfigSource__enum(handle) as usize, index);
+                let name = kafka_admin_ConfigEntry_ConfigSource_to_string(handle);
+                assert_eq!(CStr::from_ptr(name).to_str().unwrap(), source.to_string());
+                kafka_string_destroy(name);
             }
             for (index, &config_type) in TYPES.iter().enumerate() {
                 let handle = config_type_singleton(config_type);
                 assert_eq!(config_type_value_of(handle), config_type);
                 assert_eq!(kafka_admin_ConfigEntry_ConfigType__enum(handle) as usize, index);
+                let name = kafka_admin_ConfigEntry_ConfigType_to_string(handle);
+                assert_eq!(CStr::from_ptr(name).to_str().unwrap(), config_type.to_string());
+                kafka_string_destroy(name);
             }
         }
         assert_eq!(
@@ -1226,6 +1265,8 @@ mod tests {
             kafka_admin_ConfigEntry_ConfigType_password(),
             config_type_singleton(ConfigType::Password)
         );
+        assert_eq!(ConfigSource::DefaultConfig.to_string(), "DEFAULT_CONFIG");
+        assert_eq!(ConfigType::Password.to_string(), "PASSWORD");
     }
 
     #[test]

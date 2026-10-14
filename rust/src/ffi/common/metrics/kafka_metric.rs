@@ -20,7 +20,7 @@
 //! `KafkaMetric` implements `Metric`, reached through
 //! [`kafka_common_metrics_KafkaMetric__as_Metric`] (§4, "Traits").
 
-use std::ffi::c_void;
+use std::ffi::{c_char, c_void};
 use std::sync::{Arc, OnceLock};
 
 use crate::common::Metric;
@@ -34,6 +34,7 @@ use crate::ffi::common::metrics::metric_config::{
     box_metric_config, kafka_common_metrics_MetricConfig_t, metric_config_arc,
 };
 use crate::ffi::ffi_guard;
+use crate::ffi::util::into_c_string;
 
 /// Opaque handle to a [`KafkaMetric`], shared with its registry.
 #[repr(C)]
@@ -78,6 +79,12 @@ impl Measurable for MetricMeasurable {
         self.0
             .measurable()
             .map_or(f64::NAN, |measurable| measurable.measure(config, now))
+    }
+
+    /// The provider's own type: Java's `measurable()` hands out the provider
+    /// itself.
+    fn type_name(&self) -> Option<&'static str> {
+        self.0.measurable().ok().and_then(|measurable| measurable.type_name())
     }
 }
 
@@ -233,6 +240,22 @@ pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_measurable(
     view as *const Interface<dyn Measurable> as *const kafka_common_metrics_Measurable_t
 }
 
+/// `toString()`: the metric's name and its provider's type name, as an
+/// owned string freed with `kafka_string_destroy`.
+///
+/// # Safety
+///
+/// `self_` must be a valid metric handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_to_string(
+    self_: *const kafka_common_metrics_KafkaMetric_t,
+) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid metric handle, as
+    // `kafka_metric_ref` requires; the reference is used only within this call.
+    into_c_string(&unsafe { kafka_metric_ref(self_) }.to_string())
+}
+
 /// Frees a metric handle; null is a no-op. The metric stays registered.
 ///
 /// # Safety
@@ -266,12 +289,15 @@ mod tests {
         kafka_common_MetricValue_destroy,
     };
     use crate::ffi::common::metric_name::kafka_common_MetricName_name;
-    use crate::ffi::common::metrics::measurable::{kafka_common_metrics_Measurable_measure, take_measurable};
+    use crate::ffi::common::metrics::measurable::{
+        kafka_common_metrics_Measurable_measure, kafka_common_metrics_Measurable_type_name, take_measurable,
+    };
     use crate::ffi::common::metrics::metric_config::{
         kafka_common_metrics_MetricConfig_destroy, kafka_common_metrics_MetricConfig_new,
         kafka_common_metrics_MetricConfig_samples, kafka_common_metrics_MetricConfig_set_samples,
     };
     use crate::ffi::error_predicates::kafka_common_Error_is_local_illegal_state_error;
+    use crate::ffi::util::kafka_string_destroy;
 
     #[test]
     fn measurable_metric_exposes_its_views_and_shares_its_config() {
@@ -310,6 +336,21 @@ mod tests {
             assert!(err.is_null());
             let config = kafka_common_metrics_KafkaMetric_config(handle);
             assert_eq!(kafka_common_metrics_Measurable_measure(measurable, config, 0), 4.0);
+            // The view names the provider itself, as Java's `measurable()` returns it.
+            let avg_type = std::any::type_name::<Avg>();
+            assert_eq!(
+                CStr::from_ptr(kafka_common_metrics_Measurable_type_name(measurable)).to_str(),
+                Ok(avg_type)
+            );
+            let rendered = kafka_common_metrics_KafkaMetric_to_string(handle);
+            assert_eq!(
+                CStr::from_ptr(rendered).to_str().unwrap(),
+                format!(
+                    "KafkaMetric [metricName={}, metricValueProvider={avg_type}]",
+                    metrics.metric_name("avg", "g")
+                )
+            );
+            kafka_string_destroy(rendered);
             // The view is shared, never consumed: the metric keeps its provider.
             let shared = take_measurable(measurable as *mut _);
             assert_eq!(shared.measure(&MetricConfig::new(), 0), 4.0);

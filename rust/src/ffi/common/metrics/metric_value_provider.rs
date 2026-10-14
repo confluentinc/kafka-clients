@@ -249,6 +249,7 @@ mod tests {
             let measurable = kafka_common_metrics_MetricValueProvider_measurable(kafka_common_metrics_Measurable_new(
                 ptr::null_mut(),
                 c_measure,
+                None,
             ));
             assert_eq!(
                 kafka_common_metrics_MetricValueProvider__enum(measurable),
@@ -267,6 +268,7 @@ mod tests {
             let gauge = kafka_common_metrics_MetricValueProvider_gauge(kafka_common_metrics_Gauge_new(
                 ptr::null_mut(),
                 c_value,
+                None,
             ));
             assert_eq!(
                 kafka_common_metrics_MetricValueProvider__enum(gauge),

@@ -332,6 +332,25 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_timeout_next_request(
     unsafe { mock_ref(self_) }.timeout_next_request(number_of_requests)
 }
 
+/// `MockAdminClient.Builder.usingRaftController(boolean)`, as a setter on the
+/// constructed mock: whether the mocked cluster runs a KRaft controller
+/// quorum, which decides whether `unregister_controller` succeeds. `0` is
+/// `false` (the default), any other value `true`.
+///
+/// # Safety
+///
+/// `self_` must be a live handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_using_raft_controller(
+    self_: *const kafka_admin_MockAdminClient_t,
+    using_raft_controller: i8,
+) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle from
+    // `kafka_admin_MockAdminClient_create`, kept alive for this call, as `mock_ref` requires.
+    unsafe { mock_ref(self_) }.set_using_raft_controller(using_raft_controller != 0)
+}
+
 /// Frees the mock (see the module docs of `crate::ffi::admin` for what
 /// `_destroy` does); null is a no-op. Views from
 /// [`kafka_admin_MockAdminClient__as_Admin`] become invalid.
