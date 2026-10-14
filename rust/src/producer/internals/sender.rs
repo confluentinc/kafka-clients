@@ -929,9 +929,17 @@ impl<C: KafkaClient> Sender<C> {
         // Okay we stopped accepting requests but there may still be requests in the
         // transaction manager, accumulator or waiting for acknowledgment. Wait until
         // these are completed.
+        //
+        // Unlike Java, this also waits for `in_flight_batches` to be empty. A batch whose
+        // produce response did not complete it stays there until it expires (see
+        // `handle_produce_response_for`). Java stops without completing such a batch,
+        // so its record never resolves. Waiting lets it expire with Java's
+        // delivery-timeout error instead. `close(timeout)` still bounds the wait by
+        // forcing the close.
         while !self.force_close.load(Ordering::Acquire)
             && ((self.accumulator.has_undrained() || self.client.in_flight_request_count() > 0)
-                || self.has_pending_transactional_requests())
+                || self.has_pending_transactional_requests()
+                || !self.in_flight_batches.is_empty())
         {
             self.run_once_logging_errors().await;
         }
@@ -1253,7 +1261,8 @@ impl<C: KafkaClient> Sender<C> {
     /// error there, so the remaining responses of the same poll are still dispatched.
     ///
     /// The error is propagated only **after** every batch this request carried has been
-    /// made reachable again — retried, or failed with an error. The produce response is
+    /// made reachable again — retried, failed with an error, or returned to
+    /// `in_flight_batches` to expire at `delivery.timeout.ms`. The produce response is
     /// consumed from `pending_produce_responses` here and never arrives again, so a
     /// batch dropped on an early `?` return would hang its `send()` futures forever,
     /// leak its pooled buffer (eventually blocking `send` on `max.block.ms`), and keep
@@ -1369,17 +1378,24 @@ impl<C: KafkaClient> Sender<C> {
             }
         }
 
-        // Fail any batch this request carried that response handling never completed, so
-        // its records do not hang and its pooled buffer is not leaked. `first_error` is
-        // still surfaced to the boundary for logging (`handle_client_responses`); each
-        // swept batch gets an honest "not completed" error rather than another
-        // partition's failure misattributed to it (issues.md Issue 4).
+        // A batch left in `batches` was not completed by this response, either because an
+        // earlier partition's completion raised an error or because the broker omitted
+        // the partition. Java never removes such a batch from `inFlightBatches`, so it
+        // expires at `delivery.timeout.ms` in `getExpiredInflightBatches`
+        // (`Sender.java:185`). Put it back so the same happens here. Its request has
+        // completed, so it is no longer in flight, and `fail_expired_batches` releases
+        // its buffer at expiry. A batch that is already done came from
+        // `batches_awaiting_response` and only needed this response to release its
+        // buffer, so release it now.
         for mut batch in batches.into_values() {
-            let error = Error::kafka_message(format!(
-                "Produce response for correlation id {correlation_id} did not complete this batch; \
-                 failing its records so they do not hang"
-            ));
-            self.fail_undelivered_batch(&mut batch, error);
+            batch.set_inflight(false);
+            if batch.is_done() {
+                self.accumulator.deallocate(&mut batch);
+            } else {
+                let partition_batches = self.in_flight_batches.entry(batch.topic_partition.clone()).or_default();
+                let index = partition_batches.partition_point(|other| other.created_ms <= batch.created_ms);
+                partition_batches.insert(index, batch);
+            }
         }
 
         // Preserve Java's log-once boundary behavior: the first error out of
@@ -2109,6 +2125,12 @@ impl<C: KafkaClient> Sender<C> {
                 now - expired_batch.created_ms
             );
             let error = Error::with_message(Errors::RequestTimedOut, error_message);
+            // An in-flight batch keeps its buffer until its response arrives
+            // (KAFKA-19012). A batch whose response has already been handled is no
+            // longer in flight and no response is left to release its buffer, so it is
+            // released now, as `abortBatches` does for a batch that is not in flight
+            // (`RecordAccumulator.java:1160-1167`).
+            let deallocate_buffer = deallocate_buffer || !expired_batch.is_inflight();
             let retain = self.fail_batch_with_error(&mut expired_batch, error, false, deallocate_buffer);
             if let Some(transaction_manager) = self.transaction_manager.clone()
                 && expired_batch.in_retry()
@@ -2138,22 +2160,16 @@ impl<C: KafkaClient> Sender<C> {
         }
     }
 
-    /// Fails a batch that this request carried but that produce-response handling never
-    /// completed — because an earlier partition's completion raised an error and
-    /// abandoned the rest of the loop, or because the broker's response omitted the
-    /// partition. issues.md Issue 4.
+    /// Fails a batch that this request carried and that `accumulator.reenqueue` handed
+    /// back because it could not be re-inserted in sequence order. issues.md Issue 4.
     ///
     /// The produce response was already consumed from `pending_produce_responses` by
-    /// [`Self::handle_produce_response_for`], so — unlike an expired in-flight batch —
-    /// this buffer will **never** be released by a later response. The batch is failed
-    /// with `deallocate_batch = true` so its pooled buffer is returned now; leaving it
-    /// (or reinserting it into `in_flight_batches`) would leak the buffer and hang the
-    /// records' `send()` futures forever.
+    /// [`Self::handle_produce_response_for`], so this buffer will **never** be released
+    /// by a later response. The batch is failed with `deallocate_batch = true` so its
+    /// pooled buffer is returned now.
     ///
     /// Mirrors [`Self::fail_expired_batches`]'s per-batch tail: clear the inflight flag
-    /// (a never-completed batch is still `inflight`, and `deallocate` panics on an
-    /// inflight non-split batch — `set_inflight(false)` is idempotent for the one batch
-    /// that reached `complete_batch` before erroring), fail it, then — for an idempotent
+    /// (`deallocate` panics on an inflight non-split batch), fail it, then — for an idempotent
     /// or transactional producer whose batch was a retry — mark the sequence unresolved
     /// so no new batches drain until the in-flight sequences are resolved
     /// (`Sender.java:372-375`, the expired-batch analog).
@@ -7051,33 +7067,20 @@ mod tests {
         );
     }
 
-    /// A batch that the produce response never completes must be failed inline, not
-    /// left hanging (issues.md Issue 4, the Site-1 sweep).
+    /// A batch that the produce response does not complete stays in flight and expires
+    /// at `delivery.timeout.ms`, as in Java (issues.md Issue 4).
     ///
     /// One produce request carries two partitions to the same node. The response
-    /// completes `tp1` but **omits** `tp0` — the case Java tolerates because its
-    /// callback holds the batch objects directly, so an omitted partition simply has
-    /// its `completeBatch` skipped and its batch garbage-collected once the accumulator
-    /// releases it. Here the batch is owned by `in_flight_batches` and located by the
-    /// response; a partition the response never mentions is never matched, so before the
-    /// fix `handle_produce_response_for` dropped that owned `ProducerBatch` when the
-    /// method returned — hanging its `send()` future forever, leaking its pooled buffer
-    /// (eventually blocking `send` on `max.block.ms`), and keeping `has_incomplete()`
-    /// true (which wedges a transactional `EndTxn`). Now the batch is swept: failed
-    /// inline with an honest "did not complete this batch" error so its records resolve
-    /// and its buffer returns to the pool.
+    /// completes `tp1` but omits `tp0`. Java's response callback then skips
+    /// `completeBatch` for `tp0`, so its batch stays in `inFlightBatches` until
+    /// `getExpiredInflightBatches` fails it with a `TimeoutException`
+    /// (`Sender.java:185`, `Sender.java:362-377`). Its buffer must still be returned to
+    /// the pool, because no later response will release it.
     ///
-    /// This is the same sweep that reclaims a batch abandoned when a *later* partition's
-    /// `complete_batch` raises (Site 1 proper): `handle_produce_response` defers that
-    /// error instead of throwing it with `?`, and the errored/abandoned batches remain
-    /// in the local map for this sweep. That genuine-`complete_batch`-error trigger is
-    /// exercised directly by
-    /// [`test_a_later_partitions_completion_error_does_not_drop_earlier_batches`], which
-    /// drives a transactional producer so a *later* partition's `handle_completed_batch`
-    /// errors after an earlier partition has already completed; this test isolates the
-    /// simpler omitted-partition trigger of the same sweep.
+    /// [`test_a_later_partitions_completion_error_does_not_drop_earlier_batches`] covers
+    /// the other way a batch is left over: a `complete_batch` that raises an error.
     #[tokio::test]
-    async fn test_a_batch_the_response_never_completes_is_failed_not_hung() {
+    async fn test_a_batch_the_response_does_not_complete_expires_at_the_delivery_timeout() {
         let mut ctx = SenderTestContext::idempotent();
         let tp0 = ctx.tp0.clone();
         let tp1 = ctx.tp1.clone();
@@ -7100,66 +7103,28 @@ mod tests {
         let response = ctx.produce_response_for(&[(&tp1, 1000, Errors::None)]);
         ctx.sender.client_mut().respond_to_request(0, response);
 
-        // The poll itself must not fail: an omitted partition surfaces no error (there is
-        // nothing to log at the `NetworkClient.completeResponses` boundary), it is just
-        // swept.
+        // An omitted partition is not an error.
         ctx.sender.run_once().await.expect("the poll itself must not fail");
 
         // tp1 completes normally with its offset.
         assert!(future1.is_done(), "the answered partition must complete");
         assert_eq!(future1.get().await.expect("tp1 succeeds").offset(), 1000);
 
-        // tp0 was omitted; it must be failed inline, not left hanging.
-        assert!(future0.is_done(), "the omitted partition's record must be failed (not hung)");
-        let error0 = future0.get().await.expect_err("the omitted partition must fail");
-        assert!(
-            error0.message().contains("did not complete this batch"),
-            "unexpected failure cause for the omitted partition: {error0}"
-        );
-
-        // Nothing hangs, leaks, or stays tracked (Issue 4).
-        assert!(
-            !ctx.accumulator.has_incomplete(),
-            "no batch may remain incomplete after the response is handled"
-        );
-        assert_eq!(
-            ctx.accumulator.buffer_pool_available_memory(),
-            total_memory,
-            "both batches' buffers must be returned to the pool"
-        );
-        assert!(
-            ctx.sender.in_flight_batches(&tp0).is_empty() && ctx.sender.in_flight_batches(&tp1).is_empty(),
-            "no batch may remain in flight for either partition"
-        );
-        assert!(
-            ctx.sender.batches_awaiting_response.is_empty(),
-            "the swept batch is deallocated inline, not parked awaiting its consumed response"
-        );
+        assert_left_in_flight_until_delivery_timeout(&mut ctx, &tp0, &future0, total_memory).await;
     }
 
     /// A `complete_batch` that raises for a *later* partition must not drop the batches
-    /// the same request carried for *earlier* partitions (issues.md Issue 4, Site 1).
+    /// the same request carried (issues.md Issue 4).
     ///
-    /// One produce request carries two partitions of a **transactional** producer to the
-    /// same node. Both are answered successfully in one response, `tp0` first. Before the
-    /// response is handled, `tp1`'s `TxnPartitionMap` entry is removed, so `tp1`'s
-    /// completion (`complete_batch` → `complete_batch_success` → `handle_completed_batch`
-    /// → `update_last_acked_offset` → `TxnPartitionMap::get_mut`) raises a genuine error
-    /// mid-loop, *after* `tp0` has already completed and been released.
+    /// One produce request carries two partitions of a transactional producer to the
+    /// same node, and one response answers both, `tp0` first. `tp1`'s `TxnPartitionMap`
+    /// entry is removed beforehand, so its completion (`complete_batch_success` →
+    /// `handle_completed_batch`) raises after `tp0` has completed.
     ///
-    /// Before the fix, `handle_produce_response` threw that error out of
-    /// `handle_produce_response_for` with `?`, dropping every batch still owned by the
-    /// function-local map — including `tp1`'s own owned `ProducerBatch`. That hung its
-    /// `send()` future forever, leaked its pooled buffer (eventually blocking `send` on
-    /// `max.block.ms`), and kept `has_incomplete()` true, which wedges a transactional
-    /// `EndTxn` / `commit_transaction` / `abort_transaction`.
-    ///
-    /// Now the error is *deferred*: `handle_produce_response` returns it alongside the
-    /// actions collected before it (so `tp0`'s completion still stands), and the abandoned
-    /// `tp1` batch is left in the local map and failed by the sweep with an honest "did
-    /// not complete this batch" error. The error is still surfaced to the
-    /// `NetworkClient.completeResponses` boundary and logged once, so `run_once` itself
-    /// returns `Ok`.
+    /// In Java the `IllegalStateException` leaves the response callback and is logged by
+    /// `NetworkClient.completeResponses`. `tp0` keeps its result, and `tp1`'s batch stays
+    /// in `inFlightBatches` until it expires at `delivery.timeout.ms`. The same must
+    /// happen here, and `tp1`'s buffer must still be returned to the pool.
     #[tokio::test]
     async fn test_a_later_partitions_completion_error_does_not_drop_earlier_batches() {
         let mut ctx = SenderTestContext::transactional();
@@ -7215,46 +7180,90 @@ mod tests {
         let response = ctx.produce_response_for(&[(&tp0, 1000, Errors::None), (&tp1, 2000, Errors::None)]);
         ctx.sender.client_mut().respond_to_request(0, response);
 
-        // The poll must not fail: the deferred error is logged once at the
-        // NetworkClient.completeResponses boundary and swallowed.
+        // The poll must not fail: the error is logged once at the
+        // NetworkClient.completeResponses boundary.
         ctx.sender.run_once().await.expect("the poll itself must not fail");
 
-        // tp0 was completed and released before tp1's error — it must keep its offset.
+        // tp0 was completed before tp1's error and keeps its offset.
         assert!(future0.is_done(), "the earlier partition must complete");
         assert_eq!(future0.get().await.expect("tp0 succeeds").offset(), 1000);
 
-        // tp1's completion raised; its owned batch must be FAILED by the sweep, not
-        // dropped. Before the fix its future hung here.
-        assert!(
-            future1.is_done(),
-            "the later partition whose completion errored must be failed (not hung)"
+        assert_left_in_flight_until_delivery_timeout(&mut ctx, &tp1, &future1, total_memory).await;
+    }
+
+    /// A graceful close waits for a batch that a produce response did not complete, so
+    /// its record fails with the delivery-timeout error instead of never resolving.
+    #[tokio::test]
+    async fn test_a_graceful_close_waits_for_a_batch_the_response_did_not_complete() {
+        let mut ctx = SenderTestContext::idempotent();
+        let tp0 = ctx.tp0.clone();
+        let tp1 = ctx.tp1.clone();
+        initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
+        let total_memory = ctx.accumulator.buffer_pool_available_memory();
+
+        let future0 = ctx.append_to_accumulator_with(&tp0, 0, "k0", "v0").await;
+        let future1 = ctx.append_to_accumulator_with(&tp1, 0, "k1", "v1").await;
+        ctx.sender.run_once().await.expect("run_once");
+        let response = ctx.produce_response_for(&[(&tp1, 1000, Errors::None)]);
+        ctx.sender.client_mut().respond_to_request(0, response);
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(future1.is_done());
+        assert!(!future0.is_done());
+
+        ctx.time.sleep(DELIVERY_TIMEOUT_MS as i64);
+        ctx.sender.initiate_close();
+        tokio::time::timeout(std::time::Duration::from_secs(5), ctx.sender.run())
+            .await
+            .expect("the close must finish");
+
+        assert!(future0.is_done(), "the record must not be left unresolved by the close");
+        assert_eq!(
+            future0.get().await.expect_err("the record must expire").error(),
+            Errors::RequestTimedOut
         );
-        let error1 = future1.get().await.expect_err("tp1's completion must fail its record");
-        assert!(
-            error1.message().contains("did not complete this batch"),
-            "unexpected failure cause for the abandoned partition: {error1}"
+        assert!(!ctx.accumulator.has_incomplete());
+        assert_eq!(ctx.accumulator.buffer_pool_available_memory(), total_memory);
+    }
+
+    /// Asserts that the batch for `tp`, which a produce response did not complete, is
+    /// still in flight, and that it fails with Java's delivery-timeout error once
+    /// `delivery.timeout.ms` has passed since it was created, with its buffer returned
+    /// to the pool.
+    async fn assert_left_in_flight_until_delivery_timeout(
+        ctx: &mut SenderTestContext,
+        tp: &TopicPartition,
+        future: &FutureRecordMetadata,
+        total_memory: i64,
+    ) {
+        assert!(!future.is_done(), "the record must stay pending until the delivery timeout");
+        assert_eq!(ctx.sender.in_flight_batches(tp).len(), 1, "the batch must stay in flight");
+        assert!(ctx.accumulator.has_incomplete());
+
+        ctx.time.sleep(DELIVERY_TIMEOUT_MS as i64 - 1);
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(!future.is_done(), "the batch must not expire before the delivery timeout");
+
+        ctx.time.sleep(1);
+        ctx.sender.run_once().await.expect("run_once");
+        assert!(future.is_done(), "the batch must expire at the delivery timeout");
+        let error = future.get().await.expect_err("the expired record must fail");
+        assert_eq!(error.error(), Errors::RequestTimedOut);
+        assert_eq!(
+            error.message(),
+            format!(
+                "Expiring 1 record(s) for {tp}:{DELIVERY_TIMEOUT_MS} ms has passed since batch creation. \
+                 The request has not been sent, or no server response has been received yet."
+            )
         );
 
-        // Nothing hangs, leaks, or stays tracked (Issue 4): both records resolved, both
-        // buffers back in the pool, nothing in flight, incomplete, or parked awaiting a
-        // response that already arrived.
-        assert!(
-            !ctx.accumulator.has_incomplete(),
-            "no batch may remain incomplete after the response is handled"
-        );
+        assert!(!ctx.accumulator.has_incomplete());
         assert_eq!(
             ctx.accumulator.buffer_pool_available_memory(),
             total_memory,
             "both batches' buffers must be returned to the pool"
         );
-        assert!(
-            ctx.sender.in_flight_batches(&tp0).is_empty() && ctx.sender.in_flight_batches(&tp1).is_empty(),
-            "no batch may remain in flight for either partition"
-        );
-        assert!(
-            ctx.sender.batches_awaiting_response.is_empty(),
-            "the swept batch is deallocated inline, not parked awaiting its consumed response"
-        );
+        assert!(ctx.sender.in_flight_batches(tp).is_empty());
+        assert!(ctx.sender.batches_awaiting_response.is_empty());
     }
 
     // =====================================================================
