@@ -18,7 +18,8 @@
 use std::ffi::c_char;
 
 use crate::admin::FenceProducersResult;
-use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_result, out_slot, result_ref};
+use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_result, result_ref};
+use crate::ffi::common::deliver_value;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
@@ -72,64 +73,56 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_fenced_producers(
     h.ctx.string_keyed_future_map(fenced.iter(), |ctx, f| ctx.void_future(f))
 }
 
-/// `producerId(String transactionalId)`: delivers through `out_producer_id`
-/// an owned future (freed with `kafka_common_KafkaFuture_destroy`) whose
-/// `get` yields an `int64_t *` owned by the future, or returns the owned
-/// `IllegalArgumentError` when `transactional_id` was not
-/// part of the request.
+/// `producerId(String transactionalId)`: returns an owned future (freed with
+/// `kafka_common_KafkaFuture_destroy`) whose `get` yields an `int64_t *` owned
+/// by the future, or stores the owned `IllegalArgumentError` in `*out_err` and
+/// returns `NULL` when `transactional_id` was not part of the request.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle, `transactional_id` a valid
-/// NUL-terminated string and `out_producer_id` a valid slot.
+/// NUL-terminated string and `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FenceProducersResult_producer_id(
     self_: *const kafka_admin_FenceProducersResult_t,
     transactional_id: *const c_char,
-    out_producer_id: *mut *mut kafka_common_KafkaFuture_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     // SAFETY: Per this function's `# Safety`, `transactional_id` is a valid NUL-terminated string,
     // as `c_str_to_string` requires; it is copied into a `String` during the call.
     let transactional_id = unsafe { c_str_to_string(transactional_id) };
-    // SAFETY: Per this function's `# Safety`, `out_producer_id` is a valid slot, as `out_slot`
-    // requires.
-    unsafe {
-        out_slot(h.result.producer_id(&transactional_id), out_producer_id, |f| {
-            h.ctx.value_future(&f)
-        })
-    }
+    // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_value` requires.
+    unsafe { deliver_value(h.result.producer_id(&transactional_id), out_err, |f| h.ctx.value_future(&f)) }
 }
 
-/// `epochId(String transactionalId)`: delivers through `out_epoch_id` an
-/// owned future (freed with `kafka_common_KafkaFuture_destroy`) whose `get`
-/// yields an `int16_t *` owned by the future, or returns the owned
-/// `IllegalArgumentError` when `transactional_id` was not
-/// part of the request.
+/// `epochId(String transactionalId)`: returns an owned future (freed with
+/// `kafka_common_KafkaFuture_destroy`) whose `get` yields an `int16_t *` owned
+/// by the future, or stores the owned `IllegalArgumentError` in `*out_err` and
+/// returns `NULL` when `transactional_id` was not part of the request.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle, `transactional_id` a valid
-/// NUL-terminated string and `out_epoch_id` a valid slot.
+/// NUL-terminated string and `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FenceProducersResult_epoch_id(
     self_: *const kafka_admin_FenceProducersResult_t,
     transactional_id: *const c_char,
-    out_epoch_id: *mut *mut kafka_common_KafkaFuture_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     // SAFETY: Per this function's `# Safety`, `transactional_id` is a valid NUL-terminated string,
     // as `c_str_to_string` requires; it is copied into a `String` during the call.
     let transactional_id = unsafe { c_str_to_string(transactional_id) };
-    // SAFETY: Per this function's `# Safety`, `out_epoch_id` is a valid slot, as `out_slot`
-    // requires.
-    unsafe { out_slot(h.result.epoch_id(&transactional_id), out_epoch_id, |f| h.ctx.value_future(&f)) }
+    // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_value` requires.
+    unsafe { deliver_value(h.result.epoch_id(&transactional_id), out_err, |f| h.ctx.value_future(&f)) }
 }
 
 /// `all()`: an owned `KafkaFuture<Void>` freed with

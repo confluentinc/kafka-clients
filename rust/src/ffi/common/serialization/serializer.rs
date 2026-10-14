@@ -18,14 +18,14 @@
 //!
 //! `T` is a `void *` (§4, "Generic types"): `data` is whatever the
 //! implementation reads, `NULL` being Java's `null`. A C implementation
-//! writes the serialized bytes into its `out_*` slot as a `kafka_Bytes_t`
-//! that Rust copies once the function returns, on the same thread and before
-//! calling it again there, so the buffer behind it must stay valid and
-//! unwritten past the function's return until then; `data == NULL` in the
-//! slot is Java's `null` array.
+//! returns the serialized bytes as a `kafka_Bytes_t` that Rust copies once
+//! the function returns, on the same thread and before calling it again
+//! there, so the buffer behind it must stay valid and unwritten past the
+//! function's return until then; a returned `data == NULL` is Java's `null`
+//! array.
 //!
 //! The invokers deliver the bytes the other way round: the `kafka_Bytes_t`
-//! they write borrows a buffer the handle keeps, valid until the next
+//! they return borrows a buffer the handle keeps, valid until the next
 //! `serialize*` call on the same handle or its destruction — the same
 //! lifetime a `const char *` getter gives.
 //!
@@ -44,7 +44,7 @@ use crate::common::serialization::Serializer;
 use crate::ffi::common::header::internals::record_headers::{
     RecordHeadersInner, kafka_common_header_internals_RecordHeaders_t, record_headers_ref,
 };
-use crate::ffi::common::{box_error, kafka_common_Error_t, take_error};
+use crate::ffi::common::{deliver_value, kafka_common_Error_t, take_error};
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{GenericValue, c_str_to_string, kafka_Bytes_t, owned_c_string};
 
@@ -59,17 +59,18 @@ pub struct kafka_common_serialization_Serializer_t {
 pub(crate) type DynSerializer = dyn Serializer<GenericValue> + Send + Sync;
 
 /// `byte[] serialize(String topic, T data)` of a C implementation: `data` is
-/// the `void *` (`NULL` for Java's `null`); the bytes written to
-/// `out_serialize` are copied once the function returns, on the same thread
-/// and before it is called again there, so they must stay valid and
-/// unwritten until then (not on the function's stack). `data == NULL` in the
-/// slot stands for a `null` array. Returns `NULL` or an owned error.
+/// the `void *` (`NULL` for Java's `null`); the bytes it returns are copied
+/// once the function returns, on the same thread and before it is called
+/// again there, so they must stay valid and unwritten until then (not on the
+/// function's stack). A returned `data == NULL` stands for a `null` array. On
+/// failure it stores an owned error in `*out_err`, which points at `NULL` on
+/// entry, and its return value is ignored.
 pub type kafka_common_serialization_Serializer_serialize_fn_t = unsafe extern "C" fn(
     self_: *mut c_void,
     topic: *const c_char,
     data: *const c_void,
-    out_serialize: *mut kafka_Bytes_t,
-) -> *mut kafka_common_Error_t;
+    out_err: *mut *mut kafka_common_Error_t,
+) -> kafka_Bytes_t;
 
 /// `byte[] serialize(String topic, Headers headers, T data)` of a C
 /// implementation; `headers` is a copy borrowed for the call. `NULL` is the
@@ -80,8 +81,8 @@ pub type kafka_common_serialization_Serializer_serialize_with_headers_fn_t = Opt
         topic: *const c_char,
         headers: *const kafka_common_header_internals_RecordHeaders_t,
         data: *const c_void,
-        out_serialize_with_headers: *mut kafka_Bytes_t,
-    ) -> *mut kafka_common_Error_t,
+        out_err: *mut *mut kafka_common_Error_t,
+    ) -> kafka_Bytes_t,
 >;
 
 /// The Rust-only `serialize_owned_with_headers` of a C implementation: the
@@ -94,8 +95,8 @@ pub type kafka_common_serialization_Serializer_serialize_owned_with_headers_fn_t
         topic: *const c_char,
         headers: *const kafka_common_header_internals_RecordHeaders_t,
         data: *const c_void,
-        out_serialize_owned_with_headers: *mut kafka_Bytes_t,
-    ) -> *mut kafka_common_Error_t,
+        out_err: *mut *mut kafka_common_Error_t,
+    ) -> kafka_Bytes_t,
 >;
 
 /// What a [`kafka_common_serialization_Serializer_t`] points at: the
@@ -216,12 +217,13 @@ fn data_ptr(data: Option<&GenericValue>) -> *const c_void {
     data.map_or(ptr::null(), |value| value.as_ptr().cast_const())
 }
 
-/// Reads a C implementation's result: its error, or a copy of the bytes it
-/// wrote (`None` for a `NULL` array).
+/// Reads a C implementation's result: the error it stored, or a copy of the
+/// bytes it returned (`None` for a `NULL` array).
 ///
 /// # Safety
 ///
-/// `out` must be what the C implementation wrote: null or `len` readable
+/// `error` must be what the C implementation stored in its `out_err` slot,
+/// null or an owned error; `out` what it returned: null or `len` readable
 /// bytes.
 unsafe fn collect(error: *mut kafka_common_Error_t, out: kafka_Bytes_t) -> Result<Option<Vec<u8>>, Error> {
     // SAFETY: Per this function's `# Safety`, `error` is null or an owned error handle, the
@@ -241,19 +243,19 @@ unsafe fn collect(error: *mut kafka_common_Error_t, out: kafka_Bytes_t) -> Resul
 impl Serializer<GenericValue> for CSerializer {
     fn serialize(&self, topic: &str, data: Option<&GenericValue>) -> Result<Option<Vec<u8>>, Error> {
         let topic = owned_c_string(topic);
-        let mut out = kafka_Bytes_t::NULL;
+        let mut error = ptr::null_mut();
         // SAFETY: `self.serialize` and `self.self_` are the pair the C caller registered together
         // through `kafka_common_serialization_Serializer_new`, whose rustdoc has the caller keep
         // `self_` alive until the handle, or the client that consumed it, is destroyed, which is
         // after this `&self` call, and allows the call to come from any thread, concurrently with
         // others. The arguments are borrowed for the call, as the `_fn_t` rustdoc states: `topic`
         // is a `CString` local, `data` the `void *` the caller of this method paired with this
-        // serializer, and `out` a local slot.
-        let error = unsafe { (self.serialize)(self.self_, topic.as_ptr(), data_ptr(data), &raw mut out) };
-        // SAFETY: `error` is what the C function just returned: null or an owned error handle, as
-        // its `_fn_t` rustdoc states; `out` is the array it wrote, or the null it was initialised
-        // with, whose bytes the module rustdoc keeps valid until Rust has copied them, which
-        // `collect` does before returning, as it requires.
+        // serializer, and `out_err` a local slot pointing at null.
+        let out = unsafe { (self.serialize)(self.self_, topic.as_ptr(), data_ptr(data), &raw mut error) };
+        // SAFETY: `error` is what the C function stored in its slot: null or an owned error handle,
+        // as its `_fn_t` rustdoc states; `out` is the array it returned, whose bytes the module
+        // rustdoc keeps valid until Rust has copied them, which `collect` does before returning, as
+        // it requires.
         unsafe { collect(error, out) }
     }
 
@@ -269,7 +271,7 @@ impl Serializer<GenericValue> for CSerializer {
         let topic = owned_c_string(topic);
         // A copy borrowed for the call: the class handle owns its headers.
         let headers = RecordHeadersInner::new(headers.clone());
-        let mut out = kafka_Bytes_t::NULL;
+        let mut error = ptr::null_mut();
         // SAFETY: `serialize_with_headers` and `self.self_` are the pair the C caller registered
         // together through `kafka_common_serialization_Serializer_new`, whose rustdoc has the
         // caller keep `self_` alive until the handle, or the client that consumed it, is destroyed,
@@ -277,14 +279,14 @@ impl Serializer<GenericValue> for CSerializer {
         // concurrently with others. The arguments are borrowed for the call, as the `_fn_t` rustdoc
         // states: `topic` is a `CString` local, `headers` the call-local `RecordHeadersInner` built
         // from a copy of the argument, `data` the `void *` the caller of this method paired with
-        // this serializer, and `out` a local slot.
-        let error = unsafe {
-            serialize_with_headers(self.self_, topic.as_ptr(), headers.as_ptr(), data_ptr(data), &raw mut out)
+        // this serializer, and `out_err` a local slot pointing at null.
+        let out = unsafe {
+            serialize_with_headers(self.self_, topic.as_ptr(), headers.as_ptr(), data_ptr(data), &raw mut error)
         };
-        // SAFETY: `error` is what the C function just returned: null or an owned error handle, as
-        // its `_fn_t` rustdoc states; `out` is the array it wrote, or the null it was initialised
-        // with, whose bytes the module rustdoc keeps valid until Rust has copied them, which
-        // `collect` does before returning, as it requires.
+        // SAFETY: `error` is what the C function stored in its slot: null or an owned error handle,
+        // as its `_fn_t` rustdoc states; `out` is the array it returned, whose bytes the module
+        // rustdoc keeps valid until Rust has copied them, which `collect` does before returning, as
+        // it requires.
         unsafe { collect(error, out) }
     }
 
@@ -299,7 +301,7 @@ impl Serializer<GenericValue> for CSerializer {
         };
         let topic = owned_c_string(topic);
         let headers = RecordHeadersInner::new(headers.clone());
-        let mut out = kafka_Bytes_t::NULL;
+        let mut error = ptr::null_mut();
         // SAFETY: `serialize_owned_with_headers` and `self.self_` are the pair the C caller
         // registered together through `kafka_common_serialization_Serializer_new`, whose rustdoc
         // has the caller keep `self_` alive until the handle, or the client that consumed it, is
@@ -307,20 +309,20 @@ impl Serializer<GenericValue> for CSerializer {
         // concurrently with others. The arguments are borrowed for the call, as the `_fn_t` rustdoc
         // states: `topic` is a `CString` local, `headers` the call-local `RecordHeadersInner` built
         // from a copy of the argument, `data` the `void *` the caller of this method paired with
-        // this serializer, and `out` a local slot.
-        let error = unsafe {
+        // this serializer, and `out_err` a local slot pointing at null.
+        let out = unsafe {
             serialize_owned_with_headers(
                 self.self_,
                 topic.as_ptr(),
                 headers.as_ptr(),
                 data_ptr(data.as_ref()),
-                &raw mut out,
+                &raw mut error,
             )
         };
-        // SAFETY: `error` is what the C function just returned: null or an owned error handle, as
-        // its `_fn_t` rustdoc states; `out` is the array it wrote, or the null it was initialised
-        // with, whose bytes the module rustdoc keeps valid until Rust has copied them, which
-        // `collect` does before returning, as it requires.
+        // SAFETY: `error` is what the C function stored in its slot: null or an owned error handle,
+        // as its `_fn_t` rustdoc states; `out` is the array it returned, whose bytes the module
+        // rustdoc keeps valid until Rust has copied them, which `collect` does before returning, as
+        // it requires.
         unsafe { collect(error, out) }
     }
 }
@@ -345,31 +347,26 @@ pub extern "C" fn kafka_common_serialization_Serializer_new(
     SerializerInner::owned(serializer)
 }
 
-/// Runs `serialize` on the implementation behind `self_` and writes its
-/// bytes to `out`, borrowed from the handle until its next call.
+/// Runs `serialize` on the implementation behind `self_` and returns its
+/// bytes, borrowed from the handle until its next call; on failure stores
+/// the error in `*out_err`.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid serializer handle and `out` a valid slot.
+/// `self_` must be a valid serializer handle and `out_err` as `fail_with`
+/// requires.
 unsafe fn invoke(
     self_: *const kafka_common_serialization_Serializer_t,
-    out: *mut kafka_Bytes_t,
+    out_err: *mut *mut kafka_common_Error_t,
     serialize: impl FnOnce(&DynSerializer) -> Result<Option<Vec<u8>>, Error>,
-) -> *mut kafka_common_Error_t {
+) -> kafka_Bytes_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid serializer handle, as
     // `serializer_ref` requires; the reference is used only within this call.
     let inner = unsafe { serializer_ref(self_) };
-    match serialize(inner.get()) {
-        Ok(bytes) => {
-            // SAFETY: Per this function's `# Safety`, `out` is a valid slot, so the write is sound.
-            // The array written borrows the handle's `output`, which `store` keeps until the next
-            // `serialize*` call on this handle or its destruction, the lifetime the exported
-            // invokers document.
-            unsafe { *out = inner.store(bytes) };
-            ptr::null_mut()
-        },
-        Err(error) => box_error(error),
-    }
+    // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_value` requires. The array
+    // returned borrows the handle's `output`, which `store` keeps until the next `serialize*` call
+    // on this handle or its destruction, the lifetime the exported invokers document.
+    unsafe { deliver_value(serialize(inner.get()), out_err, |bytes| inner.store(bytes)) }
 }
 
 /// The `Option<&GenericValue>` for a `void *` parameter.
@@ -378,35 +375,35 @@ fn generic(data: *const c_void) -> Option<GenericValue> {
 }
 
 /// `byte[] serialize(String topic, T data)`: `data` is the `void *` the
-/// implementation reads, `NULL` for Java's `null`. On success writes the
-/// bytes to `out_serialize` (`data == NULL` for a `null` array), borrowed
-/// from the handle until its next `serialize*` call or its destruction;
-/// returns the owned error otherwise.
+/// implementation reads, `NULL` for Java's `null`. Returns the bytes
+/// (`data == NULL` for a `null` array), borrowed from the handle until its
+/// next `serialize*` call or its destruction; on failure stores the owned
+/// error in `*out_err` and returns a `NULL` array.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid serializer handle, `topic` a valid
 /// NUL-terminated string, `data` null or the representation the
 /// implementation reads, alive and unchanged for the call, and
-/// `out_serialize` a valid slot.
+/// `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_serialization_Serializer_serialize(
     self_: *const kafka_common_serialization_Serializer_t,
     topic: *const c_char,
     data: *const c_void,
-    out_serialize: *mut kafka_Bytes_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> kafka_Bytes_t {
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
     // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
     let topic = unsafe { c_str_to_string(topic) };
     let data = generic(data);
     // SAFETY: Per this function's `# Safety`, `self_` is a valid serializer handle and
-    // `out_serialize` a valid slot, as `invoke` requires; `data` is null or the representation the
+    // `out_err` as `invoke` requires; `data` is null or the representation the
     // implementation reads, alive and unchanged for this call, and every borrow the closure
     // captures is used only within this call.
-    unsafe { invoke(self_, out_serialize, |serializer| serializer.serialize(&topic, data.as_ref())) }
+    unsafe { invoke(self_, out_err, |serializer| serializer.serialize(&topic, data.as_ref())) }
 }
 
 /// `byte[] serialize(String topic, Headers headers, T data)`; the bytes
@@ -417,7 +414,7 @@ pub unsafe extern "C" fn kafka_common_serialization_Serializer_serialize(
 /// `self_` must be a valid serializer handle, `topic` a valid
 /// NUL-terminated string, `headers` a valid record-headers handle, `data`
 /// null or the representation the implementation reads, alive and unchanged
-/// for the call, and `out_serialize_with_headers` a valid slot.
+/// for the call, and `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_serialization_Serializer_serialize_with_headers(
@@ -425,8 +422,8 @@ pub unsafe extern "C" fn kafka_common_serialization_Serializer_serialize_with_he
     topic: *const c_char,
     headers: *const kafka_common_header_internals_RecordHeaders_t,
     data: *const c_void,
-    out_serialize_with_headers: *mut kafka_Bytes_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> kafka_Bytes_t {
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
     // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
@@ -437,11 +434,11 @@ pub unsafe extern "C" fn kafka_common_serialization_Serializer_serialize_with_he
     let headers = unsafe { record_headers_ref(headers) };
     let data = generic(data);
     // SAFETY: Per this function's `# Safety`, `self_` is a valid serializer handle and
-    // `out_serialize_with_headers` a valid slot, as `invoke` requires; `data` is null or the
+    // `out_err` as `invoke` requires; `data` is null or the
     // representation the implementation reads, alive and unchanged for this call, and every borrow
     // the closure captures is used only within this call.
     unsafe {
-        invoke(self_, out_serialize_with_headers, |serializer| {
+        invoke(self_, out_err, |serializer| {
             serializer.serialize_with_headers(&topic, headers, data.as_ref())
         })
     }
@@ -456,7 +453,7 @@ pub unsafe extern "C" fn kafka_common_serialization_Serializer_serialize_with_he
 /// `self_` must be a valid serializer handle, `topic` a valid
 /// NUL-terminated string, `headers` a valid record-headers handle, `data`
 /// null or the representation the implementation reads, alive and unchanged
-/// for the call, and `out_serialize_owned_with_headers` a valid slot.
+/// for the call, and `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_serialization_Serializer_serialize_owned_with_headers(
@@ -464,8 +461,8 @@ pub unsafe extern "C" fn kafka_common_serialization_Serializer_serialize_owned_w
     topic: *const c_char,
     headers: *const kafka_common_header_internals_RecordHeaders_t,
     data: *const c_void,
-    out_serialize_owned_with_headers: *mut kafka_Bytes_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> kafka_Bytes_t {
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
     // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
@@ -476,11 +473,11 @@ pub unsafe extern "C" fn kafka_common_serialization_Serializer_serialize_owned_w
     let headers = unsafe { record_headers_ref(headers) };
     let data = generic(data);
     // SAFETY: Per this function's `# Safety`, `self_` is a valid serializer handle and
-    // `out_serialize_owned_with_headers` a valid slot, as `invoke` requires; `data` is null or the
+    // `out_err` as `invoke` requires; `data` is null or the
     // representation the implementation reads, alive and unchanged for this call, and every borrow
     // the closure captures is used only within this call.
     unsafe {
-        invoke(self_, out_serialize_owned_with_headers, |serializer| {
+        invoke(self_, out_err, |serializer| {
             serializer.serialize_owned_with_headers(&topic, headers, data)
         })
     }
@@ -535,46 +532,45 @@ mod tests {
         // that passes it back.
         unsafe { &*(self_ as *const Upper) }
     }
-    fn write_upper(self_: *mut c_void, data: *const c_void, out: *mut kafka_Bytes_t) -> *mut kafka_common_Error_t {
+    fn write_upper(self_: *mut c_void, data: *const c_void, out_err: *mut *mut kafka_common_Error_t) -> kafka_Bytes_t {
         if data.is_null() {
-            // SAFETY: Test code: `out` is the valid slot the invoker passes.
-            unsafe { *out = kafka_Bytes_t::NULL };
-            return ptr::null_mut();
+            return kafka_Bytes_t::NULL;
         }
         // SAFETY: Test code: `data` is non-null here, and every caller passes a `CString`'s
         // pointer, alive for the call.
         let text = unsafe { CStr::from_ptr(data as *const c_char) }.to_str().unwrap();
         if text == "fail" {
             let message = CString::new("cannot serialize fail").unwrap();
-            // SAFETY: Test code: `message` outlives the constructor, which copies it; the error
-            // returned is handed to Rust, which consumes it.
-            return unsafe { kafka_common_Error_serialization(message.as_ptr()) };
+            // SAFETY: Test code: `message` outlives the constructor, which copies it; `out_err` is
+            // the valid slot pointing at null the invoker passes, and the error stored there is
+            // handed to Rust, which consumes it.
+            unsafe { *out_err = kafka_common_Error_serialization(message.as_ptr()) };
+            return kafka_Bytes_t::NULL;
         }
         let mut buffer = upper(self_).buffer.lock().unwrap();
         *buffer = text.to_uppercase().into_bytes();
-        // SAFETY: Test code: `out` is the valid slot the invoker passes; the array written points
-        // into `imp`'s buffer, which stays alive until Rust has copied it.
-        unsafe { *out = kafka_Bytes_t::from_slice(&buffer) };
-        ptr::null_mut()
+        // The array returned points into `imp`'s buffer, which stays alive until Rust has copied
+        // it.
+        kafka_Bytes_t::from_slice(&buffer)
     }
     unsafe extern "C" fn c_serialize(
         self_: *mut c_void,
         topic: *const c_char,
         data: *const c_void,
-        out: *mut kafka_Bytes_t,
-    ) -> *mut kafka_common_Error_t {
+        out_err: *mut *mut kafka_common_Error_t,
+    ) -> kafka_Bytes_t {
         // SAFETY: Test code: `topic` is the `CString` the invoker passes, alive for the call.
         let topic = unsafe { CStr::from_ptr(topic) }.to_str().unwrap();
         upper(self_).calls.lock().unwrap().push(format!("serialize {topic}"));
-        write_upper(self_, data, out)
+        write_upper(self_, data, out_err)
     }
     unsafe extern "C" fn c_serialize_with_headers(
         self_: *mut c_void,
         topic: *const c_char,
         headers: *const kafka_common_header_internals_RecordHeaders_t,
         data: *const c_void,
-        out: *mut kafka_Bytes_t,
-    ) -> *mut kafka_common_Error_t {
+        out_err: *mut *mut kafka_common_Error_t,
+    ) -> kafka_Bytes_t {
         // SAFETY: Test code: `topic` is the `CString` the invoker passes, alive for the call.
         let topic = unsafe { CStr::from_ptr(topic) }.to_str().unwrap();
         // SAFETY: Test code: `headers` is the record-headers handle the invoker passes, alive for
@@ -591,12 +587,12 @@ mod tests {
             .lock()
             .unwrap()
             .push(format!("serialize_with_headers {topic} {text}"));
-        write_upper(self_, data, out)
+        write_upper(self_, data, out_err)
     }
 
     unsafe fn bytes_of(out: kafka_Bytes_t) -> Option<Vec<u8>> {
-        // SAFETY: Test code: `out` is a view over a static byte string or the array the handle's
-        // last call wrote, read before the next call on that handle.
+        // SAFETY: Test code: `out` is null or the array the handle's last call returned, read
+        // before the next call on that handle.
         unsafe { out.as_slice() }.map(<[u8]>::to_vec)
     }
 
@@ -617,47 +613,48 @@ mod tests {
         // SAFETY: Test code: `handle` comes from `kafka_common_serialization_Serializer_new` and is
         // destroyed once, at the end; `imp` outlives it; `headers` comes from `box_record_headers`
         // and is destroyed once, after its last use; `topic` and `hello` outlive the calls reading
-        // them; `out` is a valid local slot, read before the next call on the handle.
+        // them; `err` is a valid slot pointing at null, left null by every call (asserted); each
+        // returned view is read before the next call on the handle.
         unsafe {
-            let mut out = kafka_Bytes_t::NULL;
-            let error = kafka_common_serialization_Serializer_serialize(
+            let mut err = ptr::null_mut();
+            let out = kafka_common_serialization_Serializer_serialize(
                 handle,
                 topic.as_ptr(),
                 hello.as_ptr().cast(),
-                &raw mut out,
+                &raw mut err,
             );
-            assert!(error.is_null());
+            assert!(err.is_null());
             assert_eq!(bytes_of(out), Some(b"HELLO".to_vec()));
             // The C buffer is overwritten by the next call; the handle's copy
             // is what the first view pointed at, so it is a different buffer.
             assert_ne!(out.data, imp.buffer.lock().unwrap().as_ptr());
 
-            let error = kafka_common_serialization_Serializer_serialize_with_headers(
+            let out = kafka_common_serialization_Serializer_serialize_with_headers(
                 handle,
                 topic.as_ptr(),
                 headers,
                 hello.as_ptr().cast(),
-                &raw mut out,
+                &raw mut err,
             );
-            assert!(error.is_null());
+            assert!(err.is_null());
             assert_eq!(bytes_of(out), Some(b"HELLO".to_vec()));
 
             // The owned variant has no C method: it falls back to
             // `serialize_with_headers`, the Java default chain.
-            let error = kafka_common_serialization_Serializer_serialize_owned_with_headers(
+            let out = kafka_common_serialization_Serializer_serialize_owned_with_headers(
                 handle,
                 topic.as_ptr(),
                 headers,
                 hello.as_ptr().cast(),
-                &raw mut out,
+                &raw mut err,
             );
-            assert!(error.is_null());
+            assert!(err.is_null());
             assert_eq!(bytes_of(out), Some(b"HELLO".to_vec()));
 
             // Null data is Java's null.
-            let error =
-                kafka_common_serialization_Serializer_serialize(handle, topic.as_ptr(), ptr::null(), &raw mut out);
-            assert!(error.is_null());
+            let out =
+                kafka_common_serialization_Serializer_serialize(handle, topic.as_ptr(), ptr::null(), &raw mut err);
+            assert!(err.is_null());
             assert!(out.data.is_null());
 
             kafka_common_header_internals_RecordHeaders_destroy(headers);
@@ -681,7 +678,7 @@ mod tests {
     }
 
     #[test]
-    fn c_error_is_returned_owned_and_null_optional_methods_are_the_java_default() {
+    fn c_error_is_stored_owned_and_null_optional_methods_are_the_java_default() {
         let imp = Upper::default();
         let handle =
             kafka_common_serialization_Serializer_new(&imp as *const Upper as *mut c_void, c_serialize, None, None);
@@ -691,42 +688,45 @@ mod tests {
         // SAFETY: Test code: `handle` comes from `kafka_common_serialization_Serializer_new` and is
         // destroyed once, at the end; `imp` outlives it; `headers` comes from `box_record_headers`
         // and is destroyed once, after its last use; `topic`, `fail` and `hello` outlive the calls
-        // reading them; `out` is a valid local slot, read before the next call on the handle; the
+        // reading them; `err` is a valid slot pointing at null before every call (reset after the
+        // error is destroyed); each returned view is read before the next call on the handle; the
         // error is destroyed once, after it is read.
         unsafe {
-            let mut out = kafka_Bytes_t::from_slice(b"untouched");
-            let error = kafka_common_serialization_Serializer_serialize(
+            let mut err = ptr::null_mut();
+            let out = kafka_common_serialization_Serializer_serialize(
                 handle,
                 topic.as_ptr(),
                 fail.as_ptr().cast(),
-                &raw mut out,
+                &raw mut err,
             );
-            assert!(!error.is_null());
+            assert!(!err.is_null());
             assert_eq!(
-                CStr::from_ptr(kafka_common_Error_message(error)).to_str().unwrap(),
+                CStr::from_ptr(kafka_common_Error_message(err)).to_str().unwrap(),
                 "cannot serialize fail"
             );
-            assert_eq!(bytes_of(out), Some(b"untouched".to_vec()), "the slot is left alone on error");
-            kafka_common_Error_destroy(error);
+            assert!(out.data.is_null(), "a failure returns the null array");
+            kafka_common_Error_destroy(err);
+            err = ptr::null_mut();
 
             // Both header variants reach `serialize`.
             let hello = CString::new("hi").unwrap();
-            let error = kafka_common_serialization_Serializer_serialize_with_headers(
+            let out = kafka_common_serialization_Serializer_serialize_with_headers(
                 handle,
                 topic.as_ptr(),
                 headers,
                 hello.as_ptr().cast(),
-                &raw mut out,
+                &raw mut err,
             );
-            assert!(error.is_null());
-            let error = kafka_common_serialization_Serializer_serialize_owned_with_headers(
+            assert!(err.is_null());
+            assert_eq!(bytes_of(out), Some(b"HI".to_vec()));
+            let out = kafka_common_serialization_Serializer_serialize_owned_with_headers(
                 handle,
                 topic.as_ptr(),
                 headers,
                 hello.as_ptr().cast(),
-                &raw mut out,
+                &raw mut err,
             );
-            assert!(error.is_null());
+            assert!(err.is_null());
             assert_eq!(bytes_of(out), Some(b"HI".to_vec()));
             kafka_common_header_internals_RecordHeaders_destroy(headers);
             kafka_common_serialization_Serializer_destroy(handle);

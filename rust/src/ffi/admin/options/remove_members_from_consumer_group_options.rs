@@ -29,7 +29,7 @@ use crate::admin::{MemberToRemove, RemoveMembersFromConsumerGroupOptions};
 use crate::ffi::admin::member_to_remove::{
     box_member_to_remove, destroy_member_to_remove_element, kafka_admin_MemberToRemove_t, member_to_remove_ref,
 };
-use crate::ffi::admin::out_slot;
+use crate::ffi::common::deliver_value;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_list, c_str_to_string, kafka_List_t, list_elements, owned_c_string};
@@ -127,26 +127,26 @@ pub extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_new()
     boxed(RemoveMembersFromConsumerGroupOptions::new())
 }
 
-/// `new RemoveMembersFromConsumerGroupOptions(Collection<MemberToRemove> members)`:
-/// `members` is a borrowed `kafka_List_t` of borrowed
-/// `kafka_admin_MemberToRemove_t *`, copied during the call. Fails with
-/// Java's `IllegalArgumentException` ("Invalid empty members has been
-/// provided") when the list is empty or `NULL`; on success `out_with_members`
-/// receives an owned handle, freed with
-/// [`kafka_admin_RemoveMembersFromConsumerGroupOptions_destroy`]. The
-/// returned error is owned by the caller, `NULL` on success.
+/// `new RemoveMembersFromConsumerGroupOptions(Collection<MemberToRemove>
+/// members)`: `members` is a borrowed `kafka_List_t` of borrowed
+/// `kafka_admin_MemberToRemove_t *`, copied during the call. Returns an owned
+/// handle, freed with
+/// [`kafka_admin_RemoveMembersFromConsumerGroupOptions_destroy`]. When the list
+/// is empty or `NULL` it stores the translation of Java\'s
+/// `IllegalArgumentException` ("Invalid empty members has been provided"),
+/// owned by the caller, in `*out_err` and returns `NULL`.
 ///
 /// # Safety
 ///
-/// `members` must be `NULL` or a valid list, not mutated during the call,
-/// whose elements are live member-to-remove handles; `out_with_members`
-/// must be a valid slot.
+/// `members` must be `NULL` or a valid list, not mutated during the call, whose
+/// elements are live member-to-remove handles; `out_err` a valid slot pointing
+/// at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_with_members(
     members: *const kafka_List_t,
-    out_with_members: *mut *mut kafka_admin_RemoveMembersFromConsumerGroupOptions_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_admin_RemoveMembersFromConsumerGroupOptions_t {
     // SAFETY: Per this function's `# Safety`, `members` is null or a valid list, not mutated during
     // the call, which is as long as the borrowed elements are used, as `list_elements` requires.
     let members: Vec<MemberToRemove> = unsafe { list_elements(members) }
@@ -156,15 +156,8 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_with_
         // clone, during this call, while the caller keeps the handle alive.
         .map(|&element| unsafe { member_to_remove_ref(element as *const kafka_admin_MemberToRemove_t) }.clone())
         .collect();
-    // SAFETY: Per this function's `# Safety`, `out_with_members` is a valid slot, as `out_slot`
-    // requires.
-    unsafe {
-        out_slot(
-            RemoveMembersFromConsumerGroupOptions::with_members(members),
-            out_with_members,
-            boxed,
-        )
-    }
+    // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_value` requires.
+    unsafe { deliver_value(RemoveMembersFromConsumerGroupOptions::with_members(members), out_err, boxed) }
 }
 
 /// `RemoveMembersFromConsumerGroupOptions.reason(String reason)`: `reason`

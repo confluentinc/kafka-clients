@@ -21,18 +21,18 @@
 //! [`kafka_common_metrics_KafkaMetric__as_Metric`] (§4, "Traits").
 
 use std::ffi::c_void;
-use std::ptr;
 use std::sync::{Arc, OnceLock};
 
 use crate::common::Metric;
 use crate::common::metrics::{KafkaMetric, Measurable, MetricConfig};
+use crate::ffi::common::fail_with;
+use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::common::metric::{MetricInner, kafka_common_Metric_t};
 use crate::ffi::common::metrics::Interface;
 use crate::ffi::common::metrics::measurable::kafka_common_metrics_Measurable_t;
 use crate::ffi::common::metrics::metric_config::{
     box_metric_config, kafka_common_metrics_MetricConfig_t, metric_config_arc,
 };
-use crate::ffi::common::{box_error, kafka_common_Error_t};
 use crate::ffi::ffi_guard;
 
 /// Opaque handle to a [`KafkaMetric`], shared with its registry.
@@ -203,38 +203,34 @@ pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_is_measurable(
     i8::from(unsafe { kafka_metric_ref(self_) }.is_measurable())
 }
 
-/// `measurable()`: stores in `out_measurable` a view borrowed from the
-/// handle (valid as long as it is, never passed to
-/// `kafka_common_metrics_Measurable_destroy`), or returns the owned
-/// `IllegalStateException` translation when the provider is a gauge.
+/// `measurable()`: returns a view borrowed from the handle (valid as long as it
+/// is, never passed to `kafka_common_metrics_Measurable_destroy`), or stores
+/// the owned `IllegalStateException` translation in `*out_err` and returns
+/// `NULL` when the provider is a gauge.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid metric handle and `out_measurable` a valid
-/// pointer.
+/// `self_` must be a valid metric handle and `out_err` a valid slot pointing at
+/// null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_measurable(
     self_: *const kafka_common_metrics_KafkaMetric_t,
-    out_measurable: *mut *const kafka_common_metrics_Measurable_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *const kafka_common_metrics_Measurable_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid metric handle, as `inner`
     // requires; `inner` is used only within this call, and the view written out lives in the
     // handle's own `measurable` cell.
     let inner = unsafe { inner(self_) };
     if let Err(error) = inner.metric.measurable() {
-        return box_error(error);
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        return unsafe { fail_with(out_err, error) };
     }
     let view = inner.measurable.get_or_init(|| {
         let measurable: Arc<dyn Measurable> = Arc::new(MetricMeasurable(Arc::clone(&inner.metric)));
         Interface::view(measurable)
     });
-    // SAFETY: Per this function's `# Safety`, `out_measurable` is a valid pointer, so the write is
-    // sound. The view written is the `Interface` cached in the handle's `measurable` cell, so it
-    // lives as long as the handle; that is the rustdoc's "a view borrowed from the handle (valid as
-    // long as it is".
-    unsafe { *out_measurable = view as *const Interface<dyn Measurable> as *const kafka_common_metrics_Measurable_t };
-    ptr::null_mut()
+    view as *const Interface<dyn Measurable> as *const kafka_common_metrics_Measurable_t
 }
 
 /// Frees a metric handle; null is a no-op. The metric stays registered.
@@ -257,6 +253,7 @@ pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_destroy(self_: *mut ka
 #[cfg(test)]
 mod tests {
     use std::ffi::CStr;
+    use std::ptr;
 
     use super::*;
     use crate::common::MetricValue;
@@ -293,7 +290,7 @@ mod tests {
         // the views read from it (`as_metric`, its name, `measurable`); `value` and each `config`
         // are owned and destroyed once, after their last use; `measurable` is a view, which
         // `take_measurable` shares without freeing; `config` is an owned config handle only this
-        // test uses.
+        // test uses; `err` is a valid slot pointing at null.
         unsafe {
             let as_metric = kafka_common_metrics_KafkaMetric__as_Metric(handle);
             assert_eq!(
@@ -308,8 +305,9 @@ mod tests {
             kafka_common_MetricValue_destroy(value);
 
             assert_eq!(kafka_common_metrics_KafkaMetric_is_measurable(handle), 1);
-            let mut measurable = ptr::null();
-            assert!(kafka_common_metrics_KafkaMetric_measurable(handle, &mut measurable).is_null());
+            let mut err = ptr::null_mut();
+            let measurable = kafka_common_metrics_KafkaMetric_measurable(handle, &mut err);
+            assert!(err.is_null());
             let config = kafka_common_metrics_KafkaMetric_config(handle);
             assert_eq!(kafka_common_metrics_Measurable_measure(measurable, config, 0), 4.0);
             // The view is shared, never consumed: the metric keeps its provider.
@@ -347,15 +345,15 @@ mod tests {
         );
         let handle = box_kafka_metric(metric);
         // SAFETY: Test code: `handle` comes from `box_kafka_metric` and is destroyed once, at the
-        // end; `measurable` is a valid local out slot; the error and `config` are owned and each
+        // end; `err` is a valid slot pointing at null; the error and `config` are owned and each
         // destroyed once.
         unsafe {
             assert_eq!(kafka_common_metrics_KafkaMetric_is_measurable(handle), 0);
-            let mut measurable = ptr::null();
-            let error = kafka_common_metrics_KafkaMetric_measurable(handle, &mut measurable);
-            assert_eq!(kafka_common_Error_is_local_illegal_state_error(error), 1);
+            let mut err = ptr::null_mut();
+            let measurable = kafka_common_metrics_KafkaMetric_measurable(handle, &mut err);
+            assert_eq!(kafka_common_Error_is_local_illegal_state_error(err), 1);
             assert!(measurable.is_null());
-            kafka_common_Error_destroy(error);
+            kafka_common_Error_destroy(err);
             let config = kafka_common_metrics_MetricConfig_new();
             kafka_common_metrics_MetricConfig_destroy(config);
             kafka_common_metrics_KafkaMetric_destroy(handle);

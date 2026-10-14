@@ -63,6 +63,7 @@ use futures_util::FutureExt;
 
 use crate::common::{Error, KafkaFuture};
 use crate::ffi::callback_queue::{CallbackJob, CallbackQueue, SendPtr};
+use crate::ffi::common::fail_with;
 use crate::ffi::common::{
     box_error, catch_task_panic, caught_panic_error, deliver_panic_value, kafka_common_Error_t, spawn_callback_task,
     take_error,
@@ -586,34 +587,30 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_completed_future(
     box_future(KafkaFuture::completed_future(result), None, None)
 }
 
-/// `KafkaFuture.get()`: blocks until the future resolves and stores its value
-/// in `*out_get`, borrowed as described in the module docs. A future that
-/// belongs to no client (see [`kafka_common_KafkaFuture_completed_future`]) is
-/// already complete and is answered without blocking.
+/// `KafkaFuture.get()`: blocks until the future resolves and returns its value,
+/// borrowed as described in the module docs. A future that belongs to no client
+/// (see [`kafka_common_KafkaFuture_completed_future`]) is already complete and
+/// is answered without blocking.
 ///
-/// Returns `NULL` on success, otherwise the error the operation failed with,
-/// owned by the caller.
+/// On failure it stores the error the operation failed with, owned by the
+/// caller, in `*out_err` and returns `NULL`.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid future handle and `out_get` a valid pointer.
+/// `self_` must be a valid future handle and `out_err` a valid slot pointing at
+/// null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_KafkaFuture_get(
     self_: *const kafka_common_KafkaFuture_t,
-    out_get: *mut *mut c_void,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut c_void {
     // SAFETY: per this function's `# Safety`, `self_` is a valid future handle; the
     // borrow lasts for this call only, while the caller keeps the handle alive.
     match unsafe { future_ref(self_) }.resolve(None) {
-        Ok(value) => {
-            // SAFETY: per this function's `# Safety`, `out_get` is a valid pointer. The
-            // value it receives is the one the handle caches, alive until the handle is
-            // destroyed (module docs).
-            unsafe { *out_get = value.ptr() };
-            std::ptr::null_mut()
-        },
-        Err(e) => box_error(e),
+        Ok(value) => value.ptr(),
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        Err(e) => unsafe { fail_with(out_err, e) },
     }
 }
 
@@ -655,26 +652,21 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_get_cb(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid future handle and `out_get_with_timeout` a valid
-/// pointer.
+/// `self_` must be a valid future handle and `out_err` a valid slot pointing at
+/// null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_KafkaFuture_get_with_timeout(
     self_: *const kafka_common_KafkaFuture_t,
     timeout: i64,
-    out_get_with_timeout: *mut *mut c_void,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut c_void {
     // SAFETY: per this function's `# Safety`, `self_` is a valid future handle; the
     // borrow lasts for this call only, while the caller keeps the handle alive.
     match unsafe { future_ref(self_) }.resolve(Some(timeout_ms(timeout))) {
-        Ok(value) => {
-            // SAFETY: per this function's `# Safety`, `out_get_with_timeout` is a valid
-            // pointer. The value it receives is the one the handle caches, alive until
-            // the handle is destroyed (module docs).
-            unsafe { *out_get_with_timeout = value.ptr() };
-            std::ptr::null_mut()
-        },
-        Err(e) => box_error(e),
+        Ok(value) => value.ptr(),
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        Err(e) => unsafe { fail_with(out_err, e) },
     }
 }
 
@@ -764,16 +756,17 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_all_of(
 // `KafkaFuture.BaseFunction` and `thenApply`
 // ---------------------------------------------------------------------------
 
-/// `typedef kafka_common_Error_t *(*kafka_common_KafkaFuture_BaseFunction_apply_fn_t)(void *self, void *a, void **out_apply);`
+/// `typedef void *(*kafka_common_KafkaFuture_BaseFunction_apply_fn_t)(void *self, void *a, kafka_common_Error_t **out_err);`
 ///
 /// `BaseFunction.apply(A a)`: `a` is the source future's value, borrowed for
-/// the duration of the call (`NULL` for a `Void` future); the result goes in
-/// `*out_apply`, a `void *` the implementation owns and keeps alive as long
-/// as the derived future may deliver it (Rust never frees it). Returns `NULL`
-/// on success, otherwise an owned error that fails the derived future, as a
-/// throwing Java function does.
+/// the duration of the call (`NULL` for a `Void` future). Returns the result,
+/// a `void *` the implementation owns and keeps alive as long as the derived
+/// future may deliver it (Rust never frees it). On failure the implementation
+/// stores an owned error in `*out_err`, which points at `NULL` on entry, and
+/// that error fails the derived future, as a throwing Java function does; the
+/// returned value is then ignored.
 pub type kafka_common_KafkaFuture_BaseFunction_apply_fn_t =
-    unsafe extern "C" fn(self_: *mut c_void, a: *mut c_void, out_apply: *mut *mut c_void) -> *mut kafka_common_Error_t;
+    unsafe extern "C" fn(self_: *mut c_void, a: *mut c_void, out_err: *mut *mut kafka_common_Error_t) -> *mut c_void;
 
 /// A C implementation of `KafkaFuture.BaseFunction` (CLAUDE.md §4 rule 3):
 /// the caller's `void *self` plus its `apply`.
@@ -785,11 +778,11 @@ struct BaseFunctionInner {
 impl BaseFunctionInner {
     /// Invokes the C `apply` on `a`.
     fn apply(&self, a: *mut c_void) -> Result<*mut c_void, Error> {
-        let mut out: *mut c_void = std::ptr::null_mut();
+        let mut error: *mut kafka_common_Error_t = std::ptr::null_mut();
         // SAFETY: `apply` is the function pointer the C caller registered,
-        // called with its own `self`.
-        let error = unsafe { (self.apply)(self.self_.0, a, &raw mut out) };
-        // SAFETY: `apply` returns null or an owned error handle, per the
+        // called with its own `self` and a slot pointing at null.
+        let out = unsafe { (self.apply)(self.self_.0, a, &raw mut error) };
+        // SAFETY: `apply` leaves the slot null or stores an owned error handle, per the
         // `kafka_common_KafkaFuture_BaseFunction_apply_fn_t` contract, consumed here once.
         match unsafe { take_error(error) } {
             Some(error) => Err(error),
@@ -838,29 +831,27 @@ pub extern "C" fn kafka_common_KafkaFuture_BaseFunction_new(
     Box::into_raw(Box::new(BaseFunctionInner { self_: SendPtr(self_), apply })) as *mut _
 }
 
-/// `BaseFunction.apply(a)`: invokes the registered `apply` with its `self`,
-/// storing the result in `*out_apply`. Returns `NULL` on success, otherwise
-/// the error the function returned, owned by the caller.
+/// `BaseFunction.apply(a)`: invokes the registered `apply` with its `self`, and
+/// returns its result. On failure it stores the error the function reported,
+/// owned by the caller, in `*out_err` and returns `NULL`.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid function handle and `out_apply` a valid pointer.
+/// `self_` must be a valid function handle and `out_err` a valid slot pointing
+/// at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_apply(
     self_: *const kafka_common_KafkaFuture_BaseFunction_t,
     a: *mut c_void,
-    out_apply: *mut *mut c_void,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut c_void {
     // SAFETY: per this function's `# Safety`, `self_` is a valid function handle; the
     // borrow lasts for this call only.
     match unsafe { base_function_ref(self_) }.apply(a) {
-        Ok(value) => {
-            // SAFETY: per this function's `# Safety`, `out_apply` is a valid pointer.
-            unsafe { *out_apply = value };
-            std::ptr::null_mut()
-        },
-        Err(e) => box_error(e),
+        Ok(value) => value,
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        Err(e) => unsafe { fail_with(out_err, e) },
     }
 }
 
@@ -972,14 +963,15 @@ mod tests {
     ///
     /// `f` must be a live future handle.
     unsafe fn get(f: *const kafka_common_KafkaFuture_t) -> Result<*mut c_void, String> {
-        let mut out: *mut c_void = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
         // SAFETY: Test helper: per this function's `# Safety`, `f` is a live future handle,
-        // and `out` is a live local.
-        let err = unsafe { kafka_common_KafkaFuture_get(f, &mut out) };
+        // and `err` is a valid slot pointing at null.
+        let out = unsafe { kafka_common_KafkaFuture_get(f, &mut err) };
         if err.is_null() {
             Ok(out)
         } else {
-            // SAFETY: Test helper: `err` is the fresh, non-null error handle `get` returned;
+            assert!(out.is_null(), "a failed get returns NULL");
+            // SAFETY: Test helper: `err` is the fresh, non-null error handle `get` stored;
             // its message is copied into a `String` before the handle is destroyed, once.
             let msg = unsafe {
                 let msg = CStr::from_ptr(kafka_common_Error_message(err)).to_str().unwrap().to_string();
@@ -1096,19 +1088,23 @@ mod tests {
         let runtime = client_runtime();
         let pending = KafkaFutureImpl::<i64>::new();
         let f = box_future(map_future(&pending.future()), Some(runtime.handle().clone()), None);
-        let mut out: *mut c_void = std::ptr::null_mut();
         // SAFETY: Test code: `f` is the fresh `box_future` handle, destroyed once at the end;
-        // `out` is a live local. Each `err` is the fresh, non-null error handle a timed-out
-        // get returned, destroyed once. The value read at the end is the `i64` `f` caches.
+        // each `err` is a valid slot pointing at null, then the fresh, non-null error handle a
+        // timed-out get stored, destroyed once. The value read at the end is the `i64` `f`
+        // caches.
         unsafe {
             assert_eq!(kafka_common_KafkaFuture_is_done(f), 0);
-            let err = kafka_common_KafkaFuture_get_with_timeout(f, 10, &mut out);
+            let mut err = std::ptr::null_mut();
+            let out = kafka_common_KafkaFuture_get_with_timeout(f, 10, &mut err);
             assert!(!err.is_null());
+            assert!(out.is_null());
             assert_eq!(kafka_common_Error_is_local_timeout_error(err), 1);
             kafka_common_Error_destroy(err);
             // Negative timeouts are zero, not a panic.
-            let err = kafka_common_KafkaFuture_get_with_timeout(f, -5, &mut out);
+            let mut err = std::ptr::null_mut();
+            let out = kafka_common_KafkaFuture_get_with_timeout(f, -5, &mut err);
             assert!(!err.is_null());
+            assert!(out.is_null());
             kafka_common_Error_destroy(err);
             // Once completed, the same handle answers the value.
             pending.complete(3);
@@ -1153,13 +1149,13 @@ mod tests {
         );
         let doubler = Doubler { calls: AtomicUsize::new(0), output: Mutex::new(0) };
         let function = kafka_common_KafkaFuture_BaseFunction_new(&doubler as *const _ as *mut c_void, double);
-        let mut out: *mut c_void = std::ptr::null_mut();
         // SAFETY: Test code: `f` and `plain` are the fresh handles above and `function` a fresh
         // function handle over `doubler`, a live local that outlives the derived future; each is
-        // destroyed once at the end. `out` is a live local; the error a timed-out get returns is
-        // destroyed once.
+        // destroyed once at the end. `err` is a valid slot pointing at null; the error a
+        // timed-out get stores there is destroyed once.
         let derived = unsafe {
-            let err = kafka_common_KafkaFuture_get_with_timeout(f, 20, &mut out);
+            let mut err = std::ptr::null_mut();
+            kafka_common_KafkaFuture_get_with_timeout(f, 20, &mut err);
             assert_eq!(kafka_common_Error_is_local_timeout_error(err), 1, "nothing queued completes it");
             kafka_common_Error_destroy(err);
             kafka_common_KafkaFuture_then_apply(f, function)
@@ -1228,18 +1224,18 @@ mod tests {
             for timeout in [None, Some(0), Some(1000)] {
                 let started = std::time::Instant::now();
                 for (f, expected) in [(completed, 5), (derived, 10)] {
-                    let mut out: *mut c_void = std::ptr::null_mut();
-                    let err = match timeout {
-                        None => kafka_common_KafkaFuture_get(f, &mut out),
-                        Some(ms) => kafka_common_KafkaFuture_get_with_timeout(f, ms, &mut out),
+                    let mut err = std::ptr::null_mut();
+                    let out = match timeout {
+                        None => kafka_common_KafkaFuture_get(f, &mut err),
+                        Some(ms) => kafka_common_KafkaFuture_get_with_timeout(f, ms, &mut err),
                     };
                     assert!(err.is_null(), "{timeout:?}");
                     assert_eq!(*(out as *const i64), expected, "{timeout:?}");
                 }
-                let mut out: *mut c_void = std::ptr::null_mut();
-                let err = match timeout {
-                    None => kafka_common_KafkaFuture_get(all, &mut out),
-                    Some(ms) => kafka_common_KafkaFuture_get_with_timeout(all, ms, &mut out),
+                let mut err = std::ptr::null_mut();
+                let out = match timeout {
+                    None => kafka_common_KafkaFuture_get(all, &mut err),
+                    Some(ms) => kafka_common_KafkaFuture_get_with_timeout(all, ms, &mut err),
                 };
                 assert!(err.is_null() && out.is_null(), "{timeout:?}: a Void future delivers NULL");
                 assert!(started.elapsed() < Duration::from_millis(500), "{timeout:?}: nothing waits");
@@ -1247,8 +1243,9 @@ mod tests {
             assert_eq!(doubler.calls.load(Ordering::SeqCst), 1, "Java runs the function once");
 
             let failed = kafka_common_KafkaFuture_completed_future(std::ptr::null(), box_error(Error::timeout("late")));
-            let mut out: *mut c_void = std::ptr::null_mut();
-            let err = kafka_common_KafkaFuture_get_with_timeout(failed, 1000, &mut out);
+            let mut err = std::ptr::null_mut();
+            let out = kafka_common_KafkaFuture_get_with_timeout(failed, 1000, &mut err);
+            assert!(out.is_null());
             assert_eq!(CStr::from_ptr(kafka_common_Error_message(err)).to_str().unwrap(), "late");
             kafka_common_Error_destroy(err);
             assert_eq!(get(failed), Err("late".to_string()));
@@ -1285,13 +1282,14 @@ mod tests {
         let f = box_future(map_future(&pending.future()), None, None);
         let seen: Mutex<Vec<String>> = Mutex::new(Vec::new());
         // SAFETY: Test code: `f` is the fresh `box_future` handle, destroyed once at the end;
-        // `out` is a live local, and `err` the fresh error handle the get returned,
+        // `err` is a valid slot pointing at null, then the fresh error handle the get stored,
         // destroyed once. `opaque` is `seen`, the `Mutex<Vec<String>>` `record_error`
         // expects, which outlives the inline delivery.
         unsafe {
-            let mut out: *mut c_void = std::ptr::null_mut();
-            let err = kafka_common_KafkaFuture_get_with_timeout(f, 1000, &mut out);
+            let mut err = std::ptr::null_mut();
+            let out = kafka_common_KafkaFuture_get_with_timeout(f, 1000, &mut err);
             assert!(!err.is_null());
+            assert!(out.is_null());
             assert_eq!(
                 kafka_common_Error_is_local_timeout_error(err),
                 0,
@@ -1582,8 +1580,8 @@ mod tests {
     unsafe extern "C" fn double(
         self_: *mut c_void,
         a: *mut c_void,
-        out_apply: *mut *mut c_void,
-    ) -> *mut kafka_common_Error_t {
+        _out_err: *mut *mut kafka_common_Error_t,
+    ) -> *mut c_void {
         // SAFETY: Test code: every registration of this function passes a live `Doubler` as
         // `self`, which outlives every future derived through it.
         let doubler = unsafe { &*(self_ as *const Doubler) };
@@ -1592,18 +1590,18 @@ mod tests {
         // SAFETY: Test code: every source future this function is applied to delivers an
         // `i64`, borrowed for the call (module docs), or the test passes a live `i64`.
         *output = unsafe { *(a as *const i64) } * 2;
-        // SAFETY: Test code: `out_apply` is the valid out-pointer `BaseFunctionInner::apply`
-        // or the test passes; the slot it receives lives in the `Doubler`.
-        unsafe { *out_apply = &raw mut *output as *mut c_void };
-        std::ptr::null_mut()
+        &raw mut *output as *mut c_void
     }
 
     unsafe extern "C" fn fail(
         _self: *mut c_void,
         _a: *mut c_void,
-        _out_apply: *mut *mut c_void,
-    ) -> *mut kafka_common_Error_t {
-        box_error(Error::local_illegal_argument("apply failed"))
+        out_err: *mut *mut kafka_common_Error_t,
+    ) -> *mut c_void {
+        // SAFETY: Test code: the function-pointer contract hands every implementation a valid
+        // slot pointing at null.
+        unsafe { *out_err = box_error(Error::local_illegal_argument("apply failed")) };
+        std::ptr::null_mut()
     }
 
     #[test]
@@ -1612,20 +1610,21 @@ mod tests {
         let function = kafka_common_KafkaFuture_BaseFunction_new(&doubler as *const _ as *mut c_void, double);
         let failing = kafka_common_KafkaFuture_BaseFunction_new(std::ptr::null_mut(), fail);
         let mut a = 21i64;
-        let mut out: *mut c_void = std::ptr::null_mut();
+        let mut error = std::ptr::null_mut();
         // SAFETY: Test code: `function` (over `doubler`, a live local) and `failing` are fresh
-        // function handles, each destroyed once at the end; `a` and `out` are live locals,
-        // and `out` points into `doubler` when read. `error` is first null, then the fresh
-        // handle `fail` returned, destroyed once after its message is read. Null is accepted
-        // by `kafka_common_KafkaFuture_BaseFunction_destroy`.
+        // function handles, each destroyed once at the end; `a` is a live local, and `out`
+        // points into `doubler` when read. `error` is a valid slot pointing at null, then the
+        // fresh handle `fail` stored, destroyed once after its message is read. Null is
+        // accepted by `kafka_common_KafkaFuture_BaseFunction_destroy`.
         unsafe {
-            let error = kafka_common_KafkaFuture_BaseFunction_apply(function, &raw mut a as *mut c_void, &raw mut out);
+            let out = kafka_common_KafkaFuture_BaseFunction_apply(function, &raw mut a as *mut c_void, &raw mut error);
             assert!(error.is_null());
             assert_eq!(*(out as *const i64), 42);
             assert_eq!(doubler.calls.load(Ordering::SeqCst), 1);
 
-            let error = kafka_common_KafkaFuture_BaseFunction_apply(failing, &raw mut a as *mut c_void, &raw mut out);
+            let out = kafka_common_KafkaFuture_BaseFunction_apply(failing, &raw mut a as *mut c_void, &raw mut error);
             assert!(!error.is_null());
+            assert!(out.is_null());
             assert_eq!(
                 CStr::from_ptr(kafka_common_Error_message(error)).to_str().unwrap(),
                 "apply failed"

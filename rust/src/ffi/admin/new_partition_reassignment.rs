@@ -19,7 +19,7 @@
 use std::ffi::c_void;
 
 use crate::admin::NewPartitionReassignment;
-use crate::ffi::admin::out_slot;
+use crate::ffi::common::deliver_value;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_list, destroy_boxed, kafka_List_t, list_elements};
@@ -63,20 +63,21 @@ pub(crate) fn box_new_partition_reassignment(
 
 /// `new NewPartitionReassignment(List<Integer> targetReplicas)`: a borrowed
 /// list of `const int32_t *` broker ids, copied (`NULL` reads as empty).
-/// Delivers the owned handle through `out_new` (freed with
-/// [`kafka_admin_NewPartitionReassignment_destroy`]), or returns the owned
-/// `IllegalArgumentException` translation when the list is empty.
+/// Returns the owned handle (freed with
+/// [`kafka_admin_NewPartitionReassignment_destroy`]), or stores the owned
+/// `IllegalArgumentException` translation in `*out_err` and returns `NULL` when
+/// the list is empty.
 ///
 /// # Safety
 ///
 /// `target_replicas` must be null or a valid list whose elements point at
-/// `int32_t`s, and `out_new` a valid slot.
+/// `int32_t`s, and `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewPartitionReassignment_new(
     target_replicas: *const kafka_List_t,
-    out_new: *mut *mut kafka_admin_NewPartitionReassignment_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_admin_NewPartitionReassignment_t {
     // SAFETY: Per this function's `# Safety`, `target_replicas` is null or a valid list, alive and
     // not mutated for this call, as `list_elements` requires; the borrowed slice is dropped at the
     // end of this statement.
@@ -86,11 +87,11 @@ pub unsafe extern "C" fn kafka_admin_NewPartitionReassignment_new(
         // live `int32_t`, read by copy while the list is alive.
         .map(|&element| unsafe { *(element as *const i32) })
         .collect();
-    // SAFETY: Per this function's `# Safety`, `out_new` is a valid slot, as `out_slot` requires.
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid slot, as `deliver_value` requires.
     unsafe {
-        out_slot(
+        deliver_value(
             NewPartitionReassignment::new(target_replicas),
-            out_new,
+            out_err,
             box_new_partition_reassignment,
         )
     }
@@ -147,28 +148,32 @@ mod tests {
 
     #[test]
     fn new_rejects_an_empty_list_and_copies_a_full_one() {
-        let mut reassignment = ptr::null_mut();
-        // SAFETY: Test code: `reassignment` is a local slot, then the owned handle the second
-        // `kafka_admin_NewPartitionReassignment_new` delivered, destroyed once, last; `error` is
-        // the owned error the first call returned, read while alive and destroyed once; `list` is
+        let mut error = ptr::null_mut();
+        // SAFETY: Test code: `error` is a valid slot pointing at null before each call, holding
+        // the owned error the first call stored, read while alive, destroyed once and reset;
+        // `reassignment` is the owned handle the second `kafka_admin_NewPartitionReassignment_new`
+        // returned, destroyed once, last; `list` is
         // an empty list that owns nothing, holding pointers to the locals `b1` and `b2`, which
         // outlive it, and is destroyed once after the copy; `replicas` is the owned list
         // `kafka_admin_NewPartitionReassignment_target_replicas` returned, whose elements point at
         // `int32_t`s, read while alive and destroyed once; destroying null is a no-op.
         unsafe {
-            let error = kafka_admin_NewPartitionReassignment_new(ptr::null(), &mut reassignment);
+            let failed = kafka_admin_NewPartitionReassignment_new(ptr::null(), &mut error);
+            assert!(failed.is_null());
             assert!(!error.is_null());
             assert_eq!(
                 error_ref(error).error.message(),
                 "Cannot create a new partition reassignment without any replicas"
             );
             kafka_common_Error_destroy(error);
+            error = ptr::null_mut();
 
             let list = kafka_List_new();
             let (mut b1, mut b2) = (5_i32, 7_i32);
             kafka_List_add(list, &mut b1 as *mut i32 as *mut c_void);
             kafka_List_add(list, &mut b2 as *mut i32 as *mut c_void);
-            assert!(kafka_admin_NewPartitionReassignment_new(list, &mut reassignment).is_null());
+            let reassignment = kafka_admin_NewPartitionReassignment_new(list, &mut error);
+            assert!(error.is_null());
             kafka_List_destroy(list);
             assert_eq!(
                 *new_partition_reassignment_ref(reassignment),

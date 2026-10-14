@@ -30,7 +30,8 @@ use std::ffi::{CString, c_char};
 use std::sync::Mutex;
 
 use crate::consumer::ConsumerConfig;
-use crate::ffi::common::{box_error, kafka_common_Error_t};
+use crate::ffi::common::fail_with;
+use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{
     box_string_list, c_str_to_string, kafka_List_t, kafka_Map_t, list_strings, map_strings, owned_c_string,
@@ -111,27 +112,24 @@ unsafe fn inner_mut<'a>(config: *mut kafka_consumer_ConsumerConfig_t) -> &'a mut
 ///
 /// # Safety
 ///
-/// `props` must be null or a valid map of `char *` keys and values;
-/// `out_new` a valid pointer.
+/// `props` must be null or a valid map of `char *` keys and values; `out_err` a
+/// valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_new(
     props: *const kafka_Map_t,
-    out_new: *mut *mut kafka_consumer_ConsumerConfig_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_consumer_ConsumerConfig_t {
     // SAFETY: Per this function's `# Safety`, `props` is null or a valid map of `char *` keys and
     // values, as `map_strings` requires; they are copied into owned strings.
     let props: HashMap<String, String> = unsafe { map_strings(props) }.into_iter().collect();
     match ConsumerConfig::new(&props) {
         Ok(config) => {
             let inner = ConsumerConfigInner { config: Some(config), strings: Mutex::new(HashMap::new()) };
-            // SAFETY: Per this function's `# Safety`, `out_new` is a valid pointer, so the write is
-            // sound; the handle written is the fresh box the caller owns, freed with
-            // `kafka_consumer_ConsumerConfig_destroy`.
-            unsafe { *out_new = Box::into_raw(Box::new(inner)) as *mut kafka_consumer_ConsumerConfig_t };
-            std::ptr::null_mut()
+            Box::into_raw(Box::new(inner)) as *mut kafka_consumer_ConsumerConfig_t
         },
-        Err(error) => box_error(error),
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        Err(error) => unsafe { fail_with(out_err, error) },
     }
 }
 
@@ -698,10 +696,11 @@ mod tests {
         // SAFETY: Test code: `props` is the live map just built, and the key and value are C string
         // literals that outlive it; the map does not own them.
         unsafe { kafka_Map_put(props, key.as_ptr() as *mut _, value.as_ptr() as *mut _) };
-        let mut config = std::ptr::null_mut();
-        // SAFETY: Test code: `props` is a live map of `char *` keys and values and `config` a valid
-        // out pointer.
-        assert!(unsafe { kafka_consumer_ConsumerConfig_new(props, &mut config) }.is_null());
+        let mut err = std::ptr::null_mut();
+        // SAFETY: Test code: `props` is a live map of `char *` keys and values and `err` a valid
+        // slot pointing at null.
+        let config = unsafe { kafka_consumer_ConsumerConfig_new(props, &mut err) };
+        assert!(err.is_null());
         // SAFETY: Test code: `props` is the map built above, destroyed once.
         unsafe { kafka_Map_destroy(props) };
         config

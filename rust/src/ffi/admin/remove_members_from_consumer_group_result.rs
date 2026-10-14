@@ -18,7 +18,8 @@
 
 use crate::admin::RemoveMembersFromConsumerGroupResult;
 use crate::ffi::admin::member_to_remove::{kafka_admin_MemberToRemove_t, member_to_remove_ref};
-use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_result, out_slot, result_ref};
+use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_result, result_ref};
+use crate::ffi::common::deliver_value;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
@@ -71,24 +72,23 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_all(
     h.ctx.void_future(&h.result.all())
 }
 
-/// `memberResult(MemberToRemove member)`: delivers through `out_member_result`
-/// an owned `KafkaFuture<Void>` (freed with `kafka_common_KafkaFuture_destroy`,
-/// `get` delivering `NULL` once that member has been removed), or returns
-/// the owned `IllegalArgumentError` when the result is in
-/// `removeAll` mode or `member` was not part of the request. `member` is
-/// borrowed for the call.
+/// `memberResult(MemberToRemove member)`: returns an owned `KafkaFuture<Void>`
+/// (freed with `kafka_common_KafkaFuture_destroy`, `get` delivering `NULL` once
+/// that member has been removed), or stores the owned `IllegalArgumentError` in
+/// `*out_err` and returns `NULL` when the result is in `removeAll` mode or
+/// `member` was not part of the request. `member` is borrowed for the call.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle, `member` a valid member-to-remove
-/// handle and `out_member_result` a valid slot.
+/// handle and `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(
     self_: *const kafka_admin_RemoveMembersFromConsumerGroupResult_t,
     member: *const kafka_admin_MemberToRemove_t,
-    out_member_result: *mut *mut kafka_common_KafkaFuture_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
     let h = unsafe { handle(self_) };
@@ -96,9 +96,8 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_member
     // `member_to_remove_ref` requires; the borrow ends with this call, during which the caller
     // keeps the handle alive.
     let member = unsafe { member_to_remove_ref(member) };
-    // SAFETY: Per this function's `# Safety`, `out_member_result` is a valid slot, as `out_slot`
-    // requires.
-    unsafe { out_slot(h.result.member_result(member), out_member_result, |f| h.ctx.void_future(&f)) }
+    // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_value` requires.
+    unsafe { deliver_value(h.result.member_result(member), out_err, |f| h.ctx.void_future(&f)) }
 }
 
 /// Frees a result handle; null is a no-op. Futures already taken from it

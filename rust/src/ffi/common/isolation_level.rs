@@ -25,7 +25,8 @@
 use std::ffi::c_char;
 
 use crate::common::IsolationLevel;
-use crate::ffi::common::{box_error, kafka_common_Error_t};
+use crate::ffi::common::fail_with;
+use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
 use crate::ffi::util::into_c_string;
 
@@ -121,28 +122,23 @@ pub unsafe extern "C" fn kafka_common_IsolationLevel_id(self_: *const kafka_comm
     unsafe { value_of(self_) }.id() as i8
 }
 
-/// `IsolationLevel.forId(byte id)`: delivers the singleton through
-/// `out_for_id`, or returns the owned `IllegalArgumentException` translation
-/// for an unknown id.
+/// `IsolationLevel.forId(byte id)`: returns the singleton, or stores the owned
+/// `IllegalArgumentException` translation in `*out_err` and returns `NULL` for
+/// an unknown id.
 ///
 /// # Safety
 ///
-/// `out_for_id` must be a valid pointer.
+/// `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_IsolationLevel_for_id(
     id: i8,
-    out_for_id: *mut *const kafka_common_IsolationLevel_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *const kafka_common_IsolationLevel_t {
     match IsolationLevel::for_id(id as u8) {
-        Ok(level) => {
-            // SAFETY: Per this function's `# Safety`, `out_for_id` is a valid pointer, so the write
-            // is sound; the singleton written points into the static `VARIANTS` array and is never
-            // freed.
-            unsafe { *out_for_id = singleton(level) };
-            std::ptr::null_mut()
-        },
-        Err(error) => box_error(error),
+        Ok(level) => singleton(level),
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        Err(error) => unsafe { fail_with(out_err, error) },
     }
 }
 
@@ -194,15 +190,17 @@ mod tests {
 
     #[test]
     fn id_for_id_and_to_string_follow_java() {
-        // SAFETY: Test code: the singletons are never freed, `level` is a valid out pointer, the
-        // error from the unknown id is destroyed once, and the string from `to_string` is destroyed
+        // SAFETY: Test code: the singletons are never freed, `error` is a valid slot pointing at
+        // null before each call, the error from the unknown id is destroyed once, and the string from `to_string` is destroyed
         // once, after it is read.
         unsafe {
             assert_eq!(kafka_common_IsolationLevel_id(kafka_common_IsolationLevel_read_committed()), 1);
-            let mut level = ptr::null();
-            assert!(kafka_common_IsolationLevel_for_id(0, &mut level).is_null());
+            let mut error = ptr::null_mut();
+            let level = kafka_common_IsolationLevel_for_id(0, &mut error);
+            assert!(error.is_null());
             assert_eq!(level, kafka_common_IsolationLevel_read_uncommitted());
-            let error = kafka_common_IsolationLevel_for_id(7, &mut level);
+            let unknown = kafka_common_IsolationLevel_for_id(7, &mut error);
+            assert!(unknown.is_null());
             assert!(!error.is_null());
             assert_eq!(kafka_common_Error_is_local_illegal_argument_error(error), 1);
             kafka_common_Error_destroy(error);

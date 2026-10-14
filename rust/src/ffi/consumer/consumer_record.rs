@@ -33,11 +33,12 @@ use std::sync::OnceLock;
 
 use crate::consumer::ConsumerRecord;
 use crate::consumer::{ConsumerRecordOptions, ConsumerRecordOptionsBuilder};
+use crate::ffi::common::fail_with;
 use crate::ffi::common::header::internals::record_headers::{
     RecordHeadersInner, kafka_common_header_internals_RecordHeaders_t, record_headers_ref,
 };
+use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::common::record::timestamp_type::{self, kafka_common_record_TimestampType_t};
-use crate::ffi::common::{box_error, kafka_common_Error_t};
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{
     GenericValue, c_str_to_string, into_c_string, kafka_Bytes_destroy, kafka_Bytes_t, owned_c_string,
@@ -711,40 +712,35 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_deliver
     unsafe { with_builder(self_, |b| b.set_delivery_count((delivery_count >= 0).then_some(delivery_count))) }
 }
 
-/// `build()`: validates the mandatory fields and delivers the options,
-/// owned by the caller ([`kafka_consumer_ConsumerRecordOptions_destroy`]),
-/// or returns the `IllegalArgumentError`. The builder is consumed either
-/// way and only waits to be destroyed.
+/// `build()`: validates the mandatory fields and returns the options, owned by
+/// the caller ([`kafka_consumer_ConsumerRecordOptions_destroy`]), or stores the
+/// owned `IllegalArgumentError` in `*out_err` and returns `NULL`. The builder
+/// is consumed either way and only waits to be destroyed.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle that no other call uses at the
-/// same time, and `out_build` a valid pointer.
+/// `self_` must be a valid builder handle that no other call uses at the same
+/// time, and `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_build(
     self_: *mut kafka_consumer_ConsumerRecordOptionsBuilder_t,
-    out_build: *mut *mut kafka_consumer_ConsumerRecordOptions_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_consumer_ConsumerRecordOptions_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle, i.e. the
     // `Box::into_raw` of an `Option<GenericBuilder>` in
     // `kafka_consumer_ConsumerRecordOptionsBuilder_new`, that no other call uses at the same time,
     // so the exclusive reference, used only within this call, aliases nothing.
     let slot = unsafe { &mut *(self_ as *mut Option<GenericBuilder>) };
     let Some(builder) = slot.take() else {
-        return box_error(crate::common::Error::local_illegal_state(
-            "ConsumerRecordOptionsBuilder already built",
-        ));
+        let error = crate::common::Error::local_illegal_state("ConsumerRecordOptionsBuilder already built");
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        return unsafe { fail_with(out_err, error) };
     };
     match builder.build() {
-        Ok(options) => {
-            // SAFETY: Per this function's `# Safety`, `out_build` is a valid pointer, so the write
-            // is sound; the handle written is a fresh box the caller owns, freed with
-            // `kafka_consumer_ConsumerRecordOptions_destroy`.
-            unsafe { *out_build = Box::into_raw(Box::new(options)) as *mut kafka_consumer_ConsumerRecordOptions_t };
-            std::ptr::null_mut()
-        },
-        Err(error) => box_error(error),
+        Ok(options) => Box::into_raw(Box::new(options)) as *mut kafka_consumer_ConsumerRecordOptions_t,
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        Err(error) => unsafe { fail_with(out_err, error) },
     }
 }
 
@@ -833,11 +829,12 @@ mod tests {
     #[test]
     fn builder_validates_and_builds() {
         let builder = kafka_consumer_ConsumerRecordOptionsBuilder_new();
-        let mut options = std::ptr::null_mut();
+        let mut error = std::ptr::null_mut();
         // Missing mandatory fields: the Rust builder's IllegalArgumentError.
-        // SAFETY: Test code: `builder` is a live builder and `options` a local slot.
-        let error = unsafe { kafka_consumer_ConsumerRecordOptionsBuilder_build(builder, &mut options) };
+        // SAFETY: Test code: `builder` is a live builder and `error` a valid slot pointing at null.
+        let options = unsafe { kafka_consumer_ConsumerRecordOptionsBuilder_build(builder, &mut error) };
         assert!(!error.is_null());
+        assert!(options.is_null());
         // SAFETY: Test code: `error` is the owned error just returned, non-null (asserted above).
         assert!(unsafe { error_ref(error) }.error.is_local_illegal_argument_error());
         // SAFETY: Test code: `error` and `builder` are live handles, each destroyed once here.
@@ -847,9 +844,11 @@ mod tests {
         }
 
         let builder = kafka_consumer_ConsumerRecordOptionsBuilder_new();
+        let mut err = std::ptr::null_mut();
         // SAFETY: Test code: `builder` is a live builder used by this thread only, destroyed once
-        // after its last use; `options` is the handle `build` wrote, destroyed once after
-        // `with_options` copied it; `record` is destroyed once, last.
+        // after its last use; `err` is a valid slot pointing at null; `options` is the handle
+        // `build` returned, destroyed once after `with_options` copied it; `record` is destroyed
+        // once, last.
         unsafe {
             kafka_consumer_ConsumerRecordOptionsBuilder_set_topic(builder, c"t".as_ptr());
             kafka_consumer_ConsumerRecordOptionsBuilder_set_partition(builder, 1);
@@ -865,7 +864,8 @@ mod tests {
             // explicit `NULL`.
             kafka_consumer_ConsumerRecordOptionsBuilder_set_key(builder, std::ptr::null());
             kafka_consumer_ConsumerRecordOptionsBuilder_set_value(builder, std::ptr::null());
-            assert!(kafka_consumer_ConsumerRecordOptionsBuilder_build(builder, &mut options).is_null());
+            let options = kafka_consumer_ConsumerRecordOptionsBuilder_build(builder, &mut err);
+            assert!(err.is_null());
             kafka_consumer_ConsumerRecordOptionsBuilder_destroy(builder);
             let record = kafka_consumer_ConsumerRecord_with_options(options);
             kafka_consumer_ConsumerRecordOptions_destroy(options);

@@ -30,12 +30,13 @@ use crate::common::Error;
 use crate::common::header::Headers;
 use crate::common::serialization::Deserializer;
 use crate::consumer::KafkaConsumer;
+use crate::ffi::common::deliver_value;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::common::serialization::deserializer::{
     SharedDeserializer, kafka_common_serialization_Deserializer_t, take_deserializer,
 };
 use crate::ffi::consumer::consumer_config::{consumer_config_ref, kafka_consumer_ConsumerConfig_t};
-use crate::ffi::consumer::{ConsumerClassHandle, ConsumerKind, Owns, kafka_consumer_Consumer_t, out_slot};
+use crate::ffi::consumer::{ConsumerClassHandle, ConsumerKind, Owns, kafka_consumer_Consumer_t};
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{GenericValue, box_bytes};
 
@@ -131,26 +132,27 @@ unsafe fn deserializer_from(
     }
 }
 
-/// `KafkaConsumer(ConsumerConfig config, Deserializer<K> keyDeserializer, Deserializer<V> valueDeserializer)`:
-/// delivers the owned `kafka_consumer_Consumer_t` the constructor returns
-/// (`Box<dyn Consumer>` in Rust), freed with `kafka_consumer_Consumer_destroy`,
-/// or returns the owned error. The config is copied; each deserializer
-/// handle is consumed (its `self` stays the caller's until the consumer is
-/// destroyed, CLAUDE.md §4 rule 3), and `NULL` means the record's `void *`
-/// on that side is a `kafka_Bytes_t *` owned by the records (rule 6).
+/// `KafkaConsumer(ConsumerConfig config, Deserializer<K> keyDeserializer,
+/// Deserializer<V> valueDeserializer)`: returns the owned
+/// `kafka_consumer_Consumer_t` the constructor returns (`Box<dyn Consumer>` in
+/// Rust), freed with `kafka_consumer_Consumer_destroy`, or stores the owned
+/// error in `*out_err` and returns `NULL`. The config is copied; each
+/// deserializer handle is consumed (its `self` stays the caller's until the
+/// consumer is destroyed, CLAUDE.md §4 rule 3), and `NULL` means the record's
+/// `void *` on that side is a `kafka_Bytes_t *` owned by the records (rule 6).
 ///
 /// # Safety
 ///
-/// `config` must be a live handle, each deserializer null or a live handle
-/// not used afterwards, and `out_new` a valid slot.
+/// `config` must be a live handle, each deserializer null or a live handle not
+/// used afterwards, and `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
     config: *const kafka_consumer_ConsumerConfig_t,
     key_deserializer: *mut kafka_common_serialization_Deserializer_t,
     value_deserializer: *mut kafka_common_serialization_Deserializer_t,
-    out_new: *mut *mut kafka_consumer_Consumer_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_consumer_Consumer_t {
     // SAFETY: Per this function's `# Safety`, `config` is a live handle; no setter can run on it
     // meanwhile, since the setters' `# Safety` excludes any other call using the handle at the same
     // time, so `consumer_config_ref`'s requirement holds for this statement, the only use of the
@@ -165,11 +167,11 @@ pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
     let result = ConsumerClassHandle::new(Owns { key: owns_key, value: owns_value }, || {
         KafkaConsumer::new(config, key, value).map(ConsumerKind::Async)
     });
-    // SAFETY: Per this function's `# Safety`, `out_new` is a valid slot, as `out_slot` requires;
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid slot, as `deliver_value` requires;
     // the handle written is the fresh box the caller owns, freed with
     // `kafka_consumer_Consumer_destroy`.
     unsafe {
-        out_slot(result, out_new, |handle| {
+        deliver_value(result, out_err, |handle| {
             Box::into_raw(handle) as *mut kafka_consumer_Consumer_t
         })
     }

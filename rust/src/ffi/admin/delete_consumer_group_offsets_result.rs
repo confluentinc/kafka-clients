@@ -15,7 +15,8 @@
 //! C bindings for `org.apache.kafka.clients.admin.DeleteConsumerGroupOffsetsResult`.
 
 use crate::admin::DeleteConsumerGroupOffsetsResult;
-use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_result, out_slot, result_ref};
+use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_result, result_ref};
+use crate::ffi::common::deliver_value;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::common::topic_partition::{kafka_common_TopicPartition_t, topic_partition_ref};
 use crate::ffi::ffi_guard;
@@ -51,26 +52,26 @@ unsafe fn handle<'a>(
     unsafe { result_ref(self_) }
 }
 
-/// `DeleteConsumerGroupOffsetsResult.partitionResult(TopicPartition partition)`:
-/// stores in `*out_partition_result` an owned `KafkaFuture<Void>` (its `get`
-/// delivers `NULL`) that succeeds once the offset of `partition` was
-/// deleted, freed with `kafka_common_KafkaFuture_destroy`. Returns `NULL`,
-/// or the owned translation of `IllegalArgumentException` when `partition`
-/// was not part of the request (Java throws it synchronously, so it is
-/// returned rather than carried by the future). `partition` is borrowed and
-/// copied during the call.
+/// `DeleteConsumerGroupOffsetsResult.partitionResult(TopicPartition
+/// partition)`: returns an owned `KafkaFuture<Void>` (its `get` delivers
+/// `NULL`) that succeeds once the offset of `partition` was deleted, freed with
+/// `kafka_common_KafkaFuture_destroy`. On failure it stores the owned
+/// translation of `IllegalArgumentException` in `*out_err` and returns `NULL`,
+/// when `partition` was not part of the request (Java throws it synchronously,
+/// so it is reported here rather than carried by the future). `partition` is
+/// borrowed and copied during the call.
 ///
 /// # Safety
 ///
-/// `self_` must be a live result handle, `partition` a valid
-/// topic-partition handle and `out_partition_result` a valid slot.
+/// `self_` must be a live result handle, `partition` a valid topic-partition
+/// handle and `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(
     self_: *const kafka_admin_DeleteConsumerGroupOffsetsResult_t,
     partition: *const kafka_common_TopicPartition_t,
-    out_partition_result: *mut *mut kafka_common_KafkaFuture_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
     let h = unsafe { handle(self_) };
@@ -78,9 +79,8 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_partition_
     // `topic_partition_ref` requires; the borrow ends with the `partition_result` call, during
     // which the caller keeps the handle alive.
     let result = h.result.partition_result(unsafe { topic_partition_ref(partition) });
-    // SAFETY: Per this function's `# Safety`, `out_partition_result` is a valid slot, as `out_slot`
-    // requires.
-    unsafe { out_slot(result, out_partition_result, |future| h.ctx.void_future(&future)) }
+    // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_value` requires.
+    unsafe { deliver_value(result, out_err, |future| h.ctx.void_future(&future)) }
 }
 
 /// `DeleteConsumerGroupOffsetsResult.all()`: an owned `KafkaFuture<Void>`

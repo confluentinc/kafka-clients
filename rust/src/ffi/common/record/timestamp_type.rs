@@ -23,7 +23,8 @@ use std::ffi::{CString, c_char};
 use std::sync::LazyLock;
 
 use crate::common::record::TimestampType;
-use crate::ffi::common::{box_error, kafka_common_Error_t};
+use crate::ffi::common::fail_with;
+use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
 
@@ -157,32 +158,27 @@ pub unsafe extern "C" fn kafka_common_record_TimestampType_name(
     NAMES[enum_of(unsafe { value_of(self_) }) as usize].as_ptr()
 }
 
-/// `TimestampType.forName(String name)`: delivers the singleton through
-/// `out_for_name`, or returns the owned `NoSuchElementException` translation
+/// `TimestampType.forName(String name)`: returns the singleton, or stores the
+/// owned `NoSuchElementException` translation in `*out_err` and returns `NULL`
 /// for an unknown name.
 ///
 /// # Safety
 ///
-/// `name` must be a valid NUL-terminated string and `out_for_name` a valid
-/// pointer.
+/// `name` must be a valid NUL-terminated string and `out_err` a valid slot
+/// pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_record_TimestampType_for_name(
     name: *const c_char,
-    out_for_name: *mut *const kafka_common_record_TimestampType_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *const kafka_common_record_TimestampType_t {
     // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
     // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
     match TimestampType::for_name(&unsafe { c_str_to_string(name) }) {
-        Ok(timestamp_type) => {
-            // SAFETY: Per this function's `# Safety`, `out_for_name` is a valid pointer, so the
-            // write is sound; the singleton written points into the static `VARIANTS` array and is
-            // never freed.
-            unsafe { *out_for_name = singleton(timestamp_type) };
-            std::ptr::null_mut()
-        },
-        Err(error) => box_error(error),
+        Ok(timestamp_type) => singleton(timestamp_type),
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        Err(error) => unsafe { fail_with(out_err, error) },
     }
 }
 
@@ -246,14 +242,16 @@ mod tests {
     fn for_name_and_to_string_follow_java() {
         let create_time = CString::new("CreateTime").unwrap();
         let bogus = CString::new("bogus").unwrap();
-        // SAFETY: Test code: the `CString`s outlive the calls reading them, `timestamp_type` is a
-        // valid out pointer, the error from the unknown name and the string from `to_string` are
+        // SAFETY: Test code: the `CString`s outlive the calls reading them, `error` is a valid
+        // slot pointing at null before each call, the error from the unknown name and the string from `to_string` are
         // each destroyed once, and the singletons are never freed.
         unsafe {
-            let mut timestamp_type = ptr::null();
-            assert!(kafka_common_record_TimestampType_for_name(create_time.as_ptr(), &mut timestamp_type).is_null());
+            let mut error = ptr::null_mut();
+            let timestamp_type = kafka_common_record_TimestampType_for_name(create_time.as_ptr(), &mut error);
+            assert!(error.is_null());
             assert_eq!(timestamp_type, kafka_common_record_TimestampType_create_time());
-            let error = kafka_common_record_TimestampType_for_name(bogus.as_ptr(), &mut timestamp_type);
+            let unknown = kafka_common_record_TimestampType_for_name(bogus.as_ptr(), &mut error);
+            assert!(unknown.is_null());
             assert!(!error.is_null());
             kafka_common_Error_destroy(error);
 

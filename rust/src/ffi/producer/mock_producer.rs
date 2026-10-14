@@ -32,6 +32,8 @@ use std::sync::Arc;
 use crate::common::{Cluster, TopicPartition};
 use crate::consumer::OffsetAndMetadata;
 use crate::ffi::common::cluster::{cluster_ref, kafka_common_Cluster_t};
+use crate::ffi::common::deliver_unit;
+use crate::ffi::common::fail_with;
 use crate::ffi::common::metric_name::{kafka_common_MetricName_t, metric_name_ref};
 use crate::ffi::common::metrics::kafka_metric::{kafka_common_metrics_KafkaMetric_t, kafka_metric_ref};
 use crate::ffi::common::serialization::serializer::{
@@ -40,7 +42,7 @@ use crate::ffi::common::serialization::serializer::{
 use crate::ffi::common::topic_partition::{
     box_topic_partition, kafka_common_TopicPartition_destroy, kafka_common_TopicPartition_t, topic_partition_ref,
 };
-use crate::ffi::common::{box_error, kafka_common_Error_t, take_error};
+use crate::ffi::common::{kafka_common_Error_t, take_error};
 use crate::ffi::consumer::{
     box_offset_and_metadata, kafka_consumer_OffsetAndMetadata_destroy, kafka_consumer_OffsetAndMetadata_t,
 };
@@ -509,18 +511,19 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_error_next(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. `out_err` must be a valid slot pointing at
+/// null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_fence_producer(
     self_: *const kafka_producer_MockProducer_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `mock` requires; the
     // reference is used only within this call.
-    unsafe { mock(self_) }
-        .fence_producer()
-        .err()
-        .map_or(std::ptr::null_mut(), box_error)
+    let result = unsafe { mock(self_) }.fence_producer();
+    // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_unit` requires.
+    unsafe { deliver_unit(result, out_err) }
 }
 
 /// `MockProducer.transactionInitialized()`.
@@ -968,14 +971,14 @@ pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_set_value_ser
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle that no other call uses at the same time,
-/// and `out_build` a valid slot.
+/// `self_` must be a live handle that no other call uses at the same time, and
+/// `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_build(
     self_: *mut kafka_producer_MockProducerOptionsBuilder_t,
-    out_build: *mut *mut kafka_producer_MockProducerOptions_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_producer_MockProducerOptions_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, as `builder` requires; the exclusive reference is used only within this call,
     // which only reads through it.
@@ -991,7 +994,8 @@ pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_build(
     }
     let validated = match validation.build() {
         Ok(options) => options,
-        Err(error) => return box_error(error),
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        Err(error) => return unsafe { fail_with(out_err, error) },
     };
     let inner = OptionsInner {
         cluster: validated.cluster,
@@ -1000,11 +1004,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_build(
         key_serializer: builder.key_serializer.clone(),
         value_serializer: builder.value_serializer.clone(),
     };
-    // SAFETY: Per this function's `# Safety`, `out_build` is a valid slot, so the write is sound;
-    // the handle written is a fresh box the caller owns, freed with
-    // `kafka_producer_MockProducerOptions_destroy`.
-    unsafe { *out_build = Box::into_raw(Box::new(inner)) as *mut kafka_producer_MockProducerOptions_t };
-    std::ptr::null_mut()
+    Box::into_raw(Box::new(inner)) as *mut kafka_producer_MockProducerOptions_t
 }
 
 /// Frees the builder; null is a no-op.
@@ -1050,7 +1050,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::ffi::common::{kafka_common_Error_destroy, kafka_common_Error_message};
+    use crate::ffi::common::{box_error, kafka_common_Error_destroy, kafka_common_Error_message};
     use crate::ffi::kafka_future::{
         kafka_common_KafkaFuture_destroy, kafka_common_KafkaFuture_get, kafka_common_KafkaFuture_is_done,
         kafka_common_KafkaFuture_t,
@@ -1132,9 +1132,10 @@ mod tests {
         let seen = Seen::new();
         let topic = CString::new("topic").unwrap();
         let value = 42i32;
-        // SAFETY: Test code: `mock`, `record` and `callback` are live from their constructor to
-        // their single destroy below, `view` is used only before the mock is destroyed, `future`,
-        // `history`, each error and the metadata borrowed from `future` are used only before they
+        // SAFETY: Test code: `err` is a valid slot pointing at null before each call (only the last
+        // call fails), `mock`, `record` and `callback` are live from their constructor to their
+        // single destroy below, `view` is used only before the mock is destroyed, `future`,
+        // `history`, the error and the metadata borrowed from `future` are used only before they
         // are destroyed, once, and `seen`, `topic` and `value` outlive every use.
         unsafe {
             let mock = kafka_producer_MockProducer_with_auto_complete(0);
@@ -1142,8 +1143,9 @@ mod tests {
             let record = kafka_producer_ProducerRecord_new(topic.as_ptr(), &value as *const i32 as *const c_void);
             let callback = kafka_producer_Callback_new(&seen as *const Seen as *mut c_void, on_completion);
 
-            let mut future = std::ptr::null_mut();
-            assert!(kafka_producer_Producer_send_with_callback(view, record, callback, &raw mut future).is_null());
+            let mut err = std::ptr::null_mut();
+            let future = kafka_producer_Producer_send_with_callback(view, record, callback, &raw mut err);
+            assert!(err.is_null());
             let history = kafka_producer_MockProducer_history(mock);
             assert_eq!(kafka_List_size(history), 1);
             assert_eq!(
@@ -1171,8 +1173,8 @@ mod tests {
             );
             assert_eq!(kafka_common_KafkaFuture_is_done(future), 1);
 
-            let mut metadata = std::ptr::null_mut();
-            assert!(kafka_common_KafkaFuture_get(future, &raw mut metadata).is_null());
+            let metadata = kafka_common_KafkaFuture_get(future, &raw mut err);
+            assert!(err.is_null());
             assert_eq!(kafka_producer_RecordMetadata_offset(metadata as *const _), 0);
             // The metadata is borrowed from the future and freed with it.
             kafka_common_KafkaFuture_destroy(future);
@@ -1182,9 +1184,10 @@ mod tests {
                 mock,
                 box_error(crate::common::Error::local_illegal_state("boom")),
             );
-            let error = kafka_producer_Producer_send(view, record, &raw mut future);
-            assert_eq!(c_str_to_string(kafka_common_Error_message(error)), "boom");
-            kafka_common_Error_destroy(error);
+            let future = kafka_producer_Producer_send(view, record, &raw mut err);
+            assert!(future.is_null());
+            assert_eq!(c_str_to_string(kafka_common_Error_message(err)), "boom");
+            kafka_common_Error_destroy(err);
 
             kafka_producer_Callback_destroy(callback);
             kafka_producer_ProducerRecord_destroy(record);
@@ -1197,21 +1200,26 @@ mod tests {
     fn send_cb_is_drained_by_flush_and_the_control_operations() {
         let seen = Seen::new();
         let topic = CString::new("topic").unwrap();
-        // SAFETY: Test code: `mock` and `record` are live from their constructor to their single
-        // destroy below, `view` is used only before the mock is destroyed, each list is destroyed
-        // once after its last use, and `seen` outlives the callback run that reads it.
+        // SAFETY: Test code: `err` is a valid slot pointing at null for each call (no call fails),
+        // `mock` and `record` are live from their constructor to their single destroy below,
+        // `view` is used only before the mock is destroyed, each list is destroyed once after its
+        // last use, and `seen` outlives the callback run that reads it.
         unsafe {
             let mock = kafka_producer_MockProducer_with_auto_complete(1);
             let view = kafka_producer_MockProducer__as_Producer(mock);
             let record = kafka_producer_ProducerRecord_new(topic.as_ptr(), std::ptr::null());
 
-            assert!(kafka_producer_Producer_init_transactions(view).is_null());
-            assert!(kafka_producer_Producer_begin_transaction(view).is_null());
+            let mut err = std::ptr::null_mut();
+            kafka_producer_Producer_init_transactions(view, &raw mut err);
+            assert!(err.is_null());
+            kafka_producer_Producer_begin_transaction(view, &raw mut err);
+            assert!(err.is_null());
             for _ in 0..3 {
                 kafka_producer_Producer_send_cb(view, record, on_sent, &seen as *const Seen as *mut c_void);
             }
             // The commit drains the queued sends first, so they are committed.
-            assert!(kafka_producer_Producer_commit_transaction(view).is_null());
+            kafka_producer_Producer_commit_transaction(view, &raw mut err);
+            assert!(err.is_null());
             assert_eq!(kafka_producer_MockProducer_transaction_committed(mock), 1);
             let history = kafka_producer_MockProducer_history(mock);
             assert_eq!(kafka_List_size(history), 3);
@@ -1220,7 +1228,8 @@ mod tests {
             assert_eq!(kafka_List_size(uncommitted), 0);
             kafka_List_destroy(uncommitted);
 
-            assert!(kafka_producer_Producer_flush(view).is_null());
+            kafka_producer_Producer_flush(view, &raw mut err);
+            assert!(err.is_null());
             assert_eq!(kafka_producer_MockProducer_flushed(mock), 1);
             // The blocking commit, waiting for the delivery callbacks to report, ran the queued
             // completions on this thread.
@@ -1249,15 +1258,18 @@ mod tests {
         // history, not staged in the transaction, once the begin completes.
         let seen = Seen::new();
         let topic = CString::new("topic").unwrap();
-        // SAFETY: Test code: `mock` and `record` are live from their constructor to their single
-        // destroy below, `view` is used only before the mock is destroyed, each list is destroyed
-        // once after its last use, and `seen` outlives the callback runs that read it.
+        // SAFETY: Test code: `err` is a valid slot pointing at null, `mock` and `record` are live
+        // from their constructor to their single destroy below, `view` is used only before the
+        // mock is destroyed, each list is destroyed once after its last use, and `seen` outlives
+        // the callback runs that read it.
         unsafe {
             let mock = kafka_producer_MockProducer_with_auto_complete(1);
             let view = kafka_producer_MockProducer__as_Producer(mock);
             let record = kafka_producer_ProducerRecord_new(topic.as_ptr(), std::ptr::null());
 
-            assert!(kafka_producer_Producer_init_transactions(view).is_null());
+            let mut err = std::ptr::null_mut();
+            kafka_producer_Producer_init_transactions(view, &raw mut err);
+            assert!(err.is_null());
             for _ in 0..3 {
                 kafka_producer_Producer_send_cb(view, record, on_sent, &seen as *const Seen as *mut c_void);
             }
@@ -1300,17 +1312,19 @@ mod tests {
     fn flush_waits_for_the_reports_of_the_callbacks_queued_before_it() {
         let seen = Seen::new();
         let topic = CString::new("topic").unwrap();
-        // SAFETY: Test code: `mock`, `record` and `callback` are live from their constructor to
-        // their single destroy below, which comes after the helper thread is joined; `view` is
-        // used only before the mock is destroyed, each future is destroyed once after its last
-        // use, and `seen` and `topic` outlive every use.
+        // SAFETY: Test code: `err` is a valid slot pointing at null for each call (no call fails),
+        // `mock`, `record` and `callback` are live from their constructor to their single destroy
+        // below, which comes after the helper thread is joined; `view` is used only before the
+        // mock is destroyed, each future is destroyed once after its last use, and `seen` and
+        // `topic` outlive every use.
         unsafe {
             let mock = kafka_producer_MockProducer_with_auto_complete(0);
             let view = kafka_producer_MockProducer__as_Producer(mock);
             let record = kafka_producer_ProducerRecord_new(topic.as_ptr(), std::ptr::null());
             let callback = kafka_producer_Callback_new(&seen as *const Seen as *mut c_void, on_completion);
-            let mut first = std::ptr::null_mut();
-            assert!(kafka_producer_Producer_send_with_callback(view, record, callback, &raw mut first).is_null());
+            let mut err = std::ptr::null_mut();
+            let first = kafka_producer_Producer_send_with_callback(view, record, callback, &raw mut err);
+            assert!(err.is_null());
 
             // `MockProducer.flush()` completes the record; the flush then runs its callback on its
             // own thread and waits for the report.
@@ -1319,10 +1333,11 @@ mod tests {
             std::thread::scope(|scope| {
                 let flusher = scope.spawn(|| {
                     let view = shared.0 as *const kafka_producer_Producer_t;
+                    let mut err = std::ptr::null_mut();
                     // SAFETY: Test code: the view outlives this thread, which the scope joins
-                    // before the mock is destroyed.
-                    let error = kafka_producer_Producer_flush(view);
-                    assert!(error.is_null());
+                    // before the mock is destroyed, and `err` is a valid slot pointing at null.
+                    kafka_producer_Producer_flush(view, &raw mut err);
+                    assert!(err.is_null());
                     flushed.store(true, Ordering::SeqCst);
                 });
                 wait_until("the flush never ran the callback", || {
@@ -1334,8 +1349,8 @@ mod tests {
 
                 // A record completing after the flush began registers after its mark: the flush
                 // runs its callback too, but does not wait for its report.
-                let mut second = std::ptr::null_mut();
-                assert!(kafka_producer_Producer_send_with_callback(view, record, callback, &raw mut second).is_null());
+                let second = kafka_producer_Producer_send_with_callback(view, record, callback, &raw mut err);
+                assert!(err.is_null());
                 assert_eq!(kafka_producer_MockProducer_complete_next(mock), 1);
                 wait_until("the flush never ran the second callback", || {
                     seen.completions.load(Ordering::SeqCst) == 2
@@ -1360,8 +1375,8 @@ mod tests {
                     std::ptr::null_mut(),
                     box_error(crate::common::Error::local_illegal_state("thrown by the callback")),
                 );
-                let mut metadata = std::ptr::null_mut();
-                assert!(kafka_common_KafkaFuture_get(second, &raw mut metadata).is_null());
+                let metadata = kafka_common_KafkaFuture_get(second, &raw mut err);
+                assert!(err.is_null());
                 assert_eq!(kafka_producer_RecordMetadata_offset(metadata as *const _), 1);
                 kafka_common_KafkaFuture_destroy(second);
             });
@@ -1376,17 +1391,19 @@ mod tests {
     fn destroy_completes_a_future_whose_callback_never_reported() {
         let seen = Seen::new();
         let topic = CString::new("topic").unwrap();
-        // SAFETY: Test code: `mock`, `record` and `callback` are live from their constructor to
-        // their single destroy below, `view` is used only before the mock is destroyed, `future`
-        // and the metadata borrowed from it are used only before it is destroyed, once, after the
-        // mock, and `seen` and `topic` outlive every use.
+        // SAFETY: Test code: `err` is a valid slot pointing at null for each call (no call fails),
+        // `mock`, `record` and `callback` are live from their constructor to their single destroy
+        // below, `view` is used only before the mock is destroyed, `future` and the metadata
+        // borrowed from it are used only before it is destroyed, once, after the mock, and `seen`
+        // and `topic` outlive every use.
         unsafe {
             let mock = kafka_producer_MockProducer_with_auto_complete(1);
             let view = kafka_producer_MockProducer__as_Producer(mock);
             let record = kafka_producer_ProducerRecord_new(topic.as_ptr(), std::ptr::null());
             let callback = kafka_producer_Callback_new(&seen as *const Seen as *mut c_void, on_completion);
-            let mut future = std::ptr::null_mut();
-            assert!(kafka_producer_Producer_send_with_callback(view, record, callback, &raw mut future).is_null());
+            let mut err = std::ptr::null_mut();
+            let future = kafka_producer_Producer_send_with_callback(view, record, callback, &raw mut err);
+            assert!(err.is_null());
             assert_eq!(kafka_producer_Producer__execute_callbacks(view), 1);
             assert_eq!(kafka_common_KafkaFuture_is_done(future), 0);
             kafka_producer_Callback_destroy(callback);
@@ -1395,8 +1412,8 @@ mod tests {
             // Destroy completes the callback as if it had reported, so no future is left waiting.
             kafka_producer_MockProducer_destroy(mock);
             assert_eq!(kafka_common_KafkaFuture_is_done(future), 1);
-            let mut metadata = std::ptr::null_mut();
-            assert!(kafka_common_KafkaFuture_get(future, &raw mut metadata).is_null());
+            let metadata = kafka_common_KafkaFuture_get(future, &raw mut err);
+            assert!(err.is_null());
             assert_eq!(kafka_producer_RecordMetadata_offset(metadata as *const _), 0);
             kafka_common_KafkaFuture_destroy(future);
         }
@@ -1412,11 +1429,15 @@ mod tests {
         callback_id: i64,
     ) {
         let view = self_ as *const kafka_producer_Producer_t;
+        let mut err = std::ptr::null_mut();
         // SAFETY: Test code: `self_` is the view the test registered, alive until the mock is
-        // destroyed after the callbacks ran.
+        // destroyed after the callbacks ran, and `err` is a valid slot pointing at null for each
+        // call (neither fails).
         unsafe {
-            assert!(kafka_producer_Producer_flush(view).is_null());
-            assert!(crate::ffi::producer::kafka_producer_Producer_close(view).is_null());
+            kafka_producer_Producer_flush(view, &raw mut err);
+            assert!(err.is_null());
+            crate::ffi::producer::kafka_producer_Producer_close(view, &raw mut err);
+            assert!(err.is_null());
             kafka_producer_Producer__set_callback_result(view, callback_id, std::ptr::null_mut(), std::ptr::null_mut());
         }
     }
@@ -1424,16 +1445,17 @@ mod tests {
     #[test]
     fn a_mock_flushes_and_closes_from_inside_a_delivery_callback() {
         let topic = CString::new("topic").unwrap();
-        // SAFETY: Test code: `mock`, `record` and `callback` are live from their constructor to
-        // their single destroy below, `view` is used only before the mock is destroyed, and the
-        // future is destroyed once after its last use.
+        // SAFETY: Test code: `err` is a valid slot pointing at null, `mock`, `record` and
+        // `callback` are live from their constructor to their single destroy below, `view` is used
+        // only before the mock is destroyed, and the future is destroyed once after its last use.
         unsafe {
             let mock = kafka_producer_MockProducer_with_auto_complete(1);
             let view = kafka_producer_MockProducer__as_Producer(mock);
             let record = kafka_producer_ProducerRecord_new(topic.as_ptr(), std::ptr::null());
             let callback = kafka_producer_Callback_new(view as *mut c_void, flush_and_close_from_the_callback);
-            let mut future = std::ptr::null_mut();
-            assert!(kafka_producer_Producer_send_with_callback(view, record, callback, &raw mut future).is_null());
+            let mut err = std::ptr::null_mut();
+            let future = kafka_producer_Producer_send_with_callback(view, record, callback, &raw mut err);
+            assert!(err.is_null());
             assert_eq!(kafka_producer_Producer__execute_callbacks(view), 1);
             assert_eq!(kafka_common_KafkaFuture_is_done(future), 1, "the callback reported");
             assert_eq!(kafka_producer_MockProducer_closed(mock), 1);
@@ -1446,22 +1468,26 @@ mod tests {
 
     #[test]
     fn options_builder_validates_and_builds_a_mock() {
-        // SAFETY: Test code: `builder`, `options`, `mock` and each list, map and error are live
-        // from their constructor to their single destroy below, and `builder` is destroyed only
-        // after its last use.
+        // SAFETY: Test code: `err` is a valid slot pointing at null before each call (reset after
+        // the error is destroyed), `builder`, `options`, `mock` and each list, map and error are
+        // live from their constructor to their single destroy below, and `builder` is destroyed
+        // only after its last use.
         unsafe {
             let builder = kafka_producer_MockProducerOptionsBuilder_new();
-            let mut options = std::ptr::null_mut();
-            let error = kafka_producer_MockProducerOptionsBuilder_build(builder, &raw mut options);
+            let mut err = std::ptr::null_mut();
+            let options = kafka_producer_MockProducerOptionsBuilder_build(builder, &raw mut err);
+            assert!(options.is_null());
             assert_eq!(
-                c_str_to_string(kafka_common_Error_message(error)),
+                c_str_to_string(kafka_common_Error_message(err)),
                 "MockProducerOptionsBuilder::build: mandatory parameter `auto_complete` was not set"
             );
-            kafka_common_Error_destroy(error);
+            kafka_common_Error_destroy(err);
+            err = std::ptr::null_mut();
 
             kafka_producer_MockProducerOptionsBuilder_set_auto_complete(builder, 1);
             kafka_producer_MockProducerOptionsBuilder_set_partitioner(builder, std::ptr::null_mut());
-            assert!(kafka_producer_MockProducerOptionsBuilder_build(builder, &raw mut options).is_null());
+            let options = kafka_producer_MockProducerOptionsBuilder_build(builder, &raw mut err);
+            assert!(err.is_null());
             kafka_producer_MockProducerOptionsBuilder_destroy(builder);
 
             let mock = kafka_producer_MockProducer_with_options(options);

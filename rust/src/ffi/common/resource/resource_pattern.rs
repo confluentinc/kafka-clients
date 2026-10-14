@@ -16,9 +16,10 @@
 //! `org.apache.kafka.common.resource.ResourcePattern` (CLAUDE.md §4).
 
 use std::ffi::{CString, c_char};
-use std::ptr;
 
 use crate::common::resource::ResourcePattern;
+use crate::ffi::common::fail_with;
+use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::common::resource::pattern_type::{
     kafka_common_resource_PatternType_t, singleton as pattern_type_singleton, value_of as pattern_type_of,
 };
@@ -28,7 +29,6 @@ use crate::ffi::common::resource::resource_pattern_filter::{
 use crate::ffi::common::resource::resource_type::{
     kafka_common_resource_ResourceType_t, singleton as resource_type_singleton, value_of as resource_type_of,
 };
-use crate::ffi::common::{box_error, kafka_common_Error_t};
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
 
@@ -90,23 +90,23 @@ pub(crate) fn box_resource_pattern(pattern: ResourcePattern) -> *mut kafka_commo
     Box::into_raw(Box::new(ResourcePatternInner::new(pattern))) as *mut kafka_common_resource_ResourcePattern_t
 }
 
-/// `new ResourcePattern(ResourceType resourceType, String name, PatternType patternType)`:
-/// delivers the owned pattern through `out_pattern`, or returns the owned
-/// `IllegalArgumentException` translation when `resource_type` is `ANY` or
-/// `pattern_type` is `ANY` or `MATCH`.
+/// `new ResourcePattern(ResourceType resourceType, String name, PatternType
+/// patternType)`: returns the owned pattern, or stores the owned
+/// `IllegalArgumentException` translation in `*out_err` and returns `NULL` when
+/// `resource_type` is `ANY` or `pattern_type` is `ANY` or `MATCH`.
 ///
 /// # Safety
 ///
-/// `resource_type` and `pattern_type` must be singletons of their enums,
-/// `name` a valid NUL-terminated string and `out_pattern` a valid pointer.
+/// `resource_type` and `pattern_type` must be singletons of their enums, `name`
+/// a valid NUL-terminated string and `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_new(
     resource_type: *const kafka_common_resource_ResourceType_t,
     name: *const c_char,
     pattern_type: *const kafka_common_resource_PatternType_t,
-    out_pattern: *mut *mut kafka_common_resource_ResourcePattern_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_common_resource_ResourcePattern_t {
     let pattern = ResourcePattern::new(
         // SAFETY: Per this function's `# Safety`, `resource_type` is a singleton of its enum, i.e.
         // one returned by the `resource_type` module, as `resource_type_of`
@@ -122,14 +122,9 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_new(
         unsafe { pattern_type_of(pattern_type) },
     );
     match pattern {
-        Ok(pattern) => {
-            // SAFETY: Per this function's `# Safety`, `out_pattern` is a valid pointer, so writing
-            // through it is sound. The handle written is a fresh owned one from
-            // `box_resource_pattern`, which the caller owns.
-            unsafe { *out_pattern = box_resource_pattern(pattern) };
-            ptr::null_mut()
-        },
-        Err(error) => box_error(error),
+        Ok(pattern) => box_resource_pattern(pattern),
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        Err(error) => unsafe { fail_with(out_err, error) },
     }
 }
 
@@ -253,6 +248,7 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_destroy(
 #[cfg(test)]
 mod tests {
     use std::ffi::CStr;
+    use std::ptr;
 
     use super::*;
     use crate::common::resource::{PatternType, ResourceType};
@@ -275,20 +271,18 @@ mod tests {
     fn constructor_getters_and_filter_follow_java() {
         let name = CString::new("orders-").unwrap();
         // SAFETY: Test code: the enum arguments are singletons from their getters, `name` is a
-        // `CString` that outlives the constructor copying it, `pattern` is a local the constructor
-        // writes an owned handle into, the name view is read only while `pattern` is alive, and
-        // every owned handle (the pattern, the filter, the string) is destroyed once.
+        // `CString` that outlives the constructor copying it, `err` is a valid slot pointing at
+        // null, the name view is read only while `pattern` is alive, and every owned handle (the
+        // pattern the constructor returns, the filter, the string) is destroyed once.
         unsafe {
-            let mut pattern = ptr::null_mut();
-            assert!(
-                kafka_common_resource_ResourcePattern_new(
-                    kafka_common_resource_ResourceType_topic(),
-                    name.as_ptr(),
-                    kafka_common_resource_PatternType_prefixed(),
-                    &mut pattern
-                )
-                .is_null()
+            let mut err = ptr::null_mut();
+            let pattern = kafka_common_resource_ResourcePattern_new(
+                kafka_common_resource_ResourceType_topic(),
+                name.as_ptr(),
+                kafka_common_resource_PatternType_prefixed(),
+                &mut err,
             );
+            assert!(err.is_null());
             let expected = ResourcePattern::new(ResourceType::Topic, "orders-", PatternType::Prefixed).unwrap();
             assert_eq!(*resource_pattern_ref(pattern), expected);
             assert_eq!(
@@ -323,35 +317,37 @@ mod tests {
     fn any_resource_type_and_filter_pattern_types_are_rejected() {
         let name = CString::new("orders").unwrap();
         // SAFETY: Test code: the enum arguments are singletons from their getters, `name` is a
-        // `CString` that outlives the calls reading it, `pattern` is a local out pointer the
-        // failing constructor leaves null, and each returned error is destroyed once, after its
-        // message is read.
+        // `CString` that outlives the calls reading it, `error` is a valid slot pointing at null
+        // before each call, and each error the failing constructor stores is destroyed once,
+        // after its message is read, and the slot reset.
         unsafe {
-            let mut pattern = ptr::null_mut();
-            let error = kafka_common_resource_ResourcePattern_new(
+            let mut error = ptr::null_mut();
+            let pattern = kafka_common_resource_ResourcePattern_new(
                 kafka_common_resource_ResourceType_any(),
                 name.as_ptr(),
                 kafka_common_resource_PatternType_literal(),
-                &mut pattern,
+                &mut error,
             );
+            assert!(pattern.is_null(), "nothing is returned on failure");
             assert_eq!(kafka_common_Error_is_local_illegal_argument_error(error), 1);
             assert_eq!(
                 CStr::from_ptr(kafka_common_Error_message(error)).to_str().unwrap(),
                 "resourceType must not be ANY"
             );
             kafka_common_Error_destroy(error);
-            let error = kafka_common_resource_ResourcePattern_new(
+            error = ptr::null_mut();
+            let pattern = kafka_common_resource_ResourcePattern_new(
                 kafka_common_resource_ResourceType_topic(),
                 name.as_ptr(),
                 kafka_common_resource_PatternType_any(),
-                &mut pattern,
+                &mut error,
             );
             assert_eq!(
                 CStr::from_ptr(kafka_common_Error_message(error)).to_str().unwrap(),
                 "patternType must not be ANY"
             );
             kafka_common_Error_destroy(error);
-            assert!(pattern.is_null(), "nothing is delivered on failure");
+            assert!(pattern.is_null(), "nothing is returned on failure");
         }
     }
 }

@@ -22,9 +22,8 @@ use crate::admin::{DescribeTransactionsResult, TransactionDescription};
 use crate::ffi::admin::transaction_description::{
     box_transaction_description, destroy_transaction_description_element,
 };
-use crate::ffi::admin::{
-    FutureCtx, ResultHandle, box_result, destroy_map_element, destroy_result, out_slot, result_ref,
-};
+use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_map_element, destroy_result, result_ref};
+use crate::ffi::common::deliver_value;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
@@ -72,36 +71,35 @@ unsafe fn handle<'a>(
     unsafe { result_ref(self_) }
 }
 
-/// `description(String transactionalId)`: delivers through `out_description`
-/// an owned future (freed with `kafka_common_KafkaFuture_destroy`) whose
-/// `get` yields a `kafka_admin_TransactionDescription_t *` owned by the
-/// future, or returns the owned `IllegalArgumentError` when
+/// `description(String transactionalId)`: returns an owned future (freed with
+/// `kafka_common_KafkaFuture_destroy`) whose `get` yields a
+/// `kafka_admin_TransactionDescription_t *` owned by the future, or stores the
+/// owned `IllegalArgumentError` in `*out_err` and returns `NULL` when
 /// `transactional_id` was not part of the request.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle, `transactional_id` a valid
-/// NUL-terminated string and `out_description` a valid slot.
+/// NUL-terminated string and `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_description(
     self_: *const kafka_admin_DescribeTransactionsResult_t,
     transactional_id: *const c_char,
-    out_description: *mut *mut kafka_common_KafkaFuture_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     // SAFETY: Per this function's `# Safety`, `transactional_id` is a valid NUL-terminated string,
     // as `c_str_to_string` requires; it is copied into a `String` during the call.
     let transactional_id = unsafe { c_str_to_string(transactional_id) };
-    // SAFETY: Per this function's `# Safety`, `out_description` is a valid slot, as `out_slot`
-    // requires. For `handle_future`, `destroy_transaction_description_element` frees exactly the
+    // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_value` requires. For `handle_future`, `destroy_transaction_description_element` frees exactly the
     // handle `box_transaction_description` makes, and the handle holds only owned data and no
     // thread-bound state, so it may be freed from any thread and read from several at once, as
     // `handle_future` requires.
     unsafe {
-        out_slot(h.result.description(&transactional_id), out_description, |f| {
+        deliver_value(h.result.description(&transactional_id), out_err, |f| {
             h.ctx.handle_future(
                 &f,
                 |d| box_transaction_description(d) as *mut c_void,

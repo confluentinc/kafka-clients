@@ -9,13 +9,24 @@ header = """
  * Panics never cross this API.
  *
  * Every function declared here catches a Rust panic before it can unwind into
- * its caller, which would abort the process, and reports it instead. A
- * fallible function returns the panic as its kafka_common_Error_t * and leaves
- * its out_<name> parameters unwritten, as for any other failure: read them
- * only after a NULL return. The error's code is
- * kafka_common_Error_LOCAL_ILLEGAL_STATE and its message begins
- * "Rust panic caught at the FFI boundary in <function>". Any other function
- * returns the failure value of its return type:
+ * its caller, which would abort the process, and reports it instead.
+ *
+ * A fallible function takes a trailing kafka_common_Error_t **out_err. It
+ * must not be NULL and *out_err must be NULL on entry; neither is checked. On
+ * failure, a caught panic included, the function stores an owned error in
+ * *out_err, which the caller frees with kafka_common_Error_destroy, and
+ * returns NULL for a pointer, a NULL kafka_Bytes_t, 0 for an int8_t and -1
+ * for another integer; on success it leaves *out_err untouched. Test *out_err,
+ * not the value: NULL and -1 can be valid answers. The function pointers a
+ * caller implements and that can fail (a Serializer's and a Deserializer's
+ * methods, Headers' add and remove, KafkaFuture_BaseFunction's apply) take the
+ * same trailing out_err: they fail by storing an owned error there, and their
+ * return value is then ignored.
+ *
+ * A caught panic's error has the code kafka_common_Error_LOCAL_ILLEGAL_STATE
+ * and a message beginning "Rust panic caught at the FFI boundary in
+ * <function>". Any other function has no out_err: it logs a panic and, unless
+ * it is a _cb function (below), returns the failure value of its return type:
  *   - a pointer: NULL;
  *   - an int8_t: 0, false for a boolean. An int8_t carrying a Java byte code
  *     whose 0 is a valid constant (kafka_common_IsolationLevel_id, say)
@@ -52,7 +63,10 @@ header = """
  * kafka_admin_AbortTransactionSpec_producer_epoch, and the empty optional
  * values whose Java domain holds -2 (a member epoch, a consumer's lag, a log
  * dir's byte counts, a node id, an admin option's timeout). Such a panic shows
- * only in the error-level log line every caught panic writes.
+ * only in the error-level log line every caught panic writes. A language
+ * binding that must tell every panic apart includes
+ * confluent_kafka_bindings.h instead, whose _err twins report it through
+ * out_err.
  *
  * A _cb function reports a caught panic the way it reports every other
  * outcome, exactly once, whether the panic happens on the calling thread or

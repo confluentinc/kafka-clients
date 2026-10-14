@@ -24,9 +24,8 @@ use crate::common::TopicPartition;
 use crate::ffi::admin::producer_state::{
     box_producer_state, destroy_producer_state_element, kafka_admin_ProducerState_t, producer_state_ref,
 };
-use crate::ffi::admin::{
-    FutureCtx, ResultHandle, box_result, destroy_map_element, destroy_result, out_slot, result_ref,
-};
+use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_map_element, destroy_result, result_ref};
+use crate::ffi::common::deliver_value;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::common::topic_partition::{
     box_topic_partition, kafka_common_TopicPartition_destroy, kafka_common_TopicPartition_t, topic_partition_key_eq,
@@ -244,25 +243,24 @@ unsafe fn handle<'a>(self_: *const kafka_admin_DescribeProducersResult_t) -> &'a
     unsafe { result_ref(self_) }
 }
 
-/// `partitionResult(TopicPartition partition)`: delivers through
-/// `out_partition_result` an owned future (freed with
-/// `kafka_common_KafkaFuture_destroy`) whose `get` yields a
+/// `partitionResult(TopicPartition partition)`: returns an owned future (freed
+/// with `kafka_common_KafkaFuture_destroy`) whose `get` yields a
 /// `kafka_admin_DescribeProducersResult_PartitionProducerState_t *` owned by
-/// the future, or returns the owned `IllegalArgumentError`
-/// when `partition` was not part of the request. `partition` is borrowed
-/// for the call.
+/// the future, or stores the owned `IllegalArgumentError` in `*out_err` and
+/// returns `NULL` when `partition` was not part of the request. `partition` is
+/// borrowed for the call.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle, `partition` a valid topic-partition
-/// handle and `out_partition_result` a valid slot.
+/// handle and `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_partition_result(
     self_: *const kafka_admin_DescribeProducersResult_t,
     partition: *const kafka_common_TopicPartition_t,
-    out_partition_result: *mut *mut kafka_common_KafkaFuture_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
     let h = unsafe { handle(self_) };
@@ -270,13 +268,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_partition_result(
     // `topic_partition_ref` requires; the caller keeps it alive for this call, which the borrow
     // does not outlive.
     let partition = unsafe { topic_partition_ref(partition) };
-    // SAFETY: Per this function's `# Safety`, `out_partition_result` is a valid slot, as `out_slot`
-    // requires. For `handle_future`, `destroy_partition_producer_state_element` frees exactly the
+    // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_value` requires. For `handle_future`, `destroy_partition_producer_state_element` frees exactly the
     // handle `box_partition_producer_state` makes, and the handle holds only owned data and no
     // thread-bound state, so it may be freed from any thread and read from several at once, as
     // `handle_future` requires.
     unsafe {
-        out_slot(h.result.partition_result(partition), out_partition_result, |f| {
+        deliver_value(h.result.partition_result(partition), out_err, |f| {
             h.ctx.handle_future(
                 &f,
                 |s| box_partition_producer_state(s) as *mut c_void,

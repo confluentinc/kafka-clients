@@ -220,11 +220,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_new(
             "The future passed to DescribeClientQuotasResult must already be complete",
         ))
     } else {
-        let mut value: *mut c_void = ptr::null_mut();
+        let mut error = ptr::null_mut();
         // SAFETY: Per this function's `# Safety`, `entities` is a valid future handle, and
-        // `&mut value` points at a local, so it is a valid pointer, as
+        // `&mut error` points at a local null, so it is a valid slot, as
         // `kafka_common_KafkaFuture_get` requires.
-        let error = unsafe { kafka_common_KafkaFuture_get(entities, &mut value) };
+        let value = unsafe { kafka_common_KafkaFuture_get(entities, &mut error) };
         // SAFETY: `error` is null or the owned error handle `kafka_common_KafkaFuture_get` just
         // returned, not yet destroyed, as `take_error` requires; nothing uses it afterwards.
         match unsafe { take_error(error) } {

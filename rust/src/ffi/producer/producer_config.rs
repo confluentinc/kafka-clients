@@ -32,7 +32,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::common::Error;
-use crate::ffi::common::{box_error, kafka_common_Error_t};
+use crate::ffi::common::fail_with;
+use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
 use crate::ffi::producer::partitioner::{
     SharedPartitioner, SharedPartitionerAdapter, kafka_producer_Partitioner_t, take_partitioner,
@@ -92,25 +93,23 @@ pub(crate) unsafe fn producer_config_ref<'a>(
 ///
 /// # Safety
 ///
-/// `props` must be a live map of C strings and `out_new` a valid slot.
+/// `props` must be a live map of C strings and `out_err` a valid slot pointing
+/// at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerConfig_new(
     props: *const kafka_Map_t,
-    out_new: *mut *mut kafka_producer_ProducerConfig_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_producer_ProducerConfig_t {
     // SAFETY: Per this function's `# Safety`, `props` is a live map of C strings, as `map_strings`
     // requires; its entries are copied into owned `String`s.
     let props: HashMap<String, String> = unsafe { map_strings(props) }.into_iter().collect();
     if let Err(error) = ProducerConfig::new(&props) {
-        return box_error(error);
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        return unsafe { fail_with(out_err, error) };
     }
     let inner = ProducerConfigInner { props, partitioner: None };
-    // SAFETY: Per this function's `# Safety`, `out_new` is a valid slot, so the write is sound; the
-    // handle written is a fresh box the caller owns, freed with
-    // `kafka_producer_ProducerConfig_destroy`.
-    unsafe { *out_new = Box::into_raw(Box::new(inner)) as *mut kafka_producer_ProducerConfig_t };
-    std::ptr::null_mut()
+    Box::into_raw(Box::new(inner)) as *mut kafka_producer_ProducerConfig_t
 }
 
 /// `ProducerConfig::set_partitioner`: the `*mut` parameter consumes an owned
@@ -168,20 +167,24 @@ mod tests {
     #[test]
     fn new_validates_and_the_handle_rebuilds_the_config() {
         let bad = box_string_map([("bootstrap.servers", "localhost:9092"), ("acks", "many")]);
-        let mut out = std::ptr::null_mut();
-        // SAFETY: Test code: `out` is a valid slot, each map and error handle is destroyed once
-        // after its last use, the round-robin handle outlives its `__as_Partitioner` view, which
-        // the configuration shares, and the configuration handle is destroyed once after its last
+        let mut err = std::ptr::null_mut();
+        // SAFETY: Test code: `err` is a valid slot pointing at null before each call (reset after
+        // the error is destroyed), each map and error handle is destroyed once after its last use,
+        // the round-robin handle outlives its `__as_Partitioner` view, which the configuration
+        // shares, and the configuration handle is destroyed once after its last
         // `producer_config_ref`.
         unsafe {
-            let error = kafka_producer_ProducerConfig_new(bad, &raw mut out);
-            assert!(!error.is_null());
-            assert!(c_str_to_string(kafka_common_Error_message(error)).contains("acks"));
-            kafka_common_Error_destroy(error);
+            let out = kafka_producer_ProducerConfig_new(bad, &raw mut err);
+            assert!(!err.is_null());
+            assert!(out.is_null());
+            assert!(c_str_to_string(kafka_common_Error_message(err)).contains("acks"));
+            kafka_common_Error_destroy(err);
+            err = std::ptr::null_mut();
             kafka_Map_destroy(bad);
 
             let good = box_string_map([("bootstrap.servers", "localhost:9092"), ("linger.ms", "5")]);
-            assert!(kafka_producer_ProducerConfig_new(good, &raw mut out).is_null());
+            let out = kafka_producer_ProducerConfig_new(good, &raw mut err);
+            assert!(err.is_null());
             kafka_Map_destroy(good);
 
             let partitioner = kafka_producer_RoundRobinPartitioner_new();

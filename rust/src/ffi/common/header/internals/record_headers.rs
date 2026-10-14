@@ -363,17 +363,17 @@ mod tests {
         // SAFETY: Test code: `headers` comes from `kafka_common_header_internals_RecordHeaders_new`
         // and is destroyed once, after the last use of `view`, the `Headers` view it hands out; the
         // record-header reference read from the owned list is used before the list is destroyed and
-        // before the next mutation; `k` outlives the calls reading it, and the error is destroyed
-        // once, after it is read.
+        // before the next mutation; `k` outlives the calls reading it; `err` is a valid slot
+        // pointing at null before each call, and the error stored there is destroyed once, after
+        // it is read.
         unsafe {
             let headers = kafka_common_header_internals_RecordHeaders_new();
             let view = kafka_common_header_internals_RecordHeaders__as_Headers(headers);
             // The view is borrowed and cached.
             assert_eq!(view, kafka_common_header_internals_RecordHeaders__as_Headers(headers));
-            assert!(
-                kafka_common_header_Headers_add_with_key_value(view, k.as_ptr(), kafka_Bytes_t::from_slice(&[7]))
-                    .is_null()
-            );
+            let mut err = ptr::null_mut();
+            kafka_common_header_Headers_add_with_key_value(view, k.as_ptr(), kafka_Bytes_t::from_slice(&[7]), &mut err);
+            assert!(err.is_null());
             // The class handle sees the mutation made through the view ...
             assert_eq!(record_headers_ref(headers).to_array().len(), 1);
             // ... and the view hands the header back as a borrowed handle.
@@ -388,10 +388,10 @@ mod tests {
             assert_eq!(kafka_common_header_internals_RecordHeaders_is_read_only(headers), 0);
             kafka_common_header_internals_RecordHeaders_set_read_only(headers);
             assert_eq!(kafka_common_header_internals_RecordHeaders_is_read_only(headers), 1);
-            let error = kafka_common_header_Headers_add_with_key_value(view, k.as_ptr(), kafka_Bytes_t::NULL);
-            assert!(!error.is_null());
-            assert_eq!(kafka_common_Error_is_local_illegal_state_error(error), 1);
-            kafka_common_Error_destroy(error);
+            kafka_common_header_Headers_add_with_key_value(view, k.as_ptr(), kafka_Bytes_t::NULL, &mut err);
+            assert!(!err.is_null());
+            assert_eq!(kafka_common_Error_is_local_illegal_state_error(err), 1);
+            kafka_common_Error_destroy(err);
             kafka_common_header_internals_RecordHeaders_destroy(headers);
         }
     }

@@ -19,10 +19,10 @@
 //! cross as `int64_t`, like every Java `long` (§4, "Primitive types").
 
 use std::ffi::{c_char, c_void};
-use std::ptr;
 
 use crate::common::Uuid;
-use crate::ffi::common::{box_error, kafka_common_Error_t};
+use crate::ffi::common::fail_with;
+use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_list, c_str_to_string, destroy_boxed, into_c_string, kafka_List_t, list_elements};
 
@@ -89,31 +89,28 @@ pub extern "C" fn kafka_common_Uuid_random_uuid() -> *mut kafka_common_Uuid_t {
     box_uuid(Uuid::random_uuid())
 }
 
-/// `Uuid.fromString(String)`: parses the base64 form `toString()` produces
-/// into `*out_from_string` (an owned handle), or returns the
-/// `IllegalArgumentException` Java throws for a malformed string.
+/// `Uuid.fromString(String)`: parses the base64 form `toString()` produces and
+/// returns an owned handle, or stores the translation of the
+/// `IllegalArgumentException` Java throws for a malformed string in `*out_err`
+/// and returns `NULL`.
 ///
 /// # Safety
 ///
-/// `s` must be a valid NUL-terminated string and `out_from_string` a valid
-/// pointer.
+/// `s` must be a valid NUL-terminated string and `out_err` a valid slot
+/// pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Uuid_from_string(
     s: *const c_char,
-    out_from_string: *mut *mut kafka_common_Uuid_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_common_Uuid_t {
     // SAFETY: Per this function's `# Safety`, `s` is a valid NUL-terminated string, as
     // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
     match Uuid::from_string(&unsafe { c_str_to_string(s) }) {
-        Ok(uuid) => {
-            // SAFETY: Per this function's `# Safety`, `out_from_string` is a valid pointer, so the
-            // write is sound; the caller owns the handle written, as the rustdoc states.
-            unsafe { *out_from_string = box_uuid(uuid) };
-            ptr::null_mut()
-        },
-        Err(e) => box_error(e),
+        Ok(uuid) => box_uuid(uuid),
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        Err(e) => unsafe { fail_with(out_err, e) },
     }
 }
 
@@ -176,6 +173,7 @@ pub unsafe extern "C" fn kafka_common_Uuid_destroy(self_: *mut kafka_common_Uuid
 #[cfg(test)]
 mod tests {
     use std::ffi::{CStr, CString};
+    use std::ptr;
 
     use super::*;
     use crate::ffi::common::kafka_common_Error_destroy;
@@ -201,15 +199,15 @@ mod tests {
     #[test]
     fn from_string_round_trips_to_string_and_reports_malformed_input() {
         let original = kafka_common_Uuid_random_uuid();
-        let mut parsed: *mut kafka_common_Uuid_t = ptr::null_mut();
+        let mut error = ptr::null_mut();
         // SAFETY: Test code: `original` comes from `kafka_common_Uuid_random_uuid` and `parsed`
         // from `kafka_common_Uuid_from_string`, and each is destroyed once, after the calls reading
         // it; `text` comes from `kafka_common_Uuid_to_string` and is destroyed once, after it is
-        // read; `bad` outlives the call reading it, `parsed` and `out` are valid out pointers, and
-        // the error is destroyed once.
+        // read; `bad` outlives the call reading it, `error` is a valid slot pointing at null before
+        // each call, and the error the failing call stores is destroyed once.
         unsafe {
             let text = kafka_common_Uuid_to_string(original);
-            let error = kafka_common_Uuid_from_string(text, &mut parsed);
+            let parsed = kafka_common_Uuid_from_string(text, &mut error);
             assert!(error.is_null());
             assert_eq!(uuid_of(parsed), uuid_of(original));
             assert_eq!(CStr::from_ptr(text).to_bytes().len(), 22);
@@ -218,10 +216,9 @@ mod tests {
             kafka_common_Uuid_destroy(original);
 
             let bad = CString::new("not a uuid!").unwrap();
-            let mut out: *mut kafka_common_Uuid_t = ptr::null_mut();
-            let error = kafka_common_Uuid_from_string(bad.as_ptr(), &mut out);
+            let out = kafka_common_Uuid_from_string(bad.as_ptr(), &mut error);
             assert!(!error.is_null());
-            assert!(out.is_null(), "the out slot is untouched on failure");
+            assert!(out.is_null(), "nothing is returned on failure");
             assert_eq!(kafka_common_Error_is_local_illegal_argument_error(error), 1);
             kafka_common_Error_destroy(error);
         }

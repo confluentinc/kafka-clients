@@ -22,7 +22,7 @@
 use std::ffi::c_char;
 
 use crate::admin::{FeatureUpdate, UpgradeType};
-use crate::ffi::admin::out_slot;
+use crate::ffi::common::deliver_value;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
 use crate::ffi::util::into_c_string;
@@ -200,28 +200,28 @@ pub(crate) fn box_feature_update(update: FeatureUpdate) -> *mut kafka_admin_Feat
     Box::into_raw(Box::new(FeatureUpdateInner { update })) as *mut kafka_admin_FeatureUpdate_t
 }
 
-/// `new FeatureUpdate(short maxVersionLevel, UpgradeType upgradeType)`:
-/// delivers the owned handle through `out_new` (freed with
-/// [`kafka_admin_FeatureUpdate_destroy`]), or returns the owned
-/// `IllegalArgumentException` translation when the level is negative or a
-/// deletion (level 0) is requested with `UPGRADE`.
+/// `new FeatureUpdate(short maxVersionLevel, UpgradeType upgradeType)`: returns
+/// the owned handle (freed with [`kafka_admin_FeatureUpdate_destroy`]), or
+/// stores the owned `IllegalArgumentException` translation in `*out_err` and
+/// returns `NULL` when the level is negative or a deletion (level 0) is
+/// requested with `UPGRADE`.
 ///
 /// # Safety
 ///
-/// `upgrade_type` must be an upgrade-type singleton and `out_new` a valid
-/// slot.
+/// `upgrade_type` must be an upgrade-type singleton and `out_err` a valid slot
+/// pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FeatureUpdate_new(
     max_version_level: i16,
     upgrade_type: *const kafka_admin_FeatureUpdate_UpgradeType_t,
-    out_new: *mut *mut kafka_admin_FeatureUpdate_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_admin_FeatureUpdate_t {
     // SAFETY: Per this function's `# Safety`, `upgrade_type` is an upgrade-type singleton; only
     // this module hands those out, as `upgrade_type_value_of` requires.
     let result = FeatureUpdate::new(max_version_level, unsafe { upgrade_type_value_of(upgrade_type) });
-    // SAFETY: Per this function's `# Safety`, `out_new` is a valid slot, as `out_slot` requires.
-    unsafe { out_slot(result, out_new, box_feature_update) }
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid slot, as `deliver_value` requires.
+    unsafe { deliver_value(result, out_err, box_feature_update) }
 }
 
 /// `maxVersionLevel()`.
@@ -321,19 +321,21 @@ mod tests {
 
     #[test]
     fn new_validates_like_java() {
-        let mut update = ptr::null_mut();
-        // SAFETY: Test code: `update` is a valid slot; `error`, `update` and `s` are live handles,
-        // each destroyed once after its last use, and destroying null is a no-op.
+        let mut error = ptr::null_mut();
+        // SAFETY: Test code: `error` is a valid slot pointing at null before each call; the
+        // failing call returns null and stores the owned error, destroyed once and the slot reset;
+        // `update` and `s` are live handles, each destroyed once after its last use, and destroying
+        // null is a no-op.
         unsafe {
-            let error = kafka_admin_FeatureUpdate_new(0, kafka_admin_FeatureUpdate_UpgradeType_upgrade(), &mut update);
+            let failed = kafka_admin_FeatureUpdate_new(0, kafka_admin_FeatureUpdate_UpgradeType_upgrade(), &mut error);
+            assert!(failed.is_null());
             assert!(!error.is_null());
             assert!(error_ref(error).error.is_local_illegal_argument_error());
             kafka_common_Error_destroy(error);
+            error = ptr::null_mut();
 
-            assert!(
-                kafka_admin_FeatureUpdate_new(2, kafka_admin_FeatureUpdate_UpgradeType_upgrade(), &mut update)
-                    .is_null()
-            );
+            let update = kafka_admin_FeatureUpdate_new(2, kafka_admin_FeatureUpdate_UpgradeType_upgrade(), &mut error);
+            assert!(error.is_null());
             let expected = FeatureUpdate::new(2, UpgradeType::Upgrade).unwrap();
             assert_eq!(*feature_update_ref(update), expected);
             assert_eq!(kafka_admin_FeatureUpdate_max_version_level(update), 2);

@@ -25,8 +25,11 @@
 //! use `i32`, and negative values (-1) signal "not set" for optional
 //! **scalar** fields and for out-of-range element accessors.
 //!
-//! A fallible function returns `*mut kafka_common_Error_t` (null on success)
-//! and delivers its value through a trailing `out_<name>` parameter. Owned
+//! A fallible function returns its value (or nothing) and takes a trailing
+//! `out_err: *mut *mut kafka_common_Error_t`, which must not be null and must
+//! point at null on entry; on failure it stores an owned error there and
+//! returns its failure value (`common::FailValue`: null, a null
+//! `kafka_Bytes_t`, 0 for an `i8`, -1 for another integer). Owned
 //! strings are freed with `kafka_string_destroy`; collections cross as the
 //! package-less `kafka_List_t` and `kafka_Map_t` of `void *`, byte buffers as
 //! `kafka_Bytes_t`. A Java `KafkaFuture<T>` is `kafka_common_KafkaFuture_t`;
@@ -45,12 +48,13 @@
 //!
 //! Every exported function catches a Rust panic before it can unwind into its
 //! caller, which would abort the process, and reports it instead. A fallible
-//! function returns the panic as its `kafka_common_Error_t *` and leaves its
-//! `out_<name>` parameters unwritten, as for any other failure: read them only
-//! after a NULL return. The error's code is
+//! function stores the panic in `*out_err` and returns its failure value, as
+//! for any other failure: test `*out_err`, not the value, since null and -1
+//! can be valid answers. The error's code is
 //! `kafka_common_Error_LOCAL_ILLEGAL_STATE` and its message begins
 //! `Rust panic caught at the FFI boundary in <function>`. Any other function
-//! returns the failure value of its return type:
+//! has no `out_err`: it logs the panic and, unless it is a `_cb` function
+//! (below), returns the failure value of its return type:
 //!
 //! - a pointer: NULL;
 //! - an `int8_t`: 0, false for a boolean. An `int8_t` carrying a Java `byte`
@@ -123,26 +127,25 @@
 //! library:
 //!
 //! - `confluent_kafka.h`, for C users: the functions above, where only those
-//!   that are fallible in Rust return an error;
+//!   that are fallible in Rust take `out_err`;
 //! - `confluent_kafka_bindings.h`, for language bindings: the same types, and
-//!   every function `f` as its `_err` twin, which [`ffi_guard`] emits beside
-//!   `f` and which reports every failure, a caught panic included, as the
-//!   `kafka_common_Error_t *` it returns (NULL on success).
+//!   a form of every function that reports every failure, a caught panic
+//!   included, through a trailing `kafka_common_Error_t **out_err`.
 //!
-//! | `f` in `confluent_kafka.h` | `f_err` in `confluent_kafka_bindings.h` |
+//! | `f` in `confluent_kafka.h` | in `confluent_kafka_bindings.h` |
 //! |---|---|
-//! | `kafka_common_Error_t *f(args)` | the same signature and behaviour |
-//! | `T f(args)`, any other `T` | `kafka_common_Error_t *f_err(args, T *out_result)`, writing `*out_result` only when it returns NULL |
-//! | `void f(args)` | `kafka_common_Error_t *f_err(args)`: NULL, or the caught panic |
-//! | a `_cb` function | `kafka_common_Error_t *f_cb_err(args)`: NULL, the completion reporting every outcome, a caught panic included, as for `f_cb` |
+//! | fallible: `T f(args, kafka_common_Error_t **out_err)` | `f` itself |
+//! | a `_cb` function | `f_cb` itself: its completion reports every outcome, a caught panic included |
+//! | any other `T f(args)`, `void` included | only `T f_err(args, kafka_common_Error_t **out_err)`, which [`ffi_guard`] emits beside `f`: on a caught panic it stores the error in `*out_err` and returns `f`'s panic value, otherwise it returns what `f` returns |
 //!
 //! A twin has the documentation and the preconditions of `f`, and a caught
-//! panic has the code and message above, naming the twin. `fallback` and the
-//! failure values do not apply to it. A program includes one of the two
-//! headers, never both, since they declare the same types. The function-pointer
-//! typedefs (interface methods, `_cb_t` completions, the `__set_callbacks_notify`
-//! hook) are the same in both: they are implemented by the caller, not
-//! exported. `ffi::tests` pins both headers against the exports.
+//! panic has the code and message above, naming the twin. `out_err` has the
+//! same contract everywhere: not null, `*out_err` null on entry, written only
+//! on failure. A program includes one of the two headers, never both, since
+//! they declare the same types. The function-pointer typedefs (interface
+//! methods, `_cb_t` completions, the `__set_callbacks_notify` hook) are the
+//! same in both: they are implemented by the caller, not exported.
+//! `ffi::tests` pins both headers against the exports.
 //!
 //! # Feature Gate
 //!
@@ -256,6 +259,15 @@ mod tests {
     /// above it, in source order. `test_every_exported_function_is_guarded`
     /// pins that the attribute is there.
     fn exports() -> Vec<(String, String)> {
+        exports_with_signatures()
+            .into_iter()
+            .map(|(name, guard, _)| (name, guard))
+            .collect()
+    }
+
+    /// [`exports`], each with its signature: the text from `fn` to the opening
+    /// brace of its body, whitespace collapsed.
+    fn exports_with_signatures() -> Vec<(String, String, String)> {
         let mut found = Vec::new();
         for (_, text) in sources() {
             let lines: Vec<&str> = text.lines().collect();
@@ -273,7 +285,19 @@ mod tests {
                 while start > 0 && !lines[start].trim_start().starts_with("#[ffi_guard") {
                     start -= 1;
                 }
-                found.push((name, lines[start..index].join("\n")));
+                let signature: Vec<&str> = lines[index + 1..]
+                    .iter()
+                    .map(|line| line.trim())
+                    .take_while(|line| !line.ends_with('{'))
+                    .chain(
+                        lines[index + 1..]
+                            .iter()
+                            .map(|line| line.trim())
+                            .find(|line| line.ends_with('{')),
+                    )
+                    .collect();
+                let signature = signature.join(" ").replace("( ", "(").replace(", )", ")");
+                found.push((name, lines[start..index].join("\n"), signature));
             }
         }
         found
@@ -301,28 +325,86 @@ mod tests {
     }
 
     /// `confluent_kafka.h` declares the exports, and `confluent_kafka_bindings.h`
-    /// (written by `build.rs`) their `_err` twins, which `#[ffi_guard]` emits:
-    /// both are pinned against the source, so a header that lost or gained a
-    /// function, or a twin that `build.rs` and the macro name differently,
-    /// fails here. No export of its own ends in `_err`, which would collide
-    /// with the twin of another one.
+    /// (written by `build.rs`) the fallible ones and the `_cb` ones under their
+    /// own names and every other one as its `_err` twin, which `#[ffi_guard]`
+    /// emits: both are pinned against the source, so a header that lost or
+    /// gained a function, or a twin that `build.rs` and the macro name or
+    /// select differently, fails here. A fallible export is one whose last
+    /// parameter is `out_err`; no other parameter is named so. No export of its
+    /// own ends in `_err`, which would collide with the twin of another one.
     #[test]
     fn test_bindings_header_declares_the_twin_of_every_export() {
-        let mut names: Vec<String> = exports().into_iter().map(|(name, _)| name).collect();
+        const OUT_ERR: &str = "out_err: *mut *mut kafka_common_Error_t";
+        let exports = exports_with_signatures();
+        let misplaced: Vec<&String> = exports
+            .iter()
+            .filter(|(_, _, signature)| {
+                let fallible =
+                    signature.contains(&format!("{OUT_ERR})")) || signature.contains(&format!("{OUT_ERR},)"));
+                names_out_err(signature) && !fallible
+            })
+            .map(|(name, _, _)| name)
+            .collect();
+        assert!(misplaced.is_empty(), "`out_err` not the last parameter: {misplaced:?}");
+        let fallible = |signature: &str| names_out_err(signature);
+        let mut names: Vec<String> = exports.iter().map(|(name, _, _)| name.clone()).collect();
         names.sort();
         let hand_written: Vec<&String> = names.iter().filter(|name| name.ends_with("_err")).collect();
         assert!(hand_written.is_empty(), "exports named like an `_err` twin: {hand_written:?}");
         assert_eq!(declared_functions("confluent_kafka.h"), names);
-        let mut twins: Vec<String> = names.iter().map(|name| format!("{name}_err")).collect();
-        twins.sort();
-        assert_eq!(declared_functions("confluent_kafka_bindings.h"), twins);
+        let mut bindings: Vec<String> = exports
+            .iter()
+            .map(|(name, _, signature)| {
+                if fallible(signature) || name.ends_with("_cb") {
+                    name.clone()
+                } else {
+                    format!("{name}_err")
+                }
+            })
+            .collect();
+        bindings.sort();
+        assert_eq!(declared_functions("confluent_kafka_bindings.h"), bindings);
+        let plain = exports
+            .iter()
+            .filter(|(name, _, signature)| fallible(signature) || name.ends_with("_cb"))
+            .count();
         assert!(names.len() >= 2315, "only {} exported functions found", names.len());
+        assert!(plain >= 261, "only {plain} fallible or `_cb` exports found");
+    }
+
+    /// Whether `text` names the identifier `out_err`, not merely contains it
+    /// (`kafka_common_Error_is_timeout_error` does).
+    fn names_out_err(text: &str) -> bool {
+        let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        text.match_indices("out_err")
+            .any(|(at, word)| !text[..at].ends_with(is_ident) && !text[at + word.len()..].starts_with(is_ident))
+    }
+
+    /// Every fallible export declares `out_err` last in `confluent_kafka.h` too,
+    /// with the C type the contract names.
+    #[test]
+    fn test_fallible_declarations_end_in_out_err() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/include/confluent_kafka.h");
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        // Drop the comments, which name `out_err` in prose.
+        let mut code = String::new();
+        let mut rest = text.as_str();
+        while let Some((before, after)) = rest.split_once("/*") {
+            code.push_str(before);
+            rest = after.split_once("*/").map_or("", |(_, after)| after);
+        }
+        code.push_str(rest);
+        let declarations = code.split(';').filter(|item| names_out_err(item));
+        let wrong: Vec<&str> = declarations
+            .filter(|item| !item.trim_end().ends_with("kafka_common_Error_t **out_err)"))
+            .collect();
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
     /// The exports whose `#[ffi_guard]` takes `on_panic` are exactly the `_cb`
-    /// ones, which report a caught panic through their completion. `build.rs`
-    /// documents a twin by its name, on that ground, as returning NULL and
-    /// leaving the panic to its completion.
+    /// ones, which report a caught panic through their completion. The macro
+    /// gives an `on_panic` export no twin, and `build.rs`, on that ground,
+    /// declares every `_cb` function under its own name.
     #[test]
     fn test_on_panic_exports_are_the_cb_exports() {
         let mismatched: Vec<String> = exports()

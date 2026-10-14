@@ -61,8 +61,9 @@
 //!     nothing it returns has a `_destroy`), the parameters mapped
 //!     positionally (a struct by value as `*const`, copied out of the
 //!     caller's handle; `Error` by value as `*mut`, consumed), a `Result<T, Error>`
-//!     returned as `*mut kafka_common_Error_t` with `T` through a trailing
-//!     `out_*` slot, a fluent `self -> Self` setter returning nothing;
+//!     as `T` returned (nothing for `()`) and a trailing
+//!     `out_err: *mut *mut kafka_common_Error_t`, a fluent `self -> Self`
+//!     setter returning nothing;
 //!   - `<prefix>_to_string(const <prefix>_t *)` returning an owned string
 //!     when the type implements `Display` (Java's `toString()`);
 //!   - an `async fn` (or one returning `impl Future`, `Pin<Box<dyn Future>>`,
@@ -237,7 +238,7 @@ const C_ONLY_DRAINING_CB_TWINS: &[&str] = &[
 /// (Java's `acquire()`, which `AsyncKafkaConsumer`'s `assignment()`,
 /// `subscription()`, `paused()`, `currentLag()` and `groupMetadata()` take
 /// through `acquireAndEnsureOpen()`), so the C form reports a refusal as
-/// `LOCAL_CONCURRENT_MODIFICATION` and delivers the value through `out_<name>`.
+/// `LOCAL_CONCURRENT_MODIFICATION` through `out_err` and returns the value.
 /// `metrics()` is not here: Java's takes no `acquire()`.
 const C_GUARDED_READS: &[&str] = &[
     "kafka_consumer_Consumer_assignment",
@@ -414,11 +415,6 @@ impl CType {
             CType::Map { mutable } => format!("{} kafka_Map_t", ptr(*mutable)),
             CType::FnPtr { name, .. } => name.clone(),
         }
-    }
-
-    /// The `out_` slot delivering a value of this type.
-    fn out_slot(&self) -> String {
-        format!("*mut {}", self.render())
     }
 
     fn error() -> String {
@@ -755,22 +751,28 @@ fn is_unit(ty: &syn::Type) -> bool {
 // Signatures of expected C items
 // ---------------------------------------------------------------------------
 
-/// One parameter of an expected C function: how it is shown, the prefix its
-/// name must carry if any (`out_`), and its type.
+/// One parameter of an expected C function: how it is shown, the exact name
+/// it must carry if any (`out_err`), and its type.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Param {
     name: String,
-    name_prefix: Option<&'static str>,
+    required_name: Option<&'static str>,
     ty: String,
 }
 
 impl Param {
     fn new(name: &str, ty: String) -> Self {
-        Param { name: name.to_string(), name_prefix: None, ty }
+        Param { name: name.to_string(), required_name: None, ty }
     }
 
-    fn out(name: &str, ty: String) -> Self {
-        Param { name: format!("out_{name}"), name_prefix: Some("out_"), ty }
+    /// The trailing `out_err` of a fallible function, where it stores an owned
+    /// error on failure.
+    fn out_err() -> Self {
+        Param {
+            name: "out_err".to_string(),
+            required_name: Some("out_err"),
+            ty: format!("*mut *mut {ERROR_HANDLE}"),
+        }
     }
 }
 
@@ -999,7 +1001,7 @@ enum Output {
     Unit,
     /// A value returned directly.
     Value(syn::Type),
-    /// `Result<T, Error>`: the error returned, `T` (if any) through an `out_` slot.
+    /// `Result<T, Error>`: `T` (if any) returned, the error through `out_err`.
     Fallible(Option<syn::Type>),
     /// A fluent setter consuming and returning `Self`: in C it mutates in place.
     Fluent,
@@ -2070,14 +2072,12 @@ fn expect_method(
     let guarded_read = C_GUARDED_READS.contains(&name.as_str());
     match (&output, &value) {
         (Output::Value(_), Some(v)) if guarded_read => {
-            blocking.params.push(Param::out(&m.name, v.out_slot()));
-            blocking.ret = Some(CType::error());
+            blocking.params.push(Param::out_err());
+            blocking.ret = Some(v.render());
         },
         (Output::Fallible(_), v) => {
-            if let Some(v) = v {
-                blocking.params.push(Param::out(&m.name, v.out_slot()));
-            }
-            blocking.ret = Some(CType::error());
+            blocking.params.push(Param::out_err());
+            blocking.ret = v.as_ref().map(CType::render);
         },
         (Output::Value(_), Some(v)) => blocking.ret = Some(v.render()),
         _ => {},
@@ -2160,10 +2160,8 @@ fn expect_interface<'a>(
         } else {
             match (&output, &value) {
                 (Ok(Output::Fallible(_)), v) => {
-                    if let Some(v) = v {
-                        sig.params.push(Param::out(&m.name, v.out_slot()));
-                    }
-                    sig.ret = Some(CType::error());
+                    sig.params.push(Param::out_err());
+                    sig.ret = v.as_ref().map(CType::render);
                 },
                 (Ok(Output::Value(_)), Some(v)) => sig.ret = Some(v.render()),
                 _ => {},
@@ -2398,8 +2396,8 @@ fn compare(expected: &BTreeMap<String, Expected>, actual: &CSurface, findings: &
                         sig.params
                             .iter()
                             .zip(f.sig.inputs.iter())
-                            .all(|(p, arg)| match (p.name_prefix, arg) {
-                                (Some(prefix), syn::FnArg::Typed(pt)) => compact(&pt.pat).starts_with(prefix),
+                            .all(|(p, arg)| match (p.required_name, arg) {
+                                (Some(required), syn::FnArg::Typed(pt)) => compact(&pt.pat) == required,
                                 _ => true,
                             });
                     let types_ok = f.sig.inputs.len() == sig.params.len()
@@ -2976,13 +2974,13 @@ mod tests {
             #[doc(alias = "rust-only")]
             #[repr(C)] pub struct kafka_common_Error_t { _p: [u8; 0] }
             #[repr(C)] pub struct kafka_producer_Producer_t { _p: [u8; 0] }
-            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer_flush(this: *const kafka_producer_Producer_t) -> *mut kafka_common_Error_t { std::ptr::null_mut() }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer_flush(this: *const kafka_producer_Producer_t, out_err: *mut *mut kafka_common_Error_t) {}
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer_destroy(this: *mut kafka_producer_Producer_t) {}
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer__execute_callbacks(this: *const kafka_producer_Producer_t) -> i32 { 0 }
             pub type kafka_producer_Producer_callbacks_notify_fn_t = unsafe extern "C" fn(opaque: *mut c_void);
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer__set_callbacks_notify(this: *const kafka_producer_Producer_t, notify: kafka_producer_Producer_callbacks_notify_fn_t, opaque: *mut c_void) {}
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer__set_callback_result(this: *const kafka_producer_Producer_t, callback_id: i64, result: *mut c_void, error: *mut kafka_common_Error_t) {}
-            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(bootstrap: *const c_char, out_producer: *mut *mut kafka_producer_Producer_t) -> *mut kafka_common_Error_t { std::ptr::null_mut() }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(bootstrap: *const c_char, out_err: *mut *mut kafka_common_Error_t) -> *mut kafka_producer_Producer_t { std::ptr::null_mut() }
         "#;
         let findings = run("factory", rust, ffi);
         // `Error` is a public enum whose variants all carry data: a class with no
@@ -2991,7 +2989,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fallible_method_needs_error_return_and_out_slot() {
+    fn test_fallible_method_returns_its_value_and_takes_out_err() {
         let rust = r#"
             pub mod common {
                 pub mod error { pub enum Error { Timeout(TimeoutError) } pub struct TimeoutError; }
@@ -3009,19 +3007,19 @@ mod tests {
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Error_destroy(this: *mut kafka_common_Error_t) {}
             #[repr(C)] pub struct kafka_common_Cluster_t { _p: [u8; 0] }
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Cluster_destroy(this: *mut kafka_common_Cluster_t) {}
-            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Cluster_node_count(this: *const kafka_common_Cluster_t, out_error: *mut *mut kafka_common_Error_t) -> i32 { 0 }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Cluster_node_count(this: *const kafka_common_Cluster_t, out_node_count: *mut i32) -> *mut kafka_common_Error_t { std::ptr::null_mut() }
         "#;
         let findings = run("fallible", rust, ffi);
         assert_eq!(keys(&findings), ["shape kafka_common_Cluster_node_count"]);
         assert_eq!(
             detail(&findings, "shape kafka_common_Cluster_node_count"),
-            "expected `fn(self: *const kafka_common_Cluster_t, out_node_count: *mut i32) -> *mut kafka_common_Error_t`, \
-             found `fn(this: *const kafka_common_Cluster_t, out_error: *mut *mut kafka_common_Error_t) -> i32`"
+            "expected `fn(self: *const kafka_common_Cluster_t, out_err: *mut *mut kafka_common_Error_t) -> i32`, \
+             found `fn(this: *const kafka_common_Cluster_t, out_node_count: *mut i32) -> *mut kafka_common_Error_t`"
         );
     }
 
     #[test]
-    fn test_out_slot_must_be_named_out() {
+    fn test_error_slot_must_be_named_out_err() {
         let rust = r#"
             pub mod common {
                 pub mod error { pub enum Error { Timeout(TimeoutError) } pub struct TimeoutError; }
@@ -3037,7 +3035,7 @@ mod tests {
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Error_destroy(this: *mut kafka_common_Error_t) {}
             #[repr(C)] pub struct kafka_common_Cluster_t { _p: [u8; 0] }
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Cluster_destroy(this: *mut kafka_common_Cluster_t) {}
-            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Cluster_node_count(this: *const kafka_common_Cluster_t, count: *mut i32) -> *mut kafka_common_Error_t { std::ptr::null_mut() }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Cluster_node_count(this: *const kafka_common_Cluster_t, out_error: *mut *mut kafka_common_Error_t) -> i32 { 0 }
         "#;
         let findings = run("out-name", rust, ffi);
         assert_eq!(keys(&findings), ["shape kafka_common_Cluster_node_count"]);
@@ -3063,7 +3061,7 @@ mod tests {
         #[repr(C)] pub struct kafka_common_Cluster_t { _p: [u8; 0] }
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Cluster_destroy(this: *mut kafka_common_Cluster_t) {}
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Cluster_id(this: *const kafka_common_Cluster_t) -> i32 { 0 }
-        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Cluster_refresh(this: *const kafka_common_Cluster_t, timeout: i64, out_refresh: *mut i64) -> *mut kafka_common_Error_t { std::ptr::null_mut() }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Cluster_refresh(this: *const kafka_common_Cluster_t, timeout: i64, out_err: *mut *mut kafka_common_Error_t) -> i64 { 0 }
         pub type kafka_common_Cluster_refresh_cb_t = unsafe extern "C" fn(value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void);
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Cluster_refresh_cb(this: *const kafka_common_Cluster_t, timeout: i64, cb: kafka_common_Cluster_refresh_cb_t, opaque: *mut c_void) {}
     "#;
@@ -3120,7 +3118,7 @@ mod tests {
         );
         assert_eq!(
             detail(&findings, "missing kafka_common_Cluster_refresh"),
-            "expected `fn(self: *const kafka_common_Cluster_t) -> *mut kafka_common_Error_t`"
+            "expected `fn(self: *const kafka_common_Cluster_t, out_err: *mut *mut kafka_common_Error_t)`"
         );
     }
 
@@ -3223,7 +3221,7 @@ mod tests {
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Partitioner_partition(this: *const kafka_producer_Partitioner_t, topic: *const c_char, key: *const c_void, key_bytes: kafka_Bytes_t, cluster: *const kafka_common_Cluster_t) -> i32 { 0 }
         #[repr(C)] pub struct kafka_producer_KafkaProducer_t { _p: [u8; 0] }
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_KafkaProducer_destroy(this: *mut kafka_producer_KafkaProducer_t) {}
-        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(partitioner: *mut kafka_producer_Partitioner_t, out_new: *mut *mut kafka_producer_KafkaProducer_t) -> *mut kafka_common_Error_t { std::ptr::null_mut() }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(partitioner: *mut kafka_producer_Partitioner_t, out_err: *mut *mut kafka_common_Error_t) -> *mut kafka_producer_KafkaProducer_t { std::ptr::null_mut() }
     "#;
 
     #[test]
@@ -3358,7 +3356,7 @@ mod tests {
         assert_eq!(
             detail(&findings, "missing kafka_consumer_Consumer_subscribe"),
             "expected `fn(self: *mut kafka_consumer_Consumer_t, topics: *const kafka_List_t, \
-             listener: *mut kafka_consumer_ConsumerRebalanceListener_t) -> *mut kafka_common_Error_t`"
+             listener: *mut kafka_consumer_ConsumerRebalanceListener_t, out_err: *mut *mut kafka_common_Error_t)`"
         );
         // The listener is never returned owned, so the interface's destroy comes
         // from `_new` alone; the client has no `_new` and no constructor returns
@@ -3399,7 +3397,7 @@ mod tests {
         #[doc(alias = "rust-only")]
         #[repr(C)] pub struct kafka_Bytes_t { data: *const u8, len: i32 }
         #[repr(C)] pub struct kafka_common_serialization_Serializer_t { _p: [u8; 0] }
-        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_serialization_Serializer_serialize(this: *const kafka_common_serialization_Serializer_t, topic: *const c_char, data: *const c_void, out_serialize: *mut kafka_Bytes_t) -> *mut kafka_common_Error_t { std::ptr::null_mut() }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_serialization_Serializer_serialize(this: *const kafka_common_serialization_Serializer_t, topic: *const c_char, data: *const c_void, out_err: *mut *mut kafka_common_Error_t) -> kafka_Bytes_t { kafka_Bytes_t { data: std::ptr::null(), len: 0 } }
         #[repr(C)] pub struct kafka_common_serialization_StringSerializer_t { _p: [u8; 0] }
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_serialization_StringSerializer_new() -> *mut kafka_common_serialization_StringSerializer_t { std::ptr::null_mut() }
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_serialization_StringSerializer_destroy(this: *mut kafka_common_serialization_StringSerializer_t) {}
@@ -3547,10 +3545,10 @@ mod tests {
         let ffi = r#"
             #[repr(C)] pub struct kafka_common_KafkaFuture_t { _p: [u8; 0] }
             #[repr(C)] pub struct kafka_common_KafkaFuture_BaseFunction_t { _p: [u8; 0] }
-            pub type kafka_common_KafkaFuture_BaseFunction_apply_fn_t = unsafe extern "C" fn(self_: *mut c_void, a: *mut c_void, out_apply: *mut *mut c_void) -> *mut kafka_common_Error_t;
+            pub type kafka_common_KafkaFuture_BaseFunction_apply_fn_t = unsafe extern "C" fn(self_: *mut c_void, a: *mut c_void, out_err: *mut *mut kafka_common_Error_t) -> *mut c_void;
             #[repr(C)] pub struct kafka_common_Error_t { _p: [u8; 0] }
             #[unsafe(no_mangle)] pub extern "C" fn kafka_common_KafkaFuture_BaseFunction_new(self_: *mut c_void, apply: kafka_common_KafkaFuture_BaseFunction_apply_fn_t) -> *mut kafka_common_KafkaFuture_BaseFunction_t { std::ptr::null_mut() }
-            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_apply(self_: *const kafka_common_KafkaFuture_BaseFunction_t, a: *mut c_void, out_apply: *mut *mut c_void) -> *mut kafka_common_Error_t { std::ptr::null_mut() }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_apply(self_: *const kafka_common_KafkaFuture_BaseFunction_t, a: *mut c_void, out_err: *mut *mut kafka_common_Error_t) -> *mut c_void { std::ptr::null_mut() }
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_destroy(self_: *mut kafka_common_KafkaFuture_BaseFunction_t) {}
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_stray(self_: *mut kafka_common_KafkaFuture_BaseFunction_t) {}
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_KafkaFuture_then_apply(self_: *const kafka_common_KafkaFuture_t, function: *const kafka_common_KafkaFuture_BaseFunction_t) -> *mut kafka_common_KafkaFuture_t { std::ptr::null_mut() }
@@ -3934,7 +3932,7 @@ mod tests {
         let findings = run("payload-error", rust, "");
         assert_eq!(
             detail(&findings, "missing kafka_common_Cluster_with_id"),
-            "expected `fn(id: *const c_char, out_with_id: *mut *mut kafka_common_Cluster_t) -> *mut kafka_common_Error_t`"
+            "expected `fn(id: *const c_char, out_err: *mut *mut kafka_common_Error_t) -> *mut kafka_common_Cluster_t`"
         );
         // A fluent setter returning the owner by name mutates the handle in place.
         assert_eq!(
@@ -3943,7 +3941,7 @@ mod tests {
         );
         assert_eq!(
             detail(&findings, "missing kafka_common_Cluster_check"),
-            "expected `fn(self: *const kafka_common_Cluster_t) -> *mut kafka_common_Error_t`"
+            "expected `fn(self: *const kafka_common_Cluster_t, out_err: *mut *mut kafka_common_Error_t)`"
         );
         // A private alias is transparent: the signature means its target.
         assert_eq!(
@@ -4058,7 +4056,7 @@ mod tests {
         );
         assert_eq!(
             detail(&findings, "missing kafka_common_record_TimestampType_for_name"),
-            "expected `fn(name: *const c_char, out_for_name: *mut *const kafka_common_record_TimestampType_t) -> *mut kafka_common_Error_t`"
+            "expected `fn(name: *const c_char, out_err: *mut *mut kafka_common_Error_t) -> *const kafka_common_record_TimestampType_t`"
         );
         // No `_destroy`: nothing a unit enum returns is owned.
         assert!(
@@ -4203,19 +4201,19 @@ mod tests {
             #[repr(C)] pub struct kafka_common_Error_t { _p: [u8; 0] }
             #[repr(C)] pub struct kafka_consumer_Consumer_t { _p: [u8; 0] }
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_consumer_Consumer_current_lag(self_: *const kafka_consumer_Consumer_t, partition: i32) -> i64 { 0 }
-            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_consumer_Consumer_client_lag(self_: *const kafka_consumer_Consumer_t, partition: i32, out_client_lag: *mut i64) -> *mut kafka_common_Error_t { std::ptr::null_mut() }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_consumer_Consumer_client_lag(self_: *const kafka_consumer_Consumer_t, partition: i32, out_err: *mut *mut kafka_common_Error_t) -> i64 { 0 }
         "#;
         let findings = run("guarded-reads", rust, ffi);
         assert_eq!(
             detail(&findings, "shape kafka_consumer_Consumer_current_lag"),
-            "expected `fn(self: *const kafka_consumer_Consumer_t, partition: i32, out_current_lag: *mut i64) \
-             -> *mut kafka_common_Error_t`, found `fn(self_: *const kafka_consumer_Consumer_t, partition: i32) -> i64`"
+            "expected `fn(self: *const kafka_consumer_Consumer_t, partition: i32, \
+             out_err: *mut *mut kafka_common_Error_t) -> i64`, found `fn(self_: *const kafka_consumer_Consumer_t, partition: i32) -> i64`"
         );
         assert_eq!(
             detail(&findings, "shape kafka_consumer_Consumer_client_lag"),
             "expected `fn(self: *const kafka_consumer_Consumer_t, partition: i32) -> i64`, \
-             found `fn(self_: *const kafka_consumer_Consumer_t, partition: i32, out_client_lag: *mut i64) \
-             -> *mut kafka_common_Error_t`"
+             found `fn(self_: *const kafka_consumer_Consumer_t, partition: i32, \
+             out_err: *mut *mut kafka_common_Error_t) -> i64`"
         );
     }
 

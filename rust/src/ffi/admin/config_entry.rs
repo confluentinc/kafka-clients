@@ -29,7 +29,7 @@ use std::ffi::{CString, c_char, c_void};
 
 use crate::admin::config_entry::{ConfigSource, ConfigSynonym, ConfigType};
 use crate::admin::{ConfigEntry, ConfigEntryOptions, ConfigEntryOptionsBuilder};
-use crate::ffi::admin::out_slot;
+use crate::ffi::common::deliver_value;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{
@@ -840,28 +840,29 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_documentation
     unsafe { builder_mut(self_) }.documentation = Some(unsafe { c_str_to_option(documentation) });
 }
 
-/// `build()`: delivers the owned options through `out_build` (freed with
-/// [`kafka_admin_ConfigEntryOptions_destroy`]), or returns the owned
-/// `IllegalArgumentException` translation naming the first mandatory
-/// parameter (`name`, `value`) that was not set. The builder stays usable.
+/// `build()`: returns the owned options (freed with
+/// [`kafka_admin_ConfigEntryOptions_destroy`]), or stores the owned
+/// `IllegalArgumentException` translation in `*out_err` and returns `NULL`,
+/// naming the first mandatory parameter (`name`, `value`) that was not set. The
+/// builder stays usable.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid builder handle that no other call uses at the same
-/// time, and `out_build` a valid slot.
+/// time, and `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_build(
     self_: *mut kafka_admin_ConfigEntryOptionsBuilder_t,
-    out_build: *mut *mut kafka_admin_ConfigEntryOptions_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_admin_ConfigEntryOptions_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
     // uses at the same time, kept alive for this call, as `builder_mut` requires; the borrow ends
     // with this statement.
     let result = unsafe { builder_mut(self_) }.builder().build();
-    // SAFETY: Per this function's `# Safety`, `out_build` is a valid slot, as `out_slot` requires.
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid slot, as `deliver_value` requires.
     unsafe {
-        out_slot(result, out_build, |options| {
+        deliver_value(result, out_err, |options| {
             Box::into_raw(Box::new(options)) as *mut kafka_admin_ConfigEntryOptions_t
         })
     }
@@ -1265,9 +1266,10 @@ mod tests {
     fn builder_validates_then_builds_the_wide_constructor() {
         // SAFETY: Test code: `builder` is the owned handle
         // `kafka_admin_ConfigEntryOptionsBuilder_new` returned, used only on this thread and
-        // destroyed once, after its last build; `options` and `again` are local slots, then the
-        // owned options the builds delivered, each destroyed once after its last read; `error` is
-        // the owned error the first build returned, read while alive and destroyed once. `synonyms`
+        // destroyed once, after its last build; `error` and `err` are valid slots pointing at
+        // null; `error` then holds the owned error the first build stored, read while alive and
+        // destroyed once, and `err` stays null; `options` and `again` are the owned options the
+        // later builds returned, each destroyed once after its last read. `synonyms`
         // owns nothing and holds the owned `synonym_handle`; both stay alive until
         // `kafka_admin_ConfigEntryOptionsBuilder_set_synonyms` copied them, then each is destroyed
         // once. `entry` is the owned handle `kafka_admin_ConfigEntry_with_options` returned,
@@ -1278,9 +1280,10 @@ mod tests {
         // `kafka_string_destroy`; destroying null is a no-op.
         unsafe {
             let builder = kafka_admin_ConfigEntryOptionsBuilder_new();
-            let mut options = ptr::null_mut();
-            let error = kafka_admin_ConfigEntryOptionsBuilder_build(builder, &mut options);
+            let mut error = ptr::null_mut();
+            let options = kafka_admin_ConfigEntryOptionsBuilder_build(builder, &mut error);
             assert!(!error.is_null());
+            assert!(options.is_null());
             assert_eq!(
                 error_ref(error).error.message(),
                 "ConfigEntryOptionsBuilder::build: mandatory parameter `name` was not set"
@@ -1306,7 +1309,9 @@ mod tests {
             kafka_List_destroy(synonyms);
             kafka_admin_ConfigEntry_ConfigSynonym_destroy(synonym_handle);
 
-            assert!(kafka_admin_ConfigEntryOptionsBuilder_build(builder, &mut options).is_null());
+            let mut err = ptr::null_mut();
+            let options = kafka_admin_ConfigEntryOptionsBuilder_build(builder, &mut err);
+            assert!(err.is_null());
             let expected = ConfigEntryOptionsBuilder::new()
                 .set_name("retention.ms".to_string())
                 .set_value(Some("secret".to_string()))
@@ -1320,8 +1325,8 @@ mod tests {
                 .unwrap();
             assert_eq!(*config_entry_options_ref(options), expected);
             // The builder is reusable after `build`.
-            let mut again = ptr::null_mut();
-            assert!(kafka_admin_ConfigEntryOptionsBuilder_build(builder, &mut again).is_null());
+            let again = kafka_admin_ConfigEntryOptionsBuilder_build(builder, &mut err);
+            assert!(err.is_null());
             assert_eq!(*config_entry_options_ref(again), expected);
             kafka_admin_ConfigEntryOptions_destroy(again);
             kafka_admin_ConfigEntryOptionsBuilder_destroy(builder);

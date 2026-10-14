@@ -27,10 +27,11 @@ use std::collections::{BTreeMap, HashMap};
 use std::ffi::c_char;
 
 use crate::admin::MockAdminClient;
-use crate::ffi::admin::{AdminClassHandle, error_slot, kafka_admin_Admin_t, out_slot};
+use crate::ffi::admin::{AdminClassHandle, kafka_admin_Admin_t};
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::common::topic_partition::map_topic_partition_i64;
 use crate::ffi::common::topic_partition_info::topic_partition_info_ref;
+use crate::ffi::common::{deliver_unit, deliver_value};
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{
     c_str_to_string, kafka_List_t, kafka_Map_t, list_elements, list_strings, map_entries, map_strings,
@@ -88,17 +89,17 @@ unsafe fn map_string_i16(map: *const kafka_Map_t) -> HashMap<String, i16> {
 ///
 /// # Safety
 ///
-/// `out_create` must be a valid slot.
+/// `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_create(
     num_brokers: i32,
-    out_create: *mut *mut kafka_admin_MockAdminClient_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_admin_MockAdminClient_t {
     let result = AdminClassHandle::new_mock(|| MockAdminClient::create(num_brokers));
-    // SAFETY: Per this function's `# Safety`, `out_create` is a valid slot, as `out_slot` requires.
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid slot, as `deliver_value` requires.
     unsafe {
-        out_slot(result, out_create, |handle| {
+        deliver_value(result, out_err, |handle| {
             Box::into_raw(handle) as *mut kafka_admin_MockAdminClient_t
         })
     }
@@ -219,18 +220,19 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_consumer_group_offse
 /// # Safety
 ///
 /// `self_` must be a live handle and `log_dirs` null or a live list of C
-/// strings.
+/// strings. `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_broker_log_dirs(
     self_: *const kafka_admin_MockAdminClient_t,
     broker_id: i32,
     log_dirs: *const kafka_List_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle from
     // `kafka_admin_MockAdminClient_create`, kept alive for this call, as `mock_ref` requires, and
     // `log_dirs` null or a live list of C strings, as `list_strings` requires; they are copied.
-    error_slot(unsafe { mock_ref(self_).set_broker_log_dirs(broker_id, list_strings(log_dirs)) })
+    unsafe { deliver_unit(mock_ref(self_).set_broker_log_dirs(broker_id, list_strings(log_dirs)), out_err) }
 }
 
 /// `MockAdminClient.addTopic(boolean internal, String name,
@@ -244,8 +246,8 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_broker_log_dirs(
 /// # Safety
 ///
 /// `self_` must be a live handle, `name` a C string, `partitions` null or a
-/// live list and `configs` null or a live map, of the element types above,
-/// each element live.
+/// live list and `configs` null or a live map, of the element types above, each
+/// element live. `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_add_topic(
@@ -254,7 +256,8 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_add_topic(
     name: *const c_char,
     partitions: *const kafka_List_t,
     configs: *const kafka_Map_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `name` is a C string, as `c_str_to_string` requires;
     // it is copied.
     let name = unsafe { c_str_to_string(name) };
@@ -283,7 +286,9 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_add_topic(
     };
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle from
     // `kafka_admin_MockAdminClient_create`, kept alive for this call, as `mock_ref` requires.
-    error_slot(unsafe { mock_ref(self_) }.add_topic(internal != 0, &name, partitions, configs))
+    let result = unsafe { mock_ref(self_) }.add_topic(internal != 0, &name, partitions, configs);
+    // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_unit` requires.
+    unsafe { deliver_unit(result, out_err) }
 }
 
 /// `MockAdminClient.markTopicForDeletion(String name)`; fails with Java's
@@ -291,19 +296,23 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_add_topic(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `name` a C string.
+/// `self_` must be a live handle and `name` a C string. `out_err` must be a
+/// valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_mark_topic_for_deletion(
     self_: *const kafka_admin_MockAdminClient_t,
     name: *const c_char,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `name` is a C string, as `c_str_to_string` requires;
     // it is copied.
     let name = unsafe { c_str_to_string(name) };
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle from
     // `kafka_admin_MockAdminClient_create`, kept alive for this call, as `mock_ref` requires.
-    error_slot(unsafe { mock_ref(self_) }.mark_topic_for_deletion(&name))
+    let result = unsafe { mock_ref(self_) }.mark_topic_for_deletion(&name);
+    // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_unit` requires.
+    unsafe { deliver_unit(result, out_err) }
 }
 
 /// `MockAdminClient.timeoutNextRequest(int numberOfRequests)`: the next

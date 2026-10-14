@@ -172,62 +172,72 @@ mod tests {
         // `kafka_common_serialization_ByteArraySerializer_new` and is destroyed once, at the end,
         // after the last use of its view `view`; `headers` comes from `box_record_headers` and is
         // destroyed once, after its last use; `topic` and every `kafka_Bytes_t` passed, with the
-        // bytes behind it, outlive the calls reading them; `out` is a valid local slot, read before
-        // the next call on the handle.
+        // bytes behind it, outlive the calls reading them; `err` is a valid slot pointing at null,
+        // left null by every call (asserted); each returned view is read before the next call on
+        // the handle.
         unsafe {
             let view = kafka_common_serialization_ByteArraySerializer__as_Serializer(handle);
-            let mut out = kafka_Bytes_t::NULL;
-            for error in [
-                kafka_common_serialization_Serializer_serialize(
-                    view,
-                    topic.as_ptr(),
-                    &raw const payload as *const c_void,
-                    &raw mut out,
-                ),
-                kafka_common_serialization_Serializer_serialize_with_headers(
-                    view,
-                    topic.as_ptr(),
-                    headers,
-                    &raw const payload as *const c_void,
-                    &raw mut out,
-                ),
-                kafka_common_serialization_Serializer_serialize_owned_with_headers(
-                    view,
-                    topic.as_ptr(),
-                    headers,
-                    &raw const payload as *const c_void,
-                    &raw mut out,
-                ),
-            ] {
-                assert!(error.is_null());
+            let mut err = ptr::null_mut();
+            // One call at a time: each view is valid until the next call on the handle.
+            let err_slot = &raw mut err;
+            let calls: [&dyn Fn() -> kafka_Bytes_t; 3] = [
+                &|| {
+                    kafka_common_serialization_Serializer_serialize(
+                        view,
+                        topic.as_ptr(),
+                        &raw const payload as *const c_void,
+                        err_slot,
+                    )
+                },
+                &|| {
+                    kafka_common_serialization_Serializer_serialize_with_headers(
+                        view,
+                        topic.as_ptr(),
+                        headers,
+                        &raw const payload as *const c_void,
+                        err_slot,
+                    )
+                },
+                &|| {
+                    kafka_common_serialization_Serializer_serialize_owned_with_headers(
+                        view,
+                        topic.as_ptr(),
+                        headers,
+                        &raw const payload as *const c_void,
+                        err_slot,
+                    )
+                },
+            ];
+            for call in calls {
+                let out = call();
+                assert!(err.is_null());
                 assert_eq!(out.as_slice(), Some(&b"raw"[..]));
                 assert_ne!(out.data, payload.data, "a copy, not the caller's buffer");
             }
 
             // Java's null, either way.
-            let error =
-                kafka_common_serialization_Serializer_serialize(view, topic.as_ptr(), ptr::null(), &raw mut out);
-            assert!(error.is_null());
+            let out = kafka_common_serialization_Serializer_serialize(view, topic.as_ptr(), ptr::null(), &raw mut err);
+            assert!(err.is_null());
             assert!(out.data.is_null());
             let null_array = kafka_Bytes_t::NULL;
-            let error = kafka_common_serialization_Serializer_serialize(
+            let out = kafka_common_serialization_Serializer_serialize(
                 view,
                 topic.as_ptr(),
                 &raw const null_array as *const c_void,
-                &raw mut out,
+                &raw mut err,
             );
-            assert!(error.is_null());
+            assert!(err.is_null());
             assert!(out.data.is_null());
 
             // An empty array stays an empty array.
             let empty = kafka_Bytes_t::from_slice(b"");
-            let error = kafka_common_serialization_Serializer_serialize(
+            let out = kafka_common_serialization_Serializer_serialize(
                 view,
                 topic.as_ptr(),
                 &raw const empty as *const c_void,
-                &raw mut out,
+                &raw mut err,
             );
-            assert!(error.is_null());
+            assert!(err.is_null());
             assert_eq!(out.as_slice(), Some(&b""[..]));
 
             kafka_common_header_internals_RecordHeaders_destroy(headers);

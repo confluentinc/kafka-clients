@@ -164,10 +164,10 @@ mod tests {
     unsafe fn take_bytes(out: *mut c_void) -> Vec<u8> {
         let bytes = out as *mut kafka_Bytes_t;
         // SAFETY: Test code: `out` is an owned `kafka_Bytes_t *` from `box_bytes` that the
-        // deserializer just wrote, read before `kafka_Bytes_destroy` frees it.
+        // deserializer just returned, read before `kafka_Bytes_destroy` frees it.
         let copy = unsafe { (*bytes).as_slice() }.unwrap().to_vec();
         // SAFETY: Test code: `out` is an owned `kafka_Bytes_t *` from `box_bytes` that the
-        // deserializer just wrote, not yet freed and not used after this call.
+        // deserializer just returned, not yet freed and not used after this call.
         unsafe { kafka_Bytes_destroy(bytes) };
         copy
     }
@@ -181,63 +181,63 @@ mod tests {
         // SAFETY: Test code: `handle` comes from the class constructor and is destroyed once, at
         // the end, after the last use of its view `view`; `record_headers` comes from
         // `box_record_headers` and is destroyed once, after the last use of its `Headers` view
-        // `headers`; `topic`, `source` and the arrays outlive the calls reading them; `out` is a
-        // valid local slot, and every value written to it is an owned array that `take_bytes` frees
-        // once.
+        // `headers`; `topic`, `source` and the arrays outlive the calls reading them; `err` is a
+        // valid slot pointing at null, left null by every call (asserted), and every value returned
+        // is an owned array that `take_bytes` frees once.
         unsafe {
             let view = kafka_common_serialization_ByteArrayDeserializer__as_Deserializer(handle);
             let headers = kafka_common_header_internals_RecordHeaders__as_Headers(record_headers);
-            let mut out: *mut c_void = ptr::null_mut();
+            let mut err = ptr::null_mut();
 
-            let error = kafka_common_serialization_Deserializer_deserialize(
+            let out = kafka_common_serialization_Deserializer_deserialize(
                 view,
                 topic.as_ptr(),
                 kafka_Bytes_t::from_slice(b"raw"),
-                &raw mut out,
+                &raw mut err,
             );
-            assert!(error.is_null());
+            assert!(err.is_null());
             assert_ne!((*(out as *const kafka_Bytes_t)).data, b"raw".as_ptr(), "a copy");
             assert_eq!(take_bytes(out), b"raw");
 
-            let error = kafka_common_serialization_Deserializer_deserialize_with_headers(
+            let out = kafka_common_serialization_Deserializer_deserialize_with_headers(
                 view,
                 topic.as_ptr(),
                 headers,
                 kafka_Bytes_t::from_slice(b"raw"),
-                &raw mut out,
+                &raw mut err,
             );
-            assert!(error.is_null());
+            assert!(err.is_null());
             assert_eq!(take_bytes(out), b"raw");
 
-            let error = kafka_common_serialization_Deserializer_deserialize_from_shared(
+            let out = kafka_common_serialization_Deserializer_deserialize_from_shared(
                 view,
                 topic.as_ptr(),
                 kafka_Bytes_t::from_slice(source),
                 kafka_Bytes_t::from_slice(&source[6..]),
-                &raw mut out,
+                &raw mut err,
             );
-            assert!(error.is_null());
+            assert!(err.is_null());
             assert_eq!(take_bytes(out), b"world");
 
-            let error = kafka_common_serialization_Deserializer_deserialize_from_shared_with_headers(
+            let out = kafka_common_serialization_Deserializer_deserialize_from_shared_with_headers(
                 view,
                 topic.as_ptr(),
                 headers,
                 kafka_Bytes_t::from_slice(source),
                 kafka_Bytes_t::from_slice(&source[..5]),
-                &raw mut out,
+                &raw mut err,
             );
-            assert!(error.is_null());
+            assert!(err.is_null());
             assert_eq!(take_bytes(out), b"hello");
 
             // Null data is an empty array, not Java's null.
-            let error = kafka_common_serialization_Deserializer_deserialize(
+            let out = kafka_common_serialization_Deserializer_deserialize(
                 view,
                 topic.as_ptr(),
                 kafka_Bytes_t::NULL,
-                &raw mut out,
+                &raw mut err,
             );
-            assert!(error.is_null());
+            assert!(err.is_null());
             assert!(!(*(out as *const kafka_Bytes_t)).data.is_null());
             assert_eq!(take_bytes(out), b"");
 

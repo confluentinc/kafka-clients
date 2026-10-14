@@ -40,6 +40,7 @@ use crate::common::{Error, TopicPartition};
 use crate::consumer::{OffsetAndMetadata, OffsetCommitCallback};
 use crate::ffi::callback_queue::SendPtr;
 use crate::ffi::callback_result::{CallbackResults, INVOKER_RESULTS, void_sink};
+use crate::ffi::common::deliver_unit;
 use crate::ffi::common::{
     box_error, deliver_panic, error_ref, kafka_common_Error_destroy, kafka_common_Error_t, run_inline,
 };
@@ -206,14 +207,15 @@ pub extern "C" fn kafka_consumer_OffsetCommitCallback_new(
 /// `self_` must be a live callback handle, `offsets` a valid map of
 /// `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *`
 /// that no other call mutates during this one, and `error` null or a live
-/// error.
+/// error. `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetCommitCallback_on_complete(
     self_: *const kafka_consumer_OffsetCommitCallback_t,
     offsets: *const kafka_Map_t,
     error: *const kafka_common_Error_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live callback handle, as
     // `commit_callback_registration` requires.
     let registration = unsafe { commit_callback_registration(self_) };
@@ -234,10 +236,14 @@ pub unsafe extern "C" fn kafka_consumer_OffsetCommitCallback_on_complete(
             let _ = tx.send(result);
         }),
     );
-    error_slot(
-        rx.recv()
-            .unwrap_or_else(|_| Err(Error::local_illegal_state("commit callback result dropped"))),
-    )
+    // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_unit` requires.
+    unsafe {
+        deliver_unit(
+            rx.recv()
+                .unwrap_or_else(|_| Err(Error::local_illegal_state("commit callback result dropped"))),
+            out_err,
+        )
+    }
 }
 
 /// Completion of [`kafka_consumer_OffsetCommitCallback_on_complete_cb`]:
@@ -376,12 +382,14 @@ mod tests {
         let offsets = HashMap::from([(TopicPartition::new("t", 0), OffsetAndMetadata::new(7).unwrap())]);
         let c_offsets = offset_and_metadata_map(&offsets);
         let error = box_error(Error::timeout("late"));
+        let mut raised = std::ptr::null_mut();
         // SAFETY: Test code: `handle`, `c_offsets` and `error` are live handles this test made,
-        // each destroyed once, after its last use.
+        // each destroyed once, after its last use; `raised` is a valid slot pointing at null, and
+        // stays null after the first call (asserted).
         unsafe {
-            let none = kafka_consumer_OffsetCommitCallback_on_complete(handle, c_offsets, std::ptr::null());
-            assert!(none.is_null(), "no error reported");
-            let raised = kafka_consumer_OffsetCommitCallback_on_complete(handle, c_offsets, error);
+            kafka_consumer_OffsetCommitCallback_on_complete(handle, c_offsets, std::ptr::null(), &mut raised);
+            assert!(raised.is_null(), "no error reported");
+            kafka_consumer_OffsetCommitCallback_on_complete(handle, c_offsets, error, &mut raised);
             assert_eq!(error_ref(error).error.message(), "late", "borrowed, not consumed");
             assert_eq!(error_ref(raised).error.message(), "raised: late", "the reported error, owned");
             kafka_common_Error_destroy(raised);

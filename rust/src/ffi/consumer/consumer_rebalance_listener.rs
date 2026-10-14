@@ -37,6 +37,7 @@ use crate::common::{Error, TopicPartition};
 use crate::consumer::ConsumerRebalanceListener;
 use crate::ffi::callback_queue::SendPtr;
 use crate::ffi::callback_result::{CallbackResults, INVOKER_RESULTS, void_sink};
+use crate::ffi::common::deliver_unit;
 use crate::ffi::common::topic_partition::{list_topic_partitions, sorted_topic_partition_list};
 use crate::ffi::common::{deliver_panic, kafka_common_Error_t, run_inline};
 use crate::ffi::consumer::{Delivery, error_slot};
@@ -221,17 +222,19 @@ pub extern "C" fn kafka_consumer_ConsumerRebalanceListener_new(
     })) as *mut kafka_consumer_ConsumerRebalanceListener_t
 }
 
-/// Invokes `method` on the calling thread and waits for the report.
+/// Invokes `method` on the calling thread and waits for the report; its
+/// error is stored in `*out_err`.
 ///
 /// # Safety
 ///
 /// `partitions` must be null or a valid list whose elements are
-/// topic-partition handles.
+/// topic-partition handles, and `out_err` as `deliver_unit` requires.
 unsafe fn invoke_blocking(
     registration: ListenerRegistration,
     method: Method,
     partitions: *const kafka_List_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list whose elements
     // are topic-partition handles, as `list_topic_partitions` requires.
     let partitions = unsafe { list_topic_partitions(partitions) };
@@ -244,10 +247,11 @@ unsafe fn invoke_blocking(
             let _ = tx.send(result);
         }),
     );
-    error_slot(
-        rx.recv()
-            .unwrap_or_else(|_| Err(Error::local_illegal_state("listener result dropped"))),
-    )
+    let result = rx
+        .recv()
+        .unwrap_or_else(|_| Err(Error::local_illegal_state("listener result dropped")));
+    // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_unit` requires.
+    unsafe { deliver_unit(result, out_err) }
 }
 
 /// Invokes `method` on the calling thread; `cb` fires on whichever thread
@@ -286,25 +290,28 @@ unsafe fn invoke_cb(
 
 /// Invokes the implementation's `onPartitionsRevoked` on the calling thread
 /// with a list of `kafka_common_TopicPartition_t *` (copied) and waits for
-/// its `__set_callback_result` report; returns the reported error, or `NULL`.
+/// its `__set_callback_result` report; stores the reported error in
+/// `*out_err`.
 ///
 /// # Safety
 ///
 /// `self_` must be a live listener handle and `partitions` a valid list of
-/// `kafka_common_TopicPartition_t *`.
+/// `kafka_common_TopicPartition_t *`. `out_err` must be a valid slot pointing
+/// at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked(
     self_: *const kafka_consumer_ConsumerRebalanceListener_t,
     partitions: *const kafka_List_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live listener handle, as
     // `listener_registration` requires.
     let registration = unsafe { listener_registration(self_) };
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of topic-partition
-    // handles, as `invoke_blocking` requires; `registration` was just copied out of the live handle
+    // handles, and `out_err` is as `invoke_blocking` requires; `registration` was just copied out of the live handle
     // `self_`, and the method is one of its own pointers.
-    unsafe { invoke_blocking(registration, registration.on_partitions_revoked, partitions) }
+    unsafe { invoke_blocking(registration, registration.on_partitions_revoked, partitions, out_err) }
 }
 
 /// Completion of the `_cb` invokers: `error` is `NULL` on success, owned
@@ -351,20 +358,22 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_on_partitions_
 /// # Safety
 ///
 /// `self_` must be a live listener handle and `partitions` a valid list of
-/// `kafka_common_TopicPartition_t *`.
+/// `kafka_common_TopicPartition_t *`. `out_err` must be a valid slot pointing
+/// at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_on_partitions_assigned(
     self_: *const kafka_consumer_ConsumerRebalanceListener_t,
     partitions: *const kafka_List_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live listener handle, as
     // `listener_registration` requires.
     let registration = unsafe { listener_registration(self_) };
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of topic-partition
-    // handles, as `invoke_blocking` requires; `registration` was just copied out of the live handle
+    // handles, and `out_err` is as `invoke_blocking` requires; `registration` was just copied out of the live handle
     // `self_`, and the method is one of its own pointers.
-    unsafe { invoke_blocking(registration, registration.on_partitions_assigned, partitions) }
+    unsafe { invoke_blocking(registration, registration.on_partitions_assigned, partitions, out_err) }
 }
 
 /// Completion of `on_partitions_assigned_cb`.
@@ -409,20 +418,22 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_on_partitions_
 /// # Safety
 ///
 /// `self_` must be a live listener handle and `partitions` a valid list of
-/// `kafka_common_TopicPartition_t *`.
+/// `kafka_common_TopicPartition_t *`. `out_err` must be a valid slot pointing
+/// at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_on_partitions_lost(
     self_: *const kafka_consumer_ConsumerRebalanceListener_t,
     partitions: *const kafka_List_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live listener handle, as
     // `listener_registration` requires.
     let registration = unsafe { listener_registration(self_) };
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of topic-partition
-    // handles, as `invoke_blocking` requires; `registration` was just copied out of the live handle
+    // handles, and `out_err` is as `invoke_blocking` requires; `registration` was just copied out of the live handle
     // `self_`, and the method is one of its own pointers.
-    unsafe { invoke_blocking(registration, registration.lost_or_revoked(), partitions) }
+    unsafe { invoke_blocking(registration, registration.lost_or_revoked(), partitions, out_err) }
 }
 
 /// Completion of `on_partitions_lost_cb`.
@@ -575,15 +586,20 @@ mod tests {
         let imp = Impl::default();
         let listener = handle(&imp);
         let partitions = sorted_topic_partition_list([TopicPartition::new("t", 1), TopicPartition::new("a", 0)].iter());
-        // SAFETY: Test code: `listener` and `partitions` are live handles this test made, and the
-        // returned error is owned; each is destroyed once, after its last use.
+        let mut err = std::ptr::null_mut();
+        // SAFETY: Test code: `listener` and `partitions` are live handles this test made, `err` is a
+        // valid slot pointing at null before each call, and the error stored in it is owned; each
+        // is destroyed once, after its last use.
         unsafe {
-            assert!(kafka_consumer_ConsumerRebalanceListener_on_partitions_assigned(listener, partitions).is_null());
-            assert!(kafka_consumer_ConsumerRebalanceListener_on_partitions_lost(listener, partitions).is_null());
+            kafka_consumer_ConsumerRebalanceListener_on_partitions_assigned(listener, partitions, &mut err);
+            assert!(err.is_null());
+            kafka_consumer_ConsumerRebalanceListener_on_partitions_lost(listener, partitions, &mut err);
+            assert!(err.is_null());
             imp.fail.store(true, Ordering::Relaxed);
-            let error = kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked(listener, partitions);
-            assert_eq!(error_ref(error).error.message(), "listener failed");
-            kafka_common_Error_destroy(error);
+            kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked(listener, partitions, &mut err);
+            assert!(!err.is_null());
+            assert_eq!(error_ref(err).error.message(), "listener failed");
+            kafka_common_Error_destroy(err);
             kafka_List_destroy(partitions);
             kafka_consumer_ConsumerRebalanceListener_destroy(listener);
         }

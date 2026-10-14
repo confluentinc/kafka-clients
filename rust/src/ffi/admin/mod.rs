@@ -77,9 +77,7 @@ use tokio::task::JoinHandle;
 use crate::admin::{Admin, MockAdminClient};
 use crate::common::{Error, KafkaFuture};
 use crate::ffi::callback_queue::{CallbackJob, CallbackQueue, SendPtr};
-use crate::ffi::common::{
-    box_error, catch_task_panic, deliver_panic_opaque, init_default_logger, kafka_common_Error_t, spawn_callback_task,
-};
+use crate::ffi::common::{catch_task_panic, deliver_panic_opaque, init_default_logger, spawn_callback_task};
 use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::{
     FfiFuture, FfiValue, block_on, box_future, kafka_common_KafkaFuture_destroy, kafka_common_KafkaFuture_t,
@@ -413,34 +411,6 @@ pub(crate) unsafe fn client_ref<'a>(admin: *const kafka_admin_Admin_t) -> &'a Ar
     // `'a`. Nothing takes a `&mut` to the handle while it is live: only its destroy takes it back,
     // after the handle's last use.
     unsafe { &*(admin as *const Arc<Client>) }
-}
-
-/// Delivers `result` through the error slot and `out`.
-///
-/// # Safety
-///
-/// `out` must be a valid slot.
-pub(crate) unsafe fn out_slot<T, P>(
-    result: Result<T, Error>,
-    out: *mut P,
-    to_value: impl FnOnce(T) -> P,
-) -> *mut kafka_common_Error_t {
-    match result {
-        Ok(value) => {
-            // SAFETY: Per this function's `# Safety`, `out` is a valid slot, so writing the
-            // converted value through it is sound. Every `P` the admin bindings use is a raw
-            // pointer or an integer, which have no drop glue, so the assignment reads nothing from
-            // the slot, which C may leave uninitialised.
-            unsafe { *out = to_value(value) };
-            std::ptr::null_mut()
-        },
-        Err(error) => box_error(error),
-    }
-}
-
-/// Translates a `Result<(), Error>` to the error slot.
-pub(crate) fn error_slot(result: Result<(), Error>) -> *mut kafka_common_Error_t {
-    result.err().map_or(std::ptr::null_mut(), box_error)
 }
 
 // ---------------------------------------------------------------------------
@@ -837,10 +807,12 @@ mod tests {
     /// caller gets its `opaque` back and the panic is only logged.
     #[test]
     fn a_panicking_close_cb_queues_its_completion_once() {
-        // SAFETY: the mock is live until it is destroyed below.
+        // SAFETY: `err` is a valid slot pointing at null; the mock is live until it is
+        // destroyed below.
         unsafe {
-            let mut mock = std::ptr::null_mut();
-            assert!(kafka_admin_MockAdminClient_create(1, &mut mock).is_null());
+            let mut err = std::ptr::null_mut();
+            let mock = kafka_admin_MockAdminClient_create(1, &mut err);
+            assert!(err.is_null());
             let admin = kafka_admin_MockAdminClient__as_Admin(mock);
 
             let close = Probe::default();

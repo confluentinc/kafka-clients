@@ -21,7 +21,8 @@
 use std::ffi::c_void;
 
 use crate::common::ElectionType;
-use crate::ffi::common::{box_error, kafka_common_Error_t};
+use crate::ffi::common::fail_with;
+use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_list, kafka_List_t};
 
@@ -117,28 +118,23 @@ pub unsafe extern "C" fn kafka_common_ElectionType_value(self_: *const kafka_com
     unsafe { value_of(self_) }.value()
 }
 
-/// `ElectionType.valueOf(byte value)`: delivers the singleton through
-/// `out_value_of`, or returns the owned `IllegalArgumentException`
-/// translation for an unknown value.
+/// `ElectionType.valueOf(byte value)`: returns the singleton, or stores the
+/// owned `IllegalArgumentException` translation in `*out_err` and returns
+/// `NULL` for an unknown value.
 ///
 /// # Safety
 ///
-/// `out_value_of` must be a valid pointer.
+/// `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ElectionType_value_of(
     value: i8,
-    out_value_of: *mut *const kafka_common_ElectionType_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *const kafka_common_ElectionType_t {
     match ElectionType::value_of(value) {
-        Ok(election_type) => {
-            // SAFETY: Per this function's `# Safety`, `out_value_of` is a valid pointer, so the
-            // write is sound; the singleton written points into the static `VARIANTS` array and is
-            // never freed.
-            unsafe { *out_value_of = singleton(election_type) };
-            std::ptr::null_mut()
-        },
-        Err(error) => box_error(error),
+        Ok(election_type) => singleton(election_type),
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        Err(error) => unsafe { fail_with(out_err, error) },
     }
 }
 
@@ -178,15 +174,17 @@ mod tests {
 
     #[test]
     fn value_value_of_and_values_follow_java() {
-        // SAFETY: Test code: the singletons are never freed, `election_type` is a valid out
-        // pointer, the error from the unknown value is destroyed once, and the owned list from
-        // `values` is destroyed once, after its elements are read.
+        // SAFETY: Test code: the singletons are never freed, `error` is a valid slot pointing at
+        // null before each call, the error from the unknown value is destroyed once, and the
+        // owned list from `values` is destroyed once, after its elements are read.
         unsafe {
             assert_eq!(kafka_common_ElectionType_value(kafka_common_ElectionType_unclean()), 1);
-            let mut election_type = ptr::null();
-            assert!(kafka_common_ElectionType_value_of(0, &mut election_type).is_null());
+            let mut error = ptr::null_mut();
+            let election_type = kafka_common_ElectionType_value_of(0, &mut error);
+            assert!(error.is_null());
             assert_eq!(election_type, kafka_common_ElectionType_preferred());
-            let error = kafka_common_ElectionType_value_of(9, &mut election_type);
+            let unknown = kafka_common_ElectionType_value_of(9, &mut error);
+            assert!(unknown.is_null());
             assert_eq!(kafka_common_Error_is_local_illegal_argument_error(error), 1);
             kafka_common_Error_destroy(error);
 

@@ -189,10 +189,11 @@ use crate::ffi::admin::{
     terminate_transaction_result::{box_terminate_transaction_result, kafka_admin_TerminateTransactionResult_t},
     update_features_result::{box_update_features_result, kafka_admin_UpdateFeaturesResult_t},
 };
-use crate::ffi::admin::{client_ref, kafka_admin_Admin_t, out_slot};
+use crate::ffi::admin::{client_ref, kafka_admin_Admin_t};
 use crate::ffi::common::acl::acl_binding::acl_binding_ref;
 use crate::ffi::common::acl::acl_binding_filter::{acl_binding_filter_ref, kafka_common_acl_AclBindingFilter_t};
 use crate::ffi::common::config::config_resource::{config_resource_ref, type_of};
+use crate::ffi::common::deliver_value;
 use crate::ffi::common::election_type::{kafka_common_ElectionType_t, value_of as election_type_value_of};
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::common::quota::client_quota_alteration::client_quota_alteration_ref;
@@ -3393,19 +3394,18 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_features_with_options(
 /// # Safety
 ///
 /// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
-/// `out_update_features` must be a valid slot.
+/// where the module docs allow it, or else live and not mutated by any other
+/// call for the duration of this one, and of its parameter's type: a string
+/// NUL-terminated, an enum one of its singletons, and a list or map holding
+/// elements of the types the module docs give, each element meeting these same
+/// conditions. `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_update_features(
     self_: *const kafka_admin_Admin_t,
     feature_updates: *const kafka_Map_t,
-    out_update_features: *mut *mut kafka_admin_UpdateFeaturesResult_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_admin_UpdateFeaturesResult_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_) };
@@ -3416,13 +3416,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_update_features(
     // `feature_update_ref` requires; each value is copied out before the call returns.
     let feature_updates_ = unsafe { string_keyed(feature_updates, |p| *feature_update_ref(p as *const _)) };
     let result = client.call(|admin| admin.update_features(&feature_updates_));
-    // SAFETY: Per this function's `# Safety`, `out_update_features` is a valid slot, as `out_slot`
-    // requires.
-    unsafe {
-        out_slot(result, out_update_features, |r| {
-            box_update_features_result(r, &client.future_ctx())
-        })
-    }
+    // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_value` requires.
+    unsafe { deliver_value(result, out_err, |r| box_update_features_result(r, &client.future_ctx())) }
 }
 
 /// `Admin.update_features_with_options`: a non-blocking call returning the owned result handle,
@@ -3433,20 +3428,19 @@ pub unsafe extern "C" fn kafka_admin_Admin_update_features(
 /// # Safety
 ///
 /// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
-/// `out_update_features_with_options` must be a valid slot.
+/// where the module docs allow it, or else live and not mutated by any other
+/// call for the duration of this one, and of its parameter's type: a string
+/// NUL-terminated, an enum one of its singletons, and a list or map holding
+/// elements of the types the module docs give, each element meeting these same
+/// conditions. `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_update_features_with_options(
     self_: *const kafka_admin_Admin_t,
     feature_updates: *const kafka_Map_t,
     options: *const kafka_admin_UpdateFeaturesOptions_t,
-    out_update_features_with_options: *mut *mut kafka_admin_UpdateFeaturesResult_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_admin_UpdateFeaturesResult_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_) };
@@ -3461,11 +3455,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_update_features_with_options(
     // no setter runs on it while it is cloned, as `update_features_options_ref` requires.
     let options_ = unsafe { update_features_options_ref(options) }.clone();
     let result = client.call(|admin| admin.update_features_with_options(&feature_updates_, options_));
-    // SAFETY: Per this function's `# Safety`, `out_update_features_with_options` is a valid slot,
-    // as `out_slot` requires.
-    unsafe {
-        out_slot(result, out_update_features_with_options, |r| {
-            box_update_features_result(r, &client.future_ctx())
-        })
-    }
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid slot,
+    // as `deliver_value` requires.
+    unsafe { deliver_value(result, out_err, |r| box_update_features_result(r, &client.future_ctx())) }
 }

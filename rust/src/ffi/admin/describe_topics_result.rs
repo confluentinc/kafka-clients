@@ -142,10 +142,10 @@ fn ids_map(map: HashMap<Uuid, TopicDescription>) -> *mut c_void {
 /// `future` must be a valid future handle whose value, when it succeeds, is
 /// a live topic-description handle.
 unsafe fn resolved_description(future: *const kafka_common_KafkaFuture_t) -> KafkaFuture<TopicDescription> {
-    let mut value: *mut c_void = std::ptr::null_mut();
-    // SAFETY: Per this function's `# Safety`, `future` is a valid future handle, and `&mut value`
-    // points at a local, so it is a valid pointer, as `kafka_common_KafkaFuture_get` requires.
-    let error = unsafe { kafka_common_KafkaFuture_get(future, &mut value) };
+    let mut error = std::ptr::null_mut();
+    // SAFETY: Per this function's `# Safety`, `future` is a valid future handle, and `&mut error`
+    // points at a local null, so it is a valid slot, as `kafka_common_KafkaFuture_get` requires.
+    let value = unsafe { kafka_common_KafkaFuture_get(future, &mut error) };
     // SAFETY: `error` is null or the owned error handle `kafka_common_KafkaFuture_get` just
     // returned, not yet destroyed, as `take_error` requires; nothing uses it afterwards.
     match unsafe { take_error(error) } {

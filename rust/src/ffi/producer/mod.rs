@@ -151,8 +151,11 @@ use crate::common::{Error, TopicPartition};
 use crate::consumer::OffsetAndMetadata;
 use crate::ffi::callback_queue::{CallbackJob, CallbackQueue, SendPtr};
 use crate::ffi::callback_result::{CallbackResults, INVOKER_RESULTS, Mark};
+use crate::ffi::common::deliver_unit;
+use crate::ffi::common::fail_with;
 use crate::ffi::common::metrics::box_metrics_map;
 use crate::ffi::common::partition_info::{box_partition_info, kafka_common_PartitionInfo_destroy};
+use crate::ffi::common::store_error;
 use crate::ffi::common::topic_partition::topic_partition_ref;
 use crate::ffi::common::{
     box_error, catch_task_panic, deliver_panic, deliver_panic_value, init_default_logger, kafka_common_Error_t,
@@ -764,20 +767,26 @@ pub(crate) unsafe fn completion_sink(producer: *const kafka_producer_Producer_t)
     move |job| client.queue.push(job)
 }
 
-fn error_slot(result: Result<(), Error>) -> *mut kafka_common_Error_t {
-    result.err().map_or(std::ptr::null_mut(), box_error)
-}
-
 /// Runs a transaction-control operation on the calling thread: takes the
 /// flag, drains the submission queue, runs `op`, then releases the flag and
-/// waits as `wait` asks (see [`Client::wait_for_reports_blocking`]).
-fn with_txn_control<F, Fut>(client: &Arc<Client>, wait: ReportWait, op: F) -> *mut kafka_common_Error_t
-where
+/// waits as `wait` asks (see [`Client::wait_for_reports_blocking`]). An
+/// error is stored in `*out_err`.
+///
+/// # Safety
+///
+/// `out_err` must be as `store_error` requires.
+unsafe fn with_txn_control<F, Fut>(
+    client: &Arc<Client>,
+    wait: ReportWait,
+    out_err: *mut *mut kafka_common_Error_t,
+    op: F,
+) where
     F: FnOnce(Arc<DynProducerGv>) -> Fut,
     Fut: Future<Output = Result<(), Error>>,
 {
     if let Err(error) = client.acquire_txn_control() {
-        return box_error(error);
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `store_error` requires.
+        return unsafe { store_error(out_err, error) };
     }
     let in_callback = client.in_callback();
     let result = {
@@ -789,7 +798,8 @@ where
             })
         })
     };
-    error_slot(client.wait_for_reports_blocking(result, wait, in_callback))
+    // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_unit` requires.
+    unsafe { deliver_unit(client.wait_for_reports_blocking(result, wait, in_callback), out_err) }
 }
 
 /// The `_cb` form of [`with_txn_control`]: the drain, `op` and the wait run
@@ -870,7 +880,7 @@ fn with_drain<F, Fut>(
     wait: ReportWait,
     in_callback: bool,
     op: F,
-) -> *mut kafka_common_Error_t
+) -> Result<(), Error>
 where
     F: FnOnce(Arc<DynProducerGv>, Duration) -> Fut,
     Fut: Future<Output = Result<(), Error>>,
@@ -881,7 +891,7 @@ where
             op(producer, left).await
         })
     });
-    error_slot(client.wait_for_reports_blocking(result, wait, in_callback))
+    client.wait_for_reports_blocking(result, wait, in_callback)
 }
 
 /// The `_cb` form of [`with_drain`], whose wait runs on the task without
@@ -1010,17 +1020,21 @@ pub type kafka_producer_Producer_callbacks_notify_fn_t = unsafe extern "C" fn(op
 ///
 /// # Safety
 ///
-/// `self_` must be a live view.
+/// `self_` must be a live view. `out_err` must be a valid slot pointing at
+/// null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_init_transactions(
     self_: *const kafka_producer_Producer_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires; the
-    // reference does not outlive the call.
-    with_txn_control(unsafe { client_ref(self_) }, ReportWait::No, |p| async move {
-        p.init_transactions().await
-    })
+    // reference does not outlive the call, and `out_err` is as `with_txn_control` requires.
+    unsafe {
+        with_txn_control(client_ref(self_), ReportWait::No, out_err, |p| async move {
+            p.init_transactions().await
+        })
+    }
 }
 
 /// `Producer.initTransactions()`, completion queued.
@@ -1060,17 +1074,24 @@ pub unsafe extern "C" fn kafka_producer_Producer_init_transactions_cb(
 ///
 /// # Safety
 ///
-/// `self_` must be a live view.
+/// `self_` must be a live view. `out_err` must be a valid slot pointing at
+/// null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_begin_transaction(
     self_: *const kafka_producer_Producer_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires; the
-    // reference does not outlive the call.
-    with_txn_control(unsafe { client_ref(self_) }, ReportWait::No, |p| async move {
-        p.begin_transaction()
-    })
+    // reference does not outlive the call, and `out_err` is as `with_txn_control` requires.
+    unsafe {
+        with_txn_control(
+            client_ref(self_),
+            ReportWait::No,
+            out_err,
+            |p| async move { p.begin_transaction() },
+        )
+    }
 }
 
 /// `Producer.beginTransaction()`, completion queued: ordered after the queued
@@ -1116,14 +1137,15 @@ pub unsafe extern "C" fn kafka_producer_Producer_begin_transaction_cb(
 /// `self_` must be a live view, `offsets` a live map of
 /// `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *`
 /// that no other call mutates during this one, and `group_metadata` a live
-/// handle.
+/// handle. `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_send_offsets_to_transaction(
     self_: *const kafka_producer_Producer_t,
     offsets: *const kafka_Map_t,
     group_metadata: *const kafka_consumer_ConsumerGroupMetadata_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `offsets` is a live map of topic-partition to
     // offset-and-metadata handles that no other call mutates during this one, as `offsets_map`
     // requires.
@@ -1132,10 +1154,12 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_offsets_to_transaction(
     // `group_metadata_ref` requires; the reference is only cloned, within this statement.
     let group_metadata = Arc::clone(unsafe { group_metadata_ref(group_metadata) });
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires; the
-    // reference does not outlive the call.
-    with_txn_control(unsafe { client_ref(self_) }, ReportWait::No, |p| async move {
-        p.send_offsets_to_transaction(offsets, &*group_metadata).await
-    })
+    // reference does not outlive the call, and `out_err` is as `with_txn_control` requires.
+    unsafe {
+        with_txn_control(client_ref(self_), ReportWait::No, out_err, |p| async move {
+            p.send_offsets_to_transaction(offsets, &*group_metadata).await
+        })
+    }
 }
 
 /// `Producer.sendOffsetsToTransaction(...)`, completion queued.
@@ -1195,17 +1219,21 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_offsets_to_transaction_cb(
 ///
 /// # Safety
 ///
-/// `self_` must be a live view.
+/// `self_` must be a live view. `out_err` must be a valid slot pointing at
+/// null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_commit_transaction(
     self_: *const kafka_producer_Producer_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires; the
-    // reference does not outlive the call.
-    with_txn_control(unsafe { client_ref(self_) }, ReportWait::OnSuccess, |p| async move {
-        p.commit_transaction().await
-    })
+    // reference does not outlive the call, and `out_err` is as `with_txn_control` requires.
+    unsafe {
+        with_txn_control(client_ref(self_), ReportWait::OnSuccess, out_err, |p| async move {
+            p.commit_transaction().await
+        })
+    }
 }
 
 /// `Producer.commitTransaction()`, completion queued.
@@ -1256,17 +1284,21 @@ pub unsafe extern "C" fn kafka_producer_Producer_commit_transaction_cb(
 ///
 /// # Safety
 ///
-/// `self_` must be a live view.
+/// `self_` must be a live view. `out_err` must be a valid slot pointing at
+/// null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_abort_transaction(
     self_: *const kafka_producer_Producer_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires; the
-    // reference does not outlive the call.
-    with_txn_control(unsafe { client_ref(self_) }, ReportWait::OnSuccess, |p| async move {
-        p.abort_transaction().await
-    })
+    // reference does not outlive the call, and `out_err` is as `with_txn_control` requires.
+    unsafe {
+        with_txn_control(client_ref(self_), ReportWait::OnSuccess, out_err, |p| async move {
+            p.abort_transaction().await
+        })
+    }
 }
 
 /// `Producer.abortTransaction()`, completion queued.
@@ -1317,18 +1349,19 @@ pub unsafe extern "C" fn kafka_producer_Producer_abort_transaction_cb(
 ///
 /// # Safety
 ///
-/// `self_` and `record` must be live handles and `out_send` a valid slot.
+/// `self_` and `record` must be live handles and `out_err` a valid slot
+/// pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_send(
     self_: *const kafka_producer_Producer_t,
     record: *const kafka_producer_ProducerRecord_t,
-    out_send: *mut *mut kafka_common_KafkaFuture_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, `record` a live handle and
-    // `out_send` a valid slot, and a null `callback` is allowed, which is what
+    // `out_err` a valid slot, and a null `callback` is allowed, which is what
     // `kafka_producer_Producer_send_with_callback`'s `# Safety` asks for.
-    unsafe { kafka_producer_Producer_send_with_callback(self_, record, std::ptr::null(), out_send) }
+    unsafe { kafka_producer_Producer_send_with_callback(self_, record, std::ptr::null(), out_err) }
 }
 
 /// `Producer.send(ProducerRecord)`, completion queued: the record is copied
@@ -1376,26 +1409,26 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_cb(
 /// inside the record's own callback it waits forever, as Java's `get` does
 /// on the I/O thread.
 ///
-/// When this call returns an error, the callback may still fire later,
-/// exactly once, if the record had reached the accumulator: as in Java's
+/// When this call stores an error in `*out_err`, the callback may still fire
+/// later, exactly once, if the record had reached the accumulator: as in Java's
 /// `doSend`, the record is appended with its callback before
-/// `maybeAddPartition` fails (for example a send outside a transaction), and
-/// it completes with its batch. A record rejected before the append never
-/// fires it. The caller cannot tell the two apart, so after an error the
-/// callback's `self` must stay alive until `_destroy`.
+/// `maybeAddPartition` fails (for example a send outside a transaction), and it
+/// completes with its batch. A record rejected before the append never fires
+/// it. The caller cannot tell the two apart, so after an error the callback's
+/// `self` must stay alive until `_destroy`.
 ///
 /// # Safety
 ///
-/// `self_` and `record` must be live handles, `callback` null or a live
-/// handle, `out_send_with_callback` a valid slot.
+/// `self_` and `record` must be live handles, `callback` null or a live handle,
+/// `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
     self_: *const kafka_producer_Producer_t,
     record: *const kafka_producer_ProducerRecord_t,
     callback: *const kafka_producer_Callback_t,
-    out_send_with_callback: *mut *mut kafka_common_KafkaFuture_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
     // `client` is used only during the call.
     let client = unsafe { client_ref(self_) };
@@ -1412,14 +1445,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
         )
     });
     match sent {
-        Ok(future) => {
-            // SAFETY: Per this function's `# Safety`, `out_send_with_callback` is a valid slot, so
-            // the write is sound; the handle written is the fresh `box_send_future` the caller
-            // owns, freed with `kafka_common_KafkaFuture_destroy`.
-            unsafe { *out_send_with_callback = client.box_send_future(&future, completion) };
-            std::ptr::null_mut()
-        },
-        Err(error) => box_error(error),
+        Ok(future) => client.box_send_future(&future, completion),
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        Err(error) => unsafe { fail_with(out_err, error) },
     }
 }
 
@@ -1534,26 +1562,31 @@ unsafe fn delivery_callback(
 ///
 /// # Safety
 ///
-/// `self_` must be a live view.
+/// `self_` must be a live view. `out_err` must be a valid slot pointing at
+/// null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_flush(
     self_: *const kafka_producer_Producer_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires; the
     // reference does not outlive the call.
     let client = unsafe { client_ref(self_) };
     let in_callback = client.in_callback();
     if let Err(error) = client.check_flush_outside_callback(in_callback) {
-        return box_error(error);
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        return unsafe { fail_with(out_err, error) };
     }
-    with_drain(
+    let result = with_drain(
         client,
         DrainBound::Unbounded,
         ReportWait::OnSuccess,
         in_callback,
         |p, _| async move { p.flush().await },
-    )
+    );
+    // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_unit` requires.
+    unsafe { deliver_unit(result, out_err) }
 }
 
 /// `Producer.flush()`, completion queued: `cb` fires once every record sent
@@ -1605,15 +1638,15 @@ pub unsafe extern "C" fn kafka_producer_Producer_flush_cb(
 ///
 /// # Safety
 ///
-/// `self_` must be a live view, `topic` a NUL-terminated string and
-/// `out_partitions_for` a valid slot.
+/// `self_` must be a live view, `topic` a NUL-terminated string and `out_err` a
+/// valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_partitions_for(
     self_: *const kafka_producer_Producer_t,
     topic: *const c_char,
-    out_partitions_for: *mut *mut kafka_List_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
     // `client` is used only during the call.
     let client = unsafe { client_ref(self_) };
@@ -1624,14 +1657,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for(
         .producer()
         .and_then(|producer| block_on(&client.runtime, async move { producer.partitions_for(&topic).await }));
     match infos {
-        Ok(infos) => {
-            // SAFETY: Per this function's `# Safety`, `out_partitions_for` is a valid slot, so the
-            // write is sound; the list written is the fresh `box_list` the caller owns, freed with
-            // `kafka_List_destroy`.
-            unsafe { *out_partitions_for = partition_info_list(infos) };
-            std::ptr::null_mut()
-        },
-        Err(error) => box_error(error),
+        Ok(infos) => partition_info_list(infos),
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        Err(error) => unsafe { fail_with(out_err, error) },
     }
 }
 
@@ -1740,17 +1768,19 @@ pub unsafe extern "C" fn kafka_producer_Producer_metrics(self_: *const kafka_pro
 ///
 /// # Safety
 ///
-/// `self_` must be a live view.
+/// `self_` must be a live view. `out_err` must be a valid slot pointing at
+/// null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_close(
     self_: *const kafka_producer_Producer_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
     // `client` is used only during the call.
     let client = unsafe { client_ref(self_) };
     let in_callback = client.in_callback();
-    match untimed_close_override(client, in_callback) {
+    let result = match untimed_close_override(client, in_callback) {
         None => with_drain(
             client,
             DrainBound::Unbounded,
@@ -1765,7 +1795,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_close(
             in_callback,
             |p, left| async move { p.close_with_timeout(left).await },
         ),
-    }
+    };
+    // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_unit` requires.
+    unsafe { deliver_unit(result, out_err) }
 }
 
 /// `Producer.close()`, completion queued: `cb` fires once the producer is
@@ -1843,28 +1875,33 @@ pub unsafe extern "C" fn kafka_producer_Producer_close_cb(
 ///
 /// # Safety
 ///
-/// `self_` must be a live view.
+/// `self_` must be a live view. `out_err` must be a valid slot pointing at
+/// null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_close_with_timeout(
     self_: *const kafka_producer_Producer_t,
     timeout: i64,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
     // `client` is used only during the call.
     let client = unsafe { client_ref(self_) };
     let in_callback = client.in_callback();
     let timeout = match close_timeout(client, timeout, in_callback) {
         Ok(timeout) => timeout,
-        Err(error) => return box_error(error),
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        Err(error) => return unsafe { fail_with(out_err, error) },
     };
-    with_drain(
+    let result = with_drain(
         client,
         DrainBound::Within(timeout),
         ReportWait::Always,
         in_callback,
         |p, left| async move { p.close_with_timeout(left).await },
-    )
+    );
+    // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_unit` requires.
+    unsafe { deliver_unit(result, out_err) }
 }
 
 /// `Producer.close(Duration timeout)`, completion queued; the bounded drain,
@@ -2093,11 +2130,14 @@ mod tests {
     /// instead of rejecting it as `KafkaProducer` does; both forms.
     #[test]
     fn mock_close_with_timeout_treats_a_negative_timeout_as_zero() {
-        // SAFETY: every handle is live until it is destroyed below.
+        // SAFETY: every handle is live until it is destroyed below, and `err` is a valid slot
+        // pointing at null.
         unsafe {
             let mock = kafka_producer_MockProducer_with_auto_complete(1);
             let view = kafka_producer_MockProducer__as_Producer(mock);
-            assert!(kafka_producer_Producer_close_with_timeout(view, -1).is_null());
+            let mut err = std::ptr::null_mut();
+            kafka_producer_Producer_close_with_timeout(view, -1, &raw mut err);
+            assert!(err.is_null());
             assert_eq!(kafka_producer_MockProducer_closed(mock), 1);
             kafka_producer_MockProducer_destroy(mock);
 
@@ -2169,7 +2209,8 @@ mod tests {
     #[test]
     fn a_panicking_cb_body_queues_one_panic_completion() {
         let topic = CString::new("topic").unwrap();
-        // SAFETY: every handle is live until it is destroyed below.
+        // SAFETY: every handle is live until it is destroyed below, and `err` is a valid slot
+        // pointing at null.
         unsafe {
             let mock = kafka_producer_MockProducer_with_auto_complete(1);
             let view = kafka_producer_MockProducer__as_Producer(mock);
@@ -2199,7 +2240,9 @@ mod tests {
 
             // The send panicked before it was counted, so a flush does not
             // wait for it, and the transaction-control flag was never taken.
-            assert!(kafka_producer_Producer_flush(view).is_null());
+            let mut err = std::ptr::null_mut();
+            kafka_producer_Producer_flush(view, &raw mut err);
+            assert!(err.is_null());
             std::thread::sleep(Duration::from_millis(20));
             assert_eq!(kafka_producer_Producer__execute_callbacks(view), 0);
             kafka_producer_MockProducer_destroy(mock);
@@ -2216,7 +2259,8 @@ mod tests {
     fn send_cb_tolerates_a_poisoned_submission_lock() {
         let sends = AtomicI32::new(0);
         let topic = CString::new("topic").unwrap();
-        // SAFETY: every handle is live until it is destroyed below.
+        // SAFETY: every handle is live until it is destroyed below, and `err` is a valid slot
+        // pointing at null.
         unsafe {
             let mock = kafka_producer_MockProducer_with_auto_complete(1);
             let view = kafka_producer_MockProducer__as_Producer(mock);
@@ -2230,7 +2274,9 @@ mod tests {
 
             let record = kafka_producer_ProducerRecord_new(topic.as_ptr(), std::ptr::null());
             kafka_producer_Producer_send_cb(view, record, count_send, &sends as *const AtomicI32 as *mut c_void);
-            assert!(kafka_producer_Producer_flush(view).is_null());
+            let mut err = std::ptr::null_mut();
+            kafka_producer_Producer_flush(view, &raw mut err);
+            assert!(err.is_null());
             while sends.load(Ordering::SeqCst) == 0 {
                 kafka_producer_Producer__execute_callbacks(view);
                 std::thread::yield_now();
@@ -2248,13 +2294,15 @@ mod tests {
     fn destroy_fires_a_waiting_future_get_cb_once() {
         let topic = CString::new("topic").unwrap();
         let seen: Mutex<Vec<Option<String>>> = Mutex::new(Vec::new());
-        // SAFETY: every handle is live until it is destroyed below.
+        // SAFETY: every handle is live until it is destroyed below, and `err` is a valid slot
+        // pointing at null.
         unsafe {
             let mock = kafka_producer_MockProducer_with_auto_complete(0);
             let view = kafka_producer_MockProducer__as_Producer(mock);
             let record = kafka_producer_ProducerRecord_new(topic.as_ptr(), std::ptr::null());
-            let mut future = std::ptr::null_mut();
-            assert!(kafka_producer_Producer_send(view, record, &mut future).is_null());
+            let mut err = std::ptr::null_mut();
+            let future = kafka_producer_Producer_send(view, record, &mut err);
+            assert!(err.is_null());
             let opaque = &seen as *const Mutex<Vec<Option<String>>> as *mut c_void;
             kafka_common_KafkaFuture_get_cb(future, record_future, opaque);
             std::thread::sleep(Duration::from_millis(20));

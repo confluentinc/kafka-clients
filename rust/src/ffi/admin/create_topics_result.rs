@@ -20,7 +20,8 @@ use std::ffi::{c_char, c_void};
 use crate::admin::{CreateTopicsResult, TopicMetadataAndConfig};
 use crate::common::{Error, KafkaFuture, Uuid};
 use crate::ffi::admin::config::{box_config, config_ref, destroy_config_element, kafka_admin_Config_t};
-use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_result, out_slot, result_ref};
+use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_result, result_ref};
+use crate::ffi::common::deliver_value;
 use crate::ffi::common::uuid::{box_uuid, kafka_common_Uuid_destroy, kafka_common_Uuid_t, uuid_of};
 use crate::ffi::common::{kafka_common_Error_t, take_error};
 use crate::ffi::ffi_guard;
@@ -114,86 +115,78 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_w
     box_topic_metadata_and_config(TopicMetadataAndConfig::with_error(error))
 }
 
-/// `topicId()`: stores in `*out_topic_id` an owned `kafka_common_Uuid_t *`
-/// (freed with `kafka_common_Uuid_destroy`) and returns `NULL`, or returns
-/// the owned error this holder stands for.
+/// `topicId()`: returns an owned `kafka_common_Uuid_t *` (freed with
+/// `kafka_common_Uuid_destroy`), or stores the owned error this holder stands
+/// for in `*out_err` and returns `NULL`.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid handle and `out_topic_id` a valid slot.
+/// `self_` must be a valid handle and `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_topic_id(
     self_: *const kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_t,
-    out_topic_id: *mut *mut kafka_common_Uuid_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_common_Uuid_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, kept alive for this call,
-    // as `topic_metadata_and_config_ref` requires, and `out_topic_id` a valid slot, as `out_slot`
+    // as `topic_metadata_and_config_ref` requires, and `out_err` as `deliver_value`
     // requires.
-    unsafe { out_slot(topic_metadata_and_config_ref(self_).topic_id(), out_topic_id, box_uuid) }
+    unsafe { deliver_value(topic_metadata_and_config_ref(self_).topic_id(), out_err, box_uuid) }
 }
 
-/// `numPartitions()`: stores the partition count in `*out_num_partitions`
-/// and returns `NULL`, or returns the owned error this holder stands for.
+/// `numPartitions()`: returns the partition count, or stores the owned error
+/// this holder stands for in `*out_err` and returns -1.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid handle and `out_num_partitions` a valid slot.
+/// `self_` must be a valid handle and `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_num_partitions(
     self_: *const kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_t,
-    out_num_partitions: *mut i32,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, kept alive for this call,
-    // as `topic_metadata_and_config_ref` requires, and `out_num_partitions` a valid slot, as
-    // `out_slot` requires.
-    unsafe { out_slot(topic_metadata_and_config_ref(self_).num_partitions(), out_num_partitions, |n| n) }
+    // as `topic_metadata_and_config_ref` requires, and `out_err` as
+    // `deliver_value` requires.
+    unsafe { deliver_value(topic_metadata_and_config_ref(self_).num_partitions(), out_err, |n| n) }
 }
 
-/// `replicationFactor()`: stores the replication factor in
-/// `*out_replication_factor` and returns `NULL`, or returns the owned error
-/// this holder stands for.
+/// `replicationFactor()`: returns the replication factor, or stores the owned
+/// error this holder stands for in `*out_err` and returns -1.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid handle and `out_replication_factor` a valid
-/// slot.
+/// `self_` must be a valid handle and `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_replication_factor(
     self_: *const kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_t,
-    out_replication_factor: *mut i32,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, kept alive for this call,
-    // as `topic_metadata_and_config_ref` requires, and `out_replication_factor` a valid slot, as
-    // `out_slot` requires.
-    unsafe {
-        out_slot(
-            topic_metadata_and_config_ref(self_).replication_factor(),
-            out_replication_factor,
-            |n| n,
-        )
-    }
+    // as `topic_metadata_and_config_ref` requires, and `out_err` as
+    // `deliver_value` requires.
+    unsafe { deliver_value(topic_metadata_and_config_ref(self_).replication_factor(), out_err, |n| n) }
 }
 
-/// `config()`: stores in `*out_config` an owned `kafka_admin_Config_t *`
-/// (freed with `kafka_admin_Config_destroy`) and returns `NULL`, or returns
-/// the owned error this holder stands for.
+/// `config()`: returns an owned `kafka_admin_Config_t *` (freed with
+/// `kafka_admin_Config_destroy`), or stores the owned error this holder stands
+/// for in `*out_err` and returns `NULL`.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid handle and `out_config` a valid slot.
+/// `self_` must be a valid handle and `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_config(
     self_: *const kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_t,
-    out_config: *mut *mut kafka_admin_Config_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_admin_Config_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, kept alive for this call,
-    // as `topic_metadata_and_config_ref` requires, and `out_config` a valid slot, as `out_slot`
+    // as `topic_metadata_and_config_ref` requires, and `out_err` as `deliver_value`
     // requires.
-    unsafe { out_slot(topic_metadata_and_config_ref(self_).config(), out_config, box_config) }
+    unsafe { deliver_value(topic_metadata_and_config_ref(self_).config(), out_err, box_config) }
 }
 
 /// Frees a handle; null is a no-op.

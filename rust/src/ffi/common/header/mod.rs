@@ -45,10 +45,11 @@ use std::sync::OnceLock;
 
 use crate::common::header::{Header, Headers, RecordHeader};
 use crate::common::{Error, LocalIllegalStateError};
+use crate::ffi::common::deliver_unit;
 use crate::ffi::common::header::internals::record_header::{
     RecordHeaderInner, kafka_common_header_internals_RecordHeader_t, record_header_ref,
 };
-use crate::ffi::common::{box_error, kafka_common_Error_t, take_error};
+use crate::ffi::common::{kafka_common_Error_t, take_error};
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{
     box_list, c_str_to_string, kafka_Bytes_t, kafka_List_destroy, kafka_List_t, list_elements, owned_c_string,
@@ -262,12 +263,15 @@ unsafe fn illegal_state(error: *mut kafka_common_Error_t) -> Result<(), LocalIll
     }
 }
 
-/// The error slot of a mutating method: null on success.
-fn result(result: Result<(), LocalIllegalStateError>) -> *mut kafka_common_Error_t {
-    match result {
-        Ok(()) => ptr::null_mut(),
-        Err(e) => box_error(Error::LocalIllegalState(e)),
-    }
+/// Delivers a mutating method's outcome: nothing on success, the owned
+/// error in `*out_err` otherwise.
+///
+/// # Safety
+///
+/// `out_err` must be as `deliver_unit` requires.
+unsafe fn result(result: Result<(), LocalIllegalStateError>, out_err: *mut *mut kafka_common_Error_t) {
+    // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_unit` requires.
+    unsafe { deliver_unit(result.map_err(Error::LocalIllegalState), out_err) }
 }
 
 /// An owned list of borrowed `kafka_common_header_internals_RecordHeader_t *`,
@@ -305,21 +309,23 @@ unsafe fn headers_mut<'a>(self_: *mut kafka_common_header_Headers_t) -> &'a mut 
     unsafe { &mut *(self_ as *mut HeadersInner) }.headers_mut()
 }
 
-/// `add(Header header)`: appends a copy of `header`. Returns the translation
-/// of `IllegalStateException` when the headers are read-only.
+/// `add(Header header)`: appends a copy of `header`. Stores the translation
+/// of `IllegalStateException` in `*out_err` when the headers are read-only.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid headers handle whose headers may be mutated (not a
 /// view on a handle the caller received `const`, nor the `const` view a
 /// deserializer receives), that no other call uses at the same time, and
-/// `header` a valid record-header handle.
+/// `header` a valid record-header handle. `out_err` must be a valid slot
+/// pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_Headers_add_with_header(
     self_: *mut kafka_common_header_Headers_t,
     header: *const kafka_common_header_internals_RecordHeader_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `header` is a valid record-header handle, as
     // `record_header_ref` requires. It is cloned before `headers_mut` below drops this handle's
     // cached views, so the borrow ends before a `header` taken from those views is freed.
@@ -327,26 +333,31 @@ pub unsafe extern "C" fn kafka_common_header_Headers_add_with_header(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid headers handle whose headers may
     // be mutated and that no other call uses at the same time, as `headers_mut` requires; the
     // reference is used only within this call.
-    result(unsafe { headers_mut(self_) }.add_with_header(header))
+    let added = unsafe { headers_mut(self_) }.add_with_header(header);
+    // SAFETY: Per this function's `# Safety`, `out_err` is as `result` requires.
+    unsafe { result(added, out_err) }
 }
 
 /// `add(String key, byte[] value)`: appends a header built from copies of
-/// `key` and `value` (`value.data == NULL` is Java's null). Returns the
-/// translation of `IllegalStateException` when the headers are read-only.
+/// `key` and `value` (`value.data == NULL` is Java's null). Stores the
+/// translation of `IllegalStateException` in `*out_err` when the headers are
+/// read-only.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid headers handle whose headers may be mutated (not a
 /// view on a handle the caller received `const`, nor the `const` view a
 /// deserializer receives), that no other call uses at the same time, `key` a
-/// valid NUL-terminated string and `value` null or a valid buffer.
+/// valid NUL-terminated string and `value` null or a valid buffer. `out_err`
+/// must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_Headers_add_with_key_value(
     self_: *mut kafka_common_header_Headers_t,
     key: *const c_char,
     value: kafka_Bytes_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `key` is a valid NUL-terminated string, as
     // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
@@ -356,25 +367,29 @@ pub unsafe extern "C" fn kafka_common_header_Headers_add_with_key_value(
     // `value` is null or a valid buffer, so `value.data` is null or valid for `value.len` bytes, as
     // `kafka_Bytes_t::as_slice` requires; both borrows are used only within this call, and the
     // implementation copies the bytes.
-    result(unsafe { headers_mut(self_) }.add_with_key_value(&key, unsafe { value.as_slice() }))
+    let added = unsafe { headers_mut(self_) }.add_with_key_value(&key, unsafe { value.as_slice() });
+    // SAFETY: Per this function's `# Safety`, `out_err` is as `result` requires.
+    unsafe { result(added, out_err) }
 }
 
 /// `remove(String key)`: drops every header with `key`, keeping the order of
-/// the rest. Returns the translation of `IllegalStateException` when the
-/// headers are read-only.
+/// the rest. Stores the translation of `IllegalStateException` in
+/// `*out_err` when the headers are read-only.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid headers handle whose headers may be mutated (not a
 /// view on a handle the caller received `const`, nor the `const` view a
-/// deserializer receives), that no other call uses at the same time, and
-/// `key` a valid NUL-terminated string.
+/// deserializer receives), that no other call uses at the same time, and `key`
+/// a valid NUL-terminated string. `out_err` must be a valid slot pointing at
+/// null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_Headers_remove(
     self_: *mut kafka_common_header_Headers_t,
     key: *const c_char,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `key` is a valid NUL-terminated string, as
     // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
@@ -382,7 +397,9 @@ pub unsafe extern "C" fn kafka_common_header_Headers_remove(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid headers handle whose headers may
     // be mutated and that no other call uses at the same time, as `headers_mut` requires; the
     // reference is used only within this call.
-    result(unsafe { headers_mut(self_) }.remove(&key))
+    let removed = unsafe { headers_mut(self_) }.remove(&key);
+    // SAFETY: Per this function's `# Safety`, `out_err` is as `result` requires.
+    unsafe { result(removed, out_err) }
 }
 
 /// `lastHeader(String key)`: the last header with `key`, borrowed from the
@@ -490,22 +507,29 @@ pub unsafe extern "C" fn kafka_common_header_Headers_iter(
 // ---------------------------------------------------------------------------
 
 /// `add(Header header)` of a C implementation: `header` is borrowed for the
-/// call and copied by the implementation. Returns null, or an owned error
-/// the Rust side takes over.
+/// call and copied by the implementation. On failure it stores an owned
+/// error, which the Rust side takes over, in `*out_err`, which points at
+/// `NULL` on entry.
 pub type kafka_common_header_Headers_add_with_header_fn_t = unsafe extern "C" fn(
     self_: *mut c_void,
     header: *const kafka_common_header_internals_RecordHeader_t,
-) -> *mut kafka_common_Error_t;
+    out_err: *mut *mut kafka_common_Error_t,
+);
 
 /// `add(String key, byte[] value)` of a C implementation: both are borrowed
-/// for the call. Returns null, or an owned error the Rust side takes over.
-pub type kafka_common_header_Headers_add_with_key_value_fn_t =
-    unsafe extern "C" fn(self_: *mut c_void, key: *const c_char, value: kafka_Bytes_t) -> *mut kafka_common_Error_t;
+/// for the call. A failure is reported as for
+/// [`kafka_common_header_Headers_add_with_header_fn_t`].
+pub type kafka_common_header_Headers_add_with_key_value_fn_t = unsafe extern "C" fn(
+    self_: *mut c_void,
+    key: *const c_char,
+    value: kafka_Bytes_t,
+    out_err: *mut *mut kafka_common_Error_t,
+);
 
-/// `remove(String key)` of a C implementation. Returns null, or an owned
-/// error the Rust side takes over.
+/// `remove(String key)` of a C implementation. A failure is reported as for
+/// [`kafka_common_header_Headers_add_with_header_fn_t`].
 pub type kafka_common_header_Headers_remove_fn_t =
-    unsafe extern "C" fn(self_: *mut c_void, key: *const c_char) -> *mut kafka_common_Error_t;
+    unsafe extern "C" fn(self_: *mut c_void, key: *const c_char, out_err: *mut *mut kafka_common_Error_t);
 
 /// `lastHeader(String key)` of a C implementation: a handle the C side owns
 /// and keeps valid until its next mutation, or null.
@@ -593,38 +617,46 @@ impl Headers for CHeaders {
     fn add_with_header(&mut self, header: RecordHeader) -> Result<(), LocalIllegalStateError> {
         self.array.take();
         let header = RecordHeaderInner::new(header);
+        let mut error = ptr::null_mut();
         // SAFETY: `add_with_header` and `self_` were registered together through
         // `kafka_common_header_Headers_new`, whose rustdoc requires the C side to keep `self_`
         // alive until this handle is destroyed. `header` is a local record-header handle that
-        // outlives the call, which borrows and copies it, as the `_fn_t` rustdoc states; the result
-        // is null or an owned error, as `illegal_state` requires.
-        unsafe { illegal_state((self.add_with_header)(self.self_, header.as_ptr())) }
+        // outlives the call, which borrows and copies it, as the `_fn_t` rustdoc states, and `error`
+        // a local slot pointing at null.
+        unsafe { (self.add_with_header)(self.self_, header.as_ptr(), &raw mut error) };
+        // SAFETY: `error` is null or the owned error the C function stored, as its `_fn_t` rustdoc
+        // states and `illegal_state` requires.
+        unsafe { illegal_state(error) }
     }
 
     fn add_with_key_value(&mut self, key: &str, value: Option<&[u8]>) -> Result<(), LocalIllegalStateError> {
         self.array.take();
         let key = owned_c_string(key);
+        let mut error = ptr::null_mut();
         // SAFETY: `add_with_key_value` and `self_` were registered together through
         // `kafka_common_header_Headers_new`, whose rustdoc requires the C side to keep `self_`
         // alive until this handle is destroyed. `key` and the bytes `value` views outlive the call,
-        // which borrows them; the result is null or an owned error, as `illegal_state` requires.
+        // which borrows them, and `error` is a local slot pointing at null.
         unsafe {
-            illegal_state((self.add_with_key_value)(
-                self.self_,
-                key.as_ptr(),
-                kafka_Bytes_t::from_option(value),
-            ))
-        }
+            (self.add_with_key_value)(self.self_, key.as_ptr(), kafka_Bytes_t::from_option(value), &raw mut error)
+        };
+        // SAFETY: `error` is null or the owned error the C function stored, as its `_fn_t` rustdoc
+        // states and `illegal_state` requires.
+        unsafe { illegal_state(error) }
     }
 
     fn remove(&mut self, key: &str) -> Result<(), LocalIllegalStateError> {
         self.array.take();
         let key = owned_c_string(key);
+        let mut error = ptr::null_mut();
         // SAFETY: `remove` and `self_` were registered together through
         // `kafka_common_header_Headers_new`, whose rustdoc requires the C side to keep `self_`
-        // alive until this handle is destroyed. `key` outlives the call, which borrows it; the
-        // result is null or an owned error, as `illegal_state` requires.
-        unsafe { illegal_state((self.remove)(self.self_, key.as_ptr())) }
+        // alive until this handle is destroyed. `key` outlives the call, which borrows it, and
+        // `error` is a local slot pointing at null.
+        unsafe { (self.remove)(self.self_, key.as_ptr(), &raw mut error) };
+        // SAFETY: `error` is null or the owned error the C function stored, as its `_fn_t` rustdoc
+        // states and `illegal_state` requires.
+        unsafe { illegal_state(error) }
     }
 
     fn last_header(&self, key: &str) -> Option<&RecordHeader> {
@@ -730,7 +762,7 @@ mod tests {
         kafka_common_header_internals_RecordHeaders_destroy, kafka_common_header_internals_RecordHeaders_set_read_only,
         record_headers_ref,
     };
-    use crate::ffi::common::kafka_common_Error_destroy;
+    use crate::ffi::common::{box_error, kafka_common_Error_destroy};
     use crate::ffi::error_predicates::kafka_common_Error_is_local_illegal_state_error;
     use crate::ffi::util::{kafka_List_get, kafka_List_size};
 
@@ -771,7 +803,8 @@ mod tests {
         // and destroyed once, after it is read, and every record-header reference read from a
         // getter is used before the next mutation; `a`, `b` and `missing` outlive the calls reading
         // them; `header` comes from `kafka_common_header_internals_RecordHeader_new` and is
-        // destroyed once, after `add_with_header` copies it.
+        // destroyed once, after `add_with_header` copies it; `err` is a valid slot pointing at
+        // null, left null by every mutation (asserted).
         unsafe {
             let view = kafka_common_header_internals_RecordHeaders__as_Headers(class);
             assert_eq!(keys(kafka_common_header_Headers_to_array(view)), ["a", "b", "a"]);
@@ -795,10 +828,13 @@ mod tests {
             assert!(kafka_common_header_Headers_last_header(view, missing.as_ptr()).is_null());
 
             // Mutations rebuild the borrowed handles.
-            assert!(kafka_common_header_Headers_remove(view, a.as_ptr()).is_null());
+            let mut err = ptr::null_mut();
+            kafka_common_header_Headers_remove(view, a.as_ptr(), &mut err);
+            assert!(err.is_null());
             assert_eq!(keys(kafka_common_header_Headers_to_array(view)), ["b"]);
             let header = kafka_common_header_internals_RecordHeader_new(b.as_ptr(), kafka_Bytes_t::from_slice(&[3]));
-            assert!(kafka_common_header_Headers_add_with_header(view, header).is_null());
+            kafka_common_header_Headers_add_with_header(view, header, &mut err);
+            assert!(err.is_null());
             kafka_common_header_internals_RecordHeader_destroy(header);
             assert_eq!(keys(kafka_common_header_Headers_to_array(view)), ["b", "b"]);
             assert_eq!(
@@ -816,29 +852,38 @@ mod tests {
     unsafe extern "C" fn c_add_with_header(
         self_: *mut c_void,
         header: *const kafka_common_header_internals_RecordHeader_t,
-    ) -> *mut kafka_common_Error_t {
+        out_err: *mut *mut kafka_common_Error_t,
+    ) {
         // SAFETY: Test code: `self_` is the `Headers_t` view this test registered as the C
         // implementation's state, alive for the whole test, and the other arguments are what the
         // caller passes; they are forwarded unchanged to the invoker, whose `# Safety` they meet.
-        unsafe { kafka_common_header_Headers_add_with_header(self_ as *mut kafka_common_header_Headers_t, header) }
+        unsafe {
+            kafka_common_header_Headers_add_with_header(self_ as *mut kafka_common_header_Headers_t, header, out_err)
+        }
     }
     unsafe extern "C" fn c_add_with_key_value(
         self_: *mut c_void,
         key: *const c_char,
         value: kafka_Bytes_t,
-    ) -> *mut kafka_common_Error_t {
+        out_err: *mut *mut kafka_common_Error_t,
+    ) {
         // SAFETY: Test code: `self_` is the `Headers_t` view this test registered as the C
         // implementation's state, alive for the whole test, and the other arguments are what the
         // caller passes; they are forwarded unchanged to the invoker, whose `# Safety` they meet.
         unsafe {
-            kafka_common_header_Headers_add_with_key_value(self_ as *mut kafka_common_header_Headers_t, key, value)
+            kafka_common_header_Headers_add_with_key_value(
+                self_ as *mut kafka_common_header_Headers_t,
+                key,
+                value,
+                out_err,
+            )
         }
     }
-    unsafe extern "C" fn c_remove(self_: *mut c_void, key: *const c_char) -> *mut kafka_common_Error_t {
+    unsafe extern "C" fn c_remove(self_: *mut c_void, key: *const c_char, out_err: *mut *mut kafka_common_Error_t) {
         // SAFETY: Test code: `self_` is the `Headers_t` view this test registered as the C
         // implementation's state, alive for the whole test, and the other arguments are what the
         // caller passes; they are forwarded unchanged to the invoker, whose `# Safety` they meet.
-        unsafe { kafka_common_header_Headers_remove(self_ as *mut kafka_common_header_Headers_t, key) }
+        unsafe { kafka_common_header_Headers_remove(self_ as *mut kafka_common_header_Headers_t, key, out_err) }
     }
     unsafe extern "C" fn c_last_header(
         self_: *mut c_void,
@@ -878,7 +923,8 @@ mod tests {
         // is destroyed, after `c`; `c` comes from `kafka_common_header_Headers_new` and is
         // destroyed once; the exclusive reference `headers` is last used before the C-side invokers
         // touch `c`; each list is owned and destroyed once, after it is read; `a` and `b` outlive
-        // the calls reading them; the error is destroyed once, after it is read.
+        // the calls reading them; `err` is a valid slot pointing at null before each call, and the
+        // error stored there is destroyed once, after it is read.
         unsafe {
             let backing = kafka_common_header_internals_RecordHeaders__as_Headers(class);
             let c = kafka_common_header_Headers_new(
@@ -908,7 +954,9 @@ mod tests {
 
             // The C-side invokers on the owned handle see the same state.
             assert_eq!(keys(kafka_common_header_Headers_to_array(c)), ["b"]);
-            assert!(kafka_common_header_Headers_add_with_key_value(c, a.as_ptr(), kafka_Bytes_t::NULL).is_null());
+            let mut err = ptr::null_mut();
+            kafka_common_header_Headers_add_with_key_value(c, a.as_ptr(), kafka_Bytes_t::NULL, &mut err);
+            assert!(err.is_null());
             assert_eq!(keys(kafka_common_header_Headers_headers(c, b.as_ptr())), ["b"]);
 
             // A read-only backing surfaces as the trait's error, through C
@@ -919,15 +967,16 @@ mod tests {
                 error.to_string(),
                 LocalIllegalStateError::new("RecordHeaders has been closed.").to_string()
             );
-            let error = kafka_common_header_Headers_remove(c, b.as_ptr());
-            assert_eq!(kafka_common_Error_is_local_illegal_state_error(error), 1);
+            kafka_common_header_Headers_remove(c, b.as_ptr(), &mut err);
+            assert!(!err.is_null());
+            assert_eq!(kafka_common_Error_is_local_illegal_state_error(err), 1);
             assert_eq!(
-                CStr::from_ptr(crate::ffi::common::kafka_common_Error_message(error))
+                CStr::from_ptr(crate::ffi::common::kafka_common_Error_message(err))
                     .to_str()
                     .unwrap(),
                 "RecordHeaders has been closed."
             );
-            kafka_common_Error_destroy(error);
+            kafka_common_Error_destroy(err);
 
             kafka_common_header_Headers_destroy(c);
             kafka_common_header_Headers_destroy(ptr::null_mut());

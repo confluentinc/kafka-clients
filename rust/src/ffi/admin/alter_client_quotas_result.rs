@@ -113,10 +113,10 @@ unsafe fn resolved_void_future(future: *const kafka_common_KafkaFuture_t) -> Kaf
             "The futures passed to AlterClientQuotasResult must already be complete",
         )));
     }
-    let mut value: *mut c_void = ptr::null_mut();
-    // SAFETY: Per this function's `# Safety`, `future` is a valid future handle, and `&mut value`
+    let mut error = ptr::null_mut();
+    // SAFETY: Per this function's `# Safety`, `future` is a valid future handle, and `&mut error`
     // points at a local, so it is a valid pointer, as `kafka_common_KafkaFuture_get` requires.
-    let error = unsafe { kafka_common_KafkaFuture_get(future, &mut value) };
+    let _value = unsafe { kafka_common_KafkaFuture_get(future, &mut error) };
     // SAFETY: `error` is null or the owned error handle `kafka_common_KafkaFuture_get` just
     // returned, not yet destroyed, as `take_error` requires; nothing uses it afterwards.
     KafkaFuture::completed_future(unsafe { take_error(error) }.map_or(Ok(()), Err))

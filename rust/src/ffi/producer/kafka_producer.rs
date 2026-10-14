@@ -37,10 +37,11 @@ use std::sync::Arc;
 use crate::common::Error;
 use crate::common::header::RecordHeaders;
 use crate::common::serialization::Serializer;
+use crate::ffi::common::fail_with;
 use crate::ffi::common::serialization::serializer::{
     DynSerializer, kafka_common_serialization_Serializer_t, take_serializer,
 };
-use crate::ffi::common::{box_error, deliver_panic, deliver_panic_value, kafka_common_Error_t};
+use crate::ffi::common::{deliver_panic, deliver_panic_value, kafka_common_Error_t};
 use crate::ffi::consumer::kafka_consumer_ConsumerGroupMetadata_t;
 use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
@@ -186,15 +187,16 @@ unsafe fn producer(self_: *const kafka_producer_KafkaProducer_t) -> *const kafka
 /// # Safety
 ///
 /// `config` must be a live handle, each serializer null or a live handle (an
-/// owned one not used again by the caller), `out_new` a valid slot.
+/// owned one not used again by the caller), `out_err` a valid slot pointing at
+/// null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(
     config: *const kafka_producer_ProducerConfig_t,
     key_serializer: *mut kafka_common_serialization_Serializer_t,
     value_serializer: *mut kafka_common_serialization_Serializer_t,
-    out_new: *mut *mut kafka_producer_KafkaProducer_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_producer_KafkaProducer_t {
     // The serializers are taken first, so that a configuration error below
     // drops (and so frees) the owned ones the caller handed over.
     // SAFETY: Per this function's `# Safety`, `key_serializer` is null or a live handle, not used
@@ -209,17 +211,13 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(
     // `producer_config_ref`'s requirement holds for this statement, the only use of the reference.
     let config = match unsafe { producer_config_ref(config) }.build() {
         Ok(config) => config,
-        Err(error) => return box_error(error),
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        Err(error) => return unsafe { fail_with(out_err, error) },
     };
     match ProducerHandle::new(|| KafkaProducer::new(config, key_serializer, value_serializer), true) {
-        Ok(handle) => {
-            // SAFETY: Per this function's `# Safety`, `out_new` is a valid slot, so the write is
-            // sound; the handle written is the fresh box the caller owns, freed with
-            // `kafka_producer_KafkaProducer_destroy`.
-            unsafe { *out_new = Box::into_raw(handle) as *mut kafka_producer_KafkaProducer_t };
-            std::ptr::null_mut()
-        },
-        Err(error) => box_error(error),
+        Ok(handle) => Box::into_raw(handle) as *mut kafka_producer_KafkaProducer_t,
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        Err(error) => unsafe { fail_with(out_err, error) },
     }
 }
 
@@ -246,16 +244,18 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer__as_Producer(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. `out_err` must be a valid slot pointing at
+/// null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_init_transactions(
     self_: *const kafka_producer_KafkaProducer_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `producer` requires, so
-    // `producer(self_)` is its live `__as_Producer` view, which is what
+    // `producer(self_)` is its live `__as_Producer` view, and `out_err` as it requires, which is what
     // `kafka_producer_Producer_init_transactions`'s `# Safety` asks for.
-    unsafe { kafka_producer_Producer_init_transactions(producer(self_)) }
+    unsafe { kafka_producer_Producer_init_transactions(producer(self_), out_err) }
 }
 
 /// `KafkaProducer.initTransactions()`, completion queued.
@@ -279,7 +279,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_init_transactions_cb(
     opaque: *mut c_void,
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `producer` requires, so
-    // `producer(self_)` is its live `__as_Producer` view, which is what
+    // `producer(self_)` is its live `__as_Producer` view, and `out_err` as it requires, which is what
     // `kafka_producer_Producer_init_transactions_cb`'s `# Safety` asks for.
     unsafe { kafka_producer_Producer_init_transactions_cb(producer(self_), cb, opaque) }
 }
@@ -289,16 +289,18 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_init_transactions_cb(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. `out_err` must be a valid slot pointing at
+/// null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_begin_transaction(
     self_: *const kafka_producer_KafkaProducer_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `producer` requires, so
     // `producer(self_)` is its live `__as_Producer` view, which is what
     // `kafka_producer_Producer_begin_transaction`'s `# Safety` asks for.
-    unsafe { kafka_producer_Producer_begin_transaction(producer(self_)) }
+    unsafe { kafka_producer_Producer_begin_transaction(producer(self_), out_err) }
 }
 
 /// `KafkaProducer.beginTransaction()`, completion queued.
@@ -335,20 +337,21 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_begin_transaction_cb(
 /// `self_` must be a live handle, `offsets` a live map of
 /// `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *`
 /// that no other call mutates during this one, and `group_metadata` a live
-/// handle.
+/// handle. `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_send_offsets_to_transaction(
     self_: *const kafka_producer_KafkaProducer_t,
     offsets: *const kafka_Map_t,
     group_metadata: *const kafka_consumer_ConsumerGroupMetadata_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `producer` requires, so
     // `producer(self_)` is its live `__as_Producer` view, `offsets` a live map of topic-partition
     // to offset-and-metadata handles that no other call mutates meanwhile and `group_metadata` a
     // live handle, which is what
     // `kafka_producer_Producer_send_offsets_to_transaction`'s `# Safety` asks for.
-    unsafe { kafka_producer_Producer_send_offsets_to_transaction(producer(self_), offsets, group_metadata) }
+    unsafe { kafka_producer_Producer_send_offsets_to_transaction(producer(self_), offsets, group_metadata, out_err) }
 }
 
 /// `KafkaProducer.sendOffsetsToTransaction(...)`, completion queued.
@@ -391,16 +394,18 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_send_offsets_to_transactio
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. `out_err` must be a valid slot pointing at
+/// null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_commit_transaction(
     self_: *const kafka_producer_KafkaProducer_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `producer` requires, so
     // `producer(self_)` is its live `__as_Producer` view, which is what
     // `kafka_producer_Producer_commit_transaction`'s `# Safety` asks for.
-    unsafe { kafka_producer_Producer_commit_transaction(producer(self_)) }
+    unsafe { kafka_producer_Producer_commit_transaction(producer(self_), out_err) }
 }
 
 /// `KafkaProducer.commitTransaction()`, completion queued.
@@ -434,16 +439,18 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_commit_transaction_cb(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. `out_err` must be a valid slot pointing at
+/// null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_abort_transaction(
     self_: *const kafka_producer_KafkaProducer_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `producer` requires, so
     // `producer(self_)` is its live `__as_Producer` view, which is what
     // `kafka_producer_Producer_abort_transaction`'s `# Safety` asks for.
-    unsafe { kafka_producer_Producer_abort_transaction(producer(self_)) }
+    unsafe { kafka_producer_Producer_abort_transaction(producer(self_), out_err) }
 }
 
 /// `KafkaProducer.abortTransaction()`, completion queued.
@@ -477,21 +484,21 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_abort_transaction_cb(
 ///
 /// # Safety
 ///
-/// `self_` and `record` must be live handles, `callback` null or a live
-/// handle, `out_send` a valid slot.
+/// `self_` and `record` must be live handles, `callback` null or a live handle,
+/// `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_send(
     self_: *const kafka_producer_KafkaProducer_t,
     record: *const kafka_producer_ProducerRecord_t,
     callback: *const kafka_producer_Callback_t,
-    out_send: *mut *mut kafka_common_KafkaFuture_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `producer` requires, so
     // `producer(self_)` is its live `__as_Producer` view, `record` a live handle, `callback` null
-    // or a live handle and `out_send` a valid slot, which is what
+    // or a live handle and `out_err` a valid slot, which is what
     // `kafka_producer_Producer_send_with_callback`'s `# Safety` asks for.
-    unsafe { kafka_producer_Producer_send_with_callback(producer(self_), record, callback, out_send) }
+    unsafe { kafka_producer_Producer_send_with_callback(producer(self_), record, callback, out_err) }
 }
 
 /// `KafkaProducer.send(ProducerRecord, Callback)`, completion queued: see
@@ -573,17 +580,17 @@ mod tests {
         let props = [("bootstrap.servers".to_string(), String::new())].into_iter().collect();
         let config = crate::ffi::producer::producer_config::ProducerConfigInner::unvalidated_for_test(props);
         // SAFETY: Test code: `config` and the two owned serializers are live handles, the
-        // serializers handed over to the constructor and not used again, and `config` is destroyed
-        // once below.
+        // serializers handed over to the constructor and not used again, `err` is a valid slot
+        // pointing at null, and `config` and the error are destroyed once below.
         unsafe {
             let key = crate::ffi::common::serialization::serializer::SerializerInner::owned(Arc::clone(&imp));
             let value = crate::ffi::common::serialization::serializer::SerializerInner::owned(Arc::clone(&imp));
             assert_eq!(Arc::strong_count(&imp), 3);
-            let mut producer = std::ptr::null_mut();
-            let error = kafka_producer_KafkaProducer_new(config, key, value, &raw mut producer);
-            assert!(!error.is_null(), "the empty bootstrap.servers is rejected");
+            let mut err = std::ptr::null_mut();
+            let producer = kafka_producer_KafkaProducer_new(config, key, value, &raw mut err);
+            assert!(!err.is_null(), "the empty bootstrap.servers is rejected");
             assert!(producer.is_null());
-            kafka_common_Error_destroy(error);
+            kafka_common_Error_destroy(err);
             kafka_producer_ProducerConfig_destroy(config);
         }
         assert_eq!(Arc::strong_count(&imp), 1, "both owned serializers were freed");
@@ -593,16 +600,17 @@ mod tests {
     /// `max.block.ms` (60 s) for it.
     fn unreachable_producer() -> *mut kafka_producer_KafkaProducer_t {
         let props = box_string_map([("bootstrap.servers", "127.0.0.1:1"), ("max.block.ms", "60000")]);
-        // SAFETY: Test code: `props` and `config` are live from their constructor to their single
-        // destroy below; the producer is handed to the caller, who destroys it.
+        // SAFETY: Test code: `err` is a valid slot pointing at null for each call (no call fails),
+        // `props` and `config` are live from their constructor to their single destroy below; the
+        // producer is handed to the caller, who destroys it.
         unsafe {
-            let mut config = std::ptr::null_mut();
-            assert!(kafka_producer_ProducerConfig_new(props, &raw mut config).is_null());
+            let mut err = std::ptr::null_mut();
+            let config = kafka_producer_ProducerConfig_new(props, &raw mut err);
+            assert!(err.is_null());
             kafka_Map_destroy(props);
-            let mut producer = std::ptr::null_mut();
-            let error =
-                kafka_producer_KafkaProducer_new(config, std::ptr::null_mut(), std::ptr::null_mut(), &raw mut producer);
-            assert!(error.is_null());
+            let producer =
+                kafka_producer_KafkaProducer_new(config, std::ptr::null_mut(), std::ptr::null_mut(), &raw mut err);
+            assert!(err.is_null());
             kafka_producer_ProducerConfig_destroy(config);
             producer
         }
@@ -689,7 +697,9 @@ mod tests {
                     }
                     assert_eq!(*closed.lock().unwrap(), [None]);
                 } else {
-                    assert!(kafka_producer_Producer_close_with_timeout(view, 500).is_null());
+                    let mut err = std::ptr::null_mut();
+                    kafka_producer_Producer_close_with_timeout(view, 500, &raw mut err);
+                    assert!(err.is_null());
                 }
                 assert!(start.elapsed() < std::time::Duration::from_secs(10), "{:?}", start.elapsed());
                 while sends.lock().unwrap().len() < 3 {
@@ -767,13 +777,17 @@ mod tests {
         let ctx = unsafe { &*(self_ as *const InCallback) };
         let opaque = &ctx.outcomes as *const std::sync::Mutex<Vec<Option<String>>> as *mut c_void;
         // SAFETY: Test code: `ctx.view` is the live view of the producer whose callback this is;
-        // each error is read, then freed once.
+        // each `err` is a valid slot pointing at null, and the error it may get is read, then
+        // freed once, by `record_void`.
         unsafe {
-            let error = crate::ffi::producer::kafka_producer_Producer_flush(ctx.view);
-            record_void(error, opaque);
+            let mut err = std::ptr::null_mut();
+            crate::ffi::producer::kafka_producer_Producer_flush(ctx.view, &raw mut err);
+            record_void(err, opaque);
             crate::ffi::producer::kafka_producer_Producer_flush_cb(ctx.view, record_void, opaque);
             let start = std::time::Instant::now();
-            record_void(kafka_producer_Producer_close_with_timeout(ctx.view, 60_000), opaque);
+            let mut err = std::ptr::null_mut();
+            kafka_producer_Producer_close_with_timeout(ctx.view, 60_000, &raw mut err);
+            record_void(err, opaque);
             assert!(
                 start.elapsed() < std::time::Duration::from_secs(10),
                 "the close timeout was overridden"
@@ -796,18 +810,19 @@ mod tests {
         let props = box_string_map([("bootstrap.servers", "127.0.0.1:1"), ("max.block.ms", "100")]);
         let topic = CString::new("topic").unwrap();
         let bytes = kafka_Bytes_t::from_slice(b"v");
-        // SAFETY: Test code: `props`, `config`, `record`, `callback` and the producer are live from
-        // their constructor to their single destroy below, `view` is used only before the producer
-        // is destroyed, the future and each error are destroyed once after their last use, and
-        // `ctx` outlives the callback runs that read it.
+        // SAFETY: Test code: `err` is a valid slot pointing at null before each call (only the last
+        // call fails), `props`, `config`, `record`, `callback` and the producer are live from their
+        // constructor to their single destroy below, `view` is used only before the producer is
+        // destroyed, the future and the error are destroyed once after their last use, and `ctx`
+        // outlives the callback runs that read it.
         unsafe {
-            let mut config = std::ptr::null_mut();
-            assert!(kafka_producer_ProducerConfig_new(props, &raw mut config).is_null());
+            let mut err = std::ptr::null_mut();
+            let config = kafka_producer_ProducerConfig_new(props, &raw mut err);
+            assert!(err.is_null());
             kafka_Map_destroy(props);
-            let mut producer = std::ptr::null_mut();
-            let error =
-                kafka_producer_KafkaProducer_new(config, std::ptr::null_mut(), std::ptr::null_mut(), &raw mut producer);
-            assert!(error.is_null());
+            let producer =
+                kafka_producer_KafkaProducer_new(config, std::ptr::null_mut(), std::ptr::null_mut(), &raw mut err);
+            assert!(err.is_null());
             kafka_producer_ProducerConfig_destroy(config);
             let view = kafka_producer_KafkaProducer__as_Producer(producer);
             let ctx = InCallback { view, outcomes: std::sync::Mutex::new(Vec::new()) };
@@ -819,14 +834,9 @@ mod tests {
                 kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
             // The metadata wait times out after `max.block.ms`, an `ApiException`, so the callback
             // is invoked and the send hands back a future.
-            let mut future = std::ptr::null_mut();
-            let error = crate::ffi::producer::kafka_producer_Producer_send_with_callback(
-                view,
-                record,
-                callback,
-                &raw mut future,
-            );
-            assert!(error.is_null());
+            let future =
+                crate::ffi::producer::kafka_producer_Producer_send_with_callback(view, record, callback, &raw mut err);
+            assert!(err.is_null());
             assert_eq!(crate::ffi::kafka_future::kafka_common_KafkaFuture_is_done(future), 0);
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
             while ctx.outcomes.lock().unwrap().len() < 3 {
@@ -851,10 +861,10 @@ mod tests {
                 1,
                 "reported"
             );
-            let mut value = std::ptr::null_mut();
-            let error = crate::ffi::kafka_future::kafka_common_KafkaFuture_get(future, &raw mut value);
-            assert!(!error.is_null(), "the record's own failure");
-            kafka_common_Error_destroy(error);
+            let value = crate::ffi::kafka_future::kafka_common_KafkaFuture_get(future, &raw mut err);
+            assert!(!err.is_null(), "the record's own failure");
+            assert!(value.is_null());
+            kafka_common_Error_destroy(err);
             kafka_common_KafkaFuture_destroy(future);
             crate::ffi::producer::callback::kafka_producer_Callback_destroy(callback);
             kafka_producer_KafkaProducer_destroy(producer);
@@ -889,19 +899,20 @@ mod tests {
         let props = box_string_map([("bootstrap.servers", "localhost:1"), ("max.block.ms", "100")]);
         let topic = CString::new("topic").unwrap();
         let bytes = kafka_Bytes_t::from_slice(b"v");
-        // SAFETY: Test code: `props`, `config`, `record` and the producer are live from their
-        // constructor to their single destroy below, `future` and each error are destroyed once
-        // after their last use, `view` is used only before the producer is destroyed, and
+        // SAFETY: Test code: `err` is a valid slot pointing at null before each call (reset after
+        // each error is destroyed), `props`, `config`, `record` and the producer are live from
+        // their constructor to their single destroy below, `future` and each error are destroyed
+        // once after their last use, `view` is used only before the producer is destroyed, and
         // `rejected` outlives the callback run that writes it.
         unsafe {
-            let mut config = std::ptr::null_mut();
-            assert!(kafka_producer_ProducerConfig_new(props, &raw mut config).is_null());
+            let mut err = std::ptr::null_mut();
+            let config = kafka_producer_ProducerConfig_new(props, &raw mut err);
+            assert!(err.is_null());
             kafka_Map_destroy(props);
 
-            let mut producer = std::ptr::null_mut();
-            let error =
-                kafka_producer_KafkaProducer_new(config, std::ptr::null_mut(), std::ptr::null_mut(), &raw mut producer);
-            assert!(error.is_null());
+            let producer =
+                kafka_producer_KafkaProducer_new(config, std::ptr::null_mut(), std::ptr::null_mut(), &raw mut err);
+            assert!(err.is_null());
             kafka_producer_ProducerConfig_destroy(config);
 
             // A send with no reachable broker either fails on the metadata
@@ -909,16 +920,16 @@ mod tests {
             // the error slot and the future handle.
             let record =
                 kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
-            let mut future = std::ptr::null_mut();
-            let error = kafka_producer_KafkaProducer_send(producer, record, std::ptr::null(), &raw mut future);
-            if error.is_null() {
+            let future = kafka_producer_KafkaProducer_send(producer, record, std::ptr::null(), &raw mut err);
+            if err.is_null() {
                 assert!(!future.is_null());
                 kafka_common_KafkaFuture_destroy(future);
             } else {
                 assert!(future.is_null());
-                let message = c_str_to_string(kafka_common_Error_message(error));
+                let message = c_str_to_string(kafka_common_Error_message(err));
                 assert!(!message.is_empty());
-                kafka_common_Error_destroy(error);
+                kafka_common_Error_destroy(err);
+                err = std::ptr::null_mut();
             }
             kafka_producer_ProducerRecord_destroy(record);
 
@@ -932,13 +943,15 @@ mod tests {
             );
             assert_eq!(kafka_producer_Producer__execute_callbacks(view), 1);
             assert_eq!(rejected.lock().unwrap().as_deref(), Some("The timeout cannot be negative."));
-            let error = kafka_producer_Producer_close_with_timeout(view, -1);
+            kafka_producer_Producer_close_with_timeout(view, -1, &raw mut err);
             assert_eq!(
-                c_str_to_string(kafka_common_Error_message(error)),
+                c_str_to_string(kafka_common_Error_message(err)),
                 "The timeout cannot be negative."
             );
-            kafka_common_Error_destroy(error);
-            assert!(kafka_producer_Producer_close_with_timeout(view, 1_000).is_null());
+            kafka_common_Error_destroy(err);
+            err = std::ptr::null_mut();
+            kafka_producer_Producer_close_with_timeout(view, 1_000, &raw mut err);
+            assert!(err.is_null());
             assert_eq!(kafka_producer_Producer__execute_callbacks(view), 0);
             kafka_producer_KafkaProducer_destroy(producer);
             kafka_producer_KafkaProducer_destroy(std::ptr::null_mut());

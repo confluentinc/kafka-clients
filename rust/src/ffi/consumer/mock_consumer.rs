@@ -39,10 +39,11 @@ use crate::ffi::callback_queue::SendPtr;
 use crate::ffi::common::partition_info::list_partition_infos;
 use crate::ffi::common::topic_partition::{list_topic_partitions, map_topic_partition_i64};
 use crate::ffi::common::{catch_task_panic, deliver_panic, kafka_common_Error_t, take_error};
+use crate::ffi::common::{deliver_unit, deliver_value};
 use crate::ffi::consumer::consumer_record::{consumer_record_ref, kafka_consumer_ConsumerRecord_t};
 use crate::ffi::consumer::{
-    BusyGuard, ConsumerClassHandle, ConsumerKind, Owns, client_ref, completion_sink, deliver_void, error_slot,
-    kafka_consumer_Consumer_t, out_slot,
+    BusyGuard, ConsumerClassHandle, ConsumerKind, Owns, client_ref, completion_sink, deliver_void,
+    kafka_consumer_Consumer_t,
 };
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{GenericValue, c_str_to_string, kafka_List_t, kafka_Map_t};
@@ -95,18 +96,20 @@ unsafe fn with_mock_void(self_: *mut kafka_consumer_MockConsumer_t, name: &str, 
     }
 }
 
-/// `new MockConsumer(String offsetResetStrategy)`: delivers the owned class
-/// handle or returns the owned error (an unknown strategy).
+/// `new MockConsumer(String offsetResetStrategy)`: returns the owned class
+/// handle, or stores the owned error (an unknown strategy) in `*out_err` and
+/// returns `NULL`.
 ///
 /// # Safety
 ///
-/// `offset_reset_strategy` must be a valid string and `out_new` a valid slot.
+/// `offset_reset_strategy` must be a valid string and `out_err` a valid slot
+/// pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_new(
     offset_reset_strategy: *const c_char,
-    out_new: *mut *mut kafka_consumer_MockConsumer_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_consumer_MockConsumer_t {
     // SAFETY: Per this function's `# Safety`, `offset_reset_strategy` is a valid NUL-terminated
     // string, as `c_str_to_string` requires; it is copied, so the borrow lasts for this call only.
     let strategy = unsafe { c_str_to_string(offset_reset_strategy) };
@@ -114,10 +117,10 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_new(
     let result = ConsumerClassHandle::new(Owns { key: false, value: false }, || {
         Mock::new(&strategy).map(|mock| ConsumerKind::Mock(Box::new(mock)))
     });
-    // SAFETY: Per this function's `# Safety`, `out_new` is a valid pointer to write the result to,
-    // as `out_slot` requires.
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer to write the result to,
+    // as `deliver_value` requires.
     unsafe {
-        out_slot(result, out_new, |handle| {
+        deliver_value(result, out_err, |handle| {
             Box::into_raw(handle) as *mut kafka_consumer_MockConsumer_t
         })
     }
@@ -173,13 +176,15 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_destroy(self_: *mut kafka_c
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `record` a live record.
+/// `self_` must be a live handle and `record` a live record. `out_err` must be
+/// a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_add_record(
     self_: *mut kafka_consumer_MockConsumer_t,
     record: *const kafka_consumer_ConsumerRecord_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `record` is a live record handle, alive for this
     // expression, the only use of the reference, as `consumer_record_ref` requires. The clone
     // copies the `void *`s without owning them: the mock was built with
@@ -187,7 +192,9 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_add_record(
     let record = unsafe { consumer_record_ref(record) }.clone();
     // SAFETY: Per this function's `# Safety`, `self_` is a live mock handle, as `with_mock`
     // requires.
-    error_slot(unsafe { with_mock(self_, |mock| mock.add_record(record)) }.and_then(|r| r))
+    let result = unsafe { with_mock(self_, |mock| mock.add_record(record)) }.and_then(|r| r);
+    // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_unit` requires.
+    unsafe { deliver_unit(result, out_err) }
 }
 
 /// `updateBeginningOffsets(Map<TopicPartition, Long>)`: a map of
@@ -259,15 +266,17 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_duration_offsets(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle, `topic` a valid string and `partitions`
-/// a valid list of `kafka_common_PartitionInfo_t *`.
+/// `self_` must be a live handle, `topic` a valid string and `partitions` a
+/// valid list of `kafka_common_PartitionInfo_t *`. `out_err` must be a valid
+/// slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_partitions(
     self_: *mut kafka_consumer_MockConsumer_t,
     topic: *const c_char,
     partitions: *const kafka_List_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
     // `c_str_to_string` requires; it is copied.
     let topic = unsafe { c_str_to_string(topic) };
@@ -277,7 +286,9 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_partitions(
     let partitions = unsafe { list_partition_infos(partitions) };
     // SAFETY: Per this function's `# Safety`, `self_` is a live mock handle, as `with_mock`
     // requires.
-    error_slot(unsafe { with_mock(self_, |mock| mock.update_partitions(&topic, partitions)) }.and_then(|r| r))
+    let result = unsafe { with_mock(self_, |mock| mock.update_partitions(&topic, partitions)) }.and_then(|r| r);
+    // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_unit` requires.
+    unsafe { deliver_unit(result, out_err) }
 }
 
 /// `setPollException(KafkaException)`: the next `poll` fails with `error`,
@@ -326,16 +337,20 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_offsets_error(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. `out_err` must be a valid slot pointing at
+/// null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_max_poll_records(
     self_: *mut kafka_consumer_MockConsumer_t,
     max_poll_records: i64,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live mock handle, as `with_mock`
     // requires.
-    error_slot(unsafe { with_mock(self_, |mock| mock.set_max_poll_records(max_poll_records)) }.and_then(|r| r))
+    let result = unsafe { with_mock(self_, |mock| mock.set_max_poll_records(max_poll_records)) }.and_then(|r| r);
+    // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_unit` requires.
+    unsafe { deliver_unit(result, out_err) }
 }
 
 /// `rebalance(Collection<TopicPartition> newAssignment)`: blocking, the
@@ -344,14 +359,16 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_max_poll_records(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `new_assignment` null or a valid list
-/// of `kafka_common_TopicPartition_t *`.
+/// `self_` must be a live handle and `new_assignment` null or a valid list of
+/// `kafka_common_TopicPartition_t *`. `out_err` must be a valid slot pointing
+/// at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance(
     self_: *mut kafka_consumer_MockConsumer_t,
     new_assignment: *const kafka_List_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `new_assignment` is null or a valid list of
     // topic-partition handles, as `list_topic_partitions` requires; the values are cloned, so the
     // borrow lasts for this call only.
@@ -365,7 +382,8 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance(
         let mock = mock_of(&mut guard)?;
         client.block_on(mock.rebalance(&partitions))
     });
-    error_slot(result)
+    // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_unit` requires.
+    unsafe { deliver_unit(result, out_err) }
 }
 
 /// The completion of [`kafka_consumer_MockConsumer_rebalance_cb`].
@@ -579,12 +597,26 @@ mod tests {
         kafka_Map_destroy, kafka_Map_new, kafka_Map_put,
     };
 
+    /// Calls `f` with an error slot pointing at null, as `out_err` requires,
+    /// and returns its value with the error it stored there, taken.
+    fn call<T>(f: impl FnOnce(*mut *mut kafka_common_Error_t) -> T) -> (T, Option<crate::common::Error>) {
+        let mut err = ptr::null_mut();
+        let value = f(&mut err);
+        // SAFETY: Test code: `err` is null or the owned error `f` stored there, taken once.
+        (value, unsafe { take_error(err) })
+    }
+
+    /// [`call`] for a call that must succeed: returns its value.
+    fn ok<T>(f: impl FnOnce(*mut *mut kafka_common_Error_t) -> T) -> T {
+        let (value, error) = call(f);
+        assert!(error.is_none(), "{error:?}");
+        value
+    }
+
     /// A mock over `void *` records and its borrowed `Consumer` view.
     fn new_mock() -> (*mut kafka_consumer_MockConsumer_t, *mut kafka_consumer_Consumer_t) {
-        let mut mock = ptr::null_mut();
-        // SAFETY: Test code: a NUL-terminated literal and a valid out-pointer.
-        let error = unsafe { kafka_consumer_MockConsumer_new(c"earliest".as_ptr(), &mut mock) };
-        assert!(error.is_null());
+        // SAFETY: Test code: a NUL-terminated literal and the valid error slot `ok` passes.
+        let mock = ok(|e| unsafe { kafka_consumer_MockConsumer_new(c"earliest".as_ptr(), e) });
         // SAFETY: Test code: `mock` is the live handle just created.
         (mock, unsafe { kafka_consumer_MockConsumer__as_Consumer(mock) })
     }
@@ -689,9 +721,9 @@ mod tests {
         // SAFETY: Test code: `topics` is a live list and the element a static NUL-terminated
         // literal.
         unsafe { kafka_List_add(topics, c"topic".as_ptr() as *mut c_void) };
-        // SAFETY: Test code: `consumer`, `topics` and `listener` are live handles.
-        let error = unsafe { kafka_consumer_Consumer_subscribe_with_topics_listener(consumer, topics, listener) };
-        assert!(error.is_null());
+        // SAFETY: Test code: `consumer`, `topics` and `listener` are live handles and `e` the valid
+        // error slot `ok` passes.
+        ok(|e| unsafe { kafka_consumer_Consumer_subscribe_with_topics_listener(consumer, topics, listener, e) });
         // SAFETY: Test code: each handle is live and destroyed once, after its last use.
         unsafe {
             kafka_List_destroy(topics);
@@ -721,8 +753,9 @@ mod tests {
         unsafe { subscribe(consumer, &probe) };
 
         let (assignment, tp) = partition_list(c"topic", 0);
-        // SAFETY: Test code: `mock` and `assignment` are live handles.
-        assert!(unsafe { kafka_consumer_MockConsumer_rebalance(mock, assignment) }.is_null());
+        // SAFETY: Test code: `mock` and `assignment` are live handles and `e` the valid error slot
+        // `ok` passes.
+        ok(|e| unsafe { kafka_consumer_MockConsumer_rebalance(mock, assignment, e) });
         assert_eq!(probe.assigned.load(SeqCst), 1);
         assert!(
             probe.ran_on_this_thread(),
@@ -731,8 +764,9 @@ mod tests {
 
         // Rebalancing the partition away revokes it, on this thread too.
         let empty = kafka_List_new();
-        // SAFETY: Test code: `mock` and `empty` are live handles.
-        assert!(unsafe { kafka_consumer_MockConsumer_rebalance(mock, empty) }.is_null());
+        // SAFETY: Test code: `mock` and `empty` are live handles and `e` the valid error slot `ok`
+        // passes.
+        ok(|e| unsafe { kafka_consumer_MockConsumer_rebalance(mock, empty, e) });
         assert_eq!(probe.revoked.load(SeqCst), 1);
         assert!(probe.ran_on_this_thread());
 
@@ -851,8 +885,9 @@ mod tests {
     fn poll_hands_back_the_record_pointers_add_record_was_given() {
         let (mock, consumer) = new_mock();
         let (assignment, tp) = partition_list(c"topic", 0);
-        // SAFETY: Test code: `consumer` and `assignment` are live handles.
-        assert!(unsafe { kafka_consumer_Consumer_assign(consumer, assignment) }.is_null());
+        // SAFETY: Test code: `consumer` and `assignment` are live handles and `e` the valid error
+        // slot `ok` passes.
+        ok(|e| unsafe { kafka_consumer_Consumer_assign(consumer, assignment, e) });
 
         let mut zero = 0i64;
         let offsets = kafka_Map_new();
@@ -879,14 +914,14 @@ mod tests {
                 &value as *const kafka_Bytes_t as *const c_void,
             )
         };
-        // SAFETY: Test code: `mock` and `record` are live handles.
-        assert!(unsafe { kafka_consumer_MockConsumer_add_record(mock, record) }.is_null());
+        // SAFETY: Test code: `mock` and `record` are live handles and `e` the valid error slot `ok`
+        // passes.
+        ok(|e| unsafe { kafka_consumer_MockConsumer_add_record(mock, record, e) });
         // SAFETY: Test code: `record` is live and destroyed once.
         unsafe { kafka_consumer_ConsumerRecord_destroy(record) };
 
-        let mut records = ptr::null_mut();
-        // SAFETY: Test code: `consumer` is live and `records` a valid out-pointer.
-        assert!(unsafe { kafka_consumer_Consumer_poll(consumer, 0, &mut records) }.is_null());
+        // SAFETY: Test code: `consumer` is live and `e` the valid error slot `ok` passes.
+        let records = ok(|e| unsafe { kafka_consumer_Consumer_poll(consumer, 0, e) });
         // SAFETY: Test code: `records` is a live handle.
         assert_eq!(unsafe { kafka_consumer_ConsumerRecords_count(records) }, 1);
         // SAFETY: Test code: `records` and `tp` are live handles.
@@ -937,8 +972,10 @@ mod tests {
             )
         };
         // In flight until the listener invocation is pumped and reported.
-        // SAFETY: Test code: `consumer` is a live handle and the returned error is owned.
-        let error = unsafe { take_error(kafka_consumer_Consumer_commit_sync(consumer)) }.expect("rejected");
+        // SAFETY: Test code: `consumer` is a live handle and `e` the valid error slot `call` passes.
+        let error = call(|e| unsafe { kafka_consumer_Consumer_commit_sync(consumer, e) })
+            .1
+            .expect("rejected");
         assert!(error.is_local_concurrent_modification_error());
         assert_eq!(error.message(), "KafkaConsumer is not safe for multi-threaded access.");
         assert_eq!(
@@ -949,26 +986,30 @@ mod tests {
         );
         // The reads Java guards with `acquire()` fail the same way, so a caller
         // can tell "busy" from an empty answer.
-        let mut list = ptr::null_mut();
-        let mut lag = 0i64;
-        let mut metadata = ptr::null_mut();
-        // SAFETY: Test code: `consumer` and `tp` are live handles, the out-pointers valid, and each
-        // returned error is owned.
-        let busy = unsafe {
+        // SAFETY: Test code: `consumer` and `tp` are live handles and `e` the valid error slot
+        // `call` passes.
+        let (lists, errors): (Vec<_>, Vec<_>) = unsafe {
             [
-                take_error(kafka_consumer_Consumer_assignment(consumer, &mut list)),
-                take_error(kafka_consumer_Consumer_subscription(consumer, &mut list)),
-                take_error(kafka_consumer_Consumer_paused(consumer, &mut list)),
-                take_error(kafka_consumer_Consumer_current_lag(consumer, tp, &mut lag)),
-                take_error(kafka_consumer_Consumer_group_metadata(consumer, &mut metadata)),
+                call(|e| kafka_consumer_Consumer_assignment(consumer, e)),
+                call(|e| kafka_consumer_Consumer_subscription(consumer, e)),
+                call(|e| kafka_consumer_Consumer_paused(consumer, e)),
             ]
-        };
-        for error in busy {
+        }
+        .into_iter()
+        .unzip();
+        // SAFETY: As above.
+        let (lag, lag_error) = call(|e| unsafe { kafka_consumer_Consumer_current_lag(consumer, tp, e) });
+        // SAFETY: As above.
+        let (metadata, metadata_error) = call(|e| unsafe { kafka_consumer_Consumer_group_metadata(consumer, e) });
+        for error in errors.into_iter().chain([lag_error, metadata_error]) {
             let error = error.expect("refused while the rebalance is in flight");
             assert!(error.is_local_concurrent_modification_error());
             assert_eq!(error.message(), "KafkaConsumer is not safe for multi-threaded access.");
         }
-        assert!(list.is_null() && metadata.is_null() && lag == 0, "no out_ value is written");
+        assert!(
+            lists.iter().all(|list| list.is_null()) && metadata.is_null() && lag == -1,
+            "each returns its failure value"
+        );
         // Java's `metrics()` takes no `acquire()`: it still answers.
         // SAFETY: Test code: `consumer` is a live handle; the map is owned and destroyed once.
         unsafe {
@@ -991,12 +1032,12 @@ mod tests {
             unsafe { kafka_consumer_Consumer__execute_callbacks(consumer) };
             completed.load(SeqCst) == 1
         });
-        // SAFETY: Test code: `consumer` is a live handle.
-        assert!(unsafe { kafka_consumer_Consumer_commit_sync(consumer) }.is_null(), "free again");
-        // SAFETY: Test code: `consumer` is a live handle, `list` a valid out-pointer, and the
-        // delivered list is owned and destroyed once.
+        // SAFETY: Test code: `consumer` is a live handle and `e` the valid error slot `ok` passes.
+        ok(|e| unsafe { kafka_consumer_Consumer_commit_sync(consumer, e) });
+        // SAFETY: Test code: `consumer` is a live handle, `e` the valid error slot `ok` passes, and
+        // the returned list is owned and destroyed once.
         unsafe {
-            assert!(kafka_consumer_Consumer_assignment(consumer, &mut list).is_null(), "free again");
+            let list = ok(|e| kafka_consumer_Consumer_assignment(consumer, e));
             assert_eq!(kafka_List_size(list), 1);
             kafka_List_destroy(list);
         }
@@ -1021,14 +1062,13 @@ mod tests {
         // A non-default value for each field, so no fallback can pass for it: a 250 ms poll,
         // a pending rebalance and a closed mock. `rebalance` checks no closed state, as Java's
         // does not, so it can still run after `close`.
-        let mut records = ptr::null_mut();
-        // SAFETY: Test code: `consumer` is a live handle, `records` a valid out-pointer, and each
-        // returned handle or error is owned and released once.
+        // SAFETY: Test code: `consumer` is a live handle, `e` the valid error slot `ok` passes, and
+        // the returned records are owned and released once.
         unsafe {
-            assert!(kafka_consumer_Consumer_poll(consumer, 250, &mut records).is_null());
+            let records = ok(|e| kafka_consumer_Consumer_poll(consumer, 250, e));
             kafka_consumer_ConsumerRecords_destroy(records);
-            assert!(crate::ffi::consumer::kafka_consumer_Consumer_enforce_rebalance(consumer).is_null());
-            assert!(crate::ffi::consumer::kafka_consumer_Consumer_close(consumer).is_null());
+            ok(|e| crate::ffi::consumer::kafka_consumer_Consumer_enforce_rebalance(consumer, e));
+            ok(|e| crate::ffi::consumer::kafka_consumer_Consumer_close(consumer, e));
         }
 
         let completed = AtomicI32::new(0);
@@ -1044,8 +1084,10 @@ mod tests {
             )
         };
         // In flight until the listener invocation is pumped and reported: a guarded call is refused.
-        // SAFETY: Test code: `consumer` is a live handle and the returned error is owned.
-        let error = unsafe { take_error(kafka_consumer_Consumer_commit_sync(consumer)) }.expect("rejected");
+        // SAFETY: Test code: `consumer` is a live handle and `e` the valid error slot `call` passes.
+        let error = call(|e| unsafe { kafka_consumer_Consumer_commit_sync(consumer, e) })
+            .1
+            .expect("rejected");
         assert!(error.is_local_concurrent_modification_error());
         // SAFETY: Test code: `mock` is a live handle.
         unsafe {
@@ -1104,8 +1146,7 @@ mod tests {
             .expect("no other call in flight");
 
             for expected in [0, 1] {
-                let mut records = ptr::null_mut();
-                assert!(kafka_consumer_Consumer_poll(consumer, 0, &mut records).is_null());
+                let records = ok(|e| kafka_consumer_Consumer_poll(consumer, 0, e));
                 assert_eq!(kafka_consumer_ConsumerRecords_count(records), 0);
                 kafka_consumer_ConsumerRecords_destroy(records);
                 assert_eq!(ran.load(SeqCst), expected);
@@ -1167,7 +1208,7 @@ mod tests {
 
             // The panics came before the single-owner flag was taken, so the
             // consumer is still free.
-            assert!(kafka_consumer_Consumer_commit_sync(consumer).is_null());
+            ok(|e| kafka_consumer_Consumer_commit_sync(consumer, e));
             for probe in [&void, &int, &value, &mock_void] {
                 assert_eq!(probe.fired().len(), 1, "no second completion");
             }
@@ -1193,8 +1234,7 @@ mod tests {
             drain_one(consumer, &probe);
             probe.assert_one_panic("kafka_consumer_Consumer_poll_cb", "poll task panicked");
 
-            let mut records = ptr::null_mut();
-            assert!(kafka_consumer_Consumer_poll(consumer, 0, &mut records).is_null(), "free again");
+            let records = ok(|e| kafka_consumer_Consumer_poll(consumer, 0, e));
             kafka_consumer_ConsumerRecords_destroy(records);
             kafka_consumer_MockConsumer_destroy(mock);
         }
@@ -1246,7 +1286,9 @@ mod tests {
         unsafe {
             let handle = kafka_consumer_Consumer_handle(consumer);
             fail_point::arm();
-            let error = take_error(kafka_consumer_ConsumerHandle_pause(handle, partitions)).expect("the panic");
+            let error = call(|e| kafka_consumer_ConsumerHandle_pause(handle, partitions, e))
+                .1
+                .expect("the panic");
             assert!(error.is_local_illegal_state_error(), "{error:?}");
             assert_eq!(
                 error.message(),
@@ -1257,9 +1299,12 @@ mod tests {
             );
 
             // Disarmed: the mock's handle answers as it always does.
-            let error = take_error(kafka_consumer_ConsumerHandle_pause(handle, partitions)).expect("mock error");
+            let error = call(|e| kafka_consumer_ConsumerHandle_pause(handle, partitions, e))
+                .1
+                .expect("mock error");
             assert!(!error.message().starts_with("Rust panic"), "{error:?}");
-            assert!(kafka_consumer_Consumer_commit_sync(consumer).is_null(), "the consumer is free");
+            // The consumer is free.
+            ok(|e| kafka_consumer_Consumer_commit_sync(consumer, e));
 
             kafka_consumer_MockConsumer_destroy(mock);
             kafka_consumer_ConsumerHandle_destroy(handle);
@@ -1278,8 +1323,9 @@ mod tests {
         unsafe {
             with_mock(mock, |m| m.schedule_poll_task(Box::new(|_| panic!("poll task panicked"))))
                 .expect("no other call in flight");
-            let mut records = ptr::null_mut();
-            let error = take_error(kafka_consumer_Consumer_poll(consumer, 0, &mut records)).expect("the panic");
+            let (records, error) = call(|e| kafka_consumer_Consumer_poll(consumer, 0, e));
+            assert!(records.is_null(), "the failure value");
+            let error = error.expect("the panic");
             assert_eq!(
                 error.message(),
                 "Rust panic caught at the FFI boundary in kafka_consumer_Consumer_poll: poll task panicked"

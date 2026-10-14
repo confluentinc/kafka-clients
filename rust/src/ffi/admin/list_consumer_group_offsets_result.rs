@@ -22,9 +22,8 @@ use std::ffi::{c_char, c_void};
 use crate::admin::{GroupOffsets, ListConsumerGroupOffsetsResult};
 use crate::common::TopicPartition;
 use crate::consumer::OffsetAndMetadata;
-use crate::ffi::admin::{
-    FutureCtx, ResultHandle, box_result, destroy_map_element, destroy_result, out_slot, result_ref,
-};
+use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_map_element, destroy_result, result_ref};
+use crate::ffi::common::deliver_value;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::common::topic_partition::{
     box_topic_partition, kafka_common_TopicPartition_destroy, kafka_common_TopicPartition_t, topic_partition_key_eq,
@@ -126,75 +125,70 @@ unsafe fn handle<'a>(
 }
 
 /// `partitionsToOffsetAndMetadata()`: when exactly one group was requested,
-/// delivers through `out_partitions_to_offset_and_metadata` an owned future
-/// (freed with `kafka_common_KafkaFuture_destroy`) whose `get` yields a
-/// `kafka_Map_t *` (owned by the future) of `kafka_common_TopicPartition_t *`
-/// keys, ordered by topic then partition and compared by value in
-/// `kafka_Map_get`, to `kafka_consumer_OffsetAndMetadata_t *` values or
-/// `NULL` for a partition without a committed offset; otherwise returns the
-/// owned `IllegalStateError`.
+/// returns an owned future (freed with `kafka_common_KafkaFuture_destroy`)
+/// whose `get` yields a `kafka_Map_t *` (owned by the future) of
+/// `kafka_common_TopicPartition_t *` keys, ordered by topic then partition and
+/// compared by value in `kafka_Map_get`, to `kafka_consumer_OffsetAndMetadata_t
+/// *` values or `NULL` for a partition without a committed offset; otherwise
+/// stores the owned `IllegalStateError` in `*out_err` and returns `NULL`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live result handle and
-/// `out_partitions_to_offset_and_metadata` a valid slot.
+/// `self_` must be a live result handle and `out_err` a valid slot pointing at
+/// null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata(
     self_: *const kafka_admin_ListConsumerGroupOffsetsResult_t,
-    out_partitions_to_offset_and_metadata: *mut *mut kafka_common_KafkaFuture_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
     let h = unsafe { handle(self_) };
-    // SAFETY: Per this function's `# Safety`, `out_partitions_to_offset_and_metadata` is a valid
-    // slot, as `out_slot` requires. For `handle_future`, `destroy_map_element` frees exactly the
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid
+    // slot, as `deliver_value` requires. For `handle_future`, `destroy_map_element` frees exactly the
     // map `group_offsets_map` makes through `box_map`, and the handle holds only owned data and no
     // thread-bound state, so it may be freed from any thread and read from several at once, as
     // `handle_future` requires.
     unsafe {
-        out_slot(
-            h.result.partitions_to_offset_and_metadata(),
-            out_partitions_to_offset_and_metadata,
-            |f| h.ctx.handle_future(&f, group_offsets_map, destroy_map_element),
-        )
+        deliver_value(h.result.partitions_to_offset_and_metadata(), out_err, |f| {
+            h.ctx.handle_future(&f, group_offsets_map, destroy_map_element)
+        })
     }
 }
 
-/// `partitionsToOffsetAndMetadata(String groupId)`: delivers through
-/// `out_partitions_to_offset_and_metadata_with_group_id` the future
+/// `partitionsToOffsetAndMetadata(String groupId)`: returns the future
 /// described in
 /// [`kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata`]
-/// for `group_id`, or returns the owned `IllegalArgumentError`
-/// translation when that group was not part of the request.
+/// for `group_id`, or stores the owned `IllegalArgumentError` translation in
+/// `*out_err` and returns `NULL` when that group was not part of the request.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle, `group_id` a valid NUL-terminated
-/// string and `out_partitions_to_offset_and_metadata_with_group_id` a valid
-/// slot.
+/// string and `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata_with_group_id(
     self_: *const kafka_admin_ListConsumerGroupOffsetsResult_t,
     group_id: *const c_char,
-    out_partitions_to_offset_and_metadata_with_group_id: *mut *mut kafka_common_KafkaFuture_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     // SAFETY: Per this function's `# Safety`, `group_id` is a valid NUL-terminated string, as
     // `c_str_to_string` requires; it is copied into a `String` during the call.
     let group_id = unsafe { c_str_to_string(group_id) };
-    // SAFETY: Per this function's `# Safety`, `out_partitions_to_offset_and_metadata_with_group_id`
-    // is a valid slot, as `out_slot` requires. For `handle_future`, `destroy_map_element` frees
+    // SAFETY: Per this function's `# Safety`, `out_err`
+    // is a valid slot, as `deliver_value` requires. For `handle_future`, `destroy_map_element` frees
     // exactly the map `group_offsets_map` makes through `box_map`, and the handle holds only owned
     // data and no thread-bound state, so it may be freed from any thread and read from several at
     // once, as `handle_future` requires.
     unsafe {
-        out_slot(
+        deliver_value(
             h.result.partitions_to_offset_and_metadata_with_group_id(&group_id),
-            out_partitions_to_offset_and_metadata_with_group_id,
+            out_err,
             |f| h.ctx.handle_future(&f, group_offsets_map, destroy_map_element),
         )
     }

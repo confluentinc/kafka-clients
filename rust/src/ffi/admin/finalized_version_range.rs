@@ -18,7 +18,7 @@
 use std::ffi::{c_char, c_void};
 
 use crate::admin::FinalizedVersionRange;
-use crate::ffi::admin::out_slot;
+use crate::ffi::common::deliver_value;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
 use crate::ffi::util::into_c_string;
@@ -72,26 +72,26 @@ pub(crate) unsafe fn destroy_finalized_version_range_element(element: *mut c_voi
 }
 
 /// `new FinalizedVersionRange(short minVersionLevel, short maxVersionLevel)`:
-/// delivers the owned handle through `out_new` (freed with
-/// [`kafka_admin_FinalizedVersionRange_destroy`]), or returns the owned
-/// `IllegalArgumentException` translation when a level is negative or the
-/// maximum is below the minimum.
+/// returns the owned handle (freed with
+/// [`kafka_admin_FinalizedVersionRange_destroy`]), or stores the owned
+/// `IllegalArgumentException` translation in `*out_err` and returns `NULL` when
+/// a level is negative or the maximum is below the minimum.
 ///
 /// # Safety
 ///
-/// `out_new` must be a valid slot.
+/// `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FinalizedVersionRange_new(
     min_version_level: i16,
     max_version_level: i16,
-    out_new: *mut *mut kafka_admin_FinalizedVersionRange_t,
-) -> *mut kafka_common_Error_t {
-    // SAFETY: Per this function's `# Safety`, `out_new` is a valid slot, as `out_slot` requires.
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_admin_FinalizedVersionRange_t {
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid slot, as `deliver_value` requires.
     unsafe {
-        out_slot(
+        deliver_value(
             FinalizedVersionRange::new(min_version_level, max_version_level),
-            out_new,
+            out_err,
             box_finalized_version_range,
         )
     }
@@ -172,16 +172,21 @@ mod tests {
 
     #[test]
     fn new_validates_like_java() {
-        let mut range = ptr::null_mut();
-        // SAFETY: Test code: `range` is a valid slot; `error`, `range` and `s` are live handles,
-        // each destroyed once after its last use, and destroying null is a no-op.
+        let mut error = ptr::null_mut();
+        // SAFETY: Test code: `error` is a valid slot pointing at null before each call; the
+        // failing call returns null and stores the owned error, destroyed once and the slot reset;
+        // `range` and `s` are live handles, each destroyed once after its last use, and destroying
+        // null is a no-op.
         unsafe {
-            let error = kafka_admin_FinalizedVersionRange_new(3, 2, &mut range);
+            let failed = kafka_admin_FinalizedVersionRange_new(3, 2, &mut error);
+            assert!(failed.is_null());
             assert!(!error.is_null());
             assert!(error_ref(error).error.is_local_illegal_argument_error());
             kafka_common_Error_destroy(error);
+            error = ptr::null_mut();
 
-            assert!(kafka_admin_FinalizedVersionRange_new(1, 4, &mut range).is_null());
+            let range = kafka_admin_FinalizedVersionRange_new(1, 4, &mut error);
+            assert!(error.is_null());
             let expected = FinalizedVersionRange::new(1, 4).unwrap();
             assert_eq!(*finalized_version_range_ref(range), expected);
             assert_eq!(kafka_admin_FinalizedVersionRange_min_version_level(range), 1);

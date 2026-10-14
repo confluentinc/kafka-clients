@@ -16,7 +16,6 @@
 //! `org.apache.kafka.common.acl.AccessControlEntry` (CLAUDE.md §4).
 
 use std::ffi::{CString, c_char};
-use std::ptr;
 
 use crate::common::acl::AccessControlEntry;
 use crate::ffi::common::acl::access_control_entry_filter::{
@@ -28,7 +27,8 @@ use crate::ffi::common::acl::acl_operation::{
 use crate::ffi::common::acl::acl_permission_type::{
     kafka_common_acl_AclPermissionType_t, singleton as permission_type_singleton, value_of as permission_type_of,
 };
-use crate::ffi::common::{box_error, kafka_common_Error_t};
+use crate::ffi::common::fail_with;
+use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
 
@@ -92,16 +92,16 @@ pub(crate) fn box_access_control_entry(entry: AccessControlEntry) -> *mut kafka_
     Box::into_raw(Box::new(AccessControlEntryInner::new(entry))) as *mut kafka_common_acl_AccessControlEntry_t
 }
 
-/// `new AccessControlEntry(String principal, String host, AclOperation operation, AclPermissionType permissionType)`:
-/// delivers the owned entry through `out_entry`, or returns the owned
-/// `IllegalArgumentException` translation when `operation` or
-/// `permission_type` is `ANY`.
+/// `new AccessControlEntry(String principal, String host, AclOperation
+/// operation, AclPermissionType permissionType)`: returns the owned entry, or
+/// stores the owned `IllegalArgumentException` translation in `*out_err` and
+/// returns `NULL` when `operation` or `permission_type` is `ANY`.
 ///
 /// # Safety
 ///
-/// `principal` and `host` must be valid NUL-terminated strings, `operation`
-/// and `permission_type` singletons of their enums and `out_entry` a valid
-/// pointer.
+/// `principal` and `host` must be valid NUL-terminated strings, `operation` and
+/// `permission_type` singletons of their enums and `out_err` a valid slot
+/// pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_new(
@@ -109,8 +109,8 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_new(
     host: *const c_char,
     operation: *const kafka_common_acl_AclOperation_t,
     permission_type: *const kafka_common_acl_AclPermissionType_t,
-    out_entry: *mut *mut kafka_common_acl_AccessControlEntry_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_common_acl_AccessControlEntry_t {
     let entry = AccessControlEntry::new(
         // SAFETY: Per this function's `# Safety`, `principal` is a valid NUL-terminated string, as
         // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
@@ -130,14 +130,9 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_new(
         unsafe { permission_type_of(permission_type) },
     );
     match entry {
-        Ok(entry) => {
-            // SAFETY: Per this function's `# Safety`, `out_entry` is a valid pointer, so writing
-            // through it is sound. The handle written is a fresh owned one from
-            // `box_access_control_entry`, which the caller owns.
-            unsafe { *out_entry = box_access_control_entry(entry) };
-            ptr::null_mut()
-        },
-        Err(error) => box_error(error),
+        Ok(entry) => box_access_control_entry(entry),
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        Err(error) => unsafe { fail_with(out_err, error) },
     }
 }
 
@@ -286,6 +281,7 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_destroy(
 #[cfg(test)]
 mod tests {
     use std::ffi::CStr;
+    use std::ptr;
 
     use super::*;
     use crate::common::acl::{AclOperation, AclPermissionType};
@@ -308,21 +304,19 @@ mod tests {
         let principal = CString::new("User:alice").unwrap();
         let host = CString::new("*").unwrap();
         // SAFETY: Test code: `principal` and `host` are `CString`s that outlive every call reading
-        // them, `entry` is a local the constructor writes an owned handle into, the operation and
-        // permission-type arguments are singletons from their enums' getters, and every owned
-        // handle (the entry, the filter, the string) is destroyed once.
+        // them, `err` is a valid slot pointing at null, the operation and permission-type
+        // arguments are singletons from their enums' getters, and every owned handle (the entry
+        // the constructor returns, the filter, the string) is destroyed once.
         unsafe {
-            let mut entry = ptr::null_mut();
-            assert!(
-                kafka_common_acl_AccessControlEntry_new(
-                    principal.as_ptr(),
-                    host.as_ptr(),
-                    kafka_common_acl_AclOperation_read(),
-                    kafka_common_acl_AclPermissionType_allow(),
-                    &mut entry
-                )
-                .is_null()
+            let mut err = ptr::null_mut();
+            let entry = kafka_common_acl_AccessControlEntry_new(
+                principal.as_ptr(),
+                host.as_ptr(),
+                kafka_common_acl_AclOperation_read(),
+                kafka_common_acl_AclPermissionType_allow(),
+                &mut err,
             );
+            assert!(err.is_null());
             let expected =
                 AccessControlEntry::new("User:alice", "*", AclOperation::Read, AclPermissionType::Allow).unwrap();
             assert_eq!(*access_control_entry_ref(entry), expected);
@@ -365,37 +359,40 @@ mod tests {
         let principal = CString::new("User:alice").unwrap();
         let host = CString::new("*").unwrap();
         // SAFETY: Test code: `principal` and `host` are `CString`s that outlive every call reading
-        // them, `entry` is a local out pointer the failing constructor leaves null, the operation
-        // and permission-type arguments are singletons from their enums' getters, and each returned
-        // error is destroyed once, after its message is read.
+        // them, `error` is a valid slot pointing at null before each call, the operation and
+        // permission-type arguments are singletons from their enums' getters, and each error the
+        // failing constructor stores is destroyed once, after its message is read, and the slot
+        // reset.
         unsafe {
-            let mut entry = ptr::null_mut();
-            let error = kafka_common_acl_AccessControlEntry_new(
+            let mut error = ptr::null_mut();
+            let entry = kafka_common_acl_AccessControlEntry_new(
                 principal.as_ptr(),
                 host.as_ptr(),
                 kafka_common_acl_AclOperation_any(),
                 kafka_common_acl_AclPermissionType_allow(),
-                &mut entry,
+                &mut error,
             );
+            assert!(entry.is_null(), "nothing is returned on failure");
             assert_eq!(kafka_common_Error_is_local_illegal_argument_error(error), 1);
             assert_eq!(
                 CStr::from_ptr(kafka_common_Error_message(error)).to_str().unwrap(),
                 "operation must not be ANY"
             );
             kafka_common_Error_destroy(error);
-            let error = kafka_common_acl_AccessControlEntry_new(
+            error = ptr::null_mut();
+            let entry = kafka_common_acl_AccessControlEntry_new(
                 principal.as_ptr(),
                 host.as_ptr(),
                 kafka_common_acl_AclOperation_read(),
                 kafka_common_acl_AclPermissionType_any(),
-                &mut entry,
+                &mut error,
             );
             assert_eq!(
                 CStr::from_ptr(kafka_common_Error_message(error)).to_str().unwrap(),
                 "permissionType must not be ANY"
             );
             kafka_common_Error_destroy(error);
-            assert!(entry.is_null(), "nothing is delivered on failure");
+            assert!(entry.is_null(), "nothing is returned on failure");
         }
     }
 }

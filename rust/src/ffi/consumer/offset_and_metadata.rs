@@ -22,11 +22,12 @@ use std::ffi::{CString, c_char, c_void};
 
 use crate::common::{Error, TopicPartition};
 use crate::consumer::OffsetAndMetadata;
+use crate::ffi::common::deliver_value;
+use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::common::topic_partition::{
     TopicPartitionInner, box_topic_partition, kafka_common_TopicPartition_t, topic_partition_key_eq,
     topic_partition_ref,
 };
-use crate::ffi::common::{box_error, kafka_common_Error_t};
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_map, c_str_to_string, destroy_boxed, into_c_string, kafka_Map_t, map_entries};
 
@@ -124,44 +125,38 @@ pub(crate) unsafe fn map_offset_and_metadata(map: *const kafka_Map_t) -> HashMap
         .collect()
 }
 
-/// Delivers a freshly constructed value through `out`, or returns the
-/// construction error (CLAUDE.md §4 error slot).
+/// Returns a freshly constructed value as an owned handle, or stores the
+/// construction error in `*out_err` (CLAUDE.md §4).
 ///
 /// # Safety
 ///
-/// `out` must be a valid pointer.
+/// `out_err` must be valid for one write and point at null.
 unsafe fn deliver(
     oam: Result<OffsetAndMetadata, Error>,
-    out: *mut *mut kafka_consumer_OffsetAndMetadata_t,
-) -> *mut kafka_common_Error_t {
-    match oam {
-        Ok(oam) => {
-            // SAFETY: Per this function's `# Safety`, `out` is a valid pointer, so the write is
-            // sound; the handle written is the fresh box the caller owns, freed with
-            // `kafka_consumer_OffsetAndMetadata_destroy`.
-            unsafe { *out = box_offset_and_metadata(oam) };
-            std::ptr::null_mut()
-        },
-        Err(error) => box_error(error),
-    }
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_consumer_OffsetAndMetadata_t {
+    // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_value` requires. The
+    // handle returned is the fresh box the caller owns, freed with
+    // `kafka_consumer_OffsetAndMetadata_destroy`.
+    unsafe { deliver_value(oam, out_err, box_offset_and_metadata) }
 }
 
-/// `new OffsetAndMetadata(long offset)`: an owned handle delivered through
-/// `out_new`, freed with [`kafka_consumer_OffsetAndMetadata_destroy`]. A
-/// negative offset fails with the Java `IllegalArgumentException`
-/// (`LocalIllegalArgument`, "Invalid negative offset").
+/// `new OffsetAndMetadata(long offset)`: returns an owned handle, freed with
+/// [`kafka_consumer_OffsetAndMetadata_destroy`]. A negative offset stores the
+/// Java `IllegalArgumentException` in `*out_err` (`LocalIllegalArgument`,
+/// "Invalid negative offset").
 ///
 /// # Safety
 ///
-/// `out_new` must be a valid pointer.
+/// `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_new(
     offset: i64,
-    out_new: *mut *mut kafka_consumer_OffsetAndMetadata_t,
-) -> *mut kafka_common_Error_t {
-    // SAFETY: Per this function's `# Safety`, `out_new` is a valid pointer, as `deliver` requires.
-    unsafe { deliver(OffsetAndMetadata::new(offset), out_new) }
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_consumer_OffsetAndMetadata_t {
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer, as `deliver` requires.
+    unsafe { deliver(OffsetAndMetadata::new(offset), out_err) }
 }
 
 /// `new OffsetAndMetadata(long offset, String metadata)`; a null `metadata`
@@ -169,21 +164,21 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_new(
 ///
 /// # Safety
 ///
-/// `metadata` must be null or a valid NUL-terminated string; `out_with_metadata`
-/// a valid pointer.
+/// `metadata` must be null or a valid NUL-terminated string; `out_err` a valid
+/// slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_with_metadata(
     offset: i64,
     metadata: *const c_char,
-    out_with_metadata: *mut *mut kafka_consumer_OffsetAndMetadata_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_consumer_OffsetAndMetadata_t {
     // SAFETY: Per this function's `# Safety`, `metadata` is null or a valid NUL-terminated string,
     // as `c_str_to_string` requires; it is copied into an owned `String`.
     let metadata = unsafe { c_str_to_string(metadata) };
-    // SAFETY: Per this function's `# Safety`, `out_with_metadata` is a valid pointer, as `deliver`
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer, as `deliver`
     // requires.
-    unsafe { deliver(OffsetAndMetadata::with_metadata(offset, metadata), out_with_metadata) }
+    unsafe { deliver(OffsetAndMetadata::with_metadata(offset, metadata), out_err) }
 }
 
 /// `new OffsetAndMetadata(long offset, Optional<Integer> leaderEpoch, String metadata)`;
@@ -191,26 +186,26 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_with_metadata(
 ///
 /// # Safety
 ///
-/// `metadata` must be null or a valid NUL-terminated string;
-/// `out_with_leader_epoch_metadata` a valid pointer.
+/// `metadata` must be null or a valid NUL-terminated string; `out_err` a valid
+/// slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_with_leader_epoch_metadata(
     offset: i64,
     leader_epoch: i32,
     metadata: *const c_char,
-    out_with_leader_epoch_metadata: *mut *mut kafka_consumer_OffsetAndMetadata_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_consumer_OffsetAndMetadata_t {
     // SAFETY: Per this function's `# Safety`, `metadata` is null or a valid NUL-terminated string,
     // as `c_str_to_string` requires; it is copied into an owned `String`.
     let metadata = unsafe { c_str_to_string(metadata) };
     let leader_epoch = (leader_epoch >= 0).then_some(leader_epoch);
-    // SAFETY: Per this function's `# Safety`, `out_with_leader_epoch_metadata` is a valid pointer,
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer,
     // as `deliver` requires.
     unsafe {
         deliver(
             OffsetAndMetadata::with_leader_epoch_metadata(offset, leader_epoch, metadata),
-            out_with_leader_epoch_metadata,
+            out_err,
         )
     }
 }
@@ -308,12 +303,13 @@ mod tests {
 
     #[test]
     fn constructors_and_getters() {
-        let mut oam = std::ptr::null_mut();
-        let error =
-            // SAFETY: Test code: the metadata is a C string literal and `oam` a valid out pointer.
-            unsafe { kafka_consumer_OffsetAndMetadata_with_leader_epoch_metadata(42, 7, c"m".as_ptr(), &mut oam) };
+        let mut error = std::ptr::null_mut();
+        let oam =
+            // SAFETY: Test code: the metadata is a C string literal and `error` a valid slot
+            // pointing at null.
+            unsafe { kafka_consumer_OffsetAndMetadata_with_leader_epoch_metadata(42, 7, c"m".as_ptr(), &mut error) };
         assert!(error.is_null());
-        // SAFETY: Test code: `oam` is the owned handle just delivered (the error is null, asserted
+        // SAFETY: Test code: `oam` is the owned handle just returned (the error is null, asserted
         // above), destroyed once at the end, after the borrowed metadata string is read; the string
         // from `to_string` is destroyed once, after it is read.
         unsafe {
@@ -332,10 +328,11 @@ mod tests {
             kafka_consumer_OffsetAndMetadata_destroy(oam);
         }
 
-        let mut plain = std::ptr::null_mut();
-        // SAFETY: Test code: `plain` is a valid out pointer.
-        assert!(unsafe { kafka_consumer_OffsetAndMetadata_new(1, &mut plain) }.is_null());
-        // SAFETY: Test code: `plain` is the owned handle just delivered, destroyed once at the end,
+        // SAFETY: Test code: `error` is a valid slot, still pointing at null.
+        let plain = unsafe { kafka_consumer_OffsetAndMetadata_new(1, &mut error) };
+        assert!(error.is_null());
+        // SAFETY: Test code: `plain` is the owned handle just returned (`error` is null, asserted
+        // above), destroyed once at the end,
         // after the borrowed metadata string is read.
         unsafe {
             assert_eq!(kafka_consumer_OffsetAndMetadata_leader_epoch(plain), -1);
@@ -351,13 +348,14 @@ mod tests {
 
     #[test]
     fn negative_offset_is_the_java_illegal_argument() {
-        let mut oam = std::ptr::null_mut();
-        // SAFETY: Test code: `oam` is a valid out pointer.
-        let error = unsafe { kafka_consumer_OffsetAndMetadata_new(-1, &mut oam) };
+        let mut error = std::ptr::null_mut();
+        // SAFETY: Test code: `error` is a valid slot pointing at null.
+        let oam = unsafe { kafka_consumer_OffsetAndMetadata_new(-1, &mut error) };
         assert!(!error.is_null());
-        // SAFETY: Test code: `error` is the owned error just returned (non-null, asserted above).
+        assert!(oam.is_null());
+        // SAFETY: Test code: `error` is the owned error just stored (non-null, asserted above).
         assert!(unsafe { error_ref(error) }.error.is_local_illegal_argument_error());
-        // SAFETY: Test code: `error` is the owned error returned above, destroyed once.
+        // SAFETY: Test code: `error` is the owned error stored above, destroyed once.
         unsafe { kafka_common_Error_destroy(error) };
     }
 

@@ -30,7 +30,8 @@ use std::collections::HashMap;
 
 use crate::admin::AdminClientConfig;
 use crate::common::Error;
-use crate::ffi::common::{box_error, kafka_common_Error_t};
+use crate::ffi::common::fail_with;
+use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{kafka_Map_t, map_strings};
 
@@ -72,26 +73,24 @@ pub(crate) unsafe fn admin_client_config_ref<'a>(
 ///
 /// # Safety
 ///
-/// `props` must be a live map of C strings and `out_new` a valid slot.
+/// `props` must be a live map of C strings and `out_err` a valid slot pointing
+/// at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClientConfig_new(
     props: *const kafka_Map_t,
-    out_new: *mut *mut kafka_admin_AdminClientConfig_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_admin_AdminClientConfig_t {
     // SAFETY: Per this function's `# Safety`, `props` is a live map of C strings, i.e. a valid map
     // whose keys and values are NUL-terminated strings, as `map_strings` requires; they are copied
     // into owned strings.
     let props: HashMap<String, String> = unsafe { map_strings(props) }.into_iter().collect();
     if let Err(error) = AdminClientConfig::new(&props) {
-        return box_error(error);
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        return unsafe { fail_with(out_err, error) };
     }
     let inner = AdminClientConfigInner { props };
-    // SAFETY: Per this function's `# Safety`, `out_new` is a valid slot, so the write is sound; the
-    // handle written is the fresh box the caller owns, freed with
-    // `kafka_admin_AdminClientConfig_destroy`.
-    unsafe { *out_new = Box::into_raw(Box::new(inner)) as *mut kafka_admin_AdminClientConfig_t };
-    std::ptr::null_mut()
+    Box::into_raw(Box::new(inner)) as *mut kafka_admin_AdminClientConfig_t
 }
 
 /// Frees the handle; null is a no-op.
@@ -121,12 +120,12 @@ mod tests {
     #[test]
     fn new_validates_and_rebuilds_the_configuration() {
         let props = box_string_map([("bootstrap.servers", "localhost:9092"), ("request.timeout.ms", "1234")]);
-        let mut config: *mut kafka_admin_AdminClientConfig_t = std::ptr::null_mut();
+        let mut error = std::ptr::null_mut();
         // SAFETY: Test code: `props` is the live map of C strings just built, destroyed once after
-        // `new` copied it; `config` is a valid slot, then the live handle `new` delivered, read
-        // only while alive and destroyed once at the end.
+        // `new` copied it; `error` is a valid slot pointing at null, left null on success; `config`
+        // is the live handle `new` returned, read only while alive and destroyed once at the end.
         unsafe {
-            let error = kafka_admin_AdminClientConfig_new(props, &mut config);
+            let config = kafka_admin_AdminClientConfig_new(props, &mut error);
             assert!(error.is_null());
             kafka_Map_destroy(props);
 
@@ -144,12 +143,13 @@ mod tests {
             ("bootstrap.servers", "localhost:9092"),
             ("request.timeout.ms", "not-a-number"),
         ]);
-        let mut config: *mut kafka_admin_AdminClientConfig_t = std::ptr::null_mut();
+        let mut error = std::ptr::null_mut();
         // SAFETY: Test code: `props` is the live map of C strings just built, destroyed once at the
-        // end; `config` is a valid slot, left null on failure; `error` is the owned error `new`
-        // returned, its message read while it is alive and it is destroyed once.
+        // end; `error` is a valid slot pointing at null, then the owned error `new` stored, its
+        // message read while it is alive and it is destroyed once; `config` is the null `new`
+        // returned on failure.
         unsafe {
-            let error = kafka_admin_AdminClientConfig_new(props, &mut config);
+            let config = kafka_admin_AdminClientConfig_new(props, &mut error);
             assert!(!error.is_null());
             assert!(config.is_null());
             let message = c_str_to_string(kafka_common_Error_message(error));

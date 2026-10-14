@@ -39,8 +39,8 @@
 //! sync getters Java guards with `acquire()` (`assignment`, `subscription`,
 //! `paused`, `currentLag`, `groupMetadata`) take the flag for the call and,
 //! when another call holds it, fail with the same
-//! `LOCAL_CONCURRENT_MODIFICATION`, delivering their value through an `out_`
-//! parameter otherwise. `metrics`, which Java does not guard, reads through
+//! `LOCAL_CONCURRENT_MODIFICATION` through their trailing `out_err`, returning
+//! their value otherwise. `metrics`, which Java does not guard, reads through
 //! the `ConsumerHandle`. `wakeup` and the `ConsumerHandle` never touch the
 //! consumer itself and are callable at any time.
 //!
@@ -108,6 +108,7 @@ use crate::ffi::common::{
     box_error, catch_task_panic, deliver_panic, deliver_panic_i64, deliver_panic_value, init_default_logger,
     kafka_common_Error_t, spawn_callback_task, take_error,
 };
+use crate::ffi::common::{deliver_unit, deliver_value};
 use crate::ffi::consumer::close_options::{close_options_ref, kafka_consumer_CloseOptions_t};
 use crate::ffi::consumer::consumer_group_metadata::box_group_metadata;
 pub(crate) use crate::ffi::consumer::consumer_group_metadata::{
@@ -743,30 +744,6 @@ fn deliver_ptr<T, P>(
     }));
 }
 
-/// Delivers a blocking operation's value through `out`, or returns its
-/// error (CLAUDE.md §4 error slot).
-///
-/// # Safety
-///
-/// `out` must be a valid pointer.
-unsafe fn out_slot<T, P>(
-    result: Result<T, Error>,
-    out: *mut P,
-    to_value: impl FnOnce(T) -> P,
-) -> *mut kafka_common_Error_t {
-    match result {
-        Ok(value) => {
-            // SAFETY: Per this function's `# Safety`, `out` is a valid pointer, so writing the
-            // converted value through it is sound. Every `P` this module uses is a raw pointer or
-            // an `i64`, which have no drop glue, so the assignment reads nothing from the slot,
-            // which C may leave uninitialised.
-            unsafe { *out = to_value(value) };
-            std::ptr::null_mut()
-        },
-        Err(error) => box_error(error),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Subscription
 // ---------------------------------------------------------------------------
@@ -781,22 +758,29 @@ unsafe fn out_slot<T, P>(
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle and the other parameters
-/// valid for their documented types.
-/// `partitions` must be a valid list of `kafka_common_TopicPartition_t *`.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `partitions` must be a valid list of
+/// `kafka_common_TopicPartition_t *`. `out_err` must be a valid slot pointing
+/// at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_assign(
     self_: *mut kafka_consumer_Consumer_t,
     partitions: *const kafka_List_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
-    error_slot(unsafe { run(self_, move |c| Box::pin(async move { c.assign(partitions).await })) })
+    unsafe {
+        deliver_unit(
+            run(self_, move |c| Box::pin(async move { c.assign(partitions).await })),
+            out_err,
+        )
+    }
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -855,21 +839,27 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_assign_cb(
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle and the other parameters
-/// valid for their documented types.
-/// `topics` must be a valid list of NUL-terminated `char *`.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `topics` must be a valid list of NUL-terminated
+/// `char *`. `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics(
     self_: *mut kafka_consumer_Consumer_t,
     topics: *const kafka_List_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `topics` is a valid list of NUL-terminated `char *`,
     // as `list_strings` requires; the strings are copied, so the borrow lasts for this call only.
     let topics = unsafe { list_strings(topics) };
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
-    error_slot(unsafe { run(self_, move |c| Box::pin(async move { c.subscribe_with_topics(topics).await })) })
+    unsafe {
+        deliver_unit(
+            run(self_, move |c| Box::pin(async move { c.subscribe_with_topics(topics).await })),
+            out_err,
+        )
+    }
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -928,16 +918,17 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics_cb(
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle and the other parameters
-/// valid for their documented types.
-/// `topics` must be a valid list of NUL-terminated `char *`.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `topics` must be a valid list of NUL-terminated
+/// `char *`. `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics_listener(
     self_: *mut kafka_consumer_Consumer_t,
     topics: *const kafka_List_t,
     listener: *mut kafka_consumer_ConsumerRebalanceListener_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `client_ref` requires.
     let client = unsafe { client_ref(self_) };
@@ -951,11 +942,14 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics_listener(
     let listener = unsafe { listener_adapter(listener, Arc::clone(client.delivery())) };
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
-    error_slot(unsafe {
-        run(self_, move |c| {
-            Box::pin(async move { c.subscribe_with_topics_listener(topics, listener).await })
-        })
-    })
+    unsafe {
+        deliver_unit(
+            run(self_, move |c| {
+                Box::pin(async move { c.subscribe_with_topics_listener(topics, listener).await })
+            }),
+            out_err,
+        )
+    }
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -1021,21 +1015,27 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics_listener_
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle and the other parameters
-/// valid for their documented types.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_pattern(
     self_: *mut kafka_consumer_Consumer_t,
     pattern: *const kafka_consumer_SubscriptionPattern_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `pattern` is a valid subscription-pattern handle,
     // alive for this expression, the only use of the reference, as `subscription_pattern_ref`
     // requires; the value is cloned.
     let pattern = unsafe { subscription_pattern_ref(pattern) }.clone();
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
-    error_slot(unsafe { run(self_, move |c| Box::pin(async move { c.subscribe_with_pattern(pattern).await })) })
+    unsafe {
+        deliver_unit(
+            run(self_, move |c| Box::pin(async move { c.subscribe_with_pattern(pattern).await })),
+            out_err,
+        )
+    }
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -1093,15 +1093,16 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_pattern_cb(
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle and the other parameters
-/// valid for their documented types.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_pattern_listener(
     self_: *mut kafka_consumer_Consumer_t,
     pattern: *const kafka_consumer_SubscriptionPattern_t,
     listener: *mut kafka_consumer_ConsumerRebalanceListener_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `client_ref` requires.
     let client = unsafe { client_ref(self_) };
@@ -1116,11 +1117,14 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_pattern_listener
     let listener = unsafe { listener_adapter(listener, Arc::clone(client.delivery())) };
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
-    error_slot(unsafe {
-        run(self_, move |c| {
-            Box::pin(async move { c.subscribe_with_pattern_listener(pattern, listener).await })
-        })
-    })
+    unsafe {
+        deliver_unit(
+            run(self_, move |c| {
+                Box::pin(async move { c.subscribe_with_pattern_listener(pattern, listener).await })
+            }),
+            out_err,
+        )
+    }
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -1187,16 +1191,17 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_pattern_listener
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle and the other parameters
-/// valid for their documented types.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_unsubscribe(
     self_: *mut kafka_consumer_Consumer_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
-    error_slot(unsafe { run(self_, move |c| Box::pin(async move { c.unsubscribe().await })) })
+    unsafe { deliver_unit(run(self_, move |c| Box::pin(async move { c.unsubscribe().await })), out_err) }
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -1247,20 +1252,20 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_unsubscribe_cb(
 /// Java's `IllegalArgumentException`); the records are owned by the
 /// caller (`kafka_consumer_ConsumerRecords_destroy`).
 ///
-/// Blocking (CLAUDE.md §4 rule 5); the owned value is delivered
-/// through the trailing `out_` parameter, or the error returned.
+/// Blocking (CLAUDE.md §4 rule 5); the owned value is returned; on failure the
+/// error is stored in `*out_err`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle, the other parameters valid
-/// for their documented types and the `out_` pointer valid.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_poll(
     self_: *mut kafka_consumer_Consumer_t,
     timeout: i64,
-    out_poll: *mut *mut kafka_consumer_ConsumerRecords_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_consumer_ConsumerRecords_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `client_ref` requires.
     let client = unsafe { client_ref(self_) };
@@ -1268,9 +1273,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_poll(
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
     let result = unsafe { run(self_, move |c| Box::pin(async move { c.poll(ms(timeout)?).await })) };
-    // SAFETY: Per this function's `# Safety`, `out_poll` is a valid pointer to write the result to,
-    // as `out_slot` requires.
-    unsafe { out_slot(result, out_poll, |records| box_consumer_records(records, owns.key, owns.value)) }
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer to write the result to,
+    // as `deliver_value` requires.
+    unsafe { deliver_value(result, out_err, |records| box_consumer_records(records, owns.key, owns.value)) }
 }
 
 /// The completion of the `_cb` twin: the owned `value` on success,
@@ -1338,16 +1343,17 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_poll_cb(
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle and the other parameters
-/// valid for their documented types.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync(
     self_: *mut kafka_consumer_Consumer_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
-    error_slot(unsafe { run(self_, move |c| Box::pin(async move { c.commit_sync().await })) })
+    unsafe { deliver_unit(run(self_, move |c| Box::pin(async move { c.commit_sync().await })), out_err) }
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -1399,21 +1405,25 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_cb(
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle and the other parameters
-/// valid for their documented types.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_timeout(
     self_: *mut kafka_consumer_Consumer_t,
     timeout: i64,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
-    error_slot(unsafe {
-        run(self_, move |c| {
-            Box::pin(async move { c.commit_sync_with_timeout(ms(timeout)?).await })
-        })
-    })
+    unsafe {
+        deliver_unit(
+            run(self_, move |c| {
+                Box::pin(async move { c.commit_sync_with_timeout(ms(timeout)?).await })
+            }),
+            out_err,
+        )
+    }
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -1468,17 +1478,18 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_timeout_cb(
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle and the other parameters
-/// valid for their documented types.
-/// `offsets` must be a valid map of `kafka_common_TopicPartition_t *` to
-/// `kafka_consumer_OffsetAndMetadata_t *` that no other call mutates during
-/// this one.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `offsets` must be a valid map of
+/// `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *`
+/// that no other call mutates during this one. `out_err` must be a valid slot
+/// pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets(
     self_: *mut kafka_consumer_Consumer_t,
     offsets: *const kafka_Map_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `offsets` is a valid map of
     // `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *` that no other
     // call mutates during this one, as `map_offset_and_metadata` requires; the entries are copied,
@@ -1486,11 +1497,14 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets(
     let offsets = unsafe { map_offset_and_metadata(offsets) };
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
-    error_slot(unsafe {
-        run(self_, move |c| {
-            Box::pin(async move { c.commit_sync_with_offsets(offsets).await })
-        })
-    })
+    unsafe {
+        deliver_unit(
+            run(self_, move |c| {
+                Box::pin(async move { c.commit_sync_with_offsets(offsets).await })
+            }),
+            out_err,
+        )
+    }
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -1548,18 +1562,19 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets_cb(
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle and the other parameters
-/// valid for their documented types.
-/// `offsets` must be a valid map of `kafka_common_TopicPartition_t *` to
-/// `kafka_consumer_OffsetAndMetadata_t *` that no other call mutates during
-/// this one.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `offsets` must be a valid map of
+/// `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *`
+/// that no other call mutates during this one. `out_err` must be a valid slot
+/// pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets_timeout(
     self_: *mut kafka_consumer_Consumer_t,
     offsets: *const kafka_Map_t,
     timeout: i64,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `offsets` is a valid map of
     // `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *` that no other
     // call mutates during this one, as `map_offset_and_metadata` requires; the entries are copied,
@@ -1567,11 +1582,14 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets_timeou
     let offsets = unsafe { map_offset_and_metadata(offsets) };
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
-    error_slot(unsafe {
-        run(self_, move |c| {
-            Box::pin(async move { c.commit_sync_with_offsets_timeout(offsets, ms(timeout)?).await })
-        })
-    })
+    unsafe {
+        deliver_unit(
+            run(self_, move |c| {
+                Box::pin(async move { c.commit_sync_with_offsets_timeout(offsets, ms(timeout)?).await })
+            }),
+            out_err,
+        )
+    }
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -1630,16 +1648,17 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets_timeou
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle and the other parameters
-/// valid for their documented types.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async(
     self_: *mut kafka_consumer_Consumer_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
-    error_slot(unsafe { run(self_, move |c| Box::pin(async move { c.commit_async().await })) })
+    unsafe { deliver_unit(run(self_, move |c| Box::pin(async move { c.commit_async().await })), out_err) }
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -1693,14 +1712,15 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_cb(
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle and the other parameters
-/// valid for their documented types.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_callback(
     self_: *mut kafka_consumer_Consumer_t,
     callback: *mut kafka_consumer_OffsetCommitCallback_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `client_ref` requires.
     let client = unsafe { client_ref(self_) };
@@ -1711,11 +1731,14 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_callback(
     let callback = unsafe { commit_callback_adapter(callback, Arc::clone(client.delivery())) };
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
-    error_slot(unsafe {
-        run(self_, move |c| {
-            Box::pin(async move { c.commit_async_with_callback(callback).await })
-        })
-    })
+    unsafe {
+        deliver_unit(
+            run(self_, move |c| {
+                Box::pin(async move { c.commit_async_with_callback(callback).await })
+            }),
+            out_err,
+        )
+    }
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -1776,18 +1799,19 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_callback_cb(
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle and the other parameters
-/// valid for their documented types.
-/// `offsets` must be a valid map of `kafka_common_TopicPartition_t *` to
-/// `kafka_consumer_OffsetAndMetadata_t *` that no other call mutates during
-/// this one.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `offsets` must be a valid map of
+/// `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *`
+/// that no other call mutates during this one. `out_err` must be a valid slot
+/// pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_offsets_callback(
     self_: *mut kafka_consumer_Consumer_t,
     offsets: *const kafka_Map_t,
     callback: *mut kafka_consumer_OffsetCommitCallback_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `client_ref` requires.
     let client = unsafe { client_ref(self_) };
@@ -1803,11 +1827,14 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_offsets_callb
     let callback = unsafe { commit_callback_adapter(callback, Arc::clone(client.delivery())) };
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
-    error_slot(unsafe {
-        run(self_, move |c| {
-            Box::pin(async move { c.commit_async_with_offsets_callback(offsets, callback).await })
-        })
-    })
+    unsafe {
+        deliver_unit(
+            run(self_, move |c| {
+                Box::pin(async move { c.commit_async_with_offsets_callback(offsets, callback).await })
+            }),
+            out_err,
+        )
+    }
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -1878,26 +1905,30 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_offsets_callb
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle and the other parameters
-/// valid for their documented types.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset(
     self_: *mut kafka_consumer_Consumer_t,
     partition: *const kafka_common_TopicPartition_t,
     offset: i64,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, alive
     // for this expression, the only use of the reference, as `topic_partition_ref` requires; the
     // value is cloned.
     let partition = unsafe { topic_partition_ref(partition) }.clone();
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
-    error_slot(unsafe {
-        run(self_, move |c| {
-            Box::pin(async move { c.seek_with_offset(partition, offset).await })
-        })
-    })
+    unsafe {
+        deliver_unit(
+            run(self_, move |c| {
+                Box::pin(async move { c.seek_with_offset(partition, offset).await })
+            }),
+            out_err,
+        )
+    }
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -1955,15 +1986,16 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset_cb(
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle and the other parameters
-/// valid for their documented types.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset_and_metadata(
     self_: *mut kafka_consumer_Consumer_t,
     partition: *const kafka_common_TopicPartition_t,
     offset_and_metadata: *const kafka_consumer_OffsetAndMetadata_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, alive
     // for this expression, the only use of the reference, as `topic_partition_ref` requires; the
     // value is cloned.
@@ -1974,11 +2006,14 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset_and_metadata(
     let offset_and_metadata = unsafe { offset_and_metadata_ref(offset_and_metadata) }.clone();
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
-    error_slot(unsafe {
-        run(self_, move |c| {
-            Box::pin(async move { c.seek_with_offset_and_metadata(partition, offset_and_metadata).await })
-        })
-    })
+    unsafe {
+        deliver_unit(
+            run(self_, move |c| {
+                Box::pin(async move { c.seek_with_offset_and_metadata(partition, offset_and_metadata).await })
+            }),
+            out_err,
+        )
+    }
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -2040,22 +2075,29 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset_and_metadata_c
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle and the other parameters
-/// valid for their documented types.
-/// `partitions` must be a valid list of `kafka_common_TopicPartition_t *`.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `partitions` must be a valid list of
+/// `kafka_common_TopicPartition_t *`. `out_err` must be a valid slot pointing
+/// at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_beginning(
     self_: *mut kafka_consumer_Consumer_t,
     partitions: *const kafka_List_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
-    error_slot(unsafe { run(self_, move |c| Box::pin(async move { c.seek_to_beginning(&partitions).await })) })
+    unsafe {
+        deliver_unit(
+            run(self_, move |c| Box::pin(async move { c.seek_to_beginning(&partitions).await })),
+            out_err,
+        )
+    }
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -2112,22 +2154,29 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_beginning_cb(
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle and the other parameters
-/// valid for their documented types.
-/// `partitions` must be a valid list of `kafka_common_TopicPartition_t *`.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `partitions` must be a valid list of
+/// `kafka_common_TopicPartition_t *`. `out_err` must be a valid slot pointing
+/// at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_end(
     self_: *mut kafka_consumer_Consumer_t,
     partitions: *const kafka_List_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
-    error_slot(unsafe { run(self_, move |c| Box::pin(async move { c.seek_to_end(&partitions).await })) })
+    unsafe {
+        deliver_unit(
+            run(self_, move |c| Box::pin(async move { c.seek_to_end(&partitions).await })),
+            out_err,
+        )
+    }
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -2177,20 +2226,20 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_end_cb(
 
 /// `position(TopicPartition partition)`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5); the value is delivered through the
-/// trailing `out_` parameter, or the error returned.
+/// Blocking (CLAUDE.md §4 rule 5); the value is returned; on failure the error
+/// is stored in `*out_err`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle, the other parameters valid
-/// for their documented types and the `out_` pointer valid.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_position(
     self_: *mut kafka_consumer_Consumer_t,
     partition: *const kafka_common_TopicPartition_t,
-    out_position: *mut i64,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> i64 {
     // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, alive
     // for this expression, the only use of the reference, as `topic_partition_ref` requires; the
     // value is cloned.
@@ -2198,9 +2247,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_position(
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
     let result = unsafe { run(self_, move |c| Box::pin(async move { c.position(&partition).await })) };
-    // SAFETY: Per this function's `# Safety`, `out_position` is a valid pointer to write the result
-    // to, as `out_slot` requires.
-    unsafe { out_slot(result, out_position, |v| v) }
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer to write the result
+    // to, as `deliver_value` requires.
+    unsafe { deliver_value(result, out_err, |v| v) }
 }
 
 /// The completion of the `_cb` twin: `value` on success, `-1` beside
@@ -2250,21 +2299,21 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_position_cb(
 
 /// `position(TopicPartition partition, Duration timeout)`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5); the value is delivered through the
-/// trailing `out_` parameter, or the error returned.
+/// Blocking (CLAUDE.md §4 rule 5); the value is returned; on failure the error
+/// is stored in `*out_err`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle, the other parameters valid
-/// for their documented types and the `out_` pointer valid.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_position_with_timeout(
     self_: *mut kafka_consumer_Consumer_t,
     partition: *const kafka_common_TopicPartition_t,
     timeout: i64,
-    out_position_with_timeout: *mut i64,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> i64 {
     // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, alive
     // for this expression, the only use of the reference, as `topic_partition_ref` requires; the
     // value is cloned.
@@ -2276,9 +2325,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_position_with_timeout(
             Box::pin(async move { c.position_with_timeout(&partition, ms(timeout)?).await })
         })
     };
-    // SAFETY: Per this function's `# Safety`, `out_position_with_timeout` is a valid pointer to
-    // write the result to, as `out_slot` requires.
-    unsafe { out_slot(result, out_position_with_timeout, |v| v) }
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer to
+    // write the result to, as `deliver_value` requires.
+    unsafe { deliver_value(result, out_err, |v| v) }
 }
 
 /// The completion of the `_cb` twin: `value` on success, `-1` beside
@@ -2331,21 +2380,22 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_position_with_timeout_cb(
 /// `kafka_common_TopicPartition_t *` to owned
 /// `kafka_consumer_OffsetAndMetadata_t *`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5); the owned value is delivered
-/// through the trailing `out_` parameter, or the error returned.
+/// Blocking (CLAUDE.md §4 rule 5); the owned value is returned; on failure the
+/// error is stored in `*out_err`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle, the other parameters valid
-/// for their documented types and the `out_` pointer valid.
-/// `partitions` must be a valid list of `kafka_common_TopicPartition_t *`.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `partitions` must be a valid list of
+/// `kafka_common_TopicPartition_t *`. `out_err` must be a valid slot pointing
+/// at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_committed(
     self_: *mut kafka_consumer_Consumer_t,
     partitions: *const kafka_List_t,
-    out_committed: *mut *mut kafka_Map_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
@@ -2353,9 +2403,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_committed(
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
     let result = unsafe { run(self_, move |c| Box::pin(async move { c.committed(&partitions).await })) };
-    // SAFETY: Per this function's `# Safety`, `out_committed` is a valid pointer to write the
-    // result to, as `out_slot` requires.
-    unsafe { out_slot(result, out_committed, |offsets| offset_and_metadata_map(&offsets)) }
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer to write the
+    // result to, as `deliver_value` requires.
+    unsafe { deliver_value(result, out_err, |offsets| offset_and_metadata_map(&offsets)) }
 }
 
 /// The completion of the `_cb` twin: the owned `value` on success,
@@ -2407,22 +2457,23 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_committed_cb(
 
 /// `committed(Set<TopicPartition> partitions, Duration timeout)`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5); the owned value is delivered
-/// through the trailing `out_` parameter, or the error returned.
+/// Blocking (CLAUDE.md §4 rule 5); the owned value is returned; on failure the
+/// error is stored in `*out_err`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle, the other parameters valid
-/// for their documented types and the `out_` pointer valid.
-/// `partitions` must be a valid list of `kafka_common_TopicPartition_t *`.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `partitions` must be a valid list of
+/// `kafka_common_TopicPartition_t *`. `out_err` must be a valid slot pointing
+/// at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_committed_with_timeout(
     self_: *mut kafka_consumer_Consumer_t,
     partitions: *const kafka_List_t,
     timeout: i64,
-    out_committed_with_timeout: *mut *mut kafka_Map_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
@@ -2434,9 +2485,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_committed_with_timeout(
             Box::pin(async move { c.committed_with_timeout(&partitions, ms(timeout)?).await })
         })
     };
-    // SAFETY: Per this function's `# Safety`, `out_committed_with_timeout` is a valid pointer to
-    // write the result to, as `out_slot` requires.
-    unsafe { out_slot(result, out_committed_with_timeout, |offsets| offset_and_metadata_map(&offsets)) }
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer to
+    // write the result to, as `deliver_value` requires.
+    unsafe { deliver_value(result, out_err, |offsets| offset_and_metadata_map(&offsets)) }
 }
 
 /// The completion of the `_cb` twin: the owned `value` on success,
@@ -2519,30 +2570,30 @@ unsafe fn destroy_list_element(element: *mut c_void) {
 /// `partitionsFor(String topic)`: an owned list of owned
 /// `kafka_common_PartitionInfo_t *`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5); the owned value is delivered
-/// through the trailing `out_` parameter, or the error returned.
+/// Blocking (CLAUDE.md §4 rule 5); the owned value is returned; on failure the
+/// error is stored in `*out_err`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle, the other parameters valid
-/// for their documented types and the `out_` pointer valid.
-/// `topic` must be a NUL-terminated string.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `topic` must be a NUL-terminated string. `out_err`
+/// must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for(
     self_: *mut kafka_consumer_Consumer_t,
     topic: *const c_char,
-    out_partitions_for: *mut *mut kafka_List_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
     // `c_str_to_string` requires; it is copied.
     let topic = unsafe { c_str_to_string(topic) };
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
     let result = unsafe { run(self_, move |c| Box::pin(async move { c.partitions_for(&topic).await })) };
-    // SAFETY: Per this function's `# Safety`, `out_partitions_for` is a valid pointer to write the
-    // result to, as `out_slot` requires.
-    unsafe { out_slot(result, out_partitions_for, |infos| partition_info_list(&infos)) }
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer to write the
+    // result to, as `deliver_value` requires.
+    unsafe { deliver_value(result, out_err, |infos| partition_info_list(&infos)) }
 }
 
 /// The completion of the `_cb` twin: the owned `value` on success,
@@ -2591,22 +2642,22 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for_cb(
 
 /// `partitionsFor(String topic, Duration timeout)`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5); the owned value is delivered
-/// through the trailing `out_` parameter, or the error returned.
+/// Blocking (CLAUDE.md §4 rule 5); the owned value is returned; on failure the
+/// error is stored in `*out_err`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle, the other parameters valid
-/// for their documented types and the `out_` pointer valid.
-/// `topic` must be a NUL-terminated string.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `topic` must be a NUL-terminated string. `out_err`
+/// must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for_with_timeout(
     self_: *mut kafka_consumer_Consumer_t,
     topic: *const c_char,
     timeout: i64,
-    out_partitions_for_with_timeout: *mut *mut kafka_List_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
     // `c_str_to_string` requires; it is copied.
     let topic = unsafe { c_str_to_string(topic) };
@@ -2617,9 +2668,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for_with_timeout(
             Box::pin(async move { c.partitions_for_with_timeout(&topic, ms(timeout)?).await })
         })
     };
-    // SAFETY: Per this function's `# Safety`, `out_partitions_for_with_timeout` is a valid pointer
-    // to write the result to, as `out_slot` requires.
-    unsafe { out_slot(result, out_partitions_for_with_timeout, |infos| partition_info_list(&infos)) }
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer
+    // to write the result to, as `deliver_value` requires.
+    unsafe { deliver_value(result, out_err, |infos| partition_info_list(&infos)) }
 }
 
 /// The completion of the `_cb` twin: the owned `value` on success,
@@ -2670,25 +2721,25 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for_with_timeout_cb(
 /// `listTopics()`: an owned map of owned `char *` to owned `kafka_List_t *`
 /// of owned `kafka_common_PartitionInfo_t *`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5); the owned value is delivered
-/// through the trailing `out_` parameter, or the error returned.
+/// Blocking (CLAUDE.md §4 rule 5); the owned value is returned; on failure the
+/// error is stored in `*out_err`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle, the other parameters valid
-/// for their documented types and the `out_` pointer valid.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics(
     self_: *mut kafka_consumer_Consumer_t,
-    out_list_topics: *mut *mut kafka_Map_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
     let result = unsafe { run(self_, move |c| Box::pin(async move { c.list_topics().await })) };
-    // SAFETY: Per this function's `# Safety`, `out_list_topics` is a valid pointer to write the
-    // result to, as `out_slot` requires.
-    unsafe { out_slot(result, out_list_topics, topic_partition_info_map) }
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer to write the
+    // result to, as `deliver_value` requires.
+    unsafe { deliver_value(result, out_err, topic_partition_info_map) }
 }
 
 /// The completion of the `_cb` twin: the owned `value` on success,
@@ -2733,20 +2784,20 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics_cb(
 
 /// `listTopics(Duration timeout)`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5); the owned value is delivered
-/// through the trailing `out_` parameter, or the error returned.
+/// Blocking (CLAUDE.md §4 rule 5); the owned value is returned; on failure the
+/// error is stored in `*out_err`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle, the other parameters valid
-/// for their documented types and the `out_` pointer valid.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics_with_timeout(
     self_: *mut kafka_consumer_Consumer_t,
     timeout: i64,
-    out_list_topics_with_timeout: *mut *mut kafka_Map_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
     let result = unsafe {
@@ -2754,9 +2805,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics_with_timeout(
             Box::pin(async move { c.list_topics_with_timeout(ms(timeout)?).await })
         })
     };
-    // SAFETY: Per this function's `# Safety`, `out_list_topics_with_timeout` is a valid pointer to
-    // write the result to, as `out_slot` requires.
-    unsafe { out_slot(result, out_list_topics_with_timeout, topic_partition_info_map) }
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer to
+    // write the result to, as `deliver_value` requires.
+    unsafe { deliver_value(result, out_err, topic_partition_info_map) }
 }
 
 /// The completion of the `_cb` twin: the owned `value` on success,
@@ -2805,22 +2856,22 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics_with_timeout_cb(
 /// result maps owned `kafka_common_TopicPartition_t *` to owned
 /// `kafka_consumer_OffsetAndTimestamp_t *`, unresolved partitions absent.
 ///
-/// Blocking (CLAUDE.md §4 rule 5); the owned value is delivered
-/// through the trailing `out_` parameter, or the error returned.
+/// Blocking (CLAUDE.md §4 rule 5); the owned value is returned; on failure the
+/// error is stored in `*out_err`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle, the other parameters valid
-/// for their documented types and the `out_` pointer valid.
-/// `timestamps_to_search` must be a valid map of
-/// `kafka_common_TopicPartition_t *` to `int64_t *`.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `timestamps_to_search` must be a valid map of
+/// `kafka_common_TopicPartition_t *` to `int64_t *`. `out_err` must be a valid
+/// slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times(
     self_: *mut kafka_consumer_Consumer_t,
     timestamps_to_search: *const kafka_Map_t,
-    out_offsets_for_times: *mut *mut kafka_Map_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `timestamps_to_search` is a valid map of
     // `kafka_common_TopicPartition_t *` to `int64_t *`, as `map_topic_partition_i64` requires; the
     // entries are copied, so the borrow lasts for this call only.
@@ -2832,9 +2883,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times(
             Box::pin(async move { c.offsets_for_times(timestamps_to_search).await })
         })
     };
-    // SAFETY: Per this function's `# Safety`, `out_offsets_for_times` is a valid pointer to write
-    // the result to, as `out_slot` requires.
-    unsafe { out_slot(result, out_offsets_for_times, |offsets| offset_and_timestamp_map(&offsets)) }
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer to write
+    // the result to, as `deliver_value` requires.
+    unsafe { deliver_value(result, out_err, |offsets| offset_and_timestamp_map(&offsets)) }
 }
 
 /// The completion of the `_cb` twin: the owned `value` on success,
@@ -2886,23 +2937,23 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_cb(
 
 /// `offsetsForTimes(Map<TopicPartition, Long> timestampsToSearch, Duration timeout)`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5); the owned value is delivered
-/// through the trailing `out_` parameter, or the error returned.
+/// Blocking (CLAUDE.md §4 rule 5); the owned value is returned; on failure the
+/// error is stored in `*out_err`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle, the other parameters valid
-/// for their documented types and the `out_` pointer valid.
-/// `timestamps_to_search` must be a valid map of
-/// `kafka_common_TopicPartition_t *` to `int64_t *`.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `timestamps_to_search` must be a valid map of
+/// `kafka_common_TopicPartition_t *` to `int64_t *`. `out_err` must be a valid
+/// slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_with_timeout(
     self_: *mut kafka_consumer_Consumer_t,
     timestamps_to_search: *const kafka_Map_t,
     timeout: i64,
-    out_offsets_for_times_with_timeout: *mut *mut kafka_Map_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `timestamps_to_search` is a valid map of
     // `kafka_common_TopicPartition_t *` to `int64_t *`, as `map_topic_partition_i64` requires; the
     // entries are copied, so the borrow lasts for this call only.
@@ -2914,13 +2965,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_with_timeout(
             Box::pin(async move { c.offsets_for_times_with_timeout(timestamps_to_search, ms(timeout)?).await })
         })
     };
-    // SAFETY: Per this function's `# Safety`, `out_offsets_for_times_with_timeout` is a valid
-    // pointer to write the result to, as `out_slot` requires.
-    unsafe {
-        out_slot(result, out_offsets_for_times_with_timeout, |offsets| {
-            offset_and_timestamp_map(&offsets)
-        })
-    }
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid
+    // pointer to write the result to, as `deliver_value` requires.
+    unsafe { deliver_value(result, out_err, |offsets| offset_and_timestamp_map(&offsets)) }
 }
 
 /// The completion of the `_cb` twin: the owned `value` on success,
@@ -2976,21 +3023,22 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_with_timeout_
 /// `beginningOffsets(Collection<TopicPartition> partitions)`: an owned
 /// map of owned `kafka_common_TopicPartition_t *` to owned `int64_t *`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5); the owned value is delivered
-/// through the trailing `out_` parameter, or the error returned.
+/// Blocking (CLAUDE.md §4 rule 5); the owned value is returned; on failure the
+/// error is stored in `*out_err`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle, the other parameters valid
-/// for their documented types and the `out_` pointer valid.
-/// `partitions` must be a valid list of `kafka_common_TopicPartition_t *`.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `partitions` must be a valid list of
+/// `kafka_common_TopicPartition_t *`. `out_err` must be a valid slot pointing
+/// at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets(
     self_: *mut kafka_consumer_Consumer_t,
     partitions: *const kafka_List_t,
-    out_beginning_offsets: *mut *mut kafka_Map_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
@@ -2998,9 +3046,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets(
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
     let result = unsafe { run(self_, move |c| Box::pin(async move { c.beginning_offsets(&partitions).await })) };
-    // SAFETY: Per this function's `# Safety`, `out_beginning_offsets` is a valid pointer to write
-    // the result to, as `out_slot` requires.
-    unsafe { out_slot(result, out_beginning_offsets, |offsets| topic_partition_i64_map(&offsets)) }
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer to write
+    // the result to, as `deliver_value` requires.
+    unsafe { deliver_value(result, out_err, |offsets| topic_partition_i64_map(&offsets)) }
 }
 
 /// The completion of the `_cb` twin: the owned `value` on success,
@@ -3052,22 +3100,23 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_cb(
 
 /// `beginningOffsets(Collection<TopicPartition> partitions, Duration timeout)`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5); the owned value is delivered
-/// through the trailing `out_` parameter, or the error returned.
+/// Blocking (CLAUDE.md §4 rule 5); the owned value is returned; on failure the
+/// error is stored in `*out_err`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle, the other parameters valid
-/// for their documented types and the `out_` pointer valid.
-/// `partitions` must be a valid list of `kafka_common_TopicPartition_t *`.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `partitions` must be a valid list of
+/// `kafka_common_TopicPartition_t *`. `out_err` must be a valid slot pointing
+/// at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_with_timeout(
     self_: *mut kafka_consumer_Consumer_t,
     partitions: *const kafka_List_t,
     timeout: i64,
-    out_beginning_offsets_with_timeout: *mut *mut kafka_Map_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
@@ -3079,13 +3128,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_with_timeout(
             Box::pin(async move { c.beginning_offsets_with_timeout(&partitions, ms(timeout)?).await })
         })
     };
-    // SAFETY: Per this function's `# Safety`, `out_beginning_offsets_with_timeout` is a valid
-    // pointer to write the result to, as `out_slot` requires.
-    unsafe {
-        out_slot(result, out_beginning_offsets_with_timeout, |offsets| {
-            topic_partition_i64_map(&offsets)
-        })
-    }
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid
+    // pointer to write the result to, as `deliver_value` requires.
+    unsafe { deliver_value(result, out_err, |offsets| topic_partition_i64_map(&offsets)) }
 }
 
 /// The completion of the `_cb` twin: the owned `value` on success,
@@ -3139,21 +3184,22 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_with_timeout_
 /// `endOffsets(Collection<TopicPartition> partitions)`: an owned map of
 /// owned `kafka_common_TopicPartition_t *` to owned `int64_t *`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5); the owned value is delivered
-/// through the trailing `out_` parameter, or the error returned.
+/// Blocking (CLAUDE.md §4 rule 5); the owned value is returned; on failure the
+/// error is stored in `*out_err`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle, the other parameters valid
-/// for their documented types and the `out_` pointer valid.
-/// `partitions` must be a valid list of `kafka_common_TopicPartition_t *`.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `partitions` must be a valid list of
+/// `kafka_common_TopicPartition_t *`. `out_err` must be a valid slot pointing
+/// at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets(
     self_: *mut kafka_consumer_Consumer_t,
     partitions: *const kafka_List_t,
-    out_end_offsets: *mut *mut kafka_Map_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
@@ -3161,9 +3207,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets(
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
     let result = unsafe { run(self_, move |c| Box::pin(async move { c.end_offsets(&partitions).await })) };
-    // SAFETY: Per this function's `# Safety`, `out_end_offsets` is a valid pointer to write the
-    // result to, as `out_slot` requires.
-    unsafe { out_slot(result, out_end_offsets, |offsets| topic_partition_i64_map(&offsets)) }
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer to write the
+    // result to, as `deliver_value` requires.
+    unsafe { deliver_value(result, out_err, |offsets| topic_partition_i64_map(&offsets)) }
 }
 
 /// The completion of the `_cb` twin: the owned `value` on success,
@@ -3215,22 +3261,23 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_cb(
 
 /// `endOffsets(Collection<TopicPartition> partitions, Duration timeout)`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5); the owned value is delivered
-/// through the trailing `out_` parameter, or the error returned.
+/// Blocking (CLAUDE.md §4 rule 5); the owned value is returned; on failure the
+/// error is stored in `*out_err`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle, the other parameters valid
-/// for their documented types and the `out_` pointer valid.
-/// `partitions` must be a valid list of `kafka_common_TopicPartition_t *`.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `partitions` must be a valid list of
+/// `kafka_common_TopicPartition_t *`. `out_err` must be a valid slot pointing
+/// at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_with_timeout(
     self_: *mut kafka_consumer_Consumer_t,
     partitions: *const kafka_List_t,
     timeout: i64,
-    out_end_offsets_with_timeout: *mut *mut kafka_Map_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
@@ -3242,13 +3289,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_with_timeout(
             Box::pin(async move { c.end_offsets_with_timeout(&partitions, ms(timeout)?).await })
         })
     };
-    // SAFETY: Per this function's `# Safety`, `out_end_offsets_with_timeout` is a valid pointer to
-    // write the result to, as `out_slot` requires.
-    unsafe {
-        out_slot(result, out_end_offsets_with_timeout, |offsets| {
-            topic_partition_i64_map(&offsets)
-        })
-    }
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer to
+    // write the result to, as `deliver_value` requires.
+    unsafe { deliver_value(result, out_err, |offsets| topic_partition_i64_map(&offsets)) }
 }
 
 /// The completion of the `_cb` twin: the owned `value` on success,
@@ -3312,22 +3355,29 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_with_timeout_cb(
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle and the other parameters
-/// valid for their documented types.
-/// `partitions` must be a valid list of `kafka_common_TopicPartition_t *`.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `partitions` must be a valid list of
+/// `kafka_common_TopicPartition_t *`. `out_err` must be a valid slot pointing
+/// at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_pause(
     self_: *mut kafka_consumer_Consumer_t,
     partitions: *const kafka_List_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
-    error_slot(unsafe { run(self_, move |c| Box::pin(async move { c.pause(&partitions).await })) })
+    unsafe {
+        deliver_unit(
+            run(self_, move |c| Box::pin(async move { c.pause(&partitions).await })),
+            out_err,
+        )
+    }
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -3384,22 +3434,29 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_pause_cb(
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle and the other parameters
-/// valid for their documented types.
-/// `partitions` must be a valid list of `kafka_common_TopicPartition_t *`.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `partitions` must be a valid list of
+/// `kafka_common_TopicPartition_t *`. `out_err` must be a valid slot pointing
+/// at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_resume(
     self_: *mut kafka_consumer_Consumer_t,
     partitions: *const kafka_List_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions) };
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
-    error_slot(unsafe { run(self_, move |c| Box::pin(async move { c.resume(&partitions).await })) })
+    unsafe {
+        deliver_unit(
+            run(self_, move |c| Box::pin(async move { c.resume(&partitions).await })),
+            out_err,
+        )
+    }
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -3456,16 +3513,22 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_resume_cb(
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle and the other parameters
-/// valid for their documented types.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_enforce_rebalance(
     self_: *mut kafka_consumer_Consumer_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
-    error_slot(unsafe { run(self_, move |c| Box::pin(async move { c.enforce_rebalance().await })) })
+    unsafe {
+        deliver_unit(
+            run(self_, move |c| Box::pin(async move { c.enforce_rebalance().await })),
+            out_err,
+        )
+    }
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -3517,25 +3580,29 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_enforce_rebalance_cb(
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle and the other parameters
-/// valid for their documented types.
-/// `reason` must be a NUL-terminated string.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `reason` must be a NUL-terminated string. `out_err`
+/// must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_enforce_rebalance_with_reason(
     self_: *mut kafka_consumer_Consumer_t,
     reason: *const c_char,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `reason` is a NUL-terminated string, as
     // `c_str_to_string` requires; it is copied.
     let reason = unsafe { c_str_to_string(reason) };
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
-    error_slot(unsafe {
-        run(self_, move |c| {
-            Box::pin(async move { c.enforce_rebalance_with_reason(&reason).await })
-        })
-    })
+    unsafe {
+        deliver_unit(
+            run(self_, move |c| {
+                Box::pin(async move { c.enforce_rebalance_with_reason(&reason).await })
+            }),
+            out_err,
+        )
+    }
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -3592,16 +3659,17 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_enforce_rebalance_with_reason_c
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle and the other parameters
-/// valid for their documented types.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_close(
     self_: *mut kafka_consumer_Consumer_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
-    error_slot(unsafe { run(self_, move |c| Box::pin(async move { c.close().await })) })
+    unsafe { deliver_unit(run(self_, move |c| Box::pin(async move { c.close().await })), out_err) }
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -3653,14 +3721,15 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_close_cb(
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle and the other parameters
-/// valid for their documented types.
+/// `self_` must be a live consumer handle and the other parameters valid for
+/// their documented types. `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_close_with_options(
     self_: *mut kafka_consumer_Consumer_t,
     options: *const kafka_consumer_CloseOptions_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `options` is a valid close-options handle, alive for
     // this expression, the only use of the reference; no setter runs on it meanwhile, since the
     // setters' `# Safety` excludes any other call using the handle at the same time, so
@@ -3668,7 +3737,12 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_close_with_options(
     let options = unsafe { close_options_ref(options) }.clone();
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
-    error_slot(unsafe { run(self_, move |c| Box::pin(async move { c.close_with_options(options).await })) })
+    unsafe {
+        deliver_unit(
+            run(self_, move |c| Box::pin(async move { c.close_with_options(options).await })),
+            out_err,
+        )
+    }
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -3739,69 +3813,69 @@ unsafe fn read<T>(self_: *const kafka_consumer_Consumer_t, f: impl FnOnce(&DynCo
 }
 
 /// `assignment()`: an owned list of owned `kafka_common_TopicPartition_t *`,
-/// sorted by topic and partition, delivered through `out_assignment`; fails
-/// with `LOCAL_CONCURRENT_MODIFICATION` while another call holds the consumer,
-/// as Java's `acquire()` throws `ConcurrentModificationException`.
-///
-/// # Safety
-///
-/// `self_` must be a live handle and `out_assignment` a valid pointer.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_Consumer_assignment(
-    self_: *const kafka_consumer_Consumer_t,
-    out_assignment: *mut *mut kafka_List_t,
-) -> *mut kafka_common_Error_t {
-    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
-    // as `read` requires.
-    let assignment = unsafe { read(self_, |c| c.assignment()) };
-    // SAFETY: Per this function's `# Safety`, `out_assignment` is a valid pointer to write the
-    // result to, as `out_slot` requires.
-    unsafe { out_slot(assignment, out_assignment, |a| sorted_topic_partition_list(a.iter())) }
-}
-
-/// `subscription()`: an owned list of owned `char *`, sorted, delivered
-/// through `out_subscription`; fails with `LOCAL_CONCURRENT_MODIFICATION`
-/// while another call holds the consumer, as Java's `acquire()` throws
-/// `ConcurrentModificationException`.
-///
-/// # Safety
-///
-/// `self_` must be a live handle and `out_subscription` a valid pointer.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_Consumer_subscription(
-    self_: *const kafka_consumer_Consumer_t,
-    out_subscription: *mut *mut kafka_List_t,
-) -> *mut kafka_common_Error_t {
-    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
-    // as `read` requires.
-    let subscription = unsafe { read(self_, |c| c.subscription()) };
-    // SAFETY: Per this function's `# Safety`, `out_subscription` is a valid pointer to write the
-    // result to, as `out_slot` requires.
-    unsafe { out_slot(subscription, out_subscription, |s| sorted_string_list(s.iter())) }
-}
-
-/// `paused()`: an owned list of owned `kafka_common_TopicPartition_t *`,
-/// sorted, delivered through `out_paused`; fails with
-/// `LOCAL_CONCURRENT_MODIFICATION` while another call holds the consumer, as
+/// sorted by topic and partition; stores `LOCAL_CONCURRENT_MODIFICATION` in
+/// `*out_err` and returns `NULL` while another call holds the consumer, as
 /// Java's `acquire()` throws `ConcurrentModificationException`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `out_paused` a valid pointer.
+/// `self_` must be a live handle and `out_err` a valid slot pointing at null.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_Consumer_assignment(
+    self_: *const kafka_consumer_Consumer_t,
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `read` requires.
+    let assignment = unsafe { read(self_, |c| c.assignment()) };
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer to write the
+    // result to, as `deliver_value` requires.
+    unsafe { deliver_value(assignment, out_err, |a| sorted_topic_partition_list(a.iter())) }
+}
+
+/// `subscription()`: an owned list of owned `char *`, sorted; stores
+/// `LOCAL_CONCURRENT_MODIFICATION` in `*out_err` and returns `NULL` while
+/// another call holds the consumer, as Java's `acquire()` throws
+/// `ConcurrentModificationException`.
+///
+/// # Safety
+///
+/// `self_` must be a live handle and `out_err` a valid slot pointing at null.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_Consumer_subscription(
+    self_: *const kafka_consumer_Consumer_t,
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
+    // as `read` requires.
+    let subscription = unsafe { read(self_, |c| c.subscription()) };
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer to write the
+    // result to, as `deliver_value` requires.
+    unsafe { deliver_value(subscription, out_err, |s| sorted_string_list(s.iter())) }
+}
+
+/// `paused()`: an owned list of owned `kafka_common_TopicPartition_t *`,
+/// sorted; stores `LOCAL_CONCURRENT_MODIFICATION` in `*out_err` and returns
+/// `NULL` while another call holds the consumer, as Java's `acquire()` throws
+/// `ConcurrentModificationException`.
+///
+/// # Safety
+///
+/// `self_` must be a live handle and `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_paused(
     self_: *const kafka_consumer_Consumer_t,
-    out_paused: *mut *mut kafka_List_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `read` requires.
     let paused = unsafe { read(self_, |c| c.paused()) };
-    // SAFETY: Per this function's `# Safety`, `out_paused` is a valid pointer to write the result
-    // to, as `out_slot` requires.
-    unsafe { out_slot(paused, out_paused, |p| sorted_topic_partition_list(p.iter())) }
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer to write the result
+    // to, as `deliver_value` requires.
+    unsafe { deliver_value(paused, out_err, |p| sorted_topic_partition_list(p.iter())) }
 }
 
 /// `clientId()`: borrowed from the handle for its lifetime.
@@ -3819,30 +3893,31 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_client_id(self_: *const kafka_c
 }
 
 /// `currentLag(TopicPartition topicPartition)`: the lag, or `-1` for
-/// `OptionalLong.empty()`, delivered through `out_current_lag`; fails with
-/// `LOCAL_CONCURRENT_MODIFICATION` while another call holds the consumer, as
-/// Java's `acquire()` throws `ConcurrentModificationException`.
+/// `OptionalLong.empty()`; stores `LOCAL_CONCURRENT_MODIFICATION` in `*out_err`
+/// and returns -1 while another call holds the consumer, as Java's `acquire()`
+/// throws `ConcurrentModificationException`. Since -1 is also the empty lag,
+/// the caller tells the two apart by `*out_err`.
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle, `topic_partition` a valid handle and
-/// `out_current_lag` a valid pointer.
+/// `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_current_lag(
     self_: *const kafka_consumer_Consumer_t,
     topic_partition: *const kafka_common_TopicPartition_t,
-    out_current_lag: *mut i64,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> i64 {
     // SAFETY: Per this function's `# Safety`, `topic_partition` is a valid topic-partition handle,
     // kept alive for this call, which bounds every use of `tp`, as `topic_partition_ref` requires.
     let tp: &TopicPartition = unsafe { topic_partition_ref(topic_partition) };
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `read` requires.
     let lag = unsafe { read(self_, |c| c.current_lag(tp).unwrap_or(-1)) };
-    // SAFETY: Per this function's `# Safety`, `out_current_lag` is a valid pointer to write the
-    // result to, as `out_slot` requires.
-    unsafe { out_slot(lag, out_current_lag, |l| l) }
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer to write the
+    // result to, as `deliver_value` requires.
+    unsafe { deliver_value(lag, out_err, |l| l) }
 }
 
 /// `metrics()`: an owned `kafka_Map_t` of owned `kafka_common_MetricName_t *`
@@ -3864,26 +3939,26 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_metrics(self_: *const kafka_con
 }
 
 /// `groupMetadata()`: an owned handle freed with
-/// `kafka_consumer_ConsumerGroupMetadata_destroy`, delivered through
-/// `out_group_metadata`; fails with `LOCAL_CONCURRENT_MODIFICATION` while
+/// `kafka_consumer_ConsumerGroupMetadata_destroy`; stores
+/// `LOCAL_CONCURRENT_MODIFICATION` in `*out_err` and returns `NULL` while
 /// another call holds the consumer, as Java's `acquire()` throws
 /// `ConcurrentModificationException`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `out_group_metadata` a valid pointer.
+/// `self_` must be a live handle and `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_group_metadata(
     self_: *const kafka_consumer_Consumer_t,
-    out_group_metadata: *mut *mut kafka_consumer_ConsumerGroupMetadata_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_consumer_ConsumerGroupMetadata_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `read` requires.
     let metadata = unsafe { read(self_, |c| box_group_metadata(c.group_metadata())) };
-    // SAFETY: Per this function's `# Safety`, `out_group_metadata` is a valid pointer to write the
-    // result to, as `out_slot` requires.
-    unsafe { out_slot(metadata, out_group_metadata, |m| m) }
+    // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer to write the
+    // result to, as `deliver_value` requires.
+    unsafe { deliver_value(metadata, out_err, |m| m) }
 }
 
 /// `wakeup()`: interrupts the operation in flight (or the next one) with
@@ -4009,9 +4084,9 @@ mod tests {
 
     /// A mock consumer handle and its `Consumer` view.
     fn new_mock() -> (*mut kafka_consumer_MockConsumer_t, *const kafka_consumer_Consumer_t) {
-        let mut mock = ptr::null_mut();
-        // SAFETY: Test code: a NUL-terminated literal and a valid out-pointer.
-        let error = unsafe { kafka_consumer_MockConsumer_new(c"earliest".as_ptr(), &mut mock) };
+        let mut error = ptr::null_mut();
+        // SAFETY: Test code: a NUL-terminated literal and a valid slot pointing at null.
+        let mock = unsafe { kafka_consumer_MockConsumer_new(c"earliest".as_ptr(), &mut error) };
         assert!(error.is_null());
         // SAFETY: Test code: `mock` is the live handle just created.
         (mock, unsafe { kafka_consumer_MockConsumer__as_Consumer(mock) })

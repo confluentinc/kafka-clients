@@ -163,7 +163,6 @@ mod tests {
         kafka_common_serialization_Serializer_serialize, kafka_common_serialization_Serializer_serialize_with_headers,
     };
     use crate::ffi::common::{kafka_common_Error_destroy, kafka_common_Error_message};
-    use crate::ffi::util::kafka_Bytes_t;
 
     #[test]
     fn serializes_a_c_string_through_the_view() {
@@ -174,50 +173,51 @@ mod tests {
         // SAFETY: Test code: `handle` comes from `kafka_common_serialization_StringSerializer_new`
         // and is destroyed once, at the end, after the last use of its view `view`; `headers` comes
         // from `box_record_headers` and is destroyed once, after its last use; `topic`, `hello` and
-        // `latin1` outlive the calls reading them, and `latin1` is NUL-terminated; `out` is a valid
-        // local slot, read before the next call on the handle; the error is destroyed once, after
-        // it is read.
+        // `latin1` outlive the calls reading them, and `latin1` is NUL-terminated; `err` is a valid
+        // slot pointing at null, left null by every call but the last (asserted); each returned
+        // view is read before the next call on the handle; the error is destroyed once, after it is
+        // read.
         unsafe {
             let view = kafka_common_serialization_StringSerializer__as_Serializer(handle);
             assert_eq!(view, kafka_common_serialization_StringSerializer__as_Serializer(handle));
-            let mut out = kafka_Bytes_t::NULL;
-            let error = kafka_common_serialization_Serializer_serialize(
+            let mut err = ptr::null_mut();
+            let out = kafka_common_serialization_Serializer_serialize(
                 view,
                 topic.as_ptr(),
                 hello.as_ptr().cast(),
-                &raw mut out,
+                &raw mut err,
             );
-            assert!(error.is_null());
+            assert!(err.is_null());
             assert_eq!(out.as_slice(), Some("héllo".as_bytes()));
 
-            let error = kafka_common_serialization_Serializer_serialize_with_headers(
+            let out = kafka_common_serialization_Serializer_serialize_with_headers(
                 view,
                 topic.as_ptr(),
                 headers,
                 hello.as_ptr().cast(),
-                &raw mut out,
+                &raw mut err,
             );
-            assert!(error.is_null());
+            assert!(err.is_null());
             assert_eq!(out.as_slice(), Some("héllo".as_bytes()));
 
             // Null is Java's null, serialized to a null array.
-            let error =
-                kafka_common_serialization_Serializer_serialize(view, topic.as_ptr(), ptr::null(), &raw mut out);
-            assert!(error.is_null());
+            let out = kafka_common_serialization_Serializer_serialize(view, topic.as_ptr(), ptr::null(), &raw mut err);
+            assert!(err.is_null());
             assert!(out.data.is_null());
 
             // Not UTF-8: the translation of `SerializationException`.
             let latin1 = [b'h', 0xE9, b'l', 0];
-            let error = kafka_common_serialization_Serializer_serialize(
+            let out = kafka_common_serialization_Serializer_serialize(
                 view,
                 topic.as_ptr(),
                 latin1.as_ptr() as *const c_void,
-                &raw mut out,
+                &raw mut err,
             );
-            assert!(!error.is_null());
-            let message = CStr::from_ptr(kafka_common_Error_message(error)).to_str().unwrap();
+            assert!(!err.is_null());
+            assert!(out.data.is_null(), "a failure returns the null array");
+            let message = CStr::from_ptr(kafka_common_Error_message(err)).to_str().unwrap();
             assert!(message.starts_with("Error when serializing string to byte[]: "), "{message}");
-            kafka_common_Error_destroy(error);
+            kafka_common_Error_destroy(err);
 
             kafka_common_header_internals_RecordHeaders_destroy(headers);
             kafka_common_serialization_StringSerializer_destroy(handle);

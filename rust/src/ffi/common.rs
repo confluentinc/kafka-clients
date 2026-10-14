@@ -568,6 +568,118 @@ pub(crate) fn box_error(error: Error) -> *mut kafka_common_Error_t {
     Box::into_raw(Box::new(ErrorInner::new(error))) as *mut kafka_common_Error_t
 }
 
+/// What a fallible entry point returns beside the error it stored in
+/// `*out_err`: null for a pointer, a null `kafka_Bytes_t`, `0` for an
+/// `int8_t`, `-1` for any wider integer. `#[ffi_guard]` returns the same value
+/// for a caught panic, so a failure and a panic cannot be told apart by the
+/// value, which the caller never reads: it tests `*out_err`.
+///
+/// No Java counterpart: Java has no C boundary.
+pub(crate) trait FailValue {
+    /// The failure value.
+    fn fail() -> Self;
+}
+
+impl FailValue for () {
+    fn fail() -> Self {}
+}
+
+impl<T> FailValue for *mut T {
+    fn fail() -> Self {
+        std::ptr::null_mut()
+    }
+}
+
+impl<T> FailValue for *const T {
+    fn fail() -> Self {
+        std::ptr::null()
+    }
+}
+
+impl FailValue for i8 {
+    fn fail() -> Self {
+        0
+    }
+}
+
+impl FailValue for i16 {
+    fn fail() -> Self {
+        -1
+    }
+}
+
+impl FailValue for i32 {
+    fn fail() -> Self {
+        -1
+    }
+}
+
+impl FailValue for i64 {
+    fn fail() -> Self {
+        -1
+    }
+}
+
+impl FailValue for crate::ffi::util::kafka_Bytes_t {
+    fn fail() -> Self {
+        Self::NULL
+    }
+}
+
+/// Stores `error` in `*out_err`, as an owned handle the caller frees.
+///
+/// # Safety
+///
+/// `out_err` must be valid for one write. It should point at null, as every
+/// entry point taking it requires, or the handle there leaks.
+pub(crate) unsafe fn store_error(out_err: *mut *mut kafka_common_Error_t, error: Error) {
+    // SAFETY: Per this function's `# Safety`, `out_err` is valid for one write. A raw pointer has
+    // no drop glue, so the write reads nothing from the slot.
+    unsafe { out_err.write(box_error(error)) }
+}
+
+/// Stores `error` in `*out_err` and returns the failure value: the tail of
+/// every failing path of a fallible entry point.
+///
+/// # Safety
+///
+/// As [`store_error`].
+pub(crate) unsafe fn fail_with<P: FailValue>(out_err: *mut *mut kafka_common_Error_t, error: Error) -> P {
+    // SAFETY: Per this function's `# Safety`, `out_err` is as `store_error` requires.
+    unsafe { store_error(out_err, error) };
+    P::fail()
+}
+
+/// The value of `result` converted by `to_value`, or, for an error, the
+/// failure value with the error stored in `*out_err`.
+///
+/// # Safety
+///
+/// As [`store_error`].
+pub(crate) unsafe fn deliver_value<T, P: FailValue>(
+    result: Result<T, Error>,
+    out_err: *mut *mut kafka_common_Error_t,
+    to_value: impl FnOnce(T) -> P,
+) -> P {
+    match result {
+        Ok(value) => to_value(value),
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        Err(error) => unsafe { fail_with(out_err, error) },
+    }
+}
+
+/// Stores the error of `result`, if any, in `*out_err`.
+///
+/// # Safety
+///
+/// As [`store_error`].
+pub(crate) unsafe fn deliver_unit(result: Result<(), Error>, out_err: *mut *mut kafka_common_Error_t) {
+    if let Err(error) = result {
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `store_error` requires.
+        unsafe { store_error(out_err, error) }
+    }
+}
+
 /// Casts a `*const kafka_common_Error_t` to a reference to `ErrorInner`.
 ///
 /// # Safety
@@ -2589,21 +2701,22 @@ mod tests {
         kafka_common_IsolationLevel_e::kafka_common_IsolationLevel_READ_COMMITTED
     }
 
-    /// A fallible entry point in the CLAUDE.md §4 shape: the error is returned,
-    /// the value delivered through `out_new`.
+    /// A fallible entry point in the CLAUDE.md §4 shape: it returns its value and
+    /// stores an error in `*out_err`, here when `fail` asks for one.
     ///
     /// # Safety
     ///
-    /// `out_new` must point to a writable slot.
+    /// `out_err` must be a valid slot pointing at null.
     #[ffi_guard]
-    unsafe extern "C" fn guarded_new(panic: bool, out_new: *mut *mut u8) -> *mut kafka_common_Error_t {
+    unsafe extern "C" fn guarded_new(panic: bool, fail: bool, out_err: *mut *mut kafka_common_Error_t) -> *mut u8 {
         if panic {
             panic!("constructor boom");
         }
-        // SAFETY: Test code: per this function's `# Safety`, `out_new` points to a writable
-        // slot; one value is written into it.
-        unsafe { *out_new = std::ptr::dangling_mut() };
-        std::ptr::null_mut()
+        if fail {
+            // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+            return unsafe { fail_with(out_err, Error::local_illegal_argument("constructor failed")) };
+        }
+        std::ptr::dangling_mut()
     }
 
     /// # Safety
@@ -2835,19 +2948,34 @@ mod tests {
     }
 
     #[test]
-    fn ffi_guard_returns_the_error_and_leaves_out_unwritten() {
-        let mut out_new: *mut u8 = std::ptr::null_mut();
-        // SAFETY: Test code: `out_new` is a live local that outlives the call, so `&mut
-        // out_new` is the writable slot `guarded_new`'s `# Safety` asks for; the body panics
-        // before writing it, and the guard writes nothing there.
-        let error = unsafe { guarded_new(true, &mut out_new) };
-        assert!(out_new.is_null(), "the out slot is left unwritten on a panic");
-        // SAFETY: Test code: `error` is the fresh handle the guard returned on the panic
-        // path, not yet freed by anyone, so `take_error` (which asserts non-null) consumes it
-        // exactly once.
-        let (message, code) = unsafe { take_error(error) };
+    fn ffi_guard_stores_a_fallible_panic_in_out_err() {
+        let mut err = std::ptr::null_mut();
+        // SAFETY: Test code: `err` is a live local pointing at null, the slot `guarded_new`'s
+        // `# Safety` asks for.
+        let value = unsafe { guarded_new(true, false, &mut err) };
+        assert!(value.is_null(), "a panic returns the failure value");
+        // SAFETY: Test code: `err` holds the fresh handle the guard stored on the panic path, not
+        // yet freed by anyone, so `take_error` (which asserts non-null) consumes it exactly once.
+        let (message, code) = unsafe { take_error(err) };
         assert_eq!(message, panic_message("guarded_new", "constructor boom"));
         assert_eq!(code, kafka_common_Error_LOCAL_ILLEGAL_STATE);
+
+        // The body's own failure takes the same path: the same failure value, the error in
+        // `*out_err`.
+        let mut err = std::ptr::null_mut();
+        // SAFETY: Test code: as above, with a fresh slot pointing at null.
+        let value = unsafe { guarded_new(false, true, &mut err) };
+        assert!(value.is_null(), "a failure returns the failure value");
+        // SAFETY: Test code: `err` holds the fresh handle the body stored, consumed once.
+        let (message, code) = unsafe { take_error(err) };
+        assert_eq!(message, "constructor failed");
+        assert_eq!(code, kafka_common_Error_LOCAL_ILLEGAL_ARGUMENT);
+
+        let mut err = std::ptr::null_mut();
+        // SAFETY: Test code: as above, with a fresh slot pointing at null.
+        let value = unsafe { guarded_new(false, false, &mut err) };
+        assert!(err.is_null(), "success leaves `*out_err` untouched");
+        assert_eq!(value, std::ptr::dangling_mut());
     }
 
     #[test]
@@ -2867,101 +2995,70 @@ mod tests {
         assert_eq!(code, kafka_common_Error_LOCAL_ILLEGAL_STATE);
     }
 
-    // The `_err` twins `#[ffi_guard]` emits beside each guarded function, which
-    // `confluent_kafka_bindings.h` declares for language bindings.
+    // The `_err` twins `#[ffi_guard]` emits beside each guarded function without an
+    // error channel, which `confluent_kafka_bindings.h` declares for language bindings.
 
     #[test]
-    fn ffi_guard_err_twin_returns_the_panic() {
-        // SAFETY: Test code: `guarded_unit_err` takes no arguments and has no
-        // preconditions; it is `unsafe` only because `guarded_unit` is.
-        let error = unsafe { guarded_unit_err() };
-        // SAFETY: Test code: `error` is the fresh handle the twin returned on the panic
-        // path, not yet freed by anyone, so `take_error` consumes it exactly once.
-        let (message, code) = unsafe { take_error(error) };
+    fn ffi_guard_err_twin_stores_the_panic() {
+        let mut err = std::ptr::null_mut();
+        // SAFETY: Test code: `err` is a live local pointing at null, the slot the twin's
+        // `# Safety` asks for; `guarded_unit` itself has no preconditions.
+        unsafe { guarded_unit_err(&mut err) };
+        // SAFETY: Test code: `err` holds the fresh handle the twin stored on the panic path, not
+        // yet freed by anyone, so `take_error` consumes it exactly once.
+        let (message, code) = unsafe { take_error(err) };
         assert_eq!(message, panic_message("guarded_unit_err", "unit boom"));
         assert_eq!(code, kafka_common_Error_LOCAL_ILLEGAL_STATE);
 
-        // A value-returning twin leaves `out_result` unwritten: the sentinel survives.
-        // `guarded_bool`'s fallback, false, would overwrite it.
-        let mut flag = true;
-        // SAFETY: Test code: `flag` is a live local that outlives the call, so `&mut flag`
-        // is valid for the one write the twin's `# Safety` asks for.
-        let error = unsafe { guarded_bool_err(true, &mut flag) };
-        assert!(flag, "out_result is left unwritten on a panic");
-        // SAFETY: Test code: `error` is the fresh handle the twin returned on the panic
-        // path, not yet freed by anyone, so `take_error` consumes it exactly once.
-        let (message, code) = unsafe { take_error(error) };
+        // A value-returning twin returns the entry point's own panic value.
+        let mut err = std::ptr::null_mut();
+        // SAFETY: Test code: as above, with a fresh slot pointing at null.
+        assert!(!unsafe { guarded_bool_err(true, &mut err) }, "guarded_bool's derived false");
+        // SAFETY: Test code: `err` holds the fresh panic handle, consumed exactly once.
+        let (message, code) = unsafe { take_error(err) };
         assert_eq!(message, panic_message("guarded_bool_err", "bool boom"));
         assert_eq!(code, kafka_common_Error_LOCAL_ILLEGAL_STATE);
 
-        // `fallback` is the entry point's alone: the twin reports the panic.
-        let mut value = -7;
-        // SAFETY: Test code: `value` is a live local that outlives the call, so `&mut
-        // value` is valid for the one write the twin's `# Safety` asks for.
-        let error = unsafe { guarded_fallback_err(&mut value) };
-        assert_eq!(value, -7, "out_result is left unwritten on a panic");
-        // SAFETY: Test code: `error` is the fresh handle the twin returned on the panic
-        // path, not yet freed by anyone, so `take_error` consumes it exactly once.
-        let (message, _) = unsafe { take_error(error) };
+        // `fallback` is that value too; only `*out_err` tells it from a real 42.
+        let mut err = std::ptr::null_mut();
+        // SAFETY: Test code: as above, with a fresh slot pointing at null.
+        assert_eq!(unsafe { guarded_fallback_err(&mut err) }, 42);
+        // SAFETY: Test code: `err` holds the fresh panic handle, consumed exactly once.
+        let (message, _) = unsafe { take_error(err) };
         assert_eq!(message, panic_message("guarded_fallback_err", "fallback boom"));
 
-        // SAFETY: Test code: `value` is a live local that outlives the call, so `&mut
-        // value` is valid for the one write the twin's `# Safety` asks for.
-        let error = unsafe { guarded_formatted_err(3, &mut value) };
-        // SAFETY: Test code: `error` is the fresh handle the twin returned on the panic
-        // path, not yet freed by anyone, so `take_error` consumes it exactly once.
-        let (message, _) = unsafe { take_error(error) };
+        let mut err = std::ptr::null_mut();
+        // SAFETY: Test code: as above, with a fresh slot pointing at null.
+        unsafe { guarded_formatted_err(3, &mut err) };
+        // SAFETY: Test code: `err` holds the fresh panic handle, consumed exactly once.
+        let (message, _) = unsafe { take_error(err) };
         assert_eq!(message, panic_message("guarded_formatted_err", "formatted payload 3"));
 
-        // An error-returning twin is the entry point under its own name.
-        let mut out_new: *mut u8 = std::ptr::null_mut();
-        // SAFETY: Test code: `out_new` is a live local that outlives the call, so `&mut
-        // out_new` is the writable slot `guarded_new`'s `# Safety` asks for.
-        let error = unsafe { guarded_new_err(true, &mut out_new) };
-        assert!(out_new.is_null(), "the out slot is left unwritten on a panic");
-        // SAFETY: Test code: `error` is the fresh handle the twin returned on the panic
-        // path, not yet freed by anyone, so `take_error` consumes it exactly once.
-        let (message, code) = unsafe { take_error(error) };
-        assert_eq!(message, panic_message("guarded_new_err", "constructor boom"));
-        assert_eq!(code, kafka_common_Error_LOCAL_ILLEGAL_STATE);
+        // A twin of a function returning an error as its value (an error factory)
+        // returns null: the panic is in `*out_err`, never mistaken for the value.
+        let mut err = std::ptr::null_mut();
+        // SAFETY: Test code: as above, with a fresh slot pointing at null.
+        assert!(unsafe { guarded_error_return_err(true, &mut err) }.is_null());
+        // SAFETY: Test code: `err` holds the fresh panic handle, consumed exactly once.
+        let (message, _) = unsafe { take_error(err) };
+        assert_eq!(message, panic_message("guarded_error_return_err", "error boom"));
     }
 
     #[test]
-    fn ffi_guard_err_twin_delivers_the_value_on_success() {
-        let mut flag = false;
-        // SAFETY: Test code: `flag` is a live local that outlives the call, so `&mut flag`
-        // is valid for the one write the twin's `# Safety` asks for.
-        assert!(unsafe { guarded_bool_err(false, &mut flag) }.is_null());
-        assert!(flag);
+    fn ffi_guard_err_twin_returns_the_value_on_success() {
+        let mut err = std::ptr::null_mut();
+        // SAFETY: Test code: `err` is a live local pointing at null, the slot the twin's
+        // `# Safety` asks for.
+        assert!(unsafe { guarded_bool_err(false, &mut err) });
+        assert!(err.is_null(), "success leaves `*out_err` untouched");
         // `return` in the body still returns the entry point's value.
         for (early, expected) in [(true, 5), (false, 6)] {
-            let mut value = 0;
-            // SAFETY: Test code: `value` is a live local that outlives the call, so `&mut
-            // value` is valid for the one write the twin's `# Safety` asks for.
-            assert!(unsafe { guarded_early_return_err(early, &mut value) }.is_null());
+            // SAFETY: Test code: `err` is still null (asserted above or in the previous
+            // iteration), the slot the twin's `# Safety` asks for.
+            let value = unsafe { guarded_early_return_err(early, &mut err) };
             assert_eq!(value, expected, "for early = {early}");
+            assert!(err.is_null());
         }
-        let mut out_new: *mut u8 = std::ptr::null_mut();
-        // SAFETY: Test code: `out_new` is a live local that outlives the call, so `&mut
-        // out_new` is the writable slot `guarded_new`'s `# Safety` asks for.
-        assert!(unsafe { guarded_new_err(false, &mut out_new) }.is_null());
-        assert_eq!(out_new, std::ptr::dangling_mut());
-    }
-
-    /// A twin of a function with `on_panic` keeps that channel, as a `_cb`
-    /// export's twin keeps its completion: the closure sees the panic, named
-    /// after the twin, and the twin returns null with the closure's value.
-    #[test]
-    fn ffi_guard_err_twin_keeps_the_on_panic_channel() {
-        ON_PANIC_SAW.with(|saw| saw.borrow_mut().take());
-        let mut value = 0;
-        // SAFETY: Test code: `value` is a live local that outlives the call, so `&mut
-        // value` is valid for the one write the twin's `# Safety` asks for.
-        assert!(unsafe { guarded_on_panic_err(&mut value) }.is_null());
-        assert_eq!(value, 7);
-        let (message, code) = ON_PANIC_SAW.with(|saw| saw.borrow_mut().take()).expect("the closure ran");
-        assert_eq!(message, panic_message("guarded_on_panic_err", "custom path"));
-        assert_eq!(code, kafka_common_Error_LOCAL_ILLEGAL_STATE);
     }
 
     #[test]
@@ -3091,7 +3188,7 @@ mod tests {
     #[test]
     fn ffi_guard_passes_through_when_nothing_panics() {
         // SAFETY: Test code: every `guarded_*` call here takes only a `bool`, no argument,
-        // or `&mut out_new`, a live local that outlives the call and is the writable slot
+        // or `&mut err`, a live local pointing at null that outlives the call, the slot
         // `guarded_new` asks for; `guarded_const_pointer(false)` returns a pointer to the
         // `c"value"` literal, which is `'static`, so `CStr::from_ptr` reads a valid
         // NUL-terminated string; `guarded_bytes(false)` views the `'static` `b"value"`
@@ -3124,9 +3221,9 @@ mod tests {
                 kafka_common_IsolationLevel_e::kafka_common_IsolationLevel_READ_COMMITTED
             );
 
-            let mut out_new: *mut u8 = std::ptr::null_mut();
-            assert!(guarded_new(false, &mut out_new).is_null(), "success returns no error");
-            assert!(!out_new.is_null(), "and delivers the value");
+            let mut err = std::ptr::null_mut();
+            assert!(!guarded_new(false, false, &mut err).is_null(), "success returns the value");
+            assert!(err.is_null(), "and stores no error");
         }
     }
 }

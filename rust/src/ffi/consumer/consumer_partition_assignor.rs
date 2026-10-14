@@ -32,8 +32,9 @@ use crate::common::Error;
 use crate::consumer::consumer_partition_assignor::{
     Assignment, Subscription, SubscriptionOptions, SubscriptionOptionsBuilder,
 };
+use crate::ffi::common::fail_with;
+use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::common::topic_partition::{list_topic_partitions, topic_partition_list};
-use crate::ffi::common::{box_error, kafka_common_Error_t};
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_string_list, c_str_to_option, kafka_Bytes_t, kafka_List_t, list_strings, owned_c_string};
 
@@ -620,30 +621,27 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_rack_id(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle that no other call uses at the
-/// same time, and `out_build` a valid pointer.
+/// `self_` must be a valid builder handle that no other call uses at the same
+/// time, and `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_build(
     self_: *mut kafka_consumer_SubscriptionOptionsBuilder_t,
-    out_build: *mut *mut kafka_consumer_SubscriptionOptions_t,
-) -> *mut kafka_common_Error_t {
+    out_err: *mut *mut kafka_common_Error_t,
+) -> *mut kafka_consumer_SubscriptionOptions_t {
     // SAFETY: Per this function's `# Safety`, `self_` is the `Box::into_raw` of an
     // `Option<SubscriptionOptionsBuilder>` in `kafka_consumer_SubscriptionOptionsBuilder_new`, the
     // only constructor, that no other call uses at the same time, so the exclusive reference, used
     // only within this call, aliases nothing.
     let slot = unsafe { &mut *(self_ as *mut Option<SubscriptionOptionsBuilder>) };
     let Some(builder) = slot.take() else {
-        return box_error(Error::local_illegal_state("SubscriptionOptionsBuilder already built"));
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        return unsafe { fail_with(out_err, Error::local_illegal_state("SubscriptionOptionsBuilder already built")) };
     };
     match builder.build() {
-        Ok(options) => {
-            // SAFETY: Per this function's `# Safety`, `out_build` is a valid pointer to write the
-            // result to.
-            unsafe { *out_build = Box::into_raw(Box::new(options)) as *mut kafka_consumer_SubscriptionOptions_t };
-            std::ptr::null_mut()
-        },
-        Err(error) => box_error(error),
+        Ok(options) => Box::into_raw(Box::new(options)) as *mut kafka_consumer_SubscriptionOptions_t,
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        Err(error) => unsafe { fail_with(out_err, error) },
     }
 }
 
@@ -736,15 +734,17 @@ mod tests {
     fn builder_and_assignment() {
         let builder = kafka_consumer_SubscriptionOptionsBuilder_new();
         let topics = topics();
-        let mut options = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
         // SAFETY: Test code: every handle is live and owned by this test, used on this thread only,
-        // `options` is a valid out-pointer, and each handle is destroyed once, after its last use.
+        // `err` is a valid slot pointing at null, and each handle is destroyed once, after its last
+        // use.
         unsafe {
             kafka_consumer_SubscriptionOptionsBuilder_set_topics(builder, topics);
             kafka_consumer_SubscriptionOptionsBuilder_set_generation_id(builder, 9);
             kafka_consumer_SubscriptionOptionsBuilder_set_rack_id(builder, c"r1".as_ptr());
             kafka_consumer_SubscriptionOptionsBuilder_set_user_data(builder, kafka_Bytes_t::NULL);
-            assert!(kafka_consumer_SubscriptionOptionsBuilder_build(builder, &mut options).is_null());
+            let options = kafka_consumer_SubscriptionOptionsBuilder_build(builder, &mut err);
+            assert!(err.is_null());
             kafka_consumer_SubscriptionOptionsBuilder_destroy(builder);
             kafka_List_destroy(topics);
             let sub = kafka_consumer_ConsumerPartitionAssignor_Subscription_with_options(options);

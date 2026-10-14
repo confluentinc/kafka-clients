@@ -166,10 +166,10 @@ mod tests {
 
     unsafe fn take_string(out: *mut c_void) -> String {
         // SAFETY: Test code: `out` is an owned `char *` from `into_c_string` that the deserializer
-        // just wrote, read before `kafka_string_destroy` frees it.
+        // just returned, read before `kafka_string_destroy` frees it.
         let s = unsafe { CStr::from_ptr(out as *const c_char) }.to_str().unwrap().to_string();
         // SAFETY: Test code: `out` is an owned `char *` from `into_c_string` that the deserializer
-        // just wrote, not yet freed and not used after this call.
+        // just returned, not yet freed and not used after this call.
         unsafe { kafka_string_destroy(out as *mut c_char) };
         s
     }
@@ -183,64 +183,64 @@ mod tests {
         // SAFETY: Test code: `handle` comes from the class constructor and is destroyed once, at
         // the end, after the last use of its view `view`; `record_headers` comes from
         // `box_record_headers` and is destroyed once, after the last use of its `Headers` view
-        // `headers`; `topic`, `source` and the arrays outlive the calls reading them; `out` is a
-        // valid local slot, and every value written to it is an owned string that `take_string`
-        // frees once; `configure` gets a null map, which reads as empty.
+        // `headers`; `topic`, `source` and the arrays outlive the calls reading them; `err` is a
+        // valid slot pointing at null, left null by every call (asserted), and every value returned
+        // is an owned string that `take_string` frees once; `configure` gets a null map, which reads as empty.
         unsafe {
             let view = kafka_common_serialization_StringDeserializer__as_Deserializer(handle);
             assert_eq!(view, kafka_common_serialization_StringDeserializer__as_Deserializer(handle));
             let headers = kafka_common_header_internals_RecordHeaders__as_Headers(record_headers);
-            let mut out: *mut c_void = ptr::null_mut();
+            let mut err = ptr::null_mut();
 
-            let error = kafka_common_serialization_Deserializer_deserialize(
+            let out = kafka_common_serialization_Deserializer_deserialize(
                 view,
                 topic.as_ptr(),
                 kafka_Bytes_t::from_slice("héllo".as_bytes()),
-                &raw mut out,
+                &raw mut err,
             );
-            assert!(error.is_null());
+            assert!(err.is_null());
             assert_eq!(take_string(out), "héllo");
 
-            let error = kafka_common_serialization_Deserializer_deserialize_with_headers(
+            let out = kafka_common_serialization_Deserializer_deserialize_with_headers(
                 view,
                 topic.as_ptr(),
                 headers,
                 kafka_Bytes_t::from_slice(b"hi"),
-                &raw mut out,
+                &raw mut err,
             );
-            assert!(error.is_null());
+            assert!(err.is_null());
             assert_eq!(take_string(out), "hi");
 
-            let error = kafka_common_serialization_Deserializer_deserialize_from_shared(
+            let out = kafka_common_serialization_Deserializer_deserialize_from_shared(
                 view,
                 topic.as_ptr(),
                 kafka_Bytes_t::from_slice(source),
                 kafka_Bytes_t::from_slice(&source[6..]),
-                &raw mut out,
+                &raw mut err,
             );
-            assert!(error.is_null());
+            assert!(err.is_null());
             assert_eq!(take_string(out), "world");
 
-            let error = kafka_common_serialization_Deserializer_deserialize_from_shared_with_headers(
+            let out = kafka_common_serialization_Deserializer_deserialize_from_shared_with_headers(
                 view,
                 topic.as_ptr(),
                 headers,
                 kafka_Bytes_t::from_slice(source),
                 kafka_Bytes_t::from_slice(&source[..5]),
-                &raw mut out,
+                &raw mut err,
             );
-            assert!(error.is_null());
+            assert!(err.is_null());
             assert_eq!(take_string(out), "hello");
 
             // Malformed UTF-8 is replaced, as Java does; an interior NUL
             // truncates, as a C string must.
-            let error = kafka_common_serialization_Deserializer_deserialize(
+            let out = kafka_common_serialization_Deserializer_deserialize(
                 view,
                 topic.as_ptr(),
                 kafka_Bytes_t::from_slice(&[b'a', 0xFF, b'b', 0, b'c']),
-                &raw mut out,
+                &raw mut err,
             );
-            assert!(error.is_null());
+            assert!(err.is_null());
             assert_eq!(take_string(out), "a\u{FFFD}b");
 
             // The Java defaults: nothing to observe, nothing crashes.
