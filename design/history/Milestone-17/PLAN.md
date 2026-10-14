@@ -51,7 +51,7 @@ The per-commit classification table is §6. Phase 13 completes it into the forma
   milestone adds no audience work beyond keeping the lint green for the new public types.
 - **The CLAUDE.md "Source Reference" line edit (4.3.1 → 4.4.0) is human-approved through this plan**, as in
   M13. Only that line changes. Any other CLAUDE.md or rules change goes through the suggestion process
-  (drafts go in `design/current/Milestone-17/rules-errata.md`).
+  (drafts go in `design/history/Milestone-17/rules-errata.md`).
 
 ### 1.2 Method: per-subsystem tree diff, with the commit list as a checklist
 
@@ -195,7 +195,7 @@ Every phase works the same way:
 - Update `README.md` and the `CLAUDE.md:93` source line "(Apache Kafka 4.3.1)" → "(Apache Kafka 4.4.0)".
 - Rules errata survey: re-check the Java `file:line` citations in `.claude/rules/*.md` against 4.4, chiefly
   `producer-transactions.md` (TransactionManager moves under KIP-1319) and `consumer-threading.md`. Write
-  the list to `design/current/Milestone-17/rules-errata.md`.
+  the list to `design/history/Milestone-17/rules-errata.md`.
 - Commits covered: 7997c9ebe0 (spec + errors portion only; the Streams RPC itself is out of scope),
   c274a7348f (spec + error portion), 8ba75d04cb, 04c3c00f25, 89ccd6a126 / 6be48c6e54 / 70dfc4236c
   (spec-only syncs).
@@ -239,7 +239,7 @@ Phase 0 completion notes (agent 90):
     `rust/tests/common/error_code.rs` are regenerated from it, and the multilanguage decoder maps -29.
 - **Docs:** `CLAUDE.md` Source Reference line and `rust/README.md` now say 4.4.0. The repository-root
   `README.md` names no Kafka version, so it has nothing to change.
-- **Rules errata:** `design/current/Milestone-17/rules-errata.md`. 46 citations: 36 drifted, 10
+- **Rules errata:** `design/history/Milestone-17/rules-errata.md`. 46 citations: 36 drifted, 10
   unchanged, and none whose rule claim breaks. It also lists 4.4 changes to code the rules reason about
   without a line cite: KIP-1319 vs producer-transactions §10-§12 (relevant to **Phase 5**), the
   MockAdminClient move and its new in-memory methods vs admin-client §9 (**Phase 12**), and KIP-909

@@ -17,7 +17,7 @@
 > **Current state (2026-10-08, Milestone 17 close-out):** the Rust client is up
 > to **Apache Kafka 4.4.0**, built against `4.4.0-rc4` (`1156b2752a`) because
 > 4.4.0 final was not yet tagged (the bump steps for final are in
-> `Milestone-17/PLAN.md`, Phase 13 notes). The `kafka/` submodule is at
+> `design/history/Milestone-17/PLAN.md`, Phase 13 notes). The `kafka/` submodule is at
 > 4.4.0-rc4, `generator/messages/` holds **203 specs** and matches the 4.4.0-rc4
 > corpus byte for byte, and `generator/test-messages/` holds 5. `AUDIENCE_REF` /
 > `DEPRECATION_REFS` are `4.4.0-rc3` / `[4.3.1, 4.4.0-rc3]`, valid for rc4
@@ -31,13 +31,13 @@
 >   `common::utils::internals` moves; consumer heartbeat / fetch / offsets /
 >   metrics fixes; `MockConsumer::lose_partitions`; `Admin::unregister_controller`.
 >   See `design/history/MILESTONES.md` → Milestone 17.
-> - **Audit:** `Milestone-17/PLAN.md` §7 maps all 191 `clients/src` commits of
+> - **Audit:** `design/history/Milestone-17/PLAN.md` §7 maps all 191 `clients/src` commits of
 >   `4.3.1...4.4.0-rc4`, KAFKA-20864 and the two master merges to a phase or a
 >   reasoned skip, with no gaps.
-> - **Open:** `Milestone-17/PLAN.md` §8 lists the decisions left to the human
+> - **Open:** `design/history/Milestone-17/PLAN.md` §8 lists the decisions left to the human
 >   (S1/S2 producer batch timing, admin close grace period, `unregisterBroker`,
 >   the consumer I/O-loop catch-all, two upstream JIRAs, the keyed-send cost) and the follow-ups;
->   `Milestone-17/rules-errata.md` holds the drafted rules amendments.
+>   `design/history/Milestone-17/rules-errata.md` holds the drafted rules amendments.
 > - **Tests at the last merge (`5c207c9f`):** `cargo test` 4641 passed / 0
 >   failed / 10 ignored (lib 4585 / 3); `--features ffi --lib` 4835 / 0 / 3.
 >   The broker reruns owed on that merge passed on the same code (Critic 103:
