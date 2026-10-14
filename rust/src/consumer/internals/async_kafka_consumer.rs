@@ -633,6 +633,10 @@ impl AsyncConsumerHandleState {
     /// wakeup token's cancellation and the absolute `deadline_ms`. The
     /// deadline / timeout logic is identical in shape — see that method
     /// for the per-stage rationale.
+    ///
+    /// As [`AsyncKafkaConsumer::submit_and_drain`], a wakeup pending when the
+    /// call starts is raised before the event is submitted, Java's
+    /// `setActiveTask` before `addAndGet`.
     async fn submit_and_await<T: Send + 'static>(
         &self,
         event: ApplicationEvent,
@@ -641,9 +645,14 @@ impl AsyncConsumerHandleState {
         timeout_msg: impl AsRef<str>,
         enable_wakeup: bool,
     ) -> Result<T, Error> {
+        if enable_wakeup && let Err(err) = self.wakeup_trigger.maybe_trigger_wakeup() {
+            self.wakeup_trigger.rotate();
+            return Err(err);
+        }
         let now_ms = self.time.milliseconds();
         self.application_event_handler.add(event, now_ms)?;
-        self.await_completion(receiver, deadline_ms, timeout_msg, enable_wakeup).await
+        self.await_completion_inner(receiver, deadline_ms, timeout_msg, enable_wakeup, false)
+            .await
     }
 
     /// Milliseconds remaining until `deadline_ms`, saturating at zero.
@@ -809,6 +818,12 @@ impl AsyncConsumerHandleState {
                 Err(err) => return Err(err),
             }
 
+            // Java: `wakeupTrigger.maybeTriggerWakeup()` after every
+            // `updateFetchPositions` (`AsyncKafkaConsumer.java:1235`).
+            if let Err(err) = self.wakeup_trigger.maybe_trigger_wakeup() {
+                self.wakeup_trigger.rotate();
+                return Err(err);
+            }
             if self.time.milliseconds() >= deadline_ms {
                 return Err(Error::timeout(format!(
                     "Timeout of {}ms expired before the position for partition {} could be determined",
@@ -1112,18 +1127,35 @@ impl AsyncConsumerHandleState {
     /// hence the submit and the await are separated here.
     async fn await_completion<T: Send + 'static>(
         &self,
-        mut receiver: tokio::sync::oneshot::Receiver<Result<T, Error>>,
+        receiver: tokio::sync::oneshot::Receiver<Result<T, Error>>,
         deadline_ms: i64,
         timeout_msg: impl AsRef<str>,
         enable_wakeup: bool,
     ) -> Result<T, Error> {
+        self.await_completion_inner(receiver, deadline_ms, timeout_msg, enable_wakeup, true)
+            .await
+    }
+
+    /// [`Self::await_completion`], with `result_first_on_entry` as
+    /// [`AsyncKafkaConsumer::process_background_events_until_inner`] takes it:
+    /// `false` where the wakeup was checked before the event was submitted
+    /// ([`Self::submit_and_await`]).
+    async fn await_completion_inner<T: Send + 'static>(
+        &self,
+        mut receiver: tokio::sync::oneshot::Receiver<Result<T, Error>>,
+        deadline_ms: i64,
+        timeout_msg: impl AsRef<str>,
+        enable_wakeup: bool,
+        result_first_on_entry: bool,
+    ) -> Result<T, Error> {
         // Java's `setActiveTask(future)` on a future that is already done
         // keeps its result and leaves a pending wakeup armed for the next
         // call (`WakeupTrigger.java` `setActiveTask`), so on entry the result
-        // is looked at before the wakeup. Afterwards the wakeup goes first: it
+        // is looked at before the wakeup, where the future can be done then
+        // (`result_first_on_entry`). Afterwards the wakeup goes first: it
         // was not there when the result was last seen missing, and where both
         // arrived since, the `biased` wait below also prefers it.
-        if let Some(result) = try_take_completion(&mut receiver) {
+        if result_first_on_entry && let Some(result) = try_take_completion(&mut receiver) {
             return result;
         }
         loop {
@@ -3934,6 +3966,8 @@ where
             // (the consumer is already leaving).
             /* skip_assignment_events = */
             true,
+            // Without wakeups the entry order does not matter.
+            /* result_first_on_entry = */ true,
         )
         .await
     }
@@ -4402,6 +4436,7 @@ where
             enable_wakeup,
             /* skip_rebalance_callback = */ false,
             /* skip_assignment_events = */ false,
+            /* result_first_on_entry = */ true,
         )
         .await
     }
@@ -4410,6 +4445,15 @@ where
     /// with the extra `skip_rebalance_callback` / `skip_assignment_events`
     /// flags forwarded to [`Self::process_background_events_inner`]. See that
     /// method for the close-path / unsubscribe rationale.
+    ///
+    /// `result_first_on_entry`: whether the event's result may already be
+    /// there when its wakeup is registered, Java's `setActiveTask` on a done
+    /// future, which keeps the result and leaves the wakeup pending
+    /// (`commitSync`'s `commitFuture` for empty offsets, and the waits
+    /// [`Self::process_background_events_until`] serves). `false` where the
+    /// wakeup was checked before the event was submitted
+    /// ([`Self::submit_and_drain`], Java's `setActiveTask` before `addAndGet`):
+    /// a wakeup seen afterwards found the event's future pending, so it wins.
     #[expect(clippy::too_many_arguments)]
     async fn process_background_events_until_inner<T: Send + 'static>(
         &mut self,
@@ -4420,6 +4464,7 @@ where
         enable_wakeup: bool,
         skip_rebalance_callback: bool,
         skip_assignment_events: bool,
+        result_first_on_entry: bool,
     ) -> Result<T, Error> {
         let mut receiver = receiver;
         // Java's `setActiveTask(future)` lets whichever came first win
@@ -4432,8 +4477,10 @@ where
         // on entry the result (it is "done before set"), afterwards the wakeup
         // (it was not there when the result was last seen missing). Where
         // both arrived since the last look, the wakeup wins, as the `biased`
-        // wait does.
-        let mut entering = true;
+        // wait does. Without `result_first_on_entry` the wakeup goes first
+        // on entry too: it was checked before the event was submitted, so a
+        // wakeup seen now came while the event's future was pending.
+        let mut entering = result_first_on_entry;
 
         loop {
             // Observation before the drain. A result seen here stands even if
@@ -4568,7 +4615,16 @@ where
     /// callback from the bg-event channel).
     ///
     /// `enable_wakeup` mirrors Java's per-API `setActiveTask` decision;
-    /// see [`Self::process_background_events_until`] doc-comment.
+    /// see [`Self::process_background_events_until`] doc-comment. Java calls
+    /// `wakeupTrigger.setActiveTask(event.future())` before
+    /// `applicationEventHandler.addAndGet(event)` (`committed`, `partitionsFor`,
+    /// `listTopics`, `updateFetchPositions`: `AsyncKafkaConsumer.java:1264`,
+    /// `:1311`, `:1339`, `:2080`), so a wakeup pending when the call starts
+    /// always fails it, the future being not yet done: the pending wakeup is
+    /// raised (and the token rotated) before the event is submitted. Java's
+    /// `addAndGet` still enqueues that event, but its future is failed by then
+    /// and nothing reads what the background thread does with it, so the
+    /// event is not submitted here.
     pub(crate) async fn submit_and_drain<T: Send + 'static>(
         &mut self,
         event: ApplicationEvent,
@@ -4577,10 +4633,23 @@ where
         timeout_msg: impl AsRef<str>,
         enable_wakeup: bool,
     ) -> Result<T, Error> {
+        if enable_wakeup && let Err(err) = self.wakeup_trigger.maybe_trigger_wakeup() {
+            self.wakeup_trigger.rotate();
+            return Err(err);
+        }
         let now_ms = self.time.milliseconds();
         self.application_event_handler.add(event, now_ms)?;
-        self.process_background_events_until::<T>(receiver, deadline_ms, |_| false, timeout_msg, enable_wakeup)
-            .await
+        self.process_background_events_until_inner::<T>(
+            receiver,
+            deadline_ms,
+            |_| false,
+            timeout_msg,
+            enable_wakeup,
+            /* skip_rebalance_callback = */ false,
+            /* skip_assignment_events = */ false,
+            /* result_first_on_entry = */ false,
+        )
+        .await
     }
 
     /// Close-path variant of [`Self::submit_and_drain`].
@@ -4615,6 +4684,7 @@ where
             /* enable_wakeup = */ false,
             /* skip_rebalance_callback = */ true,
             /* skip_assignment_events = */ true,
+            /* result_first_on_entry = */ true,
         )
         .await
     }
@@ -5572,8 +5642,9 @@ where
             // `submit_and_drain` so a bg-task rebalance-listener
             // callback enqueued mid-wait is delivered on the caller's
             // task (Issue 10 / §31). Java `setActiveTask` analog: the
-            // helper's `enable_wakeup=true` makes a concurrent
-            // `wakeup()` interrupt the wait (Issue 11 / §11).
+            // helper's `enable_wakeup=true` raises a wakeup pending before
+            // the event is submitted and makes a concurrent `wakeup()`
+            // interrupt the wait (Issue 11 / §11).
             let (handle, receiver, _erased) = CompletableEvent::make_completable_event::<()>(deadline_ms);
             let drain_result = self
                 .submit_and_drain::<()>(
@@ -5598,8 +5669,15 @@ where
                 Err(err) => return Err(err),
             }
 
-            // The drain helper rotates the token on wakeup itself, so
-            // the second-line check below is only the deadline guard.
+            // Java: `wakeupTrigger.maybeTriggerWakeup()` after every
+            // `updateFetchPositions` (`AsyncKafkaConsumer.java:1235`): a
+            // wakeup that came once the event's future was done, which the
+            // drain helper leaves pending, fails the call here, before the
+            // valid position is read again.
+            if let Err(err) = self.wakeup_trigger.maybe_trigger_wakeup() {
+                self.wakeup_trigger.rotate();
+                return Err(err);
+            }
             if self.time.milliseconds() >= deadline_ms {
                 return Err(Error::timeout(format!(
                     "Timeout of {}ms expired before the position for partition {} could be determined",
@@ -9525,6 +9603,158 @@ mod tests {
             assert!(
                 consumer.wakeup_trigger.maybe_trigger_wakeup().is_err(),
                 "{outcome:?}: wakeup pending"
+            );
+        }
+    }
+
+    /// Asserts that `call` raised a pending wakeup before submitting its
+    /// event: `Error::Wakeup`, the token rotated, nothing on the event queue.
+    fn assert_wakeup_raised_before_submitting<T>(
+        call: &str,
+        result: Result<T, Error>,
+        trigger: &WakeupTrigger,
+        app_event_rx: &mut mpsc::UnboundedReceiver<ApplicationEventEnvelope>,
+    ) {
+        match result {
+            Err(Error::Wakeup(_)) => {},
+            Err(err) => panic!("{call}: expected Wakeup, got {err:?}"),
+            Ok(_) => panic!("{call}: expected Wakeup, got a result"),
+        }
+        assert!(!trigger.current_token().is_cancelled(), "{call}: the raised wakeup is rotated");
+        assert!(app_event_rx.try_recv().is_err(), "{call}: no event is submitted");
+    }
+
+    /// Java's `committed`, `position` (through `updateFetchPositions`),
+    /// `partitionsFor` and `listTopics` call `wakeupTrigger.setActiveTask`
+    /// before `applicationEventHandler.addAndGet`
+    /// (`AsyncKafkaConsumer.java:1264`, `:2080`, `:1311`, `:1339`), so a
+    /// wakeup pending when the call starts fails it whatever the background
+    /// thread does with the event, as `testWakeupCommitted` asserts. The same
+    /// through a [`ConsumerHandle`]'s `position` and `committed`.
+    #[tokio::test]
+    async fn a_pending_wakeup_fails_the_wakeable_queries_before_their_event_is_submitted() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("t".to_string(), 0);
+        consumer
+            .subscriptions
+            .lock()
+            .unwrap()
+            .assign_from_user(HashSet::from([tp.clone()]))
+            .unwrap();
+        let trigger = consumer.wakeup_trigger.clone();
+        let timeout = Duration::from_secs(5);
+
+        trigger.wakeup();
+        let result = consumer.committed_with_timeout(std::slice::from_ref(&tp), timeout).await;
+        assert_wakeup_raised_before_submitting("committed", result, &trigger, &mut handles.app_event_rx);
+
+        trigger.wakeup();
+        let result = consumer.position_with_timeout(&tp, timeout).await;
+        assert_wakeup_raised_before_submitting("position", result, &trigger, &mut handles.app_event_rx);
+
+        trigger.wakeup();
+        let result = consumer.partitions_for_with_timeout("t", timeout).await;
+        assert_wakeup_raised_before_submitting("partitions_for", result, &trigger, &mut handles.app_event_rx);
+
+        trigger.wakeup();
+        let result = consumer.list_topics_with_timeout(timeout).await;
+        assert_wakeup_raised_before_submitting("list_topics", result, &trigger, &mut handles.app_event_rx);
+
+        let handle = consumer.handle();
+        trigger.wakeup();
+        let result = handle.position_with_timeout(&tp, timeout).await;
+        assert_wakeup_raised_before_submitting("handle position", result, &trigger, &mut handles.app_event_rx);
+
+        trigger.wakeup();
+        let result = handle.committed(std::slice::from_ref(&tp)).await;
+        assert_wakeup_raised_before_submitting("handle committed", result, &trigger, &mut handles.app_event_rx);
+    }
+
+    /// A clock that, at its first reading after a `CheckAndUpdatePositions`
+    /// event is submitted, takes the event (leaving it pending), calls
+    /// `wakeup()` and moves past every deadline, so the wait for the update
+    /// ends by its deadline with the wakeup still pending.
+    struct WakeAtUpdateTime {
+        now_ms: AtomicI64,
+        app_event_rx: std::sync::Mutex<mpsc::UnboundedReceiver<ApplicationEventEnvelope>>,
+        held: std::sync::Mutex<Vec<ApplicationEventEnvelope>>,
+        trigger: WakeupTrigger,
+    }
+
+    impl WakeAtUpdateTime {
+        fn install(
+            consumer: &mut AsyncKafkaConsumer<Vec<u8>, Vec<u8>>,
+            app_event_rx: mpsc::UnboundedReceiver<ApplicationEventEnvelope>,
+        ) -> Arc<Self> {
+            let time = Arc::new(Self {
+                now_ms: AtomicI64::new(1_000),
+                app_event_rx: std::sync::Mutex::new(app_event_rx),
+                held: std::sync::Mutex::new(Vec::new()),
+                trigger: consumer.wakeup_trigger.clone(),
+            });
+            consumer.time = Arc::clone(&time) as Arc<dyn Time>;
+            time
+        }
+
+        fn updates_taken(&self) -> usize {
+            self.held
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|envelope| matches!(envelope.event, ApplicationEvent::CheckAndUpdatePositions { .. }))
+                .count()
+        }
+    }
+
+    impl Time for WakeAtUpdateTime {
+        fn milliseconds(&self) -> i64 {
+            if let Ok(envelope) = self.app_event_rx.lock().unwrap().try_recv() {
+                if matches!(envelope.event, ApplicationEvent::CheckAndUpdatePositions { .. }) {
+                    self.trigger.wakeup();
+                    self.now_ms.fetch_add(3_600_000, Ordering::SeqCst);
+                }
+                self.held.lock().unwrap().push(envelope);
+            }
+            self.now_ms.load(Ordering::SeqCst)
+        }
+
+        fn nanoseconds(&self) -> i64 {
+            self.milliseconds() * 1_000_000
+        }
+    }
+
+    /// Java's `position` calls `wakeupTrigger.maybeTriggerWakeup()` after
+    /// every `updateFetchPositions`, before `timer.notExpired()`
+    /// (`AsyncKafkaConsumer.java:1235`): a wakeup still pending when the
+    /// update returns fails the call, here ahead of the timeout the expired
+    /// update would otherwise lead to. Both the consumer's and a
+    /// [`ConsumerHandle`]'s `position`.
+    #[tokio::test]
+    async fn position_raises_a_wakeup_pending_after_the_update_ahead_of_the_timeout() {
+        let tp = TopicPartition::new("t".to_string(), 0);
+        for through_handle in [false, true] {
+            let (mut consumer, handles) = make_test_consumer_with_channels();
+            consumer
+                .subscriptions
+                .lock()
+                .unwrap()
+                .assign_from_user(HashSet::from([tp.clone()]))
+                .unwrap();
+            let time = WakeAtUpdateTime::install(&mut consumer, handles.app_event_rx);
+            let result = if through_handle {
+                consumer.handle().position_with_timeout(&tp, Duration::from_secs(5)).await
+            } else {
+                consumer.position_with_timeout(&tp, Duration::from_secs(5)).await
+            };
+            let err = result.expect_err("the wakeup fails position");
+            assert!(
+                matches!(err, Error::Wakeup(_)),
+                "handle={through_handle}: expected Wakeup, got {err:?}"
+            );
+            assert_eq!(time.updates_taken(), 1, "handle={through_handle}: one update was submitted");
+            assert!(
+                !consumer.wakeup_trigger.current_token().is_cancelled(),
+                "handle={through_handle}: the raised wakeup is rotated"
             );
         }
     }
