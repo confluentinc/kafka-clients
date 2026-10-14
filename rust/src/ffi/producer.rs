@@ -7631,9 +7631,6 @@ mod tests {
     }
 
     /// Waits up to ten seconds for `counter` to reach `expected` and returns its final value.
-    ///
-    /// `destroy` does not join the callback dispatcher, so callbacks queued before it returns
-    /// may still be running on the dispatcher thread when it does.
     fn wait_for_count(counter: &std::sync::atomic::AtomicUsize, expected: usize) -> usize {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while counter.load(std::sync::atomic::Ordering::Acquire) < expected && std::time::Instant::now() < deadline {
@@ -8057,6 +8054,105 @@ mod tests {
             "every callback must have run when flush returns"
         );
         // SAFETY: `producer` is the live handle created above; this destroy is its final use.
+        unsafe { kafka_producer_Producer_destroy(producer) };
+    }
+
+    /// What [`flush_from_callback`] records: the producer it flushes, and how many of its
+    /// flushes returned and how many of those failed.
+    struct FlushFromCallback {
+        producer: std::sync::atomic::AtomicPtr<kafka_producer_Producer_t>,
+        flushes: std::sync::atomic::AtomicUsize,
+        errors: std::sync::atomic::AtomicUsize,
+    }
+
+    /// A send callback that flushes the producer it was sent on, from the dispatcher thread.
+    unsafe extern "C" fn flush_from_callback(
+        metadata: *mut kafka_producer_RecordMetadata_t,
+        error: *mut kafka_common_Error_t,
+        user_data: *mut std::ffi::c_void,
+    ) {
+        // SAFETY: `user_data` is the leaked `FlushFromCallback` the test passes with this
+        // callback; only shared, atomic access is taken.
+        let state = unsafe { &*(user_data as *const FlushFromCallback) };
+        let mut flush_error: *mut kafka_common_Error_t = std::ptr::null_mut();
+        // SAFETY: `state.producer` is the live handle the test created; the test destroys it
+        // only after this callback has run. `&mut flush_error` is a writable local.
+        unsafe {
+            kafka_producer_Producer_flush(state.producer.load(std::sync::atomic::Ordering::Acquire), &mut flush_error)
+        };
+        if !flush_error.is_null() {
+            state.errors.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            // SAFETY: `flush_error` is non-null (checked above) and owned by this caller.
+            unsafe { kafka_common_Error_destroy(flush_error) };
+        }
+        state.flushes.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if !metadata.is_null() {
+            // SAFETY: as in `count_send_callback`, `metadata` is owned by this callback.
+            unsafe { kafka_producer_RecordMetadata_destroy(metadata) };
+        }
+        if !error.is_null() {
+            // SAFETY: as in `count_send_callback`, `error` is owned by this callback.
+            unsafe { kafka_common_Error_destroy(error) };
+        }
+    }
+
+    /// `flush` called from a delivery callback returns without waiting for the queued
+    /// callbacks, since it runs on the dispatcher thread that would have to run them.
+    ///
+    /// Regression test: waiting there would deadlock the dispatcher thread on itself.
+    #[test]
+    fn test_flush_from_a_callback_does_not_wait_for_the_callbacks() {
+        let state: &'static FlushFromCallback = Box::leak(Box::new(FlushFromCallback {
+            producer: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+            flushes: std::sync::atomic::AtomicUsize::new(0),
+            errors: std::sync::atomic::AtomicUsize::new(0),
+        }));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        // A dedicated thread, so that a deadlock is reported as a test failure.
+        std::thread::spawn(move || {
+            let producer = kafka_producer_MockProducer_new(false);
+            state.producer.store(producer, std::sync::atomic::Ordering::Release);
+            let topic = CString::new(BUFFERING_BROKER_TOPIC).unwrap();
+            let value = b"value";
+            let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+            // SAFETY: `producer` is the live handle created above, `topic` and `value` are
+            // alive for the call, `flush_from_callback`/`state` are a matching pair over a
+            // leaked value, and `&mut err` a writable local that `assert_success` consumes.
+            // The returned future is destroyed once.
+            unsafe {
+                let future = kafka_producer_Producer_send_with_callback(
+                    producer,
+                    topic.as_ptr(),
+                    -1,
+                    -1,
+                    std::ptr::null(),
+                    -1,
+                    value.as_ptr(),
+                    value.len() as i32,
+                    flush_from_callback,
+                    state as *const FlushFromCallback as *mut std::ffi::c_void,
+                    &mut err,
+                );
+                assert_success(err);
+                kafka_common_KafkaFuture_RecordMetadata_destroy(future);
+                // Completes the record, so its callback runs and flushes again.
+                kafka_producer_Producer_flush(producer, &mut err);
+                assert_success(err);
+            }
+            let _ = done_tx.send(producer as usize);
+        });
+        let producer = done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("flush must not deadlock when a callback flushes")
+            as *mut kafka_producer_Producer_t;
+        assert_eq!(
+            1,
+            state.flushes.load(std::sync::atomic::Ordering::Acquire),
+            "the callback must have run"
+        );
+        assert_eq!(0, state.errors.load(std::sync::atomic::Ordering::Acquire));
+        // SAFETY: `producer` is the live handle created on the thread above, which no longer
+        // uses it; this destroy is its final use.
         unsafe { kafka_producer_Producer_destroy(producer) };
     }
 
