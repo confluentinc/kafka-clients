@@ -259,7 +259,8 @@ static test_Future_t test_v3_send(test_Producer_t producer, Message *message) {
     kafka_producer_ProducerRecord_t *record =
         kafka_producer_ProducerRecord_with_key(TOPIC, KEY_SIZE > 0 ? &key : NULL, &value);
     do {
-        error = kafka_producer_Producer_send(v3_producer_view, record, &future);
+        error = NULL;
+        future = kafka_producer_Producer_send(v3_producer_view, record, &error);
 
         if (error) {
             const char* msg = kafka_common_Error_message(error);
@@ -273,8 +274,8 @@ static test_Future_t test_v3_send(test_Producer_t producer, Message *message) {
 
 static bool test_v3_verify_future(test_Future_t future) {
     kafka_common_KafkaFuture_t *f = (kafka_common_KafkaFuture_t *)future;
-    void *value = NULL;
-    kafka_common_Error_t* error = kafka_common_KafkaFuture_get(f, &value);
+    kafka_common_Error_t* error = NULL;
+    void *value = kafka_common_KafkaFuture_get(f, &error);
 
     if (error) {
         const char* msg = kafka_common_Error_message(error);
@@ -1179,13 +1180,13 @@ static void run_test() {
         }
 
         producer = NULL;
-        kafka_producer_ProducerConfig_t* config = NULL;
-        kafka_common_Error_t* error = kafka_producer_ProducerConfig_new(properties, &config);
+        kafka_common_Error_t* error = NULL;
+        kafka_producer_ProducerConfig_t* config = kafka_producer_ProducerConfig_new(properties, &error);
         kafka_Map_destroy(properties);
         if (!error) {
             // NULL serializers: the record's key and value are `kafka_Bytes_t`.
             kafka_producer_KafkaProducer_t* kafka_producer = NULL;
-            error = kafka_producer_KafkaProducer_new(config, NULL, NULL, &kafka_producer);
+            kafka_producer = kafka_producer_KafkaProducer_new(config, NULL, NULL, &error);
             kafka_producer_ProducerConfig_destroy(config);
             if (!error) {
                 producer = kafka_producer;
@@ -1413,7 +1414,8 @@ end:
     if (CLIENT_VERSION == 3) {
         if (producer != NULL) {
             // close() through the interface view, then the class destroy.
-            kafka_common_Error_t *error = kafka_producer_Producer_close(v3_producer_view);
+            kafka_common_Error_t *error = NULL;
+            kafka_producer_Producer_close(v3_producer_view, &error);
             if (error) {
                 kafka_common_Error_destroy(error);
             }

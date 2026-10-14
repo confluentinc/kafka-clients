@@ -74,19 +74,14 @@ static kafka_admin_Admin_t *create_admin_at(const char *bootstrap) {
     kafka_Map_put(props, (void *)"client.id", (void *)"c-kafka-admin-test");
     kafka_Map_put(props, (void *)"default.api.timeout.ms", (void *)"1000");
     kafka_Map_put(props, (void *)"request.timeout.ms", (void *)"500");
-    kafka_admin_AdminClientConfig_t *config = NULL;
-    kafka_common_Error_t *err = kafka_admin_AdminClientConfig_new(props, &config);
-    if (err != NULL) {
-        TEST_FAIL_MESSAGE(kafka_common_Error_message(err));
-    }
+    kafka_common_Error_t *err = NULL;
+    kafka_admin_AdminClientConfig_t *config = kafka_admin_AdminClientConfig_new(props, &err);
+    assert_ok(err, "AdminClientConfig_new");
     TEST_ASSERT_NOT_NULL(config);
-    kafka_admin_Admin_t *admin = NULL;
-    err = kafka_admin_AdminClient_create(config, &admin);
+    kafka_admin_Admin_t *admin = kafka_admin_AdminClient_create(config, &err);
     kafka_admin_AdminClientConfig_destroy(config);
     kafka_Map_destroy(props);
-    if (err != NULL) {
-        TEST_FAIL_MESSAGE(kafka_common_Error_message(err));
-    }
+    assert_ok(err, "AdminClient_create");
     TEST_ASSERT_NOT_NULL(admin);
     return admin;
 }
@@ -114,8 +109,8 @@ static void close_and_destroy(kafka_admin_Admin_t *admin) {
  * the future succeeded. */
 static int await_either_outcome(kafka_common_KafkaFuture_t *future) {
     TEST_ASSERT_NOT_NULL(future);
-    void *value = NULL;
-    kafka_common_Error_t *err = kafka_common_KafkaFuture_get(future, &value);
+    kafka_common_Error_t *err = NULL;
+    (void)kafka_common_KafkaFuture_get(future, &err);
     int ok;
     if (err != NULL) {
         TEST_ASSERT_NOT_NULL(kafka_common_Error_message(err));
@@ -132,9 +127,10 @@ static int await_either_outcome(kafka_common_KafkaFuture_t *future) {
 /* Awaits an owned future that must fail; returns the owned error. */
 static kafka_common_Error_t *await_failure(kafka_common_KafkaFuture_t *future) {
     TEST_ASSERT_NOT_NULL(future);
-    void *value = NULL;
-    kafka_common_Error_t *err = kafka_common_KafkaFuture_get(future, &value);
+    kafka_common_Error_t *err = NULL;
+    void *value = kafka_common_KafkaFuture_get(future, &err);
     TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(value);
     kafka_common_KafkaFuture_destroy(future);
     return err;
 }
@@ -142,11 +138,9 @@ static kafka_common_Error_t *await_failure(kafka_common_KafkaFuture_t *future) {
 /* Awaits an owned `KafkaFuture<Void>` that must succeed. */
 static void await_void_ok(kafka_common_KafkaFuture_t *future) {
     TEST_ASSERT_NOT_NULL(future);
-    void *value = NULL;
-    kafka_common_Error_t *err = kafka_common_KafkaFuture_get(future, &value);
-    if (err != NULL) {
-        TEST_FAIL_MESSAGE(kafka_common_Error_message(err));
-    }
+    kafka_common_Error_t *err = NULL;
+    void *value = kafka_common_KafkaFuture_get(future, &err);
+    assert_ok(err, "KafkaFuture_get");
     TEST_ASSERT_NULL(value);
     kafka_common_KafkaFuture_destroy(future);
 }
@@ -215,10 +209,11 @@ static void test_kafka_admin_create_succeeds(void) {
 static void test_kafka_admin_create_with_defaults(void) {
     kafka_Map_t *props = kafka_Map_new();
     kafka_Map_put(props, (void *)"bootstrap.servers", (void *)"localhost:9092");
-    kafka_admin_AdminClientConfig_t *config = NULL;
-    TEST_ASSERT_NULL(kafka_admin_AdminClientConfig_new(props, &config));
-    kafka_admin_Admin_t *admin = NULL;
-    TEST_ASSERT_NULL(kafka_admin_AdminClient_create(config, &admin));
+    kafka_common_Error_t *err = NULL;
+    kafka_admin_AdminClientConfig_t *config = kafka_admin_AdminClientConfig_new(props, &err);
+    TEST_ASSERT_NULL(err);
+    kafka_admin_Admin_t *admin = kafka_admin_AdminClient_create(config, &err);
+    TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(admin);
     kafka_admin_AdminClientConfig_destroy(config);
     kafka_Map_destroy(props);
@@ -324,8 +319,8 @@ static void test_kafka_admin_list_topics_async_fires_once(void) {
  * never reaches the production client at all: `Uuid.fromString` is Java's
  * IllegalArgumentException. */
 static void test_kafka_admin_uuid_from_string_rejects_bad_id(void) {
-    kafka_common_Uuid_t *id = NULL;
-    kafka_common_Error_t *err = kafka_common_Uuid_from_string("not-a-base64-uuid", &id);
+    kafka_common_Error_t *err = NULL;
+    kafka_common_Uuid_t *id = kafka_common_Uuid_from_string("not-a-base64-uuid", &err);
     TEST_ASSERT_NULL(id);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
@@ -519,11 +514,9 @@ static void test_kafka_admin_reassignment_empty_batches_need_no_broker(void) {
     kafka_admin_ListOffsetsResult_t *offsets = kafka_admin_Admin_list_offsets(admin, empty);
     TEST_ASSERT_NOT_NULL(offsets);
     kafka_common_KafkaFuture_t *all = kafka_admin_ListOffsetsResult_all(offsets);
-    void *value = NULL;
-    kafka_common_Error_t *err = kafka_common_KafkaFuture_get(all, &value);
-    if (err != NULL) {
-        TEST_FAIL_MESSAGE(kafka_common_Error_message(err));
-    }
+    kafka_common_Error_t *err = NULL;
+    void *value = kafka_common_KafkaFuture_get(all, &err);
+    assert_ok(err, "KafkaFuture_get");
     TEST_ASSERT_EQUAL_INT32(0, kafka_Map_size((const kafka_Map_t *)value));
     kafka_common_KafkaFuture_destroy(all);
     kafka_admin_ListOffsetsResult_destroy(offsets);
@@ -548,20 +541,20 @@ static void test_kafka_admin_reassignment_empty_batches_need_no_broker(void) {
  * enqueued, so these return immediately with no broker: the error names the
  * offending value rather than being a timeout. */
 static void test_kafka_admin_reassignment_constructors_reject_bad_arguments(void) {
-    const kafka_common_ElectionType_t *type = NULL;
-    kafka_common_Error_t *err = kafka_common_ElectionType_value_of(3, &type);
+    kafka_common_Error_t *err = NULL;
+    const kafka_common_ElectionType_t *type = kafka_common_ElectionType_value_of(3, &err);
     TEST_ASSERT_NULL(type);
     assert_error_message(err, "Value 3 must be one of [PREFERRED, UNCLEAN]");
 
     kafka_List_t *no_replicas = kafka_List_new();
-    kafka_admin_NewPartitionReassignment_t *reassignment = NULL;
-    err = kafka_admin_NewPartitionReassignment_new(no_replicas, &reassignment);
+    err = NULL;
+    kafka_admin_NewPartitionReassignment_t *reassignment = kafka_admin_NewPartitionReassignment_new(no_replicas, &err);
     TEST_ASSERT_NULL(reassignment);
     assert_error_message(err, "Cannot create a new partition reassignment without any replicas");
     kafka_List_destroy(no_replicas);
 
-    const kafka_common_IsolationLevel_t *level = NULL;
-    err = kafka_common_IsolationLevel_for_id(5, &level);
+    err = NULL;
+    const kafka_common_IsolationLevel_t *level = kafka_common_IsolationLevel_for_id(5, &err);
     TEST_ASSERT_NULL(level);
     assert_error_message(err, "Unknown isolation level 5");
 }
@@ -573,16 +566,17 @@ static void test_kafka_admin_reassignment_constructors_reject_bad_arguments(void
 /* Group-side argument validation also lives in the constructors. */
 static void test_kafka_admin_group_constructors_reject_bad_arguments(void) {
     /* A negative offset: Java's OffsetAndMetadata constructor throws. */
-    kafka_consumer_OffsetAndMetadata_t *om = NULL;
-    kafka_common_Error_t *err = kafka_consumer_OffsetAndMetadata_new(-2, &om);
+    kafka_common_Error_t *err = NULL;
+    kafka_consumer_OffsetAndMetadata_t *om = kafka_consumer_OffsetAndMetadata_new(-2, &err);
     TEST_ASSERT_NULL(om);
     assert_error_message(err, "Invalid negative offset");
 
     /* An empty member list without `remove_all`: Java's Collection constructor
      * throws rather than treating it as "remove everything". */
     kafka_List_t *no_members = kafka_List_new();
-    kafka_admin_RemoveMembersFromConsumerGroupOptions_t *options = NULL;
-    err = kafka_admin_RemoveMembersFromConsumerGroupOptions_with_members(no_members, &options);
+    err = NULL;
+    kafka_admin_RemoveMembersFromConsumerGroupOptions_t *options =
+        kafka_admin_RemoveMembersFromConsumerGroupOptions_with_members(no_members, &err);
     TEST_ASSERT_NULL(options);
     assert_error_message(err, "Invalid empty members has been provided");
     kafka_List_destroy(no_members);
@@ -640,17 +634,18 @@ static void test_kafka_admin_group_empty_batches_need_no_broker(void) {
  * fail before the request is enqueued (KafkaAdminClient.updateFeatures throws
  * IllegalArgumentException for an empty map), so that arm is only reachable
  * through a production handle -- Java's MockAdminClient does not check. The
- * error comes back in the call's own error slot, with no result. */
+ * error comes back in the call's own out_err, with a NULL result. */
 static void test_kafka_admin_update_features_rejects_an_empty_map(void) {
     kafka_admin_Admin_t *admin = create_admin();
     kafka_Map_t *empty = kafka_Map_new();
-    kafka_admin_UpdateFeaturesResult_t *updated = NULL;
-    kafka_common_Error_t *err = kafka_admin_Admin_update_features(admin, empty, &updated);
+    kafka_common_Error_t *err = NULL;
+    kafka_admin_UpdateFeaturesResult_t *updated = kafka_admin_Admin_update_features(admin, empty, &err);
     TEST_ASSERT_NULL(updated);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
     assert_error_message(err, "Feature updates can not be null or empty.");
     kafka_admin_UpdateFeaturesOptions_t *options = kafka_admin_UpdateFeaturesOptions_new();
-    err = kafka_admin_Admin_update_features_with_options(admin, empty, options, &updated);
+    err = NULL;
+    updated = kafka_admin_Admin_update_features_with_options(admin, empty, options, &err);
     kafka_admin_UpdateFeaturesOptions_destroy(options);
     TEST_ASSERT_NULL(updated);
     assert_error_message(err, "Feature updates can not be null or empty.");
@@ -704,12 +699,13 @@ static void test_kafka_admin_scram_empty_password_is_a_per_user_error(void) {
     TEST_ASSERT_EQUAL_INT32(2, kafka_Map_size(values));
     TEST_ASSERT_EQUAL_STRING("alice", (const char *)kafka_Map_key(values, 0));
     TEST_ASSERT_EQUAL_STRING("bob", (const char *)kafka_Map_key(values, 1));
-    void *value = NULL;
-    kafka_common_Error_t *err = kafka_common_KafkaFuture_get((const kafka_common_KafkaFuture_t *)kafka_Map_value(values, 0), &value);
+    kafka_common_Error_t *err = NULL;
+    (void)kafka_common_KafkaFuture_get((const kafka_common_KafkaFuture_t *)kafka_Map_value(values, 0), &err);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NOT_NULL(kafka_common_Error_message(err));
     kafka_common_Error_destroy(err);
-    err = kafka_common_KafkaFuture_get((const kafka_common_KafkaFuture_t *)kafka_Map_value(values, 1), &value);
+    err = NULL;
+    (void)kafka_common_KafkaFuture_get((const kafka_common_KafkaFuture_t *)kafka_Map_value(values, 1), &err);
     if (err != NULL) {
         kafka_common_Error_destroy(err);
     }

@@ -60,8 +60,9 @@ typedef struct {
 } fixture_t;
 
 static void fixture_init(fixture_t *f) {
-    f->mock = NULL;
-    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_new("earliest", &f->mock));
+    kafka_common_Error_t *err = NULL;
+    f->mock = kafka_consumer_MockConsumer_new("earliest", &err);
+    assert_ok(err, "MockConsumer_new");
     f->consumer = kafka_consumer_MockConsumer__as_Consumer(f->mock);
     TEST_ASSERT_NOT_NULL(f->consumer);
     consumer_callback_pump_install(&f->pump, f->consumer);
@@ -94,7 +95,8 @@ static kafka_common_Error_t *assign_one(kafka_consumer_Consumer_t *c, const char
     kafka_common_TopicPartition_t *tp = kafka_common_TopicPartition_new(topic, partition);
     kafka_List_t *list = kafka_List_new();
     kafka_List_add(list, tp);
-    kafka_common_Error_t *err = kafka_consumer_Consumer_assign(c, list);
+    kafka_common_Error_t *err = NULL;
+    kafka_consumer_Consumer_assign(c, list, &err);
     kafka_List_destroy(list);
     kafka_common_TopicPartition_destroy(tp);
     return err;
@@ -113,14 +115,16 @@ static void update_beginning_offset(kafka_consumer_MockConsumer_t *mock, const c
 /* An assigned, earliest-positioned mock holding one polled record, so
  * `allConsumed()` has something to commit (position 1 for topic-0). */
 static void make_consumed_mock(fixture_t *f, const char *topic) {
+    kafka_common_Error_t *err = NULL;
     fixture_init(f);
     TEST_ASSERT_NULL(assign_one(f->consumer, topic, 0));
     update_beginning_offset(f->mock, topic, 0);
     kafka_consumer_ConsumerRecord_t *record = kafka_consumer_ConsumerRecord_new(topic, 0, 0, NULL, NULL);
-    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_add_record(f->mock, record));
+    kafka_consumer_MockConsumer_add_record(f->mock, record, &err);
+    assert_ok(err, "MockConsumer_add_record");
     kafka_consumer_ConsumerRecord_destroy(record);
-    kafka_consumer_ConsumerRecords_t *records = NULL;
-    TEST_ASSERT_NULL(kafka_consumer_Consumer_poll(f->consumer, 10, &records));
+    kafka_consumer_ConsumerRecords_t *records = kafka_consumer_Consumer_poll(f->consumer, 10, &err);
+    assert_ok(err, "Consumer_poll");
     TEST_ASSERT_EQUAL_INT32(1, kafka_consumer_ConsumerRecords_count(records));
     kafka_consumer_ConsumerRecords_destroy(records);
 }
@@ -235,11 +239,13 @@ static void probe_on_assigned(void *self_, const kafka_List_t *partitions, int64
         kafka_List_t *asg = kafka_consumer_ConsumerHandle_assignment(p->handle);
         p->handle_assignment_size = asg == NULL ? -1 : kafka_List_size(asg);
         kafka_List_destroy(asg);
-        kafka_common_Error_t *err = kafka_consumer_ConsumerHandle_commit_sync(p->handle);
+        kafka_common_Error_t *err = NULL;
+        kafka_consumer_ConsumerHandle_commit_sync(p->handle, &err);
         p->handle_commit_succeeded = err == NULL;
         kafka_common_Error_destroy(err);
         /* The consumer itself is busy with the operation that invoked us. */
-        err = kafka_consumer_Consumer_commit_sync(p->consumer);
+        err = NULL;
+        kafka_consumer_Consumer_commit_sync(p->consumer, &err);
         p->consumer_call_concurrent_modification =
             err != NULL && kafka_common_Error_is_local_concurrent_modification_error(err);
         kafka_common_Error_destroy(err);
@@ -272,10 +278,12 @@ static kafka_consumer_ConsumerRebalanceListener_t *probe_listener(listener_probe
 /* `subscribe(topics, listener)`; the registration is copied, so the handle is
  * destroyed right away. */
 static void subscribe_probe(fixture_t *f, const char *topic, listener_probe_t *p) {
+    kafka_common_Error_t *err = NULL;
     kafka_consumer_ConsumerRebalanceListener_t *listener = probe_listener(p, 0);
     kafka_List_t *topics = kafka_List_new();
     kafka_List_add(topics, (void *)topic);
-    TEST_ASSERT_NULL(kafka_consumer_Consumer_subscribe_with_topics_listener(f->consumer, topics, listener));
+    kafka_consumer_Consumer_subscribe_with_topics_listener(f->consumer, topics, listener, &err);
+    assert_ok(err, "Consumer_subscribe_with_topics_listener");
     kafka_List_destroy(topics);
     kafka_consumer_ConsumerRebalanceListener_destroy(listener);
 }
@@ -283,7 +291,8 @@ static void subscribe_probe(fixture_t *f, const char *topic, listener_probe_t *p
 /* Blocking `rebalance` to `count` partitions of `topic`, freeing the list. */
 static kafka_common_Error_t *rebalance_to(fixture_t *f, const char *topic, int32_t count) {
     kafka_List_t *list = tp_list(topic, count);
-    kafka_common_Error_t *err = kafka_consumer_MockConsumer_rebalance(f->mock, list);
+    kafka_common_Error_t *err = NULL;
+    kafka_consumer_MockConsumer_rebalance(f->mock, list, &err);
     tp_list_destroy(list);
     return err;
 }
@@ -360,13 +369,15 @@ static kafka_consumer_OffsetCommitCallback_t *commit_probe_callback(commit_probe
 // commitAsync(callback) on the mock fires onComplete(allConsumed(), null),
 // directly on the calling thread (blocking form).
 static void test_commit_async_with_callback_fires_with_offsets_null_error(void) {
+    kafka_common_Error_t *err = NULL;
     fixture_t f;
     make_consumed_mock(&f, "test");
 
     commit_probe_t probe;
     commit_probe_init(&probe, f.consumer, 1);
     kafka_consumer_OffsetCommitCallback_t *cb = commit_probe_callback(&probe);
-    TEST_ASSERT_NULL(kafka_consumer_Consumer_commit_async_with_callback(f.consumer, cb));
+    kafka_consumer_Consumer_commit_async_with_callback(f.consumer, cb, &err);
+    assert_ok(err, "Consumer_commit_async_with_callback");
     kafka_consumer_OffsetCommitCallback_destroy(cb);
 
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&probe.calls));
@@ -378,7 +389,8 @@ static void test_commit_async_with_callback_fires_with_offsets_null_error(void) 
     /* The commit happened before the callback. */
     kafka_List_t *list = tp_list("test", 1);
     kafka_Map_t *committed = NULL;
-    TEST_ASSERT_NULL(kafka_consumer_Consumer_committed(f.consumer, list, &committed));
+    committed = kafka_consumer_Consumer_committed(f.consumer, list, &err);
+    assert_ok(err, "Consumer_committed");
     TEST_ASSERT_EQUAL_INT32(1, kafka_Map_size(committed));
     TEST_ASSERT_EQUAL_INT64(1, kafka_consumer_OffsetAndMetadata_offset(
                                    (const kafka_consumer_OffsetAndMetadata_t *)kafka_Map_value(committed, 0)));
@@ -389,19 +401,22 @@ static void test_commit_async_with_callback_fires_with_offsets_null_error(void) 
 
 // commitAsync(offsets, callback) hands the callback the very offsets.
 static void test_commit_async_with_offsets_callback_echoes_offsets(void) {
+    kafka_common_Error_t *err = NULL;
     fixture_t f;
     make_consumed_mock(&f, "test");
 
     kafka_common_TopicPartition_t *tp = kafka_common_TopicPartition_new("test", 0);
     kafka_consumer_OffsetAndMetadata_t *oam = NULL;
-    TEST_ASSERT_NULL(kafka_consumer_OffsetAndMetadata_with_metadata(42, "m", &oam));
+    oam = kafka_consumer_OffsetAndMetadata_with_metadata(42, "m", &err);
+    assert_ok(err, "OffsetAndMetadata_with_metadata");
     kafka_Map_t *offsets = kafka_Map_new();
     kafka_Map_put(offsets, tp, oam);
 
     commit_probe_t probe;
     commit_probe_init(&probe, f.consumer, 1);
     kafka_consumer_OffsetCommitCallback_t *cb = commit_probe_callback(&probe);
-    TEST_ASSERT_NULL(kafka_consumer_Consumer_commit_async_with_offsets_callback(f.consumer, offsets, cb));
+    kafka_consumer_Consumer_commit_async_with_offsets_callback(f.consumer, offsets, cb, &err);
+    assert_ok(err, "Consumer_commit_async_with_offsets_callback");
     kafka_consumer_OffsetCommitCallback_destroy(cb);
     kafka_Map_destroy(offsets);
     kafka_consumer_OffsetAndMetadata_destroy(oam);
@@ -415,7 +430,8 @@ static void test_commit_async_with_offsets_callback_echoes_offsets(void) {
     kafka_List_t *list = kafka_List_new();
     kafka_List_add(list, tp);
     kafka_Map_t *committed = NULL;
-    TEST_ASSERT_NULL(kafka_consumer_Consumer_committed(f.consumer, list, &committed));
+    committed = kafka_consumer_Consumer_committed(f.consumer, list, &err);
+    assert_ok(err, "Consumer_committed");
     const kafka_consumer_OffsetAndMetadata_t *got =
         (const kafka_consumer_OffsetAndMetadata_t *)kafka_Map_get(committed, tp);
     TEST_ASSERT_NOT_NULL(got);
@@ -470,23 +486,27 @@ static void test_commit_callback_error_propagates_from_commit(void) {
     commit_probe_init(&probe, f.consumer, 1);
     probe.raise = "callback failed";
     kafka_consumer_OffsetCommitCallback_t *cb = commit_probe_callback(&probe);
-    kafka_common_Error_t *err = kafka_consumer_Consumer_commit_async_with_callback(f.consumer, cb);
+    kafka_common_Error_t *err = NULL;
+    kafka_consumer_Consumer_commit_async_with_callback(f.consumer, cb, &err);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_TRUE(kafka_common_Error_is_kafka_error(err));
     TEST_ASSERT_EQUAL_STRING("callback failed", kafka_common_Error_message(err));
     kafka_common_Error_destroy(err);
+    err = NULL;
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&probe.calls));
 
     kafka_List_t *list = tp_list("test", 1);
     kafka_Map_t *committed = NULL;
-    TEST_ASSERT_NULL(kafka_consumer_Consumer_committed(f.consumer, list, &committed));
+    committed = kafka_consumer_Consumer_committed(f.consumer, list, &err);
+    assert_ok(err, "Consumer_committed");
     TEST_ASSERT_EQUAL_INT32(1, kafka_Map_size(committed));
     kafka_Map_destroy(committed);
     tp_list_destroy(list);
 
     /* The consumer is usable again. */
     probe.raise = NULL;
-    TEST_ASSERT_NULL(kafka_consumer_Consumer_commit_async_with_callback(f.consumer, cb));
+    kafka_consumer_Consumer_commit_async_with_callback(f.consumer, cb, &err);
+    assert_ok(err, "Consumer_commit_async_with_callback");
     TEST_ASSERT_EQUAL_INT(2, atomic_load(&probe.calls));
     kafka_consumer_OffsetCommitCallback_destroy(cb);
     fixture_destroy(&f);
@@ -523,7 +543,7 @@ typedef struct {
 
 static void *blocking_commit_thread(void *arg) {
     blocking_commit_t *b = (blocking_commit_t *)arg;
-    b->error = kafka_consumer_Consumer_commit_async_with_callback(b->f->consumer, b->cb);
+    kafka_consumer_Consumer_commit_async_with_callback(b->f->consumer, b->cb, &b->error);
     atomic_store(&b->returned, 1);
     return NULL;
 }
@@ -556,6 +576,7 @@ static void test_commit_returns_only_after_callback_reports(void) {
 // The standalone invoker runs the C implementation on the calling thread and
 // waits for its report, with the map and error it was given.
 static void test_offset_commit_callback_standalone_invoker(void) {
+    kafka_common_Error_t *err = NULL;
     commit_probe_t probe;
     /* No consumer: an invoker's callback_id is reported with a NULL one. */
     commit_probe_init(&probe, NULL, 1);
@@ -563,12 +584,14 @@ static void test_offset_commit_callback_standalone_invoker(void) {
 
     kafka_common_TopicPartition_t *tp = kafka_common_TopicPartition_new("t", 2);
     kafka_consumer_OffsetAndMetadata_t *oam = NULL;
-    TEST_ASSERT_NULL(kafka_consumer_OffsetAndMetadata_with_metadata(9, "md", &oam));
+    oam = kafka_consumer_OffsetAndMetadata_with_metadata(9, "md", &err);
+    assert_ok(err, "OffsetAndMetadata_with_metadata");
     kafka_Map_t *offsets = kafka_Map_new();
     kafka_Map_put(offsets, tp, oam);
     kafka_common_Error_t *error = kafka_common_Error_timeout("commit timed out");
 
-    TEST_ASSERT_NULL(kafka_consumer_OffsetCommitCallback_on_complete(cb, offsets, error));
+    kafka_consumer_OffsetCommitCallback_on_complete(cb, offsets, error, &err);
+    assert_ok(err, "OffsetCommitCallback_on_complete");
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&probe.calls));
     TEST_ASSERT_FALSE(probe.error_was_null);
     TEST_ASSERT_EQUAL_INT(1, probe.offsets_size);
@@ -576,13 +599,15 @@ static void test_offset_commit_callback_standalone_invoker(void) {
     TEST_ASSERT_EQUAL_STRING("md", probe.first_metadata);
     TEST_ASSERT_TRUE(pthread_equal(pthread_self(), probe.thread));
 
-    TEST_ASSERT_NULL(kafka_consumer_OffsetCommitCallback_on_complete(cb, offsets, NULL));
+    kafka_consumer_OffsetCommitCallback_on_complete(cb, offsets, NULL, &err);
+    assert_ok(err, "OffsetCommitCallback_on_complete");
     TEST_ASSERT_EQUAL_INT(2, atomic_load(&probe.calls));
     TEST_ASSERT_TRUE(probe.error_was_null);
 
     /* The error the callback reports is the invoker's result. */
     probe.raise = "raised by onComplete";
-    kafka_common_Error_t *raised = kafka_consumer_OffsetCommitCallback_on_complete(cb, offsets, NULL);
+    kafka_common_Error_t *raised = NULL;
+    kafka_consumer_OffsetCommitCallback_on_complete(cb, offsets, NULL, &raised);
     TEST_ASSERT_NOT_NULL(raised);
     TEST_ASSERT_EQUAL_STRING("raised by onComplete", kafka_common_Error_message(raised));
     kafka_common_Error_destroy(raised);
@@ -612,6 +637,7 @@ static void test_consumer_handle_new_destroy(void) {
 // On a mock the handle reads the mock's own state, as a Java callback
 // calling `consumer.assignment()` / `subscription()` / `paused()` does.
 static void test_consumer_handle_sync_getters_read_the_mock(void) {
+    kafka_common_Error_t *err = NULL;
     fixture_t f;
     fixture_init(&f);
     TEST_ASSERT_NULL(assign_one(f.consumer, "test", 0));
@@ -634,7 +660,8 @@ static void test_consumer_handle_sync_getters_read_the_mock(void) {
     kafka_List_destroy(l);
 
     kafka_List_t *list = tp_list("test", 1);
-    TEST_ASSERT_NULL(kafka_consumer_Consumer_pause(f.consumer, list));
+    kafka_consumer_Consumer_pause(f.consumer, list, &err);
+    assert_ok(err, "Consumer_pause");
     l = kafka_consumer_ConsumerHandle_paused(h);
     TEST_ASSERT_EQUAL_INT32(1, kafka_List_size(l));
     kafka_List_destroy(l);
@@ -654,37 +681,48 @@ static void assert_mock_handle_unsupported(kafka_common_Error_t *err) {
 }
 
 // Every async handle operation but the commits fails on a mock handle with
-// UnsupportedVersion and leaves its out-parameter untouched, even an empty
-// assign.
+// UnsupportedVersion and returns its failure value, even an empty assign.
 static void test_consumer_handle_async_ops_unsupported_on_mock(void) {
+    kafka_common_Error_t *err = NULL;
     fixture_t f;
     fixture_init(&f);
     kafka_consumer_ConsumerHandle_t *h = kafka_consumer_Consumer_handle(f.consumer);
     kafka_List_t *list = tp_list("test", 1);
     const kafka_common_TopicPartition_t *tp = (const kafka_common_TopicPartition_t *)kafka_List_get(list, 0);
 
-    assert_mock_handle_unsupported(kafka_consumer_ConsumerHandle_assign(h, list));
-    assert_mock_handle_unsupported(kafka_consumer_ConsumerHandle_seek_with_offset(h, tp, 5));
-    assert_mock_handle_unsupported(kafka_consumer_ConsumerHandle_seek_to_beginning(h, list));
+    kafka_consumer_ConsumerHandle_assign(h, list, &err);
+    assert_mock_handle_unsupported(err);
+    err = NULL;
+    kafka_consumer_ConsumerHandle_seek_with_offset(h, tp, 5, &err);
+    assert_mock_handle_unsupported(err);
+    err = NULL;
+    kafka_consumer_ConsumerHandle_seek_to_beginning(h, list, &err);
+    assert_mock_handle_unsupported(err);
+    err = NULL;
 
-    int64_t position = -42;
-    assert_mock_handle_unsupported(kafka_consumer_ConsumerHandle_position(h, tp, &position));
-    TEST_ASSERT_EQUAL_INT64(-42, position);
-    kafka_Map_t *committed = (kafka_Map_t *)&f; /* sentinel */
-    assert_mock_handle_unsupported(kafka_consumer_ConsumerHandle_committed(h, list, &committed));
-    TEST_ASSERT_EQUAL_PTR(&f, committed);
-    kafka_Map_t *begin = (kafka_Map_t *)&f;
-    assert_mock_handle_unsupported(kafka_consumer_ConsumerHandle_beginning_offsets(h, list, &begin));
-    TEST_ASSERT_EQUAL_PTR(&f, begin);
+    int64_t position = kafka_consumer_ConsumerHandle_position(h, tp, &err);
+    assert_mock_handle_unsupported(err);
+    err = NULL;
+    TEST_ASSERT_EQUAL_INT64(-1, position); /* the failure value */
+    kafka_Map_t *committed = kafka_consumer_ConsumerHandle_committed(h, list, &err);
+    assert_mock_handle_unsupported(err);
+    err = NULL;
+    TEST_ASSERT_NULL(committed);
+    kafka_Map_t *begin = kafka_consumer_ConsumerHandle_beginning_offsets(h, list, &err);
+    assert_mock_handle_unsupported(err);
+    err = NULL;
+    TEST_ASSERT_NULL(begin);
 
-    kafka_consumer_OffsetAndMetadata_t *oam = NULL;
-    TEST_ASSERT_NULL(kafka_consumer_OffsetAndMetadata_new(3, &oam));
+    kafka_consumer_OffsetAndMetadata_t *oam = kafka_consumer_OffsetAndMetadata_new(3, &err);
+    assert_ok(err, "OffsetAndMetadata_new");
     kafka_Map_t *offsets = kafka_Map_new();
     kafka_Map_put(offsets, (void *)tp, oam);
     /* The commits work on a mock handle, as Java's MockConsumer commits
      * inside a callback (see test_mock_handle_commits_commit_into_the_mock). */
-    TEST_ASSERT_NULL(kafka_consumer_ConsumerHandle_commit_sync_with_offsets(h, offsets));
-    TEST_ASSERT_NULL(kafka_consumer_ConsumerHandle_commit_async_offsets(h, offsets));
+    kafka_consumer_ConsumerHandle_commit_sync_with_offsets(h, offsets, &err);
+    assert_ok(err, "ConsumerHandle_commit_sync_with_offsets");
+    kafka_consumer_ConsumerHandle_commit_async_offsets(h, offsets, &err);
+    assert_ok(err, "ConsumerHandle_commit_async_offsets");
     kafka_Map_destroy(offsets);
     kafka_consumer_OffsetAndMetadata_destroy(oam);
 
@@ -701,7 +739,9 @@ static void test_consumer_handle_async_ops_unsupported_on_mock(void) {
      * here (its IllegalArgument rejection is a real consumer's, see
      * test_consumer_handle_shares_state_with_real_consumer). */
     kafka_List_t *empty = kafka_List_new();
-    assert_mock_handle_unsupported(kafka_consumer_ConsumerHandle_assign(h, empty));
+    kafka_consumer_ConsumerHandle_assign(h, empty, &err);
+    assert_mock_handle_unsupported(err);
+    err = NULL;
     kafka_List_destroy(empty);
 
     tp_list_destroy(list);
@@ -711,9 +751,11 @@ static void test_consumer_handle_async_ops_unsupported_on_mock(void) {
 
 /* The mock's committed offset of `topic`-0, or -1 when there is none. */
 static int64_t mock_committed_offset(fixture_t *f, const char *topic) {
+    kafka_common_Error_t *err = NULL;
     kafka_List_t *list = tp_list(topic, 1);
     kafka_Map_t *committed = NULL;
-    TEST_ASSERT_NULL(kafka_consumer_Consumer_committed(f->consumer, list, &committed));
+    committed = kafka_consumer_Consumer_committed(f->consumer, list, &err);
+    assert_ok(err, "Consumer_committed");
     int64_t offset = kafka_Map_size(committed) == 0
                          ? -1
                          : kafka_consumer_OffsetAndMetadata_offset(
@@ -728,24 +770,30 @@ static int64_t mock_committed_offset(fixture_t *f, const char *topic) {
 // `commitAsync(callback)`, all `subscriptions.allConsumed()`), the callback
 // running inline; a callback error propagates out of the commit.
 static void test_mock_handle_commits_commit_into_the_mock(void) {
+    kafka_common_Error_t *err = NULL;
     fixture_t f;
     make_consumed_mock(&f, "test"); /* consumed position 1 */
     kafka_consumer_ConsumerHandle_t *h = kafka_consumer_Consumer_handle(f.consumer);
 
     TEST_ASSERT_EQUAL_INT64(-1, mock_committed_offset(&f, "test"));
-    TEST_ASSERT_NULL(kafka_consumer_ConsumerHandle_commit_sync(h));
+    kafka_consumer_ConsumerHandle_commit_sync(h, &err);
+    assert_ok(err, "ConsumerHandle_commit_sync");
     TEST_ASSERT_EQUAL_INT64(1, mock_committed_offset(&f, "test"));
 
     kafka_common_TopicPartition_t *tp = kafka_common_TopicPartition_new("test", 0);
-    TEST_ASSERT_NULL(kafka_consumer_Consumer_seek_with_offset(f.consumer, tp, 7));
-    TEST_ASSERT_NULL(kafka_consumer_ConsumerHandle_commit_async(h));
+    kafka_consumer_Consumer_seek_with_offset(f.consumer, tp, 7, &err);
+    assert_ok(err, "Consumer_seek_with_offset");
+    kafka_consumer_ConsumerHandle_commit_async(h, &err);
+    assert_ok(err, "ConsumerHandle_commit_async");
     TEST_ASSERT_EQUAL_INT64(7, mock_committed_offset(&f, "test"));
 
-    TEST_ASSERT_NULL(kafka_consumer_Consumer_seek_with_offset(f.consumer, tp, 8));
+    kafka_consumer_Consumer_seek_with_offset(f.consumer, tp, 8, &err);
+    assert_ok(err, "Consumer_seek_with_offset");
     commit_probe_t probe;
     commit_probe_init(&probe, f.consumer, 1);
     kafka_consumer_OffsetCommitCallback_t *cb = commit_probe_callback(&probe);
-    TEST_ASSERT_NULL(kafka_consumer_ConsumerHandle_commit_async_with_callback(h, cb));
+    kafka_consumer_ConsumerHandle_commit_async_with_callback(h, cb, &err);
+    assert_ok(err, "ConsumerHandle_commit_async_with_callback");
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&probe.calls));
     TEST_ASSERT_TRUE(probe.error_was_null);
     TEST_ASSERT_EQUAL_INT64(8, probe.first_offset);
@@ -753,7 +801,7 @@ static void test_mock_handle_commits_commit_into_the_mock(void) {
     TEST_ASSERT_EQUAL_INT64(8, mock_committed_offset(&f, "test"));
 
     probe.raise = "handle callback failed";
-    kafka_common_Error_t *err = kafka_consumer_ConsumerHandle_commit_async_with_callback(h, cb);
+    kafka_consumer_ConsumerHandle_commit_async_with_callback(h, cb, &err);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_EQUAL_STRING("handle callback failed", kafka_common_Error_message(err));
     kafka_common_Error_destroy(err);
@@ -775,14 +823,16 @@ static void test_consumer_handle_wakeup(void) {
     kafka_consumer_ConsumerHandle_wakeup(h);
     kafka_consumer_ConsumerHandle_destroy(h);
 
-    kafka_consumer_ConsumerRecords_t *records = NULL;
-    kafka_common_Error_t *err = kafka_consumer_Consumer_poll(f.consumer, 10, &records);
+    kafka_common_Error_t *err = NULL;
+    kafka_consumer_ConsumerRecords_t *records = kafka_consumer_Consumer_poll(f.consumer, 10, &err);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(records);
     TEST_ASSERT_TRUE(kafka_common_Error_is_wakeup_error(err));
     kafka_common_Error_destroy(err);
+    err = NULL;
 
-    TEST_ASSERT_NULL(kafka_consumer_Consumer_poll(f.consumer, 10, &records));
+    records = kafka_consumer_Consumer_poll(f.consumer, 10, &err);
+    assert_ok(err, "Consumer_poll");
     kafka_consumer_ConsumerRecords_destroy(records);
     fixture_destroy(&f);
 }
@@ -801,10 +851,12 @@ static void test_consumer_handle_usable_while_op_in_flight(void) {
     kafka_List_t *list = tp_list("test", 1);
     kafka_consumer_MockConsumer_rebalance_cb(f.mock, list, on_void_op, &completion);
 
-    kafka_common_Error_t *err = kafka_consumer_Consumer_commit_sync(f.consumer);
+    kafka_common_Error_t *err = NULL;
+    kafka_consumer_Consumer_commit_sync(f.consumer, &err);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_concurrent_modification_error(err));
     kafka_common_Error_destroy(err);
+    err = NULL;
 
     kafka_consumer_ConsumerHandle_t *h = kafka_consumer_Consumer_handle(f.consumer);
     TEST_ASSERT_NOT_NULL(h);
@@ -813,7 +865,8 @@ static void test_consumer_handle_usable_while_op_in_flight(void) {
     TEST_ASSERT_NOT_NULL(asg);
     kafka_List_destroy(asg);
     /* Not a CM rejection: the handle commits into the mock. */
-    TEST_ASSERT_NULL(kafka_consumer_ConsumerHandle_commit_sync(h));
+    kafka_consumer_ConsumerHandle_commit_sync(h, &err);
+    assert_ok(err, "ConsumerHandle_commit_sync");
     kafka_consumer_ConsumerHandle_destroy(h);
 
     TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &probe.assigned, 1));
@@ -827,15 +880,16 @@ static void test_consumer_handle_usable_while_op_in_flight(void) {
 /* A KafkaConsumer pointed at an unreachable bootstrap: no broker is needed
  * for the metadata-free calls below. The caller owns the returned handle. */
 static kafka_consumer_Consumer_t *create_real_consumer(void) {
+    kafka_common_Error_t *err = NULL;
     kafka_Map_t *props = kafka_Map_new();
     kafka_Map_put(props, (void *)"bootstrap.servers", (void *)"localhost:9092");
     kafka_Map_put(props, (void *)"group.id", (void *)"handle-test-group");
     kafka_Map_put(props, (void *)"group.protocol", (void *)"consumer");
-    kafka_consumer_ConsumerConfig_t *config = NULL;
-    TEST_ASSERT_NULL(kafka_consumer_ConsumerConfig_new(props, &config));
+    kafka_consumer_ConsumerConfig_t *config = kafka_consumer_ConsumerConfig_new(props, &err);
+    assert_ok(err, "ConsumerConfig_new");
     kafka_Map_destroy(props);
-    kafka_consumer_Consumer_t *consumer = NULL;
-    TEST_ASSERT_NULL(kafka_consumer_KafkaConsumer_new(config, NULL, NULL, &consumer));
+    kafka_consumer_Consumer_t *consumer = kafka_consumer_KafkaConsumer_new(config, NULL, NULL, &err);
+    assert_ok(err, "KafkaConsumer_new");
     kafka_consumer_ConsumerConfig_destroy(config);
     TEST_ASSERT_NOT_NULL(consumer);
     return consumer;
@@ -865,7 +919,8 @@ static void test_consumer_handle_shares_state_with_real_consumer(void) {
     /* `assign([])` through the handle would leave the group, which only the
      * owning consumer may do: rejected up front, no broker involved. */
     kafka_List_t *empty = kafka_List_new();
-    kafka_common_Error_t *err = kafka_consumer_ConsumerHandle_assign(h, empty);
+    kafka_common_Error_t *err = NULL;
+    kafka_consumer_ConsumerHandle_assign(h, empty, &err);
     kafka_List_destroy(empty);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
@@ -875,7 +930,8 @@ static void test_consumer_handle_shares_state_with_real_consumer(void) {
 
     kafka_consumer_Consumer_destroy(consumer);
 
-    err = kafka_consumer_ConsumerHandle_commit_sync(h);
+    err = NULL;
+    kafka_consumer_ConsumerHandle_commit_sync(h, &err);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_state_error(err));
     TEST_ASSERT_EQUAL_STRING("consumer destroyed", kafka_common_Error_message(err));
@@ -891,6 +947,7 @@ static void test_consumer_handle_shares_state_with_real_consumer(void) {
 // MockConsumer.rebalance: onPartitionsRevoked(removed) only when something
 // was removed, then onPartitionsAssigned(added) always, with sorted lists.
 static void test_rebalance_listener_assigned_then_revoked(void) {
+    kafka_common_Error_t *err = NULL;
     fixture_t f;
     fixture_init(&f);
     listener_probe_t probe;
@@ -915,7 +972,8 @@ static void test_rebalance_listener_assigned_then_revoked(void) {
 
     /* Everything away: revoked(t-0). */
     kafka_List_t *empty = kafka_List_new();
-    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_rebalance(f.mock, empty));
+    kafka_consumer_MockConsumer_rebalance(f.mock, empty, &err);
+    assert_ok(err, "MockConsumer_rebalance");
     kafka_List_destroy(empty);
     TEST_ASSERT_EQUAL_INT(2, atomic_load(&probe.revoked));
     TEST_ASSERT_EQUAL_STRING("t-0", probe.last_revoked_partitions);
@@ -930,6 +988,7 @@ static void test_rebalance_listener_assigned_then_revoked(void) {
 // thread, the methods reporting synchronously; a NULL `on_partitions_lost`
 // falls back to `on_partitions_revoked` (Java's default method).
 static void test_rebalance_listener_runs_on_calling_thread(void) {
+    kafka_common_Error_t *err = NULL;
     fixture_t f;
     fixture_init(&f);
     listener_probe_t probe;
@@ -944,7 +1003,8 @@ static void test_rebalance_listener_runs_on_calling_thread(void) {
     /* Rebalancing the partition away: revoked (then assigned([])), same
      * thread. */
     kafka_List_t *empty = kafka_List_new();
-    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_rebalance(f.mock, empty));
+    kafka_consumer_MockConsumer_rebalance(f.mock, empty, &err);
+    assert_ok(err, "MockConsumer_rebalance");
     kafka_List_destroy(empty);
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&probe.revoked));
     TEST_ASSERT_TRUE(pthread_equal(pthread_self(), probe.last_thread));
@@ -956,7 +1016,8 @@ static void test_rebalance_listener_runs_on_calling_thread(void) {
      * method routes `on_partitions_lost` to its revoked method. */
     kafka_consumer_ConsumerRebalanceListener_t *defaulted = probe_listener(&probe, 0);
     kafka_List_t *list = tp_list("t", 2);
-    TEST_ASSERT_NULL(kafka_consumer_ConsumerRebalanceListener_on_partitions_lost(defaulted, list));
+    kafka_consumer_ConsumerRebalanceListener_on_partitions_lost(defaulted, list, &err);
+    assert_ok(err, "ConsumerRebalanceListener_on_partitions_lost");
     TEST_ASSERT_EQUAL_INT(2, atomic_load(&probe.revoked));
     TEST_ASSERT_EQUAL_INT(0, atomic_load(&probe.lost));
     TEST_ASSERT_EQUAL_STRING("t-0,t-1", probe.last_revoked_partitions);
@@ -965,13 +1026,16 @@ static void test_rebalance_listener_runs_on_calling_thread(void) {
 
     /* With a lost method of its own, that one runs. */
     kafka_consumer_ConsumerRebalanceListener_t *overridden = probe_listener(&probe, 1);
-    TEST_ASSERT_NULL(kafka_consumer_ConsumerRebalanceListener_on_partitions_lost(overridden, list));
+    kafka_consumer_ConsumerRebalanceListener_on_partitions_lost(overridden, list, &err);
+    assert_ok(err, "ConsumerRebalanceListener_on_partitions_lost");
     TEST_ASSERT_EQUAL_INT(2, atomic_load(&probe.revoked));
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&probe.lost));
     /* The other two standalone invokers. */
-    TEST_ASSERT_NULL(kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked(overridden, list));
+    kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked(overridden, list, &err);
+    assert_ok(err, "ConsumerRebalanceListener_on_partitions_revoked");
     TEST_ASSERT_EQUAL_INT(3, atomic_load(&probe.revoked));
-    TEST_ASSERT_NULL(kafka_consumer_ConsumerRebalanceListener_on_partitions_assigned(overridden, list));
+    kafka_consumer_ConsumerRebalanceListener_on_partitions_assigned(overridden, list, &err);
+    assert_ok(err, "ConsumerRebalanceListener_on_partitions_assigned");
     TEST_ASSERT_EQUAL_INT(3, atomic_load(&probe.assigned));
     kafka_consumer_ConsumerRebalanceListener_destroy(overridden);
     tp_list_destroy(list);
@@ -1113,7 +1177,8 @@ static void test_subscribe_with_listener_on_manually_assigned_consumer_fails(voi
     kafka_consumer_ConsumerRebalanceListener_t *listener = probe_listener(&probe, 0);
     kafka_List_t *topics = kafka_List_new();
     kafka_List_add(topics, (void *)"t");
-    kafka_common_Error_t *err = kafka_consumer_Consumer_subscribe_with_topics_listener(f.consumer, topics, listener);
+    kafka_common_Error_t *err = NULL;
+    kafka_consumer_Consumer_subscribe_with_topics_listener(f.consumer, topics, listener, &err);
     kafka_List_destroy(topics);
     kafka_consumer_ConsumerRebalanceListener_destroy(listener);
     TEST_ASSERT_NOT_NULL(err);
@@ -1146,9 +1211,10 @@ static void test_listener_calls_consumer_handle_no_deadlock(void) {
 
     /* The in-callback `ConsumerHandle_wakeup` armed the next poll. */
     update_beginning_offset(f.mock, "t", 0);
-    kafka_consumer_ConsumerRecords_t *records = NULL;
-    kafka_common_Error_t *err = kafka_consumer_Consumer_poll(f.consumer, 10, &records);
+    kafka_common_Error_t *err = NULL;
+    kafka_consumer_ConsumerRecords_t *records = kafka_consumer_Consumer_poll(f.consumer, 10, &err);
     TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(records); /* the failure value */
     TEST_ASSERT_TRUE(kafka_common_Error_is_wakeup_error(err));
     kafka_common_Error_destroy(err);
     fixture_destroy(&f);
@@ -1349,8 +1415,9 @@ typedef struct {
 
 static kafka_Map_t *one_offset(kafka_common_TopicPartition_t *tp, kafka_consumer_OffsetAndMetadata_t **oam,
                                int64_t offset) {
-    *oam = NULL;
-    TEST_ASSERT_NULL(kafka_consumer_OffsetAndMetadata_new(offset, oam));
+    kafka_common_Error_t *err = NULL;
+    *oam = kafka_consumer_OffsetAndMetadata_new(offset, &err);
+    assert_ok(err, "OffsetAndMetadata_new");
     kafka_Map_t *map = kafka_Map_new();
     kafka_Map_put(map, tp, *oam);
     return map;
@@ -1371,12 +1438,13 @@ static void nesting_on_complete(void *self_, const kafka_Map_t *offsets, const k
         kafka_consumer_ConsumerHandle_commit_async_with_offsets_callback_cb(p->handle, nested, cb, on_void_op,
                                                                            p->inner_completion);
     } else {
-        p->nested_error = kafka_consumer_ConsumerHandle_commit_async_with_offsets_callback(p->handle, nested, cb);
+        kafka_consumer_ConsumerHandle_commit_async_with_offsets_callback(p->handle, nested, cb, &p->nested_error);
     }
     kafka_Map_destroy(nested);
     kafka_consumer_OffsetAndMetadata_destroy(oam);
     /* The consumer itself is busy with the commit that invoked us. */
-    kafka_common_Error_t *err = kafka_consumer_Consumer_commit_async_with_callback(p->consumer, cb);
+    kafka_common_Error_t *err = NULL;
+    kafka_consumer_Consumer_commit_async_with_callback(p->consumer, cb, &err);
     p->consumer_call_concurrent_modification =
         err != NULL && kafka_common_Error_is_local_concurrent_modification_error(err);
     kafka_common_Error_destroy(err);
@@ -1387,10 +1455,12 @@ static void nesting_on_complete(void *self_, const kafka_Map_t *offsets, const k
 }
 
 static int64_t committed_offset(kafka_consumer_Consumer_t *consumer, kafka_common_TopicPartition_t *tp) {
+    kafka_common_Error_t *err = NULL;
     kafka_List_t *list = kafka_List_new();
     kafka_List_add(list, tp);
     kafka_Map_t *committed = NULL;
-    TEST_ASSERT_NULL(kafka_consumer_Consumer_committed(consumer, list, &committed));
+    committed = kafka_consumer_Consumer_committed(consumer, list, &err);
+    assert_ok(err, "Consumer_committed");
     const kafka_consumer_OffsetAndMetadata_t *got =
         (const kafka_consumer_OffsetAndMetadata_t *)kafka_Map_get(committed, tp);
     int64_t offset = got == NULL ? -1 : kafka_consumer_OffsetAndMetadata_offset(got);
@@ -1403,6 +1473,7 @@ static int64_t committed_offset(kafka_consumer_Consumer_t *consumer, kafka_commo
 // callback's thread (the calling one), before the outer callback returns; the
 // nested offsets land after the outer ones.
 static void test_handle_commit_with_callback_inside_callback_nests(void) {
+    kafka_common_Error_t *err = NULL;
     fixture_t f;
     make_consumed_mock(&f, "test");
     kafka_consumer_ConsumerHandle_t *h = kafka_consumer_Consumer_handle(f.consumer);
@@ -1420,7 +1491,8 @@ static void test_handle_commit_with_callback_inside_callback_nests(void) {
     kafka_common_TopicPartition_t *tp = kafka_common_TopicPartition_new("test", 0);
     kafka_consumer_OffsetAndMetadata_t *oam = NULL;
     kafka_Map_t *offsets = one_offset(tp, &oam, 3);
-    TEST_ASSERT_NULL(kafka_consumer_Consumer_commit_async_with_offsets_callback(f.consumer, offsets, cb));
+    kafka_consumer_Consumer_commit_async_with_offsets_callback(f.consumer, offsets, cb, &err);
+    assert_ok(err, "Consumer_commit_async_with_offsets_callback");
     kafka_Map_destroy(offsets);
     kafka_consumer_OffsetAndMetadata_destroy(oam);
     kafka_consumer_OffsetCommitCallback_destroy(cb);
@@ -1501,7 +1573,8 @@ static void test_handle_commit_with_callback_after_destroy(void) {
     commit_probe_t probe;
     commit_probe_init(&probe, NULL, 1);
     kafka_consumer_OffsetCommitCallback_t *cb = commit_probe_callback(&probe);
-    kafka_common_Error_t *err = kafka_consumer_ConsumerHandle_commit_async_with_callback(h, cb);
+    kafka_common_Error_t *err = NULL;
+    kafka_consumer_ConsumerHandle_commit_async_with_callback(h, cb, &err);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_state_error(err));
     TEST_ASSERT_EQUAL_STRING("consumer destroyed", kafka_common_Error_message(err));
@@ -1510,7 +1583,8 @@ static void test_handle_commit_with_callback_after_destroy(void) {
     kafka_common_TopicPartition_t *tp = kafka_common_TopicPartition_new("test", 0);
     kafka_consumer_OffsetAndMetadata_t *oam = NULL;
     kafka_Map_t *offsets = one_offset(tp, &oam, 1);
-    err = kafka_consumer_ConsumerHandle_commit_async_with_offsets_callback(h, offsets, cb);
+    err = NULL;
+    kafka_consumer_ConsumerHandle_commit_async_with_offsets_callback(h, offsets, cb, &err);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_state_error(err));
     kafka_common_Error_destroy(err);

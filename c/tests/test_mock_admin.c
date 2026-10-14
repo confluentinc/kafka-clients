@@ -78,8 +78,8 @@ typedef struct {
 /* `MockAdminClient.create(numBrokers)`: brokers `localhost:1000 + id`,
  * controller 0, default replication factor `min(numBrokers, 3)`. */
 static void fixture_init(fixture_t *f, int32_t num_brokers) {
-    f->mock = NULL;
-    kafka_common_Error_t *err = kafka_admin_MockAdminClient_create(num_brokers, &f->mock);
+    kafka_common_Error_t *err = NULL;
+    f->mock = kafka_admin_MockAdminClient_create(num_brokers, &err);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(f->mock);
     f->admin = kafka_admin_MockAdminClient__as_Admin(f->mock);
@@ -107,8 +107,8 @@ static void assert_error_message(kafka_common_Error_t *err, const char *expected
  * the future (`NULL` for a `Void` future). The future is left alive. */
 static void *get_ok(const kafka_common_KafkaFuture_t *future) {
     TEST_ASSERT_NOT_NULL(future);
-    void *value = NULL;
-    kafka_common_Error_t *err = kafka_common_KafkaFuture_get(future, &value);
+    kafka_common_Error_t *err = NULL;
+    void *value = kafka_common_KafkaFuture_get(future, &err);
     if (err != NULL) {
         char message[512];
         snprintf(message, sizeof message, "future failed: %s", kafka_common_Error_message(err));
@@ -121,9 +121,10 @@ static void *get_ok(const kafka_common_KafkaFuture_t *future) {
 /* `future.get()` on a future expected to fail: the owned error. */
 static kafka_common_Error_t *get_err(const kafka_common_KafkaFuture_t *future) {
     TEST_ASSERT_NOT_NULL(future);
-    void *value = NULL;
-    kafka_common_Error_t *err = kafka_common_KafkaFuture_get(future, &value);
+    kafka_common_Error_t *err = NULL;
+    void *value = kafka_common_KafkaFuture_get(future, &err);
     TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(value);
     return err;
 }
 
@@ -275,12 +276,13 @@ static void seed_group(fixture_t *f, const char *group_id) {
 /* `alterPartitionReassignments(singletonMap(tp, Optional.of(new
  * NewPartitionReassignment(asList(1, 2)))))`, asserting success. */
 static void reassign_one(fixture_t *f, const char *topic, int32_t partition) {
+    kafka_common_Error_t *err = NULL;
     int32_t b1 = 1, b2 = 2;
     kafka_List_t *replicas = kafka_List_new();
     kafka_List_add(replicas, &b1);
     kafka_List_add(replicas, &b2);
-    kafka_admin_NewPartitionReassignment_t *reassignment = NULL;
-    TEST_ASSERT_NULL(kafka_admin_NewPartitionReassignment_new(replicas, &reassignment));
+    kafka_admin_NewPartitionReassignment_t *reassignment = kafka_admin_NewPartitionReassignment_new(replicas, &err);
+    assert_ok(err, "NewPartitionReassignment_new");
     kafka_common_TopicPartition_t *tp = tp_new(topic, partition);
     kafka_Map_t *reassignments = kafka_Map_new();
     kafka_Map_put(reassignments, tp, reassignment);
@@ -335,16 +337,17 @@ static void test_mock_admin_create_close_destroy(void) {
 }
 
 /* Java's builder refuses a cluster without brokers with an
- * IllegalArgumentException; the C constructor returns it and leaves the slot
- * untouched. */
+ * IllegalArgumentException; the C constructor stores it in out_err and
+ * returns NULL. */
 static void test_mock_admin_rejects_zero_brokers(void) {
-    kafka_admin_MockAdminClient_t *mock = NULL;
-    kafka_common_Error_t *err = kafka_admin_MockAdminClient_create(0, &mock);
+    kafka_common_Error_t *err = NULL;
+    kafka_admin_MockAdminClient_t *mock = kafka_admin_MockAdminClient_create(0, &err);
     TEST_ASSERT_NULL(mock);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
     assert_error_message(err, "num_brokers must be at least 1, was 0");
-    err = kafka_admin_MockAdminClient_create(-1, &mock);
+    err = NULL;
+    mock = kafka_admin_MockAdminClient_create(-1, &err);
     TEST_ASSERT_NULL(mock);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
     assert_error_message(err, "num_brokers must be at least 1, was -1");
@@ -398,11 +401,12 @@ static void test_mock_admin_destroy_runs_pending_close_callback(void) {
 /* `new AdminClientConfig(Map<String, String>)` from a C-built map of string
  * pairs; the map stays the caller's. */
 static void test_admin_client_config_lifecycle(void) {
+    kafka_common_Error_t *err = NULL;
     kafka_Map_t *props = kafka_Map_new();
     kafka_Map_put(props, (void *)"bootstrap.servers", (void *)"localhost:9092");
     kafka_Map_put(props, (void *)"client.id", (void *)"c-mock-admin-test");
-    kafka_admin_AdminClientConfig_t *config = NULL;
-    TEST_ASSERT_NULL(kafka_admin_AdminClientConfig_new(props, &config));
+    kafka_admin_AdminClientConfig_t *config = kafka_admin_AdminClientConfig_new(props, &err);
+    assert_ok(err, "AdminClientConfig_new");
     TEST_ASSERT_NOT_NULL(config);
     kafka_admin_AdminClientConfig_destroy(config);
     kafka_admin_AdminClientConfig_destroy(NULL);
@@ -413,12 +417,12 @@ static void test_admin_client_config_lifecycle(void) {
  * either when the configuration is parsed or when the client is created. */
 static void test_admin_client_create_rejects_empty_bootstrap(void) {
     kafka_Map_t *props = kafka_Map_new();
-    kafka_admin_AdminClientConfig_t *config = NULL;
-    kafka_common_Error_t *err = kafka_admin_AdminClientConfig_new(props, &config);
+    kafka_common_Error_t *err = NULL;
+    kafka_admin_AdminClientConfig_t *config = kafka_admin_AdminClientConfig_new(props, &err);
     if (err == NULL) {
         TEST_ASSERT_NOT_NULL(config);
-        kafka_admin_Admin_t *admin = NULL;
-        err = kafka_admin_AdminClient_create(config, &admin);
+        err = NULL;
+        kafka_admin_Admin_t *admin = kafka_admin_AdminClient_create(config, &err);
         TEST_ASSERT_NULL(admin);
         kafka_admin_AdminClientConfig_destroy(config);
     } else {
@@ -1035,14 +1039,16 @@ static void test_mock_admin_describe_topics_async(void) {
 
 /* `Uuid.fromString` rejects a malformed id before any RPC is built. */
 static void test_mock_admin_uuid_from_string_rejects_bad_id(void) {
-    kafka_common_Uuid_t *id = NULL;
-    kafka_common_Error_t *err = kafka_common_Uuid_from_string("not-a-uuid", &id);
+    kafka_common_Error_t *err = NULL;
+    kafka_common_Uuid_t *id = kafka_common_Uuid_from_string("not-a-uuid", &err);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(id);
     TEST_ASSERT_NOT_NULL(kafka_common_Error_message(err));
     kafka_common_Error_destroy(err);
     /* A well-formed one round-trips. */
-    TEST_ASSERT_NULL(kafka_common_Uuid_from_string("4A5xz_QZTB2CtL4wc0X0Jw", &id));
+    err = NULL;
+    id = kafka_common_Uuid_from_string("4A5xz_QZTB2CtL4wc0X0Jw", &err);
+    assert_ok(err, "Uuid_from_string");
     TEST_ASSERT_NOT_NULL(id);
     char *text = kafka_common_Uuid_to_string(id);
     TEST_ASSERT_EQUAL_STRING("4A5xz_QZTB2CtL4wc0X0Jw", text);
@@ -2172,16 +2178,18 @@ static void test_mock_admin_elect_leaders_reports_unsupported(void) {
 /* `ElectionType.valueOf(byte)`: the two singletons round-trip, anything else
  * is Java's IllegalArgumentException. */
 static void test_mock_admin_election_type_value_of(void) {
-    const kafka_common_ElectionType_t *type = NULL;
-    TEST_ASSERT_NULL(kafka_common_ElectionType_value_of(0, &type));
+    kafka_common_Error_t *err = NULL;
+    const kafka_common_ElectionType_t *type = kafka_common_ElectionType_value_of(0, &err);
+    assert_ok(err, "ElectionType_value_of");
     TEST_ASSERT_TRUE(type == kafka_common_ElectionType_preferred());
     TEST_ASSERT_EQUAL_INT(kafka_common_ElectionType_PREFERRED, kafka_common_ElectionType__enum(type));
     TEST_ASSERT_EQUAL_INT8(0, kafka_common_ElectionType_value(type));
-    TEST_ASSERT_NULL(kafka_common_ElectionType_value_of(1, &type));
+    type = kafka_common_ElectionType_value_of(1, &err);
+    assert_ok(err, "ElectionType_value_of");
     TEST_ASSERT_TRUE(type == kafka_common_ElectionType_unclean());
     TEST_ASSERT_EQUAL_INT(kafka_common_ElectionType_UNCLEAN, kafka_common_ElectionType__enum(type));
-    type = NULL;
-    kafka_common_Error_t *err = kafka_common_ElectionType_value_of(7, &type);
+    err = NULL;
+    type = kafka_common_ElectionType_value_of(7, &err);
     TEST_ASSERT_NULL(type);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
     assert_error_message(err, "Value 7 must be one of [PREFERRED, UNCLEAN]");
@@ -2212,6 +2220,7 @@ static void test_mock_admin_elect_leaders_async(void) {
 
 /* One partition is reassigned, one belongs to an unknown topic. */
 static void test_mock_admin_alter_partition_reassignments_partial_failure(void) {
+    kafka_common_Error_t *err = NULL;
     fixture_t f;
     fixture_init(&f, 3);
     create_one(&f, "ra-topic", 1, 1);
@@ -2219,8 +2228,8 @@ static void test_mock_admin_alter_partition_reassignments_partial_failure(void) 
     kafka_List_t *replicas = kafka_List_new();
     kafka_List_add(replicas, &b1);
     kafka_List_add(replicas, &b2);
-    kafka_admin_NewPartitionReassignment_t *reassignment = NULL;
-    TEST_ASSERT_NULL(kafka_admin_NewPartitionReassignment_new(replicas, &reassignment));
+    kafka_admin_NewPartitionReassignment_t *reassignment = kafka_admin_NewPartitionReassignment_new(replicas, &err);
+    assert_ok(err, "NewPartitionReassignment_new");
     kafka_List_t *targets = kafka_admin_NewPartitionReassignment_target_replicas(reassignment);
     TEST_ASSERT_EQUAL_INT32(2, kafka_List_size(targets));
     TEST_ASSERT_EQUAL_INT32(2, *(const int32_t *)kafka_List_get(targets, 1));
@@ -2238,7 +2247,7 @@ static void test_mock_admin_alter_partition_reassignments_partial_failure(void) 
     kafka_Map_t *values = kafka_admin_AlterPartitionReassignmentsResult_values(result);
     TEST_ASSERT_EQUAL_INT32(2, kafka_Map_size(values));
     TEST_ASSERT_NULL(get_ok(future_for(values, ok)));
-    kafka_common_Error_t *err = get_err(future_for(values, missing));
+    err = get_err(future_for(values, missing));
     TEST_ASSERT_EQUAL_INT32(kafka_common_Error_UNKNOWN_TOPIC_OR_PARTITION, kafka_common_Error__enum(err));
     kafka_common_Error_destroy(err);
     kafka_Map_destroy(values);
@@ -2257,8 +2266,8 @@ static void test_mock_admin_alter_partition_reassignments_partial_failure(void) 
  * IllegalArgumentException, raised by the constructor. */
 static void test_mock_admin_new_partition_reassignment_rejects_empty_replicas(void) {
     kafka_List_t *empty = kafka_List_new();
-    kafka_admin_NewPartitionReassignment_t *reassignment = NULL;
-    kafka_common_Error_t *err = kafka_admin_NewPartitionReassignment_new(empty, &reassignment);
+    kafka_common_Error_t *err = NULL;
+    kafka_admin_NewPartitionReassignment_t *reassignment = kafka_admin_NewPartitionReassignment_new(empty, &err);
     TEST_ASSERT_NULL(reassignment);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
     assert_error_message(err, "Cannot create a new partition reassignment without any replicas");
@@ -2359,14 +2368,15 @@ static void test_mock_admin_list_partition_reassignments_after_delete_returns_er
 }
 
 static void test_mock_admin_alter_partition_reassignments_async(void) {
+    kafka_common_Error_t *err = NULL;
     fixture_t f;
     fixture_init(&f, 3);
     create_one(&f, "ra-async", 1, 1);
     int32_t b1 = 1;
     kafka_List_t *replicas = kafka_List_new();
     kafka_List_add(replicas, &b1);
-    kafka_admin_NewPartitionReassignment_t *reassignment = NULL;
-    TEST_ASSERT_NULL(kafka_admin_NewPartitionReassignment_new(replicas, &reassignment));
+    kafka_admin_NewPartitionReassignment_t *reassignment = kafka_admin_NewPartitionReassignment_new(replicas, &err);
+    assert_ok(err, "NewPartitionReassignment_new");
     kafka_common_TopicPartition_t *tp = tp_new("ra-async", 0);
     kafka_Map_t *request = kafka_Map_new();
     kafka_Map_put(request, tp, reassignment);
@@ -2417,6 +2427,7 @@ static void seed_lo_topic(fixture_t *f) {
  * MAX_TIMESTAMP on an unseeded partition is -1. The mock reports timestamp
  * -1 and leader epoch -1 (`Optional.empty()`) throughout. */
 static void test_mock_admin_list_offsets_earliest_and_latest(void) {
+    kafka_common_Error_t *err = NULL;
     fixture_t f;
     fixture_init(&f, 1);
     seed_lo_topic(&f);
@@ -2435,8 +2446,8 @@ static void test_mock_admin_list_offsets_earliest_and_latest(void) {
     kafka_admin_ListOffsetsOptions_destroy(options);
     TEST_ASSERT_NOT_NULL(result);
 
-    kafka_common_KafkaFuture_t *future = NULL;
-    TEST_ASSERT_NULL(kafka_admin_ListOffsetsResult_partition_result(result, p0, &future));
+    kafka_common_KafkaFuture_t *future = kafka_admin_ListOffsetsResult_partition_result(result, p0, &err);
+    assert_ok(err, "ListOffsetsResult_partition_result");
     const kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t *info =
         (const kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t *)get_ok(future);
     TEST_ASSERT_EQUAL_INT64(5, kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_offset(info));
@@ -2446,11 +2457,13 @@ static void test_mock_admin_list_offsets_earliest_and_latest(void) {
     TEST_ASSERT_NOT_NULL(strstr(text, "5"));
     kafka_string_destroy(text);
     kafka_common_KafkaFuture_destroy(future);
-    TEST_ASSERT_NULL(kafka_admin_ListOffsetsResult_partition_result(result, p1, &future));
+    future = kafka_admin_ListOffsetsResult_partition_result(result, p1, &err);
+    assert_ok(err, "ListOffsetsResult_partition_result");
     info = (const kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t *)get_ok(future);
     TEST_ASSERT_EQUAL_INT64(107, kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_offset(info));
     kafka_common_KafkaFuture_destroy(future);
-    TEST_ASSERT_NULL(kafka_admin_ListOffsetsResult_partition_result(result, unseeded, &future));
+    future = kafka_admin_ListOffsetsResult_partition_result(result, unseeded, &err);
+    assert_ok(err, "ListOffsetsResult_partition_result");
     info = (const kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t *)get_ok(future);
     TEST_ASSERT_EQUAL_INT64(-1, kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_offset(info));
     kafka_common_KafkaFuture_destroy(future);
@@ -2475,6 +2488,7 @@ static void test_mock_admin_list_offsets_earliest_and_latest(void) {
  * singletons, and the mock refuses it as unsupported with Java's message
  * "Not implement yet" (sic — MockAdminClient.java:1231). */
 static void test_mock_admin_list_offsets_for_timestamp_is_unsupported(void) {
+    kafka_common_Error_t *err = NULL;
     fixture_t f;
     fixture_init(&f, 1);
     seed_lo_topic(&f);
@@ -2487,9 +2501,9 @@ static void test_mock_admin_list_offsets_for_timestamp_is_unsupported(void) {
     kafka_Map_t *request = kafka_Map_new();
     kafka_Map_put(request, p0, at);
     kafka_admin_ListOffsetsResult_t *result = kafka_admin_Admin_list_offsets(f.admin, request);
-    kafka_common_KafkaFuture_t *future = NULL;
-    TEST_ASSERT_NULL(kafka_admin_ListOffsetsResult_partition_result(result, p0, &future));
-    kafka_common_Error_t *err = get_err(future);
+    kafka_common_KafkaFuture_t *future = kafka_admin_ListOffsetsResult_partition_result(result, p0, &err);
+    assert_ok(err, "ListOffsetsResult_partition_result");
+    err = get_err(future);
     TEST_ASSERT_EQUAL_INT32((int32_t)kafka_common_Error_UNSUPPORTED_VERSION, (int32_t)kafka_common_Error__enum(err));
     assert_error_message(err, "Not implement yet");
     kafka_common_KafkaFuture_destroy(future);
@@ -2502,17 +2516,19 @@ static void test_mock_admin_list_offsets_for_timestamp_is_unsupported(void) {
 
 /* `IsolationLevel.forId` rejects an unknown id; `partitionResult` for a
  * partition that was not requested is Java's IllegalArgumentException,
- * delivered through the error slot. */
+ * stored in out_err with a NULL result. */
 static void test_mock_admin_list_offsets_rejects_bad_inputs(void) {
-    const kafka_common_IsolationLevel_t *level = NULL;
-    TEST_ASSERT_NULL(kafka_common_IsolationLevel_for_id(0, &level));
+    kafka_common_Error_t *err = NULL;
+    const kafka_common_IsolationLevel_t *level = kafka_common_IsolationLevel_for_id(0, &err);
+    assert_ok(err, "IsolationLevel_for_id");
     TEST_ASSERT_TRUE(level == kafka_common_IsolationLevel_read_uncommitted());
     TEST_ASSERT_EQUAL_INT(kafka_common_IsolationLevel_READ_UNCOMMITTED, kafka_common_IsolationLevel__enum(level));
-    TEST_ASSERT_NULL(kafka_common_IsolationLevel_for_id(1, &level));
+    level = kafka_common_IsolationLevel_for_id(1, &err);
+    assert_ok(err, "IsolationLevel_for_id");
     TEST_ASSERT_TRUE(level == kafka_common_IsolationLevel_read_committed());
     TEST_ASSERT_EQUAL_INT8(1, kafka_common_IsolationLevel_id(level));
-    level = NULL;
-    kafka_common_Error_t *err = kafka_common_IsolationLevel_for_id(9, &level);
+    err = NULL;
+    level = kafka_common_IsolationLevel_for_id(9, &err);
     TEST_ASSERT_NULL(level);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
     assert_error_message(err, "Unknown isolation level 9");
@@ -2525,8 +2541,8 @@ static void test_mock_admin_list_offsets_rejects_bad_inputs(void) {
     kafka_Map_t *request = kafka_Map_new();
     kafka_Map_put(request, p0, (void *)kafka_admin_OffsetSpec_earliest());
     kafka_admin_ListOffsetsResult_t *result = kafka_admin_Admin_list_offsets(f.admin, request);
-    kafka_common_KafkaFuture_t *future = NULL;
-    err = kafka_admin_ListOffsetsResult_partition_result(result, p1, &future);
+    err = NULL;
+    kafka_common_KafkaFuture_t *future = kafka_admin_ListOffsetsResult_partition_result(result, p1, &err);
     TEST_ASSERT_NULL(future);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
@@ -2539,6 +2555,7 @@ static void test_mock_admin_list_offsets_rejects_bad_inputs(void) {
 }
 
 static void test_mock_admin_list_offsets_async(void) {
+    kafka_common_Error_t *err = NULL;
     fixture_t f;
     fixture_init(&f, 1);
     seed_lo_topic(&f);
@@ -2546,8 +2563,8 @@ static void test_mock_admin_list_offsets_async(void) {
     kafka_Map_t *request = kafka_Map_new();
     kafka_Map_put(request, p1, (void *)kafka_admin_OffsetSpec_earliest());
     kafka_admin_ListOffsetsResult_t *result = kafka_admin_Admin_list_offsets(f.admin, request);
-    kafka_common_KafkaFuture_t *future = NULL;
-    TEST_ASSERT_NULL(kafka_admin_ListOffsetsResult_partition_result(result, p1, &future));
+    kafka_common_KafkaFuture_t *future = kafka_admin_ListOffsetsResult_partition_result(result, p1, &err);
+    assert_ok(err, "ListOffsetsResult_partition_result");
     cb_result_t r;
     get_cb_pumped(&f, future, &r);
     TEST_ASSERT_FALSE(r.had_error);
@@ -2754,6 +2771,7 @@ static void seed_group_offsets(fixture_t *f, const char *topic_a, const char *to
  * `OffsetAndMetadata`; Java's one-argument constructor normalises the
  * metadata to "" and the leader epoch to `Optional.empty()` (-1 in C). */
 static void test_mock_admin_list_consumer_group_offsets_round_trip(void) {
+    kafka_common_Error_t *err = NULL;
     fixture_t f;
     fixture_init(&f, 1);
     seed_group_offsets(&f, "og-a", "og-b", 17, 23);
@@ -2763,8 +2781,8 @@ static void test_mock_admin_list_consumer_group_offsets_round_trip(void) {
         kafka_admin_Admin_list_consumer_group_offsets_with_group_id_options(f.admin, "og-group", options);
     kafka_admin_ListConsumerGroupOffsetsOptions_destroy(options);
     TEST_ASSERT_NOT_NULL(result);
-    kafka_common_KafkaFuture_t *future = NULL;
-    TEST_ASSERT_NULL(kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata(result, &future));
+    kafka_common_KafkaFuture_t *future = kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata(result, &err);
+    assert_ok(err, "ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata");
     const kafka_Map_t *offsets = (const kafka_Map_t *)get_ok(future);
     TEST_ASSERT_EQUAL_INT32(2, kafka_Map_size(offsets));
     kafka_common_TopicPartition_t *a0 = tp_new("og-a", 0);
@@ -2779,8 +2797,8 @@ static void test_mock_admin_list_consumer_group_offsets_round_trip(void) {
     TEST_ASSERT_NOT_NULL(om);
     TEST_ASSERT_EQUAL_INT64(23, kafka_consumer_OffsetAndMetadata_offset(om));
     kafka_common_TopicPartition_destroy(b1);
-    kafka_common_KafkaFuture_t *by_group = NULL;
-    TEST_ASSERT_NULL(kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata_with_group_id(result, "og-group", &by_group));
+    kafka_common_KafkaFuture_t *by_group = kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata_with_group_id(result, "og-group", &err);
+    assert_ok(err, "ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata_with_group_id");
     TEST_ASSERT_EQUAL_INT32(2, kafka_Map_size((const kafka_Map_t *)get_ok(by_group)));
     kafka_common_KafkaFuture_destroy(by_group);
     kafka_common_KafkaFuture_destroy(future);
@@ -2798,6 +2816,7 @@ static void test_mock_admin_list_consumer_group_offsets_round_trip(void) {
 /* A `ListConsumerGroupOffsetsSpec` with topic partitions narrows the result
  * to those partitions — which fails if the selection were ignored. */
 static void test_mock_admin_list_consumer_group_offsets_filters_by_spec_partitions(void) {
+    kafka_common_Error_t *err = NULL;
     fixture_t f;
     fixture_init(&f, 1);
     seed_group_offsets(&f, "og-a", "og-b", 17, 23);
@@ -2815,8 +2834,8 @@ static void test_mock_admin_list_consumer_group_offsets_filters_by_spec_partitio
     kafka_Map_put(specs, (void *)"og-group", spec);
     kafka_admin_ListConsumerGroupOffsetsResult_t *result = kafka_admin_Admin_list_consumer_group_offsets_with_group_specs(f.admin, specs);
     TEST_ASSERT_NOT_NULL(result);
-    kafka_common_KafkaFuture_t *future = NULL;
-    TEST_ASSERT_NULL(kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata_with_group_id(result, "og-group", &future));
+    kafka_common_KafkaFuture_t *future = kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata_with_group_id(result, "og-group", &err);
+    assert_ok(err, "ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata_with_group_id");
     const kafka_Map_t *offsets = (const kafka_Map_t *)get_ok(future);
     TEST_ASSERT_EQUAL_INT32(1, kafka_Map_size(offsets));
     const kafka_common_TopicPartition_t *key = (const kafka_common_TopicPartition_t *)kafka_Map_key(offsets, 0);
@@ -2825,8 +2844,8 @@ static void test_mock_admin_list_consumer_group_offsets_filters_by_spec_partitio
     TEST_ASSERT_EQUAL_INT64(23, kafka_consumer_OffsetAndMetadata_offset((const kafka_consumer_OffsetAndMetadata_t *)kafka_Map_value(offsets, 0)));
     kafka_common_KafkaFuture_destroy(future);
     /* A group that was not requested is Java's IllegalArgumentException. */
-    future = NULL;
-    kafka_common_Error_t *err = kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata_with_group_id(result, "other-group", &future);
+    err = NULL;
+    future = kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata_with_group_id(result, "other-group", &err);
     TEST_ASSERT_NULL(future);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
     kafka_common_Error_destroy(err);
@@ -2846,14 +2865,15 @@ static void test_mock_admin_list_consumer_group_offsets_filters_by_spec_partitio
  * fails the group's future rather than panicking, and the handle stays
  * usable: overwriting the bad offset makes the same call succeed. */
 static void test_mock_admin_list_consumer_group_offsets_rejects_a_negative_seeded_offset(void) {
+    kafka_common_Error_t *err = NULL;
     fixture_t f;
     fixture_init(&f, 1);
     seed_group_offsets(&f, "neg-a", "neg-b", 3, -1);
     kafka_admin_ListConsumerGroupOffsetsResult_t *result = kafka_admin_Admin_list_consumer_group_offsets_with_group_id(f.admin, "neg-group");
     TEST_ASSERT_NOT_NULL(result);
-    kafka_common_KafkaFuture_t *future = NULL;
-    TEST_ASSERT_NULL(kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata(result, &future));
-    kafka_common_Error_t *err = get_err(future);
+    kafka_common_KafkaFuture_t *future = kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata(result, &err);
+    assert_ok(err, "ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata");
+    err = get_err(future);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
     assert_error_message(err, "Invalid negative offset");
     kafka_common_KafkaFuture_destroy(future);
@@ -2862,8 +2882,10 @@ static void test_mock_admin_list_consumer_group_offsets_rejects_a_negative_seede
     int32_t pb[1] = {1};
     int64_t ob[1] = {9};
     update_offsets(&f, kafka_admin_MockAdminClient_update_consumer_group_offsets, "neg-b", pb, ob, 1);
+    err = NULL;
     result = kafka_admin_Admin_list_consumer_group_offsets_with_group_id(f.admin, "neg-group");
-    TEST_ASSERT_NULL(kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata(result, &future));
+    future = kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata(result, &err);
+    assert_ok(err, "ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata");
     const kafka_Map_t *offsets = (const kafka_Map_t *)get_ok(future);
     TEST_ASSERT_EQUAL_INT32(2, kafka_Map_size(offsets));
     kafka_common_TopicPartition_t *b1 = tp_new("neg-b", 1);
@@ -2891,14 +2913,17 @@ static void test_mock_admin_list_consumer_group_offsets_two_groups_are_unsupport
         kafka_admin_Admin_list_consumer_group_offsets_with_group_specs_options(f.admin, specs, options);
     kafka_admin_ListConsumerGroupOffsetsOptions_destroy(options);
     TEST_ASSERT_NOT_NULL(result);
-    kafka_common_KafkaFuture_t *future = NULL;
-    kafka_common_Error_t *err = kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata(result, &future);
+    kafka_common_Error_t *err = NULL;
+    kafka_common_KafkaFuture_t *future = kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata(result, &err);
     TEST_ASSERT_NULL(future);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_state_error(err));
     kafka_common_Error_destroy(err);
-    TEST_ASSERT_NULL(kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata_with_group_id(result, "two-a", &future));
+    err = NULL;
+    future = kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata_with_group_id(result, "two-a", &err);
+    assert_ok(err, "ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata_with_group_id");
     expect_fails_with(future, "Not implemented yet");
-    TEST_ASSERT_NULL(kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata_with_group_id(result, "two-b", &future));
+    future = kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata_with_group_id(result, "two-b", &err);
+    assert_ok(err, "ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata_with_group_id");
     expect_fails_with(future, "Not implemented yet");
     expect_fails_with(kafka_admin_ListConsumerGroupOffsetsResult_all(result), "Not implemented yet");
     kafka_admin_ListConsumerGroupOffsetsResult_destroy(result);
@@ -2909,12 +2934,13 @@ static void test_mock_admin_list_consumer_group_offsets_two_groups_are_unsupport
 }
 
 static void test_mock_admin_list_consumer_group_offsets_async(void) {
+    kafka_common_Error_t *err = NULL;
     fixture_t f;
     fixture_init(&f, 1);
     seed_group_offsets(&f, "oga-a", "oga-b", 1, 2);
     kafka_admin_ListConsumerGroupOffsetsResult_t *result = kafka_admin_Admin_list_consumer_group_offsets_with_group_id(f.admin, "oga-group");
-    kafka_common_KafkaFuture_t *future = NULL;
-    TEST_ASSERT_NULL(kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata(result, &future));
+    kafka_common_KafkaFuture_t *future = kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata(result, &err);
+    assert_ok(err, "ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata");
     cb_result_t r;
     get_cb_pumped(&f, future, &r);
     TEST_ASSERT_FALSE(r.had_error);
@@ -2932,14 +2958,15 @@ static void test_mock_admin_list_consumer_group_offsets_async(void) {
  * the Rust mock fails each partition's future, reachable through
  * `partitionResult(tp)`, which returns the future directly. */
 static void test_mock_admin_alter_consumer_group_offsets_reports_unsupported_per_partition(void) {
+    kafka_common_Error_t *err = NULL;
     fixture_t f;
     fixture_init(&f, 1);
     kafka_common_TopicPartition_t *p0 = tp_new("acg-topic", 0);
     kafka_common_TopicPartition_t *p1 = tp_new("acg-topic", 1);
-    kafka_consumer_OffsetAndMetadata_t *om0 = NULL;
-    TEST_ASSERT_NULL(kafka_consumer_OffsetAndMetadata_new(10, &om0));
-    kafka_consumer_OffsetAndMetadata_t *om1 = NULL;
-    TEST_ASSERT_NULL(kafka_consumer_OffsetAndMetadata_with_leader_epoch_metadata(20, 3, "meta", &om1));
+    kafka_consumer_OffsetAndMetadata_t *om0 = kafka_consumer_OffsetAndMetadata_new(10, &err);
+    assert_ok(err, "OffsetAndMetadata_new");
+    kafka_consumer_OffsetAndMetadata_t *om1 = kafka_consumer_OffsetAndMetadata_with_leader_epoch_metadata(20, 3, "meta", &err);
+    assert_ok(err, "OffsetAndMetadata_with_leader_epoch_metadata");
     TEST_ASSERT_EQUAL_INT64(20, kafka_consumer_OffsetAndMetadata_offset(om1));
     TEST_ASSERT_EQUAL_INT32(3, kafka_consumer_OffsetAndMetadata_leader_epoch(om1));
     TEST_ASSERT_EQUAL_STRING("meta", kafka_consumer_OffsetAndMetadata_metadata(om1));
@@ -2952,7 +2979,7 @@ static void test_mock_admin_alter_consumer_group_offsets_reports_unsupported_per
     kafka_admin_AlterConsumerGroupOffsetsOptions_destroy(options);
     TEST_ASSERT_NOT_NULL(result);
     kafka_common_KafkaFuture_t *future = kafka_admin_AlterConsumerGroupOffsetsResult_partition_result(result, p0);
-    kafka_common_Error_t *err = get_err(future);
+    err = get_err(future);
     TEST_ASSERT_EQUAL_INT32(kafka_common_Error_UNSUPPORTED_VERSION, kafka_common_Error__enum(err));
     assert_error_message(err, "Not implement yet");
     kafka_common_KafkaFuture_destroy(future);
@@ -2974,8 +3001,8 @@ static void test_mock_admin_alter_consumer_group_offsets_reports_unsupported_per
  * the derived future carries that failure (as Java's `thenApply` chain
  * would). */
 static void test_mock_admin_alter_consumer_group_offsets_rejects_bad_input(void) {
-    kafka_consumer_OffsetAndMetadata_t *om = NULL;
-    kafka_common_Error_t *err = kafka_consumer_OffsetAndMetadata_new(-1, &om);
+    kafka_common_Error_t *err = NULL;
+    kafka_consumer_OffsetAndMetadata_t *om = kafka_consumer_OffsetAndMetadata_new(-1, &err);
     TEST_ASSERT_NULL(om);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
     assert_error_message(err, "Invalid negative offset");
@@ -2984,7 +3011,9 @@ static void test_mock_admin_alter_consumer_group_offsets_rejects_bad_input(void)
     fixture_init(&f, 1);
     kafka_common_TopicPartition_t *requested = tp_new("acg-topic", 0);
     kafka_common_TopicPartition_t *other = tp_new("acg-topic", 5);
-    TEST_ASSERT_NULL(kafka_consumer_OffsetAndMetadata_new(1, &om));
+    err = NULL;
+    om = kafka_consumer_OffsetAndMetadata_new(1, &err);
+    assert_ok(err, "OffsetAndMetadata_new");
     kafka_Map_t *offsets = kafka_Map_new();
     kafka_Map_put(offsets, requested, om);
     kafka_admin_AlterConsumerGroupOffsetsResult_t *result = kafka_admin_Admin_alter_consumer_group_offsets(f.admin, "acg", offsets);
@@ -3015,11 +3044,12 @@ static void test_mock_admin_alter_consumer_group_offsets_with_no_partitions_fail
 }
 
 static void test_mock_admin_alter_consumer_group_offsets_async(void) {
+    kafka_common_Error_t *err = NULL;
     fixture_t f;
     fixture_init(&f, 1);
     kafka_common_TopicPartition_t *p0 = tp_new("acg-async", 0);
-    kafka_consumer_OffsetAndMetadata_t *om = NULL;
-    TEST_ASSERT_NULL(kafka_consumer_OffsetAndMetadata_with_metadata(7, "m", &om));
+    kafka_consumer_OffsetAndMetadata_t *om = kafka_consumer_OffsetAndMetadata_with_metadata(7, "m", &err);
+    assert_ok(err, "OffsetAndMetadata_with_metadata");
     kafka_Map_t *offsets = kafka_Map_new();
     kafka_Map_put(offsets, p0, om);
     kafka_admin_AlterConsumerGroupOffsetsResult_t *result = kafka_admin_Admin_alter_consumer_group_offsets(f.admin, "acg", offsets);
@@ -3037,9 +3067,10 @@ static void test_mock_admin_alter_consumer_group_offsets_async(void) {
 }
 
 /* `deleteConsumerGroupOffsets`: "Not implemented yet" per partition, through
- * `partitionResult(tp)`, which delivers the future through an out slot and
- * reports IllegalArgument for an unrequested partition. */
+ * `partitionResult(tp)`, which returns the future and stores
+ * IllegalArgument in out_err for an unrequested partition. */
 static void test_mock_admin_delete_consumer_group_offsets_reports_unsupported_per_partition(void) {
+    kafka_common_Error_t *err = NULL;
     fixture_t f;
     fixture_init(&f, 1);
     kafka_common_TopicPartition_t *p0 = tp_new("dcg-topic", 0);
@@ -3051,14 +3082,14 @@ static void test_mock_admin_delete_consumer_group_offsets_reports_unsupported_pe
         kafka_admin_Admin_delete_consumer_group_offsets_with_options(f.admin, "dcg", partitions, options);
     kafka_admin_DeleteConsumerGroupOffsetsOptions_destroy(options);
     TEST_ASSERT_NOT_NULL(result);
-    kafka_common_KafkaFuture_t *future = NULL;
-    TEST_ASSERT_NULL(kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(result, p0, &future));
-    kafka_common_Error_t *err = get_err(future);
+    kafka_common_KafkaFuture_t *future = kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(result, p0, &err);
+    assert_ok(err, "DeleteConsumerGroupOffsetsResult_partition_result");
+    err = get_err(future);
     TEST_ASSERT_EQUAL_INT32(kafka_common_Error_UNSUPPORTED_VERSION, kafka_common_Error__enum(err));
     assert_error_message(err, "Not implemented yet");
     kafka_common_KafkaFuture_destroy(future);
-    future = NULL;
-    err = kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(result, other, &future);
+    err = NULL;
+    future = kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(result, other, &err);
     TEST_ASSERT_NULL(future);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
     kafka_common_Error_destroy(err);
@@ -3135,6 +3166,7 @@ static void test_mock_admin_delete_consumer_groups_async(void) {
 /* `memberResult(member)` for each requested member fails "Not implemented
  * yet"; an unrequested member is Java's IllegalArgumentException. */
 static void test_mock_admin_remove_members_reports_unsupported_per_member(void) {
+    kafka_common_Error_t *err = NULL;
     fixture_t f;
     fixture_init(&f, 1);
     kafka_admin_MemberToRemove_t *b = kafka_admin_MemberToRemove_new("instance-b");
@@ -3144,8 +3176,8 @@ static void test_mock_admin_remove_members_reports_unsupported_per_member(void) 
     kafka_List_t *members = kafka_List_new();
     kafka_List_add(members, b);
     kafka_List_add(members, a);
-    kafka_admin_RemoveMembersFromConsumerGroupOptions_t *options = NULL;
-    TEST_ASSERT_NULL(kafka_admin_RemoveMembersFromConsumerGroupOptions_with_members(members, &options));
+    kafka_admin_RemoveMembersFromConsumerGroupOptions_t *options = kafka_admin_RemoveMembersFromConsumerGroupOptions_with_members(members, &err);
+    assert_ok(err, "RemoveMembersFromConsumerGroupOptions_with_members");
     kafka_admin_RemoveMembersFromConsumerGroupOptions_set_reason(options, "rolling restart");
     TEST_ASSERT_EQUAL_STRING("rolling restart", kafka_admin_RemoveMembersFromConsumerGroupOptions_reason(options));
     TEST_ASSERT_FALSE(kafka_admin_RemoveMembersFromConsumerGroupOptions_remove_all(options));
@@ -3155,16 +3187,18 @@ static void test_mock_admin_remove_members_reports_unsupported_per_member(void) 
     kafka_admin_RemoveMembersFromConsumerGroupResult_t *result =
         kafka_admin_Admin_remove_members_from_consumer_group_with_options(f.admin, "rm-group", options);
     TEST_ASSERT_NOT_NULL(result);
-    kafka_common_KafkaFuture_t *future = NULL;
-    TEST_ASSERT_NULL(kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(result, a, &future));
-    kafka_common_Error_t *err = get_err(future);
+    kafka_common_KafkaFuture_t *future = kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(result, a, &err);
+    assert_ok(err, "RemoveMembersFromConsumerGroupResult_member_result");
+    err = get_err(future);
     TEST_ASSERT_EQUAL_INT32(kafka_common_Error_UNSUPPORTED_VERSION, kafka_common_Error__enum(err));
     assert_error_message(err, "Not implemented yet");
     kafka_common_KafkaFuture_destroy(future);
-    TEST_ASSERT_NULL(kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(result, b, &future));
+    err = NULL;
+    future = kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(result, b, &err);
+    assert_ok(err, "RemoveMembersFromConsumerGroupResult_member_result");
     expect_fails_with(future, "Not implemented yet");
-    future = NULL;
-    err = kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(result, other, &future);
+    err = NULL;
+    future = kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(result, other, &err);
     TEST_ASSERT_NULL(future);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
     kafka_common_Error_destroy(err);
@@ -3195,8 +3229,8 @@ static void test_mock_admin_remove_all_members_has_no_per_member_outcome(void) {
     kafka_admin_RemoveMembersFromConsumerGroupResult_t *result =
         kafka_admin_Admin_remove_members_from_consumer_group_with_options(f.admin, "rm-group", options);
     kafka_admin_MemberToRemove_t *m = kafka_admin_MemberToRemove_new("instance-a");
-    kafka_common_KafkaFuture_t *future = NULL;
-    kafka_common_Error_t *err = kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(result, m, &future);
+    kafka_common_Error_t *err = NULL;
+    kafka_common_KafkaFuture_t *future = kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(result, m, &err);
     TEST_ASSERT_NULL(future);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
     assert_error_message(err, "The method: memberResult is not applicable in 'removeAll' mode");
@@ -3211,25 +3245,27 @@ static void test_mock_admin_remove_all_members_has_no_per_member_outcome(void) {
  * empty collection. */
 static void test_mock_admin_remove_members_rejects_an_empty_member_list(void) {
     kafka_List_t *empty = kafka_List_new();
-    kafka_admin_RemoveMembersFromConsumerGroupOptions_t *options = NULL;
-    kafka_common_Error_t *err = kafka_admin_RemoveMembersFromConsumerGroupOptions_with_members(empty, &options);
+    kafka_common_Error_t *err = NULL;
+    kafka_admin_RemoveMembersFromConsumerGroupOptions_t *options = kafka_admin_RemoveMembersFromConsumerGroupOptions_with_members(empty, &err);
     TEST_ASSERT_NULL(options);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
     assert_error_message(err, "Invalid empty members has been provided");
-    err = kafka_admin_RemoveMembersFromConsumerGroupOptions_with_members(NULL, &options);
+    err = NULL;
+    options = kafka_admin_RemoveMembersFromConsumerGroupOptions_with_members(NULL, &err);
     TEST_ASSERT_NULL(options);
     assert_error_message(err, "Invalid empty members has been provided");
     kafka_List_destroy(empty);
 }
 
 static void test_mock_admin_remove_members_async(void) {
+    kafka_common_Error_t *err = NULL;
     fixture_t f;
     fixture_init(&f, 1);
     kafka_admin_MemberToRemove_t *m = kafka_admin_MemberToRemove_new("instance-async");
     kafka_List_t *members = kafka_List_new();
     kafka_List_add(members, m);
-    kafka_admin_RemoveMembersFromConsumerGroupOptions_t *options = NULL;
-    TEST_ASSERT_NULL(kafka_admin_RemoveMembersFromConsumerGroupOptions_with_members(members, &options));
+    kafka_admin_RemoveMembersFromConsumerGroupOptions_t *options = kafka_admin_RemoveMembersFromConsumerGroupOptions_with_members(members, &err);
+    assert_ok(err, "RemoveMembersFromConsumerGroupOptions_with_members");
     kafka_admin_RemoveMembersFromConsumerGroupResult_t *result =
         kafka_admin_Admin_remove_members_from_consumer_group_with_options(f.admin, "rm-group", options);
     kafka_common_KafkaFuture_t *all = kafka_admin_RemoveMembersFromConsumerGroupResult_all(result);
@@ -3250,17 +3286,19 @@ static void test_mock_admin_remove_members_async(void) {
 // ---------------------------------------------------------------------------
 
 static kafka_common_resource_ResourcePattern_t *topic_pattern(const char *name) {
-    kafka_common_resource_ResourcePattern_t *pattern = NULL;
-    TEST_ASSERT_NULL(kafka_common_resource_ResourcePattern_new(
-        kafka_common_resource_ResourceType_topic(), name, kafka_common_resource_PatternType_literal(), &pattern));
+    kafka_common_Error_t *err = NULL;
+    kafka_common_resource_ResourcePattern_t *pattern = kafka_common_resource_ResourcePattern_new(
+        kafka_common_resource_ResourceType_topic(), name, kafka_common_resource_PatternType_literal(), &err);
+    assert_ok(err, "ResourcePattern_new");
     TEST_ASSERT_NOT_NULL(pattern);
     return pattern;
 }
 
 static kafka_common_acl_AccessControlEntry_t *allow_read_entry(const char *principal) {
-    kafka_common_acl_AccessControlEntry_t *entry = NULL;
-    TEST_ASSERT_NULL(kafka_common_acl_AccessControlEntry_new(
-        principal, "*", kafka_common_acl_AclOperation_read(), kafka_common_acl_AclPermissionType_allow(), &entry));
+    kafka_common_Error_t *err = NULL;
+    kafka_common_acl_AccessControlEntry_t *entry = kafka_common_acl_AccessControlEntry_new(
+        principal, "*", kafka_common_acl_AclOperation_read(), kafka_common_acl_AclPermissionType_allow(), &err);
+    assert_ok(err, "AccessControlEntry_new");
     TEST_ASSERT_NOT_NULL(entry);
     return entry;
 }
@@ -3314,29 +3352,32 @@ static void test_mock_admin_create_acls_reports_unsupported_per_binding(void) {
 /* The Java constructors reject the filter-only enum values (`ANY`, `MATCH`)
  * on a concrete pattern or entry; each is an IllegalArgumentException. */
 static void test_mock_admin_acl_constructors_reject_filter_values(void) {
-    kafka_common_resource_ResourcePattern_t *pattern = NULL;
-    kafka_common_Error_t *err = kafka_common_resource_ResourcePattern_new(
-        kafka_common_resource_ResourceType_any(), "t", kafka_common_resource_PatternType_literal(), &pattern);
+    kafka_common_Error_t *err = NULL;
+    kafka_common_resource_ResourcePattern_t *pattern = kafka_common_resource_ResourcePattern_new(
+        kafka_common_resource_ResourceType_any(), "t", kafka_common_resource_PatternType_literal(), &err);
     TEST_ASSERT_NULL(pattern);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
     assert_error_message(err, "resourceType must not be ANY");
-    err = kafka_common_resource_ResourcePattern_new(
-        kafka_common_resource_ResourceType_topic(), "t", kafka_common_resource_PatternType_match(), &pattern);
+    err = NULL;
+    pattern = kafka_common_resource_ResourcePattern_new(
+        kafka_common_resource_ResourceType_topic(), "t", kafka_common_resource_PatternType_match(), &err);
     TEST_ASSERT_NULL(pattern);
     assert_error_message(err, "patternType must not be MATCH");
-    err = kafka_common_resource_ResourcePattern_new(
-        kafka_common_resource_ResourceType_topic(), "t", kafka_common_resource_PatternType_any(), &pattern);
+    err = NULL;
+    pattern = kafka_common_resource_ResourcePattern_new(
+        kafka_common_resource_ResourceType_topic(), "t", kafka_common_resource_PatternType_any(), &err);
     TEST_ASSERT_NULL(pattern);
     assert_error_message(err, "patternType must not be ANY");
 
-    kafka_common_acl_AccessControlEntry_t *entry = NULL;
-    err = kafka_common_acl_AccessControlEntry_new(
-        "User:a", "*", kafka_common_acl_AclOperation_any(), kafka_common_acl_AclPermissionType_allow(), &entry);
+    err = NULL;
+    kafka_common_acl_AccessControlEntry_t *entry = kafka_common_acl_AccessControlEntry_new(
+        "User:a", "*", kafka_common_acl_AclOperation_any(), kafka_common_acl_AclPermissionType_allow(), &err);
     TEST_ASSERT_NULL(entry);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
     assert_error_message(err, "operation must not be ANY");
-    err = kafka_common_acl_AccessControlEntry_new(
-        "User:a", "*", kafka_common_acl_AclOperation_read(), kafka_common_acl_AclPermissionType_any(), &entry);
+    err = NULL;
+    entry = kafka_common_acl_AccessControlEntry_new(
+        "User:a", "*", kafka_common_acl_AclOperation_read(), kafka_common_acl_AclPermissionType_any(), &err);
     TEST_ASSERT_NULL(entry);
     assert_error_message(err, "permissionType must not be ANY");
 }
@@ -4047,8 +4088,9 @@ static int16_t finalized_level(fixture_t *f, const char *feature) {
 }
 
 static kafka_admin_FeatureUpdate_t *feature_update(int16_t level, const kafka_admin_FeatureUpdate_UpgradeType_t *type) {
-    kafka_admin_FeatureUpdate_t *update = NULL;
-    TEST_ASSERT_NULL(kafka_admin_FeatureUpdate_new(level, type, &update));
+    kafka_common_Error_t *err = NULL;
+    kafka_admin_FeatureUpdate_t *update = kafka_admin_FeatureUpdate_new(level, type, &err);
+    assert_ok(err, "FeatureUpdate_new");
     TEST_ASSERT_NOT_NULL(update);
     return update;
 }
@@ -4102,6 +4144,7 @@ static void test_mock_admin_describe_features(void) {
 /* `updateFeatures` with `validateOnly` leaves the level alone; the real
  * update applies it. */
 static void test_mock_admin_update_features_applies_a_valid_upgrade(void) {
+    kafka_common_Error_t *err = NULL;
     fixture_t f;
     fixture_init(&f, 1);
     seed_features(&f);
@@ -4122,8 +4165,8 @@ static void test_mock_admin_update_features_applies_a_valid_upgrade(void) {
 
     kafka_admin_UpdateFeaturesOptions_t *options = kafka_admin_UpdateFeaturesOptions_new();
     kafka_admin_UpdateFeaturesOptions_set_validate_only(options, 1);
-    kafka_admin_UpdateFeaturesResult_t *result = NULL;
-    TEST_ASSERT_NULL(kafka_admin_Admin_update_features_with_options(f.admin, updates, options, &result));
+    kafka_admin_UpdateFeaturesResult_t *result = kafka_admin_Admin_update_features_with_options(f.admin, updates, options, &err);
+    assert_ok(err, "Admin_update_features_with_options");
     kafka_admin_UpdateFeaturesOptions_destroy(options);
     TEST_ASSERT_NOT_NULL(result);
     kafka_Map_t *values = kafka_admin_UpdateFeaturesResult_values(result);
@@ -4135,8 +4178,8 @@ static void test_mock_admin_update_features_applies_a_valid_upgrade(void) {
     kafka_admin_UpdateFeaturesResult_destroy(NULL);
     TEST_ASSERT_EQUAL_INT16(17, finalized_level(&f, "metadata.version"));
 
-    result = NULL;
-    TEST_ASSERT_NULL(kafka_admin_Admin_update_features(f.admin, updates, &result));
+    result = kafka_admin_Admin_update_features(f.admin, updates, &err);
+    assert_ok(err, "Admin_update_features");
     expect_void_ok(kafka_admin_UpdateFeaturesResult_all(result));
     kafka_admin_UpdateFeaturesResult_destroy(result);
     TEST_ASSERT_EQUAL_INT16(19, finalized_level(&f, "metadata.version"));
@@ -4152,16 +4195,17 @@ static void test_mock_admin_update_features_applies_a_valid_upgrade(void) {
  * below 1 with an UPGRADE type (Java's IllegalArgumentException); an empty
  * batch is accepted by the mock and yields an empty result. */
 static void test_mock_admin_update_features_rejects_bad_updates(void) {
+    kafka_common_Error_t *err = NULL;
     fixture_t f;
     fixture_init(&f, 1);
     seed_features(&f);
     kafka_admin_FeatureUpdate_t *too_high = feature_update(99, kafka_admin_FeatureUpdate_UpgradeType_upgrade());
     kafka_Map_t *updates = kafka_Map_new();
     kafka_Map_put(updates, (void *)"metadata.version", too_high);
-    kafka_admin_UpdateFeaturesResult_t *result = NULL;
-    TEST_ASSERT_NULL(kafka_admin_Admin_update_features(f.admin, updates, &result));
+    kafka_admin_UpdateFeaturesResult_t *result = kafka_admin_Admin_update_features(f.admin, updates, &err);
+    assert_ok(err, "Admin_update_features");
     kafka_Map_t *values = kafka_admin_UpdateFeaturesResult_values(result);
-    kafka_common_Error_t *err = get_err(future_for(values, "metadata.version"));
+    err = get_err(future_for(values, "metadata.version"));
     TEST_ASSERT_TRUE(kafka_common_Error_is_api_error(err));
     assert_error_message(err, "Invalid update version 99 for feature metadata.version. Can't upgrade above 21");
     kafka_Map_destroy(values);
@@ -4174,8 +4218,9 @@ static void test_mock_admin_update_features_rejects_bad_updates(void) {
     kafka_admin_FeatureUpdate_t *unknown = feature_update(18, kafka_admin_FeatureUpdate_UpgradeType_unknown());
     updates = kafka_Map_new();
     kafka_Map_put(updates, (void *)"metadata.version", unknown);
-    result = NULL;
-    TEST_ASSERT_NULL(kafka_admin_Admin_update_features(f.admin, updates, &result));
+    err = NULL;
+    result = kafka_admin_Admin_update_features(f.admin, updates, &err);
+    assert_ok(err, "Admin_update_features");
     values = kafka_admin_UpdateFeaturesResult_values(result);
     assert_error_message(get_err(future_for(values, "metadata.version")),
                          "Invalid update version 18 for feature metadata.version. Invalid upgrade type.");
@@ -4184,8 +4229,8 @@ static void test_mock_admin_update_features_rejects_bad_updates(void) {
     kafka_Map_destroy(updates);
     kafka_admin_FeatureUpdate_destroy(unknown);
 
-    kafka_admin_FeatureUpdate_t *bad = NULL;
-    err = kafka_admin_FeatureUpdate_new(0, kafka_admin_FeatureUpdate_UpgradeType_upgrade(), &bad);
+    err = NULL;
+    kafka_admin_FeatureUpdate_t *bad = kafka_admin_FeatureUpdate_new(0, kafka_admin_FeatureUpdate_UpgradeType_upgrade(), &err);
     TEST_ASSERT_NULL(bad);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
     assert_error_message(err, "The upgradeType flag should be set to SAFE_DOWNGRADE or UNSAFE_DOWNGRADE when the provided maxVersionLevel:0 is < 1.");
@@ -4193,8 +4238,9 @@ static void test_mock_admin_update_features_rejects_bad_updates(void) {
     kafka_admin_FeatureUpdate_destroy(downgrade);
 
     kafka_Map_t *empty = kafka_Map_new();
-    result = NULL;
-    TEST_ASSERT_NULL(kafka_admin_Admin_update_features(f.admin, empty, &result));
+    err = NULL;
+    result = kafka_admin_Admin_update_features(f.admin, empty, &err);
+    assert_ok(err, "Admin_update_features");
     TEST_ASSERT_NOT_NULL(result);
     values = kafka_admin_UpdateFeaturesResult_values(result);
     TEST_ASSERT_EQUAL_INT32(0, kafka_Map_size(values));
@@ -4206,6 +4252,7 @@ static void test_mock_admin_update_features_rejects_bad_updates(void) {
 }
 
 static void test_mock_admin_features_async(void) {
+    kafka_common_Error_t *err = NULL;
     fixture_t f;
     fixture_init(&f, 1);
     seed_features(&f);
@@ -4221,8 +4268,8 @@ static void test_mock_admin_features_async(void) {
     kafka_admin_FeatureUpdate_t *update = feature_update(3, kafka_admin_FeatureUpdate_UpgradeType_upgrade());
     kafka_Map_t *updates = kafka_Map_new();
     kafka_Map_put(updates, (void *)"transaction.version", update);
-    kafka_admin_UpdateFeaturesResult_t *result = NULL;
-    TEST_ASSERT_NULL(kafka_admin_Admin_update_features(f.admin, updates, &result));
+    kafka_admin_UpdateFeaturesResult_t *result = kafka_admin_Admin_update_features(f.admin, updates, &err);
+    assert_ok(err, "Admin_update_features");
     kafka_common_KafkaFuture_t *all = kafka_admin_UpdateFeaturesResult_all(result);
     get_cb_pumped(&f, all, &r);
     TEST_ASSERT_FALSE(r.had_error);
@@ -4239,8 +4286,9 @@ static void test_mock_admin_features_async(void) {
 // ---------------------------------------------------------------------------
 
 /* `describeProducers`: "Not implemented yet" per partition through
- * `partitionResult(tp)` (out slot; IllegalArgument for an unrequested one). */
+ * `partitionResult(tp)` (IllegalArgument in out_err for an unrequested one). */
 static void test_mock_admin_describe_producers_reports_unsupported_per_partition(void) {
+    kafka_common_Error_t *err = NULL;
     fixture_t f;
     fixture_init(&f, 1);
     kafka_common_TopicPartition_t *p0 = tp_new("txn-topic", 0);
@@ -4253,14 +4301,14 @@ static void test_mock_admin_describe_producers_reports_unsupported_per_partition
     kafka_admin_DescribeProducersResult_t *result = kafka_admin_Admin_describe_producers_with_options(f.admin, partitions, options);
     kafka_admin_DescribeProducersOptions_destroy(options);
     TEST_ASSERT_NOT_NULL(result);
-    kafka_common_KafkaFuture_t *future = NULL;
-    TEST_ASSERT_NULL(kafka_admin_DescribeProducersResult_partition_result(result, p0, &future));
-    kafka_common_Error_t *err = get_err(future);
+    kafka_common_KafkaFuture_t *future = kafka_admin_DescribeProducersResult_partition_result(result, p0, &err);
+    assert_ok(err, "DescribeProducersResult_partition_result");
+    err = get_err(future);
     TEST_ASSERT_EQUAL_INT32(kafka_common_Error_UNSUPPORTED_VERSION, kafka_common_Error__enum(err));
     assert_error_message(err, "Not implemented yet");
     kafka_common_KafkaFuture_destroy(future);
-    future = NULL;
-    err = kafka_admin_DescribeProducersResult_partition_result(result, other, &future);
+    err = NULL;
+    future = kafka_admin_DescribeProducersResult_partition_result(result, other, &err);
     TEST_ASSERT_NULL(future);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
     kafka_common_Error_destroy(err);
@@ -4275,6 +4323,7 @@ static void test_mock_admin_describe_producers_reports_unsupported_per_partition
 
 /* `describeTransactions`: "Not implemented yet" per transactional id. */
 static void test_mock_admin_describe_transactions_reports_unsupported_per_id(void) {
+    kafka_common_Error_t *err = NULL;
     fixture_t f;
     fixture_init(&f, 1);
     kafka_List_t *ids = string_list("txn-a", NULL);
@@ -4282,14 +4331,14 @@ static void test_mock_admin_describe_transactions_reports_unsupported_per_id(voi
     kafka_admin_DescribeTransactionsResult_t *result = kafka_admin_Admin_describe_transactions_with_options(f.admin, ids, options);
     kafka_admin_DescribeTransactionsOptions_destroy(options);
     TEST_ASSERT_NOT_NULL(result);
-    kafka_common_KafkaFuture_t *future = NULL;
-    TEST_ASSERT_NULL(kafka_admin_DescribeTransactionsResult_description(result, "txn-a", &future));
-    kafka_common_Error_t *err = get_err(future);
+    kafka_common_KafkaFuture_t *future = kafka_admin_DescribeTransactionsResult_description(result, "txn-a", &err);
+    assert_ok(err, "DescribeTransactionsResult_description");
+    err = get_err(future);
     TEST_ASSERT_EQUAL_INT32(kafka_common_Error_UNSUPPORTED_VERSION, kafka_common_Error__enum(err));
     assert_error_message(err, "Not implemented yet");
     kafka_common_KafkaFuture_destroy(future);
-    future = NULL;
-    err = kafka_admin_DescribeTransactionsResult_description(result, "txn-unknown", &future);
+    err = NULL;
+    future = kafka_admin_DescribeTransactionsResult_description(result, "txn-unknown", &err);
     TEST_ASSERT_NULL(future);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
     kafka_common_Error_destroy(err);
@@ -4319,13 +4368,15 @@ static void test_mock_admin_fence_producers_reports_unsupported_per_id(void) {
     TEST_ASSERT_EQUAL_INT32(kafka_common_Error_UNSUPPORTED_VERSION, kafka_common_Error__enum(err));
     assert_error_message(err, "Not implemented yet");
     kafka_Map_destroy(fenced);
-    kafka_common_KafkaFuture_t *future = NULL;
-    TEST_ASSERT_NULL(kafka_admin_FenceProducersResult_producer_id(result, "txn-y", &future));
+    err = NULL;
+    kafka_common_KafkaFuture_t *future = kafka_admin_FenceProducersResult_producer_id(result, "txn-y", &err);
+    assert_ok(err, "FenceProducersResult_producer_id");
     expect_fails_with(future, "Not implemented yet");
-    TEST_ASSERT_NULL(kafka_admin_FenceProducersResult_epoch_id(result, "txn-y", &future));
+    future = kafka_admin_FenceProducersResult_epoch_id(result, "txn-y", &err);
+    assert_ok(err, "FenceProducersResult_epoch_id");
     expect_fails_with(future, "Not implemented yet");
-    future = NULL;
-    err = kafka_admin_FenceProducersResult_producer_id(result, "txn-z", &future);
+    err = NULL;
+    future = kafka_admin_FenceProducersResult_producer_id(result, "txn-z", &err);
     TEST_ASSERT_NULL(future);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
     kafka_common_Error_destroy(err);

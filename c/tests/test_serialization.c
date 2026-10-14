@@ -61,37 +61,36 @@ typedef struct {
     int with_headers_calls;
 } upper_serializer_t;
 
-static kafka_common_Error_t *upper_serialize(void *self, const char *topic, const void *data,
-                                             kafka_Bytes_t *out) {
+static kafka_Bytes_t upper_serialize(void *self, const char *topic, const void *data, kafka_common_Error_t **out_err) {
     upper_serializer_t *imp = self;
     imp->serialize_calls++;
     TEST_ASSERT_EQUAL_STRING("t", topic);
+    kafka_Bytes_t out = {NULL, 0};
     if (data == NULL) {
-        out->data = NULL;
-        out->len = 0;
-        return NULL;
+        return out;
     }
     const char *text = data;
     if (strcmp(text, "fail") == 0) {
-        return kafka_common_Error_serialization("cannot serialize fail");
+        *out_err = kafka_common_Error_serialization("cannot serialize fail");
+        return out;
     }
     size_t len = strlen(text);
     TEST_ASSERT_TRUE(len < sizeof(imp->buffer));
     for (size_t i = 0; i < len; i++) {
         imp->buffer[i] = (char)toupper((unsigned char)text[i]);
     }
-    out->data = (const uint8_t *)imp->buffer;
-    out->len = (int32_t)len;
-    return NULL;
+    out.data = (const uint8_t *)imp->buffer;
+    out.len = (int32_t)len;
+    return out;
 }
 
-static kafka_common_Error_t *upper_serialize_with_headers(void *self, const char *topic,
-                                                          const kafka_common_header_internals_RecordHeaders_t *headers,
-                                                          const void *data, kafka_Bytes_t *out) {
+static kafka_Bytes_t upper_serialize_with_headers(void *self, const char *topic,
+                                                  const kafka_common_header_internals_RecordHeaders_t *headers,
+                                                  const void *data, kafka_common_Error_t **out_err) {
     upper_serializer_t *imp = self;
     imp->with_headers_calls++;
     TEST_ASSERT_NOT_NULL(headers);
-    return upper_serialize(self, topic, data, out);
+    return upper_serialize(self, topic, data, out_err);
 }
 
 static void test_c_serializer_is_reached_through_the_invokers(void) {
@@ -102,8 +101,8 @@ static void test_c_serializer_is_reached_through_the_invokers(void) {
         kafka_common_serialization_Serializer_new(&imp, upper_serialize, upper_serialize_with_headers, NULL);
     kafka_common_header_internals_RecordHeaders_t *headers = kafka_common_header_internals_RecordHeaders_new();
 
-    kafka_Bytes_t out = {NULL, 0};
-    kafka_common_Error_t *error = kafka_common_serialization_Serializer_serialize(serializer, "t", "hello", &out);
+    kafka_common_Error_t *error = NULL;
+    kafka_Bytes_t out = kafka_common_serialization_Serializer_serialize(serializer, "t", "hello", &error);
     TEST_ASSERT_NULL(error);
     assert_bytes("HELLO", out);
     // Rust copied the bytes: the implementation's buffer can be reused.
@@ -111,29 +110,31 @@ static void test_c_serializer_is_reached_through_the_invokers(void) {
     memset(imp.buffer, 'x', sizeof(imp.buffer));
     assert_bytes("HELLO", out);
 
-    error = kafka_common_serialization_Serializer_serialize_with_headers(serializer, "t", headers, "abc", &out);
+    out = kafka_common_serialization_Serializer_serialize_with_headers(serializer, "t", headers, "abc", &error);
     TEST_ASSERT_NULL(error);
     assert_bytes("ABC", out);
 
-    error = kafka_common_serialization_Serializer_serialize_owned_with_headers(serializer, "t", headers, "def", &out);
+    out = kafka_common_serialization_Serializer_serialize_owned_with_headers(serializer, "t", headers, "def", &error);
     TEST_ASSERT_NULL(error);
     assert_bytes("DEF", out);
     TEST_ASSERT_EQUAL_INT(3, imp.serialize_calls);
     TEST_ASSERT_EQUAL_INT(2, imp.with_headers_calls);
 
     // Java's null serializes to a null array.
-    error = kafka_common_serialization_Serializer_serialize(serializer, "t", NULL, &out);
+    out = kafka_common_serialization_Serializer_serialize(serializer, "t", NULL, &error);
     TEST_ASSERT_NULL(error);
     TEST_ASSERT_NULL(out.data);
 
-    // The implementation's error is returned owned; the slot is left alone.
-    out = bytes_of("untouched");
-    error = kafka_common_serialization_Serializer_serialize(serializer, "t", "fail", &out);
+    // The implementation's error is stored owned in `*out_err`, with a NULL
+    // array as the failure value.
+    out = kafka_common_serialization_Serializer_serialize(serializer, "t", "fail", &error);
     TEST_ASSERT_NOT_NULL(error);
     TEST_ASSERT_EQUAL_STRING("cannot serialize fail", kafka_common_Error_message(error));
     TEST_ASSERT_EQUAL_INT8(1, kafka_common_Error_is_serialization_error(error));
-    assert_bytes("untouched", out);
+    TEST_ASSERT_NULL(out.data);
+    TEST_ASSERT_EQUAL_INT32(0, out.len);
     kafka_common_Error_destroy(error);
+    error = NULL;
 
     kafka_common_header_internals_RecordHeaders_destroy(headers);
     kafka_common_serialization_Serializer_destroy(serializer);
@@ -153,29 +154,28 @@ typedef struct {
     int close_calls;
 } upper_deserializer_t;
 
-static kafka_common_Error_t *upper_deserialize(void *self, const char *topic, kafka_Bytes_t data, void **out) {
+static void *upper_deserialize(void *self, const char *topic, kafka_Bytes_t data, kafka_common_Error_t **out_err) {
     upper_deserializer_t *imp = self;
     imp->deserialize_calls++;
     TEST_ASSERT_EQUAL_STRING("t", topic);
     if (data.len == 4 && memcmp(data.data, "fail", 4) == 0) {
-        return kafka_common_Error_serialization("cannot deserialize fail");
+        *out_err = kafka_common_Error_serialization("cannot deserialize fail");
+        return NULL;
     }
     char *text = malloc((size_t)data.len + 1);
     for (int32_t i = 0; i < data.len; i++) {
         text[i] = (char)toupper(data.data[i]);
     }
     text[data.len] = '\0';
-    *out = text;
-    return NULL;
+    return text;
 }
 
-static kafka_common_Error_t *upper_deserialize_with_headers(void *self, const char *topic,
-                                                            const kafka_common_header_Headers_t *headers,
-                                                            kafka_Bytes_t data, void **out) {
+static void *upper_deserialize_with_headers(void *self, const char *topic, const kafka_common_header_Headers_t *headers,
+                                            kafka_Bytes_t data, kafka_common_Error_t **out_err) {
     upper_deserializer_t *imp = self;
     imp->with_headers_calls++;
     imp->saw_header_k = kafka_common_header_Headers_last_header(headers, "k") != NULL;
-    return upper_deserialize(self, topic, data, out);
+    return upper_deserialize(self, topic, data, out_err);
 }
 
 static void upper_configure(void *self, const kafka_Map_t *configs, int8_t is_key) {
@@ -197,17 +197,17 @@ static void test_c_deserializer_is_reached_through_the_invokers(void) {
         &imp, upper_deserialize, upper_deserialize_with_headers, NULL, NULL, upper_configure, upper_close);
     kafka_common_header_internals_RecordHeaders_t *record_headers = kafka_common_header_internals_RecordHeaders_new();
     kafka_common_header_Headers_t *headers = kafka_common_header_internals_RecordHeaders__as_Headers(record_headers);
-    kafka_common_Error_t *error = kafka_common_header_Headers_add_with_key_value(headers, "k", bytes_of("v"));
+    kafka_common_Error_t *error = NULL;
+    kafka_common_header_Headers_add_with_key_value(headers, "k", bytes_of("v"), &error);
     TEST_ASSERT_NULL(error);
 
-    void *out = NULL;
-    error = kafka_common_serialization_Deserializer_deserialize(deserializer, "t", bytes_of("hello"), &out);
+    void *out = kafka_common_serialization_Deserializer_deserialize(deserializer, "t", bytes_of("hello"), &error);
     TEST_ASSERT_NULL(error);
     TEST_ASSERT_EQUAL_STRING("HELLO", (const char *)out);
     free(out);
 
-    error = kafka_common_serialization_Deserializer_deserialize_with_headers(deserializer, "t", headers, bytes_of("abc"),
-                                                                             &out);
+    out = kafka_common_serialization_Deserializer_deserialize_with_headers(deserializer, "t", headers, bytes_of("abc"),
+                                                                           &error);
     TEST_ASSERT_NULL(error);
     TEST_ASSERT_EQUAL_STRING("ABC", (const char *)out);
     TEST_ASSERT_TRUE(imp.saw_header_k);
@@ -215,13 +215,13 @@ static void test_c_deserializer_is_reached_through_the_invokers(void) {
 
     const char *source = "hello world";
     kafka_Bytes_t data = {(const uint8_t *)source + 6, 5};
-    error = kafka_common_serialization_Deserializer_deserialize_from_shared(deserializer, "t", bytes_of(source), data, &out);
+    out = kafka_common_serialization_Deserializer_deserialize_from_shared(deserializer, "t", bytes_of(source), data, &error);
     TEST_ASSERT_NULL(error);
     TEST_ASSERT_EQUAL_STRING("WORLD", (const char *)out);
     free(out);
 
-    error = kafka_common_serialization_Deserializer_deserialize_from_shared_with_headers(deserializer, "t", headers,
-                                                                                         bytes_of(source), data, &out);
+    out = kafka_common_serialization_Deserializer_deserialize_from_shared_with_headers(deserializer, "t", headers,
+                                                                                       bytes_of(source), data, &error);
     TEST_ASSERT_NULL(error);
     TEST_ASSERT_EQUAL_STRING("WORLD", (const char *)out);
     free(out);
@@ -229,19 +229,21 @@ static void test_c_deserializer_is_reached_through_the_invokers(void) {
     TEST_ASSERT_EQUAL_INT(2, imp.with_headers_calls);
 
     // Data outside the source is rejected before reaching the implementation.
-    error = kafka_common_serialization_Deserializer_deserialize_from_shared(deserializer, "t", bytes_of(source),
-                                                                            bytes_of("elsewhere"), &out);
+    out = kafka_common_serialization_Deserializer_deserialize_from_shared(deserializer, "t", bytes_of(source),
+                                                                          bytes_of("elsewhere"), &error);
     TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_NULL(out);
     TEST_ASSERT_EQUAL_STRING("data must be a sub-array of source", kafka_common_Error_message(error));
     kafka_common_Error_destroy(error);
+    error = NULL;
     TEST_ASSERT_EQUAL_INT(4, imp.deserialize_calls);
 
-    // The implementation's error is returned owned; the slot is left alone.
-    out = &imp;
-    error = kafka_common_serialization_Deserializer_deserialize(deserializer, "t", bytes_of("fail"), &out);
+    // The implementation's error is stored owned in `*out_err`, with NULL as
+    // the failure value.
+    out = kafka_common_serialization_Deserializer_deserialize(deserializer, "t", bytes_of("fail"), &error);
     TEST_ASSERT_NOT_NULL(error);
     TEST_ASSERT_EQUAL_STRING("cannot deserialize fail", kafka_common_Error_message(error));
-    TEST_ASSERT_EQUAL_PTR(&imp, out);
+    TEST_ASSERT_NULL(out);
     kafka_common_Error_destroy(error);
 
     // `configure` receives the configs as a map of strings, `close` is
@@ -279,13 +281,12 @@ static void test_string_serde_round_trip_through_the_views(void) {
     TEST_ASSERT_EQUAL_PTR(deserializer,
                           kafka_common_serialization_StringDeserializer__as_Deserializer(string_deserializer));
 
-    kafka_Bytes_t encoded = {NULL, 0};
-    kafka_common_Error_t *error = kafka_common_serialization_Serializer_serialize(serializer, "t", "h\xc3\xa9llo", &encoded);
+    kafka_common_Error_t *error = NULL;
+    kafka_Bytes_t encoded = kafka_common_serialization_Serializer_serialize(serializer, "t", "h\xc3\xa9llo", &error);
     TEST_ASSERT_NULL(error);
     assert_bytes("h\xc3\xa9llo", encoded);
 
-    void *decoded = NULL;
-    error = kafka_common_serialization_Deserializer_deserialize(deserializer, "t", encoded, &decoded);
+    void *decoded = kafka_common_serialization_Deserializer_deserialize(deserializer, "t", encoded, &error);
     TEST_ASSERT_NULL(error);
     TEST_ASSERT_EQUAL_STRING("h\xc3\xa9llo", (const char *)decoded);
     kafka_string_destroy(decoded);
@@ -293,17 +294,18 @@ static void test_string_serde_round_trip_through_the_views(void) {
     // Java's null round-trips as a null array on the serializer side; the
     // deserializer turns a null array into an empty string, as the Rust
     // `Deserializer` takes a slice.
-    error = kafka_common_serialization_Serializer_serialize(serializer, "t", NULL, &encoded);
+    encoded = kafka_common_serialization_Serializer_serialize(serializer, "t", NULL, &error);
     TEST_ASSERT_NULL(error);
     TEST_ASSERT_NULL(encoded.data);
-    error = kafka_common_serialization_Deserializer_deserialize(deserializer, "t", encoded, &decoded);
+    decoded = kafka_common_serialization_Deserializer_deserialize(deserializer, "t", encoded, &error);
     TEST_ASSERT_NULL(error);
     TEST_ASSERT_EQUAL_STRING("", (const char *)decoded);
     kafka_string_destroy(decoded);
 
     // Invalid UTF-8 is the translation of Java's `SerializationException`.
-    error = kafka_common_serialization_Serializer_serialize(serializer, "t", "h\xe9llo", &encoded);
+    encoded = kafka_common_serialization_Serializer_serialize(serializer, "t", "h\xe9llo", &error);
     TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_NULL(encoded.data);
     TEST_ASSERT_EQUAL_INT8(1, kafka_common_Error_is_serialization_error(error));
     TEST_ASSERT_EQUAL_STRING_LEN("Error when serializing string to byte[]: ", kafka_common_Error_message(error), 41);
     kafka_common_Error_destroy(error);
@@ -327,8 +329,8 @@ static void test_byte_array_serde_round_trip_through_the_views(void) {
 
     uint8_t raw[] = {0, 1, 2, 255};
     kafka_Bytes_t payload = {raw, 4};
-    kafka_Bytes_t encoded = {NULL, 0};
-    kafka_common_Error_t *error = kafka_common_serialization_Serializer_serialize(serializer, "t", &payload, &encoded);
+    kafka_common_Error_t *error = NULL;
+    kafka_Bytes_t encoded = kafka_common_serialization_Serializer_serialize(serializer, "t", &payload, &error);
     TEST_ASSERT_NULL(error);
     TEST_ASSERT_EQUAL_INT32(4, encoded.len);
     TEST_ASSERT_EQUAL_MEMORY(raw, encoded.data, 4);
@@ -336,8 +338,7 @@ static void test_byte_array_serde_round_trip_through_the_views(void) {
 
     // The deserializer's `void *` is an owned `kafka_Bytes_t *`, a copy of
     // the input, freed with `kafka_Bytes_destroy`.
-    void *decoded = NULL;
-    error = kafka_common_serialization_Deserializer_deserialize(deserializer, "t", encoded, &decoded);
+    void *decoded = kafka_common_serialization_Deserializer_deserialize(deserializer, "t", encoded, &error);
     TEST_ASSERT_NULL(error);
     kafka_Bytes_t *decoded_bytes = decoded;
     TEST_ASSERT_EQUAL_INT32(4, decoded_bytes->len);
@@ -347,10 +348,10 @@ static void test_byte_array_serde_round_trip_through_the_views(void) {
 
     // A NULL pointer and a null array are both Java's null.
     kafka_Bytes_t null_array = {NULL, 0};
-    error = kafka_common_serialization_Serializer_serialize(serializer, "t", NULL, &encoded);
+    encoded = kafka_common_serialization_Serializer_serialize(serializer, "t", NULL, &error);
     TEST_ASSERT_NULL(error);
     TEST_ASSERT_NULL(encoded.data);
-    error = kafka_common_serialization_Serializer_serialize(serializer, "t", &null_array, &encoded);
+    encoded = kafka_common_serialization_Serializer_serialize(serializer, "t", &null_array, &error);
     TEST_ASSERT_NULL(error);
     TEST_ASSERT_NULL(encoded.data);
 
@@ -368,15 +369,15 @@ static void test_bytes_deserializer_shares_the_source_through_the_view(void) {
 
     const char *source = "hello world";
     kafka_Bytes_t data = {(const uint8_t *)source + 6, 5};
-    void *decoded = NULL;
-    kafka_common_Error_t *error =
-        kafka_common_serialization_Deserializer_deserialize_from_shared(deserializer, "t", bytes_of(source), data, &decoded);
+    kafka_common_Error_t *error = NULL;
+    void *decoded =
+        kafka_common_serialization_Deserializer_deserialize_from_shared(deserializer, "t", bytes_of(source), data, &error);
     TEST_ASSERT_NULL(error);
     kafka_Bytes_t *decoded_bytes = decoded;
     assert_bytes("world", *decoded_bytes);
     kafka_Bytes_destroy(decoded_bytes);
 
-    error = kafka_common_serialization_Deserializer_deserialize(deserializer, "t", bytes_of("raw"), &decoded);
+    decoded = kafka_common_serialization_Deserializer_deserialize(deserializer, "t", bytes_of("raw"), &error);
     TEST_ASSERT_NULL(error);
     decoded_bytes = decoded;
     assert_bytes("raw", *decoded_bytes);
@@ -385,9 +386,10 @@ static void test_bytes_deserializer_shares_the_source_through_the_view(void) {
 
     // Data outside the source is rejected with the same error as for a C
     // implementation.
-    error = kafka_common_serialization_Deserializer_deserialize_from_shared(deserializer, "t", bytes_of(source),
-                                                                            bytes_of("elsewhere"), &decoded);
+    decoded = kafka_common_serialization_Deserializer_deserialize_from_shared(deserializer, "t", bytes_of(source),
+                                                                              bytes_of("elsewhere"), &error);
     TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_NULL(decoded);
     TEST_ASSERT_EQUAL_STRING("data must be a sub-array of source", kafka_common_Error_message(error));
     kafka_common_Error_destroy(error);
 

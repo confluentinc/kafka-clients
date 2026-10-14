@@ -835,8 +835,8 @@ class ProducerServiceImpl final : public ProducerService::Service {
         kafka_Map_put(props, const_cast<char*>(kv.first.c_str()),
                       const_cast<char*>(kv.second.c_str()));
       }
-      kafka_producer_ProducerConfig_t* config = nullptr;
-      kafka_common_Error_t* err = kafka_producer_ProducerConfig_new(props, &config);
+      kafka_common_Error_t* err = nullptr;
+      kafka_producer_ProducerConfig_t* config = kafka_producer_ProducerConfig_new(props, &err);
       kafka_Map_destroy(props);
       if (err != nullptr) {
         // Validation happens here, not in KafkaProducer_new: an invalid value
@@ -847,7 +847,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
       // NULL serializers: keys and values cross as `kafka_Bytes_t *`, exactly
       // the bytes the proto carries. The config stays ours and can be destroyed
       // right after the producer was built from it.
-      err = kafka_producer_KafkaProducer_new(config, nullptr, nullptr, &handle.kafka);
+      handle.kafka = kafka_producer_KafkaProducer_new(config, nullptr, nullptr, &err);
       kafka_producer_ProducerConfig_destroy(config);
       if (err != nullptr) {
         fill_proto_error(resp->mutable_error(), err);
@@ -912,8 +912,9 @@ class ProducerServiceImpl final : public ProducerService::Service {
       for (const auto& h : rec.headers()) {
         kafka_Bytes_t header_value{reinterpret_cast<const uint8_t*>(h.value().data()),
                                    static_cast<int32_t>(h.value().size())};
-        kafka_common_Error_t* header_err = kafka_common_header_Headers_add_with_key_value(
-            headers_view, h.key().c_str(), header_value);
+        kafka_common_Error_t* header_err = nullptr;
+        kafka_common_header_Headers_add_with_key_value(headers_view, h.key().c_str(), header_value,
+                                                       &header_err);
         if (header_err != nullptr) {
           kafka_common_header_internals_RecordHeaders_destroy(headers);
           fill_proto_error(resp->mutable_error(), header_err);
@@ -940,9 +941,9 @@ class ProducerServiceImpl final : public ProducerService::Service {
     if (headers != nullptr) {
       kafka_producer_ProducerRecordOptionsBuilder_set_headers(builder, headers);
     }
-    kafka_producer_ProducerRecordOptions_t* options = nullptr;
-    kafka_common_Error_t* build_err =
-        kafka_producer_ProducerRecordOptionsBuilder_build(builder, &options);
+    kafka_common_Error_t* build_err = nullptr;
+    kafka_producer_ProducerRecordOptions_t* options =
+        kafka_producer_ProducerRecordOptionsBuilder_build(builder, &build_err);
     // `build` consumed the builder's content; the handle itself is still ours.
     kafka_producer_ProducerRecordOptionsBuilder_destroy(builder);
     if (headers != nullptr) kafka_common_header_internals_RecordHeaders_destroy(headers);
@@ -950,8 +951,8 @@ class ProducerServiceImpl final : public ProducerService::Service {
       fill_proto_error(resp->mutable_error(), build_err);
       return grpc::Status::OK;
     }
-    kafka_producer_ProducerRecord_t* record = nullptr;
-    kafka_common_Error_t* record_err = kafka_producer_ProducerRecord_with_options(options, &record);
+    kafka_common_Error_t* record_err = nullptr;
+    kafka_producer_ProducerRecord_t* record = kafka_producer_ProducerRecord_with_options(options, &record_err);
     kafka_producer_ProducerRecordOptions_destroy(options);
     if (record_err != nullptr) {
       // Java's constructor validation (e.g. "Invalid timestamp").
@@ -971,16 +972,16 @@ class ProducerServiceImpl final : public ProducerService::Service {
     if (req->with_callback()) {
       LogState* state = log_state_for(req->producer_id());
       kafka_producer_Callback_t* callback = kafka_producer_Callback_new(state, log_delivery);
-      send_err = kafka_producer_Producer_send_with_callback(producer, record, callback, &future);
+      future = kafka_producer_Producer_send_with_callback(producer, record, callback, &send_err);
       kafka_producer_Callback_destroy(callback);
     } else {
-      send_err = kafka_producer_Producer_send(producer, record, &future);
+      future = kafka_producer_Producer_send(producer, record, &send_err);
     }
     // send cloned the record.
     kafka_producer_ProducerRecord_destroy(record);
     if (send_err != nullptr) {
       // Synchronous failure (RecordTooLarge, LocalIllegalState, etc.). The
-      // FFI returns a non-null error we forward verbatim. A pre-accumulator
+      // FFI stores the error in `send_err`, which we forward verbatim. A pre-accumulator
       // rejection also queued the delivery callback (with placeholder
       // metadata beside the error, as Java does), so pump it into the log.
       pump_callbacks(producer);
@@ -995,8 +996,8 @@ class ProducerServiceImpl final : public ProducerService::Service {
     // The metadata is BORROWED from the future (valid until the future is
     // destroyed, never passed to RecordMetadata_destroy), so copy the fields
     // out before destroying the future.
-    void* raw_metadata = nullptr;
-    kafka_common_Error_t* get_err = kafka_common_KafkaFuture_get(future, &raw_metadata);
+    kafka_common_Error_t* get_err = nullptr;
+    void* raw_metadata = kafka_common_KafkaFuture_get(future, &get_err);
     if (get_err != nullptr) {
       kafka_common_KafkaFuture_destroy(future);
       // The record's delivery callback was queued before its future resolved.
@@ -1021,8 +1022,8 @@ class ProducerServiceImpl final : public ProducerService::Service {
 
   // ── Transactions (Milestone 11) ──
   //
-  // Each maps to the same-named Producer FFI call, which returns a
-  // *error handle directly (not via an out-param), and reports it through
+  // Each maps to the same-named Producer FFI call, which is void and reports
+  // a failure through its trailing `out_err` slot, forwarded through
   // StatusResponse. fill_proto_error copies the handle's code and message; the
   // code identifies the error class on its own, so nothing is inferred from the
   // message text. init/commit/abort block on the producer's tokio runtime
@@ -1035,8 +1036,8 @@ class ProducerServiceImpl final : public ProducerService::Service {
       *resp->mutable_error() = make_synthetic_error("unknown producer_id " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
     }
-    kafka_common_Error_t* err =
-        kafka_producer_Producer_init_transactions(producer);
+    kafka_common_Error_t* err = nullptr;
+    kafka_producer_Producer_init_transactions(producer, &err);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
     }
@@ -1051,8 +1052,8 @@ class ProducerServiceImpl final : public ProducerService::Service {
       *resp->mutable_error() = make_synthetic_error("unknown producer_id " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
     }
-    kafka_common_Error_t* err =
-        kafka_producer_Producer_begin_transaction(producer);
+    kafka_common_Error_t* err = nullptr;
+    kafka_producer_Producer_begin_transaction(producer, &err);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
     }
@@ -1067,8 +1068,8 @@ class ProducerServiceImpl final : public ProducerService::Service {
       *resp->mutable_error() = make_synthetic_error("unknown producer_id " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
     }
-    kafka_common_Error_t* err =
-        kafka_producer_Producer_commit_transaction(producer);
+    kafka_common_Error_t* err = nullptr;
+    kafka_producer_Producer_commit_transaction(producer, &err);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
     }
@@ -1086,8 +1087,8 @@ class ProducerServiceImpl final : public ProducerService::Service {
       *resp->mutable_error() = make_synthetic_error("unknown producer_id " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
     }
-    kafka_common_Error_t* err =
-        kafka_producer_Producer_abort_transaction(producer);
+    kafka_common_Error_t* err = nullptr;
+    kafka_producer_Producer_abort_transaction(producer, &err);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
     }
@@ -1125,12 +1126,12 @@ class ProducerServiceImpl final : public ProducerService::Service {
       kafka_Map_destroy(offsets);
     };
     for (const auto& e : req->offsets()) {
-      kafka_consumer_OffsetAndMetadata_t* oam = nullptr;
       // Java's OffsetAndMetadata constructor validation (negative offset)
       // surfaces here, as the IllegalArgumentException it is.
-      kafka_common_Error_t* build_err = kafka_consumer_OffsetAndMetadata_with_leader_epoch_metadata(
+      kafka_common_Error_t* build_err = nullptr;
+      kafka_consumer_OffsetAndMetadata_t* oam = kafka_consumer_OffsetAndMetadata_with_leader_epoch_metadata(
           e.offset(), e.has_leader_epoch() ? e.leader_epoch() : -1,
-          e.has_metadata() ? e.metadata().c_str() : "", &oam);
+          e.has_metadata() ? e.metadata().c_str() : "", &build_err);
       if (build_err != nullptr) {
         release();
         fill_proto_error(resp->mutable_error(), build_err);
@@ -1153,9 +1154,8 @@ class ProducerServiceImpl final : public ProducerService::Service {
           std::to_string(req->group_metadata_id()));
       return grpc::Status::OK;
     }
-    kafka_common_Error_t* err =
-        kafka_producer_Producer_send_offsets_to_transaction(
-            producer, offsets, group_meta.get());
+    kafka_common_Error_t* err = nullptr;
+    kafka_producer_Producer_send_offsets_to_transaction(producer, offsets, group_meta.get(), &err);
     release();
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
@@ -1171,7 +1171,8 @@ class ProducerServiceImpl final : public ProducerService::Service {
           "unknown producer_id " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
     }
-    kafka_common_Error_t* err = kafka_producer_Producer_flush(producer);
+    kafka_common_Error_t* err = nullptr;
+    kafka_producer_Producer_flush(producer, &err);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
     }
@@ -1193,9 +1194,8 @@ class ProducerServiceImpl final : public ProducerService::Service {
     }
     // An owned list of owned PartitionInfo handles: destroying the list frees
     // the elements.
-    kafka_List_t* list = nullptr;
-    kafka_common_Error_t* err =
-        kafka_producer_Producer_partitions_for(producer, req->topic().c_str(), &list);
+    kafka_common_Error_t* err = nullptr;
+    kafka_List_t* list = kafka_producer_Producer_partitions_for(producer, req->topic().c_str(), &err);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
@@ -1262,7 +1262,8 @@ class ProducerServiceImpl final : public ProducerService::Service {
       // unregister it: forward the FFI's own validation error and keep it.
       const kafka_producer_Producer_t* producer = producer_for(producer_id);
       if (producer == nullptr) return grpc::Status::OK;
-      kafka_common_Error_t* err = kafka_producer_Producer_close_with_timeout(producer, timeout_ms);
+      kafka_common_Error_t* err = nullptr;
+      kafka_producer_Producer_close_with_timeout(producer, timeout_ms, &err);
       if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
@@ -1287,9 +1288,12 @@ class ProducerServiceImpl final : public ProducerService::Service {
     // queued, so a GetCallbackLog issued right after Close is complete
     // (destroy would run the still-pending ones anyway, so each fires exactly
     // once either way).
-    kafka_common_Error_t* err =
-        has_timeout ? kafka_producer_Producer_close_with_timeout(handle.view, timeout_ms)
-                    : kafka_producer_Producer_close(handle.view);
+    kafka_common_Error_t* err = nullptr;
+    if (has_timeout) {
+      kafka_producer_Producer_close_with_timeout(handle.view, timeout_ms, &err);
+    } else {
+      kafka_producer_Producer_close(handle.view, &err);
+    }
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
     }
@@ -1427,10 +1431,9 @@ struct OffsetMapHandles {
     partitions.reserve(entries.size());
     offsets.reserve(entries.size());
     for (const auto& e : entries) {
-      kafka_consumer_OffsetAndMetadata_t* oam = nullptr;
-      error = kafka_consumer_OffsetAndMetadata_with_leader_epoch_metadata(
+      kafka_consumer_OffsetAndMetadata_t* oam = kafka_consumer_OffsetAndMetadata_with_leader_epoch_metadata(
           e.offset().offset(), e.offset().has_leader_epoch() ? e.offset().leader_epoch() : -1,
-          e.offset().metadata().c_str(), &oam);
+          e.offset().metadata().c_str(), &error);
       if (error != nullptr) return;
       kafka_common_TopicPartition_t* tp =
           kafka_common_TopicPartition_new(e.partition().topic().c_str(), e.partition().partition());
@@ -1568,7 +1571,8 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
       // Empty config selects MockConsumer for client-side smoke testing. The
       // mock has no deserializers: a record's key / value `void *` are the
       // pointers add_record was given (this server never adds any).
-      kafka_common_Error_t* err = kafka_consumer_MockConsumer_new("earliest", &entry.mock);
+      kafka_common_Error_t* err = nullptr;
+      entry.mock = kafka_consumer_MockConsumer_new("earliest", &err);
       if (err != nullptr) {
         fill_proto_error(resp->mutable_error(), err);
         return grpc::Status::OK;
@@ -1584,8 +1588,8 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
         kafka_Map_put(props, const_cast<char*>(kv.first.c_str()),
                       const_cast<char*>(kv.second.c_str()));
       }
-      kafka_consumer_ConsumerConfig_t* config = nullptr;
-      kafka_common_Error_t* err = kafka_consumer_ConsumerConfig_new(props, &config);
+      kafka_common_Error_t* err = nullptr;
+      kafka_consumer_ConsumerConfig_t* config = kafka_consumer_ConsumerConfig_new(props, &err);
       kafka_Map_destroy(props);
       if (err != nullptr) {
         // Validation happens here, not in KafkaConsumer_new: an invalid value
@@ -1596,7 +1600,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
       // NULL deserializers: keys and values cross as `kafka_Bytes_t *` owned by
       // the records that delivered them (see record_to_proto). The config stays
       // ours and can be destroyed right after the consumer was built from it.
-      err = kafka_consumer_KafkaConsumer_new(config, nullptr, nullptr, &entry.view);
+      entry.view = kafka_consumer_KafkaConsumer_new(config, nullptr, nullptr, &err);
       kafka_consumer_ConsumerConfig_destroy(config);
       if (err != nullptr) {
         fill_proto_error(resp->mutable_error(), err);
@@ -1634,10 +1638,10 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
           kafka_consumer_ConsumerRebalanceListener_new(
               log_state_for(req->consumer_id()), log_partitions_revoked,
               log_partitions_assigned, log_partitions_lost);
-      err = kafka_consumer_Consumer_subscribe_with_topics_listener(c, topics.list, listener);
+      kafka_consumer_Consumer_subscribe_with_topics_listener(c, topics.list, listener, &err);
       kafka_consumer_ConsumerRebalanceListener_destroy(listener);
     } else {
-      err = kafka_consumer_Consumer_subscribe_with_topics(c, topics.list);
+      kafka_consumer_Consumer_subscribe_with_topics(c, topics.list, &err);
     }
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
     return grpc::Status::OK;
@@ -1647,7 +1651,8 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
                            StatusResponse* resp) override {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) return unknown(resp, req->consumer_id());
-    kafka_common_Error_t* err = kafka_consumer_Consumer_unsubscribe(c);
+    kafka_common_Error_t* err = nullptr;
+    kafka_consumer_Consumer_unsubscribe(c, &err);
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
     return grpc::Status::OK;
   }
@@ -1657,7 +1662,8 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) return unknown(resp, req->consumer_id());
     TpList partitions(req->partitions());
-    kafka_common_Error_t* err = kafka_consumer_Consumer_assign(c, partitions.list);
+    kafka_common_Error_t* err = nullptr;
+    kafka_consumer_Consumer_assign(c, partitions.list, &err);
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
     return grpc::Status::OK;
   }
@@ -1673,8 +1679,8 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     // Blocking poll: it runs on this gRPC worker thread, and any rebalance
     // listener callback it drives is invoked inline (see log_rebalance), so
     // the log entry is appended before this RPC answers.
-    kafka_consumer_ConsumerRecords_t* records = nullptr;
-    kafka_common_Error_t* err = kafka_consumer_Consumer_poll(c, req->timeout_ms(), &records);
+    kafka_common_Error_t* err = nullptr;
+    kafka_consumer_ConsumerRecords_t* records = kafka_consumer_Consumer_poll(c, req->timeout_ms(), &err);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
@@ -1710,14 +1716,14 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     if (c == nullptr) return unknown(resp, req->consumer_id());
     kafka_common_Error_t* err = nullptr;
     if (req->offsets().empty()) {
-      err = kafka_consumer_Consumer_commit_sync(c);
+      kafka_consumer_Consumer_commit_sync(c, &err);
     } else {
       OffsetMapHandles offsets(req->offsets());
       if (offsets.error != nullptr) {
         fill_proto_error(resp->mutable_error(), offsets.take_error());
         return grpc::Status::OK;
       }
-      err = kafka_consumer_Consumer_commit_sync_with_offsets(c, offsets.map);
+      kafka_consumer_Consumer_commit_sync_with_offsets(c, offsets.map, &err);
     }
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
     return grpc::Status::OK;
@@ -1729,7 +1735,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     if (c == nullptr) return unknown(resp, req->consumer_id());
     kafka_common_Error_t* err = nullptr;
     if (req->offsets().empty() && !req->with_callback()) {
-      err = kafka_consumer_Consumer_commit_async(c);
+      kafka_consumer_Consumer_commit_async(c, &err);
     } else {
       // A real OffsetCommitCallback (or the reporting no-op, see
       // discard_commit_complete) whose `self` is the consumer's LogState: it
@@ -1740,7 +1746,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
           log_state_for(req->consumer_id()),
           req->with_callback() ? log_commit_complete : discard_commit_complete);
       if (req->offsets().empty()) {
-        err = kafka_consumer_Consumer_commit_async_with_callback(c, callback);
+        kafka_consumer_Consumer_commit_async_with_callback(c, callback, &err);
       } else {
         OffsetMapHandles offsets(req->offsets());
         if (offsets.error != nullptr) {
@@ -1748,7 +1754,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
           fill_proto_error(resp->mutable_error(), offsets.take_error());
           return grpc::Status::OK;
         }
-        err = kafka_consumer_Consumer_commit_async_with_offsets_callback(c, offsets.map, callback);
+        kafka_consumer_Consumer_commit_async_with_offsets_callback(c, offsets.map, callback, &err);
       }
       kafka_consumer_OffsetCommitCallback_destroy(callback);
     }
@@ -1767,8 +1773,8 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     TpList partitions(req->partitions());
     // An owned map of owned TopicPartition -> owned OffsetAndMetadata handles;
     // destroying the map frees both sides of every entry.
-    kafka_Map_t* map = nullptr;
-    kafka_common_Error_t* err = kafka_consumer_Consumer_committed(c, partitions.list, &map);
+    kafka_common_Error_t* err = nullptr;
+    kafka_Map_t* map = kafka_consumer_Consumer_committed(c, partitions.list, &err);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
@@ -1796,8 +1802,8 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     }
     kafka_common_TopicPartition_t* tp = kafka_common_TopicPartition_new(
         req->partition().topic().c_str(), req->partition().partition());
-    int64_t out = 0;
-    kafka_common_Error_t* err = kafka_consumer_Consumer_position(c, tp, &out);
+    kafka_common_Error_t* err = nullptr;
+    const int64_t out = kafka_consumer_Consumer_position(c, tp, &err);
     kafka_common_TopicPartition_destroy(tp);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
@@ -1818,16 +1824,15 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
       // seek(TopicPartition, OffsetAndMetadata): the handle is borrowed for the
       // call. Its constructor validation (negative offset) surfaces as the
       // IllegalArgumentException it is; an absent leader_epoch is -1.
-      kafka_consumer_OffsetAndMetadata_t* oam = nullptr;
-      err = kafka_consumer_OffsetAndMetadata_with_leader_epoch_metadata(
+      kafka_consumer_OffsetAndMetadata_t* oam = kafka_consumer_OffsetAndMetadata_with_leader_epoch_metadata(
           req->offset(), req->has_leader_epoch() ? req->leader_epoch() : -1,
-          req->has_metadata() ? req->metadata().c_str() : "", &oam);
+          req->has_metadata() ? req->metadata().c_str() : "", &err);
       if (err == nullptr) {
-        err = kafka_consumer_Consumer_seek_with_offset_and_metadata(c, tp, oam);
+        kafka_consumer_Consumer_seek_with_offset_and_metadata(c, tp, oam, &err);
         kafka_consumer_OffsetAndMetadata_destroy(oam);
       }
     } else {
-      err = kafka_consumer_Consumer_seek_with_offset(c, tp, req->offset());
+      kafka_consumer_Consumer_seek_with_offset(c, tp, req->offset(), &err);
     }
     kafka_common_TopicPartition_destroy(tp);
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
@@ -1871,9 +1876,8 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     TimestampMapHandles timestamps(req->timestamps());
     // An owned map of owned TopicPartition -> owned OffsetAndTimestamp handles;
     // partitions the broker could not resolve are absent (Java's null values).
-    kafka_Map_t* map = nullptr;
-    kafka_common_Error_t* err =
-        kafka_consumer_Consumer_offsets_for_times(c, timestamps.map, &map);
+    kafka_common_Error_t* err = nullptr;
+    kafka_Map_t* map = kafka_consumer_Consumer_offsets_for_times(c, timestamps.map, &err);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
@@ -1906,9 +1910,8 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     }
     // An owned list of owned PartitionInfo handles: destroying the list frees
     // the elements.
-    kafka_List_t* infos = nullptr;
-    kafka_common_Error_t* err =
-        kafka_consumer_Consumer_partitions_for(c, req->topic().c_str(), &infos);
+    kafka_common_Error_t* err = nullptr;
+    kafka_List_t* infos = kafka_consumer_Consumer_partitions_for(c, req->topic().c_str(), &err);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
@@ -1929,8 +1932,8 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     // PartitionInfo handles. Destroying the map frees the keys and the lists
     // (with their elements), so the inner lists are read in place, not
     // destroyed on their own.
-    kafka_Map_t* map = nullptr;
-    kafka_common_Error_t* err = kafka_consumer_Consumer_list_topics(c, &map);
+    kafka_common_Error_t* err = nullptr;
+    kafka_Map_t* map = kafka_consumer_Consumer_list_topics(c, &err);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
@@ -1963,8 +1966,9 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     }
     // Fails (LOCAL_CONCURRENT_MODIFICATION) while another operation holds the
     // consumer, as Java's acquire() throws ConcurrentModificationException.
-    kafka_List_t* list = nullptr;
-    if (kafka_common_Error_t* err = kafka_consumer_Consumer_assignment(c, &list)) {
+    kafka_common_Error_t* err = nullptr;
+    kafka_List_t* list = kafka_consumer_Consumer_assignment(c, &err);
+    if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
@@ -1980,8 +1984,9 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
           "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
-    kafka_List_t* list = nullptr;
-    if (kafka_common_Error_t* err = kafka_consumer_Consumer_paused(c, &list)) {
+    kafka_common_Error_t* err = nullptr;
+    kafka_List_t* list = kafka_consumer_Consumer_paused(c, &err);
+    if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
@@ -2020,8 +2025,9 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     }
     // An owned, sorted list of owned `char *`; destroying the list frees them.
     // Fails while another operation holds the consumer, as Assignment does.
-    kafka_List_t* list = nullptr;
-    if (kafka_common_Error_t* err = kafka_consumer_Consumer_subscription(c, &list)) {
+    kafka_common_Error_t* err = nullptr;
+    kafka_List_t* list = kafka_consumer_Consumer_subscription(c, &err);
+    if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
@@ -2051,8 +2057,9 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     // An OWNED handle (its deleter is the GroupMetadataStore's); the call
     // fails with LOCAL_CONCURRENT_MODIFICATION while another operation holds
     // the consumer, as Java's acquire() throws ConcurrentModificationException.
-    kafka_consumer_ConsumerGroupMetadata_t* handle = nullptr;
-    if (kafka_common_Error_t* err = kafka_consumer_Consumer_group_metadata(c, &handle)) {
+    kafka_common_Error_t* err = nullptr;
+    kafka_consumer_ConsumerGroupMetadata_t* handle = kafka_consumer_Consumer_group_metadata(c, &err);
+    if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
@@ -2107,7 +2114,8 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     // thread (reporting synchronously, see log_rebalance), so their log
     // entries are appended before this returns and GetCallbackLog is
     // consistent right after Close.
-    kafka_common_Error_t* err = kafka_consumer_Consumer_close(entry.view);
+    kafka_common_Error_t* err = nullptr;
+    kafka_consumer_Consumer_close(entry.view, &err);
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
     // Frees the class handle (mock) or the owned Consumer (KafkaConsumer); the
     // view is invalid afterwards. The log entries stay in callback_log_ and the
@@ -2145,20 +2153,21 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
   }
 
   // The void operations over a partition list (seek_to_*, pause, resume).
-  using TpListFn = kafka_common_Error_t* (*)(kafka_consumer_Consumer_t*, const kafka_List_t*);
+  using TpListFn = void (*)(kafka_consumer_Consumer_t*, const kafka_List_t*, kafka_common_Error_t**);
   grpc::Status tp_list_op(const TopicPartitionListRequest* req, StatusResponse* resp, TpListFn fn) {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) return unknown(resp, req->consumer_id());
     TpList partitions(req->partitions());
-    kafka_common_Error_t* err = fn(c, partitions.list);
+    kafka_common_Error_t* err = nullptr;
+    fn(c, partitions.list, &err);
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
     return grpc::Status::OK;
   }
 
   // beginning_offsets / end_offsets: an owned map of owned TopicPartition ->
   // owned `int64_t *`; destroying the map frees both sides of every entry.
-  using LongOffFn = kafka_common_Error_t* (*)(kafka_consumer_Consumer_t*, const kafka_List_t*,
-                                              kafka_Map_t**);
+  using LongOffFn = kafka_Map_t* (*)(kafka_consumer_Consumer_t*, const kafka_List_t*,
+                                     kafka_common_Error_t**);
   grpc::Status long_offsets(const TopicPartitionListRequest* req, LongOffsetsResponse* resp,
                             LongOffFn fn) {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
@@ -2168,8 +2177,8 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
       return grpc::Status::OK;
     }
     TpList partitions(req->partitions());
-    kafka_Map_t* map = nullptr;
-    kafka_common_Error_t* err = fn(c, partitions.list, &map);
+    kafka_common_Error_t* err = nullptr;
+    kafka_Map_t* map = fn(c, partitions.list, &err);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
@@ -2394,15 +2403,16 @@ void copy_proto_error(KafkaError* dst, const kafka_common_Error_t* err) {
 // future). The returned error is owned by the caller.
 template <typename T>
 kafka_common_Error_t* future_get(const kafka_common_KafkaFuture_t* future, const T** out) {
-  void* value = nullptr;
-  kafka_common_Error_t* err = kafka_common_KafkaFuture_get(future, &value);
-  *out = static_cast<const T*>(value);
+  kafka_common_Error_t* err = nullptr;
+  *out = static_cast<const T*>(kafka_common_KafkaFuture_get(future, &err));
   return err;
 }
 
 kafka_common_Error_t* future_await(const kafka_common_KafkaFuture_t* future) {
-  void* value = nullptr;
-  return kafka_common_KafkaFuture_get(future, &value);
+  kafka_common_Error_t* err = nullptr;
+  // A Void future: the value is null either way.
+  kafka_common_KafkaFuture_get(future, &err);
+  return err;
 }
 
 // Awaits a Void future and reports its failure on the proto's error slot.
@@ -2819,8 +2829,8 @@ struct TopicCollectionArg {
     by_ids = req.has_topic_ids();
     if (by_ids) {
       for (const std::string& id : req.topic_ids().values()) {
-        kafka_common_Uuid_t* uuid = nullptr;
-        kafka_common_Error_t* err = kafka_common_Uuid_from_string(id.c_str(), &uuid);
+        kafka_common_Error_t* err = nullptr;
+        kafka_common_Uuid_t* uuid = kafka_common_Uuid_from_string(id.c_str(), &err);
         if (err != nullptr) {
           error.reset(err);
           return;
@@ -2868,7 +2878,8 @@ class AdminServiceImpl final : public AdminService::Service {
     AdminEntry entry;
     if (selects_mock(req->config())) {
       const int32_t num_brokers = req->has_num_brokers() ? req->num_brokers() : 1;
-      kafka_common_Error_t* err = kafka_admin_MockAdminClient_create(num_brokers, &entry.mock);
+      kafka_common_Error_t* err = nullptr;
+      entry.mock = kafka_admin_MockAdminClient_create(num_brokers, &err);
       if (err != nullptr) {
         fill_proto_error(resp->mutable_error(), err);
         return grpc::Status::OK;
@@ -2878,13 +2889,13 @@ class AdminServiceImpl final : public AdminService::Service {
       // The map aliases the proto strings; AdminClientConfig_new copies them.
       CMap props;
       for (const auto& kv : req->config()) props.put(kv.first.c_str(), kv.second.c_str());
-      kafka_admin_AdminClientConfig_t* config = nullptr;
-      kafka_common_Error_t* err = kafka_admin_AdminClientConfig_new(props.map, &config);
+      kafka_common_Error_t* err = nullptr;
+      kafka_admin_AdminClientConfig_t* config = kafka_admin_AdminClientConfig_new(props.map, &err);
       if (err != nullptr) {
         fill_proto_error(resp->mutable_error(), err);
         return grpc::Status::OK;
       }
-      err = kafka_admin_AdminClient_create(config, &entry.owned);
+      entry.owned = kafka_admin_AdminClient_create(config, &err);
       kafka_admin_AdminClientConfig_destroy(config);
       if (err != nullptr) {
         fill_proto_error(resp->mutable_error(), err);
@@ -3436,9 +3447,9 @@ class AdminServiceImpl final : public AdminService::Service {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    const kafka_common_ElectionType_t* election_type = nullptr;
-    kafka_common_Error_t* err = kafka_common_ElectionType_value_of(
-        static_cast<int8_t>(req->election_type()), &election_type);
+    kafka_common_Error_t* err = nullptr;
+    const kafka_common_ElectionType_t* election_type =
+        kafka_common_ElectionType_value_of(static_cast<int8_t>(req->election_type()), &err);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
@@ -3493,8 +3504,9 @@ class AdminServiceImpl final : public AdminService::Service {
       kafka_admin_NewPartitionReassignment_t* reassignment = nullptr;
       // An absent reassignment is Java's Optional.empty(): cancel the ongoing one.
       if (spec.has_reassignment()) {
-        kafka_common_Error_t* err = kafka_admin_NewPartitionReassignment_new(
-            replicas.list_of(spec.reassignment().target_replicas()), &reassignment);
+        kafka_common_Error_t* err = nullptr;
+        reassignment = kafka_admin_NewPartitionReassignment_new(
+            replicas.list_of(spec.reassignment().target_replicas()), &err);
         if (err != nullptr) {
           fill_proto_error(resp->mutable_error(), err);
           return grpc::Status::OK;
@@ -3600,9 +3612,9 @@ class AdminServiceImpl final : public AdminService::Service {
                                                         spec.partition().partition())),
                 offset_spec);
     }
-    const kafka_common_IsolationLevel_t* isolation_level = nullptr;
-    kafka_common_Error_t* err = kafka_common_IsolationLevel_for_id(
-        static_cast<int8_t>(req->isolation_level()), &isolation_level);
+    kafka_common_Error_t* err = nullptr;
+    const kafka_common_IsolationLevel_t* isolation_level =
+        kafka_common_IsolationLevel_for_id(static_cast<int8_t>(req->isolation_level()), &err);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
@@ -3618,8 +3630,8 @@ class AdminServiceImpl final : public AdminService::Service {
     for (kafka_common_TopicPartition_t* tp : tps.handles) {
       ListOffsetsEntry* entry = resp->add_entries();
       set_partition_key(entry->mutable_key(), tp);
-      kafka_common_KafkaFuture_t* raw = nullptr;
-      err = kafka_admin_ListOffsetsResult_partition_result(result.get(), tp, &raw);
+      err = nullptr;  // a previous entry's error was handed to its proto
+      kafka_common_KafkaFuture_t* raw = kafka_admin_ListOffsetsResult_partition_result(result.get(), tp, &err);
       if (err != nullptr) {
         fill_proto_error(entry->mutable_error(), err);
         continue;
@@ -3795,10 +3807,10 @@ class AdminServiceImpl final : public AdminService::Service {
     for (const auto& spec : req->group_specs()) {
       ListConsumerGroupOffsetsEntry* entry = resp->add_entries();
       set_name_key(entry->mutable_key(), spec.group_id().c_str());
-      kafka_common_KafkaFuture_t* raw = nullptr;
-      kafka_common_Error_t* err =
+      kafka_common_Error_t* err = nullptr;
+      kafka_common_KafkaFuture_t* raw =
           kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata_with_group_id(
-              result.get(), spec.group_id().c_str(), &raw);
+              result.get(), spec.group_id().c_str(), &err);
       if (err != nullptr) {
         fill_proto_error(entry->mutable_error(), err);
         continue;
@@ -3841,14 +3853,14 @@ class AdminServiceImpl final : public AdminService::Service {
     CMap offsets;
     for (const auto& commit : req->offsets()) {
       const OffsetAndMetadata& o = commit.offset();
-      kafka_consumer_OffsetAndMetadata_t* oam = nullptr;
       // An absent leader_epoch is Java's Optional.empty(); the constructor
       // validates the offset (negative -> IllegalArgumentException).
-      kafka_common_Error_t* err =
+      kafka_common_Error_t* err = nullptr;
+      kafka_consumer_OffsetAndMetadata_t* oam =
           o.has_leader_epoch()
               ? kafka_consumer_OffsetAndMetadata_with_leader_epoch_metadata(
-                    o.offset(), o.leader_epoch(), o.metadata().c_str(), &oam)
-              : kafka_consumer_OffsetAndMetadata_with_metadata(o.offset(), o.metadata().c_str(), &oam);
+                    o.offset(), o.leader_epoch(), o.metadata().c_str(), &err)
+              : kafka_consumer_OffsetAndMetadata_with_metadata(o.offset(), o.metadata().c_str(), &err);
       if (err != nullptr) {
         fill_proto_error(resp->mutable_error(), err);
         return grpc::Status::OK;
@@ -3895,9 +3907,9 @@ class AdminServiceImpl final : public AdminService::Service {
     for (kafka_common_TopicPartition_t* tp : partitions.handles) {
       VoidResultEntry* entry = resp->add_entries();
       set_partition_key(entry->mutable_key(), tp);
-      kafka_common_KafkaFuture_t* raw = nullptr;
-      kafka_common_Error_t* err =
-          kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(result.get(), tp, &raw);
+      kafka_common_Error_t* err = nullptr;
+      kafka_common_KafkaFuture_t* raw =
+          kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(result.get(), tp, &err);
       if (err != nullptr) {
         fill_proto_error(entry->mutable_error(), err);
         continue;
@@ -3950,7 +3962,7 @@ class AdminServiceImpl final : public AdminService::Service {
       for (const auto& m : req->members().members()) {
         member_list.add(members.add(kafka_admin_MemberToRemove_new(m.group_instance_id().c_str())));
       }
-      err = kafka_admin_RemoveMembersFromConsumerGroupOptions_with_members(member_list.list, &raw_opts);
+      raw_opts = kafka_admin_RemoveMembersFromConsumerGroupOptions_with_members(member_list.list, &err);
     }
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
@@ -3978,8 +3990,9 @@ class AdminServiceImpl final : public AdminService::Service {
     for (kafka_admin_MemberToRemove_t* member : members.handles) {
       VoidResultEntry* entry = resp->add_entries();
       set_name_key(entry->mutable_key(), kafka_admin_MemberToRemove_group_instance_id(member));
-      kafka_common_KafkaFuture_t* raw = nullptr;
-      err = kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(result.get(), member, &raw);
+      err = nullptr;  // a previous entry's error was handed to its proto
+      kafka_common_KafkaFuture_t* raw =
+          kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(result.get(), member, &err);
       if (err != nullptr) {
         fill_proto_error(entry->mutable_error(), err);
         continue;
@@ -4529,12 +4542,12 @@ class AdminServiceImpl final : public AdminService::Service {
     OwnedHandles<kafka_admin_FeatureUpdate_t, kafka_admin_FeatureUpdate_destroy> updates;
     CMap update_map;
     for (const auto& kv : req->feature_updates()) {
-      kafka_admin_FeatureUpdate_t* update = nullptr;
       // FeatureUpdate's constructor validates the pair (IllegalArgumentException
       // for a bad level or an UNKNOWN upgrade type).
-      kafka_common_Error_t* err = kafka_admin_FeatureUpdate_new(
+      kafka_common_Error_t* err = nullptr;
+      kafka_admin_FeatureUpdate_t* update = kafka_admin_FeatureUpdate_new(
           static_cast<int16_t>(kv.second.max_version_level()),
-          kafka_admin_FeatureUpdate_UpgradeType_from_code(kv.second.upgrade_type()), &update);
+          kafka_admin_FeatureUpdate_UpgradeType_from_code(kv.second.upgrade_type()), &err);
       if (err != nullptr) {
         fill_proto_error(resp->mutable_error(), err);
         return grpc::Status::OK;
@@ -4546,10 +4559,10 @@ class AdminServiceImpl final : public AdminService::Service {
     apply_timeout(*req, opts.get(), kafka_admin_UpdateFeaturesOptions_set_timeout_ms);
     kafka_admin_UpdateFeaturesOptions_set_validate_only(opts.get(), req->validate_only() ? 1 : 0);
     // The only RPC whose Java method validates its arguments up front
-    // (IllegalArgumentException on an empty map), hence the error return.
-    kafka_admin_UpdateFeaturesResult_t* raw = nullptr;
-    kafka_common_Error_t* err =
-        kafka_admin_Admin_update_features_with_options(admin, update_map.map, opts.get(), &raw);
+    // (IllegalArgumentException on an empty map), hence the error slot.
+    kafka_common_Error_t* err = nullptr;
+    kafka_admin_UpdateFeaturesResult_t* raw =
+        kafka_admin_Admin_update_features_with_options(admin, update_map.map, opts.get(), &err);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
@@ -4578,8 +4591,8 @@ class AdminServiceImpl final : public AdminService::Service {
     for (kafka_common_TopicPartition_t* tp : partitions.handles) {
       DescribeProducersEntry* entry = resp->add_entries();
       set_partition_key(entry->mutable_key(), tp);
-      kafka_common_KafkaFuture_t* raw = nullptr;
-      kafka_common_Error_t* err = kafka_admin_DescribeProducersResult_partition_result(result.get(), tp, &raw);
+      kafka_common_Error_t* err = nullptr;
+      kafka_common_KafkaFuture_t* raw = kafka_admin_DescribeProducersResult_partition_result(result.get(), tp, &err);
       if (err != nullptr) {
         fill_proto_error(entry->mutable_error(), err);
         continue;
@@ -4625,9 +4638,9 @@ class AdminServiceImpl final : public AdminService::Service {
     for (const std::string& id : req->transactional_ids()) {
       DescribeTransactionsEntry* entry = resp->add_entries();
       set_name_key(entry->mutable_key(), id.c_str());
-      kafka_common_KafkaFuture_t* raw = nullptr;
-      kafka_common_Error_t* err =
-          kafka_admin_DescribeTransactionsResult_description(result.get(), id.c_str(), &raw);
+      kafka_common_Error_t* err = nullptr;
+      kafka_common_KafkaFuture_t* raw =
+          kafka_admin_DescribeTransactionsResult_description(result.get(), id.c_str(), &err);
       if (err != nullptr) {
         fill_proto_error(entry->mutable_error(), err);
         continue;
@@ -4775,8 +4788,9 @@ class AdminServiceImpl final : public AdminService::Service {
     for (const std::string& id : req->transactional_ids()) {
       FenceProducersEntry* entry = resp->add_entries();
       set_name_key(entry->mutable_key(), id.c_str());
-      kafka_common_KafkaFuture_t* raw_pid = nullptr;
-      kafka_common_Error_t* err = kafka_admin_FenceProducersResult_producer_id(result.get(), id.c_str(), &raw_pid);
+      kafka_common_Error_t* err = nullptr;
+      kafka_common_KafkaFuture_t* raw_pid =
+          kafka_admin_FenceProducersResult_producer_id(result.get(), id.c_str(), &err);
       if (err != nullptr) {
         fill_proto_error(entry->mutable_error(), err);
         continue;
@@ -4788,8 +4802,8 @@ class AdminServiceImpl final : public AdminService::Service {
         fill_proto_error(entry->mutable_error(), err);
         continue;
       }
-      kafka_common_KafkaFuture_t* raw_epoch = nullptr;
-      err = kafka_admin_FenceProducersResult_epoch_id(result.get(), id.c_str(), &raw_epoch);
+      kafka_common_KafkaFuture_t* raw_epoch =
+          kafka_admin_FenceProducersResult_epoch_id(result.get(), id.c_str(), &err);
       if (err != nullptr) {
         fill_proto_error(entry->mutable_error(), err);
         continue;
@@ -4971,18 +4985,17 @@ class AdminServiceImpl final : public AdminService::Service {
   // keeping the pattern and entry handles they were built from alive.
   struct AclBindingArgs {
     kafka_common_Error_t* build(const AclBinding& b, kafka_common_acl_AclBinding_t** out) {
-      kafka_common_resource_ResourcePattern_t* pattern = nullptr;
-      kafka_common_Error_t* err = kafka_common_resource_ResourcePattern_new(
+      kafka_common_Error_t* err = nullptr;
+      kafka_common_resource_ResourcePattern_t* pattern = kafka_common_resource_ResourcePattern_new(
           kafka_common_resource_ResourceType_from_code(static_cast<int8_t>(b.resource_type())),
           b.resource_name().c_str(),
-          kafka_common_resource_PatternType_from_code(static_cast<int8_t>(b.pattern_type())), &pattern);
+          kafka_common_resource_PatternType_from_code(static_cast<int8_t>(b.pattern_type())), &err);
       if (err != nullptr) return err;
       patterns.add(pattern);
-      kafka_common_acl_AccessControlEntry_t* entry = nullptr;
-      err = kafka_common_acl_AccessControlEntry_new(
+      kafka_common_acl_AccessControlEntry_t* entry = kafka_common_acl_AccessControlEntry_new(
           b.principal().c_str(), b.host().c_str(),
           kafka_common_acl_AclOperation_from_code(static_cast<int8_t>(b.operation())),
-          kafka_common_acl_AclPermissionType_from_code(static_cast<int8_t>(b.permission_type())), &entry);
+          kafka_common_acl_AclPermissionType_from_code(static_cast<int8_t>(b.permission_type())), &err);
       if (err != nullptr) return err;
       entries.add(entry);
       *out = bindings.add(kafka_common_acl_AclBinding_new(pattern, entry));
@@ -5507,9 +5520,9 @@ extern "C" void chaos_on_delivery(void* self, const kafka_producer_RecordMetadat
 }
 
 // Settles record `index` after kafka_producer_Producer_send_with_callback
-// returned an error, unless its callback already did.
+// reported an error through its `out_err` slot, unless its callback already did.
 //
-// That error return is ambiguous (KafkaProducer::send in
+// That error is ambiguous (KafkaProducer::send in
 // rust/src/producer/kafka_producer.rs): on the send's early-guard paths (closed
 // producer, a non-API metadata error) the callback is dropped unfired, but on
 // its post-append path the record is already in a batch whose completion still
@@ -5607,7 +5620,7 @@ kafka_common_Error_t* chaos_shutdown_producer(kafka_producer_KafkaProducer_t* ka
     state->pump_cv.notify_one();
     pump.join();
   } else {
-    err = kafka_producer_Producer_close(producer);
+    kafka_producer_Producer_close(producer, &err);
   }
   while (kafka_producer_Producer__execute_callbacks(producer) > 0) {
   }
@@ -5719,7 +5732,8 @@ void chaos_revoke_commit(ChaosListenerState* state, const kafka_List_t* partitio
         make_synthetic_error("on_partitions_revoked fired after the consumer handle was released")));
     return;
   }
-  kafka_common_Error_t* err = kafka_consumer_ConsumerHandle_commit_sync(state->handle);
+  kafka_common_Error_t* err = nullptr;
+  kafka_consumer_ConsumerHandle_commit_sync(state->handle, &err);
   if (err != nullptr) {
     state->events->push(chaos_consumer_error(CONSUMER_OP_REVOKE_COMMIT, chaos_error(err)));
     return;
@@ -5728,8 +5742,7 @@ void chaos_revoke_commit(ChaosListenerState* state, const kafka_List_t* partitio
     // The borrowed list is exactly the `kafka_List_t` of TopicPartition
     // committed() takes, so it is passed on as is (grpc_chaos.py passes the
     // callback's partitions too).
-    kafka_Map_t* map = nullptr;
-    err = kafka_consumer_ConsumerHandle_committed(state->handle, partitions, &map);
+    kafka_Map_t* map = kafka_consumer_ConsumerHandle_committed(state->handle, partitions, &err);
     if (err != nullptr) {
       state->events->push(chaos_consumer_error(CONSUMER_OP_READ_COMMITTED, chaos_error(err)));
     } else {
@@ -5783,13 +5796,13 @@ extern "C" void chaos_on_commit_async(void* self, const kafka_Map_t* /*offsets*/
 void chaos_read_back(kafka_consumer_Consumer_t* consumer, ChaosEventQueue& events) {
   // An owned list of owned TopicPartition handles: the shape committed()
   // takes, so it is passed on directly, then destroyed with its elements.
-  kafka_List_t* assigned = nullptr;
-  if (kafka_common_Error_t* err = kafka_consumer_Consumer_assignment(consumer, &assigned)) {
+  kafka_common_Error_t* err = nullptr;
+  kafka_List_t* assigned = kafka_consumer_Consumer_assignment(consumer, &err);
+  if (err != nullptr) {
     events.push(chaos_consumer_error(CONSUMER_OP_READ_COMMITTED, chaos_error(err)));
     return;
   }
-  kafka_Map_t* map = nullptr;
-  kafka_common_Error_t* err = kafka_consumer_Consumer_committed(consumer, assigned, &map);
+  kafka_Map_t* map = kafka_consumer_Consumer_committed(consumer, assigned, &err);
   kafka_List_destroy(assigned);
   if (err != nullptr) {
     events.push(chaos_consumer_error(CONSUMER_OP_READ_COMMITTED, chaos_error(err)));
@@ -5808,7 +5821,8 @@ void chaos_read_back(kafka_consumer_Consumer_t* consumer, ChaosEventQueue& event
 // find it released.
 kafka_common_Error_t* chaos_close_consumer(kafka_consumer_Consumer_t* consumer,
                                            ChaosListenerState* state) {
-  kafka_common_Error_t* err = kafka_consumer_Consumer_close(consumer);
+  kafka_common_Error_t* err = nullptr;
+  kafka_consumer_Consumer_close(consumer, &err);
   kafka_consumer_Consumer_destroy(consumer);
   kafka_consumer_ConsumerHandle_t* handle = nullptr;
   {
@@ -5975,14 +5989,14 @@ class ChaosWorkloadServiceImpl final : public ChaosWorkloadService::Service {
       kafka_Map_put(props, const_cast<char*>(kv.first.c_str()),
                     const_cast<char*>(kv.second.c_str()));
     }
-    kafka_producer_ProducerConfig_t* config = nullptr;
-    kafka_common_Error_t* err = kafka_producer_ProducerConfig_new(props, &config);
+    kafka_common_Error_t* err = nullptr;
+    kafka_producer_ProducerConfig_t* config = kafka_producer_ProducerConfig_new(props, &err);
     kafka_Map_destroy(props);
     kafka_producer_KafkaProducer_t* kafka = nullptr;
     if (err == nullptr) {
       // NULL serializers: keys and values are `kafka_Bytes_t *`, read during
       // the send.
-      err = kafka_producer_KafkaProducer_new(config, nullptr, nullptr, &kafka);
+      kafka = kafka_producer_KafkaProducer_new(config, nullptr, nullptr, &err);
       kafka_producer_ProducerConfig_destroy(config);
     }
     if (err != nullptr) {
@@ -6074,9 +6088,9 @@ class ChaosWorkloadServiceImpl final : public ChaosWorkloadService::Service {
             kafka_producer_ProducerRecord_with_key(topic.c_str(), &key_bytes, &value_bytes);
         kafka_producer_Callback_t* callback =
             kafka_producer_Callback_new(chaos_send_cookie(state->slot, index), chaos_on_delivery);
-        kafka_common_KafkaFuture_t* future = nullptr;
-        kafka_common_Error_t* send_err =
-            kafka_producer_Producer_send_with_callback(producer, record, callback, &future);
+        kafka_common_Error_t* send_err = nullptr;
+        kafka_common_KafkaFuture_t* future =
+            kafka_producer_Producer_send_with_callback(producer, record, callback, &send_err);
         kafka_producer_Callback_destroy(callback);
         kafka_producer_ProducerRecord_destroy(record);
         if (send_err == nullptr) {
@@ -6127,8 +6141,8 @@ class ChaosWorkloadServiceImpl final : public ChaosWorkloadService::Service {
       kafka_Map_put(props, const_cast<char*>(kv.first.c_str()),
                     const_cast<char*>(kv.second.c_str()));
     }
-    kafka_consumer_ConsumerConfig_t* config = nullptr;
-    kafka_common_Error_t* err = kafka_consumer_ConsumerConfig_new(props, &config);
+    kafka_common_Error_t* err = nullptr;
+    kafka_consumer_ConsumerConfig_t* config = kafka_consumer_ConsumerConfig_new(props, &err);
     kafka_Map_destroy(props);
     // Owned (KafkaConsumer has no class handle), freed with
     // kafka_consumer_Consumer_destroy.
@@ -6136,7 +6150,7 @@ class ChaosWorkloadServiceImpl final : public ChaosWorkloadService::Service {
     if (err == nullptr) {
       // NULL deserializers: keys and values cross as `kafka_Bytes_t *` owned by
       // the records that delivered them.
-      err = kafka_consumer_KafkaConsumer_new(config, nullptr, nullptr, &consumer);
+      consumer = kafka_consumer_KafkaConsumer_new(config, nullptr, nullptr, &err);
       kafka_consumer_ConsumerConfig_destroy(config);
     }
     if (err != nullptr) {
@@ -6164,7 +6178,7 @@ class ChaosWorkloadServiceImpl final : public ChaosWorkloadService::Service {
                                                      chaos_partitions_lost);
     {
       BorrowedStringList topics(req.topics());
-      err = kafka_consumer_Consumer_subscribe_with_topics_listener(consumer, topics.list, listener);
+      kafka_consumer_Consumer_subscribe_with_topics_listener(consumer, topics.list, listener, &err);
     }
     kafka_consumer_ConsumerRebalanceListener_destroy(listener);
     if (err != nullptr) {
@@ -6182,8 +6196,8 @@ class ChaosWorkloadServiceImpl final : public ChaosWorkloadService::Service {
     ChaosClock::time_point last_check = ChaosClock::now();
 
     while (!stop.is_set()) {
-      kafka_consumer_ConsumerRecords_t* records = nullptr;
-      kafka_common_Error_t* poll_err = kafka_consumer_Consumer_poll(consumer, poll_timeout_ms, &records);
+      kafka_common_Error_t* poll_err = nullptr;
+      kafka_consumer_ConsumerRecords_t* records = kafka_consumer_Consumer_poll(consumer, poll_timeout_ms, &poll_err);
       if (poll_err != nullptr) {
         events->push(chaos_consumer_error(CONSUMER_OP_POLL, chaos_error(poll_err)));
         stop.wait_for(kChaosPollErrorBackoff);
@@ -6232,11 +6246,11 @@ class ChaosWorkloadServiceImpl final : public ChaosWorkloadService::Service {
       // destroyed right after it.
       kafka_common_Error_t* commit_err = nullptr;
       if (sync_commit) {
-        commit_err = kafka_consumer_Consumer_commit_sync(consumer);
+        kafka_consumer_Consumer_commit_sync(consumer, &commit_err);
       } else {
         kafka_consumer_OffsetCommitCallback_t* callback =
             kafka_consumer_OffsetCommitCallback_new(state.get(), chaos_on_commit_async);
-        commit_err = kafka_consumer_Consumer_commit_async_with_callback(consumer, callback);
+        kafka_consumer_Consumer_commit_async_with_callback(consumer, callback, &commit_err);
         kafka_consumer_OffsetCommitCallback_destroy(callback);
       }
       if (commit_err != nullptr) {
@@ -6253,7 +6267,8 @@ class ChaosWorkloadServiceImpl final : public ChaosWorkloadService::Service {
 
     // Final commit; with no poll after it, every assigned partition's committed
     // offset must be this consumer's last consumed offset + 1.
-    kafka_common_Error_t* commit_err = kafka_consumer_Consumer_commit_sync(consumer);
+    kafka_common_Error_t* commit_err = nullptr;
+    kafka_consumer_Consumer_commit_sync(consumer, &commit_err);
     if (commit_err != nullptr) {
       events->push(chaos_consumer_error(CONSUMER_OP_COMMIT, chaos_error(commit_err)));
     } else if (check_commits) {

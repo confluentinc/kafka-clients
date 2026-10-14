@@ -21,6 +21,17 @@
 #include "unity.h"
 #include "test_support.h"
 
+/* Runs `call`, a fallible call whose `out_err` argument is `&err`, with `err`
+ * a fresh NULL slot, and fails the test with its message if the call stored
+ * an error there. A value the call returns is assigned inside `call`
+ * (`ASSERT_OK(future = kafka_producer_Producer_send(p, r, &err))`). */
+#define ASSERT_OK(call)                       \
+    do {                                      \
+        kafka_common_Error_t *err = NULL;     \
+        call;                                 \
+        assert_ok(err, #call);                \
+    } while (0)
+
 void setUp(void) {}
 void tearDown(void) {}
 
@@ -49,7 +60,8 @@ static kafka_Map_t *config_map(const char *const *pairs) {
 static kafka_producer_ProducerConfig_t *make_config(const char *const *pairs) {
     kafka_Map_t *props = config_map(pairs);
     kafka_producer_ProducerConfig_t *config = NULL;
-    kafka_common_Error_t *err = kafka_producer_ProducerConfig_new(props, &config);
+    kafka_common_Error_t *err = NULL;
+    config = kafka_producer_ProducerConfig_new(props, &err);
     kafka_Map_destroy(props);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(config);
@@ -60,7 +72,8 @@ static kafka_producer_ProducerConfig_t *make_config(const char *const *pairs) {
 static kafka_producer_KafkaProducer_t *make_producer(const char *const *pairs) {
     kafka_producer_ProducerConfig_t *config = make_config(pairs);
     kafka_producer_KafkaProducer_t *producer = NULL;
-    kafka_common_Error_t *err = kafka_producer_KafkaProducer_new(config, NULL, NULL, &producer);
+    kafka_common_Error_t *err = NULL;
+    producer = kafka_producer_KafkaProducer_new(config, NULL, NULL, &err);
     kafka_producer_ProducerConfig_destroy(config);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(producer);
@@ -70,7 +83,8 @@ static kafka_producer_KafkaProducer_t *make_producer(const char *const *pairs) {
 /* `close()` through the interface view, then the class destroy. */
 static void close_and_destroy(kafka_producer_KafkaProducer_t *producer) {
     const kafka_producer_Producer_t *view = kafka_producer_KafkaProducer__as_Producer(producer);
-    kafka_common_Error_t *err = kafka_producer_Producer_close(view);
+    kafka_common_Error_t *err = NULL;
+    kafka_producer_Producer_close(view, &err);
     TEST_ASSERT_NULL(err);
     kafka_producer_KafkaProducer_destroy(producer);
 }
@@ -87,13 +101,13 @@ void test_config_new_and_producer(void) {
     TEST_ASSERT_EQUAL_INT32(1, kafka_Map_size(props));
 
     kafka_producer_ProducerConfig_t *config = NULL;
-    TEST_ASSERT_NULL(kafka_producer_ProducerConfig_new(props, &config));
+    ASSERT_OK(config = kafka_producer_ProducerConfig_new(props, &err));
     TEST_ASSERT_NOT_NULL(config);
     /* The map stays the caller's and is no longer needed by the config. */
     kafka_Map_destroy(props);
 
     kafka_producer_KafkaProducer_t *producer = NULL;
-    TEST_ASSERT_NULL(kafka_producer_KafkaProducer_new(config, NULL, NULL, &producer));
+    ASSERT_OK(producer = kafka_producer_KafkaProducer_new(config, NULL, NULL, &err));
     TEST_ASSERT_NOT_NULL(producer);
     kafka_producer_ProducerConfig_destroy(config);
 
@@ -112,8 +126,8 @@ void test_config_builds_several_producers(void) {
 
     kafka_producer_KafkaProducer_t *first = NULL;
     kafka_producer_KafkaProducer_t *second = NULL;
-    TEST_ASSERT_NULL(kafka_producer_KafkaProducer_new(config, NULL, NULL, &first));
-    TEST_ASSERT_NULL(kafka_producer_KafkaProducer_new(config, NULL, NULL, &second));
+    ASSERT_OK(first = kafka_producer_KafkaProducer_new(config, NULL, NULL, &err));
+    ASSERT_OK(second = kafka_producer_KafkaProducer_new(config, NULL, NULL, &err));
     TEST_ASSERT_NOT_NULL(first);
     TEST_ASSERT_NOT_NULL(second);
     TEST_ASSERT_TRUE(first != second);
@@ -134,7 +148,8 @@ void test_config_invalid_value(void) {
     };
     kafka_Map_t *props = config_map(pairs);
     kafka_producer_ProducerConfig_t *config = NULL;
-    kafka_common_Error_t *err = kafka_producer_ProducerConfig_new(props, &config);
+    kafka_common_Error_t *err = NULL;
+    config = kafka_producer_ProducerConfig_new(props, &err);
     kafka_Map_destroy(props);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(config);
@@ -150,7 +165,8 @@ void test_config_invalid_value(void) {
     /* An invalid enumerated value as well. */
     const char *const acks[] = { "bootstrap.servers", "localhost:9092", "acks", "many", NULL };
     props = config_map(acks);
-    err = kafka_producer_ProducerConfig_new(props, &config);
+    err = NULL;
+    config = kafka_producer_ProducerConfig_new(props, &err);
     kafka_Map_destroy(props);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(config);
@@ -201,7 +217,8 @@ void test_close_with_negative_timeout_is_rejected(void) {
     kafka_producer_KafkaProducer_t *producer = make_producer(BOOTSTRAP_ONLY);
     const kafka_producer_Producer_t *view = kafka_producer_KafkaProducer__as_Producer(producer);
 
-    kafka_common_Error_t *err = kafka_producer_Producer_close_with_timeout(view, -1);
+    kafka_common_Error_t *err = NULL;
+    kafka_producer_Producer_close_with_timeout(view, -1, &err);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_EQUAL_STRING("The timeout cannot be negative.", kafka_common_Error_message(err));
     kafka_common_Error_destroy(err);
@@ -215,7 +232,8 @@ void test_close_with_negative_timeout_is_rejected(void) {
     TEST_ASSERT_TRUE(callback_pump_until(&pump, &result.fired, 1));
     TEST_ASSERT_EQUAL_STRING("The timeout cannot be negative.", result.message);
 
-    err = kafka_producer_Producer_close_with_timeout(view, 0);
+    err = NULL;
+    kafka_producer_Producer_close_with_timeout(view, 0, &err);
     TEST_ASSERT_NULL(err);
     kafka_producer_KafkaProducer_destroy(producer);
     callback_pump_destroy(&pump);
@@ -234,11 +252,11 @@ void test_create_with_string_serializers(void) {
     TEST_ASSERT_NOT_NULL(value_ser);
 
     kafka_producer_KafkaProducer_t *producer = NULL;
-    kafka_common_Error_t *err = kafka_producer_KafkaProducer_new(
+    kafka_common_Error_t *err = NULL;
+    producer = kafka_producer_KafkaProducer_new(
         config,
         (kafka_common_serialization_Serializer_t *)kafka_common_serialization_StringSerializer__as_Serializer(key_ser),
-        (kafka_common_serialization_Serializer_t *)kafka_common_serialization_StringSerializer__as_Serializer(value_ser),
-        &producer);
+        (kafka_common_serialization_Serializer_t *)kafka_common_serialization_StringSerializer__as_Serializer(value_ser), &err);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(producer);
     kafka_producer_ProducerConfig_destroy(config);
@@ -246,8 +264,9 @@ void test_create_with_string_serializers(void) {
     /* The shared implementation is still usable through the view while the
      * producer lives. */
     kafka_Bytes_t out = { NULL, -1 };
-    err = kafka_common_serialization_Serializer_serialize(
-        kafka_common_serialization_StringSerializer__as_Serializer(value_ser), "topic", "hello", &out);
+    err = NULL;
+    out = kafka_common_serialization_Serializer_serialize(
+        kafka_common_serialization_StringSerializer__as_Serializer(value_ser), "topic", "hello", &err);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_EQUAL_INT32(5, out.len);
     TEST_ASSERT_EQUAL_MEMORY("hello", out.data, 5);
@@ -324,7 +343,8 @@ void test_send_cb_unreachable_broker_fails_future_with_timeout(void) {
     TEST_ASSERT_TRUE(kafka_common_KafkaFuture_is_done(result.future));
 
     void *metadata = NULL;
-    kafka_common_Error_t *err = kafka_common_KafkaFuture_get(result.future, &metadata);
+    kafka_common_Error_t *err = NULL;
+    metadata = kafka_common_KafkaFuture_get(result.future, &err);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(metadata);
     TEST_ASSERT_TRUE(kafka_common_Error_is_timeout_error(err));
@@ -372,14 +392,16 @@ static void on_reentrant_completion(void *self_, const kafka_producer_RecordMeta
     (void)metadata;
     reentrant_result_t *r = (reentrant_result_t *)self_;
     r->had_record_error = error != NULL;
-    kafka_common_Error_t *err = kafka_producer_Producer_flush(r->producer);
+    kafka_common_Error_t *err = NULL;
+    kafka_producer_Producer_flush(r->producer, &err);
     if (err != NULL) {
         strncpy(r->flush_message, kafka_common_Error_message(err), sizeof(r->flush_message) - 1);
         kafka_common_Error_destroy(err);
     }
     kafka_producer_Producer_flush_cb(r->producer, on_flush_cb, r);
     double start = now_seconds();
-    err = kafka_producer_Producer_close_with_timeout(r->producer, 60000);
+    err = NULL;
+    kafka_producer_Producer_close_with_timeout(r->producer, 60000, &err);
     r->close_seconds = now_seconds() - start;
     if (err != NULL) {
         r->close_failed = 1;
@@ -412,7 +434,7 @@ void test_delivery_callback_cannot_flush_and_closes_without_blocking(void) {
     result.producer = view;
     kafka_producer_Callback_t *callback = kafka_producer_Callback_new(&result, on_reentrant_completion);
     kafka_common_KafkaFuture_t *future = NULL;
-    TEST_ASSERT_NULL(kafka_producer_Producer_send_with_callback(view, record, callback, &future));
+    ASSERT_OK(future = kafka_producer_Producer_send_with_callback(view, record, callback, &err));
     kafka_producer_Callback_destroy(callback);
     kafka_producer_ProducerRecord_destroy(record);
 
@@ -430,8 +452,10 @@ void test_delivery_callback_cannot_flush_and_closes_without_blocking(void) {
 
     /* The future has the record's own outcome. */
     void *metadata = NULL;
-    kafka_common_Error_t *err = kafka_common_KafkaFuture_get(future, &metadata);
+    kafka_common_Error_t *err = NULL;
+    metadata = kafka_common_KafkaFuture_get(future, &err);
     TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(metadata);
     TEST_ASSERT_TRUE(kafka_common_Error_is_timeout_error(err));
     kafka_common_Error_destroy(err);
     kafka_common_KafkaFuture_destroy(future);
@@ -456,7 +480,7 @@ void test_delivery_callback_cannot_flush_and_closes_without_blocking(void) {
 // ---------------------------------------------------------------------------
 
 /* Signature shared by the four no-argument transaction-control functions. */
-typedef kafka_common_Error_t *(*txn_control_fn)(const kafka_producer_Producer_t *);
+typedef void (*txn_control_fn)(const kafka_producer_Producer_t *, kafka_common_Error_t **);
 
 /* Set once the helper thread has completed an init_transactions call that the
  * guard did *not* reject, i.e. once the overlap window has closed. */
@@ -494,7 +518,8 @@ static int is_txn_guard_error(const kafka_common_Error_t *err) {
 static void *txn_init_thread(void *arg) {
     const kafka_producer_Producer_t *producer = (const kafka_producer_Producer_t *)arg;
     for (int attempt = 0; attempt < TXN_INIT_MAX_ATTEMPTS; attempt++) {
-        kafka_common_Error_t *err = kafka_producer_Producer_init_transactions(producer);
+        kafka_common_Error_t *err = NULL;
+        kafka_producer_Producer_init_transactions(producer, &err);
         /* Classify with a local check, then publish the closed window *before*
          * freeing `err`. The Rust guard is released the instant the call above
          * returns, so anything done ahead of the store leaves the guard free
@@ -526,7 +551,8 @@ static void *txn_init_thread(void *arg) {
  * guard fired. */
 static int rejected_while_init_runs(const kafka_producer_Producer_t *producer, txn_control_fn fn) {
     while (!atomic_load(&txn_init_returned)) {
-        kafka_common_Error_t *err = fn(producer);
+        kafka_common_Error_t *err = NULL;
+        fn(producer, &err);
         int rejected = is_txn_guard_error(err);
         if (err != NULL) {
             kafka_common_Error_destroy(err);
@@ -663,7 +689,8 @@ void test_transaction_control_guard_rejects_concurrent_calls(void) {
      * a transaction are supported and drained into the operation), so this
      * commit hands the send_cb above to the producer before failing on the
      * timed-out init. */
-    kafka_common_Error_t *err = kafka_producer_Producer_commit_transaction(view);
+    kafka_common_Error_t *err = NULL;
+    kafka_producer_Producer_commit_transaction(view, &err);
     int after_join_was_guard_error = is_txn_guard_error(err);
     if (err != NULL) {
         kafka_common_Error_destroy(err);
@@ -681,7 +708,8 @@ void test_transaction_control_guard_rejects_concurrent_calls(void) {
      * `close_with_timeout(0)` or any bound force-closes fine, and a producer
      * without the send closes at once). The bound keeps the suite from hanging
      * and is what Java's `close(Duration)` does once the timeout elapses. */
-    kafka_common_Error_t *close_err = kafka_producer_Producer_close_with_timeout(view, 2000);
+    kafka_common_Error_t *close_err = NULL;
+    kafka_producer_Producer_close_with_timeout(view, 2000, &close_err);
     kafka_producer_KafkaProducer_destroy(producer);
     callback_pump_destroy(&pump);
 
@@ -724,14 +752,16 @@ void test_transaction_methods_on_non_transactional_producer(void) {
      * "Transactional method invoked on a non-transactional producer." */
     static const char FRAGMENT[] = "non-transactional producer";
 
-    kafka_common_Error_t *err = kafka_producer_Producer_init_transactions(view);
+    kafka_common_Error_t *err = NULL;
+    kafka_producer_Producer_init_transactions(view, &err);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_FALSE(is_txn_guard_error(err));
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_state_error(err));
     TEST_ASSERT_NOT_NULL(strstr(kafka_common_Error_message(err), FRAGMENT));
     kafka_common_Error_destroy(err);
 
-    err = kafka_producer_Producer_begin_transaction(view);
+    err = NULL;
+    kafka_producer_Producer_begin_transaction(view, &err);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_FALSE(is_txn_guard_error(err));
     TEST_ASSERT_FALSE(kafka_common_Error_is_transaction_abortable_error(err));
@@ -742,16 +772,17 @@ void test_transaction_methods_on_non_transactional_producer(void) {
      * group-metadata read and the blocking call all run here. Nothing else in
      * the suite reaches it — the mock tests take the other arm. */
     kafka_consumer_MockConsumer_t *mock_consumer = NULL;
-    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_new("earliest", &mock_consumer));
+    ASSERT_OK(mock_consumer = kafka_consumer_MockConsumer_new("earliest", &err));
     kafka_consumer_Consumer_t *consumer = kafka_consumer_MockConsumer__as_Consumer(mock_consumer);
     kafka_consumer_ConsumerGroupMetadata_t *group_metadata = consumer_group_metadata(consumer);
     TEST_ASSERT_NOT_NULL(group_metadata);
     kafka_common_TopicPartition_t *tp = kafka_common_TopicPartition_new("input-topic", 0);
     kafka_consumer_OffsetAndMetadata_t *oam = NULL;
-    TEST_ASSERT_NULL(kafka_consumer_OffsetAndMetadata_with_leader_epoch_metadata(99, 3, "meta", &oam));
+    ASSERT_OK(oam = kafka_consumer_OffsetAndMetadata_with_leader_epoch_metadata(99, 3, "meta", &err));
     kafka_Map_t *offsets = kafka_Map_new();
     kafka_Map_put(offsets, tp, oam);
-    err = kafka_producer_Producer_send_offsets_to_transaction(view, offsets, group_metadata);
+    err = NULL;
+    kafka_producer_Producer_send_offsets_to_transaction(view, offsets, group_metadata, &err);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_FALSE(is_txn_guard_error(err));
     TEST_ASSERT_NOT_NULL(strstr(kafka_common_Error_message(err), FRAGMENT));
@@ -760,13 +791,15 @@ void test_transaction_methods_on_non_transactional_producer(void) {
     kafka_consumer_OffsetAndMetadata_destroy(oam);
     kafka_common_TopicPartition_destroy(tp);
 
-    err = kafka_producer_Producer_commit_transaction(view);
+    err = NULL;
+    kafka_producer_Producer_commit_transaction(view, &err);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_FALSE(is_txn_guard_error(err));
     TEST_ASSERT_NOT_NULL(strstr(kafka_common_Error_message(err), FRAGMENT));
     kafka_common_Error_destroy(err);
 
-    err = kafka_producer_Producer_abort_transaction(view);
+    err = NULL;
+    kafka_producer_Producer_abort_transaction(view, &err);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_FALSE(is_txn_guard_error(err));
     TEST_ASSERT_NOT_NULL(strstr(kafka_common_Error_message(err), FRAGMENT));

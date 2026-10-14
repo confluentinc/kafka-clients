@@ -177,12 +177,12 @@ static inline int callback_pump_until(callback_pump_t *pump, atomic_int *flag, i
     return 1;
 }
 
-/* The consumer's state reads (`assignment`, `subscription`, `paused`,
- * `current_lag`, `group_metadata`) fail with LOCAL_CONCURRENT_MODIFICATION
- * only while another call holds the consumer, as Java's `acquire()` throws
- * `ConcurrentModificationException`. These wrappers are for a test reading
- * with nothing else in flight: any error fails the test. */
-static inline void consumer_read_ok(kafka_common_Error_t *err, const char *what) {
+/* Fails the test with the error's message when a fallible call stored an
+ * error in `err`, which it frees; `what` names the call. A fallible function
+ * takes a trailing `kafka_common_Error_t **out_err` that must point at NULL
+ * on entry and is written only on failure, so a test declares
+ * `kafka_common_Error_t *err = NULL;`, passes `&err` and checks it here. */
+static inline void assert_ok(kafka_common_Error_t *err, const char *what) {
     if (err != NULL) {
         char msg[256];
         snprintf(msg, sizeof msg, "%s failed: %s", what, kafka_common_Error_message(err));
@@ -191,35 +191,45 @@ static inline void consumer_read_ok(kafka_common_Error_t *err, const char *what)
     }
 }
 
+/* The consumer's state reads (`assignment`, `subscription`, `paused`,
+ * `current_lag`, `group_metadata`) fail with LOCAL_CONCURRENT_MODIFICATION
+ * only while another call holds the consumer, as Java's `acquire()` throws
+ * `ConcurrentModificationException`. These wrappers are for a test reading
+ * with nothing else in flight: any error fails the test. */
 static inline kafka_List_t *consumer_assignment(const kafka_consumer_Consumer_t *consumer) {
-    kafka_List_t *out = NULL;
-    consumer_read_ok(kafka_consumer_Consumer_assignment(consumer, &out), "assignment");
+    kafka_common_Error_t *err = NULL;
+    kafka_List_t *out = kafka_consumer_Consumer_assignment(consumer, &err);
+    assert_ok(err, "assignment");
     return out;
 }
 
 static inline kafka_List_t *consumer_subscription(const kafka_consumer_Consumer_t *consumer) {
-    kafka_List_t *out = NULL;
-    consumer_read_ok(kafka_consumer_Consumer_subscription(consumer, &out), "subscription");
+    kafka_common_Error_t *err = NULL;
+    kafka_List_t *out = kafka_consumer_Consumer_subscription(consumer, &err);
+    assert_ok(err, "subscription");
     return out;
 }
 
 static inline kafka_List_t *consumer_paused(const kafka_consumer_Consumer_t *consumer) {
-    kafka_List_t *out = NULL;
-    consumer_read_ok(kafka_consumer_Consumer_paused(consumer, &out), "paused");
+    kafka_common_Error_t *err = NULL;
+    kafka_List_t *out = kafka_consumer_Consumer_paused(consumer, &err);
+    assert_ok(err, "paused");
     return out;
 }
 
 static inline int64_t consumer_current_lag(const kafka_consumer_Consumer_t *consumer,
                                            const kafka_common_TopicPartition_t *tp) {
-    int64_t out = 0;
-    consumer_read_ok(kafka_consumer_Consumer_current_lag(consumer, tp, &out), "current_lag");
+    kafka_common_Error_t *err = NULL;
+    int64_t out = kafka_consumer_Consumer_current_lag(consumer, tp, &err);
+    assert_ok(err, "current_lag");
     return out;
 }
 
 static inline kafka_consumer_ConsumerGroupMetadata_t *consumer_group_metadata(
     const kafka_consumer_Consumer_t *consumer) {
-    kafka_consumer_ConsumerGroupMetadata_t *out = NULL;
-    consumer_read_ok(kafka_consumer_Consumer_group_metadata(consumer, &out), "group_metadata");
+    kafka_common_Error_t *err = NULL;
+    kafka_consumer_ConsumerGroupMetadata_t *out = kafka_consumer_Consumer_group_metadata(consumer, &err);
+    assert_ok(err, "group_metadata");
     return out;
 }
 
