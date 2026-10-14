@@ -2064,8 +2064,8 @@ impl RecordAccumulator {
             let part = &parts[drain_index];
             let tp = TopicPartition::new(part.topic(), part.partition());
 
-            // Record the partition being visited before advancing, as Java does
-            // (`RecordAccumulator.java:865`). When the request fills up at this partition,
+            // Record the partition being visited before advancing, as Java's
+            // `drainBatchesForOneNode` does. When the request fills up at this partition,
             // the next drain starts from it, so a partition whose batch did not fit is not
             // skipped again.
             self.update_drain_index(node.id(), drain_index);
