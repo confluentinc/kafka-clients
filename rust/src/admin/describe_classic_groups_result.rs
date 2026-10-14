@@ -33,7 +33,7 @@ pub struct DescribeClassicGroupsResult {
 impl DescribeClassicGroupsResult {
     /// Creates a result from the per-group-id futures.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeClassicGroupsResult#DescribeClassicGroupsResult")]
-    pub(crate) fn new(futures: HashMap<String, KafkaFuture<ClassicGroupDescription>>) -> Self {
+    pub fn new(futures: HashMap<String, KafkaFuture<ClassicGroupDescription>>) -> Self {
         Self { futures }
     }
 
