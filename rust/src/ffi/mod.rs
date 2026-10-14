@@ -115,6 +115,35 @@
 //! `cbindgen.toml`). The mechanism is the [`ffi_guard`] attribute, whose runtime
 //! half is `common::ffi_guard_or`.
 //!
+//! # Two headers
+//!
+//! The failure values above serve a C programmer, who can accept that a panic
+//! sometimes looks like an answer. A language binding cannot: it must raise
+//! whenever Rust panicked. So `build.rs` writes two headers over the same
+//! library:
+//!
+//! - `confluent_kafka.h`, for C users: the functions above, where only those
+//!   that are fallible in Rust return an error;
+//! - `confluent_kafka_bindings.h`, for language bindings: the same types, and
+//!   every function `f` as its `_err` twin, which [`ffi_guard`] emits beside
+//!   `f` and which reports every failure, a caught panic included, as the
+//!   `kafka_common_Error_t *` it returns (NULL on success).
+//!
+//! | `f` in `confluent_kafka.h` | `f_err` in `confluent_kafka_bindings.h` |
+//! |---|---|
+//! | `kafka_common_Error_t *f(args)` | the same signature and behaviour |
+//! | `T f(args)`, any other `T` | `kafka_common_Error_t *f_err(args, T *out_result)`, writing `*out_result` only when it returns NULL |
+//! | `void f(args)` | `kafka_common_Error_t *f_err(args)`: NULL, or the caught panic |
+//! | a `_cb` function | `kafka_common_Error_t *f_cb_err(args)`: NULL, the completion reporting every outcome, a caught panic included, as for `f_cb` |
+//!
+//! A twin has the documentation and the preconditions of `f`, and a caught
+//! panic has the code and message above, naming the twin. `fallback` and the
+//! failure values do not apply to it. A program includes one of the two
+//! headers, never both, since they declare the same types. The function-pointer
+//! typedefs (interface methods, `_cb_t` completions, the `__set_callbacks_notify`
+//! hook) are the same in both: they are implemented by the caller, not
+//! exported. `ffi::tests` pins both headers against the exports.
+//!
 //! # Feature Gate
 //!
 //! This module is only compiled when the `ffi` feature is enabled.

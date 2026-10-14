@@ -1124,6 +1124,29 @@ by-design gaps, all closure parameters whose C shape the lint cannot derive):
   (`rust/cbindgen.toml` `header`) and the `src/ffi/mod.rs` module docs. A
   panic is a library bug: the handle it hit should be destroyed, and its
   `_destroy` still frees it and runs its pending callbacks once each.
+- **Two headers: `confluent_kafka.h` for C, `confluent_kafka_bindings.h` for
+  language bindings.** A failure value that is also a valid answer is
+  acceptable to a C programmer, but a binding must raise whenever Rust
+  panicked, without turning every Java precondition throw into a `Result`. So
+  `#[ffi_guard]` also emits, for every export `f`, a twin `f_err` that reports
+  every failure as the `kafka_common_Error_t *` it returns (NULL on success),
+  and `rust/build.rs` writes the second header from the same cbindgen IR with
+  each function renamed to its twin. `confluent_kafka.h` is unchanged:
+
+  | `f` | `f_err` |
+  |---|---|
+  | `kafka_common_Error_t *f(args)` | the same signature and behaviour |
+  | `T f(args)`, any other `T` | `kafka_common_Error_t *f_err(args, T *out_result)`, writing `*out_result` only when it returns NULL |
+  | `void f(args)` | `kafka_common_Error_t *f_err(args)`: NULL, or the caught panic |
+  | a `_cb` function | NULL; the completion stays the channel for every outcome, a caught panic included |
+
+  A twin has `f`'s documentation and preconditions; a caught panic is
+  `LOCAL_ILLEGAL_STATE`, its message naming the twin, and `fallback` does not
+  apply. A program includes one header, never both. Function-pointer typedefs
+  are the same in both, since the caller implements them.
+  `ffi::tests::test_bindings_header_declares_the_twin_of_every_export` pins both
+  headers against the exports, and `c/tests/test_bindings_header.c` compiles
+  against the bindings header alone. The twins grow the library by about 6%.
 - **Every `unsafe` block states why it is sound.** Clippy's
   `undocumented_unsafe_blocks` and `unnecessary_safety_comment` are denied
   (`rust/Cargo.toml`), so each block and `unsafe impl` carries a `// SAFETY:`
