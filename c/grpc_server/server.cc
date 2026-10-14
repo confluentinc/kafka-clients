@@ -275,6 +275,7 @@ using confluent::kafka::test::FenceProducersEntry;
 using confluent::kafka::test::FenceProducersRequest;
 using confluent::kafka::test::FenceProducersResponse;
 using confluent::kafka::test::ForceTerminateTransactionRequest;
+using confluent::kafka::test::UnregisterControllerRequest;
 using confluent::kafka::test::ListTransactionsEntry;
 using confluent::kafka::test::ListTransactionsRequest;
 using confluent::kafka::test::ListTransactionsResponse;
@@ -4687,6 +4688,29 @@ class AdminServiceImpl final : public AdminService::Service {
     Owned<kafka_admin_AbortTransactionResult_t, kafka_admin_AbortTransactionResult_destroy> result(
         kafka_admin_Admin_abort_transaction_with_options(admin, spec.get(), opts.get()));
     OwnedFuture f(kafka_admin_AbortTransactionResult_all(result.get()));
+    await_into(f.get(), resp);
+    return grpc::Status::OK;
+  }
+
+  // -- Controller registration (Milestone 17, KAFKA-20395) ---------------------
+  //
+  // UnregisterControllerResult exposes only all(), so its outcome goes onto
+  // the shared StatusResponse, as for AbortTransaction.
+
+  grpc::Status UnregisterController(grpc::ServerContext*, const UnregisterControllerRequest* req,
+                                    StatusResponse* resp) override {
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    Owned<kafka_admin_UnregisterControllerOptions_t, kafka_admin_UnregisterControllerOptions_destroy>
+        opts(kafka_admin_UnregisterControllerOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_UnregisterControllerOptions_set_timeout_ms);
+    Owned<kafka_admin_UnregisterControllerResult_t, kafka_admin_UnregisterControllerResult_destroy>
+        result(kafka_admin_Admin_unregister_controller_with_options(admin, req->controller_id(),
+                                                                    opts.get()));
+    OwnedFuture f(kafka_admin_UnregisterControllerResult_all(result.get()));
     await_into(f.get(), resp);
     return grpc::Status::OK;
   }

@@ -4466,6 +4466,54 @@ static void test_mock_admin_abort_and_terminate_transaction_report_unsupported(v
     fixture_destroy(&f);
 }
 
+/* `unregisterController` (KAFKA-20395, Kafka 4.4): Java's
+ * `MockAdminClient.unregisterController` succeeds when the mock uses a Raft
+ * controller and otherwise fails with `UnsupportedVersionException("")`. The
+ * mock's `usingRaftController` is a builder option in Java and a setter on the
+ * constructed mock here. */
+static void test_mock_admin_unregister_controller_follows_raft_controller(void) {
+    fixture_t f;
+    fixture_init(&f, 1);
+
+    kafka_admin_UnregisterControllerResult_t *result = kafka_admin_Admin_unregister_controller(f.admin, 1);
+    TEST_ASSERT_NOT_NULL(result);
+    kafka_common_KafkaFuture_t *all = kafka_admin_UnregisterControllerResult_all(result);
+    kafka_common_Error_t *err = get_err(all);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_unsupported_version_error(err));
+    assert_error_message(err, "");
+    kafka_common_KafkaFuture_destroy(all);
+    kafka_admin_UnregisterControllerResult_destroy(result);
+
+    kafka_admin_MockAdminClient_set_using_raft_controller(f.mock, 1);
+    result = kafka_admin_Admin_unregister_controller(f.admin, 1);
+    expect_void_ok(kafka_admin_UnregisterControllerResult_all(result));
+    kafka_admin_UnregisterControllerResult_destroy(result);
+
+    kafka_admin_UnregisterControllerOptions_t *options = kafka_admin_UnregisterControllerOptions_new();
+    kafka_admin_UnregisterControllerOptions_set_timeout_ms(options, 5000);
+    TEST_ASSERT_EQUAL_INT32(5000, kafka_admin_UnregisterControllerOptions_timeout_ms(options));
+    result = kafka_admin_Admin_unregister_controller_with_options(f.admin, 1, options);
+    kafka_admin_UnregisterControllerOptions_destroy(options);
+    all = kafka_admin_UnregisterControllerResult_all(result);
+    cb_result_t r;
+    get_cb_pumped(&f, all, &r);
+    TEST_ASSERT_EQUAL_INT(0, r.had_error);
+    TEST_ASSERT_NULL(r.value);
+    kafka_common_KafkaFuture_destroy(all);
+    kafka_admin_UnregisterControllerResult_destroy(result);
+
+    kafka_admin_MockAdminClient_set_using_raft_controller(f.mock, 0);
+    result = kafka_admin_Admin_unregister_controller(f.admin, 1);
+    all = kafka_admin_UnregisterControllerResult_all(result);
+    get_cb_pumped(&f, all, &r);
+    TEST_ASSERT_EQUAL_INT(1, r.had_error);
+    TEST_ASSERT_EQUAL_STRING("", r.message);
+    kafka_common_KafkaFuture_destroy(all);
+    kafka_admin_UnregisterControllerResult_destroy(result);
+    kafka_admin_UnregisterControllerResult_destroy(NULL);
+    fixture_destroy(&f);
+}
+
 /* A `_cb` registration fires exactly once, through the pump, and a second
  * pump run finds nothing left. */
 static void test_mock_admin_transactions_async_fires_once(void) {
@@ -4608,6 +4656,7 @@ int main(void) {
     RUN_TEST(test_mock_admin_fence_producers_reports_unsupported_per_id);
     RUN_TEST(test_mock_admin_list_transactions_reports_unsupported);
     RUN_TEST(test_mock_admin_abort_and_terminate_transaction_report_unsupported);
+    RUN_TEST(test_mock_admin_unregister_controller_follows_raft_controller);
     RUN_TEST(test_mock_admin_transactions_async_fires_once);
     return UNITY_END();
 }

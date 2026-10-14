@@ -83,6 +83,14 @@ static kafka_List_t *tp_list(const char *topic, int32_t count) {
     return list;
 }
 
+/* A list holding the one partition `topic-partition`; freed through
+ * `tp_list_destroy`. */
+static kafka_List_t *tp_list_one(const char *topic, int32_t partition) {
+    kafka_List_t *list = kafka_List_new();
+    kafka_List_add(list, kafka_common_TopicPartition_new(topic, partition));
+    return list;
+}
+
 static void tp_list_destroy(kafka_List_t *list) {
     for (int32_t i = 0; i < kafka_List_size(list); i++) {
         kafka_common_TopicPartition_destroy((kafka_common_TopicPartition_t *)kafka_List_get(list, i));
@@ -275,17 +283,21 @@ static kafka_consumer_ConsumerRebalanceListener_t *probe_listener(listener_probe
     return l;
 }
 
-/* `subscribe(topics, listener)`; the registration is copied, so the handle is
- * destroyed right away. */
-static void subscribe_probe(fixture_t *f, const char *topic, listener_probe_t *p) {
+/* `subscribe(topics, listener)`, the listener with or without a lost method of
+ * its own; the registration is copied, so the handle is destroyed right away. */
+static void subscribe_probe_listener(fixture_t *f, const char *topic, listener_probe_t *p, int with_lost) {
     kafka_common_Error_t *err = NULL;
-    kafka_consumer_ConsumerRebalanceListener_t *listener = probe_listener(p, 0);
+    kafka_consumer_ConsumerRebalanceListener_t *listener = probe_listener(p, with_lost);
     kafka_List_t *topics = kafka_List_new();
     kafka_List_add(topics, (void *)topic);
     kafka_consumer_Consumer_subscribe_with_topics_listener(f->consumer, topics, listener, &err);
     assert_ok(err, "Consumer_subscribe_with_topics_listener");
     kafka_List_destroy(topics);
     kafka_consumer_ConsumerRebalanceListener_destroy(listener);
+}
+
+static void subscribe_probe(fixture_t *f, const char *topic, listener_probe_t *p) {
+    subscribe_probe_listener(f, topic, p, 0);
 }
 
 /* Blocking `rebalance` to `count` partitions of `topic`, freeing the list. */
@@ -1166,6 +1178,147 @@ static void test_rebalance_requires_a_subscription(void) {
     fixture_destroy(&f);
 }
 
+// ---------------------------------------------------------------------------
+// MockConsumer_lose_partitions: Java's `MockConsumer.losePartitions`
+// (KAFKA-20575)
+// ---------------------------------------------------------------------------
+
+/* `losePartitions(singleton(topic-partition))`, blocking, freeing the list. */
+static kafka_common_Error_t *lose_one(fixture_t *f, const char *topic, int32_t partition) {
+    kafka_List_t *list = tp_list_one(topic, partition);
+    kafka_common_Error_t *err = NULL;
+    kafka_consumer_MockConsumer_lose_partitions(f->mock, list, &err);
+    tp_list_destroy(list);
+    return err;
+}
+
+// Losing a partition fires `on_partitions_lost`, not `on_partitions_revoked`,
+// on the calling thread, and removes it from the assignment (Java's
+// `testLosePartitionsCallsOnPartitionsLost` / `...RemovesFromAssignment`).
+static void test_lose_partitions_fires_lost_and_shrinks_the_assignment(void) {
+    fixture_t f;
+    fixture_init(&f);
+    listener_probe_t probe;
+    probe_init(&probe, f.consumer, 1);
+    subscribe_probe_listener(&f, "test", &probe, 1);
+    TEST_ASSERT_NULL(rebalance_to(&f, "test", 2));
+
+    TEST_ASSERT_NULL(lose_one(&f, "test", 0));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&probe.lost));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&probe.revoked));
+    TEST_ASSERT_EQUAL_STRING("test-0", probe.last_partitions);
+    TEST_ASSERT_TRUE(pthread_equal(pthread_self(), probe.last_thread));
+
+    kafka_List_t *asg = consumer_assignment(f.consumer);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_List_size(asg));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_common_TopicPartition_partition(
+                                   (const kafka_common_TopicPartition_t *)kafka_List_get(asg, 0)));
+    kafka_List_destroy(asg);
+    fixture_destroy(&f);
+}
+
+// With a NULL `lost` method the listener falls back to `on_partitions_revoked`
+// with the lost partitions, as Java's default `onPartitionsLost` does.
+static void test_lose_partitions_without_lost_callback_delegates_to_revoked(void) {
+    fixture_t f;
+    fixture_init(&f);
+    listener_probe_t probe;
+    probe_init(&probe, f.consumer, 1);
+    subscribe_probe(&f, "test", &probe);
+    TEST_ASSERT_NULL(rebalance_to(&f, "test", 2));
+
+    TEST_ASSERT_NULL(lose_one(&f, "test", 1));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&probe.revoked));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&probe.lost));
+    TEST_ASSERT_EQUAL_STRING("test-1", probe.last_revoked_partitions);
+    fixture_destroy(&f);
+}
+
+// A partition that is not assigned is rejected with Java's
+// `IllegalStateException` text, the listener is not called and the assignment
+// does not change (`testLosePartitionsThrowsIfNotAssigned`).
+static void test_lose_partitions_rejects_an_unassigned_partition(void) {
+    fixture_t f;
+    fixture_init(&f);
+    listener_probe_t probe;
+    probe_init(&probe, f.consumer, 1);
+    subscribe_probe_listener(&f, "test", &probe, 1);
+    TEST_ASSERT_NULL(rebalance_to(&f, "test", 1));
+
+    kafka_common_Error_t *err = lose_one(&f, "test", 1);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_state_error(err));
+    TEST_ASSERT_EQUAL_STRING("Cannot lose partitions that are not currently assigned: [test-1]",
+                             kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&probe.lost));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&probe.revoked));
+
+    kafka_List_t *asg = consumer_assignment(f.consumer);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_List_size(asg));
+    kafka_List_destroy(asg);
+    fixture_destroy(&f);
+}
+
+// `lose_partitions_cb` queues the listener for the pump, as `rebalance_cb`
+// does: `on_partitions_lost` runs on the pumping thread, the loss does not
+// complete before it reports (§31), duplicates in the list are dropped, and
+// the completion fires exactly once. Losing the same partition again then
+// fails through the completion, without a listener call (KAFKA-20575).
+static void test_lose_partitions_cb_queues_the_listener_for_the_pump(void) {
+    fixture_t f;
+    fixture_init(&f);
+    listener_probe_t probe;
+    probe_init(&probe, f.consumer, 1);
+    subscribe_probe_listener(&f, "test", &probe, 1);
+    TEST_ASSERT_NULL(rebalance_to(&f, "test", 2));
+
+    completion_t completion;
+    completion_init(&completion);
+    kafka_List_t *list = tp_list_one("test", 0);
+    kafka_List_add(list, kafka_common_TopicPartition_new("test", 0));
+    kafka_consumer_MockConsumer_lose_partitions_cb(f.mock, list, on_void_op, &completion);
+    tp_list_destroy(list);
+
+    TEST_ASSERT_TRUE(callback_pump_wait_notify(&f.pump));
+    sleep_ms(50);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&probe.lost)); /* announced, not run */
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&completion.fired));
+    TEST_ASSERT_EQUAL_INT32(1, callback_pump_execute(&f.pump));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&probe.lost));
+    TEST_ASSERT_TRUE(pthread_equal(pthread_self(), probe.last_thread));
+    TEST_ASSERT_EQUAL_STRING("test-0", probe.last_partitions);
+
+    /* The probe reported inline, so the completion is queued next. */
+    TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &completion.fired, 1));
+    sleep_ms(20); /* room for a duplicate completion to show up */
+    callback_pump_execute(&f.pump);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&completion.fired));
+    TEST_ASSERT_NULL(completion.error);
+    TEST_ASSERT_TRUE(pthread_equal(pthread_self(), completion.thread));
+
+    kafka_List_t *asg = consumer_assignment(f.consumer);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_List_size(asg));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_common_TopicPartition_partition(
+                                   (const kafka_common_TopicPartition_t *)kafka_List_get(asg, 0)));
+    kafka_List_destroy(asg);
+
+    completion_t again;
+    completion_init(&again);
+    list = tp_list_one("test", 0);
+    kafka_consumer_MockConsumer_lose_partitions_cb(f.mock, list, on_void_op, &again);
+    tp_list_destroy(list);
+    TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &again.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&again.fired));
+    TEST_ASSERT_NOT_NULL(again.error);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_state_error(again.error));
+    TEST_ASSERT_EQUAL_STRING("Cannot lose partitions that are not currently assigned: [test-0]",
+                             kafka_common_Error_message(again.error));
+    kafka_common_Error_destroy(again.error);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&probe.lost));
+    fixture_destroy(&f);
+}
+
 // Subscription and manual assignment are mutually exclusive.
 static void test_subscribe_with_listener_on_manually_assigned_consumer_fails(void) {
     fixture_t f;
@@ -1634,6 +1787,10 @@ int main(void) {
     RUN_TEST(test_rebalance_cb_queues_the_listener_for_the_pump);
     RUN_TEST(test_rebalance_blocks_until_listener_reports);
     RUN_TEST(test_rebalance_requires_a_subscription);
+    RUN_TEST(test_lose_partitions_fires_lost_and_shrinks_the_assignment);
+    RUN_TEST(test_lose_partitions_without_lost_callback_delegates_to_revoked);
+    RUN_TEST(test_lose_partitions_rejects_an_unassigned_partition);
+    RUN_TEST(test_lose_partitions_cb_queues_the_listener_for_the_pump);
     RUN_TEST(test_subscribe_with_listener_on_manually_assigned_consumer_fails);
     RUN_TEST(test_listener_calls_consumer_handle_no_deadlock);
     RUN_TEST(test_listener_error_propagates);

@@ -292,6 +292,40 @@ static void test_kafka_consumer_destroy_without_close(void) {
     kafka_consumer_Consumer_destroy(consumer);
 }
 
+static long now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+}
+
+// destroy() wakes a `poll_cb` with a long timeout up rather than waiting it
+// out: the poll fails with the wakeup error and its completion, still queued,
+// runs inside destroy, exactly once.
+static void test_kafka_consumer_destroy_wakes_a_waiting_poll_cb(void) {
+    kafka_consumer_Consumer_t *consumer = create_consumer();
+    kafka_List_t *topics = kafka_List_new();
+    kafka_List_add(topics, (void *)"test-topic");
+    kafka_common_Error_t *err = NULL;
+    kafka_consumer_Consumer_subscribe_with_topics(consumer, topics, &err);
+    TEST_ASSERT_NULL(err);
+    kafka_List_destroy(topics);
+
+    poll_completion_t completion;
+    memset(&completion, 0, sizeof(completion));
+    atomic_init(&completion.fired, 0);
+    kafka_consumer_Consumer_poll_cb(consumer, 60000, on_poll, &completion);
+    sleep_ms(100);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&completion.fired));
+
+    long started = now_ms();
+    kafka_consumer_Consumer_destroy(consumer);
+    TEST_ASSERT_TRUE(now_ms() - started < 10000);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&completion.fired));
+    TEST_ASSERT_NOT_NULL(completion.error);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_wakeup_error(completion.error));
+    kafka_common_Error_destroy(completion.error);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_kafka_consumer_new_succeeds);
@@ -303,5 +337,6 @@ int main(void) {
     RUN_TEST(test_kafka_consumer_wakeup_from_other_thread);
     RUN_TEST(test_kafka_consumer_poll_cb_interrupted_by_wakeup);
     RUN_TEST(test_kafka_consumer_destroy_without_close);
+    RUN_TEST(test_kafka_consumer_destroy_wakes_a_waiting_poll_cb);
     return UNITY_END();
 }
