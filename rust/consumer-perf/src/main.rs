@@ -50,6 +50,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use confluent_kafka::common::Error;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::{Consumer, ConsumerConfig, KafkaConsumer};
+#[cfg(not(target_os = "linux"))]
 use sysinfo::{MINIMUM_CPU_UPDATE_INTERVAL, Pid, ProcessesToUpdate, System};
 
 /// Zero-copy deserializer: returns the byte length instead of the bytes, so the
@@ -210,26 +211,122 @@ impl RecordsPerPoll {
 
 /// Samples this process's CPU usage (percent of a single core; may exceed 100%
 /// on multi-core work) and resident set size, between successive calls.
+///
+/// On Linux (the benchmark hosts) this reads `/proc/self/stat` (cumulative
+/// utime+stime ticks, diffed over the interval) and `/proc/self/status`
+/// (`VmRSS`) directly, like the producer perf test's `ProcSampler` and
+/// `JavaE2E.readBusyTicks()`. sysinfo 0.32 computes per-process
+/// `cpu_usage()` on Linux only when refreshing *every* process
+/// (`ProcessesToUpdate::All`; a `Some(&[pid])` refresh reports 0.0% forever),
+/// which would scan all of `/proc` once per interval on a benchmark host.
+/// Elsewhere (macOS dev runs) sysinfo is used.
+#[cfg(target_os = "linux")]
+struct ResourceSampler {
+    prev_busy_ticks: u64,
+    prev_instant: Instant,
+}
+
+/// Linux `USER_HZ` — clock ticks per second used to convert `/proc/self/stat`
+/// utime/stime into CPU seconds. Effectively always 100 on Linux.
+#[cfg(target_os = "linux")]
+const USER_HZ: f64 = 100.0;
+
+#[cfg(target_os = "linux")]
+impl ResourceSampler {
+    fn new() -> Self {
+        Self { prev_busy_ticks: read_busy_ticks(), prev_instant: Instant::now() }
+    }
+
+    /// Restart the CPU interval baseline at "now", so the next `sample()`
+    /// covers only the time from this call on (used when warmup completes, so
+    /// warmup CPU is excluded from the first measured sample).
+    fn reset(&mut self) {
+        self.prev_busy_ticks = read_busy_ticks();
+        self.prev_instant = Instant::now();
+    }
+
+    /// Returns `(cpu_percent_of_one_core, rss_mb)` for the interval since the
+    /// last call (or since `new()` / `reset()`).
+    fn sample(&mut self) -> (f32, f64) {
+        let busy = read_busy_ticks();
+        let now = Instant::now();
+        let dt = now.duration_since(self.prev_instant).as_secs_f64();
+        let dticks = busy.saturating_sub(self.prev_busy_ticks);
+        self.prev_busy_ticks = busy;
+        self.prev_instant = now;
+        let cpu = if dt > 0.0 {
+            (dticks as f64 / USER_HZ) / dt * 100.0
+        } else {
+            0.0
+        };
+        (cpu as f32, read_rss_bytes() as f64 / (1024.0 * 1024.0))
+    }
+}
+
+/// utime + stime of this process, in clock ticks (0 if unreadable).
+#[cfg(target_os = "linux")]
+fn read_busy_ticks() -> u64 {
+    let Ok(content) = std::fs::read_to_string("/proc/self/stat") else {
+        return 0;
+    };
+    // The comm field (field 2) is wrapped in parens and may contain spaces, so
+    // start parsing after the final ')'. utime is field 14, stime field 15,
+    // i.e. indices 11 and 12 of the whitespace-split remainder.
+    let Some(rparen) = content.rfind(')') else { return 0 };
+    let fields: Vec<&str> = content[rparen + 1..].split_whitespace().collect();
+    let utime = fields.get(11).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+    let stime = fields.get(12).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+    utime + stime
+}
+
+/// Resident set size of this process in bytes, from `VmRSS` (0 if unreadable).
+#[cfg(target_os = "linux")]
+fn read_rss_bytes() -> u64 {
+    let Ok(content) = std::fs::read_to_string("/proc/self/status") else {
+        return 0;
+    };
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:")
+            && let Some(kb) = rest.split_whitespace().next().and_then(|s| s.parse::<u64>().ok())
+        {
+            return kb * 1024;
+        }
+    }
+    0
+}
+
+#[cfg(not(target_os = "linux"))]
 struct ResourceSampler {
     sys: System,
     pid: Pid,
 }
 
+#[cfg(not(target_os = "linux"))]
 impl ResourceSampler {
     fn new() -> Self {
         let pid = Pid::from_u32(std::process::id());
         let mut sys = System::new();
-        // macOS sysinfo only produces a valid per-process `cpu_usage()` after the
-        // process has been refreshed twice (the first registers it, the second
-        // establishes the CPU baseline). Warm it with two spaced refreshes so the
-        // caller's first `sample()` already yields a real reading.
+        // sysinfo only produces a valid `cpu_usage()` after the process has
+        // been refreshed twice (the first registers it, the second establishes
+        // the CPU baseline). Warm it with two spaced refreshes so the caller's
+        // first `sample()` already yields a real reading.
         sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
         std::thread::sleep(MINIMUM_CPU_UPDATE_INTERVAL);
         sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
         Self { sys, pid }
     }
 
-    /// Returns `(cpu_percent_of_one_core, rss_mb)`.
+    /// Restart the CPU interval baseline at "now": sysinfo's `cpu_usage()` is
+    /// computed over the span since the previous refresh, so refreshing here
+    /// makes the next `sample()` cover only the time from this call on (used
+    /// when warmup completes, so warmup CPU is excluded from the first measured
+    /// sample).
+    fn reset(&mut self) {
+        self.sys.refresh_processes(ProcessesToUpdate::Some(&[self.pid]), true);
+    }
+
+    /// Returns `(cpu_percent_of_one_core, rss_mb)` for the interval since the
+    /// last call (or since `new()` / `reset()`).
     fn sample(&mut self) -> (f32, f64) {
         self.sys.refresh_processes(ProcessesToUpdate::Some(&[self.pid]), true);
         match self.sys.process(self.pid) {
@@ -406,23 +503,31 @@ fn ensure_topic(args: &Args) {
     // Roll segments at 512 MB so retention can actually purge old data during a
     // long high-throughput run (bounds disk under --peak).
     let retention_cfg = format!("retention.ms={}", args.retention_ms);
+    // Replication factor is left to the broker default (a hardcoded RF=1 is
+    // rejected by Confluent Cloud), matching the librdkafka/Java arms and the
+    // Python harness's recreate_topic.
+    let mut topic_args: Vec<String> = vec![
+        "--bootstrap-server".into(),
+        args.bootstrap.clone(),
+        "--create".into(),
+        "--topic".into(),
+        args.topic.clone(),
+        "--partitions".into(),
+        args.partitions.to_string(),
+        "--config".into(),
+        retention_cfg,
+        "--config".into(),
+        "segment.bytes=536870912".into(),
+        "--if-not-exists".into(),
+    ];
+    // Forward the client config so topic creation authenticates like the
+    // consumer and the spawned load generator already do.
+    if let Some(cfg) = &args.client_config {
+        topic_args.push("--command-config".into());
+        topic_args.push(cfg.clone());
+    }
     let status = Command::new(&bin)
-        .args([
-            "--bootstrap-server",
-            &args.bootstrap,
-            "--create",
-            "--topic",
-            &args.topic,
-            "--partitions",
-            &args.partitions.to_string(),
-            "--replication-factor",
-            "1",
-            "--config",
-            &retention_cfg,
-            "--config",
-            "segment.bytes=536870912",
-            "--if-not-exists",
-        ])
+        .args(&topic_args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -682,6 +787,9 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut rss_min = f64::MAX;
     let mut rss_max = 0.0f64;
     let mut rss_samples: u64 = 0;
+    let mut cpu_sum = 0.0f64;
+    let mut cpu_min = f64::MAX;
+    let mut cpu_max = 0.0f64;
 
     let mut messages_consumed: u64 = 0;
     let mut warmup_complete = false;
@@ -757,6 +865,10 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     warmup_complete = true;
                     measure_start = Instant::now();
                     interval_start = measure_start;
+                    // The sampler's baseline dates from before warmup; restart it
+                    // so the first measured CPU sample (and therefore the
+                    // summary's CPU average) excludes warmup CPU time.
+                    sampler.reset();
                     println!("    warmup complete ({} msgs); measuring now", args.warmup_messages);
                 }
                 continue;
@@ -782,6 +894,14 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 rss_max = rss_mb;
             }
             rss_samples += 1;
+            let cpu_f64 = cpu as f64;
+            cpu_sum += cpu_f64;
+            if cpu_f64 < cpu_min {
+                cpu_min = cpu_f64;
+            }
+            if cpu_f64 > cpu_max {
+                cpu_max = cpu_f64;
+            }
             let icount = interval_hist.count;
             let throughput = icount as f64 / elapsed_s;
             emit_interval(
@@ -846,6 +966,12 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         0.0
     };
     let rss_min_out = if rss_samples > 0 { rss_min } else { 0.0 };
+    let cpu_avg = if rss_samples > 0 {
+        cpu_sum / rss_samples as f64
+    } else {
+        0.0
+    };
+    let cpu_min_out = if rss_samples > 0 { cpu_min } else { 0.0 };
     write_summary(
         &mut jsonl,
         &run_dir,
@@ -854,6 +980,9 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         measured_duration_s,
         args.warmup_messages,
         &rpp,
+        cpu_avg,
+        cpu_min_out,
+        cpu_max,
         rss_avg,
         rss_min_out,
         rss_max,
@@ -903,6 +1032,9 @@ fn write_summary(
     duration_s: f64,
     warmup: u64,
     rpp: &RecordsPerPoll,
+    cpu_avg: f64,
+    cpu_min: f64,
+    cpu_max: f64,
     rss_avg: f64,
     rss_min: f64,
     rss_max: f64,
@@ -935,6 +1067,7 @@ fn write_summary(
     println!(
         "E2E latency (ms):  min={min} avg={avg:.2} stddev={stddev:.2} p50={p50} p90={p90} p95={p95} p99={p99} p99.9={p999} max={max}"
     );
+    println!("CPU (% one core):  avg={cpu_avg:.1} min={cpu_min:.1} max={cpu_max:.1}");
     println!("RSS (MB, current): avg={rss_avg:.1} min={rss_min:.1} max={rss_max:.1}");
     println!("{}", "=".repeat(70));
 
@@ -950,6 +1083,7 @@ fn write_summary(
          \"throughput_msg_s\":{throughput_msg_s:.2},\"throughput_mib_s\":{throughput_mb_s:.2},\
          \"lat_min_ms\":{min},\"lat_avg_ms\":{avg:.2},\"lat_stddev_ms\":{stddev:.2},\"lat_p50_ms\":{p50},\"lat_p90_ms\":{p90},\
          \"lat_p95_ms\":{p95},\"lat_p99_ms\":{p99},\"lat_p999_ms\":{p999},\"lat_max_ms\":{max},\
+         \"cpu_avg_pct\":{cpu_avg:.1},\"cpu_min_pct\":{cpu_min:.1},\"cpu_max_pct\":{cpu_max:.1},\
          \"rss_avg_mb\":{rss_avg:.1},\"rss_min_mb\":{rss_min:.1},\"rss_max_mb\":{rss_max:.1},\
          \"rpp_n\":{rpp_n},\"rpp_min\":{rpp_min},\"rpp_mean\":{rpp_mean:.2},\"rpp_p50\":{rpp_p50},\
          \"rpp_p99\":{rpp_p99},\"rpp_max\":{rpp_max}}}"

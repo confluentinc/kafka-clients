@@ -208,7 +208,10 @@ impl NetworkClientUtils {
                     // substituting the class name, which would discard the one detail
                     // that makes the failure actionable.
                     if let Some(version_mismatch) = response.version_mismatch() {
-                        return Err(io::Error::new(io::ErrorKind::Unsupported, version_mismatch.to_string()));
+                        return Err(io::Error::new(
+                            io::ErrorKind::Unsupported,
+                            version_mismatch.message().to_string(),
+                        ));
                     }
                     return Ok(response);
                 }

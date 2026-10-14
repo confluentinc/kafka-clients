@@ -20,6 +20,8 @@ use crate::common::Error;
 use std::collections::BTreeSet;
 use std::io;
 
+use crate::common::internals::UnsupportedProtocolFieldErrorOptionsBuilder;
+
 use crate::MetadataRequestData;
 use crate::MetadataResponseData;
 use crate::common::Uuid;
@@ -505,24 +507,30 @@ impl RequestBuilder for Builder {
             ));
         }
         if !self.data.allow_auto_topic_creation && version < 4 {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "MetadataRequest versions older than 4 don't support the allowAutoTopicCreation field",
-            ));
+            return Err(UnsupportedProtocolFieldErrorOptionsBuilder::new()
+                .set_field_or_value("allowAutoTopicCreation")
+                .set_api_key_name(&ApiKeys::METADATA.to_string())
+                .set_api_version(version)
+                .set_lowest_supported_version(4)
+                .into_io_error());
         }
         if let Some(topics) = &self.data.topics {
             for topic in topics {
                 if topic.name.is_none() && version < 12 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        format!("MetadataRequest version {version} does not support null topic names."),
-                    ));
+                    return Err(UnsupportedProtocolFieldErrorOptionsBuilder::new()
+                        .set_field_or_value("null topic names")
+                        .set_api_key_name(&ApiKeys::METADATA.to_string())
+                        .set_api_version(version)
+                        .set_lowest_supported_version(12)
+                        .into_io_error());
                 }
                 if Uuid::zero() != topic.topic_id && version < 12 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        format!("MetadataRequest version {version} does not support non-zero topic IDs."),
-                    ));
+                    return Err(UnsupportedProtocolFieldErrorOptionsBuilder::new()
+                        .set_field_or_value("non-zero topic IDs")
+                        .set_api_key_name(&ApiKeys::METADATA.to_string())
+                        .set_api_version(version)
+                        .set_lowest_supported_version(12)
+                        .into_io_error());
                 }
             }
         }

@@ -38,7 +38,7 @@ fn main() -> anyhow::Result<()> {
         Some("java-deprecated") => java_deprecated()?,
         Some("fetch-java-refs") => fetch_java_refs()?,
         Some("lint-custom") => lint_custom::lint_custom()?,
-        Some("lint") => lint()?,
+        Some("lint") => lint(env::args().skip(2).any(|arg| arg == "--keep-going"))?,
         Some("doc-hygiene") => doc_hygiene()?,
         Some("lint-fix") => lint_fix()?,
         Some("coverage") => coverage()?,
@@ -50,6 +50,7 @@ fn main() -> anyhow::Result<()> {
         Some("chaos") => chaos()?,
         Some("chaos-matrix") => chaos_matrix::run(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("chaos-matrix-status") => chaos_matrix::status::run(&env::args().skip(2).collect::<Vec<_>>())?,
+        Some("transactional-producer-perf-test") => transactional_producer_perf_test()?,
         _ => print_help(),
     }
 
@@ -469,21 +470,40 @@ fn check_error_codes_up_to_date() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn lint() -> anyhow::Result<()> {
+/// Runs every lint step. By default it stops at the first failing step; with
+/// `keep_going` (`cargo xtask lint --keep-going`) it runs every step regardless,
+/// reports each failure, and fails at the end if any step failed. The flag changes
+/// only *whether later steps run*, never what a step enforces: it exists so a step
+/// that is known to fail (e.g. a lint-custom finding owned by a later phase) does
+/// not hide the result of the steps after it.
+fn lint(keep_going: bool) -> anyhow::Result<()> {
+    let mut failures: Vec<String> = Vec::new();
+    let mut step = |name: &str, result: anyhow::Result<()>| -> anyhow::Result<()> {
+        match result {
+            Ok(()) => Ok(()),
+            Err(e) if keep_going => {
+                eprintln!("❌ lint step `{name}` failed: {e}");
+                failures.push(format!("{name}: {e}"));
+                Ok(())
+            },
+            Err(e) => Err(e),
+        }
+    };
+
     // Runs first: it is a fast source-only scan, so a violation is reported
     // before paying for three full clippy passes. It covers what clippy cannot:
     // e.g. clippy's `exhaustive_enums` covers the enum, `lint-custom` the shape
     // of its variants and the visibility of public structs' fields.
-    lint_custom::lint_custom()?;
+    step("lint-custom", lint_custom::lint_custom())?;
 
     // Structural doc defects clippy cannot see: an item's attributes or doc
     // comment migrated onto a neighbour. Run first, because it is instant and its
     // failures are always real.
-    doc_hygiene()?;
+    step("doc-hygiene", doc_hygiene())?;
 
     // CLAUDE.md §2's import rule, in the one place the compiler cannot enforce it:
     // a file module stays visible inside its own subtree even when declared `mod x;`.
-    module_path_hygiene()?;
+    step("module-path-hygiene", module_path_hygiene())?;
 
     println!("🔍 Running clippy lints...");
 
@@ -497,26 +517,42 @@ fn lint() -> anyhow::Result<()> {
     //
     // `--workspace` covers every member (including `generator`), so no
     // per-crate pass is needed.
-    for pass in [
-        &["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"][..],
-        &[
-            "clippy",
-            "--workspace",
-            "--all-targets",
-            "--all-features",
-            "--",
-            "-D",
-            "warnings",
-        ][..],
+    for (name, pass) in [
+        (
+            "clippy (default features)",
+            &["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"][..],
+        ),
+        (
+            "clippy (--all-features)",
+            &[
+                "clippy",
+                "--workspace",
+                "--all-targets",
+                "--all-features",
+                "--",
+                "-D",
+                "warnings",
+            ][..],
+        ),
     ] {
-        run_command("cargo", pass)?;
+        step(name, run_command("cargo", pass))?;
     }
 
     // Lint the xtask crate itself. `cargo clippy` from the workspace root only
     // covers the root package, so without this the build tooling — including
     // the `lint-custom` scanner — would escape the lint gate entirely.
-    run_command("cargo", &["clippy", "-p", "xtask", "--all-targets", "--", "-D", "warnings"])?;
+    step(
+        "clippy (xtask)",
+        run_command("cargo", &["clippy", "-p", "xtask", "--all-targets", "--", "-D", "warnings"]),
+    )?;
 
+    if !failures.is_empty() {
+        eprintln!("❌ {} lint step(s) failed:", failures.len());
+        for failure in &failures {
+            eprintln!("   - {failure}");
+        }
+        anyhow::bail!("{} lint step(s) failed", failures.len());
+    }
     println!("✅ No lint issues found!");
     Ok(())
 }
@@ -610,11 +646,11 @@ fn test_multilanguage() -> anyhow::Result<()> {
 
 /// Run the producer performance test as an env-driven benchmark binary.
 ///
-/// Runs the same `producer_perf_test` that ships in the integration suite, but in
-/// release mode and driven entirely by environment variables
+/// Runs the same `producer_perf_test` that ships in the `performance` test
+/// target, but in release mode and driven entirely by environment variables
 /// (`BOOTSTRAP_SERVERS`, `VALUE_SIZE`, `LIMIT_RPS`, `TEST_DURATION_SECONDS`,
 /// `COMPRESSION_TYPE`, `P99_LIMIT_MS`, ... — see the doc comment at the top of
-/// `tests/integration/producer_perf_test.rs`). It writes `metrics.jsonl` in the
+/// `tests/performance/producer_perf_test.rs`). It writes `metrics.jsonl` in the
 /// schema `tools/performance_metrics_plot/plot_metrics.py` consumes. Keep this
 /// in sync with the other producer performance tests in the project.
 ///
@@ -625,7 +661,7 @@ fn producer_perf_test() -> anyhow::Result<()> {
     println!("   Configure via environment variables (BOOTSTRAP_SERVERS, VALUE_SIZE,");
     println!("   LIMIT_RPS, TEST_DURATION_SECONDS, COMPRESSION_TYPE, P99_LIMIT_MS, ...).");
     println!("   For a max-rate benchmark set LIMIT_RPS=0 and P99_LIMIT_MS=0.");
-    println!("   See tests/integration/producer_perf_test.rs for the full list.");
+    println!("   See tests/performance/producer_perf_test.rs for the full list.");
 
     let mut args: Vec<String> = vec![
         "test".into(),
@@ -633,7 +669,7 @@ fn producer_perf_test() -> anyhow::Result<()> {
         "--features".into(),
         "integration-tests".into(),
         "--test".into(),
-        "integration".into(),
+        "performance".into(),
         "--".into(),
         "--exact".into(),
         "producer_perf_test::producer_perf_test".into(),
@@ -1295,6 +1331,58 @@ mod signals {
         let last = LAST.load(Ordering::SeqCst);
         HANDLED.iter().find(|(n, _)| *n == last).map_or("a signal", |(_, name)| name)
     }
+
+    /// Serialises the tests that raise a handled signal or read [`count`]:
+    /// the counter is process-wide, so a test signalling the test binary would
+    /// otherwise look like an operator interrupt to one running concurrently.
+    #[cfg(test)]
+    pub fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Run the transactional producer performance test as an env-driven benchmark
+/// binary (`TXN_MODE=produce` or `TXN_MODE=eos`).
+///
+/// Runs the same `transactional_producer_perf_test` that ships in the
+/// `performance` test target, but in release mode and driven entirely by
+/// environment variables (`BOOTSTRAP_SERVERS`, `RECORDS_PER_TRANSACTION`,
+/// `ABORT_RATE`, `NUM_TRANSACTIONAL_PRODUCERS`, `TRANSACTIONAL_ID`, `TXN_MODE`,
+/// plus every knob the non-transactional `producer-perf-test` accepts — see the
+/// doc comment at the top of
+/// `tests/performance/transactional_producer_perf_test.rs`). It writes
+/// `metrics.jsonl` / `results.json` in the schema
+/// `tools/performance_metrics_plot/plot_metrics.py` consumes. Keep this in sync
+/// with the sibling transactional producer performance tests in the project.
+///
+/// Extra arguments after `transactional-producer-perf-test` are forwarded to
+/// the test binary, e.g. `cargo xtask transactional-producer-perf-test --test-threads=1`.
+fn transactional_producer_perf_test() -> anyhow::Result<()> {
+    println!("🚀 Running env-driven transactional producer performance benchmark...");
+    println!("   Configure via environment variables (BOOTSTRAP_SERVERS, VALUE_SIZE,");
+    println!("   LIMIT_RPS, TEST_DURATION_SECONDS, COMPRESSION_TYPE, RECORDS_PER_TRANSACTION,");
+    println!("   ABORT_RATE, NUM_TRANSACTIONAL_PRODUCERS, TRANSACTIONAL_ID, TXN_MODE, ...).");
+    println!("   For a max-rate benchmark set LIMIT_RPS=0 and P99_LIMIT_MS=0.");
+    println!("   See tests/performance/transactional_producer_perf_test.rs for the full list.");
+
+    let mut args: Vec<String> = vec![
+        "test".into(),
+        "--release".into(),
+        "--features".into(),
+        "integration-tests".into(),
+        "--test".into(),
+        "performance".into(),
+        "--".into(),
+        "--exact".into(),
+        "transactional_producer_perf_test::transactional_producer_perf_test".into(),
+        "--nocapture".into(),
+    ];
+    // Forward any extra args (e.g. --test-threads=1) to the test binary.
+    args.extend(env::args().skip(2));
+
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_command("cargo", &arg_refs)
 }
 
 fn run_coverage_lcov(extra_args: &[&str]) -> anyhow::Result<()> {
@@ -1879,7 +1967,9 @@ fn print_help() {
                   (also runs as the first step of `lint`):
                     check-no-data-carrying-enum-variants  public enum variants hold no data inline
                     check-no-public-field                 public structs have no `pub` field
-  lint            Run doc-hygiene plus clippy lints (warnings are errors)
+  lint            Run doc-hygiene plus clippy lints (warnings are errors);
+                  `--keep-going` runs every step even after one fails, then
+                  fails if any did
   doc-hygiene     Check for migrated attributes and stacked doc blocks
   lint-fix        Run clippy and automatically fix what it can
   coverage        Run unit test coverage (HTML report)
@@ -1915,6 +2005,7 @@ fn print_help() {
                   cycle, pass/fail counts, recent results, failures, time estimate
                     e.g. cargo xtask chaos-matrix-status --watch 30
                     --out DIR (default: the most recently active matrix)
+  transactional-producer-perf-test  Run the env-driven transactional producer performance benchmark (requires Docker or BOOTSTRAP_SERVERS)
 
 Usage:
   cargo xtask format
@@ -1923,7 +2014,7 @@ Usage:
   cargo xtask generate-error-codes
   cargo xtask java-deprecated [kafka-ref ...]
   cargo xtask lint-custom
-  cargo xtask lint
+  cargo xtask lint [--keep-going]
   cargo xtask doc-hygiene
   cargo xtask lint-fix
   cargo xtask coverage
@@ -1934,7 +2025,8 @@ Usage:
   cargo xtask package-check
   cargo xtask chaos [FLAGS | --help]
   cargo xtask chaos-matrix --matrix FILE
-  cargo xtask chaos-matrix-status [--watch [SECS]]"
+  cargo xtask chaos-matrix-status [--watch [SECS]]
+  cargo xtask transactional-producer-perf-test"
     );
 }
 
@@ -2262,6 +2354,7 @@ version = "0.1.0"
 
     #[test]
     fn a_caught_signal_is_recorded_not_fatal() {
+        let _signals = signals::test_lock();
         signals::install();
         let before = signals::count();
         Command::new("kill")

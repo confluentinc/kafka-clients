@@ -106,7 +106,7 @@ impl CompletableEventReaper {
             // past-due — the count means "events that were not done at
             // observation time", regardless of who wins a concurrent
             // race against `completeExceptionally`. Counting on
-            // `fail_with_timeout` success would diverge from Java when
+            // `complete_with_error` success would diverge from Java when
             // another task completes the handle between our `is_done`
             // check and the call.
             expired_count += 1;
@@ -118,7 +118,7 @@ impl CompletableEventReaper {
                 deadline
             ));
 
-            if handle.fail_with_timeout(error) {
+            if handle.complete_with_error(error) {
                 debug!(
                     "Event {} completed with an error since its expiration of {} passed {} ms ago",
                     handle.type_name(),
@@ -212,7 +212,7 @@ where
 
         // Java increments `count` here, *before* the
         // `completeExceptionally` call. Counting on
-        // `fail_with_timeout` success would diverge from Java when
+        // `complete_with_error` success would diverge from Java when
         // another task completes the handle between the `is_done`
         // check above and our completion attempt.
         count += 1;
@@ -222,7 +222,7 @@ where
             handle.type_name()
         ));
 
-        if handle.fail_with_timeout(error) {
+        if handle.complete_with_error(error) {
             debug!(
                 "Event {} completed with an error since the consumer is closing",
                 handle.type_name()

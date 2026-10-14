@@ -32,7 +32,7 @@ kafka_error_type! {
     /// [`is_kafka_error`](crate::common::Error::is_kafka_error) is `true` while
     /// [`is_api_error`](crate::common::Error::is_api_error) is `false`.
     ///
-    /// `NetworkClient.parseResponse` (`NetworkClient.java:824-840`) is the only
+    /// `NetworkClient.parseResponse` (`NetworkClient.java:917-933`) is the only
     /// site in the client that raises it: a buffer underflow while parsing a
     /// response, and a correlation-id mismatch on a response that is unrelated
     /// to a SASL request.

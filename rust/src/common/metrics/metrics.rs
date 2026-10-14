@@ -524,8 +524,25 @@ impl Metrics {
     /// [`SensorOptions`] — see the note above this overload group.
     pub fn sensor_options(&self, options: SensorOptions<'_>) -> Result<Arc<Sensor>, Error> {
         let SensorOptions { name, config, inactive_sensor_expiration_time_seconds, recording_level, parents } = options;
+        // Java's double-checked locking (`Metrics.java:410-429`): a lock-free
+        // (here: briefly locked) fast path, then ONE critical section that
+        // re-checks, creates, inserts and registers the children, so two
+        // concurrent callers for the same name always get the same sensor and
+        // the parent's children list gets it exactly once. Java's
+        // `synchronized (this)` maps to holding the `sensors` guard for the
+        // whole section.
+        //
+        // Lock order: `sensors` -> `children_sensors`. No path takes them in
+        // the opposite order (`remove_sensor` releases `sensors` before it
+        // takes `children_sensors`). `Sensor::new` takes no `Metrics` lock (it
+        // only walks the parent chain in `check_forest`), so it is safe to run
+        // under the guard.
         if let Some(existing) = self.get_sensor(name) {
             return Ok(existing);
+        }
+        let mut sensors = self.sensors.lock().expect("sensors mutex poisoned");
+        if let Some(existing) = sensors.get(name) {
+            return Ok(Arc::clone(existing));
         }
         let sensor_config = config.unwrap_or_else(|| Arc::clone(&self.config));
         let sensor = Arc::new(Sensor::new(
@@ -537,16 +554,14 @@ impl Metrics {
             inactive_sensor_expiration_time_seconds,
             recording_level,
         )?);
-        self.sensors
-            .lock()
-            .expect("sensors mutex poisoned")
-            .insert(name.to_string(), Arc::clone(&sensor));
+        sensors.insert(name.to_string(), Arc::clone(&sensor));
         {
             let mut children = self.children_sensors.lock().expect("children sensors mutex poisoned");
             for parent in parents {
                 children.entry(parent.name().to_string()).or_default().push(Arc::clone(&sensor));
             }
         }
+        drop(sensors);
         Ok(sensor)
     }
 
@@ -1677,5 +1692,57 @@ mod tests {
             error.message(),
             "SensorOptionsBuilder::build: mandatory parameter `name` was not set"
         );
+    }
+
+    /// Rust-only regression for the double-checked locking in
+    /// `Metrics.sensor(...)` (`Metrics.java:410-429`): concurrent creators of
+    /// the same sensor name through one shared `Metrics` must all get the SAME
+    /// sensor, the registry must hold it, and the parent's children list must
+    /// hold it exactly once. Before the fix the create-and-insert ran unlocked,
+    /// so a losing caller kept an orphaned sensor and the parent got a
+    /// duplicate child.
+    #[test]
+    fn test_concurrent_sensor_creation_returns_one_sensor() {
+        use std::sync::Barrier;
+        const THREADS: usize = 8;
+        const ITERATIONS: usize = 200;
+        for iteration in 0..ITERATIONS {
+            let metrics = Arc::new(Metrics::new());
+            let parent = metrics.sensor("parent").unwrap();
+            let barrier = Arc::new(Barrier::new(THREADS));
+            let handles: Vec<_> = (0..THREADS)
+                .map(|_| {
+                    let metrics = Arc::clone(&metrics);
+                    let parent = Arc::clone(&parent);
+                    let barrier = Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        metrics.sensor_parents("child", &[parent])
+                    })
+                })
+                .collect();
+            let sensors: Vec<Arc<Sensor>> = handles
+                .into_iter()
+                .map(|h| h.join().expect("thread panicked").expect("sensor created"))
+                .collect();
+            let registered = metrics.get_sensor("child").expect("child registered");
+            for sensor in &sensors {
+                assert!(
+                    Arc::ptr_eq(sensor, &registered),
+                    "iteration {iteration}: caller got an orphaned sensor"
+                );
+            }
+            let children = metrics.children_sensors(&parent).expect("parent has children");
+            assert_eq!(1, children.len(), "iteration {iteration}: duplicate child registration");
+            assert!(Arc::ptr_eq(&children[0], &registered));
+            // The shared sensor accepts a metric once and only once.
+            let name = metrics.metric_name("child-count", "group");
+            assert!(
+                registered
+                    .add_metric_name(name.clone(), Box::new(CumulativeCount::new()))
+                    .expect("first add")
+            );
+            assert!(metrics.metric(&name).is_some());
+        }
     }
 }

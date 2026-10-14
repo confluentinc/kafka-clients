@@ -65,7 +65,7 @@ impl CorrelationIdMismatchError {
     ///
     /// `AbstractResponse.parseResponse` *throws* the exception
     /// (`AbstractResponse.java:105`) and `NetworkClient.parseResponse` catches it by
-    /// **type** (`NetworkClient.java:829`). This crate's response readers report
+    /// **type** (`NetworkClient.java:922`). This crate's response readers report
     /// through [`io::Error`], whose [`io::ErrorKind`] cannot express "the
     /// correlation ids disagreed" — so the typed value travels inside the payload
     /// and the caller recovers it with [`Self::correlation_id_mismatch`], mirroring
@@ -80,7 +80,7 @@ impl CorrelationIdMismatchError {
 
     /// Recovers the [`CorrelationIdMismatchError`] `e` carries, if any — the Rust
     /// equivalent of Java's `catch (CorrelationIdMismatchException e)` in
-    /// `NetworkClient.parseResponse` (`NetworkClient.java:829`).
+    /// `NetworkClient.parseResponse` (`NetworkClient.java:922`).
     ///
     /// Returns the whole payload rather than its message because the `catch` clause
     /// reads [`response_correlation_id`](CorrelationIdMismatchError::response_correlation_id)

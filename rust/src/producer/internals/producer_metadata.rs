@@ -29,7 +29,7 @@ use crate::common::internals::ClusterResourceListeners;
 use crate::common::protocol::Errors;
 use crate::common::requests::MetadataResponse;
 use crate::common::requests::metadata_request;
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::LogContext;
 use crate::kafka_debug;
 
 /// Producer-specific inner state, protected by its own mutex.
@@ -218,6 +218,32 @@ impl ProducerMetadata {
             drop(state);
             self.metadata.request_update_for_new_topics();
         }
+    }
+
+    /// Atomically add a batch of topics to the working set, refreshing the
+    /// expiry for those already present. If any of the topics was newly added,
+    /// a partial metadata refresh is requested and the current update version is
+    /// returned so the caller can pass it to [`Metadata::await_update`] to wait
+    /// for the next response. Returns `None` when no topic was newly added (no
+    /// refresh requested, nothing to wait for).
+    ///
+    /// Java's `add(Collection<String>, long)` (6208dfc014), the batch overload of
+    /// [`Self::add`]. Java holds the producer lock across the refresh request;
+    /// here, as in [`Self::add`], the producer state's lock is released before
+    /// `Metadata`'s own is taken, so the two are never nested in that order.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerMetadata#add")]
+    pub fn add_with_topics<'a>(&self, topics: impl IntoIterator<Item = &'a str>, now_ms: i64) -> Option<i32> {
+        let mut state = self.inner.lock().unwrap();
+        let expiry = now_ms + state.metadata_idle_ms;
+        let mut any_new = false;
+        for topic in topics {
+            if state.topics.insert(topic.to_string(), expiry).is_none() {
+                state.new_topics.insert(topic.to_string());
+                any_new = true;
+            }
+        }
+        drop(state);
+        any_new.then(|| self.metadata.request_update_for_new_topics())
     }
 
     /// Request a metadata update for a specific topic.
@@ -540,6 +566,40 @@ mod tests {
         let error = metadata.get_error("error-topic");
         assert!(error.is_some());
         assert_eq!(error.unwrap(), Errors::LeaderNotAvailable);
+    }
+
+    /// Translated from `ProducerMetadataTest.testRetainTopic` (KAFKA-20804,
+    /// 9f15f3c540). The behaviour under test is the `retain_topic_fn` closure,
+    /// reached through [`Metadata::retain_topic`] (Java calls the overridden
+    /// `retainTopic` directly).
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerMetadataTest#testRetainTopic")]
+    fn test_retain_topic() {
+        let metadata = new_producer_metadata();
+        let unknown_topic = "unknown-topic";
+        let new_topic = "new-topic";
+        let active_topic = "active-topic";
+
+        // A topic that was never added isn't retained.
+        assert!(!metadata.retain_topic(unknown_topic, false, 0));
+
+        // A "new" topic (added but not yet resolved by an update) is retained even past its
+        // nominal expiry, since it hasn't had a chance to be fetched yet.
+        metadata.add(new_topic, 0);
+        assert!(metadata.new_topics().contains(new_topic));
+        assert!(metadata.retain_topic(new_topic, false, METADATA_IDLE_MS * 10));
+
+        // Once resolved (no longer "new"), a topic that hasn't reached its idle expiry is retained.
+        metadata.add(active_topic, 0);
+        metadata.update_with_current_request_version(&response_with_topics(&[new_topic, active_topic]), true, 0);
+        assert!(!metadata.new_topics().contains(active_topic));
+        assert!(metadata.retain_topic(active_topic, false, METADATA_IDLE_MS - 1));
+
+        // Past its idle expiry, the topic is evicted: retainTopic() returns false and actually
+        // removes the topic, so a subsequent call also returns false.
+        assert!(!metadata.retain_topic(active_topic, false, METADATA_IDLE_MS));
+        assert!(!metadata.contains_topic(active_topic));
+        assert!(!metadata.retain_topic(active_topic, false, METADATA_IDLE_MS));
     }
 
     /// Test that a new topic is not expired even if time has passed beyond idle.

@@ -20,7 +20,7 @@ use std::collections::{BTreeSet, HashMap};
 use crate::common::Error;
 use crate::common::TopicPartition;
 use crate::common::record::internal::DefaultRecordBatch;
-use crate::common::utils::ProducerIdAndEpoch;
+use crate::common::utils::internals::ProducerIdAndEpoch;
 use crate::producer::internals::ProducerBatch;
 
 /// Ordering key for an in-flight batch: `(producer_id, producer_epoch,
@@ -314,12 +314,12 @@ impl TxnPartitionEntry {
     /// already untracked here but still owned by the Sender.
     ///
     /// **Tracked ⊃ one owner** — on the retry path the batch moves owners while
-    /// *staying* tracked. `Sender.reenqueueBatch` (`Sender.java:750-752`) calls
+    /// *staying* tracked. `Sender.reenqueueBatch` (`Sender.java:751-753`) calls
     /// `accumulator.reenqueue(..)` and then `maybeRemoveFromInflightBatches(..)`,
     /// but — unlike the `MESSAGE_TOO_LARGE` split path at `:685` — it does **not**
     /// call `transactionManager.removeInFlightBatch`. Java relies on this and
     /// asserts it: `RecordAccumulator.insertInSequenceOrder`
-    /// (`RecordAccumulator.java:558-560`) throws
+    /// (`RecordAccumulator.java:603-605`) throws
     /// `IllegalStateException("We are re-enqueueing a batch which is not tracked
     /// as part of the in flight requests")` when the batch is *not* still
     /// tracked.
@@ -759,10 +759,10 @@ mod tests {
     /// Regression test for Critic 41 second-pass finding. The first-pass audit
     /// justified the `TransactionManager.java:655` call site as "those batches are
     /// in flight, so the Sender holds them" — false on this path.
-    /// `Sender.reenqueueBatch` (`Sender.java:750-752`) does **not** call
+    /// `Sender.reenqueueBatch` (`Sender.java:751-753`) does **not** call
     /// `transactionManager.removeInFlightBatch`, unlike the split path at `:685`,
     /// and Java asserts the batch is still tracked
-    /// (`RecordAccumulator.java:558-560`).
+    /// (`RecordAccumulator.java:603-605`).
     ///
     /// Both halves are pinned: supplying only one owner's batches errors, and
     /// supplying both succeeds. `bump_idempotent_producer_epoch` exists precisely

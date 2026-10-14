@@ -1,7 +1,7 @@
 # confluent_kafka (Rust-core Python client)
 
 The Python client built on the Rust core's C FFI. Its surface is the Java Kafka
-client (Apache Kafka 4.3.1) mapped to idiomatic Python, ruled by the
+client (Apache Kafka 4.4.0) mapped to idiomatic Python, ruled by the
 `## Python Binding Conventions` section of the repository's `CLAUDE.md`. The
 package sits over a hand-written CPython extension, `_confluentkafka`, which
 links the Rust library's C API (`../rust`, feature `ffi`).
