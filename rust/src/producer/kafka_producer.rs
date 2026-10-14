@@ -2402,7 +2402,7 @@ impl<K, V> KafkaProducer<K, V> {
             // covering the same Java block all route through `handle_api_error` too.
             //
             // The callback is given the partition `append` chose, as Java reports
-            // `appendCallbacks.topicPartition()` (`KafkaProducer.java:1052`), not the
+            // `appendCallbacks.topicPartition()`, not the
             // `partition` passed in, which is `UNKNOWN_PARTITION` when the built-in
             // partitioner chooses.
             Err(failure) if failure.error.is_api_error() => self
@@ -5341,9 +5341,8 @@ mod tests {
     /// partition `append` chose, not `UNKNOWN_PARTITION`.
     ///
     /// Java's `append` passes the chosen partition to `AppendCallbacks.setPartition`
-    /// before it waits for memory (`RecordAccumulator.java:309-310`), and `doSend` builds
-    /// the callback's metadata from `appendCallbacks.topicPartition()`
-    /// (`KafkaProducer.java:1052-1053`). Not a translation of a Java test:
+    /// before it waits for memory, and `doSend` builds the callback's metadata from
+    /// `appendCallbacks.topicPartition()`. Not a translation of a Java test:
     /// `test_callback_invoked_on_buffer_exhaustion` sends to an explicit partition, so it
     /// cannot tell the two apart.
     #[tokio::test]

@@ -1547,44 +1547,50 @@ mod tests {
     ///
     /// Java's `append` passes the chosen partition to `AppendCallbacks.setPartition` before it
     /// waits for memory, and `doSend` builds the callback's metadata from
-    /// `appendCallbacks.topicPartition()` (`KafkaProducer.java:1052-1053`). Not a translation of
-    /// a Java test; the incremental counterpart of
-    /// `test_buffer_exhaustion_reports_the_partition_chosen_by_the_partitioner`.
+    /// `appendCallbacks.topicPartition()`. Not a translation of a Java test; the incremental
+    /// counterpart of `test_buffer_exhaustion_reports_the_partition_chosen_by_the_partitioner`.
+    ///
+    /// The second record overflows the open batch's only chunk and finds the pool empty, so
+    /// its extension is denied and the batch is closed. With no time left to block, the retry
+    /// fails at the deadline check, before the next pass chooses a partition again. With time
+    /// left, the retry fails in the blocking allocation for a new batch.
     #[tokio::test]
     async fn test_buffer_exhaustion_reports_the_partition_chosen_by_the_partitioner() {
-        let fx = fixture();
-        let chunk_size = 256;
-        // Pool holds exactly one chunk, which the first record takes.
-        let accum = fx.accumulator(8192, chunk_size, chunk_size as i64);
-        fx.append_to(&accum, RecordMetadata::UNKNOWN_PARTITION, &[0u8; 150], 0)
-            .await
-            .unwrap();
+        for (max_time_to_block, failure_point) in [(0, "the retry deadline check"), (50, "the new-batch allocation")] {
+            let fx = fixture();
+            let chunk_size = 256;
+            // Pool holds exactly one chunk, which the first record takes.
+            let accum = fx.accumulator(8192, chunk_size, chunk_size as i64);
+            fx.append_to(&accum, RecordMetadata::UNKNOWN_PARTITION, &[0u8; 150], 0)
+                .await
+                .unwrap();
 
-        // The second record overflows that chunk and finds the pool empty. The cluster has one
-        // partition, so the built-in partitioner can only choose `PARTITION1`.
-        let failure = accum
-            .append(
-                TOPIC,
-                RecordMetadata::UNKNOWN_PARTITION,
-                0,
-                Some(KEY),
-                Some(&[0u8; 150]),
-                &[],
-                None,
-                0,
-                fx.time.milliseconds(),
-                &fx.cluster,
-            )
-            .await
-            .err()
-            .unwrap();
-        assert!(
-            matches!(failure.error, Error::ProducerBufferExhausted(_)),
-            "{:?}",
-            failure.error
-        );
-        assert_eq!(PARTITION1, failure.partition);
-        accum.base().close();
+            // The cluster has one partition, so the built-in partitioner can only choose
+            // `PARTITION1`.
+            let failure = accum
+                .append(
+                    TOPIC,
+                    RecordMetadata::UNKNOWN_PARTITION,
+                    0,
+                    Some(KEY),
+                    Some(&[0u8; 150]),
+                    &[],
+                    None,
+                    max_time_to_block,
+                    fx.time.milliseconds(),
+                    &fx.cluster,
+                )
+                .await
+                .err()
+                .unwrap();
+            assert!(
+                matches!(failure.error, Error::ProducerBufferExhausted(_)),
+                "{failure_point}: {:?}",
+                failure.error
+            );
+            assert_eq!(PARTITION1, failure.partition, "a failure at {failure_point}");
+            accum.base().close();
+        }
     }
 
     /// Test that chunks are returned to the pool only at batch completion (deallocate), never at
