@@ -1,0 +1,47 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using System.Threading.Tasks;
+using Confluent.Kafka.Internal;
+
+using Token = Confluent.Kafka.DelegationToken;
+
+namespace Confluent.Kafka.Admin;
+
+/// <summary>
+/// The result of <see cref="IAsyncAdmin.CreateDelegationToken"/> — Java's
+/// <c>org.apache.kafka.clients.admin.CreateDelegationTokenResult</c>: one future over the
+/// issued token (<c>:27</c>).
+/// </summary>
+/// <seealso cref="CreateDelegationTokenResult"/>
+public sealed class AsyncCreateDelegationTokenResult
+{
+    private readonly Task<Token> _token;
+
+    internal AsyncCreateDelegationTokenResult(Task<Token> token)
+    {
+        _token = token;
+    }
+
+    /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static AsyncCreateDelegationTokenResult From(SingleAdminOperation<DelegationToken> operation) =>
+        new AsyncCreateDelegationTokenResult(operation.Task);
+
+    /// <summary>The issued token — Java's <c>delegationToken()</c> (<c>:36</c>).</summary>
+    /// <returns>A future over the token.</returns>
+    public AsyncKafkaFuture<Token> DelegationToken() => new AsyncKafkaFuture<Token>(_token);
+}
