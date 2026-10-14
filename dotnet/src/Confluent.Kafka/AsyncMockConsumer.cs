@@ -308,8 +308,8 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// <b>only if something was removed</b>, then
     /// <see cref="IConsumerRebalanceListener.OnPartitionsAssigned"/> <b>unconditionally</b>
     /// with the <em>added</em> partitions (possibly an empty collection). It <b>never</b>
-    /// fires <see cref="IConsumerRebalanceListener.OnPartitionsLost"/>, matching Java.
-    /// Buffered records are cleared, as in Java.
+    /// fires <see cref="IConsumerRebalanceListener.OnPartitionsLost"/>, matching Java; use
+    /// <see cref="LosePartitions"/> for that. Buffered records are cleared, as in Java.
     /// </para>
     /// <para>
     /// It is <b>synchronous all the way through</b>: it does not return until the listener
@@ -331,6 +331,41 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">No topic subscription, or a listener threw.</exception>
     public void Rebalance(IReadOnlyCollection<TopicPartition> partitions) => _native.Rebalance(partitions);
+
+    /// <summary>
+    /// Simulates losing <paramref name="partitions"/> (mock-only helper; mirrors Java
+    /// <c>MockConsumer.losePartitions(Collection)</c>, added in Kafka 4.4) — the broker-free
+    /// driver for <see cref="IConsumerRebalanceListener.OnPartitionsLost"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Unlike <see cref="Rebalance"/>, which fires
+    /// <see cref="IConsumerRebalanceListener.OnPartitionsRevoked"/>, this models losing
+    /// partitions without a graceful revoke. The buffered records of the lost partitions are
+    /// cleared (records of the partitions kept are not); then, while a listener is
+    /// registered, <see cref="IConsumerRebalanceListener.OnPartitionsLost"/> fires with them;
+    /// then they are removed from the <see cref="Assignment"/>. A listener derived from
+    /// <see cref="ConsumerRebalanceListenerBase"/> that does not override
+    /// <c>OnPartitionsLost</c> gets <see cref="IConsumerRebalanceListener.OnPartitionsRevoked"/>
+    /// instead, Java's default.
+    /// </para>
+    /// <para>
+    /// Like <see cref="Rebalance"/> it is <b>synchronous all the way through</b>, and for the
+    /// same reason not a <see cref="Task"/> even on the async mock: it does not return until
+    /// the listener callback has returned, and an exception thrown by the listener surfaces
+    /// here as a <see cref="KafkaException"/>.
+    /// </para>
+    /// </remarks>
+    /// <param name="partitions">The partitions to lose; every one must be currently assigned.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">
+    /// A partition is not currently assigned (Java's <c>IllegalStateException</c>, with its
+    /// message), or the listener threw.
+    /// </exception>
+    public void LosePartitions(IReadOnlyCollection<TopicPartition> partitions) => _native.LosePartitions(partitions);
 
     /// <inheritdoc/>
     public void Dispose() => _native.Dispose();

@@ -27,17 +27,19 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// <summary>
 /// The <b>multi-shot</b> rebalance-listener registration bridge (ffi-marshalling.md §B6) —
 /// the one callback family in this binding that is not a one-shot per-operation completion.
-/// Covers what the public surface cannot reach: the <c>on_partitions_lost</c> trampoline
-/// (which <c>MockConsumer.rebalance</c> never fires, by design), the returned-error-handle
+/// Covers what the public surface does not pin on its own: each trampoline driven the way
+/// the core drives it (<c>on_partitions_lost</c> included), the returned-error-handle
 /// contract, the free-exactly-once properties, and the Java-faithful registration-release
 /// rules.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Why some tests invoke a trampoline directly.</b> <c>MockConsumer_rebalance</c> never
-/// fires <c>on_partitions_lost</c> (matching Java), so the only way to exercise that
-/// trampoline — and with it the Java default <c>lost → revoked</c> delegation carried by
-/// <see cref="ConsumerRebalanceListenerBase"/> — is to call it the way the core would. The
+/// <b>Why some tests invoke a trampoline directly.</b> Before Kafka 4.4 the mock had no way
+/// to fire <c>on_partitions_lost</c>, so calling the trampoline the way the core would was
+/// the only coverage of it — and of the Java default <c>lost → revoked</c> delegation
+/// carried by <see cref="ConsumerRebalanceListenerBase"/>. <c>MockConsumer.LosePartitions</c>
+/// now fires it end to end (<c>PublicConsumerRebalanceListenerTests</c>); the direct tests
+/// stay, because they pin the trampoline's own contract apart from the core's driver. The
 /// Rust side does exactly the same in its own <c>#[cfg(test)]</c> coverage. The delivered
 /// list is a genuine owned <c>TopicPartitionList_t</c> obtained from
 /// <c>Consumer_assignment</c>, so the callback-owns-the-handle contract is exercised for
@@ -70,15 +72,15 @@ public sealed class ConsumerRebalanceListenerBridgeTests
         return NativeMethods.ConsumerAssignment(consumer.Handle);
     }
 
-    // ---- The on_partitions_lost trampoline (unreachable from the mock) ----
+    // ---- The on_partitions_lost trampoline, driven directly ----
 
     [Fact]
     public void PartitionsLost_OnListenerBase_DelegatesToRevoked_JavaDefault()
     {
-        // MockConsumer.rebalance never fires lost, so Java's default `lost -> revoked`
-        // delegation — which lives on ConsumerRebalanceListenerBase here, because the
-        // netstandard2.0 floor has no default interface methods — is only reachable by
-        // invoking the trampoline the way the core does.
+        // Java's default `lost -> revoked` delegation lives on ConsumerRebalanceListenerBase
+        // here, because the netstandard2.0 floor has no default interface methods. This drives
+        // the trampoline the way the core does; the end-to-end twin through
+        // MockConsumer.LosePartitions is in PublicConsumerRebalanceListenerTests.
         using NativeConsumer consumer = NativeConsumer.CreateMock();
         RecordingListenerBase listener = new RecordingListenerBase();
         ListenerRegistration registration = ListenerRegistration.Root(listener);

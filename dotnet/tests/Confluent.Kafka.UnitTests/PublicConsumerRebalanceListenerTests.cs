@@ -25,8 +25,9 @@ namespace Confluent.Kafka.UnitTests;
 /// <summary>
 /// The M9/P6 rebalance-listener surface through the <b>public</b> API, broker-free: the
 /// <c>Subscribe(topics, listener)</c> overload on all four consumer types and the mock-only
-/// <c>Rebalance(...)</c> driver that fires it. Pins every semantic the core defines for
-/// <c>MockConsumer.rebalance</c>, the throwing-listener contract, and
+/// <c>Rebalance(...)</c> and <c>LosePartitions(...)</c> (Kafka 4.4) drivers that fire it. Pins
+/// every semantic the core defines for <c>MockConsumer.rebalance</c> and
+/// <c>MockConsumer.losePartitions</c>, the throwing-listener contract, and
 /// <c>consumer-threading.md</c> §31's "the rebalance does not advance until the listener
 /// returns" regression.
 /// </summary>
@@ -40,9 +41,9 @@ namespace Confluent.Kafka.UnitTests;
 /// expose. §31 test #2 is satisfied below.
 /// </para>
 /// <para>
-/// The complementary interop-level coverage (the <c>on_partitions_lost</c> trampoline the
-/// mock never fires, the returned-error-handle contract, GC survival, free-exactly-once, and
-/// the registration-release rules) lives in
+/// The complementary interop-level coverage (each trampoline driven directly, the
+/// returned-error-handle contract, GC survival, free-exactly-once, and the
+/// registration-release rules) lives in
 /// <c>Interop/ConsumerRebalanceListenerBridgeTests</c>.
 /// </para>
 /// </remarks>
@@ -189,8 +190,7 @@ public sealed class PublicConsumerRebalanceListenerTests
     [Fact]
     public void Rebalance_NeverFiresLost()
     {
-        // Matching Java's MockConsumer. This is why the lost trampoline (and the Java-default
-        // delegation) is covered at the interop level instead.
+        // Matching Java's MockConsumer: losing partitions is LosePartitions' job (below).
         using MockConsumer<byte[], byte[]> consumer = NewMock();
         RecordingListener listener = new RecordingListener();
         consumer.Subscribe(new[] { Topic }, listener);
@@ -226,6 +226,186 @@ public sealed class PublicConsumerRebalanceListenerTests
         Assert.Equal(
             "Attempt to dynamically assign partitions while manual assignment in use",
             exception.Message);
+    }
+
+    // ---- MockConsumer.losePartitions (Kafka 4.4) — Java's MockConsumerTest, translated ----
+
+    [Fact]
+    public void LosePartitions_CallsOnPartitionsLost()
+    {
+        // Java testLosePartitionsCallsOnPartitionsLost.
+        TopicPartition tp0 = new TopicPartition(Topic, 0);
+        TopicPartition tp1 = new TopicPartition(Topic, 1);
+        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        RecordingListener listener = new RecordingListener();
+        consumer.Subscribe(new[] { Topic }, listener);
+
+        consumer.Rebalance(new[] { tp0, tp1 });
+        consumer.LosePartitions(new[] { tp0 });
+
+        Assert.Equal(new[] { tp0 }, Assert.Single(listener.Lost));
+        Assert.Empty(listener.Revoked);
+    }
+
+    [Fact]
+    public void LosePartitions_RemovesFromAssignment()
+    {
+        // Java testLosePartitionsRemovesFromAssignment.
+        TopicPartition tp0 = new TopicPartition(Topic, 0);
+        TopicPartition tp1 = new TopicPartition(Topic, 1);
+        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        consumer.Subscribe(new[] { Topic });
+
+        consumer.Rebalance(new[] { tp0, tp1 });
+        consumer.LosePartitions(new[] { tp0 });
+
+        Assert.DoesNotContain(tp0, consumer.Assignment());
+        Assert.Contains(tp1, consumer.Assignment());
+    }
+
+    [Fact]
+    public void LosePartitions_ThrowsIfNotAssigned_WithTheJavaMessage()
+    {
+        // Java testLosePartitionsThrowsIfNotAssigned. Java throws IllegalStateException; the
+        // core's error arrives as the flat KafkaException (ffi §B5) and its message, Java's
+        // List.toString() included, is asserted verbatim (definition-of-done.md §3).
+        TopicPartition tp0 = new TopicPartition(Topic, 0);
+        TopicPartition tp1 = new TopicPartition(Topic, 1);
+        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        consumer.Subscribe(new[] { Topic });
+        consumer.Rebalance(new[] { tp0 });
+
+        KafkaException exception = Assert.Throws<KafkaException>(
+            () => consumer.LosePartitions(new[] { tp1 }));
+
+        Assert.Equal(
+            "Cannot lose partitions that are not currently assigned: [rebalance-listener-topic-1]",
+            exception.Message);
+        Assert.Equal(new[] { tp0 }, consumer.Assignment().ToArray());
+    }
+
+    [Fact]
+    public void LosePartitions_ClearsOnlyLostRecords()
+    {
+        // Java testLosePartitionsClearsOnlyLostRecords.
+        TopicPartition tp0 = new TopicPartition(Topic, 0);
+        TopicPartition tp1 = new TopicPartition(Topic, 1);
+        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        consumer.Subscribe(new[] { Topic });
+        consumer.Rebalance(new[] { tp0, tp1 });
+        consumer.UpdateBeginningOffset(Topic, 0, 0);
+        consumer.UpdateBeginningOffset(Topic, 1, 0);
+        consumer.Seek(tp0, 0);
+        consumer.Seek(tp1, 0);
+        consumer.AddRecord(Topic, 0, 0, null, null);
+        consumer.AddRecord(Topic, 1, 0, null, null);
+
+        consumer.LosePartitions(new[] { tp0 });
+
+        ConsumerRecords<byte[], byte[]> records = null!;
+        TestTimeout.Run(() => records = consumer.Poll(TimeSpan.FromMilliseconds(1)), s_deadline);
+        ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
+        Assert.Equal(tp1, new TopicPartition(record.Topic, record.Partition));
+    }
+
+    [Fact]
+    public void LosePartitions_ThenRebalance()
+    {
+        // Java testLosePartitionsThenRebalance. Java's listener overrides only revoked and
+        // assigned, so it is a ConsumerRebalanceListenerBase here (the netstandard2.0 home of
+        // Java's onPartitionsLost default).
+        TopicPartition tp0 = new TopicPartition(Topic, 0);
+        TopicPartition tp1 = new TopicPartition(Topic, 1);
+        TopicPartition tp2 = new TopicPartition(Topic, 2);
+        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        RecordingListenerBase listener = new RecordingListenerBase();
+        consumer.Subscribe(new[] { Topic }, listener);
+
+        consumer.Rebalance(new[] { tp0, tp1 });
+        listener.Assigned.Clear();
+
+        consumer.LosePartitions(new[] { tp0 });
+        consumer.Rebalance(new[] { tp1, tp2 });
+
+        Assert.Equal(new[] { tp2 }, Assert.Single(listener.Assigned));
+        Assert.Equal(new[] { tp1, tp2 }, consumer.Assignment().OrderBy(tp => tp.Partition).ToArray());
+    }
+
+    [Fact]
+    public void LosePartitions_WithAListenerBase_FallsBackToRevoked_JavasDefault()
+    {
+        // End to end through the lost trampoline: a ConsumerRebalanceListenerBase that does not
+        // override OnPartitionsLost gets OnPartitionsRevoked, as Java's default method does.
+        TopicPartition tp0 = new TopicPartition(Topic, 0);
+        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        RecordingListenerBase listener = new RecordingListenerBase();
+        consumer.Subscribe(new[] { Topic }, listener);
+        consumer.Rebalance(new[] { tp0, new TopicPartition(Topic, 1) });
+
+        consumer.LosePartitions(new[] { tp0 });
+
+        Assert.Equal(new[] { tp0 }, Assert.Single(listener.Revoked));
+    }
+
+    [Fact]
+    public void LosePartitions_DeduplicatesThePartitions()
+    {
+        // Java collects the argument into a HashSet before calling onPartitionsLost.
+        TopicPartition tp0 = new TopicPartition(Topic, 0);
+        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        RecordingListener listener = new RecordingListener();
+        consumer.Subscribe(new[] { Topic }, listener);
+        consumer.Rebalance(new[] { tp0 });
+
+        consumer.LosePartitions(new[] { tp0, tp0 });
+
+        Assert.Equal(new[] { tp0 }, Assert.Single(listener.Lost));
+        Assert.Empty(consumer.Assignment());
+    }
+
+    [Fact]
+    public async Task AsyncMock_LosePartitions_CallsOnPartitionsLost()
+    {
+        TopicPartition tp0 = new TopicPartition(Topic, 0);
+        TopicPartition tp1 = new TopicPartition(Topic, 1);
+        await using AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        RecordingListener listener = new RecordingListener();
+        await TestTimeout.Run(() => consumer.Subscribe(new[] { Topic }, listener), s_deadline);
+        consumer.Rebalance(new[] { tp0, tp1 });
+
+        consumer.LosePartitions(new[] { tp1 });
+
+        Assert.Equal(new[] { tp1 }, Assert.Single(listener.Lost));
+        Assert.Empty(listener.Revoked);
+        Assert.Equal(new[] { tp0 }, consumer.Assignment().ToArray());
+    }
+
+    [Fact]
+    public void LosePartitions_WhenTheListenerThrows_SurfacesTheMessage_AndKeepsTheAssignment()
+    {
+        // The header: the callback's error is returned and the assignment is left unchanged.
+        const string Message = "lost handler failed — 失敗";
+        TopicPartition tp0 = new TopicPartition(Topic, 0);
+        using MockConsumer<byte[], byte[]> consumer = NewMock();
+        consumer.Subscribe(new[] { Topic }, new ThrowingOnLostListener(Message));
+        consumer.Rebalance(new[] { tp0 });
+
+        KafkaException exception = Assert.Throws<KafkaException>(
+            () => consumer.LosePartitions(new[] { tp0 }));
+
+        Assert.Equal(Message, exception.Message);
+        Assert.Equal(new[] { tp0 }, consumer.Assignment().ToArray());
+    }
+
+    [Fact]
+    public void LosePartitions_NullPartitions_ThrowsArgumentNullException()
+    {
+        using MockConsumer<byte[], byte[]> consumer = NewMock();
+
+        ArgumentNullException exception = Assert.Throws<ArgumentNullException>(
+            () => consumer.LosePartitions(null!));
+
+        Assert.Equal("partitions", exception.ParamName);
     }
 
     // ---- The throwing-listener contract, end to end ----
@@ -416,6 +596,27 @@ public sealed class PublicConsumerRebalanceListenerTests
         public void OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions)
         {
         }
+    }
+
+    private sealed class ThrowingOnLostListener : IConsumerRebalanceListener
+    {
+        private readonly string _message;
+
+        internal ThrowingOnLostListener(string message)
+        {
+            _message = message;
+        }
+
+        public void OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions)
+        {
+        }
+
+        public void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions)
+        {
+        }
+
+        public void OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions) =>
+            throw new InvalidOperationException(_message);
     }
 
     /// <summary>

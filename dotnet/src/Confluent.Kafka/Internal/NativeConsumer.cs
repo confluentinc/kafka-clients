@@ -1636,6 +1636,27 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         RunPartitionOpSync(partitions, NativeMethods.MockConsumerRebalance);
 
     /// <summary>
+    /// Simulates losing <paramref name="partitions"/> on a <c>MockConsumer</c> (mock-only; Java
+    /// <c>MockConsumer.losePartitions(Collection)</c>, Kafka 4.4) — the broker-free driver for
+    /// <see cref="IConsumerRebalanceListener.OnPartitionsLost"/>. Reuses the shared sync
+    /// partition-op path verbatim (<see cref="RunPartitionOpSync"/>), exactly as
+    /// <see cref="Rebalance"/> does: the ABI takes the same parallel
+    /// <c>(topics[], partitions[], count)</c> arrays.
+    /// </summary>
+    /// <remarks>
+    /// It <b>does not return until the listener callback has returned</b>, and a callback's
+    /// error becomes this call's <see cref="KafkaException"/>. Every partition must be currently
+    /// assigned.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">A real consumer, a partition that is not assigned, or a listener threw.</exception>
+    internal void LosePartitions(IReadOnlyCollection<TopicPartition> partitions) =>
+        RunPartitionOpSync(partitions, NativeMethods.MockConsumerLosePartitions);
+
+    /// <summary>
     /// Validates and snapshots a topic collection before any pin / P-Invoke (ffi §B5) — the
     /// one shared topic-list precondition path for all four subscribe entry points (DoD §6).
     /// </summary>

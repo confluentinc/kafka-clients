@@ -932,6 +932,30 @@ internal static partial class NativeMethods
     internal static extern IntPtr MockConsumerRebalance(
         SafeConsumerHandle consumer, IntPtr[] topics, int[] partitions, int count);
 
+    /// <summary>
+    /// <c>kafka_consumer_MockConsumer_lose_partitions</c> — simulates a partition loss on a
+    /// mock consumer (mock only; mirrors Java <c>MockConsumer.losePartitions(Collection)</c>,
+    /// KAFKA-20575, Kafka 4.4). <paramref name="topics"/> / <paramref name="partitions"/> are
+    /// the same <b>parallel arrays</b> of length <paramref name="count"/> as
+    /// <see cref="MockConsumerRebalance"/>, naming the partitions to lose. Returns a
+    /// <c>kafka_common_Error_t</c> handle (null = success), including <c>illegal_state</c> for a
+    /// real consumer.
+    /// <para>
+    /// Semantics the core pins (header, <c>kafka_consumer_MockConsumer_lose_partitions</c>):
+    /// every partition must be currently assigned, else <c>illegal_state</c> "Cannot lose
+    /// partitions that are not currently assigned: [...]" and nothing changes; the lost
+    /// partitions' buffered records are cleared, then <c>on_partitions_lost</c> fires with them
+    /// (deduplicated, in the order given) while a listener is registered, then they leave the
+    /// assignment. It fires neither <c>on_partitions_revoked</c> nor
+    /// <c>on_partitions_assigned</c>, and like <see cref="MockConsumerRebalance"/> it <b>does
+    /// not return until the callback has returned</b>, propagating its error as the return
+    /// value (the assignment is then unchanged; the records are already cleared, as in Java).
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_MockConsumer_lose_partitions", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MockConsumerLosePartitions(
+        SafeConsumerHandle consumer, IntPtr[] topics, int[] partitions, int count);
+
     // ---- kafka_consumer_ConsumerRebalanceListener_t — the multi-shot registration (M9/P6) ----
     //
     // Java's `subscribe(Collection, ConsumerRebalanceListener)`. Unlike every other callback
