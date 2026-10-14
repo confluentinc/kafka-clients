@@ -230,10 +230,13 @@ internal static partial class NativeMethods
     internal static extern IntPtr ConsumerClose(IntPtr consumer);
 
     /// <summary>
-    /// <c>kafka_consumer_Consumer_destroy</c> — fire-and-forget free (cancels any
-    /// in-flight op, does NOT join the background task). Graceful teardown routes
-    /// through <see cref="ConsumerClose"/> (or the async close) first (ffi §B2); this is
-    /// the last-resort release. Null-safe (no-op).
+    /// <c>kafka_consumer_Consumer_destroy</c> — frees the consumer without a graceful
+    /// close: it does NOT join the background task. An <c>_async</c> op still in flight is
+    /// woken and waited for, so its callback still fires exactly once, typically with a
+    /// <c>WAKEUP</c> error, possibly after this returns. Called on the core's dispatcher
+    /// thread, it moves the wait and the free to a thread of its own and returns at once.
+    /// Graceful teardown routes through <see cref="ConsumerClose"/> (or the async close)
+    /// first (ffi §B2); this is the last-resort release. Null-safe (no-op).
     /// </summary>
     /// <remarks>
     /// <b>STRUCTURALLY EXCLUDED from the <c>SafeHandle</c>-param convention — it cannot be

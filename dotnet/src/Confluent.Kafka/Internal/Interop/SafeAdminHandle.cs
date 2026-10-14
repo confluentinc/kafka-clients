@@ -27,28 +27,30 @@ namespace Confluent.Kafka.Internal.Interop;
 /// </summary>
 /// <remarks>
 /// <para>
-/// ⚠ <b>This handle's reference count is the binding's only defence against a
-/// use-after-free.</b> <c>kafka_admin_AdminClient_destroy</c> is <b>not</b>
-/// ref-counted and does <b>not</b> drain — it shuts the runtime down, drops the
-/// client and <em>detaches</em> the dispatcher — and the header makes destroying
-/// concurrently with an in-flight <c>_async</c> operation a C lifetime precondition
-/// <em>the caller</em> must uphold. The consumer ABI ref-counts internally; the admin
-/// ABI does not. So every async submit takes a <b>span-the-op</b>
+/// ⚠ <b>This handle's reference count is load-bearing.</b>
+/// <c>kafka_admin_AdminClient_destroy</c> does not wait for a synchronous call still
+/// running on another thread, and does not wait for every in-flight <c>_async</c>
+/// operation. Since master #233 it waits for an in-flight close and fails the
+/// single-callback operations it tracks with a <c>TIMEOUT</c> error, joining their
+/// tasks, before it shuts the runtime down, drops the client and <em>detaches</em> the
+/// dispatcher. The per-key operations are not tracked, so one in flight at destroy may
+/// never fire its callbacks. So every async submit takes a <b>span-the-op</b>
 /// <see cref="System.Runtime.InteropServices.SafeHandle.DangerousAddRef(ref bool)"/>
 /// here (released by the completion callback in
-/// <c>AdminOperation.FreeGcHandle</c>), and because
-/// <see cref="ReleaseHandle"/> runs only at count zero, a <c>Dispose</c> racing an
-/// in-flight op <b>defers</b> the native destroy instead of pulling the client out
-/// from under the operation.
+/// <c>AdminOperation.FreeGcHandle</c>), a synchronous call holds the marshaller's
+/// call-scoped one (ffi §A2), and because <see cref="ReleaseHandle"/> runs only at
+/// count zero, a <c>Dispose</c> racing an in-flight op <b>defers</b> the native destroy
+/// instead of pulling the client out from under the operation.
 /// </para>
 /// <para>
 /// A deferred destroy is therefore normal operation, not a defect: disposing while an
 /// op is in flight returns promptly, and the native release happens when that op's
 /// callback releases the last reference — on whichever thread the callback ran (the
 /// handle's dispatcher, a tokio worker, or, for an inline completion, the submitting
-/// thread). This is the same trade the consumer's Category-6 handle records: a
-/// deferred release is a retention, whereas a raw pointer outliving its client is
-/// corruption.
+/// thread). On a tokio worker, the destroy moves its wait and free to a thread of its
+/// own and returns at once (master #233). This is the same trade the consumer's
+/// Category-6 handle records: a deferred release is a retention, whereas a raw pointer
+/// outliving its client is corruption.
 /// </para>
 /// <para>
 /// <see cref="ReleaseHandle"/> is the bare <c>AdminClient_destroy</c>. The

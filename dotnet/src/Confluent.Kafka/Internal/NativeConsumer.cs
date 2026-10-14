@@ -1583,7 +1583,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
                     // call. Load-bearing here — the listener callbacks fire INSIDE this call, and
                     // that reference is what keeps a concurrent teardown from racing them (the
                     // precondition Consumer_destroy places on its caller,
-                    // rust/src/ffi/consumer.rs:513-517).
+                    // rust/src/ffi/consumer.rs:721-725).
                     error = NativeMethods.ConsumerSubscribeWithListener(_handle, pointers, cnt, listenerHandle);
                 }
                 catch
@@ -2180,7 +2180,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// Unlike <see cref="Dispose"/> (which swallows the close error, best-effort), this
     /// <b>throws</b> it — <c>close()</c> reports failures. No separate-op drain (single-owner:
     /// the awaiter of an op is its disposer). <c>Consumer_close</c> is the graceful bg-task join
-    /// (a bare <c>Consumer_destroy</c> would be fire-and-forget), so it precedes destroy.
+    /// (a bare <c>Consumer_destroy</c> does not join it), so it precedes destroy.
     /// </remarks>
     /// <exception cref="KafkaException">The core reported a close failure.</exception>
     internal void CloseSync()
@@ -3002,33 +3002,40 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// the pre-<c>073252f3</c> use-after-free, so it is not available; and the only safe
     /// way to force it would be a Rust-core cancel-then-join on <c>Consumer_destroy</c>,
     /// which is <b>Mode B and explicitly not pursued and not tracked</b> (decision Q1).
+    /// Since master #233 the core's <c>Consumer_destroy</c> does wake and wait for in-flight
+    /// <c>_async</c> operations (<c>rust/src/ffi/consumer.rs:788-801</c>). It does not wait
+    /// for a synchronous call still in progress, and the binding does not rely on it: the
+    /// ref-count still defers the destroy until every operation has released its count.
     /// </para>
     /// <para>
     /// <b><c>Consumer_destroy</c> on the core's own dispatcher thread is safe by
     /// construction.</b> When the deferred release happens on an operation's completion,
     /// destroy runs on the Rust core's foreign dispatcher thread rather than the caller's
-    /// teardown thread. That is a shape ffi §B2 does not contemplate, and it is safe on
-    /// three citable grounds:
+    /// teardown thread. Since master #233, <c>Consumer_destroy</c> detects that it is on the
+    /// dispatcher thread and moves its wait and free to a new thread
+    /// (<c>kafka-consumer-destroy</c>, <c>rust/src/ffi/consumer.rs:736-744</c>), returning at
+    /// once; if that thread cannot be started, the core leaks the handle and logs an error.
+    /// That is a shape ffi §B2 does not contemplate, and it is safe on three citable grounds:
     /// </para>
     /// <list type="number">
     /// <item>
     /// <b>No self-join.</b> <c>Consumer_destroy</c> explicitly does <em>not</em> join the
-    /// dispatcher — <c>rust/src/ffi/consumer.rs:518-522</c> drops the <c>JoinHandle</c> with
+    /// dispatcher — <c>rust/src/ffi/consumer.rs:817-821</c> drops the <c>JoinHandle</c> with
     /// the comment "detach the dispatcher (do NOT join — outstanding completion jobs may
     /// still hold a cloned <c>completion_tx</c>, and the dispatcher exits once all clones
-    /// are released)". Dropping a <c>JoinHandle</c> for the current thread is a no-op
-    /// detach.
+    /// are released)". Dropping the <c>JoinHandle</c> only detaches the dispatcher, on
+    /// whichever thread the teardown runs.
     /// </item>
     /// <item>
     /// <b>No producer can block.</b> The completion queue is an <b>unbounded</b>
-    /// <c>std::sync::mpsc::channel</c> (<c>rust/src/ffi/common.rs:224</c>), so nothing the
+    /// <c>std::sync::mpsc::channel</c> (<c>rust/src/ffi/common.rs:2818</c>), so nothing the
     /// internal bg task does while <c>drop(consumer)</c> joins it can block on the
-    /// dispatcher; <c>runtime.shutdown_background()</c> (<c>consumer.rs:515</c>) is
+    /// dispatcher; <c>runtime.shutdown_background()</c> (<c>consumer.rs:814</c>) is
     /// non-blocking by definition.
     /// </item>
     /// <item>
     /// <b>No use-after-free of the dispatcher's own state.</b> <c>completion_rx</c> is
-    /// moved into the dispatcher closure (<c>rust/src/ffi/common.rs:224-231</c>), separate from
+    /// moved into the dispatcher closure (<c>rust/src/ffi/common.rs:2818-2826</c>), separate from
     /// the <c>FfiConsumerHandle</c> box being freed; after the box is gone the
     /// dispatcher's <c>while let Ok(job) = completion_rx.recv()</c> still holds a valid
     /// receiver and exits cleanly once the running job returns and releases the last
@@ -3068,7 +3075,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// graceful bg-task join, but it still frees every native resource:
     /// <c>runtime.shutdown_background()</c>, <c>drop(consumer)</c> (which joins the
     /// <em>internal</em> bg task) and the dispatcher detach all run
-    /// (<c>rust/src/ffi/consumer.rs:512-522</c>). The loss is the graceful
+    /// (<c>rust/src/ffi/consumer.rs:809-821</c>). The loss is the graceful
     /// leave-group / commit-on-close courtesy, on a path where the caller already
     /// abandoned an operation.
     /// </item>
@@ -3090,7 +3097,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
 
         try
         {
-            // Graceful close first (ffi §B2/§B7): destroy alone is fire-and-forget.
+            // Graceful close first (ffi §B2/§B7): destroy alone does not join the bg task.
             // The handle is not released until after this returns, so its raw value
             // is valid here. Dispose consumes the close error (freeing the handle
             // via FromHandle) but does NOT rethrow — Dispose must not throw, and a

@@ -58,13 +58,16 @@ namespace Confluent.Kafka.Internal;
 /// </para>
 /// <para>
 /// ⚠ <b>The span-the-op reference is load-bearing, not a nicety.</b>
-/// <c>kafka_admin_AdminClient_destroy</c> is not ref-counted and does not drain, and
-/// the header makes "do not destroy concurrently with an in-flight <c>_async</c>
-/// operation" a caller precondition. Holding a reference on the client's
-/// <c>SafeAdminHandle</c> from submit until this context is freed is what
-/// upholds it: <c>ReleaseHandle</c> → <c>AdminClient_destroy</c> runs only at count
-/// zero, so a <c>Dispose</c> racing an in-flight operation defers the destroy rather
-/// than freeing the client under the operation. See
+/// <c>kafka_admin_AdminClient_destroy</c> does not wait for every in-flight
+/// <c>_async</c> operation. Since master #233 it waits for an in-flight close, and it
+/// fails the single-callback operations it tracks with a <c>TIMEOUT</c> error ("The
+/// AdminClient thread has exited.") and joins their tasks. The per-key operations are
+/// not tracked, so if the client were destroyed while one is in flight, its callbacks
+/// might never fire: its awaiters would hang and its <see cref="GCHandle"/> would leak.
+/// Holding a reference on the client's <c>SafeAdminHandle</c> from submit until this
+/// context is freed prevents that: <c>ReleaseHandle</c> → <c>AdminClient_destroy</c>
+/// runs only at count zero, so a <c>Dispose</c> racing an in-flight operation defers
+/// the destroy until the operation's last callback has run. See
 /// <see cref="Interop.SafeAdminHandle"/>.
 /// </para>
 /// </remarks>

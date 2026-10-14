@@ -48,13 +48,14 @@ namespace Confluent.Kafka.Internal.Interop;
 /// the marshaller <c>DangerousAddRef</c> a handle that is already mid-release.
 /// </para>
 /// <para>
-/// ⚠ <b><c>AdminClient_destroy</c> is not ref-counted and does not drain.</b> The
-/// header states that destroying concurrently with an in-flight <c>_async</c>
-/// operation is a C lifetime precondition <em>the caller</em> must uphold — unlike the
-/// consumer ABI, which ref-counts internally. The span-the-op
-/// <c>DangerousAddRef</c> on <see cref="SafeAdminHandle"/> (taken in
-/// <c>NativeAdminClient</c>'s submit, released in <c>AdminOperation.FreeGcHandle</c>)
-/// is therefore <b>the</b> mechanism that upholds it.
+/// ⚠ <b><c>AdminClient_destroy</c> does not wait for every in-flight <c>_async</c>
+/// operation.</b> Since master #233 it waits for an in-flight close, and fails the
+/// single-callback operations it tracks with a <c>TIMEOUT</c> error and joins their
+/// tasks, but the per-key operations are not tracked: one in flight at destroy may never
+/// fire its callbacks. The span-the-op <c>DangerousAddRef</c> on
+/// <see cref="SafeAdminHandle"/> (taken in <c>NativeAdminClient</c>'s submit, released in
+/// <c>AdminOperation.FreeGcHandle</c>) is therefore <b>the</b> mechanism that keeps the
+/// destroy from running while any operation is in flight.
 /// </para>
 /// </remarks>
 internal static partial class NativeMethods
@@ -110,10 +111,11 @@ internal static partial class NativeMethods
 
     /// <summary>
     /// <c>kafka_admin_AdminClient_destroy</c> — frees the client. Null-safe.
-    /// <b>Not</b> ref-counted and it does <b>not</b> drain: the header makes
-    /// "do not destroy concurrently with an in-flight <c>_async</c> op" a caller
-    /// precondition, upheld here by the span-the-op ref on
-    /// <see cref="SafeAdminHandle"/>. Takes a raw <see cref="IntPtr"/> because it is
+    /// It waits for an in-flight close and fails the single-callback operations it tracks
+    /// (master #233). It does not track the per-key operations, and does not wait for a
+    /// synchronous call still running. The binding never calls it with an operation in
+    /// flight, because of the ref-count on <see cref="SafeAdminHandle"/>. Takes a raw
+    /// <see cref="IntPtr"/> because it is
     /// called from that handle's own <c>ReleaseHandle</c> (see the class remarks).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_destroy", CallingConvention = CallingConvention.Cdecl)]

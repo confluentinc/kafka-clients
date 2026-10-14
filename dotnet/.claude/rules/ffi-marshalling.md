@@ -1382,7 +1382,7 @@ layer, removed in M3/P2 to match the in-repo Python sibling.
 
 | Handle | Category | Freed by |
 |---|---|---|
-| `Consumer_t` | 1 — client (`SafeHandle`) | `Dispose`: `Consumer_close_with_timeout` → `Consumer_destroy` (`DisposeAsync`: `Consumer_close_async` → `Consumer_destroy`); **close before destroy** because destroy is **fire-and-forget** — cancels in-flight ops, no bg-task join. ⚠ The destroy is **ref-counted**, so it is immediate only when no op holds a count — see Rule; §B7 + Rule |
+| `Consumer_t` | 1 — client (`SafeHandle`) | `Dispose`: `Consumer_close_with_timeout` → `Consumer_destroy` (`DisposeAsync`: `Consumer_close_async` → `Consumer_destroy`); **close before destroy** because destroy is not a graceful close — it does **not** join the bg task (since master #233 it does wake and wait for an in-flight `_async` op). ⚠ The destroy is **ref-counted**, so it is immediate only when no op holds a count — see Rule; §B7 + Rule |
 | `ConsumerProperties_t` | 1 — config (`SafeHandle`, short) | the binding, after `KafkaConsumer_new` |
 | `KafkaError_t` (any `out_error`) | 2 — flat transient | reader: read accessors, then `_destroy` |
 | `ConsumerRecords_t` (poll batch) | 3 — owned **borrow-root** | owns the fetched bytes; **copy-out default** (CLAUDE.md §6.4), keep-alive deferred |
@@ -1460,6 +1460,12 @@ const-ness decides, not the type name:
     because M9/P4 H1 extended ref-counting to the synchronous surface; path 5
     because M9/P8's `ConsumerHandle` ref-counts its parent.
 
+    On path 3, since master #233, `Consumer_destroy` sees that it is on its own
+    dispatcher thread and moves its wait and its free to a new
+    `kafka-consumer-destroy` thread, returning at once
+    (`rust/src/ffi/consumer.rs:736-744`). If that thread cannot be started, the core
+    leaks the handle and logs an error.
+
     ⚠ **Paths 4 and 5 can run the destroy on a thread that is neither the caller's
     nor the dispatcher's.** The safety argument for the deferred paths therefore
     rests on §B6's **first** clause — the ref-counted `SafeConsumerHandle`, which
@@ -1469,10 +1475,15 @@ const-ness decides, not the type name:
 
   - `SafeConsumerHandle : SafeHandle` — `ownsHandle: true`, `IsInvalid => handle
     == IntPtr.Zero`. The release path is **not** a bare destroy: `Consumer_destroy`
-    is **fire-and-forget** — `shutdown_background` **cancels** in-flight async ops
-    (their callbacks never fire) and it does **not** join the bg task (the graceful
-    join is `Consumer_close` / `await_join`, not destroy). So teardown routes
-    through the graceful **close before destroy**: `Dispose` =
+    is not a graceful close, and it does **not** join the bg task (the graceful
+    join is `Consumer_close` / `await_join`, not destroy). Since master #233 it wakes
+    any in-flight `_async` op and waits for its task, so that op's callback still
+    fires once, typically with a `WAKEUP` error, possibly after destroy returns
+    (`rust/src/ffi/consumer.rs:788-801`; before #233, `shutdown_background`
+    cancelled such ops and their callbacks never fired). It does **not** wait for a
+    synchronous call still running on another thread. The binding relies on neither
+    behaviour: the ref-count (below) means no op is in flight when it runs. So
+    teardown routes through the graceful **close before destroy**: `Dispose` =
     **`Consumer_close_with_timeout` → `Consumer_destroy`**, `DisposeAsync` =
     **`Consumer_close_async` → `Consumer_destroy`** — no separate-op drain (§B7).
     Under single-owner the awaiter of an op *is* its disposer, so there is nothing
@@ -1570,7 +1581,7 @@ confluent-kafka-dotnet's `SafeHandleZeroIsInvalid` pattern). A per-message
 `SafeHandle` would allocate a finalizable object per record, so transient handles
 and borrowed views are not wrapped. The borrow-root discipline (Category 3
 outlives its Category 4 borrows) is what makes the receive-path zero-copy contract
-(§B4, CLAUDE.md §6.4) safe. `Consumer_destroy` being fire-and-forget is why
+(§B4, CLAUDE.md §6.4) safe. `Consumer_destroy` not being a graceful close is why
 teardown routes through the graceful `Consumer_close` (`_with_timeout` / `_async`)
 first — a bare destroy skips the bg-task join. There is no separate-op drain:
 under single-owner the awaiter of an op is its disposer, so there is no concurrent
@@ -1584,7 +1595,10 @@ the duration of the native call removes that window by construction. The cost is
 that teardown racing an *unawaited* op no longer releases at `Dispose` — the
 deliberate trade, since the alternative (forcing cancellation at teardown) **is**
 the use-after-free being fixed, and a safe version of it would need a core-side
-cancel-then-join that this layer cannot provide.
+cancel-then-join that this layer cannot provide. (Since master #233 the core's
+`Consumer_destroy` does wake and join in-flight `_async` ops, but it still does not
+wait for a synchronous call in progress — the window M9/P4 H1 closed — so the
+ref-count is still what keeps teardown safe.)
 
 **Anti-patterns:**
 
@@ -1632,7 +1646,10 @@ cancel-then-join that this layer cannot provide.
 > the documented-misuse path (dispose without awaiting your own op). The
 > close-before-destroy rule above is **not** violated by them. A core-side
 > cancel-then-join would be the theoretical clean fix; it is explicitly **not
-> pursued and not tracked**.
+> pursued and not tracked**. Since master #233 the core's `Consumer_destroy` wakes
+> and joins in-flight `_async` ops, but not a synchronous call in progress. That
+> changes neither residual — the ref-count still defers the destroy past `Dispose`,
+> and the deferred destroy is still bare — and the binding does not rely on it.
 
 **Tests required:**
 
@@ -2355,9 +2372,10 @@ PollWithCallback():                 worker task: poll(timeout).await   ← runs 
     immediate, which deferred, and on which thread — see §B2's authoritative path
     list. Do not restate them here.** (This bullet used to carry its own
     enumeration; it went stale twice during M9, which is why the list is now
-    single-sourced.) The two facts §B7 adds on top: `Consumer_destroy` is
-    fire-and-forget at the ABI (it **cancels** any remaining in-flight op and does
-    **not** join, §B2), and since M9/P4 H1 the binding rarely reaches it directly at
+    single-sourced.) The two facts §B7 adds on top: `Consumer_destroy` is not a
+    graceful close at the ABI (it does **not** join the bg task; since master #233
+    it wakes and waits for any remaining in-flight `_async` op, whose callback still
+    fires once, §B2), and since M9/P4 H1 the binding rarely reaches it directly at
     `Dispose` because release is ref-counted. Disposing with an **unawaited** op in
     flight therefore does **NOT** strand the `Task` and does **NOT** leak the
     `GCHandle` (the pre-M9/P4 description, now **obsolete**). Retention until the op

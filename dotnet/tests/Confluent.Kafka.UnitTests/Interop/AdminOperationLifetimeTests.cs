@@ -26,12 +26,12 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// The span-the-op reference contract on <see cref="SafeAdminHandle"/> — the binding's
-/// only defence against the admin ABI's unguarded destroy.
-/// <c>kafka_admin_AdminClient_destroy</c> is <b>not</b> ref-counted and does <b>not</b>
-/// drain: the header makes "do not destroy concurrently with an in-flight <c>_async</c>
-/// operation" a precondition <em>the caller</em> must uphold, unlike the consumer ABI
-/// which ref-counts internally.
+/// The span-the-op reference contract on <see cref="SafeAdminHandle"/>, which keeps the
+/// admin destroy from running while an operation is in flight.
+/// <c>kafka_admin_AdminClient_destroy</c> does not wait for every in-flight
+/// <c>_async</c> operation: since master #233 it waits for an in-flight close and fails
+/// the single-callback operations it tracks, but the per-key operations are not tracked,
+/// and no other call on the handle may run concurrently with it.
 /// </summary>
 /// <remarks>
 /// <para>

@@ -76,8 +76,8 @@ namespace Confluent.Kafka.Internal;
 /// <para>
 /// <b>What actually closes the window.</b> Dropping that future means destroying the
 /// consumer, and <c>Consumer_destroy</c> is governed by an explicit ABI precondition —
-/// "destroying concurrently with an in-flight op is a C lifetime precondition the caller
-/// must uphold" (<c>rust/src/ffi/consumer.rs:513-517</c>) — which this binding upholds
+/// "no other call on the handle may run concurrently with it or start after it, on any
+/// thread" (<c>rust/src/ffi/consumer.rs:721-725</c>) — which this binding upholds
 /// structurally: release is <b>ref-counted</b>, and a <b>listener</b> callback only ever
 /// runs inside a consumer operation that holds a count (the rebalance blocks on it), so
 /// <c>ReleaseHandle</c> → <c>Consumer_destroy</c> cannot run while one is in flight. That
