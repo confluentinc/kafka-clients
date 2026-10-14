@@ -1581,10 +1581,13 @@ def test_sync_send_offsets_to_transaction_never_calls_its_blocking_entry_point(
     with KafkaProducer(configs=UNREACHABLE) as p:
         # Non-empty offsets: Java's empty map is a no-op on an idempotent producer
         # (see test_send_offsets_to_transaction_checks_group_metadata_first).
+        # They make Java 4.4 await the offsets' topic metadata (awaitTopicMetadata,
+        # KafkaProducer.java:800-805) before ensureTransactional, so the unreachable
+        # cluster times the call out first, through the completion it waits on.
         offsets = {TopicPartition(topic=TOPIC, partition=0): OffsetAndMetadata(offset=1)}
-        with pytest.raises(IllegalStateError) as err:
+        with pytest.raises(KafkaTimeoutError) as err:
             p.send_offsets_to_transaction(offsets=offsets, group_metadata=group_metadata)
-        assert str(err.value) == NOT_TRANSACTIONAL
+        assert str(err.value) == "Failed to update metadata after 100 ms."
 
 
 def test_sigint_while_waiting_lets_the_operation_finish_then_reraises() -> None:

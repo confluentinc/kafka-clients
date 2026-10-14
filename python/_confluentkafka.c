@@ -64,6 +64,42 @@ static kafka_common_Error_t* ffi_built(kafka_common_Error_t* built, kafka_common
     return built != NULL ? built : panic;
 }
 
+// Takes the GIL for a callback the Rust client fires, unless the interpreter
+// is shutting down. Returns 1 with the GIL held (release it with
+// PyGILState_Release), or 0 without it, and the callback must then return at
+// once without touching Python. A callback can fire after the client was
+// destroyed (an in-flight close still completes), and so after Python began
+// exiting, when PyGILState_Ensure would end the calling thread (or, from 3.14,
+// hang it). This only narrows that window, since finalization can still start
+// between the check and the Ensure: CPython offers no way to take the GIL that
+// fails instead. Whatever the skipped callback owns is leaked, since a Python
+// reference cannot be dropped without the GIL. A thread that already holds the
+// GIL, such as one tearing the client down that runs a callback inline, is let
+// through even mid-shutdown, because re-entering the GIL there is safe.
+static int gil_ensure_unless_finalizing(PyGILState_STATE* gstate) {
+#if PY_VERSION_HEX >= 0x030D0000
+    int finalizing = Py_IsFinalizing();
+#else
+    int finalizing = _Py_IsFinalizing();  // the only spelling before 3.13
+#endif
+    if (!PyGILState_Check() && (!Py_IsInitialized() || finalizing)) {
+        return 0;
+    }
+    *gstate = PyGILState_Ensure();
+    return 1;
+}
+
+// The report of a user callback that could not run because the interpreter is
+// shutting down: a foreign callback error owning nothing, so the operation
+// waiting for the report fails as if the callback had raised rather than going
+// on as if it had returned. Built without the GIL.
+static kafka_common_Error_t* interpreter_finalizing_error(const char* what) {
+    kafka_common_Error_t *ffi_err = NULL;
+    char msg[160];
+    snprintf(msg, sizeof(msg), "the %s cannot run: the Python interpreter is shutting down", what);
+    return ffi_built(kafka_common_Error_local_callback_err(msg, NULL, NULL, &ffi_err), &ffi_err);
+}
+
 // The Python error for the owned error `e`: `confluent_kafka._errors.
 // from_ffi_error`, which builds the class of its FFI id with its payload and
 // cause chain. NULL with the conversion's own exception set when it fails.
@@ -903,7 +939,13 @@ static void producer_on_completion(void* self_,
                                    int64_t callback_id) {
     kafka_common_Error_t *ffi_err = NULL;
     DeliveryCtx* ctx = (DeliveryCtx*)self_;
-    PyGILState_STATE g = PyGILState_Ensure();
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) {
+        // `ctx` is leaked with the rest; the report still releases the waits.
+        ffi_unraisable((kafka_producer_Producer__set_callback_result_err(ctx->producer, callback_id, NULL,
+            interpreter_finalizing_error("delivery callback"), &ffi_err), ffi_take(&ffi_err)));
+        return;
+    }
     kafka_common_Error_t* report = NULL;
     int deferred = 0;
     PyObject* meta = metadata ? metadata_to_py(metadata) : (Py_INCREF(Py_None), Py_None);
@@ -948,7 +990,8 @@ static void producer_callbacks_notify(void* opaque) {
         // asyncio: schedule the pump on the loop. PyGILState_Ensure is a no-op
         // when this thread already holds the GIL and re-acquires it when it is
         // the calling thread inside Py_BEGIN_ALLOW_THREADS.
-        PyGILState_STATE g = PyGILState_Ensure();
+        PyGILState_STATE g;
+        if (!gil_ensure_unless_finalizing(&g)) return;
         PyObject* r = PyObject_CallNoArgs(p->notify_cb);
         if (r == NULL) PyErr_WriteUnraisable(p->notify_cb); else Py_DECREF(r);
         PyGILState_Release(g);
@@ -1266,7 +1309,8 @@ typedef struct {
 
 static void kafka_future_get_cb(void* value, kafka_common_Error_t* error, void* opaque) {
     FutureGetCtx* ctx = (FutureGetCtx*)opaque;
-    PyGILState_STATE g = PyGILState_Ensure();
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) return;
     PyObject* pair;
     if (error != NULL) {
         pair = build_value_error(Py_None, error);
@@ -1476,7 +1520,8 @@ typedef struct {
 static void producer_send_cb(kafka_common_KafkaFuture_t* value, kafka_common_Error_t* error, void* opaque) {
     kafka_common_Error_t *ffi_err = NULL;
     SendCtx* ctx = (SendCtx*)opaque;
-    PyGILState_STATE g = PyGILState_Ensure();
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) return;
     // The record's outcome reaches Python through the delivery callback; the
     // future is not needed.
     if (value != NULL) ffi_unraisable((kafka_common_KafkaFuture_destroy_err(value, &ffi_err), ffi_take(&ffi_err)));
@@ -1603,7 +1648,8 @@ typedef struct {
 static void producer_void_cb(kafka_common_Error_t* error, void* opaque) {
     kafka_common_Error_t *ffi_err = NULL;
     VoidCbCtx* ctx = (VoidCbCtx*)opaque;
-    PyGILState_STATE g = PyGILState_Ensure();
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) return;
     PyObject* py_err = error_handle_to_py(error);
     if (py_err != NULL) {
         PyObject* r = PyObject_CallFunctionObjArgs(ctx->cb, py_err, NULL);
@@ -1906,7 +1952,8 @@ static PyObject* py_Producer_partitions_for(PyObject* self, PyObject* args) {
 static void producer_partitions_for_cb(kafka_List_t* value, kafka_common_Error_t* error, void* opaque) {
     kafka_common_Error_t *ffi_err = NULL;
     VoidCbCtx* ctx = (VoidCbCtx*)opaque;
-    PyGILState_STATE g = PyGILState_Ensure();
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) return;
     PyObject* py_list;
     if (error != NULL) {
         if (value != NULL) ffi_unraisable((kafka_List_destroy_err(value, &ffi_err), ffi_take(&ffi_err)));
@@ -2568,12 +2615,8 @@ static kafka_common_Error_t* error_from_py_exception(const char* fallback) {
 // finalizing it does nothing, leaking the one object instead of touching a
 // dying interpreter.
 static void release_py_object(void* opaque) {
-#if PY_VERSION_HEX >= 0x030D0000
-    if (Py_IsFinalizing()) return;
-#else
-    if (_Py_IsFinalizing()) return;
-#endif
-    PyGILState_STATE g = PyGILState_Ensure();
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) return;
     Py_DECREF((PyObject*)opaque);
     PyGILState_Release(g);
 }
@@ -3752,7 +3795,13 @@ static void consumer_orphan_commit(Consumer* c, CommitCbCtx* ctx) {
 static void listener_fire(const char* method, void* self_, const kafka_List_t* partitions, int64_t callback_id) {
     kafka_common_Error_t *ffi_err = NULL;
     ListenerCtx* ctx = (ListenerCtx*)self_;
-    PyGILState_STATE g = PyGILState_Ensure();
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) {
+        // The listener did not run, so the rebalance fails as if it had raised.
+        ffi_unraisable((kafka_consumer_Consumer__set_callback_result_err(ctx->consumer, callback_id, NULL,
+            interpreter_finalizing_error("rebalance listener"), &ffi_err), ffi_take(&ffi_err)));
+        return;
+    }
     kafka_common_Error_t* err = NULL;
     int deferred = 0;
     PyObject* py_parts = tp_list_to_py_borrowed(partitions);
@@ -3825,7 +3874,14 @@ static void commit_on_complete(void* self_, const kafka_Map_t* offsets,
                                const kafka_common_Error_t* error, int64_t callback_id) {
     kafka_common_Error_t *ffi_err = NULL;
     CommitCbCtx* ctx = (CommitCbCtx*)self_;
-    PyGILState_STATE g = PyGILState_Ensure();
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) {
+        // `ctx` is leaked with the rest; the callback did not run, so the
+        // delivering call fails as if it had raised.
+        ffi_unraisable((kafka_consumer_Consumer__set_callback_result_err(ctx->consumer, callback_id, NULL,
+            interpreter_finalizing_error("commit callback"), &ffi_err), ffi_take(&ffi_err)));
+        return;
+    }
     kafka_common_Error_t* err = NULL;
     int deferred = 0;
     if (ctx->adapter != NULL) {
@@ -3861,7 +3917,8 @@ static void commit_on_complete(void* self_, const kafka_Map_t* offsets,
 static void consumer_callbacks_notify(void* opaque) {
     Consumer* c = (Consumer*)opaque;
     if (c->notify_cb == NULL) return;
-    PyGILState_STATE g = PyGILState_Ensure();
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) return;
     PyObject* r = PyObject_CallNoArgs(c->notify_cb);
     if (r == NULL) PyErr_WriteUnraisable(c->notify_cb); else Py_DECREF(r);
     PyGILState_Release(g);
@@ -4214,7 +4271,8 @@ typedef struct {
 // poll: cb(ConsumerRecords | None, error)
 static void consumer_poll_cb(kafka_consumer_ConsumerRecords_t* records, kafka_common_Error_t* error, void* opaque) {
     PollCbCtx* ctx = (PollCbCtx*)opaque;
-    PyGILState_STATE g = PyGILState_Ensure();
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) return;
     deliver_value_cb(ctx->cb, wrap_records(records, ctx->copy_bytes), error);
     Py_DECREF(ctx->cb);
     PyMem_Free(ctx);
@@ -4224,7 +4282,8 @@ static void consumer_poll_cb(kafka_consumer_ConsumerRecords_t* records, kafka_co
 // position: cb(int, error)   (-1 beside an error)
 static void consumer_i64_cb(int64_t value, kafka_common_Error_t* error, void* opaque) {
     VoidCbCtx* ctx = (VoidCbCtx*)opaque;
-    PyGILState_STATE g = PyGILState_Ensure();
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) return;
     deliver_value_cb(ctx->cb, PyLong_FromLongLong((long long)value), error);
     Py_DECREF(ctx->cb);
     PyMem_Free(ctx);
@@ -4254,7 +4313,8 @@ static ValueCbCtx* value_cb_ctx_new(PyObject* cb, owned_map_conv_fn conv_map, ow
 // and freed here.
 static void consumer_map_cb(kafka_Map_t* value, kafka_common_Error_t* error, void* opaque) {
     ValueCbCtx* ctx = (ValueCbCtx*)opaque;
-    PyGILState_STATE g = PyGILState_Ensure();
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) return;
     PyObject* py_value = value ? ctx->conv_map(value) : (Py_INCREF(Py_None), Py_None);
     deliver_value_cb(ctx->cb, py_value, error);
     Py_DECREF(ctx->cb);
@@ -4266,7 +4326,8 @@ static void consumer_map_cb(kafka_Map_t* value, kafka_common_Error_t* error, voi
 // and freed here.
 static void consumer_list_cb(kafka_List_t* value, kafka_common_Error_t* error, void* opaque) {
     ValueCbCtx* ctx = (ValueCbCtx*)opaque;
-    PyGILState_STATE g = PyGILState_Ensure();
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) return;
     PyObject* py_value = value ? ctx->conv_list(value) : (Py_INCREF(Py_None), Py_None);
     deliver_value_cb(ctx->cb, py_value, error);
     Py_DECREF(ctx->cb);
@@ -4788,7 +4849,8 @@ typedef struct {
 static void consumer_subscribe_cb(kafka_common_Error_t* error, void* opaque) {
     kafka_common_Error_t *ffi_err = NULL;
     SubscribeCbCtx* ctx = (SubscribeCbCtx*)opaque;
-    PyGILState_STATE g = PyGILState_Ensure();
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) return;
     consumer_listener_commit(ctx->c, ctx->lctx, error != NULL);
     PyObject* py_err = error_handle_to_py(error);  // owned: the callable takes it
     if (py_err != NULL) {
@@ -4967,7 +5029,8 @@ typedef struct {
 static void consumer_commit_async_cb(kafka_common_Error_t* error, void* opaque) {
     kafka_common_Error_t *ffi_err = NULL;
     CommitAsyncCbCtx* ctx = (CommitAsyncCbCtx*)opaque;
-    PyGILState_STATE g = PyGILState_Ensure();
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) return;
     if (error != NULL) consumer_orphan_commit(ctx->c, ctx->cctx);
     PyObject* py_err = error_handle_to_py(error);  // owned: the callable takes it
     if (py_err != NULL) {
@@ -5635,7 +5698,8 @@ static void admin_callbacks_notify(void* opaque) {
     // after the last notification this hook can receive.
     PyObject* cb = a->notify_cb;
     if (cb == NULL) return;
-    PyGILState_STATE g = PyGILState_Ensure();
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) return;
     PyObject* r = PyObject_CallNoArgs(cb);
     if (r == NULL) PyErr_WriteUnraisable(cb); else Py_DECREF(r);
     PyGILState_Release(g);
@@ -5770,7 +5834,8 @@ static PyObject* py_Admin_close(PyObject* self, PyObject* args) {
 // producer's `VoidCbCtx` for the callable reference.
 static void admin_close_cb(void* opaque) {
     VoidCbCtx* ctx = (VoidCbCtx*)opaque;
-    PyGILState_STATE g = PyGILState_Ensure();
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) return;
     PyObject* r = PyObject_CallNoArgs(ctx->cb);
     if (r == NULL) PyErr_WriteUnraisable(ctx->cb); else Py_DECREF(r);
     Py_DECREF(ctx->cb);
@@ -6143,7 +6208,8 @@ static void admin_slot_cb(void* value, kafka_common_Error_t* error, void* opaque
     kafka_common_Error_t *ffi_err = NULL;
     (void)value;
     AdminSlot* slot = (AdminSlot*)opaque;
-    PyGILState_STATE g = PyGILState_Ensure();
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) return;
     if (error) ffi_unraisable((kafka_common_Error_destroy_err(error, &ffi_err), ffi_take(&ffi_err)));
     AdminJob* job = slot->job;
     slot_resolve(job, slot);
@@ -10176,6 +10242,25 @@ static PyObject* py_Admin_abort_transaction(PyObject* self, PyObject* args) {
     return job_or_error(job, NULL);
 }
 
+// Admin_unregister_controller(h, controller_id, timeout_ms) -> (job, err).
+// Payload: (error, None).
+static PyObject* py_Admin_unregister_controller(PyObject* self, PyObject* args) {
+    kafka_common_Error_t *ffi_err = NULL;
+    unsigned long long h; int controller_id; long long timeout_ms;
+    if (!PyArg_ParseTuple(args, "KiL", &h, &controller_id, &timeout_ms)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
+    AdminHandle* a = admin_from_handle(h);
+    ADMIN_OPTIONS(UnregisterController, o, timeout_ms);
+    kafka_admin_UnregisterControllerResult_t* r = NULL;
+    FFI_STEP(o_err, (r = kafka_admin_Admin_unregister_controller_with_options_err(a->admin, (int32_t)controller_id, o, &ffi_err), ffi_take(&ffi_err)));
+    if (o) ffi_unraisable((kafka_admin_UnregisterControllerOptions_destroy_err(o, &ffi_err), ffi_take(&ffi_err)));
+    if (ffi_raise(o_err)) return NULL;
+    AdminJob* job = job_new(r, JOB_RESULT_DESTROY(UnregisterController), assemble_single);
+    if (job == NULL) { ffi_unraisable((kafka_admin_UnregisterControllerResult_destroy_err(r, &ffi_err), ffi_take(&ffi_err))); return NULL; }
+    { kafka_common_KafkaFuture_t * v_ = NULL; JOB_TRY(job, ffi_raise((v_ = kafka_admin_UnregisterControllerResult_all_err(r, &ffi_err), ffi_take(&ffi_err))) ? -1 : job_add_single(job, v_, 1, NULL, 0)); }
+    return job_or_error(job, NULL);
+}
+
 // Admin_force_terminate_transaction(h, transactional_id, timeout_ms) -> (job, err).
 // Payload: (error, None).
 static PyObject* py_Admin_force_terminate_transaction(PyObject* self, PyObject* args) {
@@ -10221,6 +10306,18 @@ static PyObject* py_MockAdminClient_timeout_next_request(PyObject* self, PyObjec
     AdminHandle* a = admin_from_handle(h);
     if (a->mock == NULL) return mock_only_error();
     return owned_error_int((kafka_admin_MockAdminClient_timeout_next_request_err(a->mock, (int32_t)n, &ffi_err), ffi_take(&ffi_err)));
+}
+
+// MockAdminClient_set_using_raft_controller(h, using_raft_controller) -> error.
+// Java's `MockAdminClient.Builder.usingRaftController(boolean)`, a setter on
+// the constructed mock here.
+static PyObject* py_MockAdminClient_set_using_raft_controller(PyObject* self, PyObject* args) {
+    kafka_common_Error_t *ffi_err = NULL;
+    unsigned long long h; int using_raft_controller;
+    if (!PyArg_ParseTuple(args, "Kp", &h, &using_raft_controller)) return NULL;
+    AdminHandle* a = admin_from_handle(h);
+    if (a->mock == NULL) return mock_only_error();
+    return owned_error_int((kafka_admin_MockAdminClient_set_using_raft_controller_err(a->mock, (int8_t)(using_raft_controller != 0), &ffi_err), ffi_take(&ffi_err)));
 }
 
 typedef void (*mock_offsets_fn)(const kafka_admin_MockAdminClient_t*, const kafka_Map_t*, kafka_common_Error_t**);
@@ -10555,8 +10652,10 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Admin_fence_producers", py_Admin_fence_producers, METH_VARARGS, "Admin_fence_producers(handle, ...) -> (job, error)"},
     {"Admin_list_transactions", py_Admin_list_transactions, METH_VARARGS, "Admin_list_transactions(handle, ...) -> (job, error)"},
     {"Admin_abort_transaction", py_Admin_abort_transaction, METH_VARARGS, "Admin_abort_transaction(handle, ...) -> (job, error)"},
+    {"Admin_unregister_controller", py_Admin_unregister_controller, METH_VARARGS, "Admin_unregister_controller(handle, ...) -> (job, error)"},
     {"Admin_force_terminate_transaction", py_Admin_force_terminate_transaction, METH_VARARGS, "Admin_force_terminate_transaction(handle, ...) -> (job, error)"},
     {"MockAdminClient_timeout_next_request", py_MockAdminClient_timeout_next_request, METH_VARARGS, "Mock-only seeding; returns an owned error handle (0 = ok)"},
+    {"MockAdminClient_set_using_raft_controller", py_MockAdminClient_set_using_raft_controller, METH_VARARGS, "Mock-only seeding; returns an owned error handle (0 = ok)"},
     {"MockAdminClient_update_beginning_offsets", py_MockAdminClient_update_beginning_offsets, METH_VARARGS, "Mock-only seeding; returns an owned error handle (0 = ok)"},
     {"MockAdminClient_update_end_offsets", py_MockAdminClient_update_end_offsets, METH_VARARGS, "Mock-only seeding; returns an owned error handle (0 = ok)"},
     {"MockAdminClient_update_consumer_group_offsets", py_MockAdminClient_update_consumer_group_offsets, METH_VARARGS, "Mock-only seeding; returns an owned error handle (0 = ok)"},

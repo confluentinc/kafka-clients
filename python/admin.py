@@ -2902,9 +2902,8 @@ class _AdminBase:
         # No result handle: Java's UnregisterControllerResult exposes only
         # all() -> KafkaFuture<Void>, so success is a null error.
         ms = _ms(timeout)
-        return (lambda cb: _lib.Admin_unregister_controller_async(
-                    self._h, int(controller_id), ms, cb),
-                self._resolve_void, self._free_void)
+        return (lambda: _lib.Admin_unregister_controller(
+                    self._h, int(controller_id), ms), _void)
 
     def _force_terminate_transaction_spec(self, transactional_id, timeout):
         # No result handle either: TerminateTransactionResult exposes only
