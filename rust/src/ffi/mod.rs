@@ -223,6 +223,90 @@ mod tests {
         assert!(total >= 2307, "only {total} exported functions found");
     }
 
+    /// Each exported function with the text of the `#[ffi_guard...]` attribute
+    /// above it, in source order. `test_every_exported_function_is_guarded`
+    /// pins that the attribute is there.
+    fn exports() -> Vec<(String, String)> {
+        let mut found = Vec::new();
+        for (_, text) in sources() {
+            let lines: Vec<&str> = text.lines().collect();
+            for (index, line) in lines.iter().enumerate() {
+                if line.trim() != "#[unsafe(no_mangle)]" {
+                    continue;
+                }
+                let name = lines[index + 1..]
+                    .iter()
+                    .find_map(|line| line.split_once("fn ").map(|(_, rest)| rest))
+                    .and_then(|rest| rest.split('(').next())
+                    .expect("an exported fn has a name")
+                    .to_string();
+                let mut start = index;
+                while start > 0 && !lines[start].trim_start().starts_with("#[ffi_guard") {
+                    start -= 1;
+                }
+                found.push((name, lines[start..index].join("\n")));
+            }
+        }
+        found
+    }
+
+    /// The names of the functions a generated C header declares: cbindgen puts
+    /// the return type and the name of each on one unindented line, while
+    /// comments, typedefs (function pointers included), struct bodies and
+    /// preprocessor lines start otherwise.
+    fn declared_functions(header: &str) -> Vec<String> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/include").join(header);
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let mut names: Vec<String> = text
+            .lines()
+            .filter(|line| {
+                !line.starts_with([' ', '/', '#', '}', '{']) && !line.starts_with("typedef") && line.contains('(')
+            })
+            .map(|line| {
+                let before = line.split('(').next().expect("split yields one piece");
+                before.rsplit([' ', '*']).next().expect("rsplit yields one piece").to_string()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// `confluent_kafka.h` declares the exports, and `confluent_kafka_bindings.h`
+    /// (written by `build.rs`) their `_err` twins, which `#[ffi_guard]` emits:
+    /// both are pinned against the source, so a header that lost or gained a
+    /// function, or a twin that `build.rs` and the macro name differently,
+    /// fails here. No export of its own ends in `_err`, which would collide
+    /// with the twin of another one.
+    #[test]
+    fn test_bindings_header_declares_the_twin_of_every_export() {
+        let mut names: Vec<String> = exports().into_iter().map(|(name, _)| name).collect();
+        names.sort();
+        let hand_written: Vec<&String> = names.iter().filter(|name| name.ends_with("_err")).collect();
+        assert!(hand_written.is_empty(), "exports named like an `_err` twin: {hand_written:?}");
+        assert_eq!(declared_functions("confluent_kafka.h"), names);
+        let mut twins: Vec<String> = names.iter().map(|name| format!("{name}_err")).collect();
+        twins.sort();
+        assert_eq!(declared_functions("confluent_kafka_bindings.h"), twins);
+        assert!(names.len() >= 2315, "only {} exported functions found", names.len());
+    }
+
+    /// The exports whose `#[ffi_guard]` takes `on_panic` are exactly the `_cb`
+    /// ones, which report a caught panic through their completion. `build.rs`
+    /// documents a twin by its name, on that ground, as returning NULL and
+    /// leaving the panic to its completion.
+    #[test]
+    fn test_on_panic_exports_are_the_cb_exports() {
+        let mismatched: Vec<String> = exports()
+            .into_iter()
+            .filter(|(name, guard)| guard.contains("on_panic") != name.ends_with("_cb"))
+            .map(|(name, _)| name)
+            .collect();
+        assert!(
+            mismatched.is_empty(),
+            "`on_panic` without `_cb`, or `_cb` without `on_panic`: {mismatched:?}"
+        );
+    }
+
     /// The `int8_t` exports carrying a Java `byte` code: each enum's domain
     /// includes 0 (`IsolationLevel.READ_UNCOMMITTED`, `AlterConfigOp.OpType.SET`,
     /// `ElectionType.PREFERRED`, or an `UNKNOWN`) and none includes -1, so a

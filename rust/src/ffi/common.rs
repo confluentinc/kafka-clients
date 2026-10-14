@@ -2867,6 +2867,103 @@ mod tests {
         assert_eq!(code, kafka_common_Error_LOCAL_ILLEGAL_STATE);
     }
 
+    // The `_err` twins `#[ffi_guard]` emits beside each guarded function, which
+    // `confluent_kafka_bindings.h` declares for language bindings.
+
+    #[test]
+    fn ffi_guard_err_twin_returns_the_panic() {
+        // SAFETY: Test code: `guarded_unit_err` takes no arguments and has no
+        // preconditions; it is `unsafe` only because `guarded_unit` is.
+        let error = unsafe { guarded_unit_err() };
+        // SAFETY: Test code: `error` is the fresh handle the twin returned on the panic
+        // path, not yet freed by anyone, so `take_error` consumes it exactly once.
+        let (message, code) = unsafe { take_error(error) };
+        assert_eq!(message, panic_message("guarded_unit_err", "unit boom"));
+        assert_eq!(code, kafka_common_Error_LOCAL_ILLEGAL_STATE);
+
+        // A value-returning twin leaves `out_result` unwritten: the sentinel survives.
+        // `guarded_bool`'s fallback, false, would overwrite it.
+        let mut flag = true;
+        // SAFETY: Test code: `flag` is a live local that outlives the call, so `&mut flag`
+        // is valid for the one write the twin's `# Safety` asks for.
+        let error = unsafe { guarded_bool_err(true, &mut flag) };
+        assert!(flag, "out_result is left unwritten on a panic");
+        // SAFETY: Test code: `error` is the fresh handle the twin returned on the panic
+        // path, not yet freed by anyone, so `take_error` consumes it exactly once.
+        let (message, code) = unsafe { take_error(error) };
+        assert_eq!(message, panic_message("guarded_bool_err", "bool boom"));
+        assert_eq!(code, kafka_common_Error_LOCAL_ILLEGAL_STATE);
+
+        // `fallback` is the entry point's alone: the twin reports the panic.
+        let mut value = -7;
+        // SAFETY: Test code: `value` is a live local that outlives the call, so `&mut
+        // value` is valid for the one write the twin's `# Safety` asks for.
+        let error = unsafe { guarded_fallback_err(&mut value) };
+        assert_eq!(value, -7, "out_result is left unwritten on a panic");
+        // SAFETY: Test code: `error` is the fresh handle the twin returned on the panic
+        // path, not yet freed by anyone, so `take_error` consumes it exactly once.
+        let (message, _) = unsafe { take_error(error) };
+        assert_eq!(message, panic_message("guarded_fallback_err", "fallback boom"));
+
+        // SAFETY: Test code: `value` is a live local that outlives the call, so `&mut
+        // value` is valid for the one write the twin's `# Safety` asks for.
+        let error = unsafe { guarded_formatted_err(3, &mut value) };
+        // SAFETY: Test code: `error` is the fresh handle the twin returned on the panic
+        // path, not yet freed by anyone, so `take_error` consumes it exactly once.
+        let (message, _) = unsafe { take_error(error) };
+        assert_eq!(message, panic_message("guarded_formatted_err", "formatted payload 3"));
+
+        // An error-returning twin is the entry point under its own name.
+        let mut out_new: *mut u8 = std::ptr::null_mut();
+        // SAFETY: Test code: `out_new` is a live local that outlives the call, so `&mut
+        // out_new` is the writable slot `guarded_new`'s `# Safety` asks for.
+        let error = unsafe { guarded_new_err(true, &mut out_new) };
+        assert!(out_new.is_null(), "the out slot is left unwritten on a panic");
+        // SAFETY: Test code: `error` is the fresh handle the twin returned on the panic
+        // path, not yet freed by anyone, so `take_error` consumes it exactly once.
+        let (message, code) = unsafe { take_error(error) };
+        assert_eq!(message, panic_message("guarded_new_err", "constructor boom"));
+        assert_eq!(code, kafka_common_Error_LOCAL_ILLEGAL_STATE);
+    }
+
+    #[test]
+    fn ffi_guard_err_twin_delivers_the_value_on_success() {
+        let mut flag = false;
+        // SAFETY: Test code: `flag` is a live local that outlives the call, so `&mut flag`
+        // is valid for the one write the twin's `# Safety` asks for.
+        assert!(unsafe { guarded_bool_err(false, &mut flag) }.is_null());
+        assert!(flag);
+        // `return` in the body still returns the entry point's value.
+        for (early, expected) in [(true, 5), (false, 6)] {
+            let mut value = 0;
+            // SAFETY: Test code: `value` is a live local that outlives the call, so `&mut
+            // value` is valid for the one write the twin's `# Safety` asks for.
+            assert!(unsafe { guarded_early_return_err(early, &mut value) }.is_null());
+            assert_eq!(value, expected, "for early = {early}");
+        }
+        let mut out_new: *mut u8 = std::ptr::null_mut();
+        // SAFETY: Test code: `out_new` is a live local that outlives the call, so `&mut
+        // out_new` is the writable slot `guarded_new`'s `# Safety` asks for.
+        assert!(unsafe { guarded_new_err(false, &mut out_new) }.is_null());
+        assert_eq!(out_new, std::ptr::dangling_mut());
+    }
+
+    /// A twin of a function with `on_panic` keeps that channel, as a `_cb`
+    /// export's twin keeps its completion: the closure sees the panic, named
+    /// after the twin, and the twin returns null with the closure's value.
+    #[test]
+    fn ffi_guard_err_twin_keeps_the_on_panic_channel() {
+        ON_PANIC_SAW.with(|saw| saw.borrow_mut().take());
+        let mut value = 0;
+        // SAFETY: Test code: `value` is a live local that outlives the call, so `&mut
+        // value` is valid for the one write the twin's `# Safety` asks for.
+        assert!(unsafe { guarded_on_panic_err(&mut value) }.is_null());
+        assert_eq!(value, 7);
+        let (message, code) = ON_PANIC_SAW.with(|saw| saw.borrow_mut().take()).expect("the closure ran");
+        assert_eq!(message, panic_message("guarded_on_panic_err", "custom path"));
+        assert_eq!(code, kafka_common_Error_LOCAL_ILLEGAL_STATE);
+    }
+
     #[test]
     fn spawn_callback_task_runs_the_task() {
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
