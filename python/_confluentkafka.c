@@ -885,7 +885,8 @@ static PyObject* py_KafkaProducer_new(PyObject* self, PyObject* args) {
 // callback as still pending (Java 4.x throws some transaction-state errors only
 // after the record was appended; the callback then still fires once and
 // releases the pin as usual).
-static void accepted_trampoline(kafka_common_Error_t* error, bool callback_pending, void* ud);
+static void accepted_trampoline(kafka_common_KafkaFuture_RecordMetadata_t* future, kafka_common_Error_t* error,
+                                bool callback_pending, void* ud);
 
 static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
     unsigned long long producer_ptr;
@@ -930,7 +931,9 @@ static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
         rs->topic, rs->partition, rs->timestamp,
         rs->key, rs->key_len, rs->value, rs->value_len,
         rs->headers, rs->header_count,
-        send_direct_trampoline, ud, accepted_trampoline, ud, &err, &callback_pending);
+        send_direct_trampoline, ud, accepted_trampoline, ud,
+        NULL,  // no out_future: the Python future is settled by the delivery callback
+        &err, &callback_pending);
     Py_END_ALLOW_THREADS
 
     if (rc == 1) {
@@ -959,7 +962,12 @@ static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
 // whose first argument is always an int. A refused record whose delivery
 // callback is not pending has no completion coming, so the pin's own reference
 // is released here too.
-static void accepted_trampoline(kafka_common_Error_t* error, bool callback_pending, void* ud) {
+static void accepted_trampoline(kafka_common_KafkaFuture_RecordMetadata_t* future, kafka_common_Error_t* error,
+                                bool callback_pending, void* ud) {
+    // An accepted record comes with its KafkaFuture (Java's send() return
+    // value); the Python future is settled by the delivery callback instead, so
+    // the handle is released at once (NULL for a refusal; destroy is NULL-safe).
+    kafka_common_KafkaFuture_RecordMetadata_destroy(future);
     PyObject* pin = (PyObject*)ud;
     PyGILState_STATE g = PyGILState_Ensure();
     PyObject* cb = PyTuple_GET_ITEM(pin, 1);  // borrowed from the tuple

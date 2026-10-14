@@ -458,11 +458,16 @@ typedef struct {
     atomic_int fired;
     int had_error;
     int callback_pending;
+    /* The accepted record's KafkaFuture (Java's send() return value), an owned
+     * handle the test destroys; NULL for a refusal. */
+    kafka_common_KafkaFuture_RecordMetadata_t *future;
     char message[256];
 } acceptance_result_t;
 
-static void on_accepted(kafka_common_Error_t *error, bool callback_pending, void *user_data) {
+static void on_accepted(kafka_common_KafkaFuture_RecordMetadata_t *future, kafka_common_Error_t *error,
+                        bool callback_pending, void *user_data) {
     acceptance_result_t *r = (acceptance_result_t *)user_data;
+    r->future = future;
     if (error != NULL) {
         r->had_error = 1;
         const char *m = kafka_common_Error_message(error);
@@ -496,7 +501,7 @@ void test_send_async_on_closed_producer_refuses_synchronously(void) {
     int32_t rc = kafka_producer_Producer_send_async(
         producer, "topic", -1, -1, NULL, -1,
         value, (int32_t)sizeof(value) - 1, NULL, 0,
-        on_record, &result, on_accepted, &acceptance, &err, &callback_pending);
+        on_record, &result, on_accepted, &acceptance, NULL, &err, &callback_pending);
     TEST_ASSERT_EQUAL_INT32(-1, rc);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_EQUAL_STRING("MockProducer is already closed.",
@@ -555,7 +560,7 @@ void test_send_async_reports_acceptance_through_the_callback(void) {
     int32_t rc = kafka_producer_Producer_send_async(
         producer, "topic", -1, -1, NULL, -1,
         value, (int32_t)sizeof(value) - 1, NULL, 0,
-        on_record, &delivered, on_accepted, &acceptance, &err, &callback_pending);
+        on_record, &delivered, on_accepted, &acceptance, NULL, &err, &callback_pending);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_EQUAL_INT32(1, rc);  /* queued: the metadata is not there yet */
     TEST_ASSERT_FALSE(callback_pending);  /* written false for a queued record */
@@ -564,6 +569,18 @@ void test_send_async_reports_acceptance_through_the_callback(void) {
     TEST_ASSERT_FALSE(acceptance.callback_pending);
     TEST_ASSERT_TRUE(wait_for(&delivered.fired, 1));
     TEST_ASSERT_TRUE(delivered.had_error);
+    /* The acceptance carries the record's KafkaFuture -- Java's send() return
+     * value -- which reports the same outcome as the delivery callback: here the
+     * failed future of the metadata timeout, already resolved. */
+    TEST_ASSERT_NOT_NULL(acceptance.future);
+    TEST_ASSERT_TRUE(kafka_common_KafkaFuture_RecordMetadata_is_done(acceptance.future));
+    err = NULL;
+    kafka_producer_RecordMetadata_t *metadata =
+        kafka_common_KafkaFuture_RecordMetadata_get(acceptance.future, &err);
+    TEST_ASSERT_NULL(metadata);
+    TEST_ASSERT_NOT_NULL(err);
+    kafka_common_Error_destroy(err);
+    kafka_common_KafkaFuture_RecordMetadata_destroy(acceptance.future);
     err = NULL;
     kafka_producer_Producer_close(producer, &err);
     TEST_ASSERT_NULL(err);
@@ -581,7 +598,7 @@ void test_send_async_reports_acceptance_through_the_callback(void) {
     rc = kafka_producer_Producer_send_async(
         producer, "topic", -1, -1, NULL, -1,
         value, (int32_t)sizeof(value) - 1, NULL, 0,
-        on_record, &refused, on_accepted, &refusal, &err, NULL);
+        on_record, &refused, on_accepted, &refusal, NULL, &err, NULL);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_EQUAL_INT32(1, rc);
     err = NULL;
@@ -591,6 +608,7 @@ void test_send_async_reports_acceptance_through_the_callback(void) {
     TEST_ASSERT_TRUE(refusal.had_error);
     TEST_ASSERT_TRUE_MESSAGE(is_closed_producer_refusal(refusal.message), refusal.message);
     TEST_ASSERT_FALSE(refusal.callback_pending);
+    TEST_ASSERT_NULL(refusal.future);  /* a refusal carries no future */
 
     kafka_producer_Producer_destroy(producer);
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&refusal.fired));
@@ -610,7 +628,7 @@ void test_flush_drains_async_queued_send(void) {
     kafka_producer_Producer_send_async(
         producer, "topic", -1, -1, NULL, -1,
         value, (int32_t)sizeof(value) - 1, NULL, 0,
-        on_record, &result, NULL, NULL, &err, NULL);
+        on_record, &result, NULL, NULL, NULL, &err, NULL);
     TEST_ASSERT_NULL(err);
 
     err = NULL;
@@ -636,7 +654,7 @@ void test_close_drains_async_queued_send(void) {
     kafka_producer_Producer_send_async(
         producer, "topic", -1, -1, NULL, -1,
         value, (int32_t)sizeof(value) - 1, NULL, 0,
-        on_record, &result, NULL, NULL, &err, NULL);
+        on_record, &result, NULL, NULL, NULL, &err, NULL);
     TEST_ASSERT_NULL(err);
 
     err = NULL;
@@ -665,7 +683,7 @@ void test_send_async_then_destroy(void) {
         kafka_producer_Producer_send_async(
             producer, "topic", -1, -1, NULL, -1,
             value, (int32_t)sizeof(value) - 1, NULL, 0,
-            on_record, &result, NULL, NULL, &err, NULL);
+            on_record, &result, NULL, NULL, NULL, &err, NULL);
         TEST_ASSERT_NULL(err);
         kafka_producer_Producer_destroy(producer);
     }
@@ -975,7 +993,7 @@ void test_send_async_headers_and_tombstone(void) {
         producer, "t", -1, -1, key, (int32_t)sizeof(key) - 1,
         NULL, -1,          // tombstone (null value)
         headers, 2,
-        on_record, &result, NULL, NULL, &err, NULL);
+        on_record, &result, NULL, NULL, NULL, &err, NULL);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_EQUAL_INT32(0, rc);  // the mock takes the record at once
     TEST_ASSERT_EQUAL_INT32(1, kafka_producer_MockProducer_history_count(producer));
@@ -1068,7 +1086,7 @@ void test_send_async_with_key_and_value(void) {
         producer, "async-topic", 3, -1,
         key, (int32_t)sizeof(key) - 1,
         value, (int32_t)sizeof(value) - 1, NULL, 0,
-        on_record, &result, NULL, NULL, &err, NULL);
+        on_record, &result, NULL, NULL, NULL, &err, NULL);
     TEST_ASSERT_NULL(err);
 
     TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
@@ -1092,7 +1110,7 @@ void test_send_async_null_key(void) {
         producer, "topic", -1, -1,
         NULL, -1,
         value, (int32_t)sizeof(value) - 1, NULL, 0,
-        on_record, &result, NULL, NULL, &err, NULL);
+        on_record, &result, NULL, NULL, NULL, &err, NULL);
     TEST_ASSERT_NULL(err);
 
     TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
@@ -1117,7 +1135,7 @@ void test_send_async_validation_error(void) {
         producer, NULL, -1, -1,
         NULL, -1,
         value, (int32_t)sizeof(value) - 1, NULL, 0,
-        on_record, &result, NULL, NULL, &err, NULL);
+        on_record, &result, NULL, NULL, NULL, &err, NULL);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_INVALID_REQUEST,
                             kafka_common_Error_code(err));
@@ -1324,7 +1342,7 @@ void test_async_callbacks_single_thread(void) {
         kafka_producer_Producer_send_async(
             producer, "thread-topic", -1, -1, NULL, -1,
             value, (int32_t)sizeof(value) - 1, NULL, 0,
-            on_record, &results[i], NULL, NULL, &err, NULL);
+            on_record, &results[i], NULL, NULL, NULL, &err, NULL);
         TEST_ASSERT_NULL(err);
     }
 
@@ -1444,7 +1462,7 @@ void test_transaction_commit_drains_async_queued_send(void) {
     kafka_producer_Producer_send_async(
         producer, "txn-topic", -1, -1, NULL, -1,
         value, (int32_t)sizeof(value) - 1, NULL, 0,
-        on_record, &result, NULL, NULL, &err, NULL);
+        on_record, &result, NULL, NULL, NULL, &err, NULL);
     TEST_ASSERT_NULL(err);
 
     /* Uncommitted (and possibly still queued): not in the sent history yet. */
@@ -1478,7 +1496,7 @@ void test_transaction_abort_drains_async_queued_send(void) {
     kafka_producer_Producer_send_async(
         producer, "txn-topic", -1, -1, NULL, -1,
         value, (int32_t)sizeof(value) - 1, NULL, 0,
-        on_record, &result, NULL, NULL, &err, NULL);
+        on_record, &result, NULL, NULL, NULL, &err, NULL);
     TEST_ASSERT_NULL(err);
 
     TEST_ASSERT_NULL(kafka_producer_Producer_abort_transaction(producer));
@@ -1942,7 +1960,7 @@ void test_transaction_async_commit_drains_async_queued_send(void) {
     kafka_producer_Producer_send_async(
         producer, "txn-topic", -1, -1, NULL, -1,
         value, (int32_t)sizeof(value) - 1, NULL, 0,
-        on_record, &record, NULL, NULL, &err, NULL);
+        on_record, &record, NULL, NULL, NULL, &err, NULL);
     TEST_ASSERT_NULL(err);
 
     /* Uncommitted (and possibly still queued): not in the sent history yet. */
@@ -1978,7 +1996,7 @@ void test_transaction_async_abort_drains_async_queued_send(void) {
     kafka_producer_Producer_send_async(
         producer, "txn-topic", -1, -1, NULL, -1,
         value, (int32_t)sizeof(value) - 1, NULL, 0,
-        on_record, &record, NULL, NULL, &err, NULL);
+        on_record, &record, NULL, NULL, NULL, &err, NULL);
     TEST_ASSERT_NULL(err);
 
     async_op_result_t abort = {0};
@@ -2365,15 +2383,28 @@ void test_send_async_takes_record_at_once(void) {
 
     async_record_result_t result = {0};
     kafka_common_Error_t *err = NULL;
+    kafka_common_KafkaFuture_RecordMetadata_t *future = NULL;
     int32_t rc = kafka_producer_Producer_send_async(
         producer, "fast-topic", 3, -1,
         key, (int32_t)sizeof(key) - 1,
         value, (int32_t)sizeof(value) - 1, NULL, 0,
-        on_record, &result, NULL, NULL, &err, NULL);
+        on_record, &result, NULL, NULL, &future, &err, NULL);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_EQUAL_INT32(0, rc);  /* taken at once: nothing to wait for */
     /* Appended before the call returned. */
     TEST_ASSERT_EQUAL_INT32(1, kafka_producer_MockProducer_history_count(producer));
+    /* Taken: the record's KafkaFuture -- Java's send() return value -- comes back
+     * through out_future, an owned handle reporting the same delivery on_record
+     * does. (A caller that does not need it passes NULL, as the other tests do.) */
+    TEST_ASSERT_NOT_NULL(future);
+    TEST_ASSERT_TRUE(kafka_common_KafkaFuture_RecordMetadata_is_done(future));
+    err = NULL;
+    kafka_producer_RecordMetadata_t *metadata = kafka_common_KafkaFuture_RecordMetadata_get(future, &err);
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(metadata);
+    TEST_ASSERT_EQUAL_INT32(3, kafka_producer_RecordMetadata_partition(metadata));
+    kafka_producer_RecordMetadata_destroy(metadata);
+    kafka_common_KafkaFuture_RecordMetadata_destroy(future);
 
     TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&result.fired));
@@ -2415,7 +2446,7 @@ void test_send_async_not_held_behind_queued_record(void) {
     int32_t rc = kafka_producer_Producer_send_async(
         producer, "topic", -1, -1, NULL, -1,
         second, (int32_t)sizeof(second) - 1, NULL, 0,
-        on_record, &direct, NULL, NULL, &err, NULL);
+        on_record, &direct, NULL, NULL, NULL, &err, NULL);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_EQUAL_INT32(0, rc);  /* taken at once, not queued behind the parked record */
     TEST_ASSERT_TRUE(wait_for(&direct.fired, 1));
