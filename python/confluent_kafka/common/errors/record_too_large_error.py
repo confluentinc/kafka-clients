@@ -42,7 +42,7 @@ class RecordTooLargeError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 10  # kafka_common_ErrorCode_MESSAGE_TOO_LARGE
+    _ffi_id: ClassVar[int] = 10  # kafka_common_Error_MESSAGE_TOO_LARGE
 
     @java_forms(
         Form(),

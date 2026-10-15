@@ -1030,7 +1030,7 @@ fn acl_operations_from_proto(ops: &proto::AclOperationList) -> BTreeSet<AclOpera
 
 fn config_resource_to_proto(resource: &ConfigResource) -> proto::ConfigResource {
     proto::ConfigResource {
-        resource_type: i32::from(resource.resource_type().id()),
+        resource_type: i32::from(resource.r#type().id()),
         name: resource.name().to_string(),
     }
 }
@@ -1178,7 +1178,7 @@ fn client_quota_entity_to_proto(entity: &ClientQuotaEntity) -> proto::ClientQuot
 /// `ofEntityType`, "match any specified name" — so it carries no name either, and
 /// only the kind separates it from `Default`.
 fn quota_filter_component_to_proto(component: &ClientQuotaFilterComponent) -> proto::ClientQuotaFilterComponent {
-    let (kind, match_name) = match component.match_spec() {
+    let (kind, match_name) = match component.r#match() {
         ClientQuotaMatch::Exact(name) => (proto::ClientQuotaMatchKind::MatchKindExact, Some(name.clone())),
         ClientQuotaMatch::Default => (proto::ClientQuotaMatchKind::MatchKindDefault, None),
         ClientQuotaMatch::Any => (proto::ClientQuotaMatchKind::MatchKindAny, None),

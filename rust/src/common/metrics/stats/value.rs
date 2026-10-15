@@ -32,6 +32,7 @@ pub struct Value {
 
 impl Value {
     /// Create a `Value` initialized to `0`, matching Java's `private double value = 0`.
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.Value#Value")]
     pub fn new() -> Self {
         Self { value: AtomicU64::new(0.0f64.to_bits()) }
     }

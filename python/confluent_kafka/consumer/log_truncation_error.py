@@ -48,7 +48,7 @@ class LogTruncationError(OffsetOutOfRangeError):
 
     __module__ = "confluent_kafka.consumer"
 
-    _ffi_id: ClassVar[int] = -20  # kafka_common_ErrorCode_CONSUMER_LOG_TRUNCATION
+    _ffi_id: ClassVar[int] = -20  # kafka_common_Error_CONSUMER_LOG_TRUNCATION
 
     def __init__(
         self,

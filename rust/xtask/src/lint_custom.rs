@@ -19,17 +19,31 @@
 //! that index. A rule reports findings rather than failing fast, so one run
 //! lists every violation of every rule.
 
+mod ffi_translation;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use quote::ToTokens;
 use syn::punctuated::Punctuated;
 
-use crate::java::{self, rust_method_bases, same_name, squash, JavaIndex};
+use crate::java::{self, same_name, squash, JavaIndex};
 
 /// A module path from the crate root, e.g. `["producer", "producer_record"]`.
 type ModPath = Vec<String>;
+
+/// What every rule is built from: the Java index, loaded once, and the
+/// options of this run.
+struct Context {
+    java: Rc<JavaIndex>,
+    /// The `check-ffi-translation` baseline to apply; `None` shows every finding.
+    ffi_baseline: Option<PathBuf>,
+    /// The cbindgen configuration whose `[enum] prefix_with_name` decides how
+    /// the C enumerators are spelled; `None` skips that check.
+    cbindgen_config: Option<PathBuf>,
+}
 
 /// One source-level rule run by `lint-custom`.
 trait Rule {
@@ -52,20 +66,46 @@ trait Rule {
 }
 
 /// The rules `lint-custom` runs, in order.
-fn rules() -> Vec<Box<dyn Rule>> {
+fn rules(ctx: &Context) -> Vec<Box<dyn Rule>> {
     vec![
         Box::new(NoDataCarryingEnumVariants),
         Box::new(NoPublicField),
-        Box::new(JavaName::new()),
-        Box::new(NoDeprecatedTranslation::new()),
-        Box::new(PublicAudience::new()),
+        Box::new(NoFixedSizeArray),
+        Box::new(JavaName::new(ctx)),
+        Box::new(NoDeprecatedTranslation::new(ctx)),
+        Box::new(PublicAudience::new(ctx)),
         Box::new(DynCompatible),
+        Box::new(ErrorPredicate),
+        Box::new(ffi_translation::FfiTranslation::new(ctx)),
     ]
 }
 
-/// Runs every rule and fails if any of them reports a finding.
-pub fn lint_custom() -> anyhow::Result<()> {
+/// Runs every rule — or the one `args` names — and fails if any of them
+/// reports a finding. `--no-baseline` shows the `check-ffi-translation`
+/// findings the baseline waives.
+pub fn lint_custom(args: &[String]) -> anyhow::Result<()> {
+    let mut only: Option<&str> = None;
+    let mut baseline = true;
+    for arg in args {
+        match arg.as_str() {
+            "--no-baseline" => baseline = false,
+            name if name.starts_with("check-") && only.is_none() => only = Some(name),
+            other => {
+                anyhow::bail!("unknown lint-custom argument `{other}`; usage: lint-custom [rule-name] [--no-baseline]")
+            },
+        }
+    }
     println!("🔍 Running custom lint rules...");
+
+    let ctx = Context {
+        java: Rc::new(JavaIndex::load()),
+        ffi_baseline: baseline.then(|| PathBuf::from(ffi_translation::FFI_BASELINE)),
+        cbindgen_config: Some(PathBuf::from(ffi_translation::CBINDGEN_CONFIG)),
+    };
+    let rules: Vec<Box<dyn Rule>> = rules(&ctx).into_iter().filter(|r| only.is_none_or(|o| o == r.name())).collect();
+    if let Some(name) = only.filter(|_| rules.is_empty()) {
+        anyhow::bail!("no custom lint rule named `{name}`");
+    }
 
     let krate = Crate::load(Path::new("src/lib.rs"))?;
     let mut failed = 0usize;
@@ -81,7 +121,7 @@ pub fn lint_custom() -> anyhow::Result<()> {
         failed += krate.parse_errors.len();
     }
 
-    for rule in rules() {
+    for rule in rules {
         if let Some(reason) = rule.skip_reason() {
             eprintln!("\n❌ {}: cannot run, {reason}", rule.name());
             failed += 1;
@@ -105,6 +145,47 @@ pub fn lint_custom() -> anyhow::Result<()> {
     if failed > 0 {
         anyhow::bail!("{failed} custom lint finding(s)");
     }
+    Ok(())
+}
+
+/// `cargo xtask ffi-baseline`: rewrites [`ffi_translation::FFI_BASELINE`] with
+/// every current `check-ffi-translation` finding, so the C FFI refactor can
+/// burn it down phase by phase (CLAUDE.md §4).
+pub fn write_ffi_baseline() -> anyhow::Result<()> {
+    println!("🔧 Writing the check-ffi-translation baseline...");
+    let ctx = Context {
+        java: Rc::new(JavaIndex::load()),
+        ffi_baseline: None,
+        cbindgen_config: Some(PathBuf::from(ffi_translation::CBINDGEN_CONFIG)),
+    };
+    let rule = ffi_translation::FfiTranslation::new(&ctx);
+    if let Some(reason) = rule.skip_reason() {
+        anyhow::bail!("cannot run check-ffi-translation: {reason}");
+    }
+    let krate = Crate::load(Path::new("src/lib.rs"))?;
+    if !krate.parse_errors.is_empty() {
+        anyhow::bail!(
+            "{} file(s) could not be parsed: {}",
+            krate.parse_errors.len(),
+            krate.parse_errors.join("; ")
+        );
+    }
+    let (findings, _) = rule.findings(&krate);
+    let mut out = String::from(
+        "# check-ffi-translation findings the C FFI refactor has not reached yet (CLAUDE.md §4).\n\
+         # One `<kind> <symbol>` per line, or `prefix:<C prefix>` to waive every symbol under it.\n\
+         # A line matching no finding any more is itself a finding: delete it. Rewrite with\n\
+         # `cargo xtask ffi-baseline`; see everything with\n\
+         # `cargo xtask lint-custom check-ffi-translation --no-baseline`.\n",
+    );
+    let mut keys: Vec<String> = findings.iter().map(ffi_translation::Finding::key).collect();
+    keys.dedup();
+    for key in &keys {
+        out.push_str(key);
+        out.push('\n');
+    }
+    fs::write(ffi_translation::FFI_BASELINE, out)?;
+    println!("✅ Wrote {} finding(s) to {}", keys.len(), ffi_translation::FFI_BASELINE);
     Ok(())
 }
 
@@ -312,6 +393,30 @@ impl Crate {
             .iter()
             .find(|item| pub_type_ident(item).is_some_and(|ident| ident == name))
             .expect("public_types only returns defined types")
+    }
+
+    /// The attributes of the item `path` names from `module` (`internals::RecordHeader`),
+    /// following `use` chains to where it is defined; `None` if it is not in
+    /// this crate.
+    fn definition_attrs(&self, module: &[String], path: &[String]) -> Option<Vec<syn::Attribute>> {
+        let (name, parent) = path.split_last()?;
+        let mut work = vec![self.resolve_module(module, parent)?];
+        let mut seen = BTreeSet::new();
+        while let Some(module) = work.pop() {
+            if !seen.insert(module.clone()) {
+                continue;
+            }
+            let Some(m) = self.modules.get(&module) else { continue };
+            if let Some((_, attrs)) = m.items.iter().filter_map(item_def).find(|(n, _)| n == name) {
+                return Some(attrs);
+            }
+            for (target, used) in self.uses(&module, false) {
+                if used.as_deref() == Some(name.as_str()) {
+                    work.push(target);
+                }
+            }
+        }
+        None
     }
 
     /// The `pub use` imports of `module`, as (target module, name); `None` for a glob.
@@ -556,6 +661,110 @@ impl Rule for NoPublicField {
 }
 
 // ---------------------------------------------------------------------------
+// Rule: check-no-fixed-size-array
+// ---------------------------------------------------------------------------
+
+/// Checks that no public interface accepts or returns a fixed-size array
+/// `[T; N]` (CLAUDE.md §3, forward compatibility).
+///
+/// An array's length is part of its type, so a Java `byte[]` or `T[]`
+/// translated as `[T; N]` fixes a length Java leaves open: as a parameter it
+/// rejects every other length at compile time, and as a return type a new value
+/// (one more enum constant in `values()`) becomes a breaking change. A slice
+/// (`&[T]`) or a `Vec<T>` carries the length at run time instead.
+///
+/// Scope: the public items of [`NoDeprecatedTranslation`] — each parameter and
+/// the return type of a public function or method, and the type a public `type`
+/// alias names — plus the trait arguments and associated types of a trait impl
+/// for a public type (`impl From<[u8; 16]> for Uuid`). An array anywhere in the
+/// type counts: `&[u8; 16]`, `Option<[u8; 16]>`,
+/// `impl Iterator<Item = [u8; 4]>`. The C FFI (`src/ffi`) and `#[cfg(test)]`
+/// functions are excluded.
+struct NoFixedSizeArray;
+
+impl Rule for NoFixedSizeArray {
+    fn name(&self) -> &'static str {
+        "check-no-fixed-size-array"
+    }
+
+    fn check(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+        let is_ffi = |module: &[String]| module.first().is_some_and(|m| m == "ffi");
+        let mut checked = 0usize;
+        for (file, item) in public_items(krate) {
+            if item.types.is_empty() || is_ffi(&item.module) {
+                continue;
+            }
+            checked += 1;
+            let name = item
+                .owner
+                .map_or_else(|| item.name.clone(), |owner| format!("{owner}::{}", item.name));
+            for (role, ty) in &item.types {
+                let mut arrays = Arrays::default();
+                syn::visit::Visit::visit_type(&mut arrays, ty);
+                for array in arrays.0 {
+                    findings.push(format!(
+                        "{}: {role} of `{name}` holds the fixed-size array `{array}`",
+                        file.display()
+                    ));
+                }
+            }
+        }
+        let types = krate.public_types();
+        for (path, module) in krate.modules.iter().filter(|(path, _)| !is_ffi(path)) {
+            for item in &module.items {
+                let syn::Item::Impl(i) = item else { continue };
+                let Some((_, trait_path, _)) = &i.trait_ else { continue };
+                let syn::Type::Path(self_ty) = &*i.self_ty else {
+                    continue;
+                };
+                let Some(self_ty) = self_ty.path.segments.last() else {
+                    continue;
+                };
+                if !types.contains(&(path.clone(), self_ty.ident.to_string())) {
+                    continue;
+                }
+                checked += 1;
+                let header = format!("`impl {} for {}`", compact(trait_path), self_ty.ident);
+                let mut arrays = Arrays::default();
+                syn::visit::Visit::visit_path(&mut arrays, trait_path);
+                let mut found: Vec<_> = arrays.0.into_iter().map(|a| ("the trait", a)).collect();
+                for it in &i.items {
+                    if let syn::ImplItem::Type(t) = it {
+                        let mut arrays = Arrays::default();
+                        syn::visit::Visit::visit_type(&mut arrays, &t.ty);
+                        found.extend(arrays.0.into_iter().map(|a| ("an associated type", a)));
+                    }
+                }
+                for (role, array) in found {
+                    findings.push(format!(
+                        "{}: {role} of {header} holds the fixed-size array `{array}`",
+                        module.file.display()
+                    ));
+                }
+            }
+        }
+        checked
+    }
+
+    fn hint(&self) -> &'static str {
+        "   Accept a slice (`&[T]`), checking its length where Java does and returning
+   `IllegalArgumentError`; return a `&'static [T]`, a `Vec<T>` or an iterator;
+   or make the item `pub(crate)` if Java does not expose it."
+    }
+}
+
+/// The outermost fixed-size arrays a visited type holds, as written.
+#[derive(Default)]
+struct Arrays(Vec<String>);
+
+impl<'ast> syn::visit::Visit<'ast> for Arrays {
+    fn visit_type_array(&mut self, array: &'ast syn::TypeArray) {
+        // An array of arrays is one finding: its elements are not visited.
+        self.0.push(compact(array));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Rule: check-java-name
 // ---------------------------------------------------------------------------
 
@@ -565,8 +774,8 @@ impl Rule for NoPublicField {
 /// An item declares what it translates with a marker (see [`crate::java`]):
 /// `#[doc(alias = "org.apache.kafka.<package>.<Class>[$Nested][#method]")]`.
 /// The marker is also the Java name rustdoc search finds the item under.
-/// Mentioning a Java class in a doc comment claims nothing, so helpers that
-/// cite the class they serve are not held to its name.
+/// Mentioning a Java class in a doc comment claims nothing, so non-public
+/// helpers that cite the class they serve are not held to its name.
 ///
 /// For every marker:
 ///   - **class** (`..Class`, `..Outer$Nested`): the class exists in the Java
@@ -579,7 +788,16 @@ impl Rule for NoPublicField {
 ///     `throw` → `return`, an optional dropped `get`, `_with_<params>` for an
 ///     overload, `new` / `with_<params>` for a constructor.
 ///
-/// The C FFI (`src/ffi`) is excluded for now.
+/// The C FFI (`src/ffi`) is out of scope: its symbols derive from the Rust
+/// items they bind, which `check-ffi-translation` checks name by name.
+///
+/// Every public method carries a method marker: a `pub fn` of an inherent
+/// `impl` of a public type, a public trait's method, or a `pub fn` of a
+/// reachable module (the scope of [`public_items`]; trait-impl methods,
+/// `#[cfg(test)]` functions and the C FFI are out of it). A public method
+/// translating no Java method is a finding — make it `pub(crate)` — unless it
+/// is tagged [`RUST_ONLY`], with a comment giving the reason a rule needs it
+/// public (CLAUDE.md §12.4's `Error::is_*_error`).
 ///
 /// And for every file named after a Java class of its package
 /// (`producer/producer_record.rs` ↔ `clients.producer.ProducerRecord`,
@@ -591,12 +809,18 @@ impl Rule for NoPublicField {
 /// together guarantee a class only ever shares a module with its own package:
 ///   - **location**: a marked item under `src/` lives in its class's package
 ///     module. A file's module is its directory, less the folders that are no
-///     Java package — grouping folders such as `admin/options/`.
+///     Java package — grouping folders such as `admin/options/`. A method of an
+///     impl or trait is placed by its owner type, so it may name the supertype
+///     that declares it in another package, e.g. `Partitioner::configure` marked
+///     `common.Configurable#configure`.
 ///   - **mapping**: no two Java packages map to one module, and no two classes
 ///     of a package map to one Rust name.
 ///   - **re-exports**: a module's `pub use` lifts only from its own class files
 ///     and grouping folders — never from another package (`crate::`, `super::`,
-///     a sub-package), whose class could collide with one of this package's.
+///     a sub-package), whose class could collide with one of this package's —
+///     unless the lifted item is tagged public on purpose ([`RUST_ONLY`],
+///     [`PUBLIC_IN_RUST`]): `common::header` lifts
+///     `internals::{RecordHeader, RecordHeaders}`.
 ///
 /// Scope: `src/` (without `src/bin`) and `tests/`, test modules included; the
 /// package checks cover `src/` only. Runs only when the `kafka` submodule is
@@ -605,23 +829,18 @@ struct JavaName {
     index: JavaIndex,
     /// Every Rust module a Java package maps to, and each of its ancestors.
     package_modules: BTreeSet<Vec<String>>,
-    /// [`PUBLIC_AUDIENCE_ALLOWLIST`]: a re-export of an allow-listed item from
-    /// another package is allowed (`common::header` lifts
-    /// `internals::{RecordHeader, RecordHeaders}`).
-    allow: AllowList,
 }
 
 impl JavaName {
-    fn new() -> Self {
-        let index = JavaIndex::load();
+    fn new(ctx: &Context) -> Self {
+        let index = (*ctx.java).clone();
         let mut package_modules = BTreeSet::new();
         for class in &index.classes {
             for len in 0..=class.module.len() {
                 package_modules.insert(class.module[..len].to_vec());
             }
         }
-        let (allow, _) = AllowList::load(Path::new(PUBLIC_AUDIENCE_ALLOWLIST));
-        JavaName { index, package_modules, allow }
+        JavaName { index, package_modules }
     }
 
     /// The Rust module of `src/` file `path`: its directory, less the grouping
@@ -646,6 +865,10 @@ struct Marked {
     kind: ItemKind,
     name: String,
     attrs: Vec<syn::Attribute>,
+    /// Whether it is a method of an impl or trait, placed by its owner type.
+    member: bool,
+    /// Whether it is a function taking `self`.
+    has_self: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -658,7 +881,22 @@ enum ItemKind {
 /// inherent-impl and trait methods, and the error types of the error macros.
 fn marked_items(items: &[syn::Item], out: &mut Vec<Marked>) {
     let push = |kind, ident: &syn::Ident, attrs: &[syn::Attribute], out: &mut Vec<Marked>| {
-        out.push(Marked { kind, name: ident.to_string(), attrs: attrs.to_vec() })
+        out.push(Marked {
+            kind,
+            name: ident.to_string(),
+            attrs: attrs.to_vec(),
+            member: false,
+            has_self: false,
+        })
+    };
+    let push_member = |sig: &syn::Signature, attrs: &[syn::Attribute], out: &mut Vec<Marked>| {
+        out.push(Marked {
+            kind: ItemKind::Fn,
+            name: sig.ident.to_string(),
+            attrs: attrs.to_vec(),
+            member: true,
+            has_self: sig.receiver().is_some(),
+        })
     };
     for item in items {
         match item {
@@ -670,7 +908,7 @@ fn marked_items(items: &[syn::Item], out: &mut Vec<Marked>) {
                 push(ItemKind::Type, &t.ident, &t.attrs, out);
                 for it in &t.items {
                     if let syn::TraitItem::Fn(f) = it {
-                        push(ItemKind::Fn, &f.sig.ident, &f.attrs, out);
+                        push_member(&f.sig, &f.attrs, out);
                     }
                 }
             },
@@ -678,7 +916,7 @@ fn marked_items(items: &[syn::Item], out: &mut Vec<Marked>) {
             syn::Item::Impl(i) if i.trait_.is_none() => {
                 for it in &i.items {
                     if let syn::ImplItem::Fn(f) = it {
-                        push(ItemKind::Fn, &f.sig.ident, &f.attrs, out);
+                        push_member(&f.sig, &f.attrs, out);
                     }
                 }
             },
@@ -689,7 +927,13 @@ fn marked_items(items: &[syn::Item], out: &mut Vec<Marked>) {
             },
             syn::Item::Macro(m) => {
                 if let Some(def) = error_macro_type_def(m) {
-                    out.push(Marked { kind: ItemKind::Type, name: def.name, attrs: def.attrs });
+                    out.push(Marked {
+                        kind: ItemKind::Type,
+                        name: def.name,
+                        attrs: def.attrs,
+                        member: false,
+                        has_self: false,
+                    });
                 }
             },
             _ => {},
@@ -697,11 +941,14 @@ fn marked_items(items: &[syn::Item], out: &mut Vec<Marked>) {
     }
 }
 
-/// A type defined by an error macro: its name and the attributes written
-/// inside the macro.
+/// A type defined by an error macro: its name, the attributes written inside
+/// the macro, and the predicates its `extends:` list names.
 struct TypeDef {
     name: String,
     attrs: Vec<syn::Attribute>,
+    /// The `ErrorHierarchy` predicates the type answers `true` to; empty for a
+    /// macro with no `extends:` list.
+    extends: Vec<String>,
 }
 
 /// The type a `kafka_error_type!` / `message_only_error!` invocation defines:
@@ -720,35 +967,144 @@ fn error_macro_type_def(m: &syn::ItemMacro) -> Option<TypeDef> {
         .parse_body_with(|input: syn::parse::ParseStream| {
             let attrs = input.call(syn::Attribute::parse_outer)?;
             let ident: syn::Ident = input.parse()?;
-            // The rest of the body (the `extends` list, ..) is not needed.
-            input.step(|cursor| {
+            // Of the rest of the body (`code: ..`, `extends: [..]`), only the
+            // `extends` list is needed.
+            let extends = input.step(|cursor| {
+                let mut extends = Vec::new();
                 let mut rest = *cursor;
-                while let Some((_, next)) = rest.token_tree() {
+                while !rest.eof() {
+                    let list = rest
+                        .ident()
+                        .filter(|(i, _)| i == "extends")
+                        .and_then(|(_, after)| after.punct())
+                        .filter(|(p, _)| p.as_char() == ':')
+                        .and_then(|(_, after)| after.any_group());
+                    if let Some((mut inside, _, _, after)) = list {
+                        while let Some((_, next)) = inside.token_tree() {
+                            if let Some((i, _)) = inside.ident() {
+                                extends.push(i.to_string());
+                            }
+                            inside = next;
+                        }
+                        rest = after;
+                        continue;
+                    }
+                    let Some((_, next)) = rest.token_tree() else { break };
                     rest = next;
                 }
-                Ok(((), rest))
+                Ok((extends, rest))
             })?;
-            Ok(TypeDef { name: ident.to_string(), attrs })
+            Ok(TypeDef { name: ident.to_string(), attrs, extends })
         })
         .ok()
 }
 
-/// The markers among `attrs`' `#[doc(alias = "..")]`s.
-fn java_markers(attrs: &[syn::Attribute]) -> Vec<String> {
+/// The values of `attrs`' `#[doc(alias = "..")]`s.
+fn doc_aliases(attrs: &[syn::Attribute]) -> Vec<String> {
     let mut out = Vec::new();
     for attr in attrs.iter().filter(|a| a.path().is_ident("doc")) {
         let _ = attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("alias") {
                 let lit: syn::LitStr = meta.value()?.parse()?;
-                if lit.value().starts_with(java::MARKER_PREFIX) {
-                    out.push(lit.value());
-                }
+                out.push(lit.value());
             } else if meta.input.peek(syn::Token![=]) {
                 // Skip the value of any other `doc(key = value)`.
                 let _: syn::Expr = meta.value()?.parse()?;
             }
             Ok(())
         });
+    }
+    out
+}
+
+/// The markers among `attrs`' `#[doc(alias = "..")]`s.
+fn java_markers(attrs: &[syn::Attribute]) -> Vec<String> {
+    doc_aliases(attrs)
+        .into_iter()
+        .filter(|alias| alias.starts_with(java::MARKER_PREFIX))
+        .collect()
+}
+
+/// The tag of a public item that translates no Java API — a Rust-only helper, a
+/// JDK type, a C-only handle — yet is public on purpose:
+/// `#[doc(alias = "rust-only")]`, with the reason in a comment above it. Read by
+/// [`JavaName`] and [`PublicAudience`].
+const RUST_ONLY: &str = "rust-only";
+
+/// The tag of a public item translating Java API that the audience rules keep
+/// non-public — a test-jar class, a class of an `internals` package, a
+/// non-`public` method — yet is public on purpose:
+/// `#[doc(alias = "public-in-rust")]`, with the reason in a comment above it.
+const PUBLIC_IN_RUST: &str = "public-in-rust";
+
+/// Whether `attrs` carry tag `tag` ([`RUST_ONLY`] or [`PUBLIC_IN_RUST`]).
+fn has_tag(attrs: &[syn::Attribute], tag: &str) -> bool {
+    doc_aliases(attrs).iter().any(|alias| alias == tag)
+}
+
+/// An item that may carry a tag: its file, the type or trait it is a member of,
+/// and its name.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct TagSite {
+    file: PathBuf,
+    owner: Option<String>,
+    name: String,
+    tag: &'static str,
+}
+
+impl TagSite {
+    fn new(file: &Path, owner: Option<&str>, name: &str, tag: &'static str) -> Self {
+        TagSite {
+            file: file.to_path_buf(),
+            owner: owner.map(str::to_string),
+            name: name.to_string(),
+            tag,
+        }
+    }
+}
+
+/// Every tag of `krate`, on an item of any visibility: a module-level item, an
+/// error macro's type, or a member of a trait or an inherent `impl`.
+fn tag_sites(krate: &Crate) -> BTreeSet<TagSite> {
+    let mut out = BTreeSet::new();
+    for module in krate.modules.values() {
+        let file = module.file.as_path();
+        let mut add = |owner: Option<&syn::Ident>, name: &str, attrs: &[syn::Attribute]| {
+            let owner = owner.map(ToString::to_string);
+            for tag in [RUST_ONLY, PUBLIC_IN_RUST].into_iter().filter(|t| has_tag(attrs, t)) {
+                out.insert(TagSite::new(file, owner.as_deref(), name, tag));
+            }
+        };
+        for item in &module.items {
+            match item {
+                syn::Item::Trait(t) => {
+                    add(None, &t.ident.to_string(), &t.attrs);
+                    for it in &t.items {
+                        match it {
+                            syn::TraitItem::Fn(f) => add(Some(&t.ident), &f.sig.ident.to_string(), &f.attrs),
+                            syn::TraitItem::Const(c) => add(Some(&t.ident), &c.ident.to_string(), &c.attrs),
+                            _ => {},
+                        }
+                    }
+                },
+                syn::Item::Impl(i) if i.trait_.is_none() => {
+                    let syn::Type::Path(ty) = &*i.self_ty else { continue };
+                    let Some(ty) = ty.path.segments.last() else { continue };
+                    for it in &i.items {
+                        match it {
+                            syn::ImplItem::Fn(f) => add(Some(&ty.ident), &f.sig.ident.to_string(), &f.attrs),
+                            syn::ImplItem::Const(c) => add(Some(&ty.ident), &c.ident.to_string(), &c.attrs),
+                            _ => {},
+                        }
+                    }
+                },
+                _ => {
+                    if let Some((name, attrs)) = item_def(item) {
+                        add(None, &name, &attrs);
+                    }
+                },
+            }
+        }
     }
     out
 }
@@ -780,6 +1136,76 @@ fn use_paths(tree: &syn::UseTree, prefix: &mut Vec<String>, out: &mut Vec<Vec<St
     }
 }
 
+/// A public function carrying no Java marker.
+struct UnmarkedMethod {
+    file: PathBuf,
+    /// The type or trait it is a member of; `None` for a free function.
+    owner: Option<String>,
+    name: String,
+    /// Whether it is tagged [`RUST_ONLY`].
+    rust_only: bool,
+    /// Whether its owner is tagged [`RUST_ONLY`]: a type translating no Java
+    /// class has no Java method for its members to name, so they inherit it.
+    owner_rust_only: bool,
+}
+
+impl UnmarkedMethod {
+    /// `Owner::method`, or the bare name of a free function.
+    fn display(&self) -> String {
+        self.owner
+            .as_ref()
+            .map_or_else(|| self.name.clone(), |owner| format!("{owner}::{}", self.name))
+    }
+
+    /// Where its [`RUST_ONLY`] tag sits.
+    fn tag_site(&self) -> TagSite {
+        TagSite::new(&self.file, self.owner.as_deref(), &self.name, RUST_ONLY)
+    }
+}
+
+/// The public functions of `krate` outside the C FFI that carry no Java
+/// marker, and how many public functions were inspected. The scope is
+/// [`public_items`]'s: a `pub fn` of an inherent `impl` of a public type, a
+/// public trait's methods, a `pub fn` of a reachable module.
+fn unmarked_public_methods(krate: &Crate) -> (Vec<UnmarkedMethod>, usize) {
+    let mut out = Vec::new();
+    let mut checked = 0;
+    for (file, item) in public_items(krate) {
+        if !item.is_fn || item.module.first().is_some_and(|m| m == "ffi") {
+            continue;
+        }
+        checked += 1;
+        if !java_markers(&item.attrs).is_empty() {
+            continue;
+        }
+        let owner_rust_only = item.owner.as_ref().is_some_and(|owner| {
+            krate
+                .definition_attrs(&item.module, std::slice::from_ref(owner))
+                .is_some_and(|attrs| has_tag(&attrs, RUST_ONLY))
+        });
+        out.push(UnmarkedMethod {
+            file: file.to_path_buf(),
+            rust_only: has_tag(&item.attrs, RUST_ONLY),
+            owner_rust_only,
+            owner: item.owner,
+            name: item.name,
+        });
+    }
+    (out, checked)
+}
+
+/// The Rust module `src/` file `path` defines: `src/a/b.rs` and `src/a/b/mod.rs`
+/// are `a::b`, `src/lib.rs` is the root. `None` outside `src/`.
+fn rust_module(path: &Path) -> Option<ModPath> {
+    let rel = path.strip_prefix("src").ok()?;
+    let mut module: ModPath = rel.iter().map(|s| s.to_string_lossy().into_owned()).collect();
+    let stem = module.pop()?.trim_end_matches(".rs").to_string();
+    if !matches!(stem.as_str(), "mod" | "lib") {
+        module.push(stem);
+    }
+    Some(module)
+}
+
 /// Every `.rs` file under `dir`, sorted.
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else { return };
@@ -798,7 +1224,8 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
 impl JavaName {
     /// Checks one marker on `item`, pushing a finding if its name does not follow,
     /// or if the item is not in its class's package module (`module`, the item's
-    /// module; `None` outside `src/`).
+    /// module; `None` outside `src/`). A method of an impl or trait is exempt from
+    /// the module check: its owner type's marker places it.
     fn check_marker(
         &self,
         file: &str,
@@ -815,7 +1242,7 @@ impl JavaName {
             return;
         };
         let origin = format!("`{}`", marker.trim_start_matches(java::MARKER_PREFIX));
-        if let Some(module) = module.filter(|m| **m != class.module) {
+        if let Some(module) = module.filter(|m| **m != class.module && !item.member) {
             findings.push(format!(
                 "{file}: `{}` translates {origin}, so it belongs in module `{}`, not `{}`",
                 item.name,
@@ -845,18 +1272,33 @@ impl JavaName {
                     }
                 }
                 if !class.methods.contains(method) {
-                    findings.push(format!(
-                        "{file}: `{}` is marked {origin}, but `{}` declares no `{method}`",
-                        item.name,
-                        class.name()
-                    ));
+                    if !class.fields.contains_key(method) {
+                        findings.push(format!(
+                            "{file}: `{}` is marked {origin}, but `{}` declares no `{method}`",
+                            item.name,
+                            class.name()
+                        ));
+                    } else if !class.is_rust_accessor_of(method, &item.name) {
+                        let base = java::rust_method_bases(method).swap_remove(0);
+                        findings.push(format!(
+                            "{file}: `{}` translates field {origin} and must be named `{base}` (getter) or \
+                             `set_{base}` (setter)",
+                            item.name
+                        ));
+                    }
                     return;
                 }
-                if !class.is_rust_name_of(method, &item.name) {
-                    let expected = if method == class.name() {
+                if !class.is_rust_name_of(method, &item.name, item.has_self) {
+                    let statics = class.static_rust_names(method);
+                    let shared =
+                        !statics.is_empty() && class.overloads.iter().any(|o| o.name == *method && !o.is_static);
+                    let expected = if shared && !item.has_self {
+                        statics.iter().map(|b| format!("`{b}`")).collect::<Vec<_>>().join(" or ")
+                    } else if method == class.name() {
                         "`new` or `with_<params>`".to_string()
                     } else {
-                        rust_method_bases(method)
+                        class
+                            .rust_bases(method)
                             .iter()
                             .map(|b| format!("`{b}`"))
                             .collect::<Vec<_>>()
@@ -970,8 +1412,16 @@ impl JavaName {
     /// The re-export check: each `pub use` of `items`, in module `module`, lifts
     /// from a class file or grouping folder of that same module — never from
     /// another package. Macros the file defines may be re-exported too, and so
-    /// may an item of [`PUBLIC_AUDIENCE_ALLOWLIST`] (by its lifted Rust path).
-    fn check_reexports(&self, file: &str, module: &[String], items: &[syn::Item], findings: &mut Vec<String>) -> usize {
+    /// may an item tagged public on purpose ([`RUST_ONLY`], [`PUBLIC_IN_RUST`]),
+    /// found in `krate` from `rust_module`, the Rust module of the file.
+    fn check_reexports(
+        &self,
+        krate: &Crate,
+        file: &str,
+        (module, rust_module): (&[String], &[String]),
+        items: &[syn::Item],
+        findings: &mut Vec<String>,
+    ) -> usize {
         let mut children = BTreeSet::new();
         let mut macros = BTreeSet::new();
         for item in items {
@@ -1002,7 +1452,12 @@ impl JavaName {
                 let lifted = path.join("::");
                 let mut child = module.to_vec();
                 child.push(name.clone());
-                let foreign = if macros.contains(name) || self.allow.allows_quietly(&[&format!("{into}::{lifted}")]) {
+                let tagged = || {
+                    krate
+                        .definition_attrs(rust_module, &path)
+                        .is_some_and(|attrs| has_tag(&attrs, RUST_ONLY) || has_tag(&attrs, PUBLIC_IN_RUST))
+                };
+                let foreign = if macros.contains(name) || tagged() {
                     None
                 } else if !children.contains(name) {
                     Some(format!("`{name}`, outside this module"))
@@ -1017,6 +1472,24 @@ impl JavaName {
                     ));
                 }
             }
+        }
+        checked
+    }
+
+    /// The unmarked-method check: every public function carries a Java
+    /// marker, unless it is tagged [`RUST_ONLY`]. A function carrying only a
+    /// class marker is reported by [`JavaName::check_marker`]. A needless tag is
+    /// reported by [`PublicAudience`], which sees every tag.
+    fn check_unmarked_methods(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+        let (unmarked, checked) = unmarked_public_methods(krate);
+        for method in unmarked.iter().filter(|m| !m.rust_only && !m.owner_rust_only) {
+            findings.push(format!(
+                "{}: public method `{}` carries no Java method marker; mark the Java method it translates \
+                 (#[doc(alias = \"org.apache.kafka.<package>.<Class>#<method>\")]), make it `pub(crate)`, or tag \
+                 it #[doc(alias = \"{RUST_ONLY}\")] under a comment giving the reason it is public",
+                method.file.display(),
+                method.display()
+            ));
         }
         checked
     }
@@ -1036,7 +1509,7 @@ impl Rule for JavaName {
         })
     }
 
-    fn check(&self, _krate: &Crate, findings: &mut Vec<String>) -> usize {
+    fn check(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
         let mut files = Vec::new();
         rust_files(Path::new("src"), &mut files);
         rust_files(Path::new("tests"), &mut files);
@@ -1066,11 +1539,11 @@ impl Rule for JavaName {
                 }
             }
             checked += self.check_file(path, &items, findings);
-            if let Some(module) = &module {
-                checked += self.check_reexports(&file, module, &parsed.items, findings);
+            if let (Some(module), Some(rust_module)) = (&module, rust_module(path)) {
+                checked += self.check_reexports(krate, &file, (module, &rust_module), &parsed.items, findings);
             }
         }
-        checked + self.check_mapping(findings)
+        checked + self.check_mapping(findings) + self.check_unmarked_methods(krate, findings)
     }
 
     fn hint(&self) -> &'static str {
@@ -1078,7 +1551,11 @@ impl Rule for JavaName {
    (CLAUDE.md §2: Exception -> Error with the package prefix outside `common`,
    camelCase -> snake_case, `_with_<params>` for overloads, `new`/`with_..` for
    constructors, a nested class under its bare name). Fix the marker instead if
-   it names the wrong Java class or method; a Rust-only helper carries none."
+   it names the wrong Java class or method; a Rust-only helper carries none.
+   A public method must carry the marker of the Java method it translates. One
+   that translates none is made `pub(crate)`, or, if a rule needs it public
+   (CLAUDE.md §12.4's `Error::is_*_error`), tagged #[doc(alias = \"rust-only\")]
+   under a `//` comment giving the reason."
     }
 }
 
@@ -1122,8 +1599,8 @@ struct NoDeprecatedTranslation {
 }
 
 impl NoDeprecatedTranslation {
-    fn new() -> Self {
-        let mut index = JavaIndex::load();
+    fn new(ctx: &Context) -> Self {
+        let mut index = (*ctx.java).clone();
         let list = fs::read_to_string(java::DEPRECATED_LIST).unwrap_or_default();
         index.merge_deprecation_list(&list);
         let baseline = fs::read_to_string(DEPRECATED_BASELINE)
@@ -1171,9 +1648,50 @@ impl NoDeprecatedTranslation {
 struct PublicItem {
     name: String,
     attrs: Vec<syn::Attribute>,
+    /// The module defining the item.
+    module: ModPath,
+    /// The type or trait a method or associated const belongs to; `None` for
+    /// a module-level item.
+    owner: Option<String>,
+    /// Whether the item is a function: a method or a free function.
+    is_fn: bool,
+    /// The types a caller passes or receives through the item, each with its
+    /// role: a function's parameters and return type, the type a `type` alias
+    /// names.
+    types: Vec<(String, syn::Type)>,
+}
+
+/// The parameter types and the return type of `sig`, each with its role.
+fn sig_types(sig: &syn::Signature) -> Vec<(String, syn::Type)> {
+    let mut out: Vec<_> = sig
+        .inputs
+        .iter()
+        .filter_map(|arg| match arg {
+            syn::FnArg::Typed(pt) => Some((format!("parameter `{}`", compact(&pt.pat)), (*pt.ty).clone())),
+            syn::FnArg::Receiver(_) => None,
+        })
+        .collect();
+    if let syn::ReturnType::Type(_, ty) = &sig.output {
+        out.push(("the return type".to_string(), (**ty).clone()));
+    }
+    out
+}
+
+/// `t`'s tokens, spaced as rustfmt would for a type: `From<[u8; 16]>`.
+fn compact(t: &impl ToTokens) -> String {
+    t.to_token_stream()
+        .to_string()
+        .replace(" ;", ";")
+        .replace("& ", "&")
+        .replace(" < ", "<")
+        .replace("< ", "<")
+        .replace(" >", ">")
+        .replace(" ,", ",")
+        .replace(" :: ", "::")
 }
 
 /// The public items of `krate` (see [`NoDeprecatedTranslation`] for the scope).
+/// A `#[cfg(test)]` function is skipped: it never ships.
 fn public_items(krate: &Crate) -> Vec<(&Path, PublicItem)> {
     let types = krate.public_types();
     let is_pub = |vis: &syn::Visibility| matches!(vis, syn::Visibility::Public(_));
@@ -1183,25 +1701,56 @@ fn public_items(krate: &Crate) -> Vec<(&Path, PublicItem)> {
         let reachable = krate.is_reachable(path);
         let is_public_type = |name: &str| types.contains(&(path.clone(), name.to_string()));
         for item in &module.items {
-            let mut push = |name: &syn::Ident, attrs: &[syn::Attribute]| {
-                out.push((file, PublicItem { name: name.to_string(), attrs: attrs.to_vec() }))
+            let mut push = |name: &syn::Ident,
+                            attrs: &[syn::Attribute],
+                            owner: Option<&syn::Ident>,
+                            is_fn: bool,
+                            types: Vec<(String, syn::Type)>| {
+                if is_fn && is_cfg_test(attrs) {
+                    return;
+                }
+                out.push((
+                    file,
+                    PublicItem {
+                        name: name.to_string(),
+                        attrs: attrs.to_vec(),
+                        module: path.clone(),
+                        owner: owner.map(ToString::to_string),
+                        is_fn,
+                        types,
+                    },
+                ))
             };
             match item {
-                syn::Item::Struct(s) if is_public_type(&s.ident.to_string()) => push(&s.ident, &s.attrs),
-                syn::Item::Enum(e) if is_public_type(&e.ident.to_string()) => push(&e.ident, &e.attrs),
+                syn::Item::Struct(s) if is_public_type(&s.ident.to_string()) => {
+                    push(&s.ident, &s.attrs, None, false, Vec::new())
+                },
+                syn::Item::Enum(e) if is_public_type(&e.ident.to_string()) => {
+                    push(&e.ident, &e.attrs, None, false, Vec::new())
+                },
                 syn::Item::Trait(t) if is_public_type(&t.ident.to_string()) => {
-                    push(&t.ident, &t.attrs);
+                    push(&t.ident, &t.attrs, None, false, Vec::new());
                     for it in &t.items {
                         match it {
-                            syn::TraitItem::Fn(f) => push(&f.sig.ident, &f.attrs),
-                            syn::TraitItem::Const(c) => push(&c.ident, &c.attrs),
+                            syn::TraitItem::Fn(f) => {
+                                push(&f.sig.ident, &f.attrs, Some(&t.ident), true, sig_types(&f.sig))
+                            },
+                            syn::TraitItem::Const(c) => push(&c.ident, &c.attrs, Some(&t.ident), false, Vec::new()),
                             _ => {},
                         }
                     }
                 },
-                syn::Item::Type(t) if reachable && is_pub(&t.vis) => push(&t.ident, &t.attrs),
-                syn::Item::Fn(f) if reachable && is_pub(&f.vis) => push(&f.sig.ident, &f.attrs),
-                syn::Item::Const(c) if reachable && is_pub(&c.vis) => push(&c.ident, &c.attrs),
+                syn::Item::Type(t) if reachable && is_pub(&t.vis) => push(
+                    &t.ident,
+                    &t.attrs,
+                    None,
+                    false,
+                    vec![("the aliased type".to_string(), (*t.ty).clone())],
+                ),
+                syn::Item::Fn(f) if reachable && is_pub(&f.vis) => {
+                    push(&f.sig.ident, &f.attrs, None, true, sig_types(&f.sig))
+                },
+                syn::Item::Const(c) if reachable && is_pub(&c.vis) => push(&c.ident, &c.attrs, None, false, Vec::new()),
                 syn::Item::Impl(i) if i.trait_.is_none() => {
                     let syn::Type::Path(ty) = &*i.self_ty else { continue };
                     let Some(ty) = ty.path.segments.last() else { continue };
@@ -1210,8 +1759,12 @@ fn public_items(krate: &Crate) -> Vec<(&Path, PublicItem)> {
                     }
                     for it in &i.items {
                         match it {
-                            syn::ImplItem::Fn(f) if is_pub(&f.vis) => push(&f.sig.ident, &f.attrs),
-                            syn::ImplItem::Const(c) if is_pub(&c.vis) => push(&c.ident, &c.attrs),
+                            syn::ImplItem::Fn(f) if is_pub(&f.vis) => {
+                                push(&f.sig.ident, &f.attrs, Some(&ty.ident), true, sig_types(&f.sig))
+                            },
+                            syn::ImplItem::Const(c) if is_pub(&c.vis) => {
+                                push(&c.ident, &c.attrs, Some(&ty.ident), false, Vec::new())
+                            },
                             _ => {},
                         }
                     }
@@ -1220,7 +1773,17 @@ fn public_items(krate: &Crate) -> Vec<(&Path, PublicItem)> {
                     // The error types are public: every error is a variant of
                     // the public `Error` (CLAUDE.md §12).
                     if let Some(def) = error_macro_type_def(m) {
-                        out.push((file, PublicItem { name: def.name, attrs: def.attrs }));
+                        out.push((
+                            file,
+                            PublicItem {
+                                name: def.name,
+                                attrs: def.attrs,
+                                module: path.clone(),
+                                owner: None,
+                                is_fn: false,
+                                types: Vec::new(),
+                            },
+                        ));
                     }
                 },
                 _ => {},
@@ -1299,94 +1862,8 @@ impl Rule for NoDeprecatedTranslation {
 /// one fully-qualified top-level name per line.
 const PUBLIC_AUDIENCE_LIST: &str = "../design/current/interface-audience-public-4.4.txt";
 
-/// The public items [`PublicAudience`] lets through although no Public Java
-/// class backs them, one per line: `<key>  # <reason>`.
-const PUBLIC_AUDIENCE_ALLOWLIST: &str = "xtask/public-audience-allowlist.txt";
-
 /// Where the C header's `[export] include` list lives.
 const CBINDGEN_TOML: &str = "cbindgen.toml";
-
-/// One line of [`PUBLIC_AUDIENCE_ALLOWLIST`].
-struct AllowEntry {
-    /// A Java class (`org.apache.kafka.clients.admin.MockAdminClient`), a Rust
-    /// path (`crate::common::Error`) or a C symbol prefix
-    /// (`kafka_consumer_ConsumerHandle`); `*` matches any run of characters.
-    key: String,
-    line: usize,
-    /// Whether the entry let through an item that would otherwise be a finding.
-    used: std::cell::Cell<bool>,
-}
-
-/// The entries of [`PUBLIC_AUDIENCE_ALLOWLIST`].
-#[derive(Default)]
-struct AllowList {
-    entries: Vec<AllowEntry>,
-}
-
-impl AllowList {
-    /// Reads the list at `path` (empty if there is none), with a finding for
-    /// each malformed line.
-    fn load(path: &Path) -> (Self, Vec<String>) {
-        Self::parse(&path.display().to_string(), &fs::read_to_string(path).unwrap_or_default())
-    }
-
-    /// Parses `text`: a line is `<key>  # <reason>`, and the reason is
-    /// required; blank lines and lines starting with `#` are comments. The
-    /// reason starts at the first `#` after whitespace, since a member marker
-    /// key (`Class#member`) contains a `#` of its own.
-    fn parse(file: &str, text: &str) -> (Self, Vec<String>) {
-        let mut list = AllowList::default();
-        let mut errors = Vec::new();
-        for (i, raw) in text.lines().enumerate() {
-            let line = raw.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let reason_at = line
-                .char_indices()
-                .find(|&(at, c)| c == '#' && line[..at].ends_with(char::is_whitespace));
-            let (key, reason) = reason_at.map_or((line, ""), |(at, _)| (line[..at].trim(), line[at + 1..].trim()));
-            if key.is_empty() || key.contains(char::is_whitespace) || reason.is_empty() {
-                errors.push(format!("{file}:{}: expected `<key>  # <reason>`, found `{line}`", i + 1));
-                continue;
-            }
-            list.entries
-                .push(AllowEntry { key: key.to_string(), line: i + 1, used: Default::default() });
-        }
-        (list, errors)
-    }
-
-    /// Whether an entry matches one of `keys`; the entry is then recorded as used.
-    fn allows(&self, keys: &[&str]) -> bool {
-        let hit = self.entries.iter().find(|e| keys.iter().any(|k| glob_match(&e.key, k)));
-        hit.inspect(|e| e.used.set(true)).is_some()
-    }
-
-    /// [`AllowList::allows`], without recording the entry as used.
-    fn allows_quietly(&self, keys: &[&str]) -> bool {
-        self.entries.iter().any(|e| keys.iter().any(|k| glob_match(&e.key, k)))
-    }
-}
-
-/// Whether `text` matches `pattern`, in which `*` matches any run of
-/// characters (`::` included) and every other character matches itself.
-fn glob_match(pattern: &str, text: &str) -> bool {
-    let Some((head, rest)) = pattern.split_once('*') else {
-        return pattern == text;
-    };
-    let Some(mut text) = text.strip_prefix(head) else {
-        return false;
-    };
-    let parts: Vec<&str> = rest.split('*').collect();
-    let (last, middle) = parts.split_last().expect("split yields at least one part");
-    for part in middle {
-        match text.find(part) {
-            Some(at) => text = &text[at + part.len()..],
-            None => return false,
-        }
-    }
-    text.len() >= last.len() && text.ends_with(last)
-}
 
 /// Checks that the crate makes public — in Rust and in C — only what Java's
 /// public API holds (CLAUDE.md §2, §4). A public item translating a Java class
@@ -1398,11 +1875,13 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 ///      [`java::AUDIENCE_REF`] ([`PUBLIC_AUDIENCE_LIST`]); a nested class
 ///      takes the audience of the top-level class declaring it.
 ///
-/// A public item without a Java class (a Rust-only helper, a JDK type) must be
-/// listed in [`PUBLIC_AUDIENCE_ALLOWLIST`] with the reason it is public, as
-/// must a Java class that is public on purpose despite the rules (a test-jar
-/// helper). An entry that no longer lets anything through is reported, so the
-/// list cannot rot.
+/// A public item without a Java class (a Rust-only helper, a JDK type, a C-only
+/// handle) must be tagged [`RUST_ONLY`], and an item translating Java API that is
+/// public on purpose despite the rules (a test-jar helper) [`PUBLIC_IN_RUST`],
+/// each under a comment giving the reason. A C prefix is let through by a tag on
+/// any of its symbols. [`JavaName`] reads [`RUST_ONLY`] on a public method that
+/// translates no Java method. A tag that lets nothing through, for either rule,
+/// is reported, so tags cannot pile up.
 ///
 /// **Rust:** every `pub` struct, enum, union, trait, type alias, fn, const and
 /// static another crate can name — defined in a reachable module or
@@ -1442,29 +1921,18 @@ struct PublicAudience {
     /// The dotted packages (below `org.apache.kafka`) carrying the
     /// unsupported-API disclaimer.
     unsupported: BTreeSet<String>,
-    allow: AllowList,
-    /// The malformed lines of the allow-list.
-    allow_errors: Vec<String>,
     /// Where the `[export] include` list is read from.
     cbindgen: PathBuf,
 }
 
 impl PublicAudience {
-    fn new() -> Self {
-        let index = JavaIndex::load();
+    fn new(ctx: &Context) -> Self {
+        let index = (*ctx.java).clone();
         let public = parse_public_list(&fs::read_to_string(PUBLIC_AUDIENCE_LIST).unwrap_or_default());
         // Read at the ref, never from the working tree: the tree is the
         // translated source (4.3.1), not the release whose disclaimers count.
         let unsupported = java::unsupported_packages_at_ref(java::AUDIENCE_REF).unwrap_or_default();
-        let (allow, allow_errors) = AllowList::load(Path::new(PUBLIC_AUDIENCE_ALLOWLIST));
-        PublicAudience {
-            index,
-            public,
-            unsupported,
-            allow,
-            allow_errors,
-            cbindgen: PathBuf::from(CBINDGEN_TOML),
-        }
+        PublicAudience { index, public, unsupported, cbindgen: PathBuf::from(CBINDGEN_TOML) }
     }
 
     /// Why top-level Java class `fqn` (`org.apache.kafka.<package>.<Class>`)
@@ -1485,8 +1953,9 @@ impl PublicAudience {
         reasons
     }
 
-    /// The Rust half: public items and the generated module.
-    fn check_rust(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+    /// The Rust half: public items and the generated module. Each tag that lets
+    /// an item through is recorded in `used`.
+    fn check_rust(&self, krate: &Crate, findings: &mut Vec<String>, used: &mut BTreeSet<TagSite>) -> usize {
         let mut checked = 0;
         for (module, name) in krate.public_names(|item| pub_def(item).map(|(name, _)| name)) {
             if module.first().is_some_and(|m| m == "ffi") {
@@ -1497,13 +1966,20 @@ impl PublicAudience {
             // Every item of the name (a type and a fn may share it through a macro).
             for (_, attrs) in m.items.iter().filter_map(pub_def).filter(|(n, _)| *n == name) {
                 checked += 1;
-                let full = format!("{}::{name}", module_path(&module));
                 // The path §2 imports it by: its file module dropped.
                 let canonical = match module.split_last() {
                     Some((file_mod, parent)) if *file_mod == java::snake_case(&name) => {
                         format!("{}::{name}", module_path(parent))
                     },
-                    _ => full.clone(),
+                    _ => format!("{}::{name}", module_path(&module)),
+                };
+                // Whether the item carries `tag`, recording it as used if so.
+                let mut tagged = |tag| {
+                    let hit = has_tag(&attrs, tag);
+                    if hit {
+                        used.insert(TagSite::new(&m.file, None, &name, tag));
+                    }
+                    hit
                 };
                 let classes: BTreeSet<String> = java_markers(&attrs)
                     .iter()
@@ -1511,14 +1987,11 @@ impl PublicAudience {
                     .map(str::to_string)
                     .collect();
                 let tops: Vec<String> = classes.iter().map(|c| top_level_class(c).to_string()).collect();
-                let mut keys: Vec<&str> = vec![&full, &canonical];
-                keys.extend(classes.iter().map(String::as_str));
-                keys.extend(tops.iter().map(String::as_str));
                 if classes.is_empty() {
-                    if !self.allow.allows(&keys) {
+                    if !tagged(RUST_ONLY) {
                         findings.push(format!(
                             "{file}: `{canonical}` is public but carries no Java marker; mark the class it translates, or \
-                             add it to {PUBLIC_AUDIENCE_ALLOWLIST} with the reason it is public"
+                             tag it #[doc(alias = \"{RUST_ONLY}\")] under a comment giving the reason it is public"
                         ));
                     }
                     continue;
@@ -1530,7 +2003,7 @@ impl PublicAudience {
                         (!reasons.is_empty()).then(|| format!("`{top}`: {}", reasons.join(", ")))
                     })
                     .collect();
-                if !failures.is_empty() && !self.allow.allows(&keys) {
+                if !failures.is_empty() && !tagged(PUBLIC_IN_RUST) {
                     findings.push(format!(
                         "{file}: `{canonical}` is public but translates {}",
                         failures.join("; ")
@@ -1538,12 +2011,12 @@ impl PublicAudience {
                 }
             }
         }
-        checked + self.check_members(krate, findings) + check_generated_module(krate, findings)
+        checked + self.check_members(krate, findings, used) + check_generated_module(krate, findings)
     }
 
     /// The member half: no public method translates a Java method that is not
-    /// `public`.
-    fn check_members(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+    /// `public`, unless it is tagged [`PUBLIC_IN_RUST`] (recorded in `used`).
+    fn check_members(&self, krate: &Crate, findings: &mut Vec<String>, used: &mut BTreeSet<TagSite>) -> usize {
         let mut checked = 0;
         for (file, item) in public_items(krate) {
             for marker in java_markers(&item.attrs) {
@@ -1557,7 +2030,8 @@ impl PublicAudience {
                     continue;
                 };
                 checked += 1;
-                if self.allow.allows(&[marker.as_str()]) {
+                if has_tag(&item.attrs, PUBLIC_IN_RUST) {
+                    used.insert(TagSite::new(file, item.owner.as_deref(), &item.name, PUBLIC_IN_RUST));
                     continue;
                 }
                 let visibility = match visibility {
@@ -1592,6 +2066,11 @@ impl PublicAudience {
     /// (possibly nested) marker and its top-level marker; `None` if it names
     /// none.
     fn resolve_ffi_class(&self, pkg: &[&str], class: &str) -> Option<(String, String)> {
+        if pkg.is_empty() {
+            // A package-less `kafka_<Type>_…` stands for a JDK type (`kafka_List_t`,
+            // CLAUDE.md §4), never a Kafka class; its `rust-only` tag admits it.
+            return None;
+        }
         let dotted = pkg.join(".");
         let packages = [format!("clients.{dotted}"), dotted];
         let mut names = vec![class.to_string()];
@@ -1649,9 +2128,13 @@ impl PublicAudience {
 
     /// The C half: the FFI symbols and the header's include list, reported once
     /// per `kafka_<pkg>_<Class>` prefix.
-    fn check_c(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+    /// A prefix is let through by a tag on any of its symbols, which are then
+    /// recorded in `used`.
+    fn check_c(&self, krate: &Crate, findings: &mut Vec<String>, used: &mut BTreeSet<TagSite>) -> usize {
         // symbol -> file it is declared in.
         let mut symbols: BTreeMap<String, String> = BTreeMap::new();
+        // prefix -> the tags on its symbols.
+        let mut tags: BTreeMap<String, Vec<TagSite>> = BTreeMap::new();
         for (path, module) in &krate.modules {
             if path.first().is_none_or(|m| m != "ffi") {
                 continue;
@@ -1666,6 +2149,12 @@ impl PublicAudience {
                     _ => continue,
                 };
                 if matches!(item, syn::Item::Fn(_)) || (name.starts_with("kafka_") && name.ends_with("_t")) {
+                    if let Some((_, attrs)) = item_def(item) {
+                        for tag in [RUST_ONLY, PUBLIC_IN_RUST].into_iter().filter(|t| has_tag(&attrs, t)) {
+                            let site = TagSite::new(&module.file, None, &name, tag);
+                            tags.entry(ffi_prefix(&name)).or_default().push(site);
+                        }
+                    }
                     symbols.entry(name).or_insert_with(|| module.file.display().to_string());
                 }
             }
@@ -1679,15 +2168,19 @@ impl PublicAudience {
         let mut by_prefix: BTreeMap<String, (String, usize, Option<String>)> = BTreeMap::new();
         for (symbol, file) in &symbols {
             let parsed = ffi_class(symbol);
-            let prefix = parsed
-                .as_ref()
-                .map_or_else(|| symbol.clone(), |(pkg, class)| format!("kafka_{}_{class}", pkg.join("_")));
+            let prefix = ffi_prefix(symbol);
             if let Some(entry) = by_prefix.get_mut(&prefix) {
                 entry.1 += 1;
                 continue;
             }
+            // Whether a symbol of the prefix carries `tag`, recording the tags if so.
+            let mut tagged = |tag| {
+                let sites: Vec<&TagSite> = tags.get(&prefix).into_iter().flatten().filter(|s| s.tag == tag).collect();
+                used.extend(sites.iter().map(|s| (*s).clone()));
+                !sites.is_empty()
+            };
             let reason = match parsed.as_ref().and_then(|(pkg, class)| self.resolve_ffi_class(pkg, class)) {
-                None if self.allow.allows(&[symbol, &prefix]) => None,
+                None if tagged(RUST_ONLY) => None,
                 None => Some(format!(
                     "names no Java class (`kafka_<pkg>_<Class>_…`, with `<pkg>` the Java package without \
                      `clients`){}",
@@ -1697,7 +2190,7 @@ impl PublicAudience {
                 )),
                 Some((class, top)) => {
                     let failures = self.audience_failures(&top);
-                    if failures.is_empty() || self.allow.allows(&[symbol, &prefix, &class, &top]) {
+                    if failures.is_empty() || tagged(PUBLIC_IN_RUST) {
                         None
                     } else {
                         Some(format!("binds `{class}`, which may not be public: {}", failures.join(", ")))
@@ -1719,16 +2212,36 @@ impl PublicAudience {
 /// union, trait, type alias, fn, const or static, or an error macro's type
 /// (always `pub`).
 fn pub_def(item: &syn::Item) -> Option<(String, Vec<syn::Attribute>)> {
-    let is_pub = |vis: &syn::Visibility| matches!(vis, syn::Visibility::Public(_));
+    let vis = match item {
+        syn::Item::Struct(s) => &s.vis,
+        syn::Item::Enum(e) => &e.vis,
+        syn::Item::Union(u) => &u.vis,
+        syn::Item::Trait(t) => &t.vis,
+        syn::Item::Type(t) => &t.vis,
+        syn::Item::Fn(f) => &f.vis,
+        syn::Item::Const(c) => &c.vis,
+        syn::Item::Static(s) => &s.vis,
+        syn::Item::Macro(_) => return item_def(item),
+        _ => return None,
+    };
+    if matches!(vis, syn::Visibility::Public(_)) {
+        item_def(item)
+    } else {
+        None
+    }
+}
+
+/// [`pub_def`], whatever the item's visibility.
+fn item_def(item: &syn::Item) -> Option<(String, Vec<syn::Attribute>)> {
     let (ident, attrs) = match item {
-        syn::Item::Struct(s) if is_pub(&s.vis) => (&s.ident, &s.attrs),
-        syn::Item::Enum(e) if is_pub(&e.vis) => (&e.ident, &e.attrs),
-        syn::Item::Union(u) if is_pub(&u.vis) => (&u.ident, &u.attrs),
-        syn::Item::Trait(t) if is_pub(&t.vis) => (&t.ident, &t.attrs),
-        syn::Item::Type(t) if is_pub(&t.vis) => (&t.ident, &t.attrs),
-        syn::Item::Fn(f) if is_pub(&f.vis) => (&f.sig.ident, &f.attrs),
-        syn::Item::Const(c) if is_pub(&c.vis) => (&c.ident, &c.attrs),
-        syn::Item::Static(s) if is_pub(&s.vis) => (&s.ident, &s.attrs),
+        syn::Item::Struct(s) => (&s.ident, &s.attrs),
+        syn::Item::Enum(e) => (&e.ident, &e.attrs),
+        syn::Item::Union(u) => (&u.ident, &u.attrs),
+        syn::Item::Trait(t) => (&t.ident, &t.attrs),
+        syn::Item::Type(t) => (&t.ident, &t.attrs),
+        syn::Item::Fn(f) => (&f.sig.ident, &f.attrs),
+        syn::Item::Const(c) => (&c.ident, &c.attrs),
+        syn::Item::Static(s) => (&s.ident, &s.attrs),
         syn::Item::Macro(m) => return error_macro_type_def(m).map(|def| (def.name, def.attrs)),
         _ => return None,
     };
@@ -1788,14 +2301,31 @@ fn is_no_mangle(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|a| a.meta.to_token_stream().to_string().contains("no_mangle"))
 }
 
-/// A C symbol `kafka_<pkg>_<Class>_…` as (package segments, class); `None`
-/// when it has no lower-case package segment followed by a PascalCase class.
+/// The prefix C `symbol` is reported under: `kafka_<pkg>_<Class>` (`kafka_<Class>`
+/// for a package-less helper), or the whole symbol when it names no class.
+fn ffi_prefix(symbol: &str) -> String {
+    ffi_class(symbol).map_or_else(
+        || symbol.to_string(),
+        |(pkg, class)| {
+            if pkg.is_empty() {
+                format!("kafka_{class}")
+            } else {
+                format!("kafka_{}_{class}", pkg.join("_"))
+            }
+        },
+    )
+}
+
+/// A C symbol `kafka_<pkg>_<Class>_…` as (package segments, class); the
+/// segments are empty for a package-less `kafka_<Class>_…` helper standing for
+/// a JDK type (`kafka_List_t`, CLAUDE.md §4). `None` when no PascalCase class
+/// follows the lower-case segments.
 fn ffi_class(symbol: &str) -> Option<(Vec<&str>, &str)> {
     let rest = symbol.strip_prefix("kafka_")?;
     let mut pkg = Vec::new();
     for seg in rest.split('_') {
         if seg.starts_with(|c: char| c.is_ascii_uppercase()) {
-            return (!pkg.is_empty()).then_some((pkg, seg));
+            return Some((pkg, seg));
         }
         if seg.is_empty() || !seg.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
             return None;
@@ -1863,12 +2393,25 @@ impl Rule for PublicAudience {
     }
 
     fn check(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
-        findings.extend(self.allow_errors.iter().cloned());
-        let checked = self.check_rust(krate, findings) + self.check_c(krate, findings);
-        for entry in self.allow.entries.iter().filter(|e| !e.used.get()) {
+        let mut used = BTreeSet::new();
+        let checked = self.check_rust(krate, findings, &mut used) + self.check_c(krate, findings, &mut used);
+        // `check-java-name` lets a `rust-only` public method through.
+        used.extend(
+            unmarked_public_methods(krate)
+                .0
+                .iter()
+                .filter(|m| m.rust_only && !m.owner_rust_only)
+                .map(UnmarkedMethod::tag_site),
+        );
+        for site in tag_sites(krate).difference(&used) {
+            let name = site
+                .owner
+                .as_ref()
+                .map_or_else(|| site.name.clone(), |o| format!("{o}::{}", site.name));
             findings.push(format!(
-                "{PUBLIC_AUDIENCE_ALLOWLIST}:{}: `{}` lets nothing through any more; remove it",
-                entry.line, entry.key
+                "{}: `{name}` is tagged `{}` but would pass without it; remove the tag",
+                site.file.display(),
+                site.tag
             ));
         }
         checked
@@ -1878,11 +2421,14 @@ impl Rule for PublicAudience {
         "   Make the item `pub(crate)` and drop its C binding: only a class Java
    publishes may be public — outside `internal*` packages, outside packages whose
    package-info.java says \"not a supported Kafka API\", and annotated
-   `@InterfaceAudience.Public` in Kafka 4.4. A Rust-only item, or a deliberate
-   exception, goes in xtask/public-audience-allowlist.txt with its reason.
+   `@InterfaceAudience.Public` in Kafka 4.4. A Rust-only item (a C-only handle
+   included) is tagged #[doc(alias = \"rust-only\")], a deliberate exception
+   #[doc(alias = \"public-in-rust\")], under a `//` comment giving the reason;
+   for C, tag any symbol of the prefix, preferably its `_t` type.
    Likewise a public method may only translate a Java method that is `public`
    (an interface member without a modifier is): make the others `pub(crate)`,
-   or allow-list the method's marker with the reason.
+   or tag the method #[doc(alias = \"public-in-rust\")] with the reason.
+   A tag on an item that would pass without it is reported: remove it.
    A public signature naming a crate-private type is caught by rustc's
    `unnameable_types` (enabled in src/lib.rs) under `cargo xtask lint`."
     }
@@ -2058,6 +2604,275 @@ impl Rule for DynCompatible {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Rule: check-error-predicate
+// ---------------------------------------------------------------------------
+
+/// The module the crate's flat error enum lives in.
+const ERROR_MODULE: [&str; 2] = ["common", "error"];
+
+/// Checks that every variant of `common::Error` has its class predicate
+/// (CLAUDE.md §3, forward compatibility).
+///
+/// Java's `catch (TopicExistsException e)` also catches a subclass a later Kafka
+/// release adds. Here that subclass becomes a new variant, so a caller's
+/// `matches!(e, Error::TopicExists(_))` would miss it, while
+/// `e.is_topic_exists_error()` keeps matching once the new payload lists its
+/// parent's predicate. So users classify with predicates, and every variant needs
+/// one: `is_` + its payload type snake_cased with a trailing `Error` dropped +
+/// `_error` (`TopicExistsError` → `is_topic_exists_error`, `KafkaError` →
+/// `is_kafka_error`).
+///
+/// A predicate is spelled out in several places. Missing any one of them
+/// compiles, but then quietly gives the wrong answer or isn't reachable, so this
+/// rule checks every one:
+///
+///  - a method on `ErrorHierarchy`, so a payload can override it — an inherent
+///    `matches!` could never answer for a future subclass;
+///  - the variant's own payload answering `true`: its `kafka_error_type!` /
+///    `message_only_error!` `extends:` list names it, or its hand-written
+///    `impl ErrorHierarchy` overrides it.
+///
+/// And for every `ErrorHierarchy` method, intermediate classes included:
+///
+///  - a forwarder in `impl ErrorHierarchy for Box<T>` — without it a boxed
+///    payload silently answers the trait's `false`;
+///  - a public forwarder on `Error` calling the trait through UFCS (a method
+///    call would resolve to the inherent method itself and recurse);
+///  - a C export `kafka_common_Error_<predicate>` in `src/ffi` (CLAUDE.md §4).
+///
+/// The rule checks that the predicates exist, not how the crate's own code
+/// classifies errors.
+struct ErrorPredicate;
+
+impl Rule for ErrorPredicate {
+    fn name(&self) -> &'static str {
+        "check-error-predicate"
+    }
+
+    fn check(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+        let path: ModPath = ERROR_MODULE.iter().map(ToString::to_string).collect();
+        let Some(module) = krate.modules.get(&path) else {
+            findings.push(format!("no `{}` module to find `Error` in", ERROR_MODULE.join("::")));
+            return 0;
+        };
+        let file = module.file.display();
+        let Some(error) = module.items.iter().find_map(|item| match item {
+            syn::Item::Enum(e) if e.ident == "Error" => Some(e),
+            _ => None,
+        }) else {
+            findings.push(format!("{file}: no `enum Error`"));
+            return 0;
+        };
+
+        let trait_methods = hierarchy_trait_methods(&module.items);
+        let box_forwarders = hierarchy_impl_methods(&module.items, |ty| ty == "Box");
+        let error_forwarders = error_forwarders(&module.items);
+        let overrides = payload_overrides(krate);
+        let c_exports = c_exports(krate);
+
+        let mut checked = 0usize;
+        for variant in &error.variants {
+            checked += 1;
+            let Some(payload) = variant_payload(variant) else {
+                findings.push(format!(
+                    "{file}: `Error::{}` does not wrap a single payload type",
+                    variant.ident
+                ));
+                continue;
+            };
+            let predicate = class_predicate(&payload);
+            if !trait_methods.contains(&predicate) {
+                findings.push(format!(
+                    "{file}: `Error::{}` has no class predicate: `ErrorHierarchy` declares no `{predicate}`",
+                    variant.ident
+                ));
+            }
+            if !overrides.get(&payload).is_some_and(|preds| preds.contains(&predicate)) {
+                findings.push(format!("{file}: `{payload}` does not answer `true` to its own `{predicate}`"));
+            }
+        }
+        for method in &trait_methods {
+            checked += 1;
+            if !box_forwarders.contains(method) {
+                findings.push(format!("{file}: `impl ErrorHierarchy for Box<T>` does not forward `{method}`"));
+            }
+            if !error_forwarders.contains(method) {
+                findings.push(format!(
+                    "{file}: `Error` has no `pub fn {method}(&self) -> bool` forwarding to `ErrorHierarchy::{method}(self)`"
+                ));
+            }
+            if !c_exports.contains(&format!("kafka_common_Error_{method}")) {
+                findings.push(format!(
+                    "{file}: `{method}` has no C export `kafka_common_Error_{method}` in `ffi`"
+                ));
+            }
+        }
+        checked
+    }
+
+    fn hint(&self) -> &'static str {
+        "   Every `Error` variant needs its class predicate (CLAUDE.md §3), named
+   `is_` + payload type snake_cased without a trailing `Error` + `_error`:
+     1. a default-false `fn is_x_error(&self) -> bool` on `ErrorHierarchy`;
+     2. its forwarder in `impl ErrorHierarchy for Box<T>`;
+     3. `pub fn is_x_error(&self) -> bool { ErrorHierarchy::is_x_error(self) }`
+        on `Error`;
+     4. the payload answering `true`: `is_x_error` in its `extends:` list, or
+        an override in its hand-written `impl ErrorHierarchy` — and in every
+        payload whose Java class extends it;
+     5. the C export, regenerated with `cargo xtask generate-error-predicates`."
+    }
+}
+
+/// `is_` + `payload` snake_cased with a trailing `Error` dropped + `_error`.
+fn class_predicate(payload: &str) -> String {
+    let base = payload.strip_suffix("Error").filter(|b| !b.is_empty()).unwrap_or(payload);
+    format!("is_{}_error", java::snake_case(base))
+}
+
+/// The payload type `variant` wraps, looking through a `Box`: `Timeout(TimeoutError)`
+/// and `QuotaViolation(Box<QuotaViolationError>)` give `TimeoutError` and
+/// `QuotaViolationError`.
+fn variant_payload(variant: &syn::Variant) -> Option<String> {
+    let syn::Fields::Unnamed(fields) = &variant.fields else {
+        return None;
+    };
+    let [field] = fields.unnamed.iter().collect::<Vec<_>>()[..] else {
+        return None;
+    };
+    let mut ty = &field.ty;
+    loop {
+        let syn::Type::Path(p) = ty else { return None };
+        let last = p.path.segments.last()?;
+        if last.ident != "Box" {
+            return Some(last.ident.to_string());
+        }
+        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+            return None;
+        };
+        let Some(syn::GenericArgument::Type(inner)) = args.args.first() else {
+            return None;
+        };
+        ty = inner;
+    }
+}
+
+/// Whether `path` names the `ErrorHierarchy` trait, however qualified.
+fn is_hierarchy_path(path: &syn::Path) -> bool {
+    path.segments.last().is_some_and(|s| s.ident == "ErrorHierarchy")
+}
+
+/// The methods `trait ErrorHierarchy` declares among `items`.
+fn hierarchy_trait_methods(items: &[syn::Item]) -> BTreeSet<String> {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Trait(t) if t.ident == "ErrorHierarchy" => Some(t),
+            _ => None,
+        })
+        .flat_map(|t| &t.items)
+        .filter_map(|item| match item {
+            syn::TraitItem::Fn(f) => Some(f.sig.ident.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The last path segment of `ty`, if it is a path type.
+fn type_ident(ty: &syn::Type) -> Option<String> {
+    let syn::Type::Path(p) = ty else { return None };
+    p.path.segments.last().map(|s| s.ident.to_string())
+}
+
+/// The methods of the `impl ErrorHierarchy for T` blocks among `items` whose `T`
+/// satisfies `self_ty`.
+fn hierarchy_impl_methods(items: &[syn::Item], self_ty: impl Fn(&str) -> bool) -> BTreeSet<String> {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Impl(i)
+                if i.trait_.as_ref().is_some_and(|(_, p, _)| is_hierarchy_path(p))
+                    && type_ident(&i.self_ty).is_some_and(|t| self_ty(&t)) =>
+            {
+                Some(i)
+            },
+            _ => None,
+        })
+        .flat_map(|i| &i.items)
+        .filter_map(|item| match item {
+            syn::ImplItem::Fn(f) => Some(f.sig.ident.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The predicates `Error` forwards publicly: each `pub fn is_x_error(&self) -> bool`
+/// of an inherent `impl Error` whose body calls `ErrorHierarchy::is_x_error`.
+fn error_forwarders(items: &[syn::Item]) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for item in items {
+        let syn::Item::Impl(i) = item else { continue };
+        if i.trait_.is_some() || type_ident(&i.self_ty).as_deref() != Some("Error") {
+            continue;
+        }
+        for item in &i.items {
+            let syn::ImplItem::Fn(f) = item else { continue };
+            let name = f.sig.ident.to_string();
+            let returns_bool = matches!(&f.sig.output, syn::ReturnType::Type(_, ty) if compact(&**ty) == "bool");
+            let body = f.block.to_token_stream().to_string().replace(' ', "");
+            let ufcs = body.contains(&format!("ErrorHierarchy::{name}(self)"));
+            if matches!(f.vis, syn::Visibility::Public(_)) && returns_bool && ufcs {
+                out.insert(name);
+            }
+        }
+    }
+    out
+}
+
+/// The predicates each error payload answers `true` to, keyed by payload type:
+/// the `extends:` list of its `kafka_error_type!` / `message_only_error!`, plus
+/// the methods of its hand-written `impl ErrorHierarchy`, from anywhere in the
+/// crate.
+fn payload_overrides(krate: &Crate) -> BTreeMap<String, BTreeSet<String>> {
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for module in krate.modules.values() {
+        for item in &module.items {
+            match item {
+                syn::Item::Macro(m) => {
+                    if let Some(def) = error_macro_type_def(m) {
+                        out.entry(def.name).or_default().extend(def.extends);
+                    }
+                },
+                syn::Item::Impl(i) if i.trait_.as_ref().is_some_and(|(_, p, _)| is_hierarchy_path(p)) => {
+                    let Some(ty) = type_ident(&i.self_ty) else { continue };
+                    let methods = i.items.iter().filter_map(|item| match item {
+                        syn::ImplItem::Fn(f) => Some(f.sig.ident.to_string()),
+                        _ => None,
+                    });
+                    out.entry(ty).or_default().extend(methods);
+                },
+                _ => {},
+            }
+        }
+    }
+    out
+}
+
+/// The `#[no_mangle]` functions of the C FFI (`ffi` and its submodules).
+fn c_exports(krate: &Crate) -> BTreeSet<String> {
+    krate
+        .modules
+        .iter()
+        .filter(|(path, _)| path.first().is_some_and(|p| p == "ffi"))
+        .flat_map(|(_, m)| &m.items)
+        .filter_map(|item| match item {
+            syn::Item::Fn(f) if is_no_mangle(&f.attrs) => Some(f.sig.ident.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2074,11 +2889,21 @@ mod tests {
             }
             #[doc(alias = "org.apache.kafka.clients.consumer.KafkaConsumer")]
             pub struct KafkaConsumer;
+            impl KafkaConsumer {
+                #[doc(alias = "rust-only")]
+                pub fn rust_only(&self) {}
+                #[doc(alias = "rust-only")]
+                pub(crate) fn needless(&self) {}
+            }
             #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer")]
+            #[doc(alias = "public-in-rust")]
             pub struct MockConsumer;
             pub struct Unmarked;
+            #[doc(alias = "rust-only")]
             pub struct Allowed;
             pub(crate) struct Hidden;
+            #[doc(alias = "rust-only")]
+            pub(crate) struct NeedlessTag;
         }
         pub mod common {
             pub mod network {
@@ -2090,14 +2915,22 @@ mod tests {
         }
         pub mod ffi {
             pub struct kafka_consumer_KafkaConsumer_t;
+            #[doc(alias = "rust-only")]
+            pub struct kafka_common_Error_t;
             #[unsafe(no_mangle)]
             pub extern "C" fn kafka_consumer_KafkaConsumer_new() {}
             #[unsafe(no_mangle)]
             pub extern "C" fn kafka_common_Cluster_new() {}
             #[unsafe(no_mangle)]
             pub extern "C" fn kafka_consumer_Nothing_new() {}
+            #[doc(alias = "rust-only")]
             #[unsafe(no_mangle)]
             pub extern "C" fn kafka_consumer_StringList_new() {}
+            #[unsafe(no_mangle)]
+            pub extern "C" fn kafka_consumer_StringList_destroy() {}
+            #[doc(alias = "public-in-rust")]
+            #[unsafe(no_mangle)]
+            pub extern "C" fn kafka_consumer_KafkaConsumer_destroy() {}
             #[unsafe(no_mangle)]
             pub extern "C" fn kafka_common_TopicAuthorizationError_topics() {}
         }
@@ -2118,13 +2951,6 @@ mod tests {
         ]
     "#;
 
-    const ALLOW: &str = "\
-        # the fixture allow-list\n\
-        crate::consumer::Allowed  # Rust-only\n\
-        org.apache.kafka.clients.consumer.MockConsumer  # a test helper\n\
-        kafka_consumer_StringList  # a Java `Collection<String>`\n\
-        kafka_common_Error  # the error handle\n";
-
     fn class(package: &str, path: &[&str]) -> java::JavaClass {
         java::JavaClass {
             module: package.split('.').filter(|s| *s != "clients").map(str::to_string).collect(),
@@ -2133,6 +2959,7 @@ mod tests {
             methods: BTreeSet::new(),
             overloads: Vec::new(),
             fields: BTreeMap::new(),
+            field_visibility: BTreeMap::new(),
             deprecated: false,
             is_test: false,
         }
@@ -2143,14 +2970,13 @@ mod tests {
     }
 
     /// The fixture crate written to its own temp dir, and the rule over a
-    /// synthetic Java index with allow-list `allow`.
-    fn fixture(name: &str, allow: &str) -> (Crate, PublicAudience) {
+    /// synthetic Java index.
+    fn fixture(name: &str) -> (Crate, PublicAudience) {
         let dir = fixture_dir(name);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("lib.rs"), FIXTURE_LIB).unwrap();
         fs::write(dir.join("cbindgen.toml"), FIXTURE_CBINDGEN).unwrap();
         let krate = Crate::load(&dir.join("lib.rs")).unwrap();
-        let (allow, allow_errors) = AllowList::parse("allow.txt", allow);
         let rule = PublicAudience {
             index: JavaIndex {
                 classes: vec![
@@ -2170,15 +2996,13 @@ mod tests {
             .map(str::to_string)
             .collect(),
             unsupported: ["common.network".to_string()].into(),
-            allow,
-            allow_errors,
             cbindgen: dir.join("cbindgen.toml"),
         };
         (krate, rule)
     }
 
-    fn run(name: &str, allow: &str) -> Vec<String> {
-        let (krate, rule) = fixture(name, allow);
+    fn run(name: &str) -> Vec<String> {
+        let (krate, rule) = fixture(name);
         let mut findings = Vec::new();
         rule.check(&krate, &mut findings);
         fs::remove_dir_all(fixture_dir(name)).unwrap();
@@ -2191,7 +3015,7 @@ mod tests {
 
     #[test]
     fn test_public_internal_item_fails_the_internal_and_public_rules() {
-        let findings = run("internal", ALLOW);
+        let findings = run("internal");
         let expected = format!(
             "{}: `crate::consumer::internals::Fetcher` is public but translates \
              `org.apache.kafka.clients.consumer.internals.Fetcher`: its package `clients.consumer.internals` is \
@@ -2204,7 +3028,7 @@ mod tests {
 
     #[test]
     fn test_public_disclaimer_item_fails_the_disclaimer_and_public_rules() {
-        let findings = run("disclaimer", ALLOW);
+        let findings = run("disclaimer");
         let expected = format!(
             "{}: `crate::common::network::Selector` is public but translates \
              `org.apache.kafka.common.network.Selector`: its package `common.network` is not a supported Kafka \
@@ -2217,7 +3041,7 @@ mod tests {
 
     #[test]
     fn test_public_item_outside_the_public_list_fails_only_that_rule() {
-        let findings = run("not-public", ALLOW);
+        let findings = run("not-public");
         let expected = format!(
             "{}: `crate::common::Cluster` is public but translates `org.apache.kafka.common.Cluster`: it is not \
              `@InterfaceAudience.Public` in Kafka {}",
@@ -2228,11 +3052,13 @@ mod tests {
     }
 
     #[test]
-    fn test_public_and_allow_listed_items_pass() {
-        let findings = run("pass", ALLOW);
+    fn test_public_and_tagged_items_pass() {
+        let findings = run("pass");
         // Public in Java, in Rust and in C.
-        assert!(with(&findings, "KafkaConsumer").is_empty(), "{findings:#?}");
-        // Allow-listed by Rust path, by Java class and by C prefix.
+        assert!(with(&findings, "`crate::consumer::KafkaConsumer`").is_empty(), "{findings:#?}");
+        assert!(with(&findings, "C `kafka_consumer_KafkaConsumer`").is_empty(), "{findings:#?}");
+        // Tagged: a Rust-only type, a Java class public on purpose, and C
+        // prefixes through a tagged fn and a tagged `_t` type of the include list.
         assert!(with(&findings, "Allowed").is_empty(), "{findings:#?}");
         assert!(with(&findings, "MockConsumer").is_empty(), "{findings:#?}");
         assert!(with(&findings, "StringList").is_empty(), "{findings:#?}");
@@ -2244,25 +3070,19 @@ mod tests {
     }
 
     #[test]
-    fn test_unmarked_public_item_needs_an_allow_list_entry() {
-        let findings = run("unmarked", ALLOW);
+    fn test_unmarked_public_item_needs_a_rust_only_tag() {
+        let findings = run("unmarked");
         let expected = format!(
             "{}: `crate::consumer::Unmarked` is public but carries no Java marker; mark the class it translates, or \
-             add it to {PUBLIC_AUDIENCE_ALLOWLIST} with the reason it is public",
+             tag it #[doc(alias = \"rust-only\")] under a comment giving the reason it is public",
             fixture_dir("unmarked").join("lib.rs").display()
         );
         assert_eq!(with(&findings, "Unmarked"), [expected]);
-        // Without the allow-list, the Rust-only item is a finding too.
-        let bare = run("unmarked-bare", "");
-        assert_eq!(
-            with(&bare, "`crate::consumer::Allowed` is public but carries no Java marker").len(),
-            1
-        );
     }
 
     #[test]
     fn test_pub_generated_module_and_its_pub_use_are_findings() {
-        let findings = run("generated", ALLOW);
+        let findings = run("generated");
         let file = fixture_dir("generated").join("lib.rs").display().to_string();
         assert_eq!(
             with(&findings, "generated module").len() + with(&findings, "generated protocol").len(),
@@ -2279,7 +3099,7 @@ mod tests {
 
     #[test]
     fn test_ffi_names_for_a_non_public_or_unknown_class_are_findings() {
-        let findings = run("ffi", ALLOW);
+        let findings = run("ffi");
         let file = fixture_dir("ffi").join("lib.rs").display().to_string();
         assert_eq!(
             with(&findings, "C `kafka_common_Cluster`"),
@@ -2303,7 +3123,7 @@ mod tests {
 
     #[test]
     fn test_ffi_name_in_the_wrong_package_says_where_java_declares_it() {
-        let (_, mut rule) = fixture("misplaced", ALLOW);
+        let (_, mut rule) = fixture("misplaced");
         fs::remove_dir_all(fixture_dir("misplaced")).unwrap();
         rule.index.classes.push(class("common", &["TopicPartition"]));
         assert_eq!(rule.resolve_ffi_class(&["consumer"], "TopicPartition"), None);
@@ -2315,34 +3135,93 @@ mod tests {
     }
 
     #[test]
-    fn test_stale_and_malformed_allow_list_entries_are_findings() {
-        let allow = format!("{ALLOW}crate::consumer::Gone  # removed\nno_reason\n");
-        let findings = run("stale", &allow);
+    fn test_needless_tags_are_findings() {
+        let findings = run("needless");
+        let file = fixture_dir("needless").join("lib.rs").display().to_string();
+        let mut needless = with(&findings, "would pass without it");
+        needless.sort();
         assert_eq!(
-            with(&findings, "allow.txt:"),
-            ["allow.txt:7: expected `<key>  # <reason>`, found `no_reason`"]
+            needless,
+            [
+                format!("{file}: `KafkaConsumer::needless` is tagged `rust-only` but would pass without it; remove the tag"),
+                format!("{file}: `NeedlessTag` is tagged `rust-only` but would pass without it; remove the tag"),
+                format!(
+                    "{file}: `kafka_consumer_KafkaConsumer_destroy` is tagged `public-in-rust` but would pass without it; \
+                     remove the tag"
+                ),
+            ]
         );
-        assert_eq!(
-            with(&findings, "lets nothing through"),
-            [format!(
-                "{PUBLIC_AUDIENCE_ALLOWLIST}:6: `crate::consumer::Gone` lets nothing through any more; remove it"
-            )]
-        );
+        // The `rust-only` tag lets `check-java-name` through for a public
+        // unmarked method, so it is not needless.
+        assert!(with(&findings, "rust_only").is_empty(), "{findings:#?}");
     }
 
+    /// A crate whose every function exercises one outcome of the unmarked-method
+    /// check of `check-java-name`.
+    const UNMARKED_LIB: &str = r#"
+        pub mod producer {
+            mod p {
+                pub struct P;
+                impl P {
+                    #[doc(alias = "org.apache.kafka.clients.producer.P#send")]
+                    pub fn send(&self) {}
+                    pub fn helper(&self) {}
+                    // Rust-only, and public on purpose.
+                    #[doc(alias = "rust-only")]
+                    pub fn allowed(&self) {}
+                    pub(crate) fn internal(&self) {}
+                    #[cfg(test)]
+                    pub fn test_only(&self) {}
+                }
+                impl Clone for P {
+                    fn clone(&self) -> Self { P }
+                }
+            }
+            pub use p::P;
+            pub trait T {
+                #[doc(alias = "org.apache.kafka.clients.producer.T#m")]
+                fn m(&self);
+                fn rust_only(&self);
+            }
+            pub fn free_helper() {}
+        }
+        mod private {
+            pub struct Q;
+            impl Q {
+                pub fn hidden(&self) {}
+            }
+        }
+        pub mod ffi {
+            #[unsafe(no_mangle)]
+            pub extern "C" fn kafka_producer_P_new() {}
+        }
+    "#;
+
     #[test]
-    fn test_glob_match() {
-        assert!(glob_match("crate::common::Error", "crate::common::Error"));
-        assert!(!glob_match("crate::common::Error", "crate::common::Errors"));
-        assert!(glob_match("crate::common::Local*Error", "crate::common::LocalTimeoutError"));
-        assert!(!glob_match("crate::common::Local*Error", "crate::common::LocalTimeout"));
-        assert!(glob_match(
-            "crate::consumer::*ConsumerHandle",
-            "crate::consumer::async_kafka_consumer::ConsumerHandle"
-        ));
-        assert!(glob_match("a*b*c", "a-b-b-c"));
-        assert!(!glob_match("a*bc*bc", "abc"));
-        assert!(glob_match("x*", "x"));
+    fn test_unmarked_public_methods_are_findings() {
+        let dir = fixture_dir("unmarked-methods");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lib.rs"), UNMARKED_LIB).unwrap();
+        let krate = Crate::load(&dir.join("lib.rs")).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        let rule = JavaName { index: JavaIndex { classes: Vec::new() }, package_modules: BTreeSet::new() };
+
+        let mut findings = Vec::new();
+        // `send`, `helper`, `allowed`, `m`, `rust_only` and `free_helper`.
+        assert_eq!(rule.check_unmarked_methods(&krate, &mut findings), 6);
+        let file = dir.join("lib.rs");
+        let expected = |name: &str| {
+            format!(
+                "{}: public method `{name}` carries no Java method marker; mark the Java method it translates \
+                 (#[doc(alias = \"org.apache.kafka.<package>.<Class>#<method>\")]), make it `pub(crate)`, or tag \
+                 it #[doc(alias = \"rust-only\")] under a comment giving the reason it is public",
+                file.display()
+            )
+        };
+        let mut want = vec![expected("P::helper"), expected("T::rust_only"), expected("free_helper")];
+        findings.sort();
+        want.sort();
+        assert_eq!(findings, want);
     }
 
     #[test]
@@ -2356,7 +3235,10 @@ mod tests {
             Some((vec!["common", "acl"], "AclBinding"))
         );
         assert_eq!(ffi_class("kafka_consumer_string_destroy"), None);
-        assert_eq!(ffi_class("kafka_Error_t"), None);
+        // A package-less helper standing for a JDK type.
+        assert_eq!(ffi_class("kafka_List_t"), Some((vec![], "List")));
+        assert_eq!(ffi_prefix("kafka_List_add"), "kafka_List");
+        assert_eq!(ffi_class("kafka_string_destroy"), None);
         assert_eq!(ffi_class("other_Thing"), None);
     }
 
@@ -2375,23 +3257,6 @@ mod tests {
         assert_eq!(
             list,
             ["org.apache.kafka.A".to_string(), "org.apache.kafka.B".to_string()].into()
-        );
-    }
-
-    /// A member marker key carries a `#` of its own; the reason starts at the
-    /// first `#` after whitespace.
-    #[test]
-    fn test_allow_list_parses_member_marker_keys() {
-        let text = "# comment\n\
-                    org.apache.kafka.clients.A#m(String,int)  # a reason # with a hash\n\
-                    crate::x::Y  # another\n\
-                    org.apache.kafka.clients.A#m\n";
-        let (list, errors) = AllowList::parse("allow.txt", text);
-        let keys: Vec<&str> = list.entries.iter().map(|e| e.key.as_str()).collect();
-        assert_eq!(keys, ["org.apache.kafka.clients.A#m(String,int)", "crate::x::Y"]);
-        assert_eq!(
-            errors,
-            ["allow.txt:4: expected `<key>  # <reason>`, found `org.apache.kafka.clients.A#m`"]
         );
     }
 }
@@ -2574,5 +3439,258 @@ mod cfg_test_tests {
         assert!(!cfg_test("#[cfg_attr(test, allow(dead_code))]"));
         assert!(!cfg_test(r#"#[doc = "test"]"#));
         assert!(!cfg_test(""));
+    }
+}
+
+#[cfg(test)]
+mod no_fixed_size_array_tests {
+    use super::*;
+
+    /// A crate whose every public item exercises one outcome of
+    /// `check-no-fixed-size-array`.
+    const FIXTURE_LIB: &str = r#"
+        pub struct Uuid;
+        impl Uuid {
+            pub fn with_bytes(bytes: [u8; 16]) -> Self {}
+            pub fn with_slice(bytes: &[u8]) -> Self {}
+            pub fn to_bytes(&self) -> [u8; 16] {}
+            pub fn borrowed(&self) -> &'static [u8; 16] {}
+            pub fn nested(&self, values: Option<Vec<[u8; 4]>>) {}
+            pub fn matrix(&self) -> [[u8; 4]; 2] {}
+            pub fn chunks(&self) -> impl Iterator<Item = [u8; 4]> {}
+            pub fn to_vec(&self) -> Vec<u8> {}
+            pub(crate) fn internal(&self) -> [u8; 16] {}
+            #[cfg(test)]
+            pub fn test_only() -> [u8; 2] {}
+            fn private(&self) -> [u8; 16] {}
+        }
+        impl From<[u8; 16]> for Uuid {
+            fn from(bytes: [u8; 16]) -> Self {}
+        }
+        impl std::ops::Index<usize> for Uuid {
+            type Output = [u8; 2];
+            fn index(&self, i: usize) -> &[u8; 2] {}
+        }
+        impl Clone for Uuid {
+            fn clone(&self) -> Self {}
+        }
+        pub trait Source {
+            fn read(&self, buf: &mut [u8; 8]);
+            fn bytes(&self) -> &[u8];
+        }
+        pub type Key = [u8; 32];
+        pub fn pair() -> (i32, [u8; 3]) {}
+        pub fn slices(a: &[u8], b: &mut [u8]) -> Vec<u8> {}
+        pub(crate) struct Hidden;
+        impl From<[u8; 1]> for Hidden {
+            fn from(bytes: [u8; 1]) -> Self {}
+        }
+        mod private {
+            pub struct Unreachable;
+            impl Unreachable {
+                pub fn hidden() -> [u8; 1] {}
+            }
+        }
+        pub mod ffi {
+            pub struct Buffer;
+            impl Buffer {
+                pub fn bytes(&self) -> [u8; 1] {}
+            }
+            #[unsafe(no_mangle)]
+            pub extern "C" fn kafka_common_Uuid_new(bytes: *const [u8; 16]) {}
+        }
+    "#;
+
+    #[test]
+    fn test_fixed_size_arrays_in_public_signatures_are_findings() {
+        let dir = std::env::temp_dir().join(format!("xtask-no-fixed-size-array-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lib.rs"), FIXTURE_LIB).unwrap();
+        let krate = Crate::load(&dir.join("lib.rs")).unwrap();
+        let mut findings = Vec::new();
+        let checked = NoFixedSizeArray.check(&krate, &mut findings);
+        fs::remove_dir_all(&dir).unwrap();
+        let file = dir.join("lib.rs").display().to_string();
+        let mut expected: Vec<String> = [
+            "parameter `bytes` of `Uuid::with_bytes` holds the fixed-size array `[u8; 16]`",
+            "the return type of `Uuid::to_bytes` holds the fixed-size array `[u8; 16]`",
+            "the return type of `Uuid::borrowed` holds the fixed-size array `[u8; 16]`",
+            "parameter `values` of `Uuid::nested` holds the fixed-size array `[u8; 4]`",
+            "the return type of `Uuid::matrix` holds the fixed-size array `[[u8; 4]; 2]`",
+            "the return type of `Uuid::chunks` holds the fixed-size array `[u8; 4]`",
+            "the trait of `impl From<[u8; 16]> for Uuid` holds the fixed-size array `[u8; 16]`",
+            "an associated type of `impl std::ops::Index<usize> for Uuid` holds the fixed-size array `[u8; 2]`",
+            "parameter `buf` of `Source::read` holds the fixed-size array `[u8; 8]`",
+            "the aliased type of `Key` holds the fixed-size array `[u8; 32]`",
+            "the return type of `pair` holds the fixed-size array `[u8; 3]`",
+        ]
+        .iter()
+        .map(|f| format!("{file}: {f}"))
+        .collect();
+        expected.sort();
+        findings.sort();
+        assert_eq!(findings, expected);
+        // The public functions and the alias with types (`Uuid`'s eight,
+        // `Source`'s two, `Key`, `pair`, `slices`), and the three trait impls
+        // for `Uuid`.
+        assert_eq!(checked, 16);
+    }
+}
+
+#[cfg(test)]
+mod error_predicate_tests {
+    use super::*;
+
+    /// A crate whose `Error` has one variant per outcome of
+    /// `check-error-predicate`: two fully wired, then one missing each piece.
+    const FIXTURE_LIB: &str = r#"
+        pub mod common {
+            pub mod error {
+                pub enum Error {
+                    Timeout(TimeoutError),
+                    QuotaViolation(Box<QuotaViolationError>),
+                    Orphan(OrphanError),
+                    Forgetful(ForgetfulError),
+                    Unboxed(UnboxedError),
+                    Recursive(RecursiveError),
+                    Unexported(UnexportedError),
+                }
+
+                pub(crate) trait ErrorHierarchy {
+                    fn is_retriable_error(&self) -> bool { false }
+                    fn is_timeout_error(&self) -> bool { false }
+                    fn is_quota_violation_error(&self) -> bool { false }
+                    fn is_forgetful_error(&self) -> bool { false }
+                    fn is_unboxed_error(&self) -> bool { false }
+                    fn is_recursive_error(&self) -> bool { false }
+                    fn is_unexported_error(&self) -> bool { false }
+                }
+
+                impl<T: ErrorHierarchy + ?Sized> ErrorHierarchy for Box<T> {
+                    fn is_retriable_error(&self) -> bool { (**self).is_retriable_error() }
+                    fn is_timeout_error(&self) -> bool { (**self).is_timeout_error() }
+                    fn is_quota_violation_error(&self) -> bool { (**self).is_quota_violation_error() }
+                    fn is_forgetful_error(&self) -> bool { (**self).is_forgetful_error() }
+                    fn is_recursive_error(&self) -> bool { (**self).is_recursive_error() }
+                    fn is_unexported_error(&self) -> bool { (**self).is_unexported_error() }
+                }
+
+                impl Error {
+                    pub fn is_retriable_error(&self) -> bool { ErrorHierarchy::is_retriable_error(self) }
+                    pub fn is_timeout_error(&self) -> bool { ErrorHierarchy::is_timeout_error(self) }
+                    pub fn is_quota_violation_error(&self) -> bool { ErrorHierarchy::is_quota_violation_error(self) }
+                    pub fn is_forgetful_error(&self) -> bool { ErrorHierarchy::is_forgetful_error(self) }
+                    pub fn is_unboxed_error(&self) -> bool { ErrorHierarchy::is_unboxed_error(self) }
+                    pub fn is_recursive_error(&self) -> bool { self.is_recursive_error() }
+                    pub fn is_unexported_error(&self) -> bool { ErrorHierarchy::is_unexported_error(self) }
+                }
+
+                kafka_error_type! {
+                    /// Wired through its macro.
+                    TimeoutError,
+                    code: RequestTimedOut,
+                    extends: [is_retriable_error, is_timeout_error,],
+                }
+                kafka_error_type! { OrphanError, code: Orphan, extends: [is_retriable_error,], }
+                kafka_error_type! { ForgetfulError, code: Forgetful, extends: [is_retriable_error,], }
+                kafka_error_type! { UnboxedError, code: Unboxed, extends: [is_unboxed_error,], }
+                kafka_error_type! { RecursiveError, code: Recursive, extends: [is_recursive_error,], }
+                kafka_error_type! { UnexportedError, code: Unexported, extends: [is_unexported_error,], }
+            }
+            pub mod metrics {
+                /// Wired through a hand-written impl, and boxed in its variant.
+                pub struct QuotaViolationError;
+                impl crate::common::error::ErrorHierarchy for QuotaViolationError {
+                    fn is_quota_violation_error(&self) -> bool { true }
+                }
+            }
+        }
+        pub mod ffi {
+            pub mod error_predicates {
+                #[unsafe(no_mangle)]
+                pub unsafe extern "C" fn kafka_common_Error_is_retriable_error() -> bool { false }
+                #[unsafe(no_mangle)]
+                pub unsafe extern "C" fn kafka_common_Error_is_timeout_error() -> bool { false }
+                #[unsafe(no_mangle)]
+                pub unsafe extern "C" fn kafka_common_Error_is_quota_violation_error() -> bool { false }
+                #[unsafe(no_mangle)]
+                pub unsafe extern "C" fn kafka_common_Error_is_forgetful_error() -> bool { false }
+                #[unsafe(no_mangle)]
+                pub unsafe extern "C" fn kafka_common_Error_is_unboxed_error() -> bool { false }
+                #[unsafe(no_mangle)]
+                pub unsafe extern "C" fn kafka_common_Error_is_recursive_error() -> bool { false }
+                // Not `#[no_mangle]`, so C cannot link it.
+                pub unsafe extern "C" fn kafka_common_Error_is_unexported_error() -> bool { false }
+            }
+        }
+    "#;
+
+    /// The findings over the fixture crate, written to its own temp dir `name`
+    /// because the tests run in parallel.
+    fn run(name: &str) -> Vec<String> {
+        let dir = std::env::temp_dir().join(format!("xtask-error-predicate-{name}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lib.rs"), FIXTURE_LIB).unwrap();
+        let krate = Crate::load(&dir.join("lib.rs")).unwrap();
+        let mut findings = Vec::new();
+        let checked = ErrorPredicate.check(&krate, &mut findings);
+        fs::remove_dir_all(&dir).unwrap();
+        // 7 variants and 7 trait methods.
+        assert_eq!(checked, 14, "{findings:#?}");
+        findings
+    }
+
+    fn with<'a>(findings: &'a [String], needle: &str) -> Vec<&'a str> {
+        findings.iter().filter(|f| f.contains(needle)).map(String::as_str).collect()
+    }
+
+    #[test]
+    fn test_class_predicate_name_drops_a_trailing_error() {
+        assert_eq!(class_predicate("TopicExistsError"), "is_topic_exists_error");
+        assert_eq!(class_predicate("KafkaError"), "is_kafka_error");
+        assert_eq!(
+            class_predicate("InvalidRegularExpression"),
+            "is_invalid_regular_expression_error"
+        );
+        assert_eq!(class_predicate("Error"), "is_error_error");
+    }
+
+    #[test]
+    fn test_wired_predicates_pass() {
+        let findings = run("pass");
+        for wired in [
+            "Timeout",
+            "timeout_error",
+            "retriable_error",
+            "QuotaViolation",
+            "quota_violation_error",
+        ] {
+            assert!(with(&findings, wired).is_empty(), "{wired}: {findings:#?}");
+        }
+    }
+
+    #[test]
+    fn test_each_missing_piece_is_reported() {
+        let findings = run("violations");
+        let fixture = |what: &str| format!("lib.rs: {what}");
+        // Variants in declaration order, then trait methods in name order.
+        let expected = [
+            fixture("`Error::Orphan` has no class predicate: `ErrorHierarchy` declares no `is_orphan_error`"),
+            fixture("`OrphanError` does not answer `true` to its own `is_orphan_error`"),
+            fixture("`ForgetfulError` does not answer `true` to its own `is_forgetful_error`"),
+            fixture(
+                "`Error` has no `pub fn is_recursive_error(&self) -> bool` forwarding to \
+                 `ErrorHierarchy::is_recursive_error(self)`",
+            ),
+            fixture("`impl ErrorHierarchy for Box<T>` does not forward `is_unboxed_error`"),
+            fixture("`is_unexported_error` has no C export `kafka_common_Error_is_unexported_error` in `ffi`"),
+        ];
+        assert_eq!(findings.len(), expected.len(), "{findings:#?}");
+        for (finding, expected) in findings.iter().zip(&expected) {
+            assert!(
+                finding.ends_with(expected.as_str()),
+                "{finding}\n  does not end with\n{expected}"
+            );
+        }
     }
 }

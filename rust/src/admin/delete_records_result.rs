@@ -47,7 +47,7 @@ impl DeleteRecordsResult {
     /// Return a future which succeeds only if all the records deletions succeed.
     #[doc(alias = "org.apache.kafka.clients.admin.DeleteRecordsResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
-        KafkaFuture::all_of(self.futures.values().map(|f| f.then_apply(|_| ())).collect())
+        KafkaFuture::all_of(self.futures.values().map(|f| f.then_apply(|_| Ok(()))).collect())
     }
 }
 

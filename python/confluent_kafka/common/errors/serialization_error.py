@@ -37,7 +37,7 @@ class SerializationError(KafkaError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = -15  # kafka_common_ErrorCode_SERIALIZATION
+    _ffi_id: ClassVar[int] = -15  # kafka_common_Error_SERIALIZATION
 
     def __init__(
         self,

@@ -100,18 +100,21 @@ def timestamps_to_spec(
 # FFI drain tuples -> Python value types.
 # --------------------------------------------------------------------------
 def to_offset_map(
-    raw: Mapping[tuple[str, int], tuple[int, str, int]],
+    raw: Mapping[tuple[str, int], tuple[int, str, int | None] | None],
 ) -> dict[TopicPartition, OffsetAndMetadata | None]:
-    """FFI ``OffsetMap`` drain -> ``dict[TopicPartition, OffsetAndMetadata |
-    None]``.
+    """FFI offset map -> ``dict[TopicPartition, OffsetAndMetadata | None]``.
 
     Java's ``committed()`` maps a partition with no committed offset to a
-    ``null`` value; the FFI signals that with ``offset == -1``,
-    which becomes ``None`` here.
+    ``null`` value; the FFI signals that with a ``None`` value (or
+    ``offset == -1``), which becomes ``None`` here.
     """
     out: dict[TopicPartition, OffsetAndMetadata | None] = {}
-    for (topic, partition), (offset, metadata, epoch) in raw.items():
+    for (topic, partition), value in raw.items():
         tp = TopicPartition(topic=topic, partition=partition)
+        if value is None:
+            out[tp] = None
+            continue
+        offset, metadata, epoch = value
         if offset < 0:
             out[tp] = None
         else:
@@ -125,19 +128,24 @@ def to_offset_map(
 
 
 def to_offset_and_timestamp_map(
-    raw: Mapping[tuple[str, int], tuple[int, int, int]],
+    raw: Mapping[tuple[str, int], tuple[int, int, int | None] | None],
 ) -> dict[TopicPartition, OffsetAndTimestamp | None]:
-    """FFI ``OffsetAndTimestampMap`` drain -> ``dict[TopicPartition,
+    """FFI offset-and-timestamp map -> ``dict[TopicPartition,
     OffsetAndTimestamp | None]``.
 
     Java's ``offsetsForTimes`` maps a partition with no offset for the requested
-    timestamp to ``null``; the FFI signals that by omitting the entry, so a
-    partition the caller asked about but that is absent here yields ``None`` at
-    the call site (handled by the caller, which knows the requested set).
+    timestamp to ``null``; the FFI signals that with a ``None`` value or by
+    omitting the entry, so a partition the caller asked about but that is absent
+    here yields ``None`` at the call site (handled by the caller, which knows the
+    requested set).
     """
     out: dict[TopicPartition, OffsetAndTimestamp | None] = {}
-    for (topic, partition), (offset, timestamp, epoch) in raw.items():
+    for (topic, partition), value in raw.items():
         tp = TopicPartition(topic=topic, partition=partition)
+        if value is None:
+            out[tp] = None
+            continue
+        offset, timestamp, epoch = value
         out[tp] = OffsetAndTimestamp(
             offset=offset,
             timestamp=timestamp,
@@ -169,19 +177,21 @@ def _to_partition_info(
     t: tuple[
         str, int,
         tuple[int, str, int, str | None] | None,
-        list[tuple[int, str, int, str | None] | None],
-        list[tuple[int, str, int, str | None] | None],
-        list[tuple[int, str, int, str | None] | None],
+        list[tuple[int, str, int, str | None] | None] | None,
+        list[tuple[int, str, int, str | None] | None] | None,
+        list[tuple[int, str, int, str | None] | None] | None,
     ],
 ) -> PartitionInfo:
     topic, partition, leader, replicas, isr, offline = t
+    # A null node list (the FFI's None) becomes an empty tuple: the Python
+    # value type holds tuples only.
     return PartitionInfo(
         topic=topic,
         partition=partition,
         leader=_to_node(leader),
-        replicas=tuple(_to_node(x) for x in replicas),  # type: ignore[misc]
-        in_sync_replicas=tuple(_to_node(x) for x in isr),  # type: ignore[misc]
-        offline_replicas=tuple(_to_node(x) for x in offline),  # type: ignore[misc]
+        replicas=tuple(_to_node(x) for x in replicas or ()),  # type: ignore[misc]
+        in_sync_replicas=tuple(_to_node(x) for x in isr or ()),  # type: ignore[misc]
+        offline_replicas=tuple(_to_node(x) for x in offline or ()),  # type: ignore[misc]
     )
 
 

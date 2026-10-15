@@ -40,6 +40,7 @@ pub struct ByteArrayDeserializer;
 
 impl ByteArrayDeserializer {
     /// Create a new `ByteArrayDeserializer`.
+    #[doc(alias = "org.apache.kafka.common.serialization.ByteArrayDeserializer#ByteArrayDeserializer")]
     pub fn new() -> Self {
         Self
     }

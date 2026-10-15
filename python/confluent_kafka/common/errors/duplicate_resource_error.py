@@ -39,7 +39,7 @@ class DuplicateResourceError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 92  # kafka_common_ErrorCode_DUPLICATE_RESOURCE
+    _ffi_id: ClassVar[int] = 92  # kafka_common_Error_DUPLICATE_RESOURCE
 
     def __init__(
         self,

@@ -40,7 +40,7 @@ class UnsupportedForMessageFormatError(InvalidConfigurationError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 43  # kafka_common_ErrorCode_UNSUPPORTED_FOR_MESSAGE_FORMAT
+    _ffi_id: ClassVar[int] = 43  # kafka_common_Error_UNSUPPORTED_FOR_MESSAGE_FORMAT
 
     def __init__(
         self,

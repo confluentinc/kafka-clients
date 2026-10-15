@@ -37,7 +37,7 @@ class InvalidTimestampError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 32  # kafka_common_ErrorCode_INVALID_TIMESTAMP
+    _ffi_id: ClassVar[int] = 32  # kafka_common_Error_INVALID_TIMESTAMP
 
     def __init__(
         self,

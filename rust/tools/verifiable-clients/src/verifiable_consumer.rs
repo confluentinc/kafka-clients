@@ -369,8 +369,13 @@ impl EventReporter {
 impl OffsetCommitCallback for EventReporter {
     /// Java `onComplete` (lines 180-195): print `offsets_committed` with
     /// success/error derived from `exception`.
-    async fn on_complete(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
+    async fn on_complete(
+        &self,
+        offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+        error: Option<&Error>,
+    ) -> Result<(), Error> {
         print_json(&OffsetsCommitted::from_commit(offsets, error));
+        Ok(())
     }
 }
 
@@ -485,10 +490,10 @@ impl VerifiableConsumer {
         let mut summaries: Vec<RecordSetSummary> = Vec::new();
 
         // Collect partitions up front so the immutable borrow of `records` for
-        // `partitions()` does not overlap the later `records_partition`.
+        // `partitions()` does not overlap the later `records_with_partition`.
         let partitions: Vec<TopicPartition> = records.partitions().cloned().collect();
         for tp in &partitions {
-            let all = records.records_partition(tp);
+            let all = records.records_with_partition(tp);
 
             // Java `subList(0, maxMessages - consumedMessages)` truncation.
             let partition_records: &[ConsumerRecord<String, String>] = if self.has_message_limit()
@@ -546,7 +551,7 @@ impl VerifiableConsumer {
     async fn commit_sync(&mut self, offsets: HashMap<TopicPartition, OffsetAndMetadata>) -> Result<(), Error> {
         match self.consumer.commit_sync_with_offsets(offsets.clone()).await {
             Ok(()) => {
-                self.reporter.on_complete(&offsets, None).await;
+                self.reporter.on_complete(&offsets, None).await?;
                 Ok(())
             },
             Err(e) if matches!(e, Error::Wakeup(_)) => {
@@ -557,7 +562,7 @@ impl VerifiableConsumer {
             },
             Err(e) if matches!(e, Error::FencedInstanceId(_)) => Err(e),
             Err(e) => {
-                self.reporter.on_complete(&offsets, Some(&e)).await;
+                self.reporter.on_complete(&offsets, Some(&e)).await?;
                 Ok(())
             },
         }

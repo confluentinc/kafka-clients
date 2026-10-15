@@ -33,5 +33,6 @@ kafka_error_type! {
         is_api_error,
         is_retriable_error,
         is_refresh_retriable_error,
+        is_not_coordinator_error,
     ],
 }

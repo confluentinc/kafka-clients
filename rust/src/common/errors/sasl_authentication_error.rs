@@ -33,5 +33,6 @@ kafka_error_type! {
         is_api_error,
         is_invalid_configuration_error,
         is_authentication_error,
+        is_sasl_authentication_error,
     ],
 }

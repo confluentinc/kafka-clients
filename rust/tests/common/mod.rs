@@ -65,7 +65,7 @@ pub mod callback_log;
 #[cfg(feature = "integration-tests")]
 pub mod consumer_assignment_poller;
 
-// Error-code constants generated from `kafka_common_ErrorCode_t`
+// Error-code constants generated from `kafka_common_Error_e`
 // (`cargo xtask generate-error-codes`). The harness decodes a proto
 // `Error` by its code and cannot use the enum itself: `src/ffi` is behind
 // the `ffi` feature, which the multilanguage test targets do not enable.

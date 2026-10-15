@@ -34,7 +34,7 @@ class PositionOutOfRangeError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 99  # kafka_common_ErrorCode_POSITION_OUT_OF_RANGE
+    _ffi_id: ClassVar[int] = 99  # kafka_common_Error_POSITION_OUT_OF_RANGE
 
     def __init__(
         self,

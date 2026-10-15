@@ -34,7 +34,7 @@ class UnknownTopicIdError(InvalidMetadataError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 100  # kafka_common_ErrorCode_UNKNOWN_TOPIC_ID
+    _ffi_id: ClassVar[int] = 100  # kafka_common_Error_UNKNOWN_TOPIC_ID
 
     def __init__(
         self,
