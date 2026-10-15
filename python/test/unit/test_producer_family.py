@@ -33,6 +33,7 @@ import itertools
 import logging
 import math
 import os
+import random
 import signal
 import subprocess
 import sys
@@ -415,6 +416,42 @@ def _native(record: ProducerRecord[Any, Any], **kwargs: Any) -> Any:
         return p._native_parts(record)[0]  # noqa: SLF001 - the struct the FFI reads
     finally:
         p.close(timeout=0)
+
+
+class _OwnTopic(ProducerRecord[Any, Any]):
+    """A record whose class overrides a getter."""
+
+    __slots__ = ()
+
+    def topic(self) -> str:
+        return "from-the-subclass"
+
+
+def test_send_reads_the_record_through_its_getters() -> None:
+    # Java's doSend reads the record through its getters, so a subclass that
+    # overrides one, and a getter patched on the class, are what is sent.
+    assert _native(_OwnTopic(topic=TOPIC, value=b"v")).topic == "from-the-subclass"
+    from unittest import mock
+
+    with mock.patch.object(ProducerRecord, "partition", lambda self: 4):
+        assert _native(ProducerRecord(topic=TOPIC, value=b"v")).partition == 4
+    assert _native(ProducerRecord(topic=TOPIC, value=b"v")).partition is None
+
+
+def test_send_reads_each_getter_once() -> None:
+    counts: dict[str, int] = {}
+
+    class Counting(ProducerRecord[Any, Any]):
+        __slots__ = ()
+
+        def __getattribute__(self, name: str) -> Any:
+            if name in ("topic", "partition", "timestamp", "key", "value", "headers"):
+                counts[name] = counts.get(name, 0) + 1
+            return object.__getattribute__(self, name)
+
+    _native(Counting(topic=TOPIC, key=b"k", value=b"v"))
+    assert counts == {"topic": 1, "partition": 1, "timestamp": 1, "key": 1, "value": 1,
+                      "headers": 1}
 
 
 def test_headers_reach_the_ffi_struct() -> None:
@@ -1190,6 +1227,178 @@ async def test_an_async_future_its_awaiter_cancelled_is_untracked_by_its_complet
     finally:
         monkeypatch.undo()
         await p.close(timeout=0)
+
+
+# ---------------------------------------------------------------------------
+# Tracking and close, together: many senders, completions out of order and
+# before send() tracks its future, cancellations, and close() with records in
+# flight. Every completion untracks its future (no done callback does it).
+# ---------------------------------------------------------------------------
+
+def _completing_send(monkeypatch: pytest.MonkeyPatch, seed: int) -> list[threading.Thread]:
+    """Fake the C send: each record completes successfully, a third of them at
+    once inside the call (before send() tracks the future), the rest on another
+    thread after a short random delay (out of order), as the C completion
+    thread would. Returns the completer threads, for the caller to join."""
+    rng = random.Random(seed)
+    lock = threading.Lock()
+    threads: list[threading.Thread] = []
+
+    def producer_send(c_producer: int, native: Any, cb: Any) -> bool:
+        with lock:
+            at_once = rng.random() < 0.33
+            delay = rng.random() * 0.003
+        if at_once:
+            cb(0, 0, False)
+        else:
+            t = threading.Thread(target=lambda: (time.sleep(delay), cb(0, 0, False)), daemon=True)
+            with lock:
+                threads.append(t)
+            t.start()
+        return False
+
+    monkeypatch.setattr(_lib, "Producer_send", producer_send)
+    return threads
+
+
+def test_many_senders_with_completions_out_of_order_leave_nothing_tracked(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    completers = _completing_send(monkeypatch, seed=1)
+    p = KafkaProducer(configs=UNREACHABLE)
+    callbacks: list[None] = []
+    done_callbacks: list[None] = []
+    futures: list[Any] = []
+    lock = threading.Lock()
+
+    def sender() -> None:
+        for _ in range(250):
+            f = p.send(record=RECORD, callback=lambda md, e: callbacks.append(None))
+            f.add_done_callback(lambda fut: done_callbacks.append(None))
+            with lock:
+                futures.append(f)
+
+    try:
+        threads = [threading.Thread(target=sender) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(30)
+        p.flush()
+        # flush() waited for every record sent before it: all completed, and
+        # each future left the tracked set as its completion completed it.
+        assert all(f.done() for f in futures) and len(futures) == 1000
+        assert len(callbacks) == 1000 and len(done_callbacks) == 1000
+        assert not p._futures  # noqa: SLF001
+    finally:
+        for t in list(completers):
+            t.join(5)
+        monkeypatch.undo()
+        p.close(timeout=0)
+
+
+async def test_async_senders_with_cancellations_leave_nothing_tracked(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    completers = _completing_send(monkeypatch, seed=2)
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    callbacks: list[None] = []
+    done_callbacks: list[None] = []
+    futures: list[Any] = []
+
+    async def sender(n: int) -> None:
+        for i in range(200):
+            f = await p.send(record=RECORD, callback=lambda md, e: callbacks.append(None))
+            f.add_done_callback(lambda fut: done_callbacks.append(None))
+            if i % 10 == n:
+                f.cancel()  # its completion still arrives, runs the callback, untracks it
+            futures.append(f)
+
+    try:
+        await asyncio.gather(*(sender(n) for n in range(4)))
+        await p.flush()
+        for t in list(completers):
+            t.join(5)
+        for _ in range(500):  # the completions of cancelled futures may still be on their way
+            if len(callbacks) == 800 and not p._futures:  # noqa: SLF001
+                break
+            await asyncio.sleep(0.01)
+        assert all(f.done() for f in futures) and len(futures) == 800
+        assert sum(f.cancelled() for f in futures) == 80
+        assert len(callbacks) == 800 and len(done_callbacks) == 800
+        assert not p._futures  # noqa: SLF001
+    finally:
+        monkeypatch.undo()
+        await p.close(timeout=0)
+
+
+def test_close_with_records_in_flight_from_several_threads_completes_and_untracks_all() -> None:
+    # Real native path: the records wait for metadata from an unreachable
+    # broker and fail after max.block.ms. close() returns only after every
+    # callback has run, every future is done, and none is left tracked.
+    p = KafkaProducer(configs=UNREACHABLE)
+    callbacks: list[Exception | None] = []
+    futures: list[Any] = []
+    lock = threading.Lock()
+    started = threading.Barrier(4)
+
+    def sender() -> None:
+        started.wait()
+        for _ in range(4):
+            f = p.send(record=RECORD, callback=lambda md, e: callbacks.append(e))
+            with lock:
+                futures.append(f)
+
+    threads = [threading.Thread(target=sender) for _ in range(3)]
+    for t in threads:
+        t.start()
+    started.wait()
+    for t in threads:
+        t.join(30)
+    p.close()
+    assert len(futures) == 12 and all(f.done() for f in futures)
+    assert len(callbacks) == 12
+    assert not p._futures  # noqa: SLF001
+
+
+async def test_async_close_with_records_in_flight_from_several_tasks_completes_and_untracks_all(
+        ) -> None:
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    callbacks: list[Exception | None] = []
+    futures: list[Any] = []
+
+    async def sender() -> None:
+        for _ in range(4):
+            futures.append(await p.send(record=RECORD, callback=lambda md, e: callbacks.append(e)))
+
+    await asyncio.gather(*(sender() for _ in range(3)))
+    await p.close()
+    assert len(futures) == 12 and all(f.done() for f in futures)
+    assert len(callbacks) == 12
+    assert not p._futures  # noqa: SLF001
+
+
+def test_close_from_a_callback_with_records_in_flight_completes_the_rest() -> None:
+    # The first record's callback closes the producer (from the completion
+    # thread, so with a zero timeout); the records still in flight complete
+    # anyway, their callbacks run, and nothing stays tracked.
+    p = KafkaProducer(configs=UNREACHABLE)
+    callbacks: list[Exception | None] = []
+    closed = threading.Event()
+
+    def first(md: RecordMetadata, e: Exception | None) -> None:
+        callbacks.append(e)
+        p.close()
+        closed.set()
+
+    futures = [p.send(record=RECORD, callback=first)]
+    futures += [p.send(record=RECORD, callback=lambda md, e: callbacks.append(e))
+                for _ in range(5)]
+    assert closed.wait(30)
+    deadline = time.monotonic() + 30
+    while (len(callbacks) < 6 or p._futures) and time.monotonic() < deadline:  # noqa: SLF001
+        time.sleep(0.01)
+    assert len(callbacks) == 6 and all(f.done() for f in futures)
+    assert not p._futures  # noqa: SLF001
+    assert p._closed  # noqa: SLF001
 
 
 def test_an_async_send_racing_close_is_refused_after_its_serializer() -> None:

@@ -313,3 +313,103 @@ def test_unset_is_a_singleton_that_pickles_to_itself() -> None:
 def test_illegal_argument_error_is_a_runtime_error() -> None:
     with pytest.raises(RuntimeError):
         _Close().close(timeout=1.0, option=object())
+
+
+def _decorated_methods() -> list[Any]:
+    """Every java_forms-decorated method of the package."""
+    import importlib
+    import pkgutil
+
+    import confluent_kafka
+
+    found: list[Any] = []
+    for info in pkgutil.walk_packages(confluent_kafka.__path__, "confluent_kafka."):
+        try:
+            module = importlib.import_module(info.name)
+        except Exception:  # noqa: BLE001 - a module that needs an optional extra
+            continue
+        for obj in list(vars(module).values()):
+            if inspect.isclass(obj) and obj.__module__ == module.__name__:
+                for member in vars(obj).values():
+                    f = member.__func__ if isinstance(member, (staticmethod, classmethod)) else member
+                    if callable(f) and hasattr(f, "__java_forms__"):
+                        found.append(f)
+    return found
+
+
+def _recorder(f: Any) -> Any:
+    """A function with the decorated method's signature that returns what it
+    received, so the wrappers can be compared without running the method."""
+    fn = f.__wrapped__
+    sig = inspect.signature(fn)
+    namespace: dict[str, Any] = {}
+    parts: list[str] = []
+    star = False
+    for i, p in enumerate(sig.parameters.values()):
+        if p.kind is p.KEYWORD_ONLY and not star:
+            parts.append("*")
+            star = True
+        default = ""
+        if p.default is not p.empty:
+            namespace[f"_d{i}"] = p.default
+            default = f"=_d{i}"
+        parts.append(f"{p.name}{default}")
+    is_async = inspect.iscoroutinefunction(fn)
+    exec(f"{'async ' if is_async else ''}def {fn.__name__}({', '.join(parts)}):\n"  # noqa: S102
+         f"    return dict(locals())\n", namespace)
+    recorder = namespace[fn.__name__]
+    recorder.__qualname__ = fn.__qualname__
+    recorder.__module__ = fn.__module__
+    return recorder
+
+
+def _outcome(wrapper: Any, args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[Any, ...]:
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            result = wrapper(*args, **kwargs)
+            if inspect.iscoroutine(result):
+                result = asyncio.run(result)
+            got: Any = ("ok", tuple(sorted((k, repr(v)) for k, v in result.items())))
+        except Exception as e:  # noqa: BLE001
+            got = ("raised", type(e), str(e))
+    return got, tuple((w.category, str(w.message), w.lineno) for w in caught)
+
+
+def test_the_generated_wrapper_matches_the_generic_one_for_every_decorated_method() -> None:
+    # The wrapper java_forms writes for a method, against the generic wrapper
+    # built from the same overload table: for every keyword combination (each
+    # keyword left out, given a value, None or UNSET; a fixed sample above six
+    # keywords) and a few misuses, the method receives the same values, or the
+    # same error with the same text is raised, with the same warnings.
+    import itertools
+    import random
+
+    methods = _decorated_methods()
+    assert len(methods) >= 20
+    value = object()
+    compared = 0
+    for f in methods:
+        decorated = java_forms(*f.__java_forms__)(_recorder(f))
+        generic = decorated.__globals__.get("_jf_generic")
+        if generic is None:
+            continue  # java_forms keeps the generic wrapper for this method
+        params = list(inspect.signature(f.__wrapped__).parameters.values())
+        positional = tuple(object() for p in params
+                           if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD))
+        names = [p.name for p in params if p.kind is p.KEYWORD_ONLY and p.name != "_java_form"]
+        states = [None, value, None, UNSET]  # left out, a value, None, UNSET
+        combos = list(itertools.product(range(4), repeat=len(names)))
+        if len(names) > 6:
+            combos = random.Random(f.__qualname__).sample(combos, 4096)
+        cases = [(positional, {n: states[s] for n, s in zip(names, c) if s}) for c in combos]
+        full = {n: value for n in names}
+        cases += [(positional[:-1], full), (positional + (value,), full),
+                  (positional, {**full, "not_a_parameter": value})]
+        if any(p.name == "_java_form" for p in params):
+            cases.append((positional, {**full, "_java_form": 0}))
+        for args, kwargs in cases:
+            assert _outcome(decorated, args, kwargs) == _outcome(generic, args, kwargs), (
+                f.__qualname__, sorted(kwargs))
+            compared += 1
+    assert compared > 10_000
