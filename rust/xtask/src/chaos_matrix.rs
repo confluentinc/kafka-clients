@@ -1651,6 +1651,26 @@ fn is_cluster_network_name(name: &str) -> bool {
 }
 
 /// Host, Docker and source-tree facts recorded with the results.
+/// The `apache/kafka` tag the chaos runs use, resolved as `KAFKA_TAG` in
+/// `tests/common/kafka_cluster.rs` resolves it: `INTEGRATION_TEST_BROKER_TAG`
+/// (trimmed) when set and non-empty — the child test processes inherit this
+/// environment — else the `DEFAULT_KAFKA_TAG` constant read from
+/// `cluster_src`, else `"unknown"`.
+fn broker_tag(env_tag: Option<&str>, cluster_src: Option<&str>) -> String {
+    if let Some(tag) = env_tag.map(str::trim).filter(|t| !t.is_empty()) {
+        return tag.to_string();
+    }
+    cluster_src
+        .and_then(|src| {
+            src.lines().find_map(|l| {
+                l.trim()
+                    .strip_prefix("const DEFAULT_KAFKA_TAG: &str = \"")
+                    .map(|r| r.trim_end_matches("\";").to_string())
+            })
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 fn describe_environment(options: &Options) -> String {
     let capture = |program: &str, args: &[&str]| {
         Command::new(program)
@@ -1675,16 +1695,12 @@ fn describe_environment(options: &Options) -> String {
     };
     // The broker tag lives in the shared test cluster code; read it rather
     // than restate it here, so the record cannot drift from what ran.
-    let kafka_tag = fs::read_to_string(package_root().join("tests/common/kafka_cluster.rs"))
-        .ok()
-        .and_then(|src| {
-            src.lines().find_map(|l| {
-                l.trim()
-                    .strip_prefix("const KAFKA_TAG: &str = \"")
-                    .map(|r| r.trim_end_matches("\";").to_string())
-            })
-        })
-        .unwrap_or_else(|| "unknown".to_string());
+    let kafka_tag = broker_tag(
+        std::env::var("INTEGRATION_TEST_BROKER_TAG").ok().as_deref(),
+        fs::read_to_string(package_root().join("tests/common/kafka_cluster.rs"))
+            .ok()
+            .as_deref(),
+    );
     let kafka_image = format!("apache/kafka:{kafka_tag}");
     format!(
         "started: {}\nbranch: {branch}\ncommit: {commit}{}\nmatrix: {}\nprotocols: {}\nmessage sizes: {}\nproducer rate: {} records/s per topic\nrun timeout: {} min\ndocker: {docker}\nbroker image: {kafka_image}\nhost: {}\n",
@@ -1946,6 +1962,20 @@ fn now_utc() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead as _, BufReader};
+
+    #[test]
+    fn broker_tag_follows_kafka_cluster_rs() {
+        let src = fs::read_to_string(package_root().join("tests/common/kafka_cluster.rs")).unwrap();
+        // The real file: the default constant is found, so the record is never `unknown`.
+        let default = broker_tag(None, Some(&src));
+        assert_ne!(default, "unknown");
+        assert!(src.contains(&format!("const DEFAULT_KAFKA_TAG: &str = \"{default}\";")));
+        // The override wins, trimmed; a blank override falls back to the default.
+        assert_eq!(broker_tag(Some(" 4.4.0-rc4 "), Some(&src)), "4.4.0-rc4");
+        assert_eq!(broker_tag(Some("  "), Some(&src)), default);
+        assert_eq!(broker_tag(None, None), "unknown");
+    }
 
     fn strings(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
@@ -2451,6 +2481,9 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 70 filtered out
 
     #[test]
     fn stopping_a_run_sends_sigint_then_kills_after_the_grace() {
+        // `stop_group` ends its grace early on any signal the binary records,
+        // so keep the signalling tests out of it.
+        let _signals = crate::signals::test_lock();
         // Honours SIGINT, as the harness does: gone well before the grace.
         let mut polite = Command::new("sh").args(["-c", "sleep 30; :"]).process_group(0).spawn().unwrap();
         let pgid = polite.id();
@@ -2460,13 +2493,16 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 70 filtered out
         assert!(!group_alive(pgid));
         // Ignores it, like a wedged test: killed once the grace is over.
         let mut wedged = Command::new("sh")
-            .args(["-c", "trap '' INT; sleep 30; :"])
+            .args(["-c", "trap '' INT; echo ready; sleep 30; :"])
             .process_group(0)
+            .stdout(Stdio::piped())
             .spawn()
             .unwrap();
         let pgid = wedged.id();
-        // Let the shell install its trap before it is signalled.
-        std::thread::sleep(Duration::from_millis(300));
+        // The shell has installed its trap once it says so.
+        let mut ready = String::new();
+        BufReader::new(wedged.stdout.take().unwrap()).read_line(&mut ready).unwrap();
+        assert_eq!(ready, "ready\n");
         let started = Instant::now();
         stop_group(&mut wedged, pgid, Duration::from_secs(1)).unwrap();
         assert!(started.elapsed() >= Duration::from_secs(1));

@@ -56,8 +56,9 @@
 //! [`kafka_consumer_Consumer__set_callback_result`], from inside the
 //! function or later from any thread; the operation waits for that report
 //! (a C implementation that never reports hangs it, as a Java listener that
-//! never returns would). [`kafka_consumer_Consumer_destroy`] runs the
-//! callbacks still pending so each fires exactly once.
+//! never returns would). [`kafka_consumer_Consumer_destroy`] wakes the
+//! operation still waiting (it fails with `kafka_common_Error_is_wakeup_error`)
+//! and runs the callbacks still pending so each fires exactly once.
 //!
 //! # Generic types
 //!
@@ -105,8 +106,8 @@ use crate::ffi::common::topic_partition::{
     topic_partition_i64_map, topic_partition_ref,
 };
 use crate::ffi::common::{
-    box_error, catch_task_panic, deliver_panic, deliver_panic_i64, deliver_panic_value, init_default_logger,
-    kafka_common_Error_t, spawn_callback_task, take_error,
+    box_error, catch_task_panic, deliver_panic, deliver_panic_i64, deliver_panic_value, in_tokio_runtime,
+    init_default_logger, kafka_common_Error_t, spawn_callback_task, spawn_teardown, take_error,
 };
 use crate::ffi::common::{deliver_unit, deliver_value};
 use crate::ffi::consumer::close_options::{close_options_ref, kafka_consumer_CloseOptions_t};
@@ -441,8 +442,36 @@ impl ConsumerClassHandle {
         self as *const Self as *mut kafka_consumer_Consumer_t
     }
 
-    /// Awaits every spawned task, fires the pending callbacks, drops the
-    /// consumer inside the runtime context, shuts the runtime down and frees
+    /// Tears the handle down ([`Self::teardown`]) on the calling thread, or,
+    /// called inside a tokio runtime, where `teardown`'s `block_on` would
+    /// panic, on a new thread, returning at once (see [`spawn_teardown`]);
+    /// the pending callbacks then fire on that thread.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Self::teardown`].
+    pub(crate) unsafe fn destroy(handle: *mut Self) {
+        if in_tokio_runtime() {
+            /// # Safety
+            ///
+            /// As for [`ConsumerClassHandle::teardown`], on `handle as *mut
+            /// ConsumerClassHandle`.
+            unsafe fn teardown(handle: usize) {
+                // SAFETY: Per this function's `# Safety`, the address meets `teardown`'s.
+                unsafe { ConsumerClassHandle::teardown(handle as *mut ConsumerClassHandle) };
+            }
+            // SAFETY: Per this function's `# Safety`, `handle` meets `teardown`'s `# Safety`, and
+            // this is its only teardown; `teardown` waits with `block_on`, which is sound on the
+            // new thread, outside any runtime.
+            unsafe { spawn_teardown("kafka-consumer-destroy", handle as usize, teardown) };
+        } else {
+            // SAFETY: Per this function's `# Safety`, as `teardown` requires.
+            unsafe { Self::teardown(handle) };
+        }
+    }
+
+    /// Wakes and awaits every spawned task, fires the pending callbacks, drops
+    /// the consumer inside the runtime context, shuts the runtime down and frees
     /// the handle.
     ///
     /// The queue is drained *while* the tasks are awaited: a `_cb` task may
@@ -469,7 +498,7 @@ impl ConsumerClassHandle {
     /// `Box<ConsumerClassHandle>` not yet destroyed, that no other call uses
     /// at the same time except the `__set_callback_result` reports of the
     /// callbacks this call runs or waits for; it is freed here.
-    pub(crate) unsafe fn destroy(handle: *mut Self) {
+    unsafe fn teardown(handle: *mut Self) {
         {
             // SAFETY: Per this function's `# Safety`, `handle` is a live `Box<ConsumerClassHandle>`
             // not yet destroyed, and the only other users are reports, which take shared references
@@ -484,6 +513,13 @@ impl ConsumerClassHandle {
                 }
                 runtime.block_on(async {
                     for mut task in tasks {
+                        // Wake the operation the task awaits (`wakeup` goes
+                        // through the reentrancy handle, never the consumer the
+                        // task borrows), so a `poll_cb` with a long timeout
+                        // returns `WakeupError` instead of holding destroy up
+                        // for the whole timeout. Once per task: the one after
+                        // it may start its wait only once this one returns.
+                        client.handle.wakeup();
                         loop {
                             client.delivery.queue.execute();
                             // Both branches are cancellation-safe: polling a
@@ -4048,7 +4084,12 @@ pub unsafe extern "C" fn kafka_consumer_Consumer__set_callbacks_notify(
 /// exactly once), drops the consumer (which closes it if `close` was never
 /// called, as Java's finalizer-less contract expects the caller to do) and
 /// shuts its runtime down. Never called on an `__as_Consumer` view; a null
-/// pointer is a no-op.
+/// pointer is a no-op. It first wakes the operation still waiting, which
+/// fails with `kafka_common_Error_is_wakeup_error`, so a long `poll_cb` does
+/// not hold it up. Called inside a tokio runtime (on a worker thread, or
+/// inside a `block_on`), where it cannot wait, it returns at once and all of
+/// this happens on a new thread, the pending callbacks included; if that
+/// thread cannot be started, the handle is leaked and an error logged.
 ///
 /// # Safety
 ///
@@ -4056,7 +4097,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer__set_callbacks_notify(
 /// `kafka_consumer_KafkaConsumer_new` not yet destroyed, that no other call
 /// uses at the same time; the callbacks this call runs may use it only to
 /// report through `kafka_consumer_Consumer__set_callback_result`, and
-/// nothing uses it once this call returned.
+/// nothing else uses it once this call returned.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_destroy(self_: *mut kafka_consumer_Consumer_t) {

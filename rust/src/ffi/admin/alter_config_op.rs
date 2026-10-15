@@ -127,6 +127,22 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_OpType__enum(
     enum_of(unsafe { op_type_value_of(self_) })
 }
 
+/// `OpType.toString()`: the Java constant name, as an owned string freed with
+/// `kafka_string_destroy`.
+///
+/// # Safety
+///
+/// `self_` must be a singleton returned by this module.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_AlterConfigOp_OpType_to_string(
+    self_: *const kafka_admin_AlterConfigOp_OpType_t,
+) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `op_type_value_of` requires.
+    into_c_string(&unsafe { op_type_value_of(self_) }.to_string())
+}
+
 /// `OpType.id()`: the wire-protocol byte of the operation.
 ///
 /// A caught Rust panic returns -1, which is no code of this Java `byte`
@@ -311,11 +327,16 @@ mod tests {
             let handle = op_type_singleton(op_type);
             // SAFETY: Test code: `handle` is the singleton `op_type_singleton` returned, a pointer
             // into the static `VARIANTS`, so it is a singleton of this module for
-            // `op_type_value_of`, `kafka_admin_AlterConfigOp_OpType__enum` and
-            // `kafka_admin_AlterConfigOp_OpType_id`.
+            // `op_type_value_of`, `kafka_admin_AlterConfigOp_OpType__enum`,
+            // `kafka_admin_AlterConfigOp_OpType_to_string` and
+            // `kafka_admin_AlterConfigOp_OpType_id`; each string `_to_string` returns is owned
+            // and freed once, after it is read.
             unsafe {
                 assert_eq!(op_type_value_of(handle), op_type);
                 assert_eq!(kafka_admin_AlterConfigOp_OpType__enum(handle) as usize, index);
+                let name = kafka_admin_AlterConfigOp_OpType_to_string(handle);
+                assert_eq!(CStr::from_ptr(name).to_str().unwrap(), op_type.to_string());
+                kafka_string_destroy(name);
                 assert_eq!(
                     kafka_admin_AlterConfigOp_OpType_for_id(kafka_admin_AlterConfigOp_OpType_id(handle)),
                     handle
@@ -324,6 +345,7 @@ mod tests {
         }
         assert_eq!(kafka_admin_AlterConfigOp_OpType_subtract(), op_type_singleton(OpType::Subtract));
         assert!(kafka_admin_AlterConfigOp_OpType_for_id(7).is_null());
+        assert_eq!(OpType::Subtract.to_string(), "SUBTRACT");
     }
 
     #[test]

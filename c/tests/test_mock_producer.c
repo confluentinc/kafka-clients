@@ -732,6 +732,7 @@ void test_error_inspection(void) {
     TEST_ASSERT_FALSE(kafka_common_Error_is_authentication_error(err));
     TEST_ASSERT_FALSE(kafka_common_Error_is_authorization_error(err));
     TEST_ASSERT_FALSE(kafka_common_Error_is_invalid_configuration_error(err));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_unsupported_version_error(err));
     TEST_ASSERT_FALSE(kafka_common_Error_is_application_recoverable_error(err));
     TEST_ASSERT_FALSE(kafka_common_Error_is_invalid_offset_error(err));
     TEST_ASSERT_FALSE(kafka_common_Error_is_out_of_order_sequence_error(err));
@@ -770,6 +771,7 @@ void test_error_null_safety(void) {
     TEST_ASSERT_FALSE(kafka_common_Error_is_authentication_error(NULL));
     TEST_ASSERT_FALSE(kafka_common_Error_is_authorization_error(NULL));
     TEST_ASSERT_FALSE(kafka_common_Error_is_invalid_configuration_error(NULL));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_unsupported_version_error(NULL));
     TEST_ASSERT_FALSE(kafka_common_Error_is_application_recoverable_error(NULL));
     TEST_ASSERT_FALSE(kafka_common_Error_is_invalid_offset_error(NULL));
     TEST_ASSERT_FALSE(kafka_common_Error_is_out_of_order_sequence_error(NULL));
@@ -1139,7 +1141,7 @@ void test_close_async(void) {
 
 /* close_with_timeout_cb closes the mock producer, a negative timeout too:
  * Java's MockProducer.close(Duration) never reads the timeout
- * (MockProducer.java:436-442); only a KafkaProducer rejects it
+ * (MockProducer.java:438-444); only a KafkaProducer rejects it
  * (test_kafka_producer.c). */
 void test_close_with_timeout_async(void) {
     int64_t timeouts[] = { 1000, -1 };

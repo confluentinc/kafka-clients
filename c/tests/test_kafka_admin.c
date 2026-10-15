@@ -35,8 +35,10 @@
 // futures and `kafka_Map_destroy` frees them.
 
 #include <confluent_kafka.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 
@@ -271,6 +273,94 @@ static void test_kafka_admin_destroy_runs_pending_close_callback(void) {
     kafka_admin_Admin_destroy(admin);
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
     callback_pump_destroy(&pump);
+}
+
+/* What a blocking `get` on another thread observed. */
+typedef struct {
+    const kafka_common_KafkaFuture_t *future;
+    int had_value;
+    int timeout;
+    char message[256];
+} blocking_get_t;
+
+static void *blocking_get(void *arg) {
+    blocking_get_t *g = (blocking_get_t *)arg;
+    kafka_common_Error_t *err = NULL;
+    g->had_value = kafka_common_KafkaFuture_get(g->future, &err) != NULL;
+    if (err != NULL) {
+        g->timeout = kafka_common_Error_is_timeout_error(err);
+        snprintf(g->message, sizeof g->message, "%s", kafka_common_Error_message(err));
+        kafka_common_Error_destroy(err);
+    }
+    return NULL;
+}
+
+typedef struct {
+    atomic_int fired;
+    int timeout;
+    char message[256];
+} failed_cb_t;
+
+static void on_future_failed(void *value, kafka_common_Error_t *error, void *opaque) {
+    (void)value;
+    failed_cb_t *r = (failed_cb_t *)opaque;
+    if (error != NULL) {
+        r->timeout = kafka_common_Error_is_timeout_error(error);
+        snprintf(r->message, sizeof r->message, "%s", kafka_common_Error_message(error));
+        kafka_common_Error_destroy(error);
+    }
+    atomic_fetch_add(&r->fired, 1);
+}
+
+static long now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+}
+
+/* `destroy` with an RPC still waiting for a broker that never answers (the
+ * default 60 s `default.api.timeout.ms`): the background task fails it on
+ * exit, as Java's `KafkaAdminClient` does when its thread exits
+ * (`KafkaAdminClient.java:1573`), so a blocking `get` on another thread and a
+ * queued `get_cb` both see the timeout instead of hanging. */
+static void test_kafka_admin_destroy_fails_the_rpc_still_waiting(void) {
+    kafka_Map_t *props = kafka_Map_new();
+    kafka_Map_put(props, (void *)"bootstrap.servers", (void *)NO_BROKER_BOOTSTRAP);
+    kafka_common_Error_t *err = NULL;
+    kafka_admin_AdminClientConfig_t *config = kafka_admin_AdminClientConfig_new(props, &err);
+    assert_ok(err, "AdminClientConfig_new");
+    kafka_Map_destroy(props);
+    kafka_admin_Admin_t *admin = kafka_admin_AdminClient_create(config, &err);
+    kafka_admin_AdminClientConfig_destroy(config);
+    assert_ok(err, "AdminClient_create");
+
+    kafka_admin_ListTopicsResult_t *result = kafka_admin_Admin_list_topics(admin);
+    kafka_common_KafkaFuture_t *names = kafka_admin_ListTopicsResult_names(result);
+    failed_cb_t queued;
+    memset(&queued, 0, sizeof(queued));
+    kafka_common_KafkaFuture_get_cb(names, on_future_failed, &queued);
+    blocking_get_t blocked;
+    memset(&blocked, 0, sizeof(blocked));
+    blocked.future = names;
+    pthread_t getter;
+    pthread_create(&getter, NULL, blocking_get, &blocked);
+    struct timespec settle = {0, 300000000}; /* the call reaches the pending list */
+    nanosleep(&settle, NULL);
+
+    long started = now_ms();
+    kafka_admin_Admin_destroy(admin);
+    pthread_join(getter, NULL);
+    TEST_ASSERT_TRUE(now_ms() - started < 5000);
+
+    const char *exited = "The AdminClient thread has exited. Call: listTopics";
+    TEST_ASSERT_EQUAL_INT(0, blocked.had_value);
+    TEST_ASSERT_TRUE(blocked.timeout);
+    TEST_ASSERT_EQUAL_STRING(exited, blocked.message);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&queued.fired));
+    TEST_ASSERT_TRUE(queued.timeout);
+    TEST_ASSERT_EQUAL_STRING(exited, queued.message);
+    kafka_common_KafkaFuture_destroy(names);
+    kafka_admin_ListTopicsResult_destroy(result);
 }
 
 // ---------------------------------------------------------------------------
@@ -793,6 +883,7 @@ int main(void) {
     RUN_TEST(test_kafka_admin_close_idempotent);
     RUN_TEST(test_kafka_admin_close_async);
     RUN_TEST(test_kafka_admin_destroy_runs_pending_close_callback);
+    RUN_TEST(test_kafka_admin_destroy_fails_the_rpc_still_waiting);
     RUN_TEST(test_kafka_admin_list_topics_returns_without_hanging);
     RUN_TEST(test_kafka_admin_list_topics_async_fires_once);
     RUN_TEST(test_kafka_admin_uuid_from_string_rejects_bad_id);

@@ -295,6 +295,7 @@ def _consumer_family_types(c: object = None) -> None:
     assert_type(mc.last_poll_timeout(), "float | None")
     assert_type(mc.closed(), bool)
     mc.rebalance(new_assignment=[tp])
+    mc.lose_partitions(partitions_lost=[tp])
     mc.schedule_poll_task(task=lambda: None)
 
     async def _async() -> None:
@@ -322,6 +323,7 @@ def _consumer_family_types(c: object = None) -> None:
         assert_type(await am.commit_nowait(offsets={tp: OffsetAndMetadata(offset=5)},
                                            callback=async_callback), None)
         assert_type(await abase.commit_nowait(callback=async_callback), None)
+        await am.lose_partitions(partitions_lost=[tp])
         assert_type(await am.poll(timeout=0), "ConsumerRecords[int, int]")
 
     del _async

@@ -23,7 +23,7 @@ use log::warn;
 
 use super::HostResolver;
 use crate::common::Error;
-use crate::{ClientDnsLookup, CommonClientConfigs, DefaultHostResolver};
+use crate::{BootstrapConfiguration, ClientDnsLookup, CommonClientConfigs, DefaultHostResolver, Metadata};
 
 /// Translates the Java static-utility class `org.apache.kafka.clients.ClientUtils`,
 /// which has no instance state, so it becomes a unit struct hosting its
@@ -107,9 +107,7 @@ impl ClientUtils {
     /// Java's `ConfigException` behavior.
     ///
     /// Translated from `ClientUtils.parseAndValidateAddresses(List<String>, ClientDnsLookup)`.
-    /// The `(AbstractConfig)` overload is covered by callers passing their
-    /// config's `bootstrap.servers` and typed `client.dns.lookup`; the
-    /// `(List<String>, String)` overload is [`ClientDnsLookup::for_config`]
+    /// The `(List<String>, String)` overload is [`ClientDnsLookup::for_config`]
     /// followed by this method.
     ///
     /// Each returned pair is the host string the client connects to (Java's
@@ -182,19 +180,236 @@ impl ClientUtils {
         urls: &[String],
         client_dns_lookup: ClientDnsLookup,
     ) -> Result<Vec<(String, SocketAddr)>, Error> {
-        Self::parse_and_validate_addresses_with_lookup(
+        Self::parse_and_validate_addresses_with_lookup(urls, client_dns_lookup, Self::system_resolve_all, |address| {
+            address.to_string()
+        })
+    }
+
+    /// The system name service: Java's `InetAddress.getAllByName` /
+    /// `InetSocketAddress` resolution, as [`Self::parse_and_validate_addresses`]
+    /// and [`Self::parse_addresses`] use it.
+    fn system_resolve_all(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+        // Test seam: a lookup that hangs like an unreachable DNS server, then
+        // fails, so tests can exercise a slow bootstrap resolution through the
+        // production clients without real DNS.
+        #[cfg(test)]
+        if host.ends_with(Self::SLOW_TEST_HOST_SUFFIX) {
+            std::thread::sleep(Self::SLOW_TEST_HOST_DELAY);
+            return Err(io::Error::new(io::ErrorKind::TimedOut, host.to_string()));
+        }
+        // `InetAddress.getAllByName("")` (and so `new InetSocketAddress("", port)`)
+        // is the loopback address with no lookup; `getaddrinfo("")` fails.
+        if host.is_empty() {
+            return Ok(vec![SocketAddr::new(DefaultHostResolver::EMPTY_HOST_ADDRESS, port)]);
+        }
+        (host, port).to_socket_addrs().map(Iterator::collect)
+    }
+
+    /// Host-name suffix whose lookup takes [`Self::SLOW_TEST_HOST_DELAY`] and
+    /// then fails (test-only).
+    #[cfg(test)]
+    pub(crate) const SLOW_TEST_HOST_SUFFIX: &str = ".slow-dns.kafka.test";
+    /// How long a [`Self::SLOW_TEST_HOST_SUFFIX`] lookup hangs.
+    #[cfg(test)]
+    pub(crate) const SLOW_TEST_HOST_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// Resolves bootstrap URLs without validating them, ignoring any URL whose
+    /// host cannot be resolved.
+    ///
+    /// Translated from `ClientUtils.parseAddresses(List<String>, ClientDnsLookup)`
+    /// (KIP-909). This is what `NetworkClient` runs, off its event loop, when
+    /// `bootstrap.resolve.timeout.ms` is positive: an empty result means "not
+    /// resolvable yet" and is retried after `retry.backoff.ms` until the timeout
+    /// expires. The URLs were validated up front by
+    /// [`BootstrapConfiguration::enabled`](crate::BootstrapConfiguration::enabled).
+    ///
+    /// `is_interrupted` is Java's `Thread.currentThread().isInterrupted()`,
+    /// checked before each URL (`ClientUtils.java:105-107`): once it answers
+    /// `true` the loop stops and returns what it has. `NetworkClient` passes
+    /// "the result receiver was dropped", which is how it cancels a resolution
+    /// (Java's `shutdownNow()` interrupt on `close()`).
+    ///
+    /// An out-of-range port is not "Unknown host": Java's `InetSocketAddress`
+    /// constructor throws `IllegalArgumentException`, which `parseAddresses`
+    /// does not catch, so the whole attempt fails and `NetworkClient` treats it
+    /// as an unresolved attempt. That is what the empty result here means too.
+    #[doc(alias = "org.apache.kafka.clients.ClientUtils#parseAddresses")]
+    pub(crate) fn parse_addresses<I>(
+        urls: &[String],
+        client_dns_lookup: ClientDnsLookup,
+        is_interrupted: I,
+    ) -> Vec<(String, SocketAddr)>
+    where
+        I: Fn() -> bool,
+    {
+        Self::parse_addresses_with_lookup(
             urls,
             client_dns_lookup,
-            |host, port| {
-                // `InetAddress.getAllByName("")` (and so `new InetSocketAddress("", port)`)
-                // is the loopback address with no lookup; `getaddrinfo("")` fails.
-                if host.is_empty() {
-                    return Ok(vec![SocketAddr::new(DefaultHostResolver::EMPTY_HOST_ADDRESS, port)]);
-                }
-                (host, port).to_socket_addrs().map(Iterator::collect)
-            },
+            is_interrupted,
+            Self::system_resolve_all,
             |address| address.to_string(),
         )
+    }
+
+    /// Body of [`Self::parse_addresses`] with its name-service calls injected,
+    /// as for [`Self::parse_and_validate_addresses_with_lookup`].
+    fn parse_addresses_with_lookup<I, R, C>(
+        urls: &[String],
+        client_dns_lookup: ClientDnsLookup,
+        is_interrupted: I,
+        resolve_all: R,
+        canonical_host_name: C,
+    ) -> Vec<(String, SocketAddr)>
+    where
+        I: Fn() -> bool,
+        R: Fn(&str, u16) -> io::Result<Vec<SocketAddr>>,
+        C: Fn(IpAddr) -> String,
+    {
+        let mut addresses = Vec::new();
+        for url in urls {
+            if is_interrupted() {
+                break;
+            }
+            // `getHost(url)` / `getPort(url)` returning `null` cannot happen
+            // here (`BootstrapConfiguration.enabled` rejected such URLs); skip
+            // one anyway rather than abort, as no address can come from it.
+            let Some((host, port)) = Self::parse_host_port(url) else {
+                continue;
+            };
+            // `Integer.parseInt` overflow: rejected by `BootstrapConfiguration.enabled`.
+            let Ok(port) = port.parse::<i32>() else {
+                continue;
+            };
+            match Self::resolve_address(url, host, port, client_dns_lookup, &resolve_all, &canonical_host_name) {
+                Ok(resolved) => addresses.extend(resolved),
+                // `catch (UnknownHostException e)`: "Silently ignore - this
+                // matches the original behavior".
+                Err(ResolveAddressError::UnknownHost) => {},
+                // The uncaught `IllegalArgumentException`: the attempt fails.
+                Err(ResolveAddressError::InvalidPort) => {
+                    log::debug!(
+                        "DNS resolution failed: invalid port in {}: {}",
+                        CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
+                        url
+                    );
+                    return Vec::new();
+                },
+            }
+        }
+        addresses
+    }
+
+    /// Resolves a single URL to one or more `(host, address)` pairs based on the
+    /// DNS lookup strategy. The result may be empty if the addresses are
+    /// unresolved.
+    ///
+    /// Translated from the private `ClientUtils.resolveAddress(String url,
+    /// String host, Integer port, ClientDnsLookup)`, which KIP-909 extracted from
+    /// `parseAndValidateAddresses` so `parseAddresses` could share it. Its two
+    /// exceptions are [`ResolveAddressError`]'s variants.
+    ///
+    /// Per `client_dns_lookup`, mirroring Java's branches:
+    ///
+    /// - [`ClientDnsLookup::UseAllDnsIps`]: exactly **one** entry per URL,
+    ///   keyed by the literal host from the URL (Java's
+    ///   `new InetSocketAddress(host, port)`). A host that does not resolve is
+    ///   logged and skipped.
+    /// - [`ClientDnsLookup::ResolveCanonicalBootstrapServersOnly`]: one entry
+    ///   per address the host resolves to (Java's `InetAddress.getAllByName`),
+    ///   keyed by that address's canonical host name. A host that does not
+    ///   resolve at all is [`ResolveAddressError::UnknownHost`]; a canonical
+    ///   name that does not resolve is logged and skipped.
+    #[doc(alias = "org.apache.kafka.clients.ClientUtils#resolveAddress")]
+    fn resolve_address<R, C>(
+        url: &str,
+        host: &str,
+        port: i32,
+        client_dns_lookup: ClientDnsLookup,
+        resolve_all: &R,
+        canonical_host_name: &C,
+    ) -> Result<Vec<(String, SocketAddr)>, ResolveAddressError>
+    where
+        R: Fn(&str, u16) -> io::Result<Vec<SocketAddr>>,
+        C: Fn(IpAddr) -> String,
+    {
+        // Java's `new InetSocketAddress(host, port)`: `Some(address)` if the
+        // host resolves, `None` for an unresolved address. `InetAddress.getByName`
+        // picks one address; take the preferred one, as `resolve` would.
+        let resolve_one = |host: &str, port: u16| -> Option<SocketAddr> {
+            let resolved = resolve_all(host, port).ok()?;
+            let mut ips: Vec<IpAddr> = resolved.iter().map(SocketAddr::ip).collect();
+            Self::filter_preferred_addresses(&mut ips);
+            let ip = *ips.first()?;
+            Some(SocketAddr::new(ip, port))
+        };
+        // `InetSocketAddress.checkPort`: a port outside 0-65535 is an
+        // `IllegalArgumentException`.
+        let check_port = |port: i32| u16::try_from(port).map_err(|_| ResolveAddressError::InvalidPort);
+
+        let mut addresses = Vec::new();
+        match client_dns_lookup {
+            ClientDnsLookup::ResolveCanonicalBootstrapServersOnly => {
+                // `InetAddress.getAllByName(host)` runs before any port
+                // check, so an unresolvable host is "Unknown host" even
+                // when its port is also out of range. The port given here
+                // is a placeholder: only the addresses are used.
+                let mut inet_addresses = resolve_all(host, 0).map_err(|_| ResolveAddressError::UnknownHost)?;
+                // Java includes both families here, in `getAllByName`
+                // order, which on a default JVM is IPv4 first
+                // (`java.net.preferIPv6Addresses=false`). `getaddrinfo`
+                // has no such order, so stable-sort IPv4 first with the
+                // same key as `filter_preferred_addresses` (see its doc);
+                // nothing is filtered, here as there.
+                inet_addresses.sort_by_key(|address| Self::is_less_preferred_family(address.ip()));
+                for inet_address in inet_addresses {
+                    let resolved_canonical_name = canonical_host_name(inet_address.ip());
+                    // `new InetSocketAddress(resolvedCanonicalName, port)`
+                    // checks the port after resolving the canonical name.
+                    let port = check_port(port)?;
+                    match resolve_one(&resolved_canonical_name, port) {
+                        Some(address) => addresses.push((resolved_canonical_name, address)),
+                        None => warn!(
+                            "Couldn't resolve server {} from {} as DNS resolution of the canonical hostname {} failed for {}",
+                            url,
+                            CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
+                            resolved_canonical_name,
+                            host
+                        ),
+                    }
+                }
+            },
+            ClientDnsLookup::UseAllDnsIps => {
+                // `new InetSocketAddress(host, port)` resolves the host and
+                // then checks the port, but it catches the
+                // `UnknownHostException` itself, so an out-of-range port is
+                // "Invalid port" whether or not the host resolves. Checking
+                // the port first gives the same result without the lookup.
+                let port = check_port(port)?;
+                match resolve_one(host, port) {
+                    // Preserve the original hostname: it is what the
+                    // bootstrap node connects by (re-resolved per
+                    // connection attempt) and what TLS SNI uses (Java's
+                    // `getHostString()`). For an empty host that is the
+                    // loopback address's name, `localhost`, since the
+                    // resolved `InetSocketAddress` keeps no literal name.
+                    Some(address) => {
+                        let host = if host.is_empty() {
+                            DefaultHostResolver::EMPTY_HOST_NAME
+                        } else {
+                            host
+                        };
+                        addresses.push((host.to_string(), address));
+                    },
+                    None => warn!(
+                        "Couldn't resolve server {} from {} as DNS resolution failed for {}",
+                        url,
+                        CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
+                        host
+                    ),
+                }
+            },
+        }
+        Ok(addresses)
     }
 
     /// Body of [`Self::parse_and_validate_addresses`] with its two name-service
@@ -212,17 +427,6 @@ impl ClientUtils {
         R: Fn(&str, u16) -> io::Result<Vec<SocketAddr>>,
         C: Fn(IpAddr) -> String,
     {
-        // Java's `new InetSocketAddress(host, port)`: `Some(address)` if the
-        // host resolves, `None` for an unresolved address. `InetAddress.getByName`
-        // picks one address; take the preferred one, as `resolve` would.
-        let resolve_one = |host: &str, port: u16| -> Option<SocketAddr> {
-            let resolved = resolve_all(host, port).ok()?;
-            let mut ips: Vec<IpAddr> = resolved.iter().map(SocketAddr::ip).collect();
-            Self::filter_preferred_addresses(&mut ips);
-            let ip = *ips.first()?;
-            Some(SocketAddr::new(ip, port))
-        };
-
         let mut addresses = Vec::new();
         for url in urls {
             // Java skips only `null` / empty entries — a whitespace-only entry
@@ -233,96 +437,23 @@ impl ClientUtils {
 
             // Java's `Utils.getHost` / `Utils.getPort`; `null` from either is
             // "Invalid url".
-            let (host, port) = Self::parse_host_port(url).ok_or_else(|| {
-                Error::config_message(format!(
-                    "Invalid url in {}: {}",
-                    CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
-                    url
-                ))
-            })?;
+            let (host, port) = Self::parse_host_port(url).ok_or_else(|| Self::invalid_url_error(url))?;
 
             // `Integer.parseInt` overflowing is a `NumberFormatException`, an
             // `IllegalArgumentException`, which Java rethrows as "Invalid port"
-            // before either branch runs. The pattern admits digits only, so
+            // before `resolveAddress` runs. The pattern admits digits only, so
             // this fails only on overflow.
-            let invalid_port = || {
-                Error::config_message(format!(
-                    "Invalid port in {}: {}",
-                    CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
-                    url
-                ))
-            };
-            let port = port.parse::<i32>().map_err(|_| invalid_port())?;
-            // `InetSocketAddress.checkPort`: a port outside 0-65535 is an
-            // `IllegalArgumentException` too, so also "Invalid port".
-            let check_port = |port: i32| u16::try_from(port).map_err(|_| invalid_port());
+            let port = port.parse::<i32>().map_err(|_| Self::invalid_port_error(url))?;
 
-            match client_dns_lookup {
-                ClientDnsLookup::ResolveCanonicalBootstrapServersOnly => {
-                    // `InetAddress.getAllByName(host)` runs before any port
-                    // check, so an unresolvable host is "Unknown host" even
-                    // when its port is also out of range. The port given here
-                    // is a placeholder: only the addresses are used.
-                    let mut inet_addresses = resolve_all(host, 0).map_err(|_| {
-                        Error::config_message(format!(
-                            "Unknown host in {}: {}",
-                            CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
-                            url
-                        ))
-                    })?;
-                    // Java includes both families here, in `getAllByName`
-                    // order, which on a default JVM is IPv4 first
-                    // (`java.net.preferIPv6Addresses=false`). `getaddrinfo`
-                    // has no such order, so stable-sort IPv4 first with the
-                    // same key as `filter_preferred_addresses` (see its doc);
-                    // nothing is filtered, here as there.
-                    inet_addresses.sort_by_key(|address| Self::is_less_preferred_family(address.ip()));
-                    for inet_address in inet_addresses {
-                        let resolved_canonical_name = canonical_host_name(inet_address.ip());
-                        // `new InetSocketAddress(resolvedCanonicalName, port)`
-                        // checks the port after resolving the canonical name.
-                        let port = check_port(port)?;
-                        match resolve_one(&resolved_canonical_name, port) {
-                            Some(address) => addresses.push((resolved_canonical_name, address)),
-                            None => warn!(
-                                "Couldn't resolve server {} from {} as DNS resolution of the canonical hostname {} failed for {}",
-                                url,
-                                CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
-                                resolved_canonical_name,
-                                host
-                            ),
-                        }
-                    }
-                },
-                ClientDnsLookup::UseAllDnsIps => {
-                    // `new InetSocketAddress(host, port)` resolves the host and
-                    // then checks the port, but it catches the
-                    // `UnknownHostException` itself, so an out-of-range port is
-                    // "Invalid port" whether or not the host resolves. Checking
-                    // the port first gives the same result without the lookup.
-                    let port = check_port(port)?;
-                    match resolve_one(host, port) {
-                        // Preserve the original hostname: it is what the
-                        // bootstrap node connects by (re-resolved per
-                        // connection attempt) and what TLS SNI uses (Java's
-                        // `getHostString()`). For an empty host that is the
-                        // loopback address's name, `localhost`, since the
-                        // resolved `InetSocketAddress` keeps no literal name.
-                        Some(address) => {
-                            let host = if host.is_empty() {
-                                DefaultHostResolver::EMPTY_HOST_NAME
-                            } else {
-                                host
-                            };
-                            addresses.push((host.to_string(), address));
-                        },
-                        None => warn!(
-                            "Couldn't resolve server {} from {} as DNS resolution failed for {}",
-                            url,
-                            CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
-                            host
-                        ),
-                    }
+            match Self::resolve_address(url, host, port, client_dns_lookup, &resolve_all, &canonical_host_name) {
+                Ok(resolved) => addresses.extend(resolved),
+                Err(ResolveAddressError::InvalidPort) => return Err(Self::invalid_port_error(url)),
+                Err(ResolveAddressError::UnknownHost) => {
+                    return Err(Error::config_message(format!(
+                        "Unknown host in {}: {}",
+                        CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
+                        url
+                    )));
                 },
             }
         }
@@ -333,6 +464,105 @@ impl ClientUtils {
             )));
         }
         Ok(addresses)
+    }
+
+    /// `new ConfigException("Invalid url in " + BOOTSTRAP_SERVERS_CONFIG + ": " + url)`,
+    /// shared with [`BootstrapConfiguration::enabled`](crate::BootstrapConfiguration::enabled).
+    pub(crate) fn invalid_url_error(url: &str) -> Error {
+        Error::config_message(format!(
+            "Invalid url in {}: {}",
+            CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
+            url
+        ))
+    }
+
+    /// `new ConfigException("Invalid port in " + BOOTSTRAP_SERVERS_CONFIG + ": " + url)`,
+    /// shared with [`BootstrapConfiguration::enabled`](crate::BootstrapConfiguration::enabled).
+    pub(crate) fn invalid_port_error(url: &str) -> Error {
+        Error::config_message(format!(
+            "Invalid port in {}: {}",
+            CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
+            url
+        ))
+    }
+
+    /// Java's `Utils.getHost(url) == null || Utils.getPort(url) == null` check,
+    /// with `getPort`'s `Integer.parseInt` overflow (an `IllegalArgumentException`)
+    /// distinguished, as `BootstrapConfiguration.enabled` needs it.
+    pub(crate) fn validate_url(url: &str) -> Result<(), Error> {
+        let (_, port) = Self::parse_host_port(url).ok_or_else(|| Self::invalid_url_error(url))?;
+        port.parse::<i32>().map_err(|_| Self::invalid_port_error(url))?;
+        Ok(())
+    }
+
+    /// If `bootstrap.resolve.timeout.ms=0` (the default), resolves DNS for the
+    /// given bootstrap servers synchronously and primes `metadata` with the
+    /// resulting cluster. A DNS failure surfaces as [`Error::Config`]
+    /// (`ConfigException`) and no client instance is created.
+    ///
+    /// A positive value opts in to asynchronous bootstrap resolution, in which
+    /// case this method is a no-op — `NetworkClient` will resolve DNS on the
+    /// first poll and defer failures to subsequent API calls as
+    /// [`BootstrapResolutionError`](crate::common::errors::BootstrapResolutionError).
+    ///
+    /// Java takes the client's `AbstractConfig` and reads
+    /// `bootstrap.resolve.timeout.ms` and `client.dns.lookup` from it; the
+    /// per-client Rust config structs share no base type, so the two values are
+    /// passed in.
+    ///
+    /// # Errors
+    ///
+    /// The [`Error::Config`] of [`Self::parse_and_validate_addresses`] in
+    /// synchronous mode.
+    #[doc(alias = "org.apache.kafka.clients.ClientUtils#maybeBootstrapMetadataSynchronously")]
+    pub(crate) fn maybe_bootstrap_metadata_synchronously(
+        bootstrap_resolve_timeout_ms: i64,
+        client_dns_lookup: ClientDnsLookup,
+        bootstrap_servers: &[String],
+        metadata: &Metadata,
+    ) -> Result<(), Error> {
+        if bootstrap_resolve_timeout_ms == 0 {
+            metadata.bootstrap(Self::parse_and_validate_addresses(bootstrap_servers, client_dns_lookup)?);
+        }
+        Ok(())
+    }
+
+    /// Returns [`BootstrapConfiguration::DISABLED`] when
+    /// `bootstrap.resolve.timeout.ms=0` (the caller is expected to have primed
+    /// metadata synchronously via [`Self::maybe_bootstrap_metadata_synchronously`]),
+    /// otherwise an enabled configuration that lets `NetworkClient` resolve DNS
+    /// asynchronously up to the configured budget.
+    ///
+    /// Java takes the client's `AbstractConfig`; as for
+    /// [`Self::maybe_bootstrap_metadata_synchronously`], the values it reads
+    /// (`bootstrap.resolve.timeout.ms`, `client.dns.lookup`,
+    /// `retry.backoff.ms`) are passed in.
+    ///
+    /// # Errors
+    ///
+    /// The [`Error::Config`] of [`BootstrapConfiguration::enabled`] for a
+    /// malformed URL, in asynchronous mode only.
+    #[doc(alias = "org.apache.kafka.clients.ClientUtils#bootstrapConfiguration")]
+    pub(crate) fn bootstrap_configuration(
+        bootstrap_resolve_timeout_ms: i64,
+        client_dns_lookup: ClientDnsLookup,
+        retry_backoff_ms: i64,
+        bootstrap_servers: &[String],
+    ) -> Result<BootstrapConfiguration, Error> {
+        if bootstrap_resolve_timeout_ms == 0 {
+            return Ok(BootstrapConfiguration::DISABLED);
+        }
+        log::info!(
+            "Asynchronous bootstrap DNS resolution is enabled via {}={}. This evolving feature may undergo compatibility-breaking changes in a minor release.",
+            CommonClientConfigs::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG,
+            bootstrap_resolve_timeout_ms
+        );
+        BootstrapConfiguration::enabled(
+            bootstrap_servers,
+            client_dns_lookup,
+            bootstrap_resolve_timeout_ms,
+            retry_backoff_ms,
+        )
     }
 
     /// Splits `address` into its host and its port digits, or `None` if it
@@ -381,6 +611,17 @@ impl ClientUtils {
         }
         Some((host, port))
     }
+}
+
+/// The two exceptions of Java's `ClientUtils.resolveAddress`.
+#[derive(Debug, PartialEq, Eq)]
+enum ResolveAddressError {
+    /// `UnknownHostException`: `InetAddress.getAllByName` failed (canonical
+    /// mode only).
+    UnknownHost,
+    /// `IllegalArgumentException`: the `InetSocketAddress` constructor rejected
+    /// a port outside 0-65535.
+    InvalidPort,
 }
 
 #[cfg(test)]
@@ -946,6 +1187,180 @@ mod tests {
                 ClientUtils::parse_and_validate_addresses(&[String::new(), String::new()], mode),
                 "No resolvable bootstrap urls given in bootstrap.servers",
             );
+        }
+    }
+
+    /// `parseAddresses` (KIP-909) resolves without validating: an unresolvable
+    /// host is silently ignored (the attempt may come back empty), resolvable
+    /// ones are returned as `parseAndValidateAddresses` would return them.
+    #[test]
+    fn test_parse_addresses() {
+        let urls = |urls: &[&str]| -> Vec<String> { urls.iter().map(|u| u.to_string()).collect() };
+        for mode in [
+            ClientDnsLookup::UseAllDnsIps,
+            ClientDnsLookup::ResolveCanonicalBootstrapServersOnly,
+        ] {
+            assert_eq!(
+                ClientUtils::parse_addresses(&urls(&["127.0.0.1:8000"]), mode, || false),
+                vec![("127.0.0.1".to_string(), "127.0.0.1:8000".parse().unwrap())]
+            );
+            assert!(ClientUtils::parse_addresses(&[], mode, || false).is_empty());
+        }
+
+        // An unknown host: skipped in both modes (canonical mode's
+        // `UnknownHostException` is caught too), so the other URL survives.
+        let resolve_all = |host: &str, port: u16| -> io::Result<Vec<SocketAddr>> {
+            match host {
+                "known" => Ok(vec![SocketAddr::new(Ipv4Addr::new(10, 0, 0, 1).into(), port)]),
+                "10.0.0.1" => Ok(vec![SocketAddr::new(Ipv4Addr::new(10, 0, 0, 1).into(), port)]),
+                _ => Err(io::Error::new(io::ErrorKind::NotFound, host.to_string())),
+            }
+        };
+        let both = urls(&["unknown:9092", "known:9092"]);
+        assert_eq!(
+            ClientUtils::parse_addresses_with_lookup(
+                &both,
+                ClientDnsLookup::UseAllDnsIps,
+                || false,
+                resolve_all,
+                |a| a.to_string()
+            ),
+            vec![("known".to_string(), "10.0.0.1:9092".parse().unwrap())]
+        );
+        assert_eq!(
+            ClientUtils::parse_addresses_with_lookup(
+                &both,
+                ClientDnsLookup::ResolveCanonicalBootstrapServersOnly,
+                || false,
+                resolve_all,
+                |a| a.to_string()
+            ),
+            vec![("10.0.0.1".to_string(), "10.0.0.1:9092".parse().unwrap())]
+        );
+        let unresolvable = urls(&["unknown:9092"]);
+        assert!(
+            ClientUtils::parse_addresses_with_lookup(
+                &unresolvable,
+                ClientDnsLookup::UseAllDnsIps,
+                || false,
+                resolve_all,
+                |a| a.to_string()
+            )
+            .is_empty()
+        );
+
+        // A port outside 0-65535 is Java's uncaught `IllegalArgumentException`:
+        // the whole attempt fails, even with a good URL beside it.
+        let bad_port = urls(&["known:9092", "known:70000"]);
+        assert!(
+            ClientUtils::parse_addresses_with_lookup(
+                &bad_port,
+                ClientDnsLookup::UseAllDnsIps,
+                || false,
+                resolve_all,
+                |a| a.to_string()
+            )
+            .is_empty()
+        );
+    }
+
+    /// `parseAddresses` checks `isInterrupted()` before each URL and stops
+    /// there (`ClientUtils.java:105-107`); the addresses resolved so far are
+    /// returned and no further lookup runs.
+    #[test]
+    fn test_parse_addresses_stops_once_interrupted() {
+        let lookups = std::sync::atomic::AtomicUsize::new(0);
+        let interrupted = std::sync::atomic::AtomicBool::new(false);
+        let urls: Vec<String> = ["a:9092", "b:9092", "c:9092"].iter().map(|u| u.to_string()).collect();
+        let addresses = ClientUtils::parse_addresses_with_lookup(
+            &urls,
+            ClientDnsLookup::UseAllDnsIps,
+            || interrupted.load(std::sync::atomic::Ordering::SeqCst),
+            |_host: &str, port: u16| -> io::Result<Vec<SocketAddr>> {
+                lookups.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // Interrupted while the first lookup is in progress.
+                interrupted.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(vec![SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)])
+            },
+            |a| a.to_string(),
+        );
+        assert_eq!(lookups.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(addresses, vec![("a".to_string(), "127.0.0.1:9092".parse().unwrap())]);
+    }
+
+    /// `bootstrapConfiguration` (KIP-909): `0` is `DISABLED`, a positive value
+    /// an enabled configuration carrying the servers, the lookup mode, the
+    /// budget and `retry.backoff.ms`; only the enabled form validates URLs.
+    #[test]
+    fn test_bootstrap_configuration() {
+        let servers = vec!["unresolvable.invalid:9092".to_string()];
+        let disabled = ClientUtils::bootstrap_configuration(0, ClientDnsLookup::UseAllDnsIps, 100, &servers).unwrap();
+        assert!(disabled.is_disabled());
+        // `DISABLED` does not look at the URLs.
+        assert!(
+            ClientUtils::bootstrap_configuration(0, ClientDnsLookup::UseAllDnsIps, 100, &["bad".to_string()])
+                .unwrap()
+                .is_disabled()
+        );
+
+        let enabled = ClientUtils::bootstrap_configuration(
+            3000,
+            ClientDnsLookup::ResolveCanonicalBootstrapServersOnly,
+            250,
+            &servers,
+        )
+        .unwrap();
+        assert_eq!(
+            enabled,
+            BootstrapConfiguration::enabled(&servers, ClientDnsLookup::ResolveCanonicalBootstrapServersOnly, 3000, 250)
+                .unwrap()
+        );
+        assert_config_error_message(
+            ClientUtils::bootstrap_configuration(3000, ClientDnsLookup::UseAllDnsIps, 100, &["bad".to_string()]),
+            "Invalid url in bootstrap.servers: bad",
+        );
+    }
+
+    /// `maybeBootstrapMetadataSynchronously` (KAFKA-20939): `0` resolves and
+    /// primes the metadata now, failing with the `ConfigException` for an
+    /// unresolvable host; a positive value leaves the metadata empty for the
+    /// `NetworkClient` to bootstrap.
+    #[test]
+    fn test_maybe_bootstrap_metadata_synchronously() {
+        let new_metadata = || Metadata::new(50, 50, 5000, crate::common::internals::ClusterResourceListeners::new());
+        let resolvable = vec!["127.0.0.1:8000".to_string()];
+        let unresolvable = vec!["unresolvable.invalid:9092".to_string()];
+
+        let metadata = new_metadata();
+        ClientUtils::maybe_bootstrap_metadata_synchronously(0, ClientDnsLookup::UseAllDnsIps, &resolvable, &metadata)
+            .unwrap();
+        assert_eq!(metadata.fetch().nodes().len(), 1);
+        assert!(metadata.fetch().is_bootstrap_configured());
+
+        let metadata = new_metadata();
+        assert_config_error_message(
+            ClientUtils::maybe_bootstrap_metadata_synchronously(
+                0,
+                ClientDnsLookup::UseAllDnsIps,
+                &unresolvable,
+                &metadata,
+            ),
+            "No resolvable bootstrap urls given in bootstrap.servers",
+        );
+        assert!(metadata.fetch().nodes().is_empty());
+
+        for urls in [&resolvable, &unresolvable] {
+            let metadata = new_metadata();
+            ClientUtils::maybe_bootstrap_metadata_synchronously(3000, ClientDnsLookup::UseAllDnsIps, urls, &metadata)
+                .unwrap();
+            assert!(metadata.fetch().nodes().is_empty());
+        }
+    }
+
+    fn assert_config_error_message<T: std::fmt::Debug>(result: Result<T, Error>, expected: &str) {
+        match result {
+            Err(Error::Config(e)) => assert_eq!(e.message(), expected),
+            other => panic!("Expected Config({expected:?}), got: {other:?}"),
         }
     }
 

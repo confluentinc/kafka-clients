@@ -43,6 +43,17 @@
 //! [`test_leader_epoch`] on a dedicated `Type::Kraft` cluster (3 brokers +
 //! 1 isolated controller), stopping the partition leader with
 //! `KafkaCluster::shutdown_broker`.
+//!
+//! `ConsumerIntegrationTest.testRackAwareAssignment` (line 263; added in 4.1.0 by
+//! `949617b0b2`, changed in 4.4 by `90a4c93979`)
+//! is NOT translated: it configures the broker with
+//! `group.consumer.assignors=org.apache.kafka.clients.consumer.RackAwareTestAssignor`,
+//! a Java test class on the Java test cluster's classpath that the Docker
+//! broker image cannot load. What it proves on the client side — that
+//! `client.rack` reaches the group coordinator over KIP-848 (the bug fixed in
+//! `55cc35be`) — is covered instead by [`test_client_rack_reaches_the_broker`],
+//! which reads the member's rack back through `describe_consumer_groups`
+//! (`MemberDescription.rackId`).
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -883,6 +894,72 @@ async fn test_leader_epoch() {
     send_msg(&bootstrap, &topic, msg_num).await;
 
     consume_asserting_leader_epoch(consumer.as_mut(), msg_num, 1).await;
+
+    consumer.close().await.expect("consumer close should succeed");
+    admin.close_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// Replacement for `ConsumerIntegrationTest.testRackAwareAssignment` (see the
+/// module doc for why that test is not translated): a KIP-848 consumer's
+/// `client.rack` reaches the group coordinator on its heartbeat, so
+/// `describe_consumer_groups` reports it as the member's rack
+/// (`MemberDescription.rackId`). Before `55cc35be` the constructor never
+/// passed the rack to the membership manager and the broker saw none.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_client_rack_reaches_the_broker() {
+    use confluent_kafka::admin::AdminClient;
+    use confluent_kafka::admin::AdminClientConfig;
+    use confluent_kafka::common::GroupState;
+
+    use crate::common::test_utils;
+
+    let mut ctx = TestContext::new(cluster_config_with_kip848()).await;
+    let topic = ctx.topic("rack_topic");
+    let group_id = ctx.group_id("g_rack");
+    let mut admin_props =
+        HashMap::from([("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string())]);
+    ctx.apply_security(&mut admin_props);
+    let admin =
+        AdminClient::create(AdminClientConfig::new(&admin_props).expect("valid admin config")).expect("admin client");
+    test_utils::create_topic(admin.as_ref(), &topic, 1, 1).await;
+
+    let mut props = HashMap::from([
+        ("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string()),
+        ("group.id".to_string(), group_id.clone()),
+        ("group.protocol".to_string(), "consumer".to_string()),
+        ("enable.auto.commit".to_string(), "false".to_string()),
+        (ConsumerConfig::CLIENT_RACK_CONFIG.to_string(), "rack0".to_string()),
+    ]);
+    ctx.apply_security(&mut props);
+    let mut consumer = KafkaConsumer::new::<String, String>(
+        ConsumerConfig::new(&props).expect("invalid test config"),
+        Box::new(StringDeserializer),
+        Box::new(StringDeserializer),
+    )
+    .expect("KafkaConsumer::new should succeed");
+    consumer.subscribe_with_topics(vec![topic.clone()]).await.expect("subscribe");
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let rack = loop {
+        let _ = consumer.poll(Duration::from_millis(200)).await;
+        let described = admin
+            .describe_consumer_groups(std::slice::from_ref(&group_id))
+            .all()
+            .get()
+            .await;
+        if let Ok(described) = described
+            && let Some(desc) = described.get(&group_id)
+            && desc.group_state() == GroupState::Stable
+            && desc.members().len() == 1
+        {
+            break desc.members()[0].rack_id().map(str::to_string);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "group {group_id} never became Stable with one member"
+        );
+    };
+    assert_eq!(Some("rack0".to_string()), rack, "the broker reports the consumer's client.rack");
 
     consumer.close().await.expect("consumer close should succeed");
     admin.close_with_timeout(Duration::from_secs(5)).await;

@@ -161,7 +161,7 @@ _GROUP_OP_CODE = {
 
 # kafka_common_Error_LOCAL_CALLBACK: a foreign callback error the client
 # reported as it is, without wrapping it.
-_LOCAL_CALLBACK = -29
+_LOCAL_CALLBACK = -30
 
 # Where a waiting call raises a callback's exception (``_raise_error``,
 # ``_raise_at``), since Java's sites wrap it differently: as it is, or as the

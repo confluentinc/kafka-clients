@@ -211,7 +211,7 @@ static void on_close(kafka_common_Error_t *error, void *opaque) {
 }
 
 /* A KafkaProducer rejects a negative close timeout with Java's
- * KafkaProducer.close(Duration) message (KafkaProducer.java:1393-1394), on both
+ * KafkaProducer.close(Duration) message (KafkaProducer.java:1480-1481), on both
  * the blocking and the `_cb` entry point, and stays open for a real close. */
 void test_close_with_negative_timeout_is_rejected(void) {
     kafka_producer_KafkaProducer_t *producer = make_producer(BOOTSTRAP_ONLY);
@@ -827,7 +827,18 @@ void test_transaction_methods_on_non_transactional_producer(void) {
 
     /* The real-producer arm of send_offsets_to_transaction: the map copy, the
      * group-metadata read and the blocking call all run here. Nothing else in
-     * the suite reaches it — the mock tests take the other arm. */
+     * the suite reaches it — the mock tests take the other arm.
+     *
+     * Since Kafka 4.4 (KIP-1319) the producer first awaits metadata for the
+     * offsets' topics (KafkaProducer.java:803), and only then calls into the
+     * transaction manager. Two outcomes are both Java-faithful:
+     *   - the metadata wait times out after max.block.ms (no reachable broker);
+     *   - the wait ends early because the sender's lazy bootstrap of
+     *     bootstrap.servers lands after the version was taken: Metadata.bootstrap
+     *     bumps updateVersion (Metadata.java:309), which satisfies awaitUpdate,
+     *     and the transaction manager then rejects the call with the
+     *     non-transactional error. That needs only a slow first sender poll, as
+     *     on a loaded CI runner, so neither outcome can be pinned here. */
     kafka_consumer_MockConsumer_t *mock_consumer = NULL;
     ASSERT_OK(mock_consumer = kafka_consumer_MockConsumer_new("earliest", &err));
     kafka_consumer_Consumer_t *consumer = kafka_consumer_MockConsumer__as_Consumer(mock_consumer);
@@ -842,7 +853,10 @@ void test_transaction_methods_on_non_transactional_producer(void) {
     kafka_producer_Producer_send_offsets_to_transaction(view, offsets, group_metadata, &err);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_FALSE(is_txn_guard_error(err));
-    TEST_ASSERT_NOT_NULL(strstr(kafka_common_Error_message(err), FRAGMENT));
+    const char *send_offsets_message = kafka_common_Error_message(err);
+    if (strcmp(send_offsets_message, "Failed to update metadata after 300 ms.") != 0)
+        TEST_ASSERT_EQUAL_STRING("Transactional method invoked on a non-transactional producer.",
+                                 send_offsets_message);
     kafka_common_Error_destroy(err);
     kafka_Map_destroy(offsets);
     kafka_consumer_OffsetAndMetadata_destroy(oam);

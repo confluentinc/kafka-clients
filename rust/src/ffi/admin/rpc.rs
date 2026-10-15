@@ -117,6 +117,7 @@ use crate::ffi::admin::options::{
     },
     renew_delegation_token_options::{kafka_admin_RenewDelegationTokenOptions_t, renew_delegation_token_options_ref},
     terminate_transaction_options::{kafka_admin_TerminateTransactionOptions_t, terminate_transaction_options_ref},
+    unregister_controller_options::{kafka_admin_UnregisterControllerOptions_t, unregister_controller_options_ref},
     update_features_options::{kafka_admin_UpdateFeaturesOptions_t, update_features_options_ref},
 };
 use crate::ffi::admin::records_to_delete::records_to_delete_ref;
@@ -187,6 +188,7 @@ use crate::ffi::admin::{
     },
     renew_delegation_token_result::{box_renew_delegation_token_result, kafka_admin_RenewDelegationTokenResult_t},
     terminate_transaction_result::{box_terminate_transaction_result, kafka_admin_TerminateTransactionResult_t},
+    unregister_controller_result::{box_unregister_controller_result, kafka_admin_UnregisterControllerResult_t},
     update_features_result::{box_update_features_result, kafka_admin_UpdateFeaturesResult_t},
 };
 use crate::ffi::admin::{client_ref, kafka_admin_Admin_t};
@@ -908,6 +910,52 @@ pub unsafe extern "C" fn kafka_admin_Admin_abort_transaction_with_options(
     let options_ = unsafe { abort_transaction_options_ref(options) }.clone();
     let result = client.call(|admin| admin.abort_transaction_with_options(spec_, options_));
     box_abort_transaction_result(result, &client.future_ctx())
+}
+
+/// `Admin.unregister_controller`: a non-blocking call returning the owned result handle,
+/// freed with `kafka_admin_UnregisterControllerResult_destroy`.
+///
+/// # Safety
+///
+/// `self_` must be a live handle or view.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_Admin_unregister_controller(
+    self_: *const kafka_admin_Admin_t,
+    controller_id: i32,
+) -> *mut kafka_admin_UnregisterControllerResult_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
+    // call, which is as long as `client` is used, as `client_ref` requires.
+    let client = unsafe { client_ref(self_) };
+    let result = client.call(|admin| admin.unregister_controller(controller_id));
+    box_unregister_controller_result(result, &client.future_ctx())
+}
+
+/// `Admin.unregister_controller_with_options`: a non-blocking call returning the owned result
+/// handle, freed with `kafka_admin_UnregisterControllerResult_destroy`; the options are borrowed
+/// and copied during the call.
+///
+/// # Safety
+///
+/// `self_` must be a live handle or view, and `options` a live handle not mutated by any other
+/// call for the duration of this one.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_Admin_unregister_controller_with_options(
+    self_: *const kafka_admin_Admin_t,
+    controller_id: i32,
+    options: *const kafka_admin_UnregisterControllerOptions_t,
+) -> *mut kafka_admin_UnregisterControllerResult_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
+    // call, which is as long as `client` is used, as `client_ref` requires.
+    let client = unsafe { client_ref(self_) };
+    // SAFETY: Per this function's `# Safety`, `options` is a live
+    // `kafka_admin_UnregisterControllerOptions_t` handle that no other call mutates during this
+    // one, so no setter runs on it while it is cloned, as `unregister_controller_options_ref`
+    // requires.
+    let options_ = unsafe { unregister_controller_options_ref(options) }.clone();
+    let result = client.call(|admin| admin.unregister_controller_with_options(controller_id, options_));
+    box_unregister_controller_result(result, &client.future_ctx())
 }
 
 /// `Admin.describe_transactions`: a non-blocking call returning the owned result handle,

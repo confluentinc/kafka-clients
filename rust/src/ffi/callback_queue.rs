@@ -37,6 +37,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread::{self, ThreadId};
 
 use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 /// A queued callback invocation: the C function pointer, its arguments and the
 /// ownership transfers it implies, baked into one closure so the queue holds
@@ -88,6 +89,17 @@ pub(crate) struct CallbackQueue {
     /// Set by [`close`](Self::close), read and written under `pending`'s
     /// lock so a push is either queued before the close or run inline after.
     closed: AtomicBool,
+    /// Cancelled by [`mark_client_stopping`](Self::mark_client_stopping)
+    /// before a client's `_destroy` stops its runtime, whose timers then stop
+    /// too: a blocking `KafkaFuture_get` with a timeout drops its timer and
+    /// waits on (see `ffi::kafka_future`).
+    client_stopping: CancellationToken,
+    /// Cancelled by [`mark_client_stopped`](Self::mark_client_stopped) once
+    /// the client's background work is gone, so only the queue's last
+    /// callbacks can complete a future of it: a blocking `KafkaFuture_get`
+    /// waiting on one then answers instead of waiting forever (see
+    /// `ffi::kafka_future`).
+    client_stopped: CancellationToken,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -144,6 +156,8 @@ impl CallbackQueue {
             running: Mutex::new(()),
             owner: Mutex::new(None),
             closed: AtomicBool::new(false),
+            client_stopping: CancellationToken::new(),
+            client_stopped: CancellationToken::new(),
         }
     }
 
@@ -182,6 +196,51 @@ impl CallbackQueue {
     pub(crate) fn is_closed(&self) -> bool {
         let _pending = lock(&self.pending);
         self.closed.load(Ordering::Relaxed)
+    }
+
+    /// Records that a client's `_destroy` is about to stop the client's
+    /// runtime, and so its timers: a blocking `KafkaFuture_get` with a
+    /// timeout drops its timer and waits on, without one, until the client is
+    /// [stopped](Self::mark_client_stopped). Called before the runtime
+    /// stops, so the waiting thread wakes on this rather than on the timers
+    /// shutting down.
+    pub(crate) fn mark_client_stopping(&self) {
+        self.client_stopping.cancel();
+    }
+
+    /// Records that the client's background work is gone, for a client's
+    /// `_destroy`: nothing but the queue's last callbacks completes a future
+    /// of the client any more, so a blocking `KafkaFuture_get` still waiting
+    /// on one answers what the future holds now, and a later one, a callback's
+    /// included, does not wait. Called before those last callbacks run, which
+    /// may make such a `get` themselves. Implies
+    /// [stopping](Self::mark_client_stopping).
+    pub(crate) fn mark_client_stopped(&self) {
+        self.client_stopping.cancel();
+        self.client_stopped.cancel();
+    }
+
+    /// Whether [`mark_client_stopping`](Self::mark_client_stopping) (or
+    /// [`mark_client_stopped`](Self::mark_client_stopped)) ran.
+    pub(crate) fn is_client_stopping(&self) -> bool {
+        self.client_stopping.is_cancelled()
+    }
+
+    /// Whether [`mark_client_stopped`](Self::mark_client_stopped) ran.
+    pub(crate) fn is_client_stopped(&self) -> bool {
+        self.client_stopped.is_cancelled()
+    }
+
+    /// Resolves once the client is stopping
+    /// ([`mark_client_stopping`](Self::mark_client_stopping)); cancellation-safe.
+    pub(crate) async fn client_stopping(&self) {
+        self.client_stopping.cancelled().await;
+    }
+
+    /// Resolves once the client is stopped
+    /// ([`mark_client_stopped`](Self::mark_client_stopped)); cancellation-safe.
+    pub(crate) async fn client_stopped(&self) {
+        self.client_stopped.cancelled().await;
     }
 
     /// Fires the notify hook when the vector has just gone from empty to

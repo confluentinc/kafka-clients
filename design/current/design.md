@@ -809,9 +809,9 @@ variant per Java exception. Java's intermediate classes survive as `is_*_error`
 predicates, and `KafkaException` is the `KafkaError` struct that every variant
 embeds.*
 
-- `Error` (`common/error.rs:863`) is the single error type that every fallible
+- `Error` (`common/error.rs:2362`) is the single error type that every fallible
   API returns.
-  - It is a `#[non_exhaustive]` flat enum with **162 variants**, one per Java
+  - It is a `#[non_exhaustive]` flat enum with **167 variants**, one per Java
     exception class. Examples: `TopicAuthorization`,
     `ProducerBufferExhausted`, `ConsumerOffsetOutOfRange`,
     `CorrelationIdMismatch`.
@@ -819,7 +819,7 @@ embeds.*
     `Local` prefix: `LocalIllegalArgument`, `LocalIllegalState`,
     `LocalConcurrentModification`, `LocalTimeout` and others.
   - `KafkaError(KafkaError)` is the variant for a bare `KafkaException`.
-- Each variant's payload lives in its own file: 146 under `common/errors/`,
+- Each variant's payload lives in its own file: 149 under `common/errors/`,
   plus `consumer/consumer_*_error.rs` and
   `producer/producer_buffer_exhausted_error.rs`, as CLAUDE.md §2 requires.
   Module-prefixed names (`Consumer…`, `Producer…`) avoid collisions with
@@ -828,30 +828,34 @@ embeds.*
   `{ error: Errors, custom_message: Option<String>, source: Option<Box<Error>> }`.
   Every payload embeds one.
 - The ambassador-delegated traits forward to that embedded base: `ErrorCode`
-  (`error.rs:318`), `ErrorName` (`:344`), `ErrorMessage` (`:509`) and
-  `ErrorSource` (`:531`).
-- The crate-private `ErrorHierarchy` trait (`error.rs:160`) encodes Java's
+  (`error.rs:1281`), `ErrorName` (`:1307`), `ErrorMessage` (`:1506`) and
+  `ErrorSource` (`:1528`).
+- The crate-private `ErrorHierarchy` trait (`error.rs:166`) encodes Java's
   `extends` chain. Each intermediate Java class is a predicate on `Error`,
-  with public forms from `error.rs:1702`:
+  with public forms from `error.rs:3234`:
   - `is_kafka_error`, `is_api_error`, `is_retriable_error`,
     `is_refresh_retriable_error`, `is_timeout_error`
   - `is_invalid_metadata_error`, `is_invalid_configuration_error`,
-    `is_application_recoverable_error`
+    `is_unsupported_version_error`, `is_application_recoverable_error`
   - `is_invalid_offset_error`, `is_consumer_invalid_offset_error`,
     `is_consumer_offset_out_of_range_error`
   - `is_out_of_order_sequence_error`, `is_serialization_error`
   - `is_authentication_error`, `is_authorization_error`
 
   They are not complements of each other. For example, `Serialization` is a
-  `KafkaException` but not an `ApiException`. `is_transaction_abortable_error`
+  `KafkaException` but not an `ApiException`. A crate-private Java subclass with no
+  public variant is a crate-private kind on its parent's payload: Kafka 4.4's
+  `UnsupportedProtocolFieldException` is `UnsupportedVersionError` with
+  `UnsupportedVersionKind::UnsupportedProtocolField`
+  (`common/internals/unsupported_protocol_field_error.rs`). `is_transaction_abortable_error`
   (`:1650`) tests a single leaf class.
 - Fatality is **not** a predicate on `Error`, because the same class is fatal
   in one context and recoverable in another. It is
   `RequestUtils::is_fatal_error(&Error)` (`common/requests/request_utils.rs:63`),
   crate-private like its Java home.
 - `Errors` (`common/protocol/errors.rs:37`) is the crate-private wire-code
-  enum. It has **135 variants** covering codes `-1..=133`. `Errors::error()`
-  (`errors.rs:583`) builds the `Error` variant for a code.
+  enum. It has **138 variants** covering codes `-1..=136`. `Errors::error()`
+  (`errors.rs:613`) builds the `Error` variant for a code.
 
 ---
 
@@ -866,7 +870,10 @@ through one crate-private `generated` module.*
 ### Pipeline
 
 1. JSON specifications live in `generator/messages/`: 198 Kafka protocol
-   definitions, the same set as Apache Kafka 4.3.1.
+   definitions, the same set as Apache Kafka 4.3.1. They are a copy of the
+   `kafka` submodule's `clients/src/main/resources/common/message/`, because
+   the crates.io package cannot reach the submodule, and
+   `cargo xtask check-generated` fails when the copy differs from it.
 2. The generator code in `generator/src/` parses the specs and emits Rust
    code.
 3. `build.rs` invokes the generator at build time.
@@ -1013,22 +1020,22 @@ over that surface.*
 ### C FFI (`src/ffi/`, feature `ffi`)
 
 The module is gated on the `ffi` feature, which also turns on the `cbindgen`
-build-dependency that emits `rust/target/include/confluent_kafka.h` (31.8K
+build-dependency that emits `rust/target/include/confluent_kafka.h` (33.9K
 lines). Only crate types that are public have bindings (CLAUDE.md §4). The
 layout mirrors the crate: one file per Java class under `src/ffi/common/`,
-`producer/`, `consumer/` and `admin/` (265 files, 2321 exported symbols),
+`producer/`, `consumer/` and `admin/` (269 files, 2353 exported symbols),
 plus the package-less helpers:
 
 | File / directory | Exported symbols | What it holds |
 |------------------|-----------------:|---------------|
-| `common.rs`, `common/` (104 files) | 835 | `kafka_common_Error_t` (factories, accessors, payload views), `TopicPartition`, `Node`, `Uuid`, `Cluster`, ACL / quota / resource / config types, metrics, serialization, enum singletons |
-| `error_predicates.rs` (generated) | 167 | `kafka_common_Error_is_<class>_error`, `kafka_common_Error_e` |
+| `common.rs`, `common/` (106 files) | 846 | `kafka_common_Error_t` (factories, accessors, payload views), `TopicPartition`, `Node`, `Uuid`, `Cluster`, ACL / quota / resource / config types, metrics, serialization, enum singletons |
+| `error_predicates.rs` (generated) | 172 | `kafka_common_Error_is_<class>_error`, `kafka_common_Error_e` |
 | `util.rs` | 14 | `kafka_List_t`, `kafka_Map_t`, `kafka_Bytes_t`, `kafka_string_destroy` |
-| `kafka_future.rs` | 13 | the one generic `kafka_common_KafkaFuture_t` (`get`, `get_cb`, `is_done`, `all_of`, `then_apply` through a `BaseFunction_t` interface, `completed_future`) |
+| `kafka_future.rs` | 12 | the one generic `kafka_common_KafkaFuture_t` (`get`, `get_cb`, `is_done`, `all_of`, `then_apply` through a `BaseFunction_t` interface, `completed_future`) |
 | `callback_queue.rs` | 0 | `CallbackQueue`: the per-client callbacks vector behind `__execute_callbacks` / `__set_callbacks_notify` |
-| `producer/` (9 files) | 131 | `kafka_producer_Producer_t` interface, `KafkaProducer_t` / `MockProducer_t` with `__as_Producer`, `Callback_t` (the `callback_id` protocol), `Partitioner_t`, `ProducerConfig_t`, records and metadata |
-| `consumer/` (16 files) | 297 | `kafka_consumer_Consumer_t`, `MockConsumer_t` with `__as_Consumer`, `ConsumerRebalanceListener_t` / `OffsetCommitCallback_t` (the `callback_id` protocol), `Deserializer_t`, `ConsumerHandle_t`, `ConsumerConfig_t`, records |
-| `admin/` (130 files; `options/` 44, `rpc.rs` 94 invokers) | 844 | `kafka_admin_Admin_t`, `AdminClient_create`, `MockAdminClient_t` with `__as_Admin`, one `<Rpc>Options_t` per Java options class, one `<Rpc>Result_t` per Java result class with per-key `KafkaFuture_t`s, every admin data class |
+| `producer/` (9 files) | 132 | `kafka_producer_Producer_t` interface, `KafkaProducer_t` / `MockProducer_t` with `__as_Producer`, `Callback_t` (the `callback_id` protocol), `Partitioner_t`, `ProducerConfig_t`, records and metadata |
+| `consumer/` (16 files) | 305 | `kafka_consumer_Consumer_t`, `MockConsumer_t` with `__as_Consumer`, `ConsumerRebalanceListener_t` / `OffsetCommitCallback_t` (the `callback_id` protocol), `Deserializer_t`, `ConsumerHandle_t`, `ConsumerConfig_t`, records |
+| `admin/` (132 files; `options/` 46, `rpc.rs` 96 invokers) | 857 | `kafka_admin_Admin_t`, `AdminClient_create`, `MockAdminClient_t` with `__as_Admin`, one `<Rpc>Options_t` per Java options class, one `<Rpc>Result_t` per Java result class with per-key `KafkaFuture_t`s, every admin data class |
 
 The conventions, each enforced by `cargo xtask lint-custom check-ffi-translation`
 (`xtask/src/lint_custom/ffi_translation.rs`, which derives the expected C
@@ -1042,7 +1049,7 @@ by-design gaps, all closure parameters whose C shape the lint cannot derive):
   it stores an owned error there and returns its type's failure value (NULL,
   a NULL `kafka_Bytes_t`, 0 for `int8_t`, -1 for the other integers); the
   caller tests `*out_err`, never the value, since NULL and -1 can be answers.
-  The value and the error come from one helper, `deliver` / `deliver_unit` in
+  The value and the error come from one helper, `deliver_value` / `deliver_unit` in
   `src/ffi/common.rs`, over the `FailValue` trait, so a body's failure value
   and a panic's cannot diverge. The interface method pointers the caller
   implements (serializer, deserializer, `Headers` add/remove,

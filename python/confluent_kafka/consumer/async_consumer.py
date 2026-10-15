@@ -491,19 +491,20 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
 
         async def run() -> None:
             error: BaseException | None = None
+            interrupted: KeyboardInterrupt | None = None
             try:
                 await awaitable
             except BaseException as exc:  # noqa: BLE001 - reported to the core
                 error = exc
-            if report_now:
-                if error is not None and self._callback_error is None:
-                    self._callback_error = error
-                return
-            # Under the lifecycle lock: close() clears the handle under it
-            # before it frees the handle, so a live handle is not freed meanwhile.
-            with self._lifecycle:
-                if self._h:
-                    _lib.Consumer__set_callback_result(self._h, callback_id, error)
+            finally:
+                # Reached whatever the except clause raises (a Ctrl+C there).
+                if report_now:
+                    if error is not None and self._callback_error is None:
+                        self._callback_error = error
+                else:
+                    interrupted = self._report_deferred(callback_id, error)
+            if interrupted is not None:
+                raise interrupted
 
         task = loop.create_task(run())
         self._listener_tasks.add(task)
@@ -513,6 +514,28 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
                 if self._h:
                     _lib.Consumer__set_callback_result(self._h, callback_id, None)
         return True
+
+    def _report_deferred(self, callback_id: int, error: BaseException | None
+                         ) -> KeyboardInterrupt | None:
+        """Report a deferred callback's outcome to the core once, whatever is
+        raised meanwhile: the core parks the delivering call, and ``destroy``,
+        until it comes. A Ctrl+C landing while it is reported (under
+        ``asyncio.run`` the second one raises ``KeyboardInterrupt`` in the
+        running code) reports it again; the core drops a report for an id
+        already reported, so one landing after the report is harmless. The
+        ``KeyboardInterrupt`` is returned for the task to raise.
+
+        Under the lifecycle lock: ``close()`` clears the handle under it before
+        it frees the handle, so a live handle is not freed meanwhile."""
+        interrupted: KeyboardInterrupt | None = None
+        while True:
+            try:
+                with self._lifecycle:
+                    if self._h:
+                        _lib.Consumer__set_callback_result(self._h, callback_id, error)
+                return interrupted
+            except KeyboardInterrupt as exc:
+                interrupted = exc
 
     # ---- commit_nowait (Java's commitAsync) on the event loop ----------------
     async def _a_commit_nowait(self, offsets: Any, callback: Callable[..., object] | None) -> None:

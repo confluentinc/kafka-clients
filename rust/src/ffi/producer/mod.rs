@@ -169,6 +169,11 @@
 //! `close` the producer: as in Rust, a `KafkaProducer` dropped without
 //! `close` is force-closed with a warning, so a caller that wants a graceful
 //! shutdown calls `close` first.
+//!
+//! Called inside a tokio runtime (on a worker thread, or inside a
+//! `block_on`), where it cannot wait, `_destroy` returns at once and all of
+//! this happens on a new thread, the pending callbacks included. If that
+//! thread cannot be started, the handle is leaked and an error logged.
 
 #![expect(non_camel_case_types)]
 
@@ -203,8 +208,8 @@ use crate::ffi::common::partition_info::{box_partition_info, kafka_common_Partit
 use crate::ffi::common::store_error;
 use crate::ffi::common::topic_partition::topic_partition_ref;
 use crate::ffi::common::{
-    box_error, catch_task_panic, deliver_panic, deliver_panic_value, init_default_logger, kafka_common_Error_t,
-    spawn_callback_task, take_error,
+    box_error, catch_task_panic, deliver_panic, deliver_panic_value, in_tokio_runtime, init_default_logger,
+    kafka_common_Error_t, spawn_callback_task, spawn_teardown, take_error,
 };
 use crate::ffi::consumer::{
     group_metadata_ref, kafka_consumer_ConsumerGroupMetadata_t, kafka_consumer_OffsetAndMetadata_t,
@@ -700,6 +705,34 @@ where
         &self.client as *const Arc<Client> as *const kafka_producer_Producer_t
     }
 
+    /// Tears the handle down ([`Self::teardown`]) on the calling thread, or,
+    /// called inside a tokio runtime, where `teardown`'s `block_on` would
+    /// panic, on a new thread, returning at once (see [`spawn_teardown`]);
+    /// the pending callbacks then fire on that thread.
+    pub(crate) fn destroy(self: Box<Self>) {
+        if in_tokio_runtime() {
+            /// # Safety
+            ///
+            /// `handle` must be the `Box::into_raw` of a `ProducerHandle<P>`
+            /// whose only teardown this is.
+            unsafe fn teardown<P>(handle: usize)
+            where
+                P: DynTrySend<GenericValue, GenericValue> + 'static,
+            {
+                // SAFETY: Per this function's `# Safety`, `handle` is the `Box::into_raw` of a
+                // `ProducerHandle<P>` torn down only here, so taking it back frees it exactly once.
+                unsafe { Box::from_raw(handle as *mut ProducerHandle<P>) }.teardown();
+            }
+            // SAFETY: `teardown`'s `# Safety` holds: the address is the `Box::into_raw` of this
+            // `ProducerHandle<P>`, just taken, and this is its only teardown, since the box is
+            // consumed here. `teardown` waits with `block_on`, which is sound on the new thread,
+            // outside any runtime.
+            unsafe { spawn_teardown("kafka-producer-destroy", Box::into_raw(self) as usize, teardown::<P>) };
+        } else {
+            self.teardown();
+        }
+    }
+
     /// Awaits every task spawned by a `_cb` call, then stops the submission
     /// task and awaits it, fires the pending callbacks and drops the producer
     /// (see the module docs), then stops the runtime and fires the completions
@@ -729,7 +762,7 @@ where
     // The box is load-bearing: the view points into it, and the callbacks
     // `destroy` runs report through the view until it returns.
     #[expect(clippy::boxed_local)]
-    pub(crate) fn destroy(self: Box<Self>) {
+    fn teardown(self: Box<Self>) {
         // Moved out of the box field by field, so `client`, which the view
         // points at, stays in place until the box is freed at the end.
         let producer = self.producer;
@@ -765,10 +798,11 @@ where
         drop(client.submit_tx.lock().unwrap_or_else(PoisonError::into_inner).take());
         let _ = runtime.block_on(submission);
         client.queue.execute();
-        // The producer's `Drop` force-closes it (a `KafkaProducer` needs the
-        // runtime context for that) and fires the delivery callbacks of the
-        // records still in flight into the queue, which runs once more so
-        // each fires exactly once; the runtime is shut down after.
+        // The producer's `Drop` only starts a forced close (a `KafkaProducer`
+        // needs the runtime context for that): its sender aborts the records
+        // still in flight later, on the runtime, firing their delivery
+        // callbacks into the queue, or never, if the shutdown below cancels it
+        // first. The queue runs once more for those already fired.
         {
             let _enter = runtime.enter();
             drop(producer);
@@ -777,12 +811,19 @@ where
         // A `KafkaFuture_get_cb` task waiting on a record's future gets its
         // value before the runtime stops.
         complete_unreported(&client.results);
+        // A blocking `KafkaFuture_get` with a timeout drops its timer before
+        // the runtime's timers stop, and waits on (see `ffi::kafka_future`).
+        client.queue.mark_client_stopping();
         runtime.shutdown_timeout(Duration::from_secs(5));
         // Shutting the runtime down dropped the `KafkaFuture_get_cb` tasks
         // still waiting, each queuing its completion as it went (see
         // `ffi::kafka_future`): run them, closing the queue first so a later
-        // `get_cb` on a future of this producer runs inline.
+        // `get_cb` on a future of this producer runs inline. The client is
+        // stopped before they run, so a blocking `KafkaFuture_get` one of them
+        // makes, or any still waiting, answers what its future holds rather
+        // than waiting on a drain that waits on it.
         client.queue.close();
+        client.queue.mark_client_stopped();
         client.queue.execute();
         complete_unreported(&client.results);
     }
@@ -2297,11 +2338,12 @@ mod tests {
     use crate::ffi::common::{kafka_common_Error_destroy, kafka_common_Error_message};
     use crate::ffi::kafka_future::{
         kafka_common_KafkaFuture_destroy, kafka_common_KafkaFuture_get, kafka_common_KafkaFuture_get_cb,
-        kafka_common_KafkaFuture_is_done, kafka_common_KafkaFuture_t,
+        kafka_common_KafkaFuture_get_with_timeout, kafka_common_KafkaFuture_is_done, kafka_common_KafkaFuture_t,
     };
+    use crate::ffi::producer::callback::{kafka_producer_Callback_destroy, kafka_producer_Callback_new};
     use crate::ffi::producer::mock_producer::{
         kafka_producer_MockProducer__as_Producer, kafka_producer_MockProducer_closed,
-        kafka_producer_MockProducer_destroy, kafka_producer_MockProducer_history,
+        kafka_producer_MockProducer_destroy, kafka_producer_MockProducer_history, kafka_producer_MockProducer_t,
         kafka_producer_MockProducer_with_auto_complete,
     };
     use crate::ffi::producer::producer_record::{
@@ -2518,6 +2560,160 @@ mod tests {
             kafka_common_KafkaFuture_get_cb(future, record_future, opaque);
             assert_eq!(*seen.lock().unwrap(), [destroyed.clone(), destroyed]);
             kafka_common_KafkaFuture_destroy(future);
+            kafka_producer_ProducerRecord_destroy(record);
+        }
+    }
+
+    /// A blocking `KafkaFuture_get`, timed or not, still waiting on a send the
+    /// mock never completes returns from the producer's `_destroy` with the
+    /// destroyed-client error: the timed one drops its timer before the
+    /// runtime's timers stop, instead of polling it into the shutdown panic.
+    #[test]
+    fn destroy_releases_a_blocking_get_on_a_pending_record() {
+        // `send` waits on the record alone; `send_with_callback` drains the
+        // callback queue meanwhile (`resolve_draining`).
+        for with_callback in [false, true] {
+            destroy_releases_a_blocking_get_on_a_pending_record_with(with_callback);
+        }
+    }
+
+    /// A delivery callback that never reports (the mock never completes the
+    /// record, so it never fires either).
+    unsafe extern "C" fn unreported(
+        _self: *mut c_void,
+        _metadata: *const kafka_producer_RecordMetadata_t,
+        _error: *const kafka_common_Error_t,
+        _callback_id: i64,
+    ) {
+    }
+
+    fn destroy_releases_a_blocking_get_on_a_pending_record_with(with_callback: bool) {
+        struct Future(*mut kafka_common_KafkaFuture_t);
+        // SAFETY: a future handle may be used from any thread (`ffi::kafka_future`).
+        unsafe impl Send for Future {}
+        // SAFETY: as above; the getters only borrow it.
+        unsafe impl Sync for Future {}
+
+        let topic = CString::new("topic").unwrap();
+        // SAFETY: every handle is live until it is destroyed below, and each `err` is a valid
+        // slot pointing at null. The future outlives both getter threads, joined before it is
+        // destroyed.
+        unsafe {
+            let mock = kafka_producer_MockProducer_with_auto_complete(0);
+            let view = kafka_producer_MockProducer__as_Producer(mock);
+            let record = kafka_producer_ProducerRecord_new(topic.as_ptr(), std::ptr::null());
+            let mut err = std::ptr::null_mut();
+            let callback = kafka_producer_Callback_new(std::ptr::null_mut(), unreported);
+            let future = Future(match with_callback {
+                true => kafka_producer_Producer_send_with_callback(view, record, callback, &mut err),
+                false => kafka_producer_Producer_send(view, record, &mut err),
+            });
+            assert!(err.is_null());
+            kafka_producer_Callback_destroy(callback);
+            let outcome = |error: *mut kafka_common_Error_t| {
+                assert!(!error.is_null(), "the record never completes");
+                // A non-null `error` is owned by the caller; freed once.
+                let message = c_str_to_string(kafka_common_Error_message(error));
+                kafka_common_Error_destroy(error);
+                message
+            };
+            let (untimed, timed) = std::thread::scope(|scope| {
+                let future = &future;
+                let untimed = scope.spawn(move || {
+                    let mut err = std::ptr::null_mut();
+                    // `future` is live until the scope ends; `err` points at null.
+                    let value = kafka_common_KafkaFuture_get(future.0, &mut err);
+                    assert!(value.is_null());
+                    outcome(err)
+                });
+                let timed = scope.spawn(move || {
+                    let mut err = std::ptr::null_mut();
+                    let value = kafka_common_KafkaFuture_get_with_timeout(future.0, 60_000, &mut err);
+                    assert!(value.is_null());
+                    outcome(err)
+                });
+                std::thread::sleep(Duration::from_millis(300));
+                // Checked after the destroy: the scope joins the getters, which only it releases.
+                let waiting = !untimed.is_finished() && !timed.is_finished();
+                kafka_producer_MockProducer_destroy(mock);
+                assert!(waiting, "still waiting before the destroy");
+                (untimed.join().unwrap(), timed.join().unwrap())
+            });
+            let destroyed = "The client was destroyed before the future completed";
+            assert_eq!(untimed, destroyed, "with_callback={with_callback}");
+            assert_eq!(timed, destroyed, "with_callback={with_callback}");
+            kafka_common_KafkaFuture_destroy(future.0);
+            kafka_producer_ProducerRecord_destroy(record);
+        }
+    }
+
+    /// The `KafkaFuture_get_cb` completions the producer's `_destroy` runs
+    /// last may block on another pending record of the producer: each such
+    /// `get`, timed or not, answers the destroyed-client error instead of
+    /// waiting on the drain that runs it.
+    #[test]
+    fn destroy_releases_a_blocking_get_made_by_a_completion_it_runs() {
+        struct Nested {
+            other: *mut kafka_common_KafkaFuture_t,
+            seen: Mutex<Vec<String>>,
+        }
+        /// Blocks on `other` from inside the completion, both ways.
+        unsafe extern "C" fn nested_get(value: *mut c_void, error: *mut kafka_common_Error_t, opaque: *mut c_void) {
+            assert!(value.is_null());
+            // SAFETY: `opaque` is the test's `Nested`, alive until the destroy returned; `other`
+            // is live until then too; a non-null `error` is owned here, freed once.
+            unsafe {
+                let nested = &*(opaque as *const Nested);
+                let mut seen = vec![c_str_to_string(kafka_common_Error_message(error))];
+                kafka_common_Error_destroy(error);
+                for timeout in [None, Some(1_000), Some(0)] {
+                    let mut err = std::ptr::null_mut();
+                    let value = match timeout {
+                        None => kafka_common_KafkaFuture_get(nested.other, &mut err),
+                        Some(ms) => kafka_common_KafkaFuture_get_with_timeout(nested.other, ms, &mut err),
+                    };
+                    assert!(value.is_null() && !err.is_null());
+                    seen.push(c_str_to_string(kafka_common_Error_message(err)));
+                    kafka_common_Error_destroy(err);
+                }
+                nested.seen.lock().unwrap().extend(seen);
+            }
+        }
+        struct Handle(*mut kafka_producer_MockProducer_t);
+        // SAFETY: a producer handle may be destroyed from any thread.
+        unsafe impl Send for Handle {}
+
+        let topic = CString::new("topic").unwrap();
+        // SAFETY: every handle is live until it is destroyed below, and each `err` is a valid
+        // slot pointing at null; `nested` outlives the destroy, which runs its completion.
+        unsafe {
+            let mock = kafka_producer_MockProducer_with_auto_complete(0);
+            let view = kafka_producer_MockProducer__as_Producer(mock);
+            let record = kafka_producer_ProducerRecord_new(topic.as_ptr(), std::ptr::null());
+            let mut err = std::ptr::null_mut();
+            let first = kafka_producer_Producer_send(view, record, &mut err);
+            let other = kafka_producer_Producer_send(view, record, &mut err);
+            assert!(err.is_null());
+            let nested = Nested { other, seen: Mutex::new(Vec::new()) };
+            kafka_common_KafkaFuture_get_cb(first, nested_get, &nested as *const Nested as *mut c_void);
+            std::thread::sleep(Duration::from_millis(20));
+            assert_eq!(kafka_producer_Producer__execute_callbacks(view), 0, "still waiting");
+
+            // A hang fails the test instead of stalling it.
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let mock = Handle(mock);
+            std::thread::spawn(move || {
+                let mock = mock;
+                kafka_producer_MockProducer_destroy(mock.0);
+                let _ = done_tx.send(());
+            });
+            done_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the destroy returns although a completion it runs blocks on a record");
+            let destroyed = "The client was destroyed before the future completed";
+            assert_eq!(*nested.seen.lock().unwrap(), [destroyed; 4]);
+            kafka_common_KafkaFuture_destroy(first);
+            kafka_common_KafkaFuture_destroy(other);
             kafka_producer_ProducerRecord_destroy(record);
         }
     }

@@ -171,6 +171,25 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_auto_commit_interval_ms(
     unsafe { consumer_config_ref(self_) }.config().auto_commit_interval_ms()
 }
 
+/// `bootstrap.resolve.timeout.ms` (KIP-909): `0` (the default) resolves
+/// `bootstrap.servers` once, when the consumer is created; a positive value
+/// resolves asynchronously, retrying for at most this long.
+///
+/// # Safety
+///
+/// `self_` must be a valid handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_bootstrap_resolve_timeout_ms(
+    self_: *const kafka_consumer_ConsumerConfig_t,
+) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, and no setter runs on it
+    // meanwhile, since the setters' `# Safety` excludes any other call using the handle at the same
+    // time, so `consumer_config_ref`'s requirement holds for this call, the only use of the
+    // reference.
+    unsafe { consumer_config_ref(self_) }.config().bootstrap_resolve_timeout_ms()
+}
+
 /// `enable.auto.commit`.
 ///
 /// # Safety
@@ -715,6 +734,7 @@ mod tests {
         unsafe {
             assert!(kafka_consumer_ConsumerConfig_group_id(config).is_null());
             assert_eq!(kafka_consumer_ConsumerConfig_enable_auto_commit(config), 1);
+            assert_eq!(kafka_consumer_ConsumerConfig_bootstrap_resolve_timeout_ms(config), 0);
             let servers = kafka_consumer_ConsumerConfig_bootstrap_servers(config);
             assert_eq!(kafka_List_size(servers), 1);
             kafka_List_destroy(servers);
@@ -735,6 +755,35 @@ mod tests {
                 CStr::from_ptr(kafka_consumer_ConsumerConfig_group_id(config)).to_str().unwrap(),
                 "h"
             );
+            kafka_consumer_ConsumerConfig_destroy(config);
+        }
+    }
+
+    #[test]
+    fn bootstrap_resolve_timeout_ms_reads_the_configured_value() {
+        let props = kafka_Map_new();
+        // SAFETY: Test code: `props` is the live map just built, and the keys and values are C
+        // string literals that outlive it; the map does not own them.
+        unsafe {
+            kafka_Map_put(
+                props,
+                c"bootstrap.servers".as_ptr() as *mut _,
+                c"localhost:9092".as_ptr() as *mut _,
+            );
+            kafka_Map_put(
+                props,
+                c"bootstrap.resolve.timeout.ms".as_ptr() as *mut _,
+                c"5000".as_ptr() as *mut _,
+            );
+        }
+        let mut err = std::ptr::null_mut();
+        // SAFETY: Test code: `props` is a live map of `char *` keys and values and `err` a valid
+        // slot pointing at null; `props` and `config` are destroyed once, after their last use.
+        unsafe {
+            let config = kafka_consumer_ConsumerConfig_new(props, &mut err);
+            assert!(err.is_null());
+            kafka_Map_destroy(props);
+            assert_eq!(kafka_consumer_ConsumerConfig_bootstrap_resolve_timeout_ms(config), 5000);
             kafka_consumer_ConsumerConfig_destroy(config);
         }
     }

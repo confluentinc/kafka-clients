@@ -59,4 +59,5 @@ pub(crate) mod list_transactions_options;
 pub(crate) mod remove_members_from_consumer_group_options;
 pub(crate) mod renew_delegation_token_options;
 pub(crate) mod terminate_transaction_options;
+pub(crate) mod unregister_controller_options;
 pub(crate) mod update_features_options;

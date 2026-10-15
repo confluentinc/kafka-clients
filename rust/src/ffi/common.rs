@@ -27,13 +27,13 @@
 //!   generated into `error_predicates.rs`. `kafka_common_*` is shared verbatim
 //!   between FFI surfaces — a second definition would make cbindgen emit a
 //!   duplicate type.
-//! - The dispatcher-thread abstraction ([`CompletionJob`],
-//!   [`spawn_dispatcher`], [`enqueue_or_run_inline`]) and the void-returning
-//!   operation callback machinery ([`OperationCallbackFn`],
-//!   [`OperationCompletion`], [`OperationCallbackTarget`]) the clients still
-//!   run their `_async` variants on. They are superseded by the per-client
-//!   callbacks vector in [`callback_queue`](crate::ffi::callback_queue) and go
-//!   away as each client moves to its `_cb` variants.
+//! - The `out_err` slot (CLAUDE.md §4): [`FailValue`], [`deliver_value`] /
+//!   [`deliver_unit`], [`fail_with`], and the panic boundary every export runs
+//!   in ([`ffi_guard_or`], the `deliver_panic*` family), so a body's failure
+//!   value and a panic's cannot diverge. Completions go through the per-client
+//!   callbacks vector in [`callback_queue`](crate::ffi::callback_queue).
+//! - The `destroy` hand-off off a runtime thread ([`in_tokio_runtime`],
+//!   [`spawn_teardown`]), since `Runtime::block_on` panics there.
 //! - The default logger initialization helper ([`init_default_logger`]).
 //!
 //! # Feature Gate
@@ -87,7 +87,7 @@ use crate::ffi::callback_queue::{CallbackJob, SendPtr};
 use crate::ffi::common::errors::local_callback_error::kafka_common_LocalCallbackError_release_fn_t;
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, kafka_List_t, list_strings};
-// The 163 enumerators are spelled out in full (see
+// The 167 enumerators are spelled out in full (see
 // [`kafka_common_Error_e`]), so this glob keeps the match arms in
 // `error_code_of` readable without repeating the type name on each one.
 use kafka_common_Error_e::*;
@@ -332,6 +332,64 @@ pub(crate) fn run_inline(job: CallbackJob) {
     job();
 }
 
+/// Whether the calling thread is inside a tokio runtime: a worker thread, or a
+/// thread inside some runtime's `block_on`. A `destroy` that must wait for a
+/// handle's tasks cannot do it there, since `Runtime::block_on` panics. The
+/// check is conservative: it is also true on a blocking-pool thread, where
+/// waiting would be allowed, and handing off there only costs a thread.
+///
+/// No Java counterpart: Java has no C boundary.
+pub(crate) fn in_tokio_runtime() -> bool {
+    tokio::runtime::Handle::try_current().is_ok()
+}
+
+/// Runs `teardown(handle)` on a new thread named `name`, for a `destroy` called
+/// where it must not wait: inside a tokio runtime ([`in_tokio_runtime`]).
+/// `destroy` then returns at once, and the wait and the free happen on that
+/// thread.
+///
+/// The handle travels as an address, so a failed spawn drops nothing. It is
+/// logged and the handle is leaked: still in use by its tasks, leaking it is
+/// safe where freeing it would not be.
+///
+/// No Java counterpart: Java has no C boundary.
+///
+/// # Safety
+///
+/// Calling `teardown(handle)` once, on a newly spawned thread, must be sound, and
+/// this must be the handle's only teardown.
+pub(crate) unsafe fn spawn_teardown(name: &str, handle: usize, teardown: unsafe fn(usize)) {
+    // SAFETY: this function's `# Safety` is the one `spawn_teardown_with` requires, and
+    // `Builder::spawn` either runs the body once on the thread it starts or returns an
+    // error without running it. Dropping the `JoinHandle` detaches that thread.
+    unsafe { spawn_teardown_with(name, handle, teardown, |builder, body| builder.spawn(body).map(drop)) }
+}
+
+/// [`spawn_teardown`] with the thread start passed in as `spawn`, so a test can
+/// make it fail.
+///
+/// # Safety
+///
+/// As for [`spawn_teardown`]. `spawn` must either run the body it is given once,
+/// on the thread it starts from the builder it is given, or return an error
+/// without running it.
+unsafe fn spawn_teardown_with(
+    name: &str,
+    handle: usize,
+    teardown: unsafe fn(usize),
+    spawn: impl FnOnce(std::thread::Builder, Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
+) {
+    let body: Box<dyn FnOnce() + Send> = Box::new(move || {
+        // SAFETY: per this function's `# Safety`, `teardown(handle)` is sound to call
+        // once on a newly spawned thread, and this is its only call: the closure is
+        // `FnOnce`, and `spawn` runs it at most once, on the thread it starts.
+        unsafe { teardown(handle) }
+    });
+    if let Err(e) = spawn(std::thread::Builder::new().name(name.to_string()), body) {
+        log::error!("leaking a destroyed handle: could not spawn the {name} thread to free it: {e}");
+    }
+}
+
 /// Runs a `_cb` entry point's task body, turning a panic inside it into the
 /// task's `Err` result, which the task then delivers like any other failure.
 ///
@@ -401,6 +459,52 @@ pub(crate) mod fail_point {
         if armed {
             panic!("{MESSAGE}");
         }
+    }
+}
+
+/// The test side of [`spawn_teardown`]: an `(error, opaque)` completion that
+/// reports which thread fired it, so a test can tell a destroy run inline from
+/// one handed off to its teardown thread.
+#[cfg(test)]
+pub(crate) mod teardown_probe {
+    use std::ffi::c_void;
+    use std::sync::mpsc::{Receiver, Sender, channel};
+    use std::time::Duration;
+
+    use super::kafka_common_Error_t;
+
+    /// Where the completion reports its firing thread's name, and whether it
+    /// carried no error.
+    pub(crate) struct Fired {
+        tx: Sender<(Option<String>, bool)>,
+        rx: Receiver<(Option<String>, bool)>,
+    }
+
+    impl Fired {
+        pub(crate) fn new() -> Self {
+            let (tx, rx) = channel();
+            Self { tx, rx }
+        }
+
+        pub(crate) fn as_opaque(&self) -> *mut c_void {
+            self as *const Self as *mut c_void
+        }
+
+        /// The one firing, waited for up to a few seconds.
+        pub(crate) fn wait(&self) -> (Option<String>, bool) {
+            let fired = self.rx.recv_timeout(Duration::from_secs(10)).expect("the completion fired");
+            assert!(self.rx.try_recv().is_err(), "the completion fired once");
+            fired
+        }
+    }
+
+    /// An `(error, opaque)` completion; the error, if any, is leaked.
+    pub(crate) unsafe extern "C" fn on_fired(error: *mut kafka_common_Error_t, opaque: *mut c_void) {
+        // SAFETY: Test code: every test registering this completion passes `Fired::as_opaque` of
+        // a `Fired` it keeps alive until it has waited for the firing.
+        let fired = unsafe { &*(opaque as *const Fired) };
+        let name = std::thread::current().name().map(str::to_string);
+        let _ = fired.tx.send((name, error.is_null()));
     }
 }
 
@@ -1402,11 +1506,11 @@ pub(crate) unsafe fn take_error(error: *mut kafka_common_Error_t) -> Option<Erro
 ///
 /// # Injectivity and ABI
 ///
-/// The 163 values are pairwise distinct — the code alone identifies the class,
+/// The 167 values are pairwise distinct — the code alone identifies the class,
 /// which is what lets a C caller use it as its sole discriminator. The
 /// negatives are ABI once published: a new class **appends at the most-negative
 /// end**, because inserting one mid-list would silently renumber every class
-/// after it. A table test pins all 27 literally so a renumbering cannot pass.
+/// after it. A table test pins all 29 literally so a renumbering cannot pass.
 // Implementation notes for Rust readers, kept out of the generated header.
 //
 // **Why the negatives live here and not in `common::protocol::Errors`.**
@@ -1446,7 +1550,7 @@ pub(crate) unsafe fn take_error(error: *mut kafka_common_Error_t) -> Option<Erro
 // typedef, so `config.style` is not respected" (`ir/enumeration.rs`). The ABI
 // is identical: a fieldless `#[repr(C)]` enum takes the target C ABI's default
 // enum size, which is `int` on every target Rust supports, and a C enum
-// spanning -28..=133 is `int` too. Naming the enum in the typedef is what lets
+// spanning -30..=136 is `int` too. Naming the enum in the typedef is what lets
 // a C or C++ caller switch on the real type and get the compiler's
 // exhaustiveness warning.
 #[repr(C)]
@@ -1589,6 +1693,9 @@ pub enum kafka_common_Error_e {
     kafka_common_Error_STREAMS_INVALID_TOPOLOGY_EPOCH = 131,
     kafka_common_Error_STREAMS_TOPOLOGY_FENCED = 132,
     kafka_common_Error_SHARE_SESSION_LIMIT_REACHED = 133,
+    kafka_common_Error_GROUP_DELETION_FAILED = 134,
+    kafka_common_Error_STREAMS_TOPOLOGY_DESCRIPTION_UPDATE_FAILED = 135,
+    kafka_common_Error_CONTROLLER_ID_NOT_REGISTERED = 136,
 
     // Classes Java gives no code of their own: Rust-local negatives,
     // grouped by origin. These are ABI — new classes append at the
@@ -1624,8 +1731,11 @@ pub enum kafka_common_Error_e {
     kafka_common_Error_RECORD_DESERIALIZATION = -27,
     // Code owned by a superclass (`BufferExhaustedException extends TimeoutException`).
     kafka_common_Error_PRODUCER_BUFFER_EXHAUSTED = -28,
+    // `common` client-side class added after the groups above were published
+    // (KIP-909); appended here because the negatives are ABI.
+    kafka_common_Error_BOOTSTRAP_RESOLUTION = -29,
     // A binding's foreign callback error (no Java class).
-    kafka_common_Error_LOCAL_CALLBACK = -29,
+    kafka_common_Error_LOCAL_CALLBACK = -30,
 }
 
 /// The [`kafka_common_Error_e`] of the class that owns a protocol code.
@@ -1688,11 +1798,13 @@ pub(crate) fn error_code_of(error: &Error) -> kafka_common_Error_e {
         Error::Authentication(_) => kafka_common_Error_AUTHENTICATION,
         Error::Authorization(_) => kafka_common_Error_AUTHORIZATION,
         Error::AuthorizerNotReady(_) => kafka_common_Error_AUTHORIZER_NOT_READY,
+        Error::BootstrapResolution(_) => kafka_common_Error_BOOTSTRAP_RESOLUTION,
         Error::BrokerIdNotRegistered(_) => kafka_common_Error_BROKER_ID_NOT_REGISTERED,
         Error::BrokerNotAvailable(_) => kafka_common_Error_BROKER_NOT_AVAILABLE,
         Error::ProducerBufferExhausted(_) => kafka_common_Error_PRODUCER_BUFFER_EXHAUSTED,
         Error::ClusterAuthorization(_) => kafka_common_Error_CLUSTER_AUTHORIZATION_FAILED,
         Error::ConcurrentTransactions(_) => kafka_common_Error_CONCURRENT_TRANSACTIONS,
+        Error::ControllerIdNotRegistered(_) => kafka_common_Error_CONTROLLER_ID_NOT_REGISTERED,
         Error::ControllerMoved(_) => kafka_common_Error_STALE_CONTROLLER_EPOCH,
         Error::CoordinatorLoadInProgress(_) => kafka_common_Error_COORDINATOR_LOAD_IN_PROGRESS,
         Error::CoordinatorNotAvailable(_) => kafka_common_Error_COORDINATOR_NOT_AVAILABLE,
@@ -1718,6 +1830,7 @@ pub(crate) fn error_code_of(error: &Error) -> kafka_common_Error_e {
         Error::FetchSessionIdNotFound(_) => kafka_common_Error_FETCH_SESSION_ID_NOT_FOUND,
         Error::FetchSessionTopicId(_) => kafka_common_Error_FETCH_SESSION_TOPIC_ID_ERROR,
         Error::GroupAuthorization(_) => kafka_common_Error_GROUP_AUTHORIZATION_FAILED,
+        Error::GroupDeletionFailed(_) => kafka_common_Error_GROUP_DELETION_FAILED,
         Error::GroupIdNotFound(_) => kafka_common_Error_GROUP_ID_NOT_FOUND,
         Error::GroupMaxSizeReached(_) => kafka_common_Error_GROUP_MAX_SIZE_REACHED,
         Error::GroupNotEmpty(_) => kafka_common_Error_NON_EMPTY_GROUP,
@@ -1809,6 +1922,9 @@ pub(crate) fn error_code_of(error: &Error) -> kafka_common_Error_e {
         Error::StaleMemberEpoch(_) => kafka_common_Error_STALE_MEMBER_EPOCH,
         Error::StreamsInvalidTopology(_) => kafka_common_Error_STREAMS_INVALID_TOPOLOGY,
         Error::StreamsInvalidTopologyEpoch(_) => kafka_common_Error_STREAMS_INVALID_TOPOLOGY_EPOCH,
+        Error::StreamsTopologyDescriptionUpdateFailed(_) => {
+            kafka_common_Error_STREAMS_TOPOLOGY_DESCRIPTION_UPDATE_FAILED
+        },
         Error::StreamsTopologyFenced(_) => kafka_common_Error_STREAMS_TOPOLOGY_FENCED,
         Error::TelemetryTooLarge(_) => kafka_common_Error_TELEMETRY_TOO_LARGE,
         Error::ThrottlingQuotaExceeded(_) => kafka_common_Error_THROTTLING_QUOTA_EXCEEDED,
@@ -2008,8 +2124,8 @@ mod tests {
     use crate::common::KafkaError;
     use crate::common::error::ErrorName;
     use crate::common::errors::{
-        ApiError, AuthenticationError, AuthorizationError, AuthorizerNotReadyError, DisconnectError, InterruptError,
-        InvalidOffsetError, SslAuthenticationError,
+        ApiError, AuthenticationError, AuthorizationError, AuthorizerNotReadyError, BootstrapResolutionError,
+        DisconnectError, InterruptError, InvalidOffsetError, SslAuthenticationError,
     };
     use crate::common::metrics::QuotaViolationError;
     use crate::common::network::InvalidReceiveError;
@@ -2027,9 +2143,9 @@ mod tests {
     /// Java's lowest and highest `Errors` codes — the full range `Errors::for_code`
     /// resolves to a named constant.
     const FIRST_CODE: i16 = -1;
-    const LAST_CODE: i16 = 133;
+    const LAST_CODE: i16 = Errors::MAX_CODE;
 
-    /// The 28 classes that own no Java code, each paired with the enumerator it
+    /// The 29 classes that own no Java code, each paired with the enumerator it
     /// must map to and that enumerator's literal value.
     ///
     /// Both halves matter. The instance checks that `error_code_of`'s arm points
@@ -2140,11 +2256,17 @@ mod tests {
             ),
             // -28: code owned by a superclass.
             (Error::buffer_exhausted("m"), kafka_common_Error_PRODUCER_BUFFER_EXHAUSTED, -28),
-            // -29: a binding's foreign callback error.
+            // -29: `common` client-side class appended after publication.
+            (
+                Error::BootstrapResolution(BootstrapResolutionError::new("m")),
+                kafka_common_Error_BOOTSTRAP_RESOLUTION,
+                -29,
+            ),
+            // -30: a binding's foreign callback error.
             (
                 Error::local_callback("m", std::ptr::null_mut()),
                 kafka_common_Error_LOCAL_CALLBACK,
-                -29,
+                -30,
             ),
         ]
     }
@@ -2220,7 +2342,7 @@ mod tests {
                 },
             }
         }
-        assert_eq!(owned, 134, "expected 134 classes to own a Java code");
+        assert_eq!(owned, 137, "expected 137 classes to own a Java code");
 
         // `Error::KafkaError` is the one variant whose code is not a constant: it
         // stores an `Errors`, so it reports whatever that value owns.
@@ -2240,7 +2362,7 @@ mod tests {
         );
     }
 
-    /// The 163 values are pairwise distinct, so the code alone identifies the
+    /// The 167 values are pairwise distinct, so the code alone identifies the
     /// class. A C caller has no other discriminator, and the gRPC test harness
     /// derives the error type from this value — a collision would silently
     /// misclassify one of the two classes involved.
@@ -2269,10 +2391,10 @@ mod tests {
             }
         }
 
-        assert_eq!(seen.len(), 163, "expected 163 distinct error codes");
+        assert_eq!(seen.len(), 167, "expected 167 distinct error codes");
     }
 
-    /// One instance of each of the 163 error classes: the owner of every Java code,
+    /// One instance of each of the 167 error classes: the owner of every Java code,
     /// the client-side classes, and the bare `KafkaException`, which reports
     /// `UNKNOWN_SERVER_ERROR` rather than a code of its own. The codes are pairwise
     /// distinct ([`ffi_error_code_values_are_injective`]), so no class appears twice.
@@ -2341,7 +2463,7 @@ mod tests {
             .into_iter()
             .map(|error| (class_predicate(ErrorName::name(&error)), box_error(error)))
             .collect();
-        assert_eq!(errors.len(), 163, "expected one error per class");
+        assert_eq!(errors.len(), 167, "expected one error per class");
 
         let owners: HashSet<&str> = errors.iter().map(|(own, _)| own.as_str()).collect();
         assert_eq!(owners.len(), errors.len(), "two classes share a predicate name");
@@ -2401,7 +2523,7 @@ mod tests {
     #[test]
     fn ffi_error_code_client_side_negatives_are_stable() {
         let classes = client_side_classes();
-        assert_eq!(classes.len(), 28, "expected 28 classes with no Java code");
+        assert_eq!(classes.len(), 29, "expected 29 classes with no Java code");
 
         for (error, expected, value) in classes {
             assert_eq!(expected as i32, value, "{expected:?} moved off its published value");
@@ -3059,6 +3181,43 @@ mod tests {
             assert_eq!(value, expected, "for early = {early}");
             assert!(err.is_null());
         }
+    }
+
+    /// A teardown thread that cannot be started leaks the handle rather than freeing
+    /// it: `teardown` runs neither on that thread nor inline on the caller's, which
+    /// handed it off because waiting there is not allowed.
+    #[test]
+    fn spawn_teardown_leaks_the_handle_when_the_thread_cannot_start() {
+        static TEARDOWNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        unsafe fn count_teardown(_: usize) {
+            TEARDOWNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        // SAFETY: Test code: `count_teardown` only counts its calls and never reads the
+        // address, so any number of calls on any thread would be sound.
+        unsafe {
+            spawn_teardown_with("kafka-test-destroy", 0x10, count_teardown, |_, _| {
+                Err(std::io::Error::other("thread limit reached"))
+            })
+        };
+        assert_eq!(
+            TEARDOWNS.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a failed spawn must free nothing"
+        );
+    }
+
+    /// `in_tokio_runtime` is what routes a `destroy` to its teardown thread: true on
+    /// a runtime's worker and inside its `block_on`, false on a plain thread.
+    #[test]
+    fn in_tokio_runtime_tells_a_runtime_thread_from_a_plain_one() {
+        assert!(!in_tokio_runtime());
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        assert!(runtime.block_on(async { in_tokio_runtime() }));
+        assert!(
+            runtime
+                .block_on(runtime.spawn(async { in_tokio_runtime() }))
+                .expect("the task ran")
+        );
     }
 
     #[test]

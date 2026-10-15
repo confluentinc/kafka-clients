@@ -18,6 +18,8 @@
 
 use std::io;
 
+use crate::common::internals::UnsupportedProtocolFieldError;
+
 use crate::ConsumerGroupHeartbeatRequestData;
 use crate::ConsumerGroupHeartbeatResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
@@ -168,8 +170,7 @@ impl RequestBuilder for Builder {
     fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         // Mirrors `ConsumerGroupHeartbeatRequest.Builder.build(short version)`.
         if version == 0 && self.data.subscribed_topic_regex.is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
+            return Err(UnsupportedProtocolFieldError::io_error_with_message(
                 ConsumerGroupHeartbeatRequest::REGEX_RESOLUTION_NOT_SUPPORTED_MSG,
             ));
         }
@@ -199,7 +200,10 @@ mod tests {
         data.set_subscribed_topic_regex(Some("topic-.*".to_string()));
         let mut builder = Builder::new(data);
         let err = builder.build_version(0).expect_err("v0 with regex must be rejected");
-        assert!(err.to_string().contains("regular expressions"), "got: {err}");
+        crate::common::internals::assert_unsupported_protocol_field(
+            &err,
+            ConsumerGroupHeartbeatRequest::REGEX_RESOLUTION_NOT_SUPPORTED_MSG,
+        );
     }
 
     /// Verifies that v1 with a regex pattern builds successfully.

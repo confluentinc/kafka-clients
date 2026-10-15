@@ -35,14 +35,14 @@
 //! registry (`add_reporter`, `add_metric_*`, `remove_metric`, `close`).
 
 use std::collections::HashMap;
-use std::ffi::c_void;
-use std::sync::Arc;
+use std::ffi::{CStr, c_char, c_void};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use crate::common::MetricName;
 use crate::common::metrics::KafkaMetric;
 use crate::ffi::common::metric_name::{box_metric_name, destroy_metric_name_element, metric_name_eq};
 use crate::ffi::common::metrics::kafka_metric::{box_kafka_metric, destroy_kafka_metric_element};
-use crate::ffi::util::{box_map, kafka_Map_t};
+use crate::ffi::util::{box_map, kafka_Map_t, owned_c_string};
 
 pub(crate) mod compound_stat;
 pub(crate) mod gauge;
@@ -60,6 +60,53 @@ pub(crate) mod sensor;
 pub(crate) mod stat;
 pub(crate) mod stats;
 pub(crate) mod time_unit;
+
+/// The C function behind a `type_name` slot of `Gauge_new`, `Measurable_new`
+/// and `MeasurableStat_new`: a NUL-terminated name that stays valid and
+/// unchanged for the rest of the program (a string literal), or `NULL` for
+/// none.
+pub(crate) type TypeNameFn = unsafe extern "C" fn(self_: *mut c_void) -> *const c_char;
+
+/// What a C implementation reports for the Rust-only `type_name`: `None`
+/// when the slot is `NULL` (a C function has no type, like a closure, which
+/// `KafkaMetric`'s `Display` omits), when it returns `NULL`, or when the
+/// name is not UTF-8.
+///
+/// # Safety
+///
+/// `slot` and `self_` must be a pair registered together through an
+/// interface's `_new`, whose rustdoc has the C function return `NULL` or a
+/// string valid and unchanged for the rest of the program, and allows the
+/// call from any thread.
+pub(crate) unsafe fn c_type_name(slot: Option<TypeNameFn>, self_: *mut c_void) -> Option<&'static str> {
+    let type_name = slot?;
+    // SAFETY: Per this function's `# Safety`, `type_name` and `self_` were registered together
+    // through an interface's `_new`, which allows this call from any thread.
+    let name = unsafe { type_name(self_) };
+    if name.is_null() {
+        return None;
+    }
+    // SAFETY: Per this function's `# Safety`, a non-null `name` is NUL-terminated and stays valid
+    // and unchanged for the rest of the program, so the `'static` borrow holds.
+    let name: &'static CStr = unsafe { CStr::from_ptr(name) };
+    name.to_str().ok()
+}
+
+/// `type_name` as C sees it: `NULL` for `None`, else a NUL-terminated copy
+/// that stays valid for the rest of the program and is never freed by the
+/// caller. Each distinct name is copied once and kept; the names are type
+/// names, so their number is bounded by the provider types in the program.
+pub(crate) fn type_name_c_str(name: Option<&'static str>) -> *const c_char {
+    static NAMES: OnceLock<Mutex<HashMap<&'static str, &'static CStr>>> = OnceLock::new();
+    let Some(name) = name else {
+        return std::ptr::null();
+    };
+    let mut names = NAMES.get_or_init(Mutex::default).lock().unwrap_or_else(PoisonError::into_inner);
+    names
+        .entry(name)
+        .or_insert_with(|| Box::leak(owned_c_string(name).into_boxed_c_str()))
+        .as_ptr()
+}
 
 /// What an interface handle points at: the implementation, shared with
 /// whoever else holds it, and who owns the handle.

@@ -446,6 +446,101 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance_cb(
     }
 }
 
+/// `losePartitions(Collection<TopicPartition> partitionsLost)`
+/// (KAFKA-20575): blocking, the registered listener's `on_partitions_lost`
+/// runs on the calling thread (CLAUDE.md §4 rule 5). Fails with Java's
+/// `IllegalStateException` when a partition is not currently assigned,
+/// before any state changes.
+///
+/// # Safety
+///
+/// `self_` must be a live handle and `partitions_lost` null or a valid list of
+/// `kafka_common_TopicPartition_t *`. `out_err` must be a valid slot pointing
+/// at null.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_MockConsumer_lose_partitions(
+    self_: *mut kafka_consumer_MockConsumer_t,
+    partitions_lost: *const kafka_List_t,
+    out_err: *mut *mut kafka_common_Error_t,
+) {
+    // SAFETY: Per this function's `# Safety`, `partitions_lost` is null or a valid list of
+    // topic-partition handles, as `list_topic_partitions` requires; the values are cloned, so the
+    // borrow lasts for this call only.
+    let partitions = unsafe { list_topic_partitions(partitions_lost) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live mock handle, kept alive for this
+    // call; the `kafka_consumer_MockConsumer_t` pointer is the `ConsumerClassHandle` pointer, the
+    // same one its `__as_Consumer` view is (`ConsumerClassHandle::as_consumer`), as `client_ref`
+    // requires. Exclusive access to the consumer comes from `acquire`, not from this reference.
+    let client = unsafe { client_ref(self_ as *const kafka_consumer_Consumer_t) };
+    let result = client.acquire().and_then(|mut guard| {
+        let mock = mock_of(&mut guard)?;
+        client.block_on(mock.lose_partitions(&partitions))
+    });
+    // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_unit` requires.
+    unsafe { deliver_unit(result, out_err) }
+}
+
+/// The completion of [`kafka_consumer_MockConsumer_lose_partitions_cb`].
+pub type kafka_consumer_MockConsumer_lose_partitions_cb_t =
+    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+
+/// Non-blocking `lose_partitions`: the listener's callbacks and `cb` are queued
+/// for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Safety
+///
+/// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live mock handle, whose pointer is its
+    // `__as_Consumer` view's, as `completion_sink` requires. The guard runs this only when the body
+    // did not return. Reading `partitions_lost` comes first and hands nothing over; the body hands
+    // `cb` over only as its last step: to `deliver_void` when `acquire` fails, or to the task
+    // `Client::spawn` registers, after which nothing can panic. So `cb` has not fired for this
+    // `opaque`, as `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_ as *const kafka_consumer_Consumer_t), cb, opaque, err) }
+})]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_MockConsumer_lose_partitions_cb(
+    self_: *mut kafka_consumer_MockConsumer_t,
+    partitions_lost: *const kafka_List_t,
+    cb: kafka_consumer_MockConsumer_lose_partitions_cb_t,
+    opaque: *mut c_void,
+) {
+    // SAFETY: Per this function's `# Safety`, `partitions_lost` is null or a valid list of
+    // topic-partition handles, as `list_topic_partitions` requires; the values are cloned, so the
+    // borrow lasts for this call only.
+    let partitions = unsafe { list_topic_partitions(partitions_lost) };
+    let opaque = SendPtr(opaque);
+    // SAFETY: Per this function's `# Safety`, `self_` is a live mock handle, kept alive for this
+    // call; the `kafka_consumer_MockConsumer_t` pointer is the `ConsumerClassHandle` pointer, the
+    // same one its `__as_Consumer` view is (`ConsumerClassHandle::as_consumer`), as `client_ref`
+    // requires. The spawned task holds its own `Arc` clones, so it does not depend on the handle
+    // staying alive.
+    let client = unsafe { client_ref(self_ as *const kafka_consumer_Consumer_t) };
+    #[cfg(test)]
+    crate::ffi::common::fail_point::hit();
+    match client.acquire() {
+        Err(error) => deliver_void(client, cb, opaque, Err(error)),
+        Ok(mut guard) => {
+            let client = Arc::clone(client);
+            let task_client = Arc::clone(&client);
+            client.spawn(async move {
+                let result = catch_task_panic("kafka_consumer_MockConsumer_lose_partitions_cb", async {
+                    match mock_of(&mut guard) {
+                        Ok(mock) => mock.lose_partitions(&partitions).await,
+                        Err(error) => Err(error),
+                    }
+                })
+                .await;
+                // Release the flag before queuing, as `run_cb` does.
+                drop(guard);
+                deliver_void(&task_client, cb, opaque, result);
+            });
+        },
+    }
+}
+
 /// The mock's reentrancy handle, which reads `closed`, `shouldRebalance`
 /// and `lastPollTimeout` without the single-owner flag.
 ///
@@ -838,6 +933,132 @@ mod tests {
         assert_eq!(completed.load(SeqCst), 1);
         // SAFETY: Test code: `consumer` is a live handle.
         assert_eq!(unsafe { kafka_consumer_Consumer__execute_callbacks(consumer) }, 0);
+
+        // SAFETY: Test code: each handle is live and destroyed once, after its last use.
+        unsafe {
+            kafka_List_destroy(assignment);
+            kafka_common_TopicPartition_destroy(tp);
+            kafka_consumer_MockConsumer_destroy(mock);
+        }
+    }
+
+    /// `MockConsumer.losePartitions` (KAFKA-20575) through C: the listener's
+    /// `on_partitions_lost` (here the Java default, forwarding to
+    /// `on_partitions_revoked`) runs on the calling thread, and losing a
+    /// partition that is not assigned fails with Java's message.
+    #[test]
+    fn blocking_lose_partitions_invokes_the_listener_on_the_calling_thread() {
+        let (mock, consumer) = new_mock();
+        let probe = ListenerProbe::new(true);
+        // SAFETY: Test code: `consumer` is live and `probe` outlives the consumer.
+        unsafe { subscribe(consumer, &probe) };
+
+        let (assignment, tp) = partition_list(c"topic", 0);
+        // SAFETY: Test code: `mock` and `assignment` are live handles and `e` the valid error slot
+        // `ok` passes.
+        ok(|e| unsafe { kafka_consumer_MockConsumer_rebalance(mock, assignment, e) });
+        assert_eq!(probe.revoked.load(SeqCst), 0);
+
+        // SAFETY: Test code: `mock` and `assignment` are live handles and `e` the valid error slot
+        // `ok` passes.
+        ok(|e| unsafe { kafka_consumer_MockConsumer_lose_partitions(mock, assignment, e) });
+        assert_eq!(probe.revoked.load(SeqCst), 1, "the default on_partitions_lost revokes");
+        assert!(
+            probe.ran_on_this_thread(),
+            "a blocking entry point invokes the listener directly"
+        );
+
+        // The partition is no longer assigned, so losing it again fails, before the listener.
+        // SAFETY: Test code: `mock` and `assignment` are live handles and `e` the valid error slot
+        // `call` passes.
+        let error = call(|e| unsafe { kafka_consumer_MockConsumer_lose_partitions(mock, assignment, e) })
+            .1
+            .expect("not assigned");
+        assert!(error.is_local_illegal_state_error(), "{error:?}");
+        assert_eq!(
+            error.message(),
+            "Cannot lose partitions that are not currently assigned: [topic-0]"
+        );
+        assert_eq!(probe.revoked.load(SeqCst), 1);
+
+        // SAFETY: Test code: each handle is live and destroyed once, after its last use.
+        unsafe {
+            kafka_List_destroy(assignment);
+            kafka_common_TopicPartition_destroy(tp);
+            kafka_consumer_MockConsumer_destroy(mock);
+        }
+    }
+
+    unsafe extern "C" fn store_completion(error: *mut kafka_common_Error_t, opaque: *mut c_void) {
+        // SAFETY: Test code: `opaque` is the test's slot, alive until after the completion fires;
+        // `error` is null or an owned error, taken once.
+        unsafe { *(*(opaque as *const Mutex<Option<Option<Error>>>)).lock().unwrap() = Some(take_error(error)) };
+    }
+
+    #[test]
+    fn lose_partitions_cb_queues_the_listener_and_its_completion_for_the_pump() {
+        let (mock, consumer) = new_mock();
+        let notifies = AtomicI32::new(0);
+        // SAFETY: Test code: `consumer` is live and `notifies` outlives the consumer.
+        unsafe {
+            kafka_consumer_Consumer__set_callbacks_notify(
+                consumer,
+                count_notify,
+                &notifies as *const AtomicI32 as *mut c_void,
+            )
+        };
+        let probe = ListenerProbe::new(true);
+        // SAFETY: Test code: `consumer` is live and `probe` outlives the consumer.
+        unsafe { subscribe(consumer, &probe) };
+        let (assignment, tp) = partition_list(c"topic", 0);
+        // SAFETY: Test code: `mock` and `assignment` are live handles and `e` the valid error slot
+        // `ok` passes.
+        ok(|e| unsafe { kafka_consumer_MockConsumer_rebalance(mock, assignment, e) });
+
+        let completed = AtomicI32::new(0);
+        // SAFETY: Test code: `mock` and `assignment` are live handles and `completed` outlives the
+        // completion.
+        unsafe {
+            kafka_consumer_MockConsumer_lose_partitions_cb(
+                mock,
+                assignment,
+                count_completion,
+                &completed as *const AtomicI32 as *mut c_void,
+            )
+        };
+        wait_until("the listener invocation to be queued", || notifies.load(SeqCst) >= 1);
+        assert_eq!(probe.revoked.load(SeqCst), 0, "queued, not run, until the pump runs it");
+        // SAFETY: Test code: `consumer` is a live handle.
+        assert_eq!(unsafe { kafka_consumer_Consumer__execute_callbacks(consumer) }, 1);
+        assert_eq!(probe.revoked.load(SeqCst), 1);
+        assert!(probe.ran_on_this_thread(), "the pump runs it on the pumping thread");
+        wait_until("the completion to be queued", || notifies.load(SeqCst) >= 2);
+        // SAFETY: Test code: `consumer` is a live handle.
+        assert_eq!(unsafe { kafka_consumer_Consumer__execute_callbacks(consumer) }, 1);
+        assert_eq!(completed.load(SeqCst), 1);
+
+        // Losing it again fails through the completion, with no listener call.
+        let failed: Mutex<Option<Option<Error>>> = Mutex::new(None);
+        // SAFETY: Test code: `mock` and `assignment` are live handles and `failed` outlives the
+        // completion.
+        unsafe {
+            kafka_consumer_MockConsumer_lose_partitions_cb(
+                mock,
+                assignment,
+                store_completion,
+                &failed as *const Mutex<Option<Option<Error>>> as *mut c_void,
+            )
+        };
+        wait_until("the failed completion to be queued", || notifies.load(SeqCst) >= 3);
+        // SAFETY: Test code: `consumer` is a live handle.
+        assert_eq!(unsafe { kafka_consumer_Consumer__execute_callbacks(consumer) }, 1);
+        let error = failed.lock().unwrap().take().expect("fired").expect("an error");
+        assert!(error.is_local_illegal_state_error(), "{error:?}");
+        assert_eq!(
+            error.message(),
+            "Cannot lose partitions that are not currently assigned: [topic-0]"
+        );
+        assert_eq!(probe.revoked.load(SeqCst), 1);
 
         // SAFETY: Test code: each handle is live and destroyed once, after its last use.
         unsafe {
@@ -1341,5 +1562,31 @@ mod tests {
             assert_eq!(ran.load(SeqCst), 1);
             kafka_consumer_MockConsumer_destroy(mock);
         }
+    }
+
+    /// A destroy inside a tokio runtime, where `teardown`'s `block_on` would
+    /// panic, returns at once and tears the handle down on its own thread: the
+    /// queued `close_cb` completion fires there, once.
+    #[test]
+    fn destroy_inside_a_tokio_runtime_tears_down_on_its_own_thread() {
+        use crate::ffi::common::teardown_probe::{Fired, on_fired};
+        use crate::ffi::consumer::kafka_consumer_Consumer_close_cb;
+        let fired = Fired::new();
+        // SAFETY: Test code: the strategy is a NUL-terminated literal and `e` the valid slot `ok`
+        // hands in.
+        let mock = ok(|e| unsafe { kafka_consumer_MockConsumer_new(c"earliest".as_ptr(), e) });
+        // SAFETY: Test code: the mock is live until it is destroyed, once, inside the runtime;
+        // `fired` outlives the completion it waits for.
+        unsafe {
+            kafka_consumer_Consumer_close_cb(
+                kafka_consumer_MockConsumer__as_Consumer(mock),
+                on_fired,
+                fired.as_opaque(),
+            );
+            let mock = mock as usize;
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+            runtime.block_on(async move { kafka_consumer_MockConsumer_destroy(mock as *mut _) });
+        }
+        assert_eq!(fired.wait(), (Some("kafka-consumer-destroy".to_string()), true));
     }
 }

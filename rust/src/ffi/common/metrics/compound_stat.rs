@@ -410,7 +410,7 @@ mod tests {
     }
     unsafe extern "C" fn c_stats(self_: *mut c_void) -> *mut kafka_List_t {
         let name = box_metric_name(MetricName::new("sum", "g", "d", BTreeMap::new()));
-        let stat = kafka_common_metrics_Measurable_new(self_, c_measure_sum);
+        let stat = kafka_common_metrics_Measurable_new(self_, c_measure_sum, None);
         let list = kafka_List_new();
         // SAFETY: Test code: `list` comes from `kafka_List_new` and takes the owned pair, which
         // takes over `stat` and copies `name`; `name` comes from `box_metric_name` and is destroyed
@@ -438,7 +438,7 @@ mod tests {
     fn named_measurable_copies_the_name_and_shares_the_stat() {
         let name = box_metric_name(MetricName::new("n", "g", "d", BTreeMap::new()));
         let mut reading = 2.5_f64;
-        let stat = kafka_common_metrics_Measurable_new(&mut reading as *mut f64 as *mut c_void, c_measure);
+        let stat = kafka_common_metrics_Measurable_new(&mut reading as *mut f64 as *mut c_void, c_measure, None);
         let config = kafka_common_metrics_MetricConfig_new();
         // SAFETY: Test code: `name` comes from `box_metric_name` and is destroyed once, after the
         // constructor copies it; `stat` comes from `kafka_common_metrics_Measurable_new` over the

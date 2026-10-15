@@ -32,7 +32,7 @@ use crate::common::protocol::Errors;
 use crate::common::requests::{
     ConcreteResponse, CoordinatorType, RequestBuilder, consumer_group_describe_request, describe_groups_request,
 };
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::LogContext;
 use crate::common::{Error, GroupState, GroupType, Node, TopicPartition};
 use crate::consumer::internals::ConsumerProtocol;
 use crate::consumer_group_describe_response_data::Assignment as WireAssignment;

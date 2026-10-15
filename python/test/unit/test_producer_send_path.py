@@ -256,7 +256,7 @@ def test_a_record_refused_at_once_runs_its_callback_inside_send_on_the_calling_t
 def test_a_refused_transactional_send_raises_at_once_and_runs_no_callback(
         monkeypatch: pytest.MonkeyPatch, freed_errors: list[int]) -> None:
     # Java's doSend rethrows the transaction manager's IllegalStateException
-    # for a send outside a transaction (KafkaProducer.java:1070-1073) and the
+    # for a send outside a transaction (KafkaProducer.java:1151-1154) and the
     # callback does not run then. Python's send() waits for the handover of
     # such a record to raise it (see Producer.send); refused as it is handed
     # over, there is nothing to wait for: send() raises inside the call, and

@@ -711,7 +711,7 @@ class AsyncProducer(Generic[K, V], _ProducerState):
     def _teardown(self, c_producer: int, force: bool) -> None:
         if force:
             # Java's sender.forceClose() for a close() the cancellation stopped
-            # (KafkaProducer.close(Duration, boolean), KafkaProducer.java:1419-1437):
+            # (KafkaProducer.close(Duration, boolean), KafkaProducer.java:1506-1524):
             # a close with a zero timeout fails the records still pending.
             _lib.Producer_close_with_timeout_cb(c_producer, 0, free_error)
         self._destroy()

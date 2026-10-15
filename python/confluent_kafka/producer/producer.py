@@ -401,7 +401,7 @@ class Producer(Generic[K, V], _ProducerState):
 
         # A transactional producer's send with no transaction started waits
         # for the handover (below) and raises the error the Rust send() returns:
-        # Java's doSend rethrows those (KafkaProducer.java:1069-1081), where an
+        # Java's doSend rethrows those (KafkaProducer.java:1150-1162), where an
         # ApiException reaches the callback and the future (:1056-1068). Inside
         # a started transaction the record is not waited for (see
         # _ProducerState._in_transaction), nor from a send() callback, whose
@@ -572,7 +572,7 @@ class Producer(Generic[K, V], _ProducerState):
 
         def force() -> None:
             # Java's sender.forceClose() for a close() an interrupt stopped
-            # (KafkaProducer.close(Duration, boolean), KafkaProducer.java:1419-1437:
+            # (KafkaProducer.close(Duration, boolean), KafkaProducer.java:1506-1524:
             # the interrupt is kept and the close proceeds to force-close and
             # join): a close with a zero timeout fails the records still pending.
             _lib.Producer_close_with_timeout_cb(c_producer, 0, free_error)
