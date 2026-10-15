@@ -150,6 +150,27 @@ impl ShutdownSignal {
     }
 }
 
+/// The max-retries check at the top of `AdminClientRunnable.enqueue`
+/// (`KafkaAdminClient.java:1669-1674`): returns the call when it may be queued,
+/// and otherwise fails it and returns `None`.
+///
+/// Java runs it for every call `runnable.call` admits, after the closing and
+/// `bootstrap.controllers` checks of [`ShutdownSignal::admit_new_call`]. The
+/// app-side path is `CallSender::call`; this is the same check for the
+/// follow-ups a response hook issues inside the loop, where a call re-queued
+/// with `HandleResult::CallAgain` carries its `tries` over. Java's `handleTimeoutFailure` passes a
+/// `TimeoutException` cause straight to `handleFailure` (`:1040-1042`), which is
+/// what is invoked here.
+pub(crate) fn enqueue_within_max_retries(max_retries: i32, log_context: &LogContext, mut call: Call) -> Option<Call> {
+    if call.tries > max_retries {
+        kafka_debug!(log_context, "Max retries {} for {} reached", max_retries, call.call_name);
+        let tries = call.tries;
+        call.handle_failure(&Error::timeout(format!("Exceeded maxRetries after {tries} tries.")));
+        return None;
+    }
+    Some(call)
+}
+
 /// The background task that assigns nodes to calls, sends requests, and routes
 /// responses back to per-call hooks.
 ///
@@ -791,12 +812,18 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                                 // before `run()` closes `admin_rx`. Pushing
                                 // straight to `pending_calls` is what the next
                                 // `drain_new_calls` would do with it.
-                                if let Some(mut new_call) = self.shutdown.admit_new_call(
-                                    self.metadata_manager.using_bootstrap_controllers(),
-                                    &self.retry_backoff,
-                                    now,
-                                    *new_call,
-                                ) {
+                                if let Some(mut new_call) = self
+                                    .shutdown
+                                    .admit_new_call(
+                                        self.metadata_manager.using_bootstrap_controllers(),
+                                        &self.retry_backoff,
+                                        now,
+                                        *new_call,
+                                    )
+                                    .and_then(|call| {
+                                        enqueue_within_max_retries(self.max_retries, &self.log_context, call)
+                                    })
+                                {
                                     new_call.cur_node = None;
                                     self.pending_calls.push(new_call);
                                 }
@@ -806,12 +833,18 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                                 // same gate as `NewCall`, applied to the call itself,
                                 // so its deadline, tries and backoff carry over as
                                 // they do for Java's re-queued `this`.
-                                if let Some(mut call) = self.shutdown.admit_new_call(
-                                    self.metadata_manager.using_bootstrap_controllers(),
-                                    &self.retry_backoff,
-                                    now,
-                                    call,
-                                ) {
+                                if let Some(mut call) = self
+                                    .shutdown
+                                    .admit_new_call(
+                                        self.metadata_manager.using_bootstrap_controllers(),
+                                        &self.retry_backoff,
+                                        now,
+                                        call,
+                                    )
+                                    .and_then(|call| {
+                                        enqueue_within_max_retries(self.max_retries, &self.log_context, call)
+                                    })
+                                {
                                     call.cur_node = None;
                                     self.pending_calls.push(call);
                                 }
