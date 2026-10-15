@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 
 use crate::common::Error;
-use crate::common::config::config_def::ValidList;
+use crate::common::config::config_def::{ConfigDef, ValidList};
 use crate::common::config::types::Password;
 use crate::common::config::{SaslConfigs, SslConfigs};
 use crate::common::security::auth::SecurityProtocol;
@@ -169,8 +169,9 @@ impl AdminClientConfig {
                 Self::CLIENT_DNS_LOOKUP_CONFIG => {
                     config.client_dns_lookup = ClientDnsLookup::parse_config_value(value)?;
                 },
-                // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:731-733`).
-                Self::CLIENT_ID_CONFIG => config.client_id = value.trim().to_string(),
+                // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:707-709`,
+                // `:731-733`), with Java's `String.trim`.
+                Self::CLIENT_ID_CONFIG => config.client_id = ConfigDef::trim(value).to_string(),
                 Self::REQUEST_TIMEOUT_MS_CONFIG => config.request_timeout_ms = parse_i32(key, value)?,
                 Self::DEFAULT_API_TIMEOUT_MS_CONFIG => config.default_api_timeout_ms = parse_i32(key, value)?,
                 Self::RETRIES_CONFIG => config.retries = parse_i32(key, value)?,
@@ -196,10 +197,14 @@ impl AdminClientConfig {
                     config.metadata_cluster_check_enable = parse_bool(key, value)?;
                 },
                 Self::SECURITY_PROTOCOL_CONFIG => {
-                    config.security_protocol = SecurityProtocol::for_name(value).ok_or_else(|| {
+                    // A trimmed `Type.STRING` (`ConfigDef.java:731-733`), checked by
+                    // `CaseInsensitiveValidString` (`AdminClientConfig.java:283-289`). The
+                    // validator sees the trimmed value, so its error prints that one.
+                    let trimmed = ConfigDef::trim(value);
+                    config.security_protocol = SecurityProtocol::for_name(trimmed).ok_or_else(|| {
                         Error::config_name_value_message(
                             key,
-                            value,
+                            trimmed,
                             format!("Valid values are: {:?}", SecurityProtocol::names()),
                         )
                     })?;
@@ -211,17 +216,25 @@ impl AdminClientConfig {
                     config.metadata_recovery_rebootstrap_trigger_ms = parse_rebootstrap_trigger_ms(key, value)?;
                 },
                 Self::SASL_MECHANISM_CONFIG => {
-                    config.sasl_config.mechanism = value.to_string();
+                    // A trimmed `Type.STRING` (`ConfigDef.java:731-733`).
+                    config.sasl_config.mechanism = ConfigDef::trim(value).to_string();
                 },
                 Self::SASL_JAAS_CONFIG => {
-                    config.sasl_config.jaas_config = if value.is_empty() {
+                    // `Type.PASSWORD`: `parseType` wraps the trimmed value
+                    // (`ConfigDef.java:724-728`). An empty value means unset here.
+                    let trimmed = ConfigDef::trim(value);
+                    config.sasl_config.jaas_config = if trimmed.is_empty() {
                         None
                     } else {
-                        Some(Password::new(value))
+                        Some(Password::new(trimmed))
                     };
                 },
                 key if key.starts_with("ssl.") => {
-                    SslConfigs::apply_ssl_config_key(&mut config.ssl_config, key, value)?;
+                    // `parseType` trims a `String` value whatever the key's type
+                    // (`ConfigDef.java:707-709`), so every `ssl.*` key
+                    // `SslConfigs.addClientSslSupport` defines (`SslConfigs.java:128-148`)
+                    // is trimmed before its parser or validator sees it.
+                    SslConfigs::apply_ssl_config_key(&mut config.ssl_config, key, ConfigDef::trim(value))?;
                 },
                 // Unknown keys are accepted silently, as in Java.
                 _ => {},
@@ -435,7 +448,9 @@ fn parse_bool(key: &str, value: &str) -> Result<bool, Error> {
 /// `HashSet`; the message lists them in that set's iteration order, which for
 /// these two names is `REBOOTSTRAP, NONE`.
 fn parse_metadata_recovery_strategy(key: &str, value: &str) -> Result<MetadataRecoveryStrategy, Error> {
-    let trimmed = value.trim();
+    // Java's `String.trim`, not `str::trim`: it strips control characters and
+    // keeps Unicode spaces such as U+00A0.
+    let trimmed = ConfigDef::trim(value);
     MetadataRecoveryStrategy::for_name(trimmed).map_err(|_| {
         Error::config_name_value_message(key, trimmed, "String must be one of (case insensitive): REBOOTSTRAP, NONE")
     })
@@ -810,6 +825,91 @@ mod tests {
         props
     }
 
+    /// `ConfigDef.parseType` trims every `String` value before it parses or
+    /// validates it, whatever the key's type (`ConfigDef.java:707-709`). These
+    /// tests cover the `Type.STRING` key `security.protocol`.
+    #[test]
+    fn test_security_protocol_is_trimmed() {
+        let config = AdminClientConfig::new(&with_bootstrap(&[("security.protocol", " SSL")])).unwrap();
+        assert_eq!(config.security_protocol(), SecurityProtocol::Ssl);
+        let config = AdminClientConfig::new(&with_bootstrap(&[
+            ("security.protocol", " sasl_ssl "),
+            ("sasl.mechanism", "PLAIN"),
+        ]))
+        .unwrap();
+        assert_eq!(config.security_protocol(), SecurityProtocol::SaslSsl);
+    }
+
+    /// The `Type.STRING` keys `sasl.mechanism` and `client.id` are trimmed
+    /// with Java's `String.trim`, which strips every character up to U+0020
+    /// and nothing else (so not U+00A0). `client.dns.lookup` was already
+    /// trimmed; it is checked here alongside them.
+    #[test]
+    fn test_string_keys_are_trimmed_with_java_trim() {
+        let config = AdminClientConfig::new(&with_bootstrap(&[
+            ("sasl.mechanism", " PLAIN "),
+            ("client.id", "\u{1}admin-1\t"),
+            ("client.dns.lookup", " resolve_canonical_bootstrap_servers_only "),
+        ]))
+        .unwrap();
+        assert_eq!(config.sasl_config().mechanism, "PLAIN");
+        assert_eq!(config.client_id(), "admin-1");
+        assert_eq!(
+            config.client_dns_lookup(),
+            ClientDnsLookup::ResolveCanonicalBootstrapServersOnly
+        );
+        let config = AdminClientConfig::new(&with_bootstrap(&[("client.id", "\u{A0}admin-1 ")])).unwrap();
+        assert_eq!(config.client_id(), "\u{A0}admin-1");
+    }
+
+    /// The `Type.PASSWORD` key `sasl.jaas.config` is trimmed
+    /// (`ConfigDef.java:724-728`); a blank value trims to empty, which this
+    /// client reads as unset.
+    #[test]
+    fn test_sasl_jaas_config_is_trimmed() {
+        let jaas = "org.apache.kafka.common.security.plain.PlainLoginModule required \
+                    username=\"alice\" password=\"secret\";";
+        let config = AdminClientConfig::new(&with_bootstrap(&[("sasl.jaas.config", &format!("  {jaas}\n"))])).unwrap();
+        assert_eq!(config.sasl_config().jaas_config.as_ref().map(Password::value), Some(jaas));
+        let config = AdminClientConfig::new(&with_bootstrap(&[("sasl.jaas.config", "  ")])).unwrap();
+        assert_eq!(config.sasl_config().jaas_config, None);
+    }
+
+    /// Every `ssl.*` value is trimmed before `SslConfigs` sees it, whatever
+    /// the key's type: `Type.STRING` locations and store types, `Type.PASSWORD`
+    /// passwords.
+    #[test]
+    fn test_ssl_values_are_trimmed() {
+        let config = AdminClientConfig::new(&with_bootstrap(&[
+            ("ssl.truststore.location", " /p.pem "),
+            ("ssl.keystore.type", "\tPKCS12 "),
+            ("ssl.key.password", " key-secret "),
+            ("ssl.endpoint.identification.algorithm", " "),
+        ]))
+        .unwrap();
+        assert_eq!(config.ssl_config().truststore_location.as_deref(), Some("/p.pem"));
+        assert_eq!(config.ssl_config().keystore_type, "PKCS12");
+        assert_eq!(
+            config.ssl_config().key_password.as_ref().map(Password::value),
+            Some("key-secret")
+        );
+        assert_eq!(config.ssl_config().endpoint_identification_algorithm, "");
+    }
+
+    /// `CaseInsensitiveValidString` validates the trimmed `security.protocol`,
+    /// so its error prints the value without the padding
+    /// (`ConfigDef.java:1141-1145`).
+    #[test]
+    fn test_invalid_security_protocol_error_prints_the_trimmed_value() {
+        let err = AdminClientConfig::new(&with_bootstrap(&[("security.protocol", " abc ")])).unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "got {err:?}");
+        assert_eq!(
+            err.message(),
+            "Invalid value abc for configuration security.protocol: \
+             Valid values are: [\"PLAINTEXT\", \"SSL\", \"SASL_PLAINTEXT\", \"SASL_SSL\"]"
+        );
+    }
+
     /// Translated from `AdminClientConfigTest.testDefaultMetadataRecoveryStrategy`
     /// (Rust's constructor also requires `bootstrap.servers`, which Java checks
     /// later, in `AdminBootstrapAddresses.fromConfig`). Also pins the trigger
@@ -859,10 +959,20 @@ mod tests {
             (" none ", MetadataRecoveryStrategy::None),
             ("REBOOTSTRAP", MetadataRecoveryStrategy::Rebootstrap),
             ("rebootstrap", MetadataRecoveryStrategy::Rebootstrap),
+            // Java's `String.trim` strips every character up to U+0020.
+            ("\u{1}none", MetadataRecoveryStrategy::None),
         ] {
             let config = AdminClientConfig::new(&with_bootstrap(&[("metadata.recovery.strategy", value)])).unwrap();
             assert_eq!(config.metadata_recovery_strategy(), expected, "value {value:?}");
         }
+        // ... and nothing else: a no-break space stays, so the value is invalid.
+        let err = AdminClientConfig::new(&with_bootstrap(&[("metadata.recovery.strategy", "none\u{A0}")])).unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "got {err:?}");
+        assert_eq!(
+            err.message(),
+            "Invalid value none\u{A0} for configuration metadata.recovery.strategy: \
+             String must be one of (case insensitive): REBOOTSTRAP, NONE"
+        );
     }
 
     /// `metadata.recovery.rebootstrap.trigger.ms` is a `Type.LONG` with
