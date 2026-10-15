@@ -232,6 +232,56 @@ def test_a_deprecated_overload_warns_when_called() -> None:
         Records(records={}, next_offsets={})
 
 
+def test_a_deprecated_overload_warns_at_the_callers_line() -> None:
+    # The wrapper java_forms writes for the method warns from its own frame, so
+    # the warning names the caller's line, as the generic wrapper's does.
+    class Records:
+        @java_forms(Form("records", deprecated="Since 4.0. Use (records, next_offsets)."),
+                    Form("records", "next_offsets"))
+        def __init__(self, *, records: object,
+                     next_offsets: object | None = None) -> None:
+            pass
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        frame = inspect.currentframe()
+        assert frame is not None
+        Records(records={}); line = frame.f_lineno  # noqa: E702 (one line: the call's)
+    assert [(w.filename, w.lineno) for w in caught] == [(__file__, line)]
+
+
+def test_pythons_own_type_errors_are_word_for_word() -> None:
+    # A call the generated wrapper does not match (an extra positional
+    # argument, an unknown or a missing keyword) goes to the generic wrapper,
+    # which leaves it to the method, so Python raises its own TypeError.
+    with pytest.raises(TypeError) as extra:
+        _Close().close(1.0)  # type: ignore[call-arg]
+    assert str(extra.value) == "_Close.close() takes 1 positional argument but 2 were given"
+    with pytest.raises(TypeError) as unknown:
+        _Close().close(nope=1)  # type: ignore[call-arg]
+    assert str(unknown.value) == "_Close.close() got an unexpected keyword argument 'nope'"
+    with pytest.raises(TypeError) as missing:
+        _OffsetAndMetadata()  # type: ignore[call-arg]
+    assert str(missing.value) == (
+        "_OffsetAndMetadata.__init__() missing 1 required keyword-only argument: 'offset'")
+    # The receiver by keyword is the method's own business, as before.
+    assert _Close.close(self=_Close()) == (None, None)  # type: ignore[call-arg]
+
+
+def test_a_rejected_call_shows_the_generated_line_in_its_traceback() -> None:
+    # The generated wrapper's source is registered with linecache, so a
+    # traceback through it shows the line that raised.
+    import traceback
+
+    with pytest.raises(IllegalArgumentError) as err:
+        _Close().close(timeout=1.0, option=object())
+    frames = [f for f in traceback.extract_tb(err.value.__traceback__)
+              if f.filename.startswith("<java_forms ")]
+    assert [(f.filename, f.name) for f in frames] == [
+        (f"<java_forms {_Close.close.__module__}._Close.close>", "close")]
+    assert frames[0].line == "raise _jf_illegal(_jf_g)"
+
+
 def test_a_coroutine_function_stays_a_coroutine_function() -> None:
     class Async:
         @java_forms(Form(), Form("timeout"), Form("option"))
@@ -263,3 +313,105 @@ def test_unset_is_a_singleton_that_pickles_to_itself() -> None:
 def test_illegal_argument_error_is_a_runtime_error() -> None:
     with pytest.raises(RuntimeError):
         _Close().close(timeout=1.0, option=object())
+
+
+def _decorated_methods() -> list[Any]:
+    """Every java_forms-decorated method of the package."""
+    import importlib
+    import pkgutil
+
+    import confluent_kafka
+
+    found: list[Any] = []
+    for info in pkgutil.walk_packages(confluent_kafka.__path__, "confluent_kafka."):
+        try:
+            module = importlib.import_module(info.name)
+        except Exception:  # noqa: BLE001 - a module that needs an optional extra
+            continue
+        for obj in list(vars(module).values()):
+            if inspect.isclass(obj) and obj.__module__ == module.__name__:
+                for member in vars(obj).values():
+                    f = member.__func__ if isinstance(member, (staticmethod, classmethod)) else member
+                    if callable(f) and hasattr(f, "__java_forms__"):
+                        found.append(f)
+    return found
+
+
+def _recorder(f: Any) -> Any:
+    """A function with the decorated method's signature that returns what it
+    received, so the wrappers can be compared without running the method."""
+    fn = f.__wrapped__
+    sig = inspect.signature(fn)
+    namespace: dict[str, Any] = {}
+    parts: list[str] = []
+    star = False
+    for i, p in enumerate(sig.parameters.values()):
+        if p.kind is p.KEYWORD_ONLY and not star:
+            parts.append("*")
+            star = True
+        default = ""
+        if p.default is not p.empty:
+            namespace[f"_d{i}"] = p.default
+            default = f"=_d{i}"
+        parts.append(f"{p.name}{default}")
+    is_async = inspect.iscoroutinefunction(fn)
+    exec(f"{'async ' if is_async else ''}def {fn.__name__}({', '.join(parts)}):\n"  # noqa: S102
+         f"    return dict(locals())\n", namespace)
+    recorder = namespace[fn.__name__]
+    recorder.__qualname__ = fn.__qualname__
+    recorder.__module__ = fn.__module__
+    return recorder
+
+
+def _outcome(wrapper: Any, args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[Any, ...]:
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            result = wrapper(*args, **kwargs)
+            if inspect.iscoroutine(result):
+                result = asyncio.run(result)
+            got: Any = ("ok", tuple(sorted((k, repr(v)) for k, v in result.items())))
+        except Exception as e:  # noqa: BLE001
+            got = ("raised", type(e), str(e))
+    return got, tuple((w.category, str(w.message), w.lineno) for w in caught)
+
+
+def test_the_generated_wrapper_matches_the_generic_one_for_every_decorated_method() -> None:
+    # The wrapper java_forms writes for a method, against the generic wrapper
+    # built from the same overload table: for every keyword combination (each
+    # keyword left out, given a value, None or UNSET; a fixed sample above six
+    # keywords) and a few misuses, the method receives the same values, or the
+    # same error with the same text is raised, with the same warnings.
+    import itertools
+    import random
+
+    methods = _decorated_methods()
+    assert len(methods) >= 20
+    value = object()
+    compared = 0
+    for f in methods:
+        decorated = java_forms(*f.__java_forms__)(_recorder(f))
+        generic = decorated.__globals__.get("_jf_generic")
+        if generic is None:
+            continue  # java_forms keeps the generic wrapper for this method
+        params = list(inspect.signature(f.__wrapped__).parameters.values())
+        positional = tuple(object() for p in params
+                           if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD))
+        names = [p.name for p in params if p.kind is p.KEYWORD_ONLY and p.name != "_java_form"]
+        states = [None, value, None, UNSET]  # left out, a value, None, UNSET
+        if len(names) <= 6:
+            combos = list(itertools.product(range(4), repeat=len(names)))
+        else:  # drawn one by one: 4**12 combinations would not fit in memory
+            rng = random.Random(f.__qualname__)
+            combos = [tuple(rng.randrange(4) for _ in names) for _ in range(4096)]
+        cases = [(positional, {n: states[s] for n, s in zip(names, c) if s}) for c in combos]
+        full = {n: value for n in names}
+        cases += [(positional[:-1], full), (positional + (value,), full),
+                  (positional, {**full, "not_a_parameter": value})]
+        if any(p.name == "_java_form" for p in params):
+            cases.append((positional, {**full, "_java_form": 0}))
+        for args, kwargs in cases:
+            assert _outcome(decorated, args, kwargs) == _outcome(generic, args, kwargs), (
+                f.__qualname__, sorted(kwargs))
+            compared += 1
+    assert compared > 10_000

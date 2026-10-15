@@ -336,21 +336,23 @@ static void test_mock_admin_create_close_destroy(void) {
     fixture_destroy(&f);
 }
 
-/* Java's builder refuses a cluster without brokers with an
- * IllegalArgumentException; the C constructor stores it in out_err and
- * returns NULL. */
+/* Java's MockAdminClient.Builder throws for a zero broker count (build()
+ * reads brokers.get(0), MockAdminClient.java:212) and for a negative one
+ * (numBrokers calls brokers.subList(0, n), :154), rather than yielding a mock.
+ * The C constructor stores the Builder's error, with the JDK's message, in
+ * out_err and returns NULL. */
 static void test_mock_admin_rejects_zero_brokers(void) {
     kafka_common_Error_t *err = NULL;
     kafka_admin_MockAdminClient_t *mock = kafka_admin_MockAdminClient_create(0, &err);
     TEST_ASSERT_NULL(mock);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
-    assert_error_message(err, "num_brokers must be at least 1, was 0");
+    assert_error_message(err, "Index 0 out of bounds for length 0");
     err = NULL;
     mock = kafka_admin_MockAdminClient_create(-1, &err);
     TEST_ASSERT_NULL(mock);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
-    assert_error_message(err, "num_brokers must be at least 1, was -1");
+    assert_error_message(err, "fromIndex(0) > toIndex(-1)");
 }
 
 typedef struct {
@@ -1047,11 +1049,11 @@ static void test_mock_admin_uuid_from_string_rejects_bad_id(void) {
     kafka_common_Error_destroy(err);
     /* A well-formed one round-trips. */
     err = NULL;
-    id = kafka_common_Uuid_from_string("4A5xz_QZTB2CtL4wc0X0Jw", &err);
+    id = kafka_common_Uuid_from_string("I4ZmrWqfT2e-upky_4fdPA", &err);
     assert_ok(err, "Uuid_from_string");
     TEST_ASSERT_NOT_NULL(id);
     char *text = kafka_common_Uuid_to_string(id);
-    TEST_ASSERT_EQUAL_STRING("4A5xz_QZTB2CtL4wc0X0Jw", text);
+    TEST_ASSERT_EQUAL_STRING("I4ZmrWqfT2e-upky_4fdPA", text);
     kafka_string_destroy(text);
     kafka_common_Uuid_destroy(id);
 }
@@ -1430,7 +1432,7 @@ static void test_mock_admin_describe_cluster_sync(void) {
     kafka_admin_DescribeClusterResult_t *result = kafka_admin_Admin_describe_cluster(f.admin);
     TEST_ASSERT_NOT_NULL(result);
     kafka_common_KafkaFuture_t *cluster_id = kafka_admin_DescribeClusterResult_cluster_id(result);
-    TEST_ASSERT_EQUAL_STRING("4A5xz_QZTB2CtL4wc0X0Jw", (const char *)get_ok(cluster_id));
+    TEST_ASSERT_EQUAL_STRING("I4ZmrWqfT2e-upky_4fdPA", (const char *)get_ok(cluster_id));
     kafka_common_KafkaFuture_destroy(cluster_id);
     kafka_common_KafkaFuture_t *nodes = kafka_admin_DescribeClusterResult_nodes(result);
     const kafka_List_t *node_list = (const kafka_List_t *)get_ok(nodes);
@@ -1503,7 +1505,7 @@ static void test_mock_admin_describe_cluster_async(void) {
     kafka_common_KafkaFuture_t *cluster_id = kafka_admin_DescribeClusterResult_cluster_id(result);
     get_cb_pumped(&f, cluster_id, &r);
     TEST_ASSERT_FALSE(r.had_error);
-    TEST_ASSERT_EQUAL_STRING("4A5xz_QZTB2CtL4wc0X0Jw", (const char *)r.value);
+    TEST_ASSERT_EQUAL_STRING("I4ZmrWqfT2e-upky_4fdPA", (const char *)r.value);
     kafka_common_KafkaFuture_destroy(cluster_id);
     kafka_admin_DescribeClusterResult_destroy(result);
     fixture_destroy(&f);

@@ -61,6 +61,7 @@ from confluent_kafka._config import duration_to_ms, prepare
 from confluent_kafka._errors import from_ffi_error
 from confluent_kafka.common.errors.timeout_error import TimeoutError as KafkaTimeoutError
 from confluent_kafka.common.errors.unsupported_version_error import UnsupportedVersionError
+from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.common.metric_name import MetricName
 from confluent_kafka.common.node import Node
 from confluent_kafka.common.partition_info import PartitionInfo
@@ -103,6 +104,14 @@ LONG_MAX_VALUE = (1 << 63) - 1
 
 # Java's RecordAccumulator.append() message for a send that races close.
 CLOSED_WHILE_SENDING_MESSAGE = "Producer closed while send in progress"
+
+
+def closed_while_sending() -> KafkaError:
+    """What a send raises when ``close()`` began while it ran, as Java's
+    ``RecordAccumulator.append`` throws ``KafkaException("Producer closed while
+    send in progress")``. Built only then, so a send that goes through
+    allocates no error."""
+    return KafkaError(message=CLOSED_WHILE_SENDING_MESSAGE)
 
 _TRANSACTIONAL_ID = "transactional.id"
 
@@ -332,24 +341,27 @@ class _Use:
 
     __slots__ = ("_state", "_error")
 
-    def __init__(self, state: _ProducerState, error: BaseException | None) -> None:
+    def __init__(self, state: _ProducerState,
+                 error: Callable[[], BaseException] | None) -> None:
         self._state = state
         self._error = error
 
     def __enter__(self) -> int:
         state = self._state
-        with state._lifecycle:
+        with state._lifecycle_lock:
             if state._closed:
-                raise self._error if self._error is not None else IllegalStateError(
+                raise self._error() if self._error is not None else IllegalStateError(
                     message=CLOSED_MESSAGE)
             state._uses += 1
         return state._c_producer
 
     def __exit__(self, *exc: object) -> None:
         state = self._state
-        with state._lifecycle:
+        with state._lifecycle_lock:
             state._uses -= 1
-            if state._uses == 0:
+            # Only a close() waits for the uses to end, and it sets _closed
+            # under this lock before it waits: with none begun, nobody waits.
+            if state._uses == 0 and state._closed:
                 state._lifecycle.notify_all()
 
 
@@ -369,7 +381,10 @@ class _ProducerState:
     def __init__(self) -> None:
         self._c_producer: int = 0
         self._closed = False
-        self._lifecycle = threading.Condition()
+        # The Condition's own lock, taken directly on the per-send path (see
+        # _Use): the same lock, without the Condition's Python-level wrappers.
+        self._lifecycle_lock = threading.RLock()
+        self._lifecycle = threading.Condition(self._lifecycle_lock)
         self._uses = 0
         # Whether transactional.id is set, and whether a transaction this
         # producer began is open (begin_transaction() returned; commit / abort
@@ -383,8 +398,12 @@ class _ProducerState:
         # Futures of the records sent and not yet completed: flush() waits for
         # the ones sent before it (their callbacks have run by then, as in Java).
         self._futures: set[Any] = set()
+        # Bound once: every completion untracks its record's future with it.
+        self._discard_future = self._futures.discard
         self._key_serializer: Serializer[Any] = bytes_serializer()
         self._value_serializer: Serializer[Any] = bytes_serializer()
+        # The use of every send(), built once: a _Use holds no per-use state.
+        self._send_use = _Use(self, closed_while_sending)
         # ProducerConfig max.block.ms: what bounds a wait that cannot be
         # serviced (see CALLBACK_WAIT_TIMEOUT_MESSAGE).
         self._max_block_ms = _DEFAULT_MAX_BLOCK_MS
@@ -403,10 +422,11 @@ class _ProducerState:
         """Run once the native producer is built (the sync producer starts its
         completion thread here)."""
 
-    def _use(self, error: BaseException | None = None) -> _Use:
+    def _use(self, error: Callable[[], BaseException] | None = None) -> _Use:
         """A call into the native producer: ``with self._use() as c:`` gives
-        the handle, or raises ``error`` (by default Java's closed
-        ``IllegalStateError``) once ``close()`` has begun."""
+        the handle, or raises what ``error()`` builds (by default Java's closed
+        ``IllegalStateError``) once ``close()`` has begun. ``error`` builds the
+        error only then, so a call that goes through allocates none."""
         return _Use(self, error)
 
     def _call(self, fn: Callable[..., Any], *args: Any) -> Any:
@@ -515,25 +535,37 @@ class _ProducerState:
         if self._closed:
             raise IllegalStateError(message=CLOSED_MESSAGE)
 
-    def _native_record(self, record: ProducerRecord[Any, Any]) -> Any:
+    def _native_parts(self, record: ProducerRecord[Any, Any]) -> tuple[Any, str, int | None]:
         """Serialize the record on the caller's thread and build the native
         ``_confluentkafka.ProducerRecord`` the send path reads: it holds the
         serialized ``bytes`` and the record's header values without copying
-        them (CLAUDE.md §12)."""
+        them (CLAUDE.md §12). Returns it with the record's topic and partition,
+        which the completion needs, so they are read once."""
         topic = record.topic()
         headers = record.headers()
         key = serialize(self._key_serializer, topic, record.key(), headers)
         value = serialize(self._value_serializer, topic, record.value(), headers)
         partition = record.partition()
         timestamp = record.timestamp()
-        return _lib.ProducerRecord(topic, value, key,
-                                   -1 if partition is None else partition,
-                                   -1 if timestamp is None else timestamp,
-                                   headers)
+        native = _lib.ProducerRecord(topic, value, key,
+                                     -1 if partition is None else partition,
+                                     -1 if timestamp is None else timestamp,
+                                     headers)
+        return native, topic, partition
 
     def _track(self, future: Any) -> None:
+        """Track a sent record's future until its completion untracks it, right
+        after completing it (``_discard_future``), so a flush() or
+        commit_transaction() waits for the records sent before it. Untracking
+        in the completion, rather than by a done callback, saves the asyncio
+        loop a scheduled callback per record. A record can complete before
+        ``send()`` gets here (on the sync producer's completion thread): its
+        future is then already done, and untracked at once. The sync ``send()``
+        fast path does not call this: it checks its completion's own flag, as
+        ``concurrent.futures.Future.done()`` takes the future's lock."""
         self._futures.add(future)
-        future.add_done_callback(self._futures.discard)
+        if future.done():
+            self._futures.discard(future)
 
     def _close_serializers(self) -> None:
         """Java closes both serializers at producer close; a failing

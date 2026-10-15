@@ -27,6 +27,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::ffi::c_char;
 
 use crate::admin::MockAdminClient;
+use crate::admin::mock_admin_client::Builder;
 use crate::ffi::admin::{AdminClassHandle, kafka_admin_Admin_t};
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::common::topic_partition::map_topic_partition_i64;
@@ -82,10 +83,18 @@ unsafe fn map_string_i16(map: *const kafka_Map_t) -> HashMap<String, i16> {
         .collect()
 }
 
-/// `MockAdminClient.create(int numBrokers)`: a mock with `numBrokers`
-/// brokers `localhost:1000 + id`, owned by the caller
-/// ([`kafka_admin_MockAdminClient_destroy`]). Fails with Java's
-/// `IllegalArgumentException` message for a non-positive count.
+/// `MockAdminClient.create().numBrokers(numBrokers).build()`: a mock with
+/// `numBrokers` brokers `localhost:1000 + id`, owned by the caller
+/// ([`kafka_admin_MockAdminClient_destroy`]).
+///
+/// The mock is built as Java's `MockAdminClient.create().numBrokers(n).build()`
+/// is, through [`MockAdminClient::create`] and its [`Builder`], and the
+/// rejection lives there: `set_num_brokers` fails for a negative count
+/// ("fromIndex(0) > toIndex(n)", Java's `subList` throw) and `build` fails for
+/// zero brokers ("Index 0 out of bounds for length 0", Java's
+/// `brokers.get(0)`). This entry point only delivers that `Err`, so there is one
+/// source of truth for the bound rather than a check here that could drift from
+/// the core's.
 ///
 /// # Safety
 ///
@@ -96,7 +105,8 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_create(
     num_brokers: i32,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_admin_MockAdminClient_t {
-    let result = AdminClassHandle::new_mock(|| MockAdminClient::create(num_brokers));
+    let result =
+        AdminClassHandle::new_mock(|| MockAdminClient::create().set_num_brokers(num_brokers).and_then(Builder::build));
     // SAFETY: Per this function's `# Safety`, `out_err` is a valid slot, as `deliver_value` requires.
     unsafe {
         deliver_value(result, out_err, |handle| {
