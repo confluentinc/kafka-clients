@@ -21,13 +21,19 @@ Methodology (matches the C benchmark):
   * Consumer config: ``group.protocol=consumer`` (KIP-848),
     ``auto.offset.reset=latest``, ``fetch.min.bytes`` / ``max.partition.fetch.bytes``
     = 4 MiB, ``check.crcs=false`` (v2/librdkafka only; the Rust client keeps its
-    default ``check.crcs=true``, matching the Java client).
+    default ``check.crcs=true``, matching the Java client). With
+    ``USE_DEFAULTS=True`` none of these tuned values is set: the client defaults
+    apply, except for the settings given by ``FETCH_MIN_BYTES``,
+    ``FETCH_MAX_WAIT_MS``, ``MAX_PARTITION_FETCH_BYTES`` and ``MAX_POLL_RECORDS``
+    (each also overrides its tuned value).
   * Settle to the live edge (poll until empty) before load starts.
   * Time-based ``WARMUP_SECONDS`` (excluded from stats) then
     ``TEST_DURATION_SECONDS`` measured; per-``INTERVAL_SECONDS`` snapshots to
     ``metrics.jsonl`` (shared ``performance_common.Metrics`` schema, same as the
     producer perf test and the Rust harness).
-  * Summary: min/avg + p50/p90/p95/p99/p999, throughput msg/s and MiB/s.
+  * Summary: min/avg + p50/p90/p95/p99/p999, throughput msg/s and MiB/s, in
+    ``RESULTS_FILE`` (default ``results.json``) with the keys of the producer
+    harnesses' results.json, which ``cargo xtask perf-cloud`` reads.
 
 Backends (``CLIENT_VERSION``): ``3`` = the Rust binding
 (``confluent_kafka.consumer.KafkaConsumer`` of this repo's package), ``2`` =
@@ -78,6 +84,13 @@ def _now_ms():
 def _env_int(name, default):
     v = os.getenv(name)
     return int(v) if v is not None and v != "" else default
+
+
+# The tuned fetch size the manual benchmark uses unless USE_DEFAULTS=True.
+_TUNED_FETCH_BYTES = 4 * 1024 * 1024
+# The consume() batch of the librdkafka backend under USE_DEFAULTS=True: the
+# Java and Rust clients' default max.poll.records.
+_DEFAULT_MAX_POLL_RECORDS = 500
 
 
 def sasl_config_from_env(v2=False):
@@ -140,11 +153,18 @@ class Config:
         if self.compression_type not in (None, "none", "gzip", "snappy", "lz4", "zstd"):
             raise ValueError(f"COMPRESSION_TYPE must be one of none, gzip, snappy, lz4, zstd; "
                              f"got {self.compression_type!r}")
-        self.fetch_min_bytes = _env_int("FETCH_MIN_BYTES", 4 * 1024 * 1024)
-        self.fetch_max_bytes = _env_int("MAX_PARTITION_FETCH_BYTES", 4 * 1024 * 1024)
+        self.use_defaults = os.getenv("USE_DEFAULTS", "False") == "True"
+        tuned_fetch = None if self.use_defaults else _TUNED_FETCH_BYTES
+        # None => the client default.
+        self.fetch_min_bytes = _env_int("FETCH_MIN_BYTES", tuned_fetch)
+        self.fetch_max_bytes = _env_int("MAX_PARTITION_FETCH_BYTES", tuned_fetch)
+        self.fetch_max_wait_ms = _env_int("FETCH_MAX_WAIT_MS", None)
         # Batch size per poll, applied to BOTH backends so they batch
         # identically: the Rust binding's max.poll.records and librdkafka's
-        # consume(num_messages=...).
+        # consume(num_messages=...). MAX_POLL_RECORDS sets both exactly;
+        # otherwise the tuned CONSUMER_BATCH_SIZE (max.poll.records 500 above
+        # it), or under USE_DEFAULTS the client default.
+        self.max_poll_records = _env_int("MAX_POLL_RECORDS", None)
         self.batch_size = _env_int("CONSUMER_BATCH_SIZE", 2000)
         # Async mode toggle — same env var/convention as the producer perf test
         # (producer_performance_test.py). When set, the benchmark drives the
@@ -154,12 +174,57 @@ class Config:
         # poll() (v2) / a poll_batch-backed single path (Rust v3), instead of
         # the batched consume()/poll().
         self.poll_single = os.getenv("POLL_SINGLE", "False") == "True"
-        self.use_defaults = os.getenv("USE_DEFAULTS", "False") == "True"
+        self.results_file = os.getenv("RESULTS_FILE") or "results.json"
         # Readiness gate before the timed window: require this many records with a
         # valid, non-negative latency to flow (feeder producing, consumer
         # receiving) before measuring; otherwise the run is retried.
         self.readiness_min_records = _env_int("READINESS_MIN_RECORDS", 20)
         self.readiness_timeout_s = _env_int("READINESS_TIMEOUT_SECONDS", 20)
+
+
+def _rust_tuning(cfg):
+    """The fetch and batch settings of the Rust binding (CLIENT_VERSION=3)."""
+    conf = {}
+    if cfg.fetch_min_bytes is not None:
+        conf["fetch.min.bytes"] = str(cfg.fetch_min_bytes)
+    if cfg.fetch_max_bytes is not None:
+        conf["max.partition.fetch.bytes"] = str(cfg.fetch_max_bytes)
+    if cfg.fetch_max_wait_ms is not None:
+        conf["fetch.max.wait.ms"] = str(cfg.fetch_max_wait_ms)
+    if cfg.max_poll_records is not None:
+        conf["max.poll.records"] = str(cfg.max_poll_records)
+    elif not cfg.use_defaults:
+        conf["max.poll.records"] = str(cfg.batch_size + 500)
+    return conf
+
+
+def _librdkafka_tuning(cfg):
+    """The fetch settings of the librdkafka client (CLIENT_VERSION=2), under
+    librdkafka's names."""
+    conf = {}
+    if cfg.fetch_min_bytes is not None:
+        conf["fetch.min.bytes"] = cfg.fetch_min_bytes
+    if cfg.fetch_max_bytes is not None:
+        conf["fetch.message.max.bytes"] = cfg.fetch_max_bytes
+    if cfg.fetch_max_wait_ms is not None:
+        conf["fetch.wait.max.ms"] = cfg.fetch_max_wait_ms
+    if not cfg.use_defaults:
+        conf["check.crcs"] = False
+    return conf
+
+
+def _librdkafka_batch(cfg):
+    """The records one librdkafka consume() returns at most."""
+    if cfg.max_poll_records is not None:
+        return cfg.max_poll_records
+    return _DEFAULT_MAX_POLL_RECORDS if cfg.use_defaults else cfg.batch_size
+
+
+def _client_name(cfg):
+    """The ``client`` of results.json: backend, then mode."""
+    backend = "rust" if cfg.client_version == "3" else "librdkafka"
+    mode = "-async" if cfg.async_mode else ""
+    return f"python-{backend}{mode}-consumer"
 
 
 # ---------------------------------------------------------------------------
@@ -172,11 +237,7 @@ class _RustConsumer:
     def __init__(self, cfg):
         from confluent_kafka.common.serialization import memoryview_deserializer
         from confluent_kafka.consumer import KafkaConsumer
-        custom_conf = {} if cfg.use_defaults else {
-            "fetch.min.bytes": str(cfg.fetch_min_bytes),
-            "max.partition.fetch.bytes": str(cfg.fetch_max_bytes),
-            "max.poll.records": str(cfg.batch_size + 500),
-        }
+        custom_conf = _rust_tuning(cfg)
         conf = {
             "bootstrap.servers": cfg.bootstrap_servers,
             "group.id": cfg.group_id,
@@ -226,11 +287,7 @@ class _LibrdkafkaConsumer:
 
     def __init__(self, cfg):
         from confluent_kafka import Consumer
-        custom_conf = {} if cfg.use_defaults else {
-            "fetch.min.bytes": cfg.fetch_min_bytes,
-            "fetch.message.max.bytes": cfg.fetch_max_bytes,
-            "check.crcs": False,
-        }
+        custom_conf = _librdkafka_tuning(cfg)
         conf = {
             "bootstrap.servers": cfg.bootstrap_servers,
             "group.id": cfg.group_id,
@@ -243,7 +300,7 @@ class _LibrdkafkaConsumer:
         conf.update(sasl_config_from_env(v2=True))
         self._c = Consumer(conf)
         self._timeout = cfg.poll_timeout_ms / 1000.0
-        self._batch = cfg.batch_size
+        self._batch = _librdkafka_batch(cfg)
 
     def subscribe(self, topic):
         self._c.subscribe([topic])
@@ -296,11 +353,7 @@ class _AsyncRustConsumer:
     def __init__(self, cfg):
         from confluent_kafka.common.serialization import memoryview_deserializer
         from confluent_kafka.consumer import AsyncKafkaConsumer
-        custom_conf = {} if cfg.use_defaults else {
-            "fetch.min.bytes": str(cfg.fetch_min_bytes),
-            "max.partition.fetch.bytes": str(cfg.fetch_max_bytes),
-            "max.poll.records": str(cfg.batch_size + 500),
-        }
+        custom_conf = _rust_tuning(cfg)
         conf = {
             "bootstrap.servers": cfg.bootstrap_servers,
             "group.id": cfg.group_id,
@@ -350,11 +403,7 @@ class _AsyncLibrdkafkaConsumer:
 
     def __init__(self, cfg):
         from confluent_kafka.aio import AIOConsumer
-        custom_conf = {} if cfg.use_defaults else {
-            "fetch.min.bytes": cfg.fetch_min_bytes,
-            "fetch.message.max.bytes": cfg.fetch_max_bytes,
-            "check.crcs": False,
-        }
+        custom_conf = _librdkafka_tuning(cfg)
         conf = {
             "bootstrap.servers": cfg.bootstrap_servers,
             "group.id": cfg.group_id,
@@ -367,7 +416,7 @@ class _AsyncLibrdkafkaConsumer:
         conf.update(sasl_config_from_env(v2=True))
         self._c = AIOConsumer(conf)
         self._timeout = cfg.poll_timeout_ms / 1000.0
-        self._batch = cfg.batch_size
+        self._batch = _librdkafka_batch(cfg)
 
     async def subscribe(self, topic):
         await self._c.subscribe([topic])
@@ -796,6 +845,7 @@ def _summarize(cfg, latency_hist, measured_messages, measured_duration,
     thr_mib = ((measured_messages * cfg.message_size) / (1024 * 1024) / measured_duration
                if measured_duration > 0 else 0.0)
     stats = {
+        "test": "consumer", "client": _client_name(cfg),
         "client_version": cfg.client_version, "topic": cfg.topic,
         "messages_measured": measured_messages, "duration_s": round(measured_duration, 2),
         "throughput_msg_s": round(thr_msg, 2), "throughput_mib_s": round(thr_mib, 2),
@@ -804,9 +854,9 @@ def _summarize(cfg, latency_hist, measured_messages, measured_duration,
     }
     # CPU/RSS averages over the measured interval, from the shared Metrics
     # sampler (psutil, per-interval buckets already written to metrics.jsonl).
-    # Same keys and units (rss_avg_mb, MB) as the other consumer harnesses'
-    # summaries (rust/consumer-perf, librdkafka_e2e.c, JavaE2E.java); the
-    # producer harnesses' results.json use rss_avg_kib instead.
+    # rss_avg_mb (MB) as the other consumer harnesses' summaries
+    # (rust/consumer-perf, librdkafka_e2e.c, JavaE2E.java), and rss_avg_kib as
+    # every harness's results.json.
     cpu_avg = rss_avg_mb = None
     if metrics is not None and metrics.total_external_metrics > 0:
         n = metrics.total_external_metrics
@@ -814,6 +864,7 @@ def _summarize(cfg, latency_hist, measured_messages, measured_duration,
         rss_avg_mb = metrics.total_rss / n / (1024.0 * 1024.0)
         stats["cpu_avg_pct"] = round(cpu_avg, 2)
         stats["rss_avg_mb"] = round(rss_avg_mb, 2)
+        stats["rss_avg_kib"] = round(rss_avg_mb * 1024.0, 2)
     print("\n" + "=" * 72)
     print(f"SUMMARY - CLIENT_VERSION={cfg.client_version} (warmup excluded)")
     print("=" * 72)
@@ -826,11 +877,13 @@ def _summarize(cfg, latency_hist, measured_messages, measured_duration,
         print(f"CPU (% one core):  avg={cpu_avg:.1f}")
         print(f"RSS (MB):          avg={rss_avg_mb:.1f}")
     print("=" * 72, flush=True)
-    try:
-        with open("results.json", "w") as fh:
-            json.dump(stats, fh, indent=2)
-    except OSError:
-        pass
+    # Not written when nothing was measured: zeros would read as a result.
+    if measured_messages > 0:
+        try:
+            with open(cfg.results_file, "w") as fh:
+                json.dump(stats, fh, indent=2)
+        except OSError:
+            pass
     return stats
 
 

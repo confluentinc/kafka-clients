@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `cargo xtask perf-cloud`: runs the producer and transactional producer
-//! performance harnesses against a remote SASL_SSL (PLAIN) cluster, such as a
+//! `cargo xtask perf-cloud`: runs the producer, transactional producer and
+//! consumer performance harnesses against a remote SASL_SSL (PLAIN) cluster, such as a
 //! Confluent Cloud cluster, and compares the clients. Whatever provisions the
 //! cluster (a CI pipeline, an operator) calls it with the cluster's bootstrap
 //! and credentials.
@@ -30,9 +30,11 @@
 //!   and async. Each Rust-backed client is compared with its librdkafka
 //!   equivalent (sync with sync, async with async).
 //!
-//! A test's `WORKLOAD` is `producer` (the producer harnesses, the default) or
+//! A test's `WORKLOAD` is `producer` (the producer harnesses, the default),
 //! `transactional` (the transactional producer harnesses, in `TXN_MODE`
-//! `produce` or `eos`).
+//! `produce` or `eos`) or `consumer` (the consumer harnesses, reading a load
+//! this driver produces at the test's rate with Kafka's
+//! `kafka-producer-perf-test.sh` from `--kafka-bin`).
 //!
 //! Subcommands:
 //!
@@ -49,8 +51,9 @@
 //!   `--push-artifacts` they also go to Semaphore: the job's artifacts, and
 //!   `report.md` as the workflow's report (its Report tab).
 //!
-//! The arms are the existing (transactional) producer harnesses, driven by
-//! the same environment variables `tools/deploy_and_run_perf/deploy_and_run_perf.py`
+//! The arms are the existing (transactional) producer and consumer
+//! harnesses, driven by the same environment variables (or, for the Rust, C
+//! and Java consumers, options) `tools/deploy_and_run_perf/deploy_and_run_perf.py`
 //! sets on EC2. Topics are created here, never by a harness
 //! (`CREATE_TOPIC=False`): the Rust harnesses cannot create topics, and one
 //! creation path gives every arm the same topic. An `eos` test also gets a
@@ -127,10 +130,10 @@ const SEED_MB_S: f64 = 50.0;
 /// allows.
 const IDEMPOTENT_MAX_IN_FLIGHT: u64 = 5;
 
-/// Every environment variable a (transactional) producer harness reads, its
-/// A/B debugging knobs included. Each arm starts from the job's environment
-/// with all of them removed, so a stray value in the job cannot change one
-/// arm and not the others.
+/// Every environment variable a harness reads, its A/B debugging knobs
+/// included. Each arm starts from the job's environment with all of them
+/// removed, so a stray value in the job cannot change one arm and not the
+/// others.
 const HARNESS_VARS: &[&str] = &[
     "ABORT_RATE",
     "ACKS",
@@ -140,16 +143,23 @@ const HARNESS_VARS: &[&str] = &[
     "BUFFER_MEMORY",
     "CLIENT_VERSION",
     "COMPRESSION_TYPE",
+    "CONSUMER_BATCH_SIZE",
     "CREATE_TOPIC",
     "DO_VERIFY",
     "ENABLE_IDEMPOTENCE",
+    "FETCH_MAX_WAIT_MS",
+    "FETCH_MIN_BYTES",
     "GROUP_ID",
+    "INTERVAL_SECONDS",
+    "JOIN_TIMEOUT_SECONDS",
     "KAFKA_BIN",
     "KEY_SIZE",
     "LIBRDKAFKA_PYTHON",
     "LIMIT_RPS",
     "LINGER_MS",
     "MAX_IN_FLIGHT",
+    "MAX_PARTITION_FETCH_BYTES",
+    "MAX_POLL_RECORDS",
     "MAX_REQUEST_SIZE",
     "METRICS_FILE",
     "NO_MSG_F_BLOCK",
@@ -160,6 +170,11 @@ const HARNESS_VARS: &[&str] = &[
     "PARTITIONS",
     "PERF_DEBUG_TIMING",
     "PERF_LRK_STATS",
+    "PERF_SETUP_ATTEMPTS",
+    "POLL_SINGLE",
+    "POLL_TIMEOUT_MS",
+    "READINESS_MIN_RECORDS",
+    "READINESS_TIMEOUT_SECONDS",
     "RECORDS_PER_TRANSACTION",
     "RESULTS_FILE",
     "SASL_MECHANISM",
@@ -168,11 +183,13 @@ const HARNESS_VARS: &[&str] = &[
     "SECURITY_PROTOCOL",
     "SEED_COUNT",
     "SEED_THROUGHPUT",
+    "SETTLE_TIMEOUT_SECONDS",
     "SKIP_PARTITIONER_OVERRIDE",
     "SOURCE_TOPIC",
     "SSL_CA_LOCATION",
     "STICKY_LINGER_MS",
     "TEST_DURATION_SECONDS",
+    "THROUGHPUT",
     "TOPIC_NAME",
     "TRANSACTIONAL_ID",
     "TXN_MODE",
@@ -231,8 +248,9 @@ const HELP: &str = "cargo xtask perf-cloud <subcommand>
   clients to run: rust, librdkafka, java / python-sync-rust,
   python-sync-librdkafka, python-async-rust, python-async-librdkafka.
   S is one test given by its settings, as in the tests file, e.g.
-  \"WORKLOAD=producer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=10000 ACKS=all\";
-  it is named after them (producer-fixed-10k-1kb-200p). Durations are minutes:
+  \"WORKLOAD=producer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=10000 ACKS=all\"
+  or \"WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=10000\"; it is
+  named after them (producer-fixed-10k-1kb-200p, consumer-fixed-10k-1kb-200p). Durations are minutes:
   --duration-min defaults to 30 (at most 60), --warmup-min to 5 (at most 30).";
 
 // ---------------------------------------------------------------------------
@@ -310,6 +328,9 @@ pub(crate) enum Workload {
     Producer,
     /// The transactional producer harnesses (`TXN_MODE` `produce` or `eos`).
     Transactional,
+    /// The consumer harnesses, reading a load this driver produces at the
+    /// test's rate with Kafka's `kafka-producer-perf-test.sh` ([`LoadGenerator`]).
+    Consumer,
 }
 
 impl Workload {
@@ -317,7 +338,16 @@ impl Workload {
         match value {
             "producer" => Ok(Workload::Producer),
             "transactional" => Ok(Workload::Transactional),
-            other => bail!("WORKLOAD={other}: expected `producer` or `transactional`"),
+            "consumer" => Ok(Workload::Consumer),
+            other => bail!("WORKLOAD={other}: expected `producer`, `transactional` or `consumer`"),
+        }
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Workload::Producer => "producer",
+            Workload::Transactional => "transactional",
+            Workload::Consumer => "consumer",
         }
     }
 }
@@ -379,15 +409,30 @@ impl Arm {
             (Workload::Transactional, Arm::PythonSyncLibrdkafka | Arm::PythonAsyncLibrdkafka) => {
                 "python-librdkafka-txn"
             },
+            (Workload::Consumer, Arm::Rust) => "rust-consumer",
+            (Workload::Consumer, Arm::Librdkafka) => "librdkafka-consumer",
+            (Workload::Consumer, Arm::Java) => "java-consumer",
+            (Workload::Consumer, Arm::PythonSyncRust) => "python-rust-consumer",
+            (Workload::Consumer, Arm::PythonSyncLibrdkafka) => "python-librdkafka-consumer",
+            (Workload::Consumer, Arm::PythonAsyncRust) => "python-rust-async-consumer",
+            (Workload::Consumer, Arm::PythonAsyncLibrdkafka) => "python-librdkafka-async-consumer",
         }
     }
 
     /// The command that runs this arm's harness for `workload` (the
     /// `RUN_PERF_SH` recipes of `deploy_and_run_perf.py`), to be started in
-    /// the arm's directory.
+    /// the arm's directory unless it sets its own. A consumer harness other
+    /// than Python's also takes [`consumer_args`].
     fn command(self, repo: &Path, workload: Workload) -> Command {
         let transactional = workload == Workload::Transactional;
         match self {
+            Arm::Rust if workload == Workload::Consumer => Command::new(rust_consumer_harness(repo)),
+            Arm::Java if workload == Workload::Consumer => {
+                let mut c = Command::new("java");
+                let classpath = format!("{}:{}", java_jar(repo).display(), java_consumer_classes(repo).display());
+                c.arg("-cp").arg(classpath).arg("JavaE2E");
+                c
+            },
             Arm::Rust => {
                 let task = if transactional {
                     "transactional-producer-perf-test"
@@ -461,9 +506,13 @@ impl Arm {
     /// What must exist before the arm can run `workload`, from `build`.
     fn prerequisites(self, repo: &Path, workload: Workload) -> Vec<PathBuf> {
         match self {
+            Arm::Rust if workload == Workload::Consumer => vec![rust_consumer_harness(repo)],
             // Built by `cargo` on first use; `build` compiles it ahead.
             Arm::Rust => Vec::new(),
             Arm::Librdkafka => vec![c_harness(repo, workload)],
+            Arm::Java if workload == Workload::Consumer => {
+                vec![java_jar(repo), java_consumer_classes(repo).join("JavaE2E.class")]
+            },
             Arm::Java => vec![java_jar(repo)],
             Arm::PythonSyncRust | Arm::PythonAsyncRust => vec![venv_python(repo, "venv")],
             Arm::PythonSyncLibrdkafka | Arm::PythonAsyncLibrdkafka => vec![venv_python(repo, "venv-librdkafka")],
@@ -479,17 +528,34 @@ fn c_harness(repo: &Path, workload: Workload) -> PathBuf {
     match workload {
         Workload::Producer => repo.join("c/build/producer_perf_test"),
         Workload::Transactional => repo.join("c/build/transactional_producer_perf_test"),
+        // Where `deploy_and_run_perf.py` builds it too.
+        Workload::Consumer => consumer_compare_dir(repo).join("build/librdkafka_e2e"),
     }
+}
+
+/// The consumer harnesses of librdkafka (C) and Java.
+fn consumer_compare_dir(repo: &Path) -> PathBuf {
+    repo.join("rust/consumer-perf/compare")
+}
+
+fn rust_consumer_harness(repo: &Path) -> PathBuf {
+    repo.join("rust/target/release/consumer-perf")
 }
 
 fn java_jar(repo: &Path) -> PathBuf {
     repo.join("tools/java-perf-test/build/libs/java-perf-test-all.jar")
 }
 
+/// Where `JavaE2E.class` is compiled to, against [`java_jar`]'s classes.
+fn java_consumer_classes(repo: &Path) -> PathBuf {
+    consumer_compare_dir(repo).join("build")
+}
+
 fn python_harness(repo: &Path, workload: Workload) -> PathBuf {
     match workload {
         Workload::Producer => repo.join("python/test/performance/producer_performance_test.py"),
         Workload::Transactional => repo.join("python/test/performance/transactional_producer_performance_test.py"),
+        Workload::Consumer => repo.join("python/test/performance/consumer_performance_test.py"),
     }
 }
 
@@ -534,13 +600,20 @@ enum Kind {
 struct Setting {
     key: &'static str,
     kind: Kind,
-    /// The only workload whose harnesses read it; `None` for both.
-    only: Option<Workload>,
+    /// The workloads whose harnesses read it; empty for all of them.
+    only: &'static [Workload],
 }
 
-const fn setting(key: &'static str, kind: Kind, only: Option<Workload>) -> Setting {
+const fn setting(key: &'static str, kind: Kind, only: &'static [Workload]) -> Setting {
     Setting { key, kind, only }
 }
+
+/// The settings of every workload.
+const ALL: &[Workload] = &[];
+/// The producers' settings. A consumer test's load comes from Kafka's
+/// `kafka-producer-perf-test.sh` with its own defaults, which only
+/// `COMPRESSION_TYPE` changes.
+const PRODUCING: &[Workload] = &[Workload::Producer, Workload::Transactional];
 
 /// The harness settings a test may set. Every harness of a workload reads
 /// all of that workload's settings, in the same units, except that the C
@@ -551,23 +624,37 @@ const fn setting(key: &'static str, kind: Kind, only: Option<Workload>) -> Setti
 /// runs; set it in the test to pin it. Units: `BATCH_SIZE` /
 /// `MAX_REQUEST_SIZE` in KiB, `BUFFER_MEMORY` in MiB. The transactional
 /// harnesses always use idempotence and `acks=all`.
+///
+/// In a consumer test `PARTITIONS`, `VALUE_SIZE`, `LIMIT_RPS` and
+/// `COMPRESSION_TYPE` shape the load, and the consumer settings left out keep
+/// each client's default (the harnesses are told to: `USE_DEFAULTS=True`).
+/// Those defaults agree: a 1-byte `fetch.min.bytes`, a 500 ms wait, 1 MiB per
+/// partition and 500 records per poll (librdkafka has no `max.poll.records`;
+/// its harnesses consume batches of `MAX_POLL_RECORDS`, 500 by default).
 const SETTINGS: &[Setting] = &[
-    setting("PARTITIONS", Kind::Positive, None),
-    setting("VALUE_SIZE", Kind::Positive, None),
-    setting("KEY_SIZE", Kind::Count, None),
-    setting("LIMIT_RPS", Kind::Count, None),
-    setting("BATCH_SIZE", Kind::Positive, None),
-    setting("LINGER_MS", Kind::Count, None),
-    setting("MAX_IN_FLIGHT", Kind::Positive, None),
-    setting("BUFFER_MEMORY", Kind::Positive, None),
-    setting("MAX_REQUEST_SIZE", Kind::Positive, None),
-    setting("COMPRESSION_TYPE", Kind::Compression, None),
-    setting("ACKS", Kind::Acks, Some(Workload::Producer)),
-    setting("ENABLE_IDEMPOTENCE", Kind::Bool, Some(Workload::Producer)),
-    setting("RECORDS_PER_TRANSACTION", Kind::Positive, Some(Workload::Transactional)),
-    setting("ABORT_RATE", Kind::Fraction, Some(Workload::Transactional)),
-    setting("NUM_TRANSACTIONAL_PRODUCERS", Kind::Positive, Some(Workload::Transactional)),
-    setting("TXN_MODE", Kind::TxnMode, Some(Workload::Transactional)),
+    setting("PARTITIONS", Kind::Positive, ALL),
+    setting("VALUE_SIZE", Kind::Positive, ALL),
+    setting("KEY_SIZE", Kind::Count, PRODUCING),
+    setting("LIMIT_RPS", Kind::Count, ALL),
+    setting("BATCH_SIZE", Kind::Positive, PRODUCING),
+    setting("LINGER_MS", Kind::Count, PRODUCING),
+    setting("MAX_IN_FLIGHT", Kind::Positive, PRODUCING),
+    setting("BUFFER_MEMORY", Kind::Positive, PRODUCING),
+    setting("MAX_REQUEST_SIZE", Kind::Positive, PRODUCING),
+    setting("COMPRESSION_TYPE", Kind::Compression, ALL),
+    setting("ACKS", Kind::Acks, &[Workload::Producer]),
+    setting("ENABLE_IDEMPOTENCE", Kind::Bool, &[Workload::Producer]),
+    setting("RECORDS_PER_TRANSACTION", Kind::Positive, &[Workload::Transactional]),
+    setting("ABORT_RATE", Kind::Fraction, &[Workload::Transactional]),
+    setting("NUM_TRANSACTIONAL_PRODUCERS", Kind::Positive, &[Workload::Transactional]),
+    setting("TXN_MODE", Kind::TxnMode, &[Workload::Transactional]),
+    // Bytes; librdkafka takes at least 1.
+    setting("FETCH_MIN_BYTES", Kind::Positive, &[Workload::Consumer]),
+    // Milliseconds (librdkafka's `fetch.wait.max.ms`).
+    setting("FETCH_MAX_WAIT_MS", Kind::Count, &[Workload::Consumer]),
+    // Bytes (librdkafka's `fetch.message.max.bytes`).
+    setting("MAX_PARTITION_FETCH_BYTES", Kind::Positive, &[Workload::Consumer]),
+    setting("MAX_POLL_RECORDS", Kind::Positive, &[Workload::Consumer]),
 ];
 
 /// Set by every test, so no arm falls back to a harness default the others
@@ -725,8 +812,8 @@ fn parse_scenario(text: &str, group: Group) -> anyhow::Result<PerfTest> {
 }
 
 /// Parse `KEY=VALUE` words into a workload and harness settings. `WORKLOAD`
-/// (`producer`, the default, or `transactional`) picks the harnesses and is
-/// not passed to them. `what` names the test in errors.
+/// (`producer`, the default, `transactional` or `consumer`) picks the
+/// harnesses and is not passed to them. `what` names the test in errors.
 fn parse_settings<'a>(
     what: &str,
     words: impl Iterator<Item = &'a str>,
@@ -756,14 +843,23 @@ fn parse_settings<'a>(
     }
     let workload = workload.unwrap_or(Workload::Producer);
     for (key, _) in &settings {
-        match SETTINGS.iter().find(|s| s.key == key).and_then(|s| s.only) {
-            Some(Workload::Producer) if workload == Workload::Transactional => {
+        let only = SETTINGS.iter().find(|s| s.key == key).map_or(ALL, |s| s.only);
+        if only.is_empty() || only.contains(&workload) {
+            continue;
+        }
+        match (workload, only) {
+            (Workload::Transactional, [Workload::Producer]) => {
                 bail!("{what}: {key} does not apply to transactional tests (they always use idempotence and acks=all)")
             },
-            Some(Workload::Transactional) if workload == Workload::Producer => {
+            (_, [Workload::Transactional]) => {
                 bail!("{what}: {key} applies to transactional tests only (WORKLOAD=transactional)")
             },
-            _ => {},
+            (Workload::Consumer, _) => bail!(
+                "{what}: {key} does not apply to consumer tests (their load comes from Kafka's \
+                 kafka-producer-perf-test.sh)"
+            ),
+            (_, [Workload::Consumer]) => bail!("{what}: {key} applies to consumer tests only (WORKLOAD=consumer)"),
+            _ => bail!("{what}: {key} does not apply to {} tests", workload.name()),
         }
     }
     for key in REQUIRED_SETTINGS {
@@ -785,6 +881,12 @@ fn parse_settings<'a>(
              at most {IDEMPOTENT_MAX_IN_FLIGHT}"
         );
     }
+    if workload == Workload::Consumer && number("LIMIT_RPS") == Some(0) {
+        bail!(
+            "{what}: WORKLOAD=consumer needs LIMIT_RPS above 0: the clients read a load produced at that rate, \
+             and an unbounded producer would measure the producer"
+        );
+    }
     if get("TXN_MODE") == Some("eos") && number("LIMIT_RPS") == Some(0) {
         bail!(
             "{what}: TXN_MODE=eos needs LIMIT_RPS above 0: each client's source topic is first filled with LIMIT_RPS \
@@ -797,7 +899,8 @@ fn parse_settings<'a>(
 /// The name of a `--scenario`: its workload, rate, value size and partitions,
 /// then each other setting that differs from the harnesses' default, in a
 /// fixed order (`producer-fixed-10k-1kb-200p`,
-/// `txn-max-1kb-36p-1000-per-txn-abort50-16-producers`). A name over
+/// `txn-max-1kb-36p-1000-per-txn-abort50-16-producers`,
+/// `consumer-fixed-10k-1kb-200p-fetchmin4mb-maxpoll4000`). A name over
 /// [`MAX_TEST_ID_LEN`] is cut short and ends with a hash of the whole name.
 fn scenario_id(workload: Workload, settings: &[(String, String)]) -> String {
     let get = |key: &str| settings.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
@@ -808,6 +911,7 @@ fn scenario_id(workload: Workload, settings: &[(String, String)]) -> String {
             (Workload::Producer, _) => "producer",
             (Workload::Transactional, Some("eos")) => "eos",
             (Workload::Transactional, _) => "txn",
+            (Workload::Consumer, _) => "consumer",
         }
         .to_string(),
     );
@@ -844,6 +948,19 @@ fn scenario_id(workload: Workload, settings: &[(String, String)]) -> String {
     }
     if let Some(kib) = number("MAX_REQUEST_SIZE") {
         parts.push(format!("maxrequest{}", size_label(kib * 1024)));
+    }
+    // The consumer settings: any one set differs from a client default.
+    if let Some(bytes) = number("FETCH_MIN_BYTES") {
+        parts.push(format!("fetchmin{}", size_label(bytes)));
+    }
+    if let Some(ms) = number("FETCH_MAX_WAIT_MS") {
+        parts.push(format!("fetchwait{ms}ms"));
+    }
+    if let Some(bytes) = number("MAX_PARTITION_FETCH_BYTES") {
+        parts.push(format!("partfetch{}", size_label(bytes)));
+    }
+    if let Some(n) = number("MAX_POLL_RECORDS") {
+        parts.push(format!("maxpoll{n}"));
     }
     if workload == Workload::Transactional {
         parts.push(format!("{}-per-txn", number("RECORDS_PER_TRANSACTION").unwrap_or(100)));
@@ -1244,9 +1361,9 @@ fn check(options: &RunOptions) -> anyhow::Result<()> {
 
 /// Build the group's harnesses, as `deploy_and_run_perf.py`'s bootstrap
 /// does. The system packages must already be installed: for `rust`
-/// librdkafka-dev (pkg-config `rdkafka`), cmake, a JDK 17+ and Gradle (`$GRADLE`
-/// or `gradle`); for `python` python3-venv and python3-dev (`$PERF_PYTHON` or
-/// `python3`).
+/// librdkafka-dev (pkg-config `rdkafka`), cmake, a C compiler (`cc`), a JDK
+/// 17+ and Gradle (`$GRADLE` or `gradle`); for `python` python3-venv and
+/// python3-dev (`$PERF_PYTHON` or `python3`).
 fn build(group: Group) -> anyhow::Result<()> {
     let repo = repo_root();
     let rust = repo.join("rust");
@@ -1284,6 +1401,27 @@ fn build(group: Group) -> anyhow::Result<()> {
                     "transactional_producer_perf_test",
                 ]),
             )?;
+            // As `deploy_and_run_perf.py` builds it: plain librdkafka, no Rust.
+            let rdkafka_flags = Command::new("pkg-config")
+                .args(["--cflags", "--libs", "rdkafka"])
+                .output()
+                .context("running pkg-config")?;
+            if !rdkafka_flags.status.success() {
+                bail!("pkg-config --cflags --libs rdkafka failed");
+            }
+            let consumer_c = c_harness(repo, Workload::Consumer);
+            if let Some(dir) = consumer_c.parent() {
+                fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+            }
+            step(
+                "librdkafka (C) consumer harness",
+                Command::new("cc")
+                    .args(["-O2", "-march=native", "-o"])
+                    .arg(&consumer_c)
+                    .arg(consumer_compare_dir(repo).join("librdkafka_e2e.c"))
+                    .args(String::from_utf8_lossy(&rdkafka_flags.stdout).split_whitespace())
+                    .args(["-lm", "-lpthread"]),
+            )?;
             // The Rust arm runs `cargo xtask producer-perf-test` or
             // `transactional-producer-perf-test`, both in this test binary;
             // compiling it now keeps the compile out of the first arm.
@@ -1301,12 +1439,30 @@ fn build(group: Group) -> anyhow::Result<()> {
                     ])
                     .current_dir(&rust),
             )?;
+            // Built like the producer harnesses above, without native CPU
+            // flags (a different RUSTFLAGS would rebuild the whole workspace).
+            step(
+                "Rust consumer harness",
+                Command::new(cargo())
+                    .args(["build", "--release", "-p", "consumer-perf"])
+                    .current_dir(&rust),
+            )?;
             let gradle = std::env::var("GRADLE").unwrap_or_else(|_| "gradle".to_string());
             step(
                 "Java (transactional) producer harnesses",
                 Command::new(gradle)
                     .args(["shadowJar", "--console=plain"])
                     .current_dir(repo.join("tools/java-perf-test")),
+            )?;
+            // The kafka-clients it runs against come with the producer jar.
+            step(
+                "Java consumer harness",
+                Command::new("javac")
+                    .arg("-cp")
+                    .arg(java_jar(repo))
+                    .arg("-d")
+                    .arg(java_consumer_classes(repo))
+                    .arg(consumer_compare_dir(repo).join("JavaE2E.java")),
             )?;
         },
         Group::Python => {
@@ -1360,7 +1516,7 @@ fn build(group: Group) -> anyhow::Result<()> {
         },
     }
     for arm in group.arms() {
-        for workload in [Workload::Producer, Workload::Transactional] {
+        for workload in [Workload::Producer, Workload::Transactional, Workload::Consumer] {
             for path in arm.prerequisites(repo, workload) {
                 if !path.exists() {
                     bail!("the build did not produce {} ({})", path.display(), arm.label());
@@ -1545,10 +1701,15 @@ fn run_tests(options: &RunOptions) -> anyhow::Result<()> {
     if !topics_cli.is_file() {
         bail!("{} not found (--kafka-bin)", topics_cli.display());
     }
-    // The eos harnesses fill their source topic with it.
+    // The eos harnesses fill their source topic with it; the consumer tests'
+    // load comes from it.
     let seeder = options.kafka_bin.join("kafka-producer-perf-test.sh");
-    if options.tests.iter().any(PerfTest::is_eos) && !seeder.is_file() {
-        bail!("{} not found (--kafka-bin; TXN_MODE=eos needs it)", seeder.display());
+    let needs_seeder = |t: &PerfTest| t.is_eos() || t.workload == Workload::Consumer;
+    if options.tests.iter().any(needs_seeder) && !seeder.is_file() {
+        bail!(
+            "{} not found (--kafka-bin; TXN_MODE=eos and consumer tests need it)",
+            seeder.display()
+        );
     }
     let kafka_bin = fs::canonicalize(&options.kafka_bin)?;
     for &arm in &options.arms {
@@ -1902,12 +2063,16 @@ fn run_arm(ctx: &ArmContext<'_>) -> anyhow::Result<ArmResult> {
 
 fn run_harness(ctx: &ArmContext<'_>, log: &ArmLog) -> anyhow::Result<Outcome> {
     let options = ctx.options;
+    let consumer = ctx.test.workload == Workload::Consumer;
     let mut command = ctx.arm.command(ctx.repo, ctx.test.workload);
-    // The Rust arm runs in the workspace (cargo needs it); every other arm
-    // runs in its own directory, since several harnesses write
+    // The Rust producer arms run in the workspace (cargo needs it); every
+    // other arm runs in its own directory, since several harnesses write
     // metrics.jsonl to the current directory.
-    if ctx.arm != Arm::Rust {
+    if command.get_current_dir().is_none() {
         command.current_dir(&ctx.dir);
+    }
+    if consumer {
+        command.args(consumer_args(ctx));
     }
     for var in HARNESS_VARS {
         command.env_remove(var);
@@ -1943,21 +2108,197 @@ fn run_harness(ctx: &ArmContext<'_>, log: &ArmLog) -> anyhow::Result<Outcome> {
         // kafka-producer-perf-test.sh from here before it measures.
         env.push(("KAFKA_BIN".into(), ctx.kafka_bin.display().to_string()));
     }
+    if consumer {
+        // The Python harness's group (the others take it in
+        // `consumer_args`), and the client defaults for every consumer
+        // setting the test leaves out.
+        env.push(("GROUP_ID".into(), ctx.topic.clone()));
+        env.push(("USE_DEFAULTS".into(), "True".into()));
+    }
     env.extend(ctx.arm.own_env(ctx.repo));
     for (k, v) in &env {
         command.env(k, v);
     }
-    log.line(&format!("==> {}", describe(&command)));
     let minutes = options.warmup_min + options.duration_min + ctx.test.seed_minutes(options.duration_min);
     let timeout = Duration::from_secs(minutes * 60) + ARM_TIMEOUT_SLACK;
-    Ok(match run_logged(&mut command, log, timeout)? {
+    let load = if consumer {
+        if log.interrupted() {
+            return Ok(Outcome::Failed(INTERRUPTED.to_string()));
+        }
+        let load_log = ArmLog::create(&ctx.dir.join("load.log"), Arc::clone(&ctx.redactions), ctx.signals_baseline)?;
+        log.line("==> load generator started, output in load.log");
+        Some(LoadGenerator::start(ctx, timeout.as_secs(), &load_log)?)
+    } else {
+        None
+    };
+    log.line(&format!("==> {}", describe(&command)));
+    // The load is stopped whatever became of the harness.
+    let exit = run_logged(&mut command, log, timeout);
+    let load_stopped = match load {
+        Some(load) => load.stop()?,
+        None => None,
+    };
+    let outcome = match exit? {
         Exit::Status(status) if status.success() => Outcome::Passed,
         Exit::Status(status) => Outcome::Failed(format!("harness exited with {status}")),
         Exit::TimedOut => {
             Outcome::Failed(format!("harness still running after {} min; stopped", timeout.as_secs() / 60))
         },
         Exit::Interrupted => Outcome::Failed(INTERRUPTED.to_string()),
+    };
+    Ok(match (outcome, load_stopped) {
+        // Part of the run had no load: whatever the harness measured, it is
+        // not the test's.
+        (_, Some(reason)) if !log.interrupted() => Outcome::Failed(reason),
+        (outcome, _) => outcome,
     })
+}
+
+/// The command-line options of a consumer harness other than Python's (which
+/// reads the environment): the arm's topic, its group (named after the
+/// topic), the measured seconds, the warmup, the consumer settings the test
+/// sets, where the harness writes `results.json`, and that the driver
+/// produces the load (`--no-produce`). These harnesses count their warmup in
+/// records: at the test's fixed rate, `LIMIT_RPS` × the warmup seconds stand
+/// for the warmup minutes.
+fn consumer_args(ctx: &ArmContext<'_>) -> Vec<String> {
+    let options = ctx.options;
+    let test = ctx.test;
+    let (warmup_flag, settings) = match ctx.arm {
+        Arm::Rust => ("--warmup-messages", CONSUMER_FLAGS),
+        Arm::Java => ("--warmup", CONSUMER_FLAGS),
+        Arm::Librdkafka => ("--warmup", LIBRDKAFKA_CONSUMER_FLAGS),
+        Arm::PythonSyncRust | Arm::PythonSyncLibrdkafka | Arm::PythonAsyncRust | Arm::PythonAsyncLibrdkafka => {
+            return Vec::new();
+        },
+    };
+    let rate = test.number("LIMIT_RPS");
+    let warmup_records = rate * options.warmup_min * 60;
+    let dir = ctx.dir.display().to_string();
+    let mut args: Vec<String> = Vec::new();
+    let mut pairs: Vec<(&str, String)> = vec![
+        ("--bootstrap", options.bootstrap.clone()),
+        ("--topic", ctx.topic.clone()),
+        ("--group-id", ctx.topic.clone()),
+        ("--duration", (options.duration_min * 60).to_string()),
+        (warmup_flag, warmup_records.to_string()),
+        ("--results-file", ctx.dir.join("results.json").display().to_string()),
+    ];
+    for (key, flag) in settings {
+        if let Some(value) = test.setting(key) {
+            pairs.push((flag, value.to_string()));
+        }
+    }
+    match ctx.arm {
+        // The C harness reads SASL from the environment.
+        Arm::Rust | Arm::Librdkafka => {
+            // Its MiB/s are records × this size; the rate is for its banner.
+            pairs.push(("--message-size", test.number("VALUE_SIZE").to_string()));
+            pairs.push(("--throughput", rate.to_string()));
+            pairs.push(("--results-dir", dir));
+        },
+        _ => {},
+    }
+    if matches!(ctx.arm, Arm::Rust | Arm::Java) {
+        pairs.push(("--client-config", ctx.client_properties.display().to_string()));
+    }
+    for (flag, value) in pairs {
+        args.push(flag.to_string());
+        args.push(value);
+    }
+    match ctx.arm {
+        Arm::Rust => args.extend(["--no-produce".to_string(), "--no-create-topic".to_string()]),
+        Arm::Librdkafka => args.push("--no-produce".to_string()),
+        _ => {},
+    }
+    args
+}
+
+/// The Rust and Java consumer harnesses' option for each consumer setting.
+const CONSUMER_FLAGS: &[(&str, &str)] = &[
+    ("FETCH_MIN_BYTES", "--fetch-min-bytes"),
+    ("FETCH_MAX_WAIT_MS", "--fetch-max-wait-ms"),
+    ("MAX_PARTITION_FETCH_BYTES", "--max-partition-fetch-bytes"),
+    ("MAX_POLL_RECORDS", "--max-poll-records"),
+];
+
+/// The librdkafka (C) consumer harness's, after librdkafka's names.
+const LIBRDKAFKA_CONSUMER_FLAGS: &[(&str, &str)] = &[
+    ("FETCH_MIN_BYTES", "--fetch-min-bytes"),
+    ("FETCH_MAX_WAIT_MS", "--fetch-wait-max-ms"),
+    ("MAX_PARTITION_FETCH_BYTES", "--fetch-message-max-bytes"),
+    ("MAX_POLL_RECORDS", "--max-poll-records"),
+];
+
+/// Kafka's `kafka-producer-perf-test.sh` producing a consumer test's load
+/// into the arm's topic at `LIMIT_RPS`, with the test's `VALUE_SIZE` and
+/// `COMPRESSION_TYPE`. It starts before the harness and stops after it, so
+/// every client reads the same load from the same producer. It runs on this
+/// machine, so the records' CreateTime and the consumer's clock agree: a
+/// consumer's latency is end to end. Its output goes to the arm's `load.log`.
+struct LoadGenerator {
+    child: Child,
+    pgid: u32,
+    pumps: Vec<JoinHandle<()>>,
+}
+
+impl LoadGenerator {
+    /// Start it with `seconds` of records: the harness is stopped before it
+    /// could read them all, so a generator that ends first has failed.
+    fn start(ctx: &ArmContext<'_>, seconds: u64, log: &ArmLog) -> anyhow::Result<LoadGenerator> {
+        let test = ctx.test;
+        let rate = test.number("LIMIT_RPS");
+        let mut command = Command::new(ctx.kafka_bin.join("kafka-producer-perf-test.sh"));
+        command
+            .arg("--topic")
+            .arg(&ctx.topic)
+            .arg("--num-records")
+            .arg((rate * seconds).to_string())
+            .arg("--record-size")
+            .arg(test.number("VALUE_SIZE").to_string())
+            .arg("--throughput")
+            .arg(rate.to_string())
+            .arg("--producer.config")
+            .arg(ctx.client_properties)
+            // As the EC2 runs. A consumer sees a record once it is
+            // replicated, whatever the producer's acks.
+            .args(["--producer-props", "acks=1"]);
+        if let Some(codec) = test.setting("COMPRESSION_TYPE") {
+            command.arg(format!("compression.type={codec}"));
+        }
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        log.line(&format!("==> {}", describe(&command)));
+        let mut child = command.spawn().with_context(|| format!("starting {}", describe(&command)))?;
+        let pgid = child.id();
+        let pumps = [
+            pump(child.stdout.take(), log, None),
+            pump(child.stderr.take(), log, None),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        Ok(LoadGenerator { child, pgid, pumps })
+    }
+
+    /// Stop it. `Some(reason)` when it had already stopped by itself, so part
+    /// of the run had no load.
+    fn stop(mut self) -> anyhow::Result<Option<String>> {
+        let stopped = self.child.try_wait()?;
+        if stopped.is_none() {
+            stop_group(&mut self.child, self.pgid, STOP_GRACE)?;
+        }
+        reap_group(&mut self.child, self.pgid)?;
+        for p in self.pumps {
+            let _ = p.join();
+        }
+        Ok(stopped.map(|status| {
+            format!("the load generator (kafka-producer-perf-test.sh) stopped with {status} before the harness; see load.log")
+        }))
+    }
 }
 
 fn topics_command(ctx: &ArmContext<'_>) -> Command {
@@ -2466,6 +2807,22 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
             ),
             "eos-fixed-1k-1kb-36p-1000-per-txn-abort12p5-16-producers"
         );
+        assert_eq!(
+            id("WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=10000"),
+            "consumer-fixed-10k-1kb-200p"
+        );
+        // Any consumer setting a test sets differs from a client default.
+        assert_eq!(
+            id("WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=10000 FETCH_MIN_BYTES=4194304 MAX_POLL_RECORDS=4000"),
+            "consumer-fixed-10k-1kb-200p-fetchmin4mb-maxpoll4000"
+        );
+        assert_eq!(
+            id(
+                "WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=100 LIMIT_RPS=1500 COMPRESSION_TYPE=lz4 \
+                FETCH_MAX_WAIT_MS=100 MAX_PARTITION_FETCH_BYTES=4194304"
+            ),
+            "consumer-fixed-1500-100b-36p-lz4-fetchwait100ms-partfetch4mb"
+        );
         // Too long: cut, with a hash of the whole name.
         let long = id(
             "PARTITIONS=200 VALUE_SIZE=1048576 LIMIT_RPS=0 KEY_SIZE=1024 ACKS=1 COMPRESSION_TYPE=zstd \
@@ -2492,8 +2849,8 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
         let base = "PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=100";
         for (extra, message) in [
             (
-                "WORKLOAD=consumer",
-                "--scenario: WORKLOAD=consumer: expected `producer` or `transactional`",
+                "WORKLOAD=consume",
+                "--scenario: WORKLOAD=consume: expected `producer`, `transactional` or `consumer`",
             ),
             ("WORKLOAD=producer WORKLOAD=producer", "--scenario: `WORKLOAD` is set twice"),
             (
@@ -2528,12 +2885,38 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
                 "TXN_MODE=consume: expected `produce` or `eos`",
             ),
             ("WORKLOAD=transactional RECORDS_PER_TRANSACTION=0", "RECORDS_PER_TRANSACTION=0"),
+            (
+                "WORKLOAD=consumer BATCH_SIZE=1024",
+                "--scenario: BATCH_SIZE does not apply to consumer tests (their load comes from Kafka's \
+                 kafka-producer-perf-test.sh)",
+            ),
+            ("WORKLOAD=consumer ACKS=1", "--scenario: ACKS does not apply to consumer tests"),
+            (
+                "WORKLOAD=consumer KEY_SIZE=16",
+                "--scenario: KEY_SIZE does not apply to consumer tests",
+            ),
+            (
+                "WORKLOAD=consumer ABORT_RATE=0.5",
+                "--scenario: ABORT_RATE applies to transactional tests only",
+            ),
+            (
+                "FETCH_MIN_BYTES=1",
+                "--scenario: FETCH_MIN_BYTES applies to consumer tests only (WORKLOAD=consumer)",
+            ),
+            (
+                "WORKLOAD=transactional MAX_POLL_RECORDS=500",
+                "--scenario: MAX_POLL_RECORDS applies to consumer tests only",
+            ),
+            ("WORKLOAD=consumer FETCH_MIN_BYTES=0", "FETCH_MIN_BYTES=0"),
+            ("WORKLOAD=consumer MAX_POLL_RECORDS=0", "MAX_POLL_RECORDS=0"),
         ] {
             let e = err(&format!("{base} {extra}"));
             assert!(e.contains(message), "{extra}: {e}");
         }
         let e = err("WORKLOAD=transactional TXN_MODE=eos PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0");
         assert!(e.contains("TXN_MODE=eos needs LIMIT_RPS above 0"), "{e}");
+        let e = err("WORKLOAD=consumer PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0");
+        assert!(e.contains("WORKLOAD=consumer needs LIMIT_RPS above 0"), "{e}");
         assert_eq!(err("PARTITIONS=1 VALUE_SIZE=1"), "--scenario must set LIMIT_RPS");
         // Accepted: idempotence with acks=all / -1 and at most 5 in flight,
         // and the transactional settings.
@@ -2542,6 +2925,8 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
             "ENABLE_IDEMPOTENCE=false ACKS=0 MAX_IN_FLIGHT=1000",
             "WORKLOAD=transactional TXN_MODE=eos ABORT_RATE=0 RECORDS_PER_TRANSACTION=10 NUM_TRANSACTIONAL_PRODUCERS=16",
             "WORKLOAD=transactional ABORT_RATE=1.0",
+            "WORKLOAD=consumer COMPRESSION_TYPE=lz4 FETCH_MIN_BYTES=1 FETCH_MAX_WAIT_MS=0 \
+             MAX_PARTITION_FETCH_BYTES=1048576 MAX_POLL_RECORDS=500",
         ] {
             parse_scenario(&format!("{base} {ok}"), Group::Rust).unwrap();
         }
@@ -2716,6 +3101,214 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
         assert_eq!(Arm::Java.expected_client(Workload::Transactional), "java-txn");
         assert_eq!(Arm::PythonAsyncRust.expected_client(Workload::Producer), "python-rust-async");
         assert_eq!(Arm::PythonAsyncRust.expected_client(Workload::Transactional), "python-rust-txn");
+
+        assert_eq!(args(Arm::Rust, Workload::Consumer), ["/repo/rust/target/release/consumer-perf"]);
+        assert!(Arm::Rust.command(repo, Workload::Consumer).get_current_dir().is_none());
+        assert_eq!(
+            args(Arm::Librdkafka, Workload::Consumer),
+            ["/repo/rust/consumer-perf/compare/build/librdkafka_e2e"]
+        );
+        assert_eq!(
+            args(Arm::Java, Workload::Consumer),
+            [
+                "java",
+                "-cp",
+                &format!("{jar}:/repo/rust/consumer-perf/compare/build"),
+                "JavaE2E"
+            ]
+        );
+        assert_eq!(
+            args(Arm::PythonAsyncLibrdkafka, Workload::Consumer),
+            [
+                "/repo/venv-librdkafka/bin/python",
+                "/repo/python/test/performance/consumer_performance_test.py"
+            ]
+        );
+        assert_eq!(
+            Arm::Rust.prerequisites(repo, Workload::Consumer),
+            [PathBuf::from("/repo/rust/target/release/consumer-perf")]
+        );
+        assert_eq!(
+            Arm::Java.prerequisites(repo, Workload::Consumer),
+            [
+                PathBuf::from(jar),
+                PathBuf::from("/repo/rust/consumer-perf/compare/build/JavaE2E.class")
+            ]
+        );
+        assert_eq!(Arm::Librdkafka.expected_client(Workload::Consumer), "librdkafka-consumer");
+        assert_eq!(
+            Arm::PythonAsyncLibrdkafka.expected_client(Workload::Consumer),
+            "python-librdkafka-async-consumer"
+        );
+    }
+
+    /// The options `consumer_args` gives `arm` for a consumer `scenario`.
+    fn consumer_args_for(scenario: &str, arm: Arm) -> Vec<String> {
+        let mut options = options(Group::Rust, 0, 30);
+        options.bootstrap = "broker:9092".to_string();
+        let test = parse_scenario(scenario, Group::Rust).unwrap();
+        let credentials = Credentials { key: "KEY".to_string(), secret: "hunter2".to_string() };
+        let ctx = ArmContext {
+            repo: Path::new("/repo"),
+            options: &options,
+            test: &test,
+            arm,
+            dir: PathBuf::from("/results/t/rust"),
+            topic: "perf-t".to_string(),
+            source_topic: None,
+            topics_cli: Path::new("/kafka/bin/kafka-topics.sh"),
+            kafka_bin: Path::new("/kafka/bin"),
+            client_properties: Path::new("/private/client.properties"),
+            credentials: &credentials,
+            redactions: Arc::new(Vec::new()),
+            signals_baseline: 0,
+        };
+        consumer_args(&ctx)
+    }
+
+    #[test]
+    fn passes_a_consumer_test_to_each_harness() {
+        let scenario = "WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=10000 FETCH_MAX_WAIT_MS=100 \
+                        MAX_POLL_RECORDS=4000";
+        let args = |arm: Arm| consumer_args_for(scenario, arm).join(" ");
+        // 30 measured minutes, and 5 warmup minutes at 10,000 msg/s.
+        let common = "--bootstrap broker:9092 --topic perf-t --group-id perf-t --duration 1800";
+        let results = "--results-file /results/t/rust/results.json";
+        assert_eq!(
+            args(Arm::Rust),
+            format!(
+                "{common} --warmup-messages 3000000 {results} --fetch-max-wait-ms 100 --max-poll-records 4000 \
+                 --message-size 1024 --throughput 10000 --results-dir /results/t/rust \
+                 --client-config /private/client.properties --no-produce --no-create-topic"
+            )
+        );
+        assert_eq!(
+            args(Arm::Librdkafka),
+            format!(
+                "{common} --warmup 3000000 {results} --fetch-wait-max-ms 100 --max-poll-records 4000 \
+                 --message-size 1024 --throughput 10000 --results-dir /results/t/rust --no-produce"
+            )
+        );
+        assert_eq!(
+            args(Arm::Java),
+            format!(
+                "{common} --warmup 3000000 {results} --fetch-max-wait-ms 100 --max-poll-records 4000 \
+                 --client-config /private/client.properties"
+            )
+        );
+        // The Python harness reads the environment.
+        for arm in Group::Python.arms() {
+            assert_eq!(args(*arm), "", "{arm:?}");
+        }
+        // The credentials never reach a command line.
+        for arm in Group::Rust.arms() {
+            assert!(!args(*arm).contains("hunter2"), "{arm:?}");
+        }
+    }
+
+    /// Each option the driver gives a consumer harness is one the harness
+    /// parses.
+    #[test]
+    fn consumer_harnesses_parse_what_they_are_given() {
+        let scenario = "WORKLOAD=consumer PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=1 FETCH_MIN_BYTES=1 FETCH_MAX_WAIT_MS=1 \
+                        MAX_PARTITION_FETCH_BYTES=1 MAX_POLL_RECORDS=1";
+        let repo = repo_root();
+        for (arm, source) in [
+            (Arm::Rust, "rust/consumer-perf/src/main.rs"),
+            (Arm::Librdkafka, "rust/consumer-perf/compare/librdkafka_e2e.c"),
+            (Arm::Java, "rust/consumer-perf/compare/JavaE2E.java"),
+        ] {
+            let text = fs::read_to_string(repo.join(source)).unwrap();
+            let args = consumer_args_for(scenario, arm);
+            let flags: Vec<&String> = args.iter().filter(|a| a.starts_with("--")).collect();
+            // Every consumer setting is passed.
+            assert_eq!(
+                flags.iter().filter(|f| f.contains("fetch") || f.contains("poll")).count(),
+                4,
+                "{args:?}"
+            );
+            for flag in flags {
+                assert!(text.contains(&format!("\"{flag}\"")), "{source} does not parse {flag}");
+            }
+        }
+    }
+
+    #[test]
+    fn runs_the_load_of_a_consumer_test() {
+        // A signal another test raises would read as an interrupt here.
+        let _signals = crate::signals::test_lock();
+        let dir = std::env::temp_dir().join(format!("perf-cloud-load-{}", std::process::id()));
+        let kafka_bin = dir.join("bin");
+        fs::create_dir_all(&kafka_bin).unwrap();
+        let script = kafka_bin.join("kafka-producer-perf-test.sh");
+        let mut options = options(Group::Rust, 0, 30);
+        options.bootstrap = "broker:9092".to_string();
+        let credentials = Credentials { key: "KEY".to_string(), secret: "hunter2".to_string() };
+        // Run the script as the generator until `ready`, then stop it.
+        let run = |scenario: &str, body: &str, ready: &dyn Fn(&mut LoadGenerator, &str) -> bool| {
+            fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            let test = parse_scenario(scenario, Group::Rust).unwrap();
+            let ctx = ArmContext {
+                repo: Path::new("/repo"),
+                options: &options,
+                test: &test,
+                arm: Arm::Rust,
+                dir: dir.clone(),
+                topic: "perf-t".to_string(),
+                source_topic: None,
+                topics_cli: Path::new("/kafka/bin/kafka-topics.sh"),
+                kafka_bin: &kafka_bin,
+                client_properties: Path::new("/private/client.properties"),
+                credentials: &credentials,
+                redactions: Arc::new(vec!["hunter2".to_string()]),
+                signals_baseline: crate::signals::count(),
+            };
+            let log_path = dir.join("load.log");
+            let _ = fs::remove_file(&log_path);
+            let log = ArmLog::create(&log_path, Arc::clone(&ctx.redactions), ctx.signals_baseline).unwrap();
+            let mut load = LoadGenerator::start(&ctx, 90, &log).unwrap();
+            // A new script can take a while to start (macOS checks it first).
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !ready(&mut load, &fs::read_to_string(&log_path).unwrap()) {
+                assert!(Instant::now() < deadline, "the script did not get ready");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let stopped = load.stop().unwrap();
+            drop(log);
+            (stopped, fs::read_to_string(&log_path).unwrap())
+        };
+
+        // Still running at the end: stopped, and not a failure.
+        let (stopped, logged) = run(
+            "WORKLOAD=consumer PARTITIONS=1 VALUE_SIZE=1024 LIMIT_RPS=10000 COMPRESSION_TYPE=lz4",
+            "echo \"args: $*\"; echo hunter2; echo started; exec sleep 60",
+            &|_, logged| logged.contains("started"),
+        );
+        assert_eq!(stopped, None);
+        assert!(
+            logged.contains(
+                "args: --topic perf-t --num-records 900000 --record-size 1024 --throughput 10000 \
+                 --producer.config /private/client.properties --producer-props acks=1 compression.type=lz4"
+            ),
+            "{logged}"
+        );
+        assert!(!logged.contains("hunter2"), "{logged}");
+
+        // Ended before the harness: part of the run had no load.
+        let (stopped, _) = run(
+            "WORKLOAD=consumer PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=1",
+            "exit 3",
+            &|load, _| load.child.try_wait().unwrap().is_some(),
+        );
+        let reason = stopped.unwrap();
+        assert!(
+            reason.starts_with("the load generator (kafka-producer-perf-test.sh) stopped with ")
+                && reason.contains('3')
+                && reason.ends_with(" before the harness; see load.log"),
+            "{reason}"
+        );
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -2741,6 +3334,7 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
             "envLong(",
             "envDouble(",
             "envBool(",
+            "_env_int(",
             "os.environ.get(",
             "os.environ[",
         ];
@@ -2788,6 +3382,9 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
             "c/tests/transactional_producer_perf_test.c",
             "python/test/performance/producer_performance_test.py",
             "python/test/performance/transactional_producer_performance_test.py",
+            // The other consumer harnesses take options, not variables (the C
+            // one reads only the SASL settings and HOME).
+            "python/test/performance/consumer_performance_test.py",
             "python/test/performance/performance_common.py",
             "python/test/performance/librdkafka_helpers.py",
         ]
@@ -2889,6 +3486,25 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
             .unwrap_err()
             .to_string();
         assert_eq!(err, "no `commit_latency_ms`");
+
+        // As the C consumer harness writes it.
+        let consumer = r#"{
+  "test": "consumer",
+  "client": "librdkafka-consumer",
+  "topic": "perf-e2e-c-68117",
+  "messages_measured": 40006,
+  "duration_s": 20.00,
+  "throughput_msg_s": 2000.14,
+  "throughput_mib_s": 1.95,
+  "latency_ms": {"min": 0, "avg": 3.95, "p50": 4, "p90": 7, "p95": 7, "p99": 8, "p999": 18, "max": 23},
+  "cpu_avg_pct": 1.45,
+  "rss_avg_kib": 16442.67
+}"#;
+        let m = Metrics::from_results(consumer).unwrap();
+        assert_eq!(m.client, "librdkafka-consumer");
+        assert_eq!(m.msg_s, 2000.14);
+        assert_eq!(m.p99, 8.0);
+        assert_eq!(m.txn, None);
     }
 
     #[test]

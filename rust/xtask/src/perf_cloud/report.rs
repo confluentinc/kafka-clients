@@ -150,6 +150,7 @@ pub(crate) fn scenario(test: &PerfTest) -> String {
     let workload = match test.workload {
         Workload::Producer => "producer".to_string(),
         Workload::Transactional => format!("transactional ({})", test.setting("TXN_MODE").unwrap_or("produce")),
+        Workload::Consumer => "consumer".to_string(),
     };
     let mut parts = vec![
         workload,
@@ -173,6 +174,10 @@ pub(crate) fn scenario(test: &PerfTest) -> String {
         ("RECORDS_PER_TRANSACTION", "records per transaction", ""),
         ("ABORT_RATE", "abort rate", ""),
         ("NUM_TRANSACTIONAL_PRODUCERS", "transactional producers", ""),
+        ("FETCH_MIN_BYTES", "fetch.min.bytes", " B"),
+        ("FETCH_MAX_WAIT_MS", "fetch.max.wait.ms", " ms"),
+        ("MAX_PARTITION_FETCH_BYTES", "max.partition.fetch.bytes", " B"),
+        ("MAX_POLL_RECORDS", "max.poll.records", ""),
     ];
     for (key, label, unit) in units {
         if let Some(v) = test.setting(key) {
@@ -357,6 +362,15 @@ fn test_table(out: &mut String, info: &RunInfo, columns: &[Column], result: &Tes
                 .to_string(),
         );
     }
+    let consumer = test.workload == Workload::Consumer;
+    if consumer {
+        notes.push(
+            "Each client read the same load: Kafka's kafka-producer-perf-test.sh at the test's rate, on the same \
+             machine. A record's latency runs from its creation by that producer to the consumer's poll (end to \
+             end); CPU and RSS are the consumer's alone."
+                .to_string(),
+        );
+    }
     // The committed rate a fixed-rate test aims at: its aborted transactions'
     // records are sent but not counted.
     let abort_rate: f64 = test.setting("ABORT_RATE").and_then(|v| v.parse().ok()).unwrap_or(0.0);
@@ -368,9 +382,10 @@ fn test_table(out: &mut String, info: &RunInfo, columns: &[Column], result: &Tes
         if let Some(limit) = info.ingress_mb_s {
             if mb_s(m) >= NEAR_INGRESS_SHARE * limit {
                 notes.push(format!(
-                    "⚠️ {} produced {:.0} MB/s, {:.0}% of the cluster's {limit:.0} MB/s ingress limit: the cluster may \
+                    "⚠️ {} {} {:.0} MB/s, {:.0}% of the cluster's {limit:.0} MB/s ingress limit: the cluster may \
                      have capped it.",
                     arm.label(),
+                    if consumer { "consumed" } else { "produced" },
                     mb_s(m),
                     100.0 * mb_s(m) / limit
                 ));
