@@ -828,7 +828,7 @@ impl RecordAccumulator {
         //     `max.block.ms` inside `free.allocate`. Java has no analogue — threads
         //     have no cancellation — so this exit exists only in Rust
         //     (CLAUDE.md §11.6). A lost `appends_in_progress` decrement makes
-        //     `abort_incomplete_batches` never leave its (non-yielding) loop.
+        //     `abort_incomplete_batches` never leave its loop.
         let mut guard = AppendGuard::new(&self.free, &self.appends_in_progress);
 
         self.append_inner(
@@ -2309,8 +2309,15 @@ impl RecordAccumulator {
     }
 
     /// Abort all incomplete batches.
+    ///
+    /// Unlike the Java method, this is `async`: the loop must yield between
+    /// iterations so that pending appends can complete.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#abortIncompleteBatches")]
-    pub fn abort_incomplete_batches(&self) {
+    pub async fn abort_incomplete_batches(&self) {
+        // We need to keep aborting the incomplete batch until no task is trying to append to
+        // 1. Avoid losing batches.
+        // 2. Free up memory in case appending tasks are blocked on buffer full.
+        // This is a tight loop but should be able to get through very quickly.
         loop {
             // Java's no-argument `abortBatches()` (Java 1193-1195) supplies this
             // reason; Rust has no overloading, so it is inlined at the two call
@@ -2319,7 +2326,16 @@ impl RecordAccumulator {
             if !self.appends_in_progress() {
                 break;
             }
+            // A pending append is typically blocked in `BufferPool::allocate` and has
+            // been woken by the abort above. In Java it runs on its own thread,
+            // concurrently with this loop. Here it is a task on the same runtime, so
+            // this task must yield for it to make progress; on a single-worker
+            // runtime the loop would otherwise never terminate.
+            tokio::task::yield_now().await;
         }
+        // After this point, no task will append any messages because they will see the close
+        // flag set. We need to do the last abort after no task was appending in case there was a new
+        // batch appended by the last appending task.
         self.abort_batches(Self::producer_closed_forcefully_error());
         self.topic_info_map.clear();
     }
@@ -4675,7 +4691,7 @@ mod tests {
             }
         }
 
-        accum.abort_incomplete_batches();
+        accum.abort_incomplete_batches().await;
         assert_eq!(num_records, callback_count.load(std::sync::atomic::Ordering::SeqCst));
         assert!(!accum.has_undrained());
     }
@@ -6341,6 +6357,96 @@ mod tests {
 
         assert!(err.callback.is_some(), "the callback must be handed back, not dropped");
         assert_eq!(0, fired.load(Ordering::SeqCst), "`append` must not fire the callback itself");
+    }
+
+    /// Verifies that a force close completes while an append is blocked on buffer
+    /// memory, on both a single-worker and a multi-worker runtime, and that the
+    /// blocked append fails with the `BufferPool` error message.
+    ///
+    /// Regression test: `abort_incomplete_batches` did not yield between iterations,
+    /// so on a single-worker runtime the blocked append could not run and the loop
+    /// did not terminate. Each runtime runs on a dedicated thread so that a hang is
+    /// reported as a test failure.
+    #[test]
+    fn test_force_close_with_a_send_waiting_for_memory_finishes() {
+        for workers in [1usize, 2] {
+            let (result_tx, result_rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let runtime = if workers == 1 {
+                    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+                } else {
+                    tokio::runtime::Builder::new_multi_thread()
+                        .worker_threads(workers)
+                        .enable_all()
+                        .build()
+                        .unwrap()
+                };
+                let result = runtime.block_on(force_close_with_a_send_waiting_for_memory());
+                let _ = result_tx.send(result);
+            });
+            let send_result = result_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap_or_else(|_| panic!("the force close must finish ({workers} worker threads)"));
+            assert_eq!(
+                Err("Producer closed while allocating memory".to_string()),
+                send_result,
+                "{workers} worker threads"
+            );
+        }
+    }
+
+    /// Exhausts the buffer pool, starts an append that blocks on memory, performs the
+    /// Sender's force-close sequence, and returns the result of the blocked append.
+    async fn force_close_with_a_send_waiting_for_memory() -> Result<(), String> {
+        let n1 = node1();
+        let batch_size = 1024 + RecordBatch::RECORD_BATCH_OVERHEAD as i32;
+        // Capacity for two batches; a third allocation blocks.
+        let accum = Arc::new(create_test_accumulator(
+            batch_size,
+            2 * batch_size as i64,
+            Compression::none().build(),
+            10,
+        ));
+        let cluster = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0)), (1, Some(0))])
+            .cluster()
+            .clone();
+        // Each record requires a batch of its own.
+        let big = vec![b'v'; 900];
+        for partition in [0, 1] {
+            accum
+                .append(TOPIC, partition, 0, Some(&key()), Some(&big), &[], None, 0, 0, &cluster)
+                .await
+                .unwrap();
+        }
+        assert_eq!(0, accum.free.available_memory(), "both batches should have drained the pool");
+
+        let appender = {
+            let accum = Arc::clone(&accum);
+            let cluster = cluster.clone();
+            let big = big.clone();
+            tokio::spawn(async move {
+                accum
+                    .append(TOPIC, 0, 0, Some(&key()), Some(&big), &[], None, 5_000, 0, &cluster)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.error.to_string())
+            })
+        };
+        while accum.free.queued() != 1 {
+            tokio::task::yield_now().await;
+        }
+
+        // Force-close sequence of the Sender: the accumulator is closed by
+        // `initiate_close`, then `Sender::run` aborts the incomplete batches.
+        let sender = {
+            let accum = Arc::clone(&accum);
+            tokio::spawn(async move {
+                accum.close();
+                accum.abort_incomplete_batches().await;
+            })
+        };
+        sender.await.unwrap();
+        appender.await.unwrap()
     }
 
     /// Java brackets the whole of `append` in
