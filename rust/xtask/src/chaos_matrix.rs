@@ -1221,7 +1221,7 @@ enum Ended {
 /// Stop process group `pgid`, led by `child`: SIGINT, then SIGKILL once
 /// `grace` has passed — or at once when another signal reaches the runner
 /// meanwhile (a second Ctrl-C). Returns when the group is gone.
-fn stop_group(child: &mut Child, pgid: u32, grace: Duration) -> anyhow::Result<()> {
+pub(crate) fn stop_group(child: &mut Child, pgid: u32, grace: Duration) -> anyhow::Result<()> {
     let signals_before = crate::signals::count();
     signal_group(pgid, "INT");
     // Wait for the whole group, not just `child`: a process the test started
@@ -1949,7 +1949,7 @@ fn unused_path(path: &Path) -> PathBuf {
 }
 
 /// The current UTC time as `YYYY-MM-DDTHH:MM:SSZ`.
-fn now_utc() -> String {
+pub(crate) fn now_utc() -> String {
     Command::new("date")
         .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
         .output()
