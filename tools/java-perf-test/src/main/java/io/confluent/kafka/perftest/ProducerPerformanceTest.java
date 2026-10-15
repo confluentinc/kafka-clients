@@ -73,6 +73,7 @@ import java.util.concurrent.atomic.AtomicLong;
  *   LINGER_MS               linger.ms
  *   COMPRESSION_TYPE        none / gzip / snappy / lz4 / zstd (default none)
  *   ENABLE_IDEMPOTENCE      true / false (default false)
+ *   ACKS                    all / -1 / 1 / 0 (default all)
  *   USE_DEFAULTS            True / False (default False); omit all tuning knobs, use client defaults
  *   MAX_IN_FLIGHT           max.in.flight.requests.per.connection
  *   WARMUP_SECONDS          warmup duration (default 0)
@@ -442,7 +443,7 @@ public class ProducerPerformanceTest {
         // Python, C and Rust producer performance tests' USE_DEFAULTS behavior.
         boolean useDefaults = "True".equals(System.getenv("USE_DEFAULTS"));
         if (!useDefaults) {
-            conf.put(ProducerConfig.ACKS_CONFIG, "all");
+            conf.put(ProducerConfig.ACKS_CONFIG, envOr("ACKS", "all"));
             conf.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, "60000");
 
             // batch.size: default 1 MiB (1024 KiB); env value is in KiB. Matches
