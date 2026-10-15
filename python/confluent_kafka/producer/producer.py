@@ -32,7 +32,7 @@ import concurrent.futures
 import logging
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Generic, TypeVar
 
@@ -43,13 +43,13 @@ from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.null_pointer_error import NullPointerError
 
 from ._base import (
-    CLOSED_WHILE_SENDING_MESSAGE,
     FLUSH_IN_CALLBACK_MESSAGE,
     LONG_MAX_VALUE,
     _ProducerState,
     await_payload,
     check_group_metadata,
     close_timeout_ms,
+    closed_while_sending,
     force_close,
     group_metadata_handle,
     offsets_to_spec,
@@ -76,6 +76,39 @@ K = TypeVar("K")
 V = TypeVar("V")
 
 _LOG = logging.getLogger("confluent_kafka.producer")
+
+
+class _Completion:
+    """The completion callback of a send that is not waited for, Java's
+    ``ProducerBatch.completeFutureAndFireCallbacks`` for one record.
+
+    Runs on the C completion thread with the GIL held; as in Java, the
+    callback runs before the future completes. Then the future is untracked
+    (see _ProducerState._track). It is one object rather than a closure over
+    its values, so a record in flight keeps fewer objects alive for the garbage
+    collector to scan.
+    """
+
+    __slots__ = ("_producer", "_callback", "_future", "_topic", "_partition", "_untrack")
+
+    def __init__(self, producer: object, callback: Callback | None,
+                 future: Future[RecordMetadata], topic: str, partition: int | None,
+                 untrack: Callable[[Future[RecordMetadata]], None]) -> None:
+        self._producer = producer
+        self._callback = callback
+        self._future = future
+        self._topic = topic
+        self._partition = partition
+        self._untrack = untrack
+
+    def __call__(self, result: int, error: int, immediate: bool) -> None:
+        metadata, exception = completion_to_python(result, error, self._topic, self._partition)
+        invoke_callback(self._producer, self._callback, metadata, exception)
+        if exception is not None:
+            self._future.set_exception(exception)
+        else:
+            self._future.set_result(metadata)
+        self._untrack(self._future)
 
 
 class Producer(Generic[K, V], _ProducerState):
@@ -276,23 +309,49 @@ class Producer(Generic[K, V], _ProducerState):
         if callback is UNSET:
             callback = None
         self._check_not_closed()
-        native = self._native_record(record)
-        topic = record.topic()
-        partition = record.partition()
+        native, topic, partition = self._native_parts(record)
         future: Future[RecordMetadata] = Future()
         # Java's FutureRecordMetadata.cancel() returns false: a running future
         # cannot be cancelled.
         future.set_running_or_notify_cancel()
+        if self._transactional and not self._in_transaction:
+            return self._send_waiting(native, topic, partition, callback, future)
 
-        # A transactional producer's send with no transaction started waits
-        # for the handover (below) and raises the error the Rust send() returns:
-        # Java's doSend rethrows those (KafkaProducer.java:1150-1162), where an
-        # ApiException reaches the callback and the future (:1056-1068). Inside
-        # a started transaction the record is not waited for (see
-        # _ProducerState._in_transaction). `waiting` is read and cleared under
-        # `lock`, so an error arriving after the wait ended (a Ctrl+C) goes to
-        # the callback instead.
-        waiting = self._transactional and not self._in_transaction
+        # Not waited for: no transactional.id, or inside a started transaction.
+        cb = _Completion(self, callback, future, topic, partition, self._discard_future)
+        space: Future[None] | None = None
+        # A close() that began since the check above (the serializers ran in
+        # between) refuses the record as Java's RecordAccumulator.append does.
+        with self._send_use as c_producer:
+            full = _lib.Producer_send(c_producer, native, cb)
+            if full is None:
+                raise closed_while_sending()
+            self._track(future)
+            if full:
+                # The buffer is full: wait (below, not as a use) until the send
+                # task frees capacity, as Java's send() blocks on buffer.memory.
+                waiter: Future[None] = Future()
+                if not _lib.Producer_on_space_available(
+                        c_producer, lambda: waiter.set_result(None)):
+                    space = waiter
+        if space is not None:
+            space.result()
+        return future
+
+    def _send_waiting(self, native: object, topic: str, partition: int | None,
+                      callback: Callback | None,
+                      future: Future[RecordMetadata]) -> Future[RecordMetadata]:
+        """``send()`` of a transactional producer with no transaction started.
+
+        It waits for the handover and raises the error the Rust send() returns:
+        Java's doSend rethrows those (KafkaProducer.java:1143-1155), where an
+        ApiException reaches the callback and the future (:1130-1142). Inside a
+        started transaction the record is not waited for (see
+        _ProducerState._in_transaction). `waiting` is read and cleared under
+        `lock`, so an error arriving after the wait ended (a Ctrl+C) goes to the
+        callback instead.
+        """
+        waiting = True
         rethrown: Exception | None = None
         lock = threading.Lock()
 
@@ -312,21 +371,18 @@ class Producer(Generic[K, V], _ProducerState):
                 future.set_exception(exception)
             else:
                 future.set_result(metadata)
+            self._discard_future(future)
 
-        # A close() that began since the check above (the serializers ran in
-        # between) refuses the record as Java's RecordAccumulator.append does.
-        closed_while_sending = KafkaError(message=CLOSED_WHILE_SENDING_MESSAGE)
         space: Future[None] | None = None
         handed_over: threading.Event | None = None
-        with self._use(closed_while_sending) as c_producer:
+        with self._send_use as c_producer:
             full = _lib.Producer_send(c_producer, native, cb)
             if full is None:
-                raise closed_while_sending
+                raise closed_while_sending()
             self._track(future)
-            if waiting:
-                handed_over = threading.Event()
-                if _lib.Producer_drain(c_producer, handed_over.set):
-                    handed_over = None
+            handed_over = threading.Event()
+            if _lib.Producer_drain(c_producer, handed_over.set):
+                handed_over = None
             if full:
                 # The buffer is full: wait (below, not as a use) until the send
                 # task frees capacity, as Java's send() blocks on buffer.memory.
@@ -343,13 +399,12 @@ class Producer(Generic[K, V], _ProducerState):
             if handed_over is not None:
                 handed_over.wait()
         finally:
-            if waiting:
-                with lock:
-                    waiting = False
-                if rethrown is not None:
-                    # The record never reached the producer (Java's doSend
-                    # rethrows the error), so flush() has nothing to wait for.
-                    self._futures.discard(future)
+            with lock:
+                waiting = False
+            if rethrown is not None:
+                # The record never reached the producer (Java's doSend
+                # rethrows the error), so flush() has nothing to wait for.
+                self._futures.discard(future)
         if rethrown is not None:
             raise rethrown
         return future

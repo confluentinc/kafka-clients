@@ -33,6 +33,7 @@ import itertools
 import logging
 import math
 import os
+import random
 import signal
 import subprocess
 import sys
@@ -356,7 +357,7 @@ def test_kafka_producer_config_route_serializer() -> None:
         _UpperSerializer.configured.clear()
         p = cls(configs={**UNREACHABLE, "key.serializer": route, "value.serializer": route})
         try:
-            native = p._native_record(ProducerRecord(topic=TOPIC, key="k", value="abc"))  # noqa: SLF001
+            native = p._native_parts(ProducerRecord(topic=TOPIC, key="k", value="abc"))[0]  # noqa: SLF001
             assert (native.key, native.value) == (b"K", b"ABC")
             assert _UpperSerializer.configured == [True, False]
         finally:
@@ -365,7 +366,7 @@ def test_kafka_producer_config_route_serializer() -> None:
         p = cls(configs={**UNREACHABLE, "key.serializer": route, "value.serializer": route},
                 value_serializer=string_serializer())
         try:
-            native = p._native_record(ProducerRecord(topic=TOPIC, key="k", value="abc"))  # noqa: SLF001
+            native = p._native_parts(ProducerRecord(topic=TOPIC, key="k", value="abc"))[0]  # noqa: SLF001
             assert (native.key, native.value) == (b"K", b"abc")
             assert _UpperSerializer.configured == [True]
         finally:
@@ -412,9 +413,45 @@ class _UpperSerializer:
 def _native(record: ProducerRecord[Any, Any], **kwargs: Any) -> Any:
     p = KafkaProducer(configs=UNREACHABLE, **kwargs)
     try:
-        return p._native_record(record)  # noqa: SLF001 - the struct the FFI reads
+        return p._native_parts(record)[0]  # noqa: SLF001 - the struct the FFI reads
     finally:
         p.close(timeout=0)
+
+
+class _OwnTopic(ProducerRecord[Any, Any]):
+    """A record whose class overrides a getter."""
+
+    __slots__ = ()
+
+    def topic(self) -> str:
+        return "from-the-subclass"
+
+
+def test_send_reads_the_record_through_its_getters() -> None:
+    # Java's doSend reads the record through its getters, so a subclass that
+    # overrides one, and a getter patched on the class, are what is sent.
+    assert _native(_OwnTopic(topic=TOPIC, value=b"v")).topic == "from-the-subclass"
+    from unittest import mock
+
+    with mock.patch.object(ProducerRecord, "partition", lambda self: 4):
+        assert _native(ProducerRecord(topic=TOPIC, value=b"v")).partition == 4
+    assert _native(ProducerRecord(topic=TOPIC, value=b"v")).partition is None
+
+
+def test_send_reads_each_getter_once() -> None:
+    counts: dict[str, int] = {}
+
+    class Counting(ProducerRecord[Any, Any]):
+        __slots__ = ()
+
+        def __getattribute__(self, name: str) -> Any:
+            if name in ("topic", "partition", "timestamp", "key", "value", "headers"):
+                counts[name] = counts.get(name, 0) + 1
+            return object.__getattribute__(self, name)
+
+    _native(Counting(topic=TOPIC, key=b"k", value=b"v"))
+    assert counts == {"topic": 1, "partition": 1, "timestamp": 1, "key": 1, "value": 1,
+                      "headers": 1}
 
 
 def test_headers_reach_the_ffi_struct() -> None:
@@ -1085,6 +1122,285 @@ def test_concurrent_async_closes_tear_down_once(monkeypatch: pytest.MonkeyPatch)
     assert calls == {"shutdown": [c_producer], "destroy": [c_producer]}
 
 
+def test_close_returns_after_every_delivery_callback_has_run() -> None:
+    # The C poll thread runs the delivery callbacks; close() joins it (in
+    # Producer_destroy), as Java's close() joins its I/O thread, so none runs
+    # after close() returns.
+    ran: list[Exception | None] = []
+
+    def callback(md: RecordMetadata, e: Exception | None) -> None:
+        time.sleep(0.02)
+        ran.append(e)
+
+    p = KafkaProducer(configs=UNREACHABLE)
+    for _ in range(10):
+        p.send(record=RECORD, callback=callback)
+    p.close()
+    assert len(ran) == 10
+
+
+async def test_async_close_returns_after_every_delivery_callback_has_run() -> None:
+    ran: list[Exception | None] = []
+
+    def callback(md: RecordMetadata, e: Exception | None) -> None:
+        time.sleep(0.02)
+        ran.append(e)
+
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    for _ in range(10):
+        await p.send(record=RECORD, callback=callback)
+    await p.close()
+    assert len(ran) == 10
+
+
+def test_a_record_that_completes_before_send_tracks_it_is_not_kept(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # The completion untracks a record's future right after completing it. It
+    # can run on the C completion thread before send() tracks the future; then
+    # send() finds the future done and does not keep it, so a later flush()
+    # does not hold it for ever.
+    def complete_at_once(c_producer: int, native: object, cb: Any) -> bool:
+        cb(0, 0, False)
+        return False
+
+    monkeypatch.setattr(_lib, "Producer_send", complete_at_once)
+    p = KafkaProducer(configs=UNREACHABLE)
+    try:
+        future = p.send(record=RECORD)
+        assert future.done()
+        assert not p._futures  # noqa: SLF001
+    finally:
+        monkeypatch.undo()
+        p.close(timeout=0)
+
+
+def test_the_completion_untracks_its_future_without_a_done_callback(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # No done callback of the producer's own is added to a record's future
+    # (asyncio would schedule each one as a loop callback): the completion
+    # removes the future from the tracked set itself.
+    captured: dict[str, Any] = {}
+
+    def hold(c_producer: int, native: object, cb: Any) -> bool:
+        captured["cb"] = cb
+        return False
+
+    monkeypatch.setattr(_lib, "Producer_send", hold)
+    p = KafkaProducer(configs=UNREACHABLE)
+    try:
+        future = p.send(record=RECORD)
+        assert future in p._futures  # noqa: SLF001
+        assert future._done_callbacks == []  # noqa: SLF001 - concurrent.futures' own list
+        captured["cb"](0, 0, False)
+        assert future.done()
+        assert future not in p._futures  # noqa: SLF001
+    finally:
+        monkeypatch.undo()
+        p.close(timeout=0)
+
+
+async def test_an_async_future_its_awaiter_cancelled_is_untracked_by_its_completion(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def hold(c_producer: int, native: object, cb: Any) -> bool:
+        captured["cb"] = cb
+        return False
+
+    monkeypatch.setattr(_lib, "Producer_send", hold)
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    try:
+        future = await p.send(record=RECORD)
+        future.cancel()
+        # Tracked until its completion arrives; a flush() meanwhile sees it as
+        # done and does not wait for it.
+        assert future in p._futures  # noqa: SLF001
+        completer = threading.Thread(target=captured["cb"], args=(0, 0, False))
+        completer.start()
+        completer.join(5)
+        for _ in range(500):
+            if future not in p._futures:  # noqa: SLF001
+                break
+            await asyncio.sleep(0.01)
+        assert future not in p._futures  # noqa: SLF001
+        assert future.cancelled()
+    finally:
+        monkeypatch.undo()
+        await p.close(timeout=0)
+
+
+# ---------------------------------------------------------------------------
+# Tracking and close, together: many senders, completions out of order and
+# before send() tracks its future, cancellations, and close() with records in
+# flight. Every completion untracks its future (no done callback does it).
+# ---------------------------------------------------------------------------
+
+def _completing_send(monkeypatch: pytest.MonkeyPatch, seed: int) -> list[threading.Thread]:
+    """Fake the C send: each record completes successfully, a third of them at
+    once inside the call (before send() tracks the future), the rest on another
+    thread after a short random delay (out of order), as the C completion
+    thread would. Returns the completer threads, for the caller to join."""
+    rng = random.Random(seed)
+    lock = threading.Lock()
+    threads: list[threading.Thread] = []
+
+    def producer_send(c_producer: int, native: Any, cb: Any) -> bool:
+        with lock:
+            at_once = rng.random() < 0.33
+            delay = rng.random() * 0.003
+        if at_once:
+            cb(0, 0, False)
+        else:
+            t = threading.Thread(target=lambda: (time.sleep(delay), cb(0, 0, False)), daemon=True)
+            with lock:
+                threads.append(t)
+            t.start()
+        return False
+
+    monkeypatch.setattr(_lib, "Producer_send", producer_send)
+    return threads
+
+
+def test_many_senders_with_completions_out_of_order_leave_nothing_tracked(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    completers = _completing_send(monkeypatch, seed=1)
+    p = KafkaProducer(configs=UNREACHABLE)
+    callbacks: list[None] = []
+    done_callbacks: list[None] = []
+    futures: list[Any] = []
+    lock = threading.Lock()
+
+    def sender() -> None:
+        for _ in range(250):
+            f = p.send(record=RECORD, callback=lambda md, e: callbacks.append(None))
+            f.add_done_callback(lambda fut: done_callbacks.append(None))
+            with lock:
+                futures.append(f)
+
+    try:
+        threads = [threading.Thread(target=sender) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(30)
+        p.flush()
+        # flush() waited for every record sent before it: all completed, and
+        # each future left the tracked set as its completion completed it.
+        assert all(f.done() for f in futures) and len(futures) == 1000
+        assert len(callbacks) == 1000 and len(done_callbacks) == 1000
+        assert not p._futures  # noqa: SLF001
+    finally:
+        for t in list(completers):
+            t.join(5)
+        monkeypatch.undo()
+        p.close(timeout=0)
+
+
+async def test_async_senders_with_cancellations_leave_nothing_tracked(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    completers = _completing_send(monkeypatch, seed=2)
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    callbacks: list[None] = []
+    done_callbacks: list[None] = []
+    futures: list[Any] = []
+
+    async def sender(n: int) -> None:
+        for i in range(200):
+            f = await p.send(record=RECORD, callback=lambda md, e: callbacks.append(None))
+            f.add_done_callback(lambda fut: done_callbacks.append(None))
+            if i % 10 == n:
+                f.cancel()  # its completion still arrives, runs the callback, untracks it
+            futures.append(f)
+
+    try:
+        await asyncio.gather(*(sender(n) for n in range(4)))
+        await p.flush()
+        for t in list(completers):
+            t.join(5)
+        for _ in range(500):  # the completions of cancelled futures may still be on their way
+            if len(callbacks) == 800 and not p._futures:  # noqa: SLF001
+                break
+            await asyncio.sleep(0.01)
+        assert all(f.done() for f in futures) and len(futures) == 800
+        assert sum(f.cancelled() for f in futures) == 80
+        assert len(callbacks) == 800 and len(done_callbacks) == 800
+        assert not p._futures  # noqa: SLF001
+    finally:
+        monkeypatch.undo()
+        await p.close(timeout=0)
+
+
+def test_close_with_records_in_flight_from_several_threads_completes_and_untracks_all() -> None:
+    # Real native path: the records wait for metadata from an unreachable
+    # broker and fail after max.block.ms. close() returns only after every
+    # callback has run, every future is done, and none is left tracked.
+    p = KafkaProducer(configs=UNREACHABLE)
+    callbacks: list[Exception | None] = []
+    futures: list[Any] = []
+    lock = threading.Lock()
+    started = threading.Barrier(4)
+
+    def sender() -> None:
+        started.wait()
+        for _ in range(4):
+            f = p.send(record=RECORD, callback=lambda md, e: callbacks.append(e))
+            with lock:
+                futures.append(f)
+
+    threads = [threading.Thread(target=sender) for _ in range(3)]
+    for t in threads:
+        t.start()
+    started.wait()
+    for t in threads:
+        t.join(30)
+    p.close()
+    assert len(futures) == 12 and all(f.done() for f in futures)
+    assert len(callbacks) == 12
+    assert not p._futures  # noqa: SLF001
+
+
+async def test_async_close_with_records_in_flight_from_several_tasks_completes_and_untracks_all(
+        ) -> None:
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    callbacks: list[Exception | None] = []
+    futures: list[Any] = []
+
+    async def sender() -> None:
+        for _ in range(4):
+            futures.append(await p.send(record=RECORD, callback=lambda md, e: callbacks.append(e)))
+
+    await asyncio.gather(*(sender() for _ in range(3)))
+    await p.close()
+    assert len(futures) == 12 and all(f.done() for f in futures)
+    assert len(callbacks) == 12
+    assert not p._futures  # noqa: SLF001
+
+
+def test_close_from_a_callback_with_records_in_flight_completes_the_rest() -> None:
+    # The first record's callback closes the producer (from the completion
+    # thread, so with a zero timeout); the records still in flight complete
+    # anyway, their callbacks run, and nothing stays tracked.
+    p = KafkaProducer(configs=UNREACHABLE)
+    callbacks: list[Exception | None] = []
+    closed = threading.Event()
+
+    def first(md: RecordMetadata, e: Exception | None) -> None:
+        callbacks.append(e)
+        p.close()
+        closed.set()
+
+    futures = [p.send(record=RECORD, callback=first)]
+    futures += [p.send(record=RECORD, callback=lambda md, e: callbacks.append(e))
+                for _ in range(5)]
+    assert closed.wait(30)
+    deadline = time.monotonic() + 30
+    while (len(callbacks) < 6 or p._futures) and time.monotonic() < deadline:  # noqa: SLF001
+        time.sleep(0.01)
+    assert len(callbacks) == 6 and all(f.done() for f in futures)
+    assert not p._futures  # noqa: SLF001
+    assert p._closed  # noqa: SLF001
+
+
 def test_an_async_send_racing_close_is_refused_after_its_serializer() -> None:
     started = threading.Event()
 
@@ -1629,7 +1945,7 @@ def test_send_without_memory_for_a_new_batch_raises_memory_error() -> None:
     _run_without_memory("""
 from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
 p = KafkaProducer(configs=UNREACHABLE)
-record = p._native_record(ProducerRecord(topic="t", value=b"v"))
+record = p._native_parts(ProducerRecord(topic="t", value=b"v"))[0]
 refs = sys.getrefcount(record), sys.getrefcount(on_complete)
 outcome = without_memory(_lib.Producer_send, p._c_producer, record, on_complete)
 assert isinstance(outcome, MemoryError), outcome
@@ -1652,7 +1968,7 @@ def test_waiting_for_space_without_memory_does_not_wait() -> None:
 p = KafkaProducer(configs=UNREACHABLE)
 _lib.Producer_test_set_paused(p._c_producer, True)
 futures = [p.send(record=ProducerRecord(topic="t", value=b"v")) for _ in range(BACKPRESSURE_BOUND - 1)]
-record = p._native_record(ProducerRecord(topic="t", value=b"v"))
+record = p._native_parts(ProducerRecord(topic="t", value=b"v"))[0]
 assert _lib.Producer_send(p._c_producer, record, on_complete) is True
 space_cb = lambda: None
 refs = sys.getrefcount(space_cb)
