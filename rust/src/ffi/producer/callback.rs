@@ -524,7 +524,11 @@ mod tests {
     /// completion to its report: the sink, the queued job, and the metadata
     /// handle with its topic `CString`, which the C callback borrows. Nothing
     /// else: no task, no copy of the record (CLAUDE.md §13). A pump costs one
-    /// more, its snapshot of the queue, whatever the number of records.
+    /// more, its snapshot of the queue, whatever the number of records. The
+    /// record's future, which the report completes, adds what completing a
+    /// fresh future costs on the platform: nothing where std's locks are
+    /// futexes (Linux), one allocation per lock at its first use where they
+    /// are pthread-backed (macOS: the future's mutex and its `Notify`'s).
     #[test]
     fn a_delivery_allocates_its_sink_job_and_metadata_handle_only() {
         const RECORDS: usize = 8;
@@ -538,6 +542,13 @@ mod tests {
         let queue = Arc::new(CallbackQueue::new());
         let results = Arc::new(CallbackResults::new());
         let metadata = record_metadata(3);
+        let complete_cost = {
+            let fresh = KafkaFutureImpl::new();
+            let value = metadata.clone();
+            let _guard = crate::AllocTrackingGuard::new();
+            fresh.complete(value);
+            crate::AllocTrackingGuard::count()
+        };
         let mut counts = Vec::new();
         for _ in 0..16 {
             ids.next.store(0, std::sync::atomic::Ordering::SeqCst);
@@ -565,6 +576,9 @@ mod tests {
             counts.push(count);
         }
         // The first round grows the registry's slab and the queue's buffer.
-        assert!(counts[1..].iter().all(|&count| count == 4 * RECORDS + 1), "{counts:?}");
+        assert!(
+            counts[1..].iter().all(|&count| count == (4 + complete_cost) * RECORDS + 1),
+            "{counts:?}, completing a future costs {complete_cost}"
+        );
     }
 }

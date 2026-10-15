@@ -1143,17 +1143,15 @@ mod tests {
     /// Waits until a connect to `127.0.0.1:<port>` is in `SYN_SENT`, which
     /// means the admin's background task is awaiting it. A fixed sleep is not
     /// enough under load: the task may not reach the connect in time. Reads
-    /// `/proc/net/tcp`; where it is missing, falls back to a fixed sleep.
+    /// `/proc/net/tcp`.
+    #[cfg(target_os = "linux")]
     fn wait_for_syn_sent(port: u16) {
         // `rem_address` of a socket connecting to 127.0.0.1:<port>, in the
         // table's little-endian hex, and the `SYN_SENT` state.
         let remote = format!("0100007F:{port:04X}");
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {
-            let Ok(table) = std::fs::read_to_string("/proc/net/tcp") else {
-                std::thread::sleep(Duration::from_millis(500));
-                return;
-            };
+            let table = std::fs::read_to_string("/proc/net/tcp").unwrap();
             let connecting = table.lines().skip(1).any(|line| {
                 let mut columns = line.split_whitespace().skip(2);
                 columns.next() == Some(remote.as_str()) && columns.next() == Some("02")
@@ -1175,6 +1173,13 @@ mod tests {
     /// blocking `get` waiting on the call's future still returns, the `get_cb`
     /// still fires, both with the "client destroyed" error, and a `get` after
     /// the destroy returns at once.
+    ///
+    /// Linux only: the stuck connect relies on Linux dropping the SYNs a full
+    /// accept queue gets, and on `/proc/net/tcp` to see the connect start.
+    /// Elsewhere (macOS) the connect does not hang, so the call fails through
+    /// the background task's exit instead, which
+    /// `destroy_fails_the_rpc_still_waiting_for_an_unreachable_broker` covers.
+    #[cfg(target_os = "linux")]
     #[test]
     fn destroy_releases_a_blocking_get_whose_call_is_stuck_in_the_connect() {
         // A listener whose accept queue is full: Linux drops the SYNs it gets
