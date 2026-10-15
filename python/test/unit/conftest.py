@@ -55,8 +55,9 @@ class HeldCompletion:
     and drops it), and ``delivered`` is set once the callback has returned.
 
     ``index`` is the position of the completion callback among the entry
-    point's arguments: the last by default, ``-2`` for ``Producer_send_cb``,
-    whose delivery callback comes before its ``resolve``.
+    point's arguments: the last by default, ``-2`` for ``Producer_send_cb`` and
+    ``Producer_try_send_cb``, whose delivery callback comes before their
+    ``resolve``.
 
     With ``submit_later``, a call of the entry point only records its
     arguments, and :meth:`submit` makes the call: the operation cannot complete,

@@ -14,9 +14,11 @@
 
 """Send-completion helpers shared by the producers (private).
 
-The C extension hands each record to the C API's queued send
-(``kafka_producer_Producer_send_with_callback_cb``) with a delivery callback,
-which the producer's callback pump (``kafka_producer_Producer__execute_callbacks``)
+The C extension hands each record to the C API's non-blocking send
+(``kafka_producer_Producer_try_send_with_callback_cb``, which queues the record
+on the core's submission task only when the producer cannot take it at once)
+with a delivery callback, which the producer's callback pump
+(``kafka_producer_Producer__execute_callbacks``)
 runs as ``on_completion(metadata, error, callback_id)``: the metadata's fields
 as a tuple (``None`` when there is none), the BORROWED error handle as an int
 (0 for none) and the id the callback reports under. :func:`completion_to_python`
@@ -144,9 +146,11 @@ def invoke_callback(producer: object, callback: Callable[..., object] | None,
     """:func:`call_callback`, returning the exception the callback raised, if
     any, instead of raising it.
 
-    The caller is the producer's completion thread, which reports it to the
-    core (see the module docstring), and the next callback must still run. It
-    is not logged here: the core logs it once, as Java's
+    The caller is the producer's completion thread, or ``send()`` itself for a
+    record the producer refused as it was handed over (see ``Producer.send``);
+    it reports the exception to the core (see the module docstring), or logs
+    it where there is no report to make, and the next callback must still run.
+    It is not logged here: the core logs a reported one once, as Java's
     ``ProducerBatch.completeFutureAndFireCallbacks`` does.
     """
     try:

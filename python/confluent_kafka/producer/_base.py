@@ -17,27 +17,34 @@
 ``Producer`` / ``KafkaProducer`` and ``AsyncProducer`` / ``AsyncKafkaProducer``
 call the C FFI through the C extension (``_confluentkafka``). Every operation
 uses the C API's queued ``_cb`` form (CLAUDE.md §4, "Async variants of blocking
-methods"): a send is ``kafka_producer_Producer_send_with_callback_cb``, which
-queues the record on the core's submission task, and a flush, close or
-transaction-control call is its ``_cb`` twin. The completions -- the
-``Callback`` of each record, the handover of each record to the producer and
-the result of each operation -- are queued in the client's callback vector and
-run by whoever calls ``kafka_producer_Producer__execute_callbacks``: the sync
-producer's completion thread, or the event loop of the async producer, which
-the ``__set_callbacks_notify`` hook wakes (the hook only schedules, never runs
-a callback). Both families reuse the same entry points and differ only in the
-future type a completion resolves and where the user's callback runs (CLAUDE.md,
-Python Binding Conventions, Implementation over the FFI and Threads and
-callbacks).
+methods"): a send is ``kafka_producer_Producer_try_send_with_callback_cb``,
+which hands the record to the producer on the calling thread when it can take
+it at once (and no earlier record is still queued) and otherwise queues it on
+the core's submission task, and a flush, close or transaction-control call is
+its ``_cb`` twin. The completions -- the ``Callback`` of each record, the
+handover of each queued record to the producer and the result of each
+operation -- are queued in the client's callback vector and run by whoever
+calls ``kafka_producer_Producer__execute_callbacks``: the sync producer's
+completion thread, or the event loop of the async producer, which the
+``__set_callbacks_notify`` hook wakes (the hook only schedules, never runs a
+callback). The handover of a record taken, or refused, at once is reported on
+the calling thread instead, inside the send. Both families reuse the same
+entry points and differ only in the future type a completion resolves and
+where the user's callback runs (CLAUDE.md, Python Binding Conventions,
+Implementation over the FFI and Threads and callbacks).
 
 *(deviation)* Backpressure is the core's ``max.block.ms`` wait: ``send()``
-returns once the record is queued on the submission task, which hands records
-to the producer one at a time, in order; there the metadata wait and the wait
-for ``buffer.memory`` space are bounded by ``max.block.ms`` as in Java, and a
-record that times out fails through its callback and future. Java's
-``send()`` blocks its caller for those waits instead; here the caller is not
-blocked, and records queued behind a full buffer are held by the submission
-task meanwhile. Two consequences follow:
+hands the record to the producer at once when its topic's metadata is known,
+the buffer has room and nothing is queued ahead of it -- the common case, which
+skips the submission task -- and otherwise returns once the record is queued on
+the submission task, which hands records to the producer one at a time, in
+order; there the metadata wait and the wait for ``buffer.memory`` space are
+bounded by ``max.block.ms`` as in Java, and a record that times out fails
+through its callback and future. Java's ``send()`` blocks its caller for those
+waits instead; here the caller is not blocked, and records queued behind a
+full buffer are held by the submission task meanwhile. A record never
+overtakes one queued before it, so one caller's records reach the producer in
+sending order, as with Java's blocking ``send()``. Two consequences follow:
 
 - The submission queue is unbounded, so the records waiting in it are not
   bounded by ``buffer.memory``: a caller that sends faster than the producer

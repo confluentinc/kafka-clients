@@ -594,16 +594,17 @@ _NOT_IN_A_TRANSACTION = "Cannot add partition topic-0 to transaction while in st
 
 
 def _fake_queued_send(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Fakes the queued send of a record not handed over yet: the delivery
-    callback and the handover callback send() passed are kept."""
+    """Fakes the send of a record the producer cannot take at once, queued and
+    not handed over yet: the delivery callback and the handover callback send()
+    passed are kept."""
     captured: dict[str, Any] = {}
 
-    def producer_send_cb(c_producer: int, native: Any, on_completion: Any, resolve: Any) -> int:
+    def producer_try_send_cb(c_producer: int, native: Any, on_completion: Any, resolve: Any) -> int:
         captured["on_completion"] = on_completion
         captured["resolve"] = resolve
         return 0
 
-    monkeypatch.setattr(_lib, "Producer_send_cb", producer_send_cb)
+    monkeypatch.setattr(_lib, "Producer_try_send_cb", producer_try_send_cb)
     return captured
 
 
@@ -1910,7 +1911,7 @@ def _run_without_memory(body: str) -> None:
 def test_send_without_memory_for_a_new_batch_raises_memory_error() -> None:
     # The first record of a fresh producer needs a new batch node. Its
     # allocation was unchecked, so a failure crashed on a NULL dereference.
-    # Updated for the branch C API: the queued send is Producer_send_cb, whose
+    # Updated for the branch C API: the send is Producer_try_send_cb, whose
     # first allocation is the context it hands the C API.
     _run_without_memory("""
 from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
@@ -1918,7 +1919,7 @@ p = KafkaProducer(configs=UNREACHABLE)
 record = p._native_record(ProducerRecord(topic="t", value=b"v"))
 resolve = lambda error: None
 refs = sys.getrefcount(record), sys.getrefcount(on_complete), sys.getrefcount(resolve)
-outcome = without_memory(_lib.Producer_send_cb, p._c_producer, record, on_complete, resolve)
+outcome = without_memory(_lib.Producer_try_send_cb, p._c_producer, record, on_complete, resolve)
 assert isinstance(outcome, MemoryError), outcome
 # Not queued: every reference taken for the queue was given back...
 assert (sys.getrefcount(record), sys.getrefcount(on_complete), sys.getrefcount(resolve)) == refs
@@ -2296,9 +2297,10 @@ def test_a_completion_its_closing_loop_refuses_is_dropped(
     # waiting for a later flush().
     caplog.set_level(logging.WARNING, logger="confluent_kafka.producer")
     p = AsyncKafkaProducer(configs=UNREACHABLE)
-    # Updated for the branch C API: the queued send is Producer_send_cb, and
-    # the delivery callback is its next-to-last argument.
-    held = hold_completion("Producer_send_cb", -2)
+    # Updated for the branch C API: the send is Producer_try_send_cb, which
+    # queues a record whose metadata the producer lacks, and the delivery
+    # callback is its next-to-last argument.
+    held = hold_completion("Producer_try_send_cb", -2)
     ran: list[Exception | None] = []
     loop = asyncio.new_event_loop()
     try:
@@ -2327,9 +2329,10 @@ def test_a_completion_left_for_a_closed_loop_is_dropped_by_close(
     # warning.
     caplog.set_level(logging.WARNING, logger="confluent_kafka.producer")
     p = AsyncKafkaProducer(configs=UNREACHABLE)
-    # Updated for the branch C API: the queued send is Producer_send_cb, and
-    # the delivery callback is its next-to-last argument.
-    held = hold_completion("Producer_send_cb", -2)
+    # Updated for the branch C API: the send is Producer_try_send_cb, which
+    # queues a record whose metadata the producer lacks, and the delivery
+    # callback is its next-to-last argument.
+    held = hold_completion("Producer_try_send_cb", -2)
     ran: list[Exception | None] = []
     loop = asyncio.new_event_loop()
     try:
