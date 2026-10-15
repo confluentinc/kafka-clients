@@ -89,7 +89,8 @@ class _Completion:
     collector to scan.
     """
 
-    __slots__ = ("_producer", "_callback", "_future", "_topic", "_partition", "_untrack")
+    __slots__ = ("_producer", "_callback", "_future", "_topic", "_partition", "_untrack",
+                 "completed")
 
     def __init__(self, producer: object, callback: Callback | None,
                  future: Future[RecordMetadata], topic: str, partition: int | None,
@@ -100,6 +101,9 @@ class _Completion:
         self._topic = topic
         self._partition = partition
         self._untrack = untrack
+        # Set before the future is untracked: send() reads it after tracking
+        # the future, to untrack one whose completion ran first.
+        self.completed = False
 
     def __call__(self, result: int, error: int, immediate: bool) -> None:
         metadata, exception = completion_to_python(result, error, self._topic, self._partition)
@@ -108,6 +112,7 @@ class _Completion:
             self._future.set_exception(exception)
         else:
             self._future.set_result(metadata)
+        self.completed = True
         self._untrack(self._future)
 
 
@@ -326,7 +331,12 @@ class Producer(Generic[K, V], _ProducerState):
             full = _lib.Producer_send(c_producer, native, cb)
             if full is None:
                 raise closed_while_sending()
-            self._track(future)
+            # The record can complete on the C completion thread before this:
+            # its completion then found nothing to untrack. A flag of the
+            # completion's own, not future.done(), which takes the future's lock.
+            self._futures.add(future)
+            if cb.completed:
+                self._discard_future(future)
             if full:
                 # The buffer is full: wait (below, not as a use) until the send
                 # task frees capacity, as Java's send() blocks on buffer.memory.

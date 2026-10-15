@@ -423,9 +423,11 @@ class _ProducerState:
         after completing it (``_discard_future``), so a flush() or
         commit_transaction() waits for the records sent before it. Untracking
         in the completion, rather than by a done callback, saves the asyncio
-        loop a scheduled callback per record. A record can complete on the C
-        completion thread before ``send()`` gets here: its future is then
-        already done, and untracked at once."""
+        loop a scheduled callback per record. A record can complete before
+        ``send()`` gets here (on the sync producer's C completion thread): its
+        future is then already done, and untracked at once. The sync ``send()``
+        fast path does not call this: it checks its completion's own flag, as
+        ``concurrent.futures.Future.done()`` takes the future's lock."""
         self._futures.add(future)
         if future.done():
             self._futures.discard(future)
