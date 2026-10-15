@@ -166,37 +166,33 @@ def _specialise(fn: Callable[..., Any], generic: Callable[..., Any],
 
     The generic wrapper packs a call's keywords into a dict and reads them one
     by one to find the Java overload. This one is generated once, when the
-    class is defined, with the method's keywords as its own parameters (at the
-    method's defaults), so a call costs a few ``is`` checks, one table lookup
-    and the call itself. It gives the same results: the given mask, the
-    overload, the Java-given defaults, the error and the deprecation warning
-    are the generic wrapper's. A call that one leaves to ``fn`` (an unknown or
-    a missing keyword, an extra positional argument, ``_java_form`` passed in)
-    is handed to the generic wrapper with only the keywords it was given, so
-    Python raises its own ``TypeError``, word for word.
+    class is defined, with the method's positional parameters and keywords as
+    its own parameters (at the method's defaults), and one branch per set of
+    given names that the table admits, each calling ``fn`` with that set's
+    Java-given defaults written in. So a call costs a few ``is`` checks, one
+    integer comparison per branch tried and the call itself. It gives the same
+    results: the given mask, the overload, the Java-given defaults, the error
+    and the deprecation warning are the generic wrapper's. A call that one
+    leaves to ``fn`` (an unknown or a missing keyword, a missing or an extra
+    positional argument, ``_java_form`` passed in) is handed to the generic
+    wrapper with only the arguments it was given, so Python raises its own
+    ``TypeError``, word for word.
     A method with ``*args`` or ``**kwargs`` of its own keeps the generic one.
     """
     if any(p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD) for p in params):
         return None
     names = [p.name for p in params if p.kind is p.KEYWORD_ONLY and p.name != _FORM_KEYWORD]
-    # Each overload's Java-given defaults, as one value per parameter that any
-    # overload fills (_MISSING where it fills none), so filling is an unpack
-    # and an `is` check per parameter rather than a loop over names.
-    fillable = [n for n in names if any(n == k for _, fills, _ in table.values() for k, _ in fills)]
-    vectors = {
-        given: (index, tuple(dict(fills).get(n, _MISSING) for n in fillable), note)
-        for given, (index, fills, note) in table.items()
-    }
+    # The positional parameters, positional-only so that a keyword of the same
+    # name lands in **_jf_extra (and so in the generic wrapper), as before.
+    positional = [f"_jf_p{i}" for i in range(n_positional)]
     ns: dict[str, Any] = {
-        "_jf_fn": fn, "_jf_generic": generic, "_jf_table_get": vectors.get,
+        "_jf_fn": fn, "_jf_generic": generic,
         "_jf_illegal": illegal, "_jf_warn": warnings.warn, "_jf_dw": DeprecationWarning,
         "_jf_missing": _MISSING, "_jf_is_not_given": _is_not_given,
     }
     signature: list[str] = []
-    missing: list[str] = []
+    missing: list[str] = [f" or {p} is _jf_missing" for p in positional]
     checks: list[str] = []
-    fill: list[str] = []
-    call: list[str] = []
     start = always
     for i, name in enumerate(names):
         m = marker[name]
@@ -213,34 +209,48 @@ def _specialise(fn: Callable[..., Any], generic: Callable[..., Any],
                     else f"not _jf_is_not_given({name}, _jf_m{i})")
             checks.append(f"    if {name} is _jf_missing:\n        {name} = _jf_m{i}\n"
                           f"    elif {test}:\n        _jf_g |= {bit[name]}")
-        if name in fillable:
-            j = fillable.index(name)
-            fill.append(f"    if _jf_f{j} is not _jf_missing:\n        {name} = _jf_f{j}")
-        call.append(f"{name}={name}")
-    passed = ", ".join(f"({name!r}, {name})" for name in names)
-    kw = "*_jf_args, " + ", ".join(call) + (", _java_form=_jf_index" if pass_form else "")
     is_async = inspect.iscoroutinefunction(fn)
     await_ = "await " if is_async else ""
+    # One branch per admitted set of given names: the overload's Java-given
+    # defaults (the same objects the table holds) go straight into the call,
+    # and a deprecated set warns from the wrapper, as the generic one does.
+    pos_args = "".join(f"{p}, " for p in positional)
+    branches: list[str] = []
+    for k, (given, (index, fills, note)) in enumerate(table.items()):
+        filled = dict(fills)
+        call: list[str] = []
+        for i, name in enumerate(names):
+            if name in filled:
+                ns[f"_jf_v{k}_{i}"] = filled[name]
+                call.append(f"{name}=_jf_v{k}_{i}")
+            else:
+                call.append(f"{name}={name}")
+        if pass_form:
+            call.append(f"_java_form={index}")
+        warn = ""
+        if note is not None:
+            ns[f"_jf_note{k}"] = note
+            warn = f"        _jf_warn(_jf_note{k}, _jf_dw, stacklevel=2)\n"
+        branches.append(f"    if _jf_g == {given}:\n{warn}"
+                        f"        return {await_}_jf_fn({pos_args}{', '.join(call)})\n")
+    passed = ", ".join(f"({name!r}, {name})" for name in names)
+    # The positional arguments a call that goes to the generic wrapper gave:
+    # they fill the parameters left to right, then the rest is in _jf_more.
+    passed_pos = (f"(*(_jf_x for _jf_x in ({', '.join(positional)},) if _jf_x is not "
+                  f"_jf_missing), *_jf_more)" if positional else "_jf_more")
     params_src = ", ".join(signature)
     src = (
-        f"{'async ' if is_async else ''}def _jf_wrapper(*_jf_args"
-        f"{', ' + params_src if params_src else ''}, **_jf_extra):\n"
-        f"    if _jf_extra or len(_jf_args) != {n_positional}{''.join(missing)}:\n"
-        f"        return {await_}_jf_generic(*_jf_args, **{{_jf_n: _jf_x for _jf_n, _jf_x in "
+        f"{'async ' if is_async else ''}def _jf_wrapper("
+        f"{''.join(f'{p}=_jf_missing, ' for p in positional)}{'/, ' if positional else ''}"
+        f"*_jf_more{', ' + params_src if params_src else ''}, **_jf_extra):\n"
+        f"    if _jf_extra or _jf_more{''.join(missing)}:\n"
+        f"        return {await_}_jf_generic(*{passed_pos}, **{{_jf_n: _jf_x for _jf_n, _jf_x in "
         f"({passed}{',' if len(names) == 1 else ''}) if _jf_x is not _jf_missing}}, "
         f"**_jf_extra)\n"
         f"    _jf_g = {start}\n"
         + "".join(c + "\n" for c in checks)
-        + "    _jf_e = _jf_table_get(_jf_g)\n"
-        "    if _jf_e is None:\n"
-        "        raise _jf_illegal(_jf_g)\n"
-        "    _jf_index, _jf_fills, _jf_note = _jf_e\n"
-        + (f"    {''.join(f'_jf_f{j}, ' for j in range(len(fillable)))}= _jf_fills\n"
-           if fillable else "")
-        + "".join(f + "\n" for f in fill)
-        + "    if _jf_note is not None:\n"
-        "        _jf_warn(_jf_note, _jf_dw, stacklevel=2)\n"
-        f"    return {await_}_jf_fn({kw})\n"
+        + "".join(branches)
+        + "    raise _jf_illegal(_jf_g)\n"
     )
     # Registered with linecache so a traceback through the wrapper shows its
     # source line, as attrs and dataclasses do for the code they generate.
