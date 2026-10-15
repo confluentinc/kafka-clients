@@ -210,24 +210,25 @@ class AsyncProducer(Generic[K, V], _ProducerState):
 
         # Not waited for: no transactional.id, or inside a started transaction.
         cb = _AsyncCompletion(self, callback, future, topic, partition, loop)
+        space: asyncio.Future[None] | None = None
         # A close() that began since the check above (the serializers ran in
         # between) refuses the record as Java's RecordAccumulator.append does.
-        # The handle outlives close() (see _release_handle), so the call is not
-        # counted as a use.
-        c_producer = self._c_producer
-        full = _lib.Producer_send(c_producer, native, cb)
-        if full is None:
-            raise closed_while_sending()
-        self._track(future)
-        if full:
-            waiter: asyncio.Future[None] = loop.create_future()
+        with self._send_use as c_producer:
+            full = _lib.Producer_send(c_producer, native, cb)
+            if full is None:
+                raise closed_while_sending()
+            self._track(future)
+            if full:
+                waiter: asyncio.Future[None] = loop.create_future()
 
-            def space_cb() -> None:
-                if not loop.is_closed():
-                    loop.call_soon_threadsafe(_set_result, waiter)
+                def space_cb() -> None:
+                    if not loop.is_closed():
+                        loop.call_soon_threadsafe(_set_result, waiter)
 
-            if not _lib.Producer_on_space_available(c_producer, space_cb):
-                await waiter
+                if not _lib.Producer_on_space_available(c_producer, space_cb):
+                    space = waiter
+        if space is not None:
+            await space
         return future
 
     async def _send_waiting(self, native: object, topic: str, partition: int | None,
@@ -436,10 +437,10 @@ class AsyncProducer(Generic[K, V], _ProducerState):
             closed = True
             raise_if_error(error)
         finally:
-            # Forces an unfinished close and waits for the counted calls still
-            # in flight: off the loop, and to its end even if this task is
-            # cancelled again meanwhile, so the serializers close after it. The
-            # handle is freed when this producer is collected.
+            # Forces an unfinished close, waits for the calls still in flight,
+            # then joins the send and poll threads: off the loop, and to its end
+            # even if this task is cancelled again meanwhile, so the serializers
+            # close after it.
             teardown = loop.run_in_executor(None, self._teardown, c_producer, not closed)
             try:
                 await await_to_end(teardown)
@@ -453,7 +454,7 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         if force:
             force_close(c_producer)
         self._wait_for_uses()
-        self._release_handle(c_producer)
+        _lib.Producer_destroy(c_producer)
 
     async def __aenter__(self) -> AsyncProducer[K, V]:
         return self
