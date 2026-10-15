@@ -314,7 +314,7 @@ impl AdminClientConfig {
             }
         }
 
-        config.post_process_parsed_config(props);
+        config.post_process_parsed_config(props)?;
 
         // `KafkaAdminClient.determineBootstrapType` (KIP-909 moved it there from
         // the deleted `AdminBootstrapAddresses.fromConfig`). Java runs it in
@@ -341,13 +341,19 @@ impl AdminClientConfig {
     /// Java's `AbstractConfig.postProcessParsedConfig` hook as
     /// `AdminClientConfig` overrides it (`AdminClientConfig.java:318-323`), run
     /// once every key is parsed, before the bootstrap check:
-    /// `warnDisablingExponentialBackoff`, then
-    /// `postProcessReconnectBackoffConfigs`, whose override replaces the parsed
-    /// `reconnect.backoff.max.ms`.
+    /// `postValidateSaslMechanismConfig`, `warnDisablingExponentialBackoff`,
+    /// then `postProcessReconnectBackoffConfigs`, whose override replaces the
+    /// parsed `reconnect.backoff.max.ms`.
     ///
     /// `originals` is the user's map, Java's `originals()`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Config`] when a SASL `security.protocol` has an empty
+    /// `sasl.mechanism`.
     #[doc(alias = "org.apache.kafka.clients.admin.AdminClientConfig#postProcessParsedConfig")]
-    fn post_process_parsed_config(&mut self, originals: &HashMap<String, String>) {
+    fn post_process_parsed_config(&mut self, originals: &HashMap<String, String>) -> Result<(), Error> {
+        CommonClientConfigs::post_validate_sasl_mechanism_config(self.security_protocol, &self.sasl_config.mechanism)?;
         CommonClientConfigs::warn_disabling_exponential_backoff(
             self.retry_backoff_ms,
             self.retry_backoff_max_ms,
@@ -359,6 +365,7 @@ impl AdminClientConfig {
         {
             self.reconnect_backoff_max_ms = reconnect_backoff_max_ms;
         }
+        Ok(())
     }
 
     /// The `bootstrap.servers` list.
@@ -859,6 +866,25 @@ mod tests {
         assert_eq!(
             err.message(),
             "Invalid value abc for configuration socket.connection.setup.timeout.max.ms: Not a number of type LONG"
+        );
+    }
+
+    /// Java checks the SASL mechanism in the config constructor
+    /// (`AdminClientConfig.postProcessParsedConfig`), before
+    /// `KafkaAdminClient.determineBootstrapType` runs, so with no bootstrap
+    /// servers either the mechanism error is the one reported.
+    #[test]
+    fn test_sasl_mechanism_is_checked_before_the_bootstrap_servers() {
+        let props = HashMap::from([
+            ("security.protocol".to_string(), "SASL_SSL".to_string()),
+            ("sasl.mechanism".to_string(), String::new()),
+        ]);
+        let err = AdminClientConfig::new(&props).unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "got {err:?}");
+        assert_eq!(
+            err.message(),
+            "Invalid value null for configuration sasl.mechanism: When the security.protocol \
+             configuration enables SASL, mechanism must be non-null and non-empty string."
         );
     }
 

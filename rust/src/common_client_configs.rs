@@ -20,6 +20,10 @@
 
 use std::collections::HashMap;
 
+use crate::common::Error;
+use crate::common::config::SaslConfigs;
+use crate::common::security::auth::SecurityProtocol;
+
 /// Configuration keys shared by producer, consumer and admin clients.
 ///
 /// Translates the Java static-utility class
@@ -288,6 +292,39 @@ impl CommonClientConfigs {
         None
     }
 
+    /// Rejects a SASL `security.protocol` whose `sasl.mechanism` is empty.
+    ///
+    /// Java's `postValidateSaslMechanismConfig(AbstractConfig config)`
+    /// (`CommonClientConfigs.java:320-329`) reads both values from the config;
+    /// this crate's configs are not `AbstractConfig`s, so it takes them, the
+    /// mechanism already trimmed by `ConfigDef.parseType`. Java also rejects a
+    /// `null` mechanism, which a `String` property cannot be here.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Config`] with Java's `ConfigException(SaslConfigs.SASL_MECHANISM,
+    /// null, ..)` message when the protocol is `SASL_PLAINTEXT` or `SASL_SSL`
+    /// and the mechanism is empty.
+    #[doc(alias = "org.apache.kafka.clients.CommonClientConfigs#postValidateSaslMechanismConfig")]
+    pub(crate) fn post_validate_sasl_mechanism_config(
+        security_protocol: SecurityProtocol,
+        client_sasl_mechanism: &str,
+    ) -> Result<(), Error> {
+        if matches!(security_protocol, SecurityProtocol::SaslPlaintext | SecurityProtocol::SaslSsl)
+            && client_sasl_mechanism.is_empty()
+        {
+            return Err(Error::config_name_value_message(
+                SaslConfigs::SASL_MECHANISM,
+                "null",
+                format!(
+                    "When the {} configuration enables SASL, mechanism must be non-null and non-empty string.",
+                    Self::SECURITY_PROTOCOL_CONFIG
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     /// Log warning if the exponential backoff is disabled due to initial
     /// backoff value is greater than max backoff value.
     ///
@@ -346,6 +383,13 @@ mod tests {
     use super::*;
     use crate::admin::AdminClientConfig;
 
+    // `CommonClientConfigsTest` has three tests. `testExponentialBackoffDefaults`
+    // and `testInvalidSaslMechanism` are translated below. `testMetricsReporters`
+    // is not: it exercises `CommonClientConfigs.metricsReporters`, which
+    // instantiates the classes named by `metric.reporters`. A class is not a
+    // configuration value here (CLAUDE.md §2), so `metric.reporters` is an
+    // unknown key and `metricsReporters` has no counterpart.
+
     /// Java's `CommonClientConfigsTest.TestConfig` is an `AbstractConfig`
     /// whose `postProcessParsedConfig` calls this class's statics. This
     /// crate has no `AbstractConfig`; `AdminClientConfig` stands in for it,
@@ -355,6 +399,27 @@ mod tests {
         let mut map = HashMap::from([("bootstrap.servers".to_string(), "localhost:9092".to_string())]);
         map.extend(props.iter().map(|(k, v)| (k.to_string(), v.to_string())));
         AdminClientConfig::new(&map)
+    }
+
+    /// Translated from `CommonClientConfigsTest.testInvalidSaslMechanism`,
+    /// asserting Java's whole message rather than only the key it contains.
+    /// Its first case, a `null` `sasl.mechanism`, has no counterpart: a
+    /// property value here is always a string. The empty mechanism is also
+    /// rejected with `SASL_SSL`, and a blank one once trimmed; with
+    /// `PLAINTEXT` the mechanism is not checked.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.CommonClientConfigsTest#testInvalidSaslMechanism")]
+    fn test_invalid_sasl_mechanism() {
+        let expected = "Invalid value null for configuration sasl.mechanism: When the security.protocol \
+                        configuration enables SASL, mechanism must be non-null and non-empty string.";
+        for (protocol, mechanism) in [("SASL_PLAINTEXT", ""), ("SASL_SSL", ""), ("SASL_PLAINTEXT", "  ")] {
+            let err = test_config(&[("security.protocol", protocol), ("sasl.mechanism", mechanism)]).unwrap_err();
+            assert!(matches!(err, Error::Config(_)), "{protocol} {mechanism:?}: got {err:?}");
+            assert_eq!(err.message(), expected, "{protocol} {mechanism:?}");
+        }
+        test_config(&[("security.protocol", "PLAINTEXT"), ("sasl.mechanism", "")]).unwrap();
+        // The default mechanism (`GSSAPI`) is not empty.
+        test_config(&[("security.protocol", "SASL_SSL")]).unwrap();
     }
 
     /// Translated from `CommonClientConfigsTest.testExponentialBackoffDefaults`:
