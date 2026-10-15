@@ -34,6 +34,15 @@ class TopicPartition:
         self._partition = partition
         self._topic = topic
 
+    @classmethod
+    def _of(cls, topic: str, partition: int) -> TopicPartition:
+        """What ``__init__`` builds, without its keyword call: for the client,
+        which builds one per completed record (``RecordMetadata._from_ffi``)."""
+        self = cls.__new__(cls)
+        self._partition = partition
+        self._topic = topic
+        return self
+
     def partition(self) -> int:
         return self._partition
 
