@@ -18,6 +18,7 @@ mod cluster_resource_listeners;
 mod kafka_future_impl;
 mod partition_states;
 mod topic;
+mod unsupported_protocol_field_error;
 
 pub(crate) use cluster_resource_listeners::ClusterResourceListeners;
 pub(crate) use kafka_future_impl::KafkaFutureImpl;
@@ -27,3 +28,8 @@ pub(crate) use kafka_future_impl::KafkaFutureImpl;
 // `#[expect(unused_imports)]` keeps `cargo build` clean.
 pub(crate) use partition_states::PartitionStates;
 pub(crate) use topic::Topic;
+#[cfg(test)]
+pub(crate) use unsupported_protocol_field_error::assert_unsupported_protocol_field;
+pub(crate) use unsupported_protocol_field_error::{
+    UnsupportedProtocolFieldError, UnsupportedProtocolFieldErrorOptionsBuilder,
+};

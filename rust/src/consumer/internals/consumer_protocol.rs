@@ -23,15 +23,12 @@
 //! break compatibility: when it encounters a newer version, it parses it using
 //! the current (highest) format.
 //!
-//! Java's `SchemaException` is mapped to
-//! [`Error::serialization`](crate::common::Error::serialization) — a
-//! non-retriable parse error, matching `SchemaException`'s nature.
+//! Java's `SchemaException` is [`Error::Schema`](crate::common::Error::Schema).
 
 use crate::ConsumerProtocolAssignmentData;
 use crate::ConsumerProtocolSubscriptionData;
 use crate::common::Error;
 use crate::common::TopicPartition;
-use crate::common::errors::SerializationError;
 use crate::common::protocol::MessageUtil;
 use crate::common::protocol::{ByteBufferAccessor, Readable};
 use crate::consumer::consumer_partition_assignor::{Assignment, Subscription, SubscriptionOptionsBuilder};
@@ -92,34 +89,27 @@ impl ConsumerProtocol {
     /// group-describe handlers.
     pub(crate) const PROTOCOL_TYPE: &str = "consumer";
 
-    /// Translate a decode failure the way each Java `deserialize*` method's
-    /// `catch (BufferUnderflowException e)` does.
+    /// The failure the body readers report, as the cause of the
+    /// `SchemaException` the `deserialize*` methods raise.
     ///
-    /// Java's clause is NARROW: only a genuine end-of-buffer is relabelled as
-    /// `new SchemaException("Buffer underflow while parsing consumer protocol's
-    /// <part>", e)`. Every other decode fault — a negative array/string length,
-    /// invalid UTF-8 — is not a `BufferUnderflowException`, escapes the clause,
-    /// and surfaces with its own message. Relabelling those too would report
-    /// "Buffer underflow" for a fault that is nothing of the kind.
-    ///
-    /// [`std::io::ErrorKind::UnexpectedEof`] is the crate's
-    /// `BufferUnderflowException`: `ByteBufferAccessor::check_remaining` and
-    /// `BytesReader` raise it on a short buffer, while the generated readers use
-    /// `InvalidData` / `InvalidInput` for the structural faults.
-    ///
-    /// Java passes `e` as a separate **cause**, so the relabelled message is
-    /// exactly the text above with no `": ..."` suffix; the original is reachable
-    /// through [`Error::source`].
-    fn map_decode_error(e: std::io::Error, part: &str) -> Error {
-        if e.kind() == std::io::ErrorKind::UnexpectedEof {
-            Error::Serialization(SerializationError::with_source(
-                format!("Buffer underflow while parsing consumer protocol's {part}"),
-                Error::serialization(e.to_string()),
-            ))
-        } else {
-            // Not a BufferUnderflowException in Java — propagate unrelabelled.
-            Error::serialization(e.to_string())
-        }
+    /// The generated readers report every read failure through
+    /// [`std::io::Error`], which has no Java class. It is carried as an
+    /// [`Error::schema`] with the reader's diagnostic, the class Java's own
+    /// `Schema` / `ArrayOf` / `Struct` raise for these malformed-buffer cases
+    /// (`protocol/types/ArrayOf.java:73,76`), so the diagnostic stays reachable
+    /// through [`std::error::Error::source`].
+    fn decode_cause(e: std::io::Error) -> Error {
+        Error::schema(e.to_string())
+    }
+
+    /// Java's `catch (RuntimeException e) { throw new SchemaException(
+    /// "Malformed consumer protocol <part>", e); }` around each body read
+    /// (KAFKA-20570). The clause used to catch only `BufferUnderflowException`;
+    /// it now catches every runtime failure (a negative array length, a
+    /// non-nullable field read as null, ...), so every one of them is
+    /// relabelled, with the original as the cause.
+    fn malformed(part: &str, cause: Error) -> Error {
+        Error::schema_source(format!("Malformed consumer protocol {part}"), cause)
     }
 
     /// Reads the 2-byte version header from the buffer.
@@ -127,7 +117,14 @@ impl ConsumerProtocol {
     /// Mirrors `ConsumerProtocol.deserializeVersion`.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerProtocol#deserializeVersion")]
     pub(crate) fn deserialize_version(buffer: &mut dyn Readable) -> Result<i16, Error> {
-        buffer.read_short().map_err(|e| Self::map_decode_error(e, "header"))
+        // Java's `catch (BufferUnderflowException e)`: a 2-byte read can fail no
+        // other way.
+        buffer.read_short().map_err(|e| {
+            Error::schema_source(
+                "Buffer underflow while parsing consumer protocol's header",
+                Self::decode_cause(e),
+            )
+        })
     }
 
     /// Serializes a subscription at the highest supported version.
@@ -192,8 +189,10 @@ impl ConsumerProtocol {
     ) -> Result<Subscription, Error> {
         let version = Self::check_subscription_version(version)?;
 
+        // Java's `try { ... } catch (RuntimeException e)` covers the read and
+        // the conversion that follows it.
         let data = ConsumerProtocolSubscriptionData::read(buffer, version)
-            .map_err(|e| Self::map_decode_error(e, "subscription"))?;
+            .map_err(|e| Self::malformed("subscription", Self::decode_cause(e)))?;
 
         let mut owned_partitions = Vec::new();
         for tp in &data.owned_partitions {
@@ -207,15 +206,15 @@ impl ConsumerProtocol {
             _ => None,
         };
 
-        Ok(Subscription::with_options(
-            SubscriptionOptionsBuilder::new()
-                .set_topics(data.topics.clone())
-                .set_user_data(data.user_data.clone())
-                .set_owned_partitions(owned_partitions)
-                .set_generation_id(data.generation_id)
-                .set_rack_id(rack_id)
-                .build()?,
-        ))
+        let options = SubscriptionOptionsBuilder::new()
+            .set_topics(data.topics.clone())
+            .set_user_data(data.user_data.clone())
+            .set_owned_partitions(owned_partitions)
+            .set_generation_id(data.generation_id)
+            .set_rack_id(rack_id)
+            .build()
+            .map_err(|e| Self::malformed("subscription", e))?;
+        Ok(Subscription::with_options(options))
     }
 
     /// Deserializes a subscription, reading the version header from the buffer.
@@ -238,7 +237,8 @@ impl ConsumerProtocol {
         version: i16,
     ) -> Result<ConsumerProtocolSubscriptionData, Error> {
         let version = Self::check_subscription_version(version)?;
-        ConsumerProtocolSubscriptionData::read(buffer, version).map_err(|e| Self::map_decode_error(e, "subscription"))
+        ConsumerProtocolSubscriptionData::read(buffer, version)
+            .map_err(|e| Self::malformed("subscription", Self::decode_cause(e)))
     }
 
     /// Deserializes the raw generated subscription struct, reading the version
@@ -319,7 +319,7 @@ impl ConsumerProtocol {
         let version = Self::check_assignment_version(version)?;
 
         let data = ConsumerProtocolAssignmentData::read(buffer, version)
-            .map_err(|e| Self::map_decode_error(e, "assignment"))?;
+            .map_err(|e| Self::malformed("assignment", Self::decode_cause(e)))?;
 
         let mut assigned_partitions = Vec::new();
         for tp in &data.assigned_partitions {
@@ -353,7 +353,8 @@ impl ConsumerProtocol {
         version: i16,
     ) -> Result<ConsumerProtocolAssignmentData, Error> {
         let version = Self::check_assignment_version(version)?;
-        ConsumerProtocolAssignmentData::read(buffer, version).map_err(|e| Self::map_decode_error(e, "assignment"))
+        ConsumerProtocolAssignmentData::read(buffer, version)
+            .map_err(|e| Self::malformed("assignment", Self::decode_cause(e)))
     }
 
     /// Deserializes the raw generated assignment struct, reading the version
@@ -377,7 +378,7 @@ impl ConsumerProtocol {
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerProtocol#checkSubscriptionVersion")]
     fn check_subscription_version(version: i16) -> Result<i16, Error> {
         if version < ConsumerProtocolSubscriptionData::LOWEST_SUPPORTED_VERSION {
-            Err(Error::serialization(format!("Unsupported subscription version: {version}")))
+            Err(Error::schema(format!("Unsupported subscription version: {version}")))
         } else if version > ConsumerProtocolSubscriptionData::HIGHEST_SUPPORTED_VERSION {
             Ok(ConsumerProtocolSubscriptionData::HIGHEST_SUPPORTED_VERSION)
         } else {
@@ -392,7 +393,7 @@ impl ConsumerProtocol {
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerProtocol#checkAssignmentVersion")]
     fn check_assignment_version(version: i16) -> Result<i16, Error> {
         if version < ConsumerProtocolAssignmentData::LOWEST_SUPPORTED_VERSION {
-            Err(Error::serialization(format!("Unsupported assignment version: {version}")))
+            Err(Error::schema(format!("Unsupported assignment version: {version}")))
         } else if version > ConsumerProtocolAssignmentData::HIGHEST_SUPPORTED_VERSION {
             Ok(ConsumerProtocolAssignmentData::HIGHEST_SUPPORTED_VERSION)
         } else {
@@ -409,14 +410,10 @@ mod tests {
         TopicPartition::new(topic, partition)
     }
 
-    /// Java's `catch (BufferUnderflowException e)` in every `deserialize*`
-    /// method is a NARROW type filter: only a genuine end-of-buffer is
-    /// relabelled "Buffer underflow while parsing consumer protocol's <part>".
-    ///
-    /// A truncated header IS an underflow, so it gets the relabel — with the
-    /// original as a separate cause, matching Java's
-    /// `new SchemaException(message, e)` (so `message()` carries no `": ..."`
-    /// suffix).
+    /// `deserializeVersion`'s `catch (BufferUnderflowException e)`: a
+    /// truncated header is relabelled, with the original as a separate cause,
+    /// matching Java's `new SchemaException(message, e)` (so `message()` carries
+    /// no `": ..."` suffix).
     #[test]
     fn genuine_underflow_is_relabelled_with_the_cause_attached() {
         // One byte where a 2-byte version header is required.
@@ -430,11 +427,9 @@ mod tests {
             "Java's message is exact, with the cause carried separately"
         );
         // Java raises `SchemaException` here.
-        assert!(
-            matches!(err, Error::Serialization(_)),
-            "a serialization error maps here: {err:?}"
-        );
-        assert!(err.is_kafka_error(), "a serialization error is a Kafka error: {err:?}");
+        assert!(matches!(err, Error::Schema(_)), "a schema error maps here: {err:?}");
+        assert!(err.is_kafka_error(), "a schema error is a Kafka error: {err:?}");
+        assert!(!err.is_api_error(), "SchemaException is not an ApiException: {err:?}");
         // Java passes `e` as the cause rather than interpolating it.
         assert!(
             std::error::Error::source(&err).is_some(),
@@ -442,16 +437,14 @@ mod tests {
         );
     }
 
-    /// The other half of the narrow filter: a decode fault that is NOT a
-    /// `BufferUnderflowException` escapes Java's clause and surfaces with its
-    /// own message. Relabelling it "Buffer underflow" would be an incorrect
-    /// diagnosis — the concrete case the audit flagged is an admin
-    /// `DescribeConsumerGroups` decoding a classic member whose assignment
-    /// carries a negative array length.
+    /// KAFKA-20570 widened the body clause from `BufferUnderflowException` to
+    /// `RuntimeException`: a decode fault that is not an underflow (here a
+    /// negative array length, the case the commit names, and the one an admin
+    /// `DescribeConsumerGroups` hits on a classic member's corrupt assignment)
+    /// is now relabelled too, with the reader's diagnostic as the cause.
     #[test]
-    fn non_underflow_decode_fault_keeps_its_own_message() {
+    fn non_underflow_decode_fault_is_relabelled_as_malformed() {
         // Version 0 header, then a negative topic-array length (-1 as i32).
-        // A negative length is `InvalidData`, not `UnexpectedEof`.
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&0i16.to_be_bytes()); // version 0
         bytes.extend_from_slice(&(-1i32).to_be_bytes()); // negative array length
@@ -459,15 +452,124 @@ mod tests {
         let err =
             ConsumerProtocol::deserialize_assignment(&bytes).expect_err("a negative array length must fail to decode");
 
+        assert!(matches!(err, Error::Schema(_)), "got {err:?}");
+        assert_eq!("Malformed consumer protocol assignment", err.message());
+        let cause = std::error::Error::source(&err).expect("the reader's failure is the cause");
         assert!(
-            !err.message().contains("Buffer underflow"),
-            "a negative array length is not an underflow — it must not be relabelled as one, got: {}",
-            err.message()
+            cause.to_string().contains("Negative array length"),
+            "the real fault stays reachable as the cause, got: {cause}"
         );
-        assert!(
-            err.message().contains("Negative array length"),
-            "the real fault must be reported on its own terms, got: {}",
-            err.message()
+
+        // The subscription clause is the same (Java's poison metadata in the
+        // group-coordinator tests: version 1, topics array length -1).
+        let poison = [0u8, 1, 0xFF, 0xFF, 0xFF, 0xFF];
+        let err = ConsumerProtocol::deserialize_subscription(&poison).expect_err("poison metadata");
+        assert!(matches!(err, Error::Schema(_)), "got {err:?}");
+        assert_eq!("Malformed consumer protocol subscription", err.message());
+    }
+
+    fn truncation_test_subscription() -> Subscription {
+        Subscription::with_options(
+            SubscriptionOptionsBuilder::new()
+                .set_topics(vec!["foo".to_string(), "bar".to_string()])
+                .set_user_data(Some(vec![0x01, 0x02]))
+                .set_owned_partitions(vec![tp("foo", 0), tp("bar", 1)])
+                .set_generation_id(crate::consumer::consumer_partition_assignor::DEFAULT_GENERATION)
+                .set_rack_id(Some("rack".to_string()))
+                .build()
+                .unwrap(),
+        )
+    }
+
+    fn truncation_test_assignment() -> Assignment {
+        Assignment::with_user_data(vec![tp("foo", 0), tp("bar", 1)], Some(vec![0x01, 0x02]))
+    }
+
+    /// Asserts `deserialize` fails with a schema error on every proper prefix
+    /// of `serialized` and succeeds on the whole of it.
+    fn assert_schema_error_for_every_truncation<T, F>(serialized: &[u8], what: &str, deserialize: F)
+    where
+        F: Fn(&[u8]) -> Result<T, Error>,
+    {
+        for len in 0..serialized.len() {
+            match deserialize(&serialized[..len]) {
+                Err(Error::Schema(_)) => {},
+                Err(other) => panic!("Expected SchemaException for {what} truncated to length {len}, got {other:?}"),
+                Ok(_) => panic!("Expected SchemaException for {what} truncated to length {len}, got a value"),
+            }
+        }
+        assert!(deserialize(serialized).is_ok(), "the whole {what} must deserialize");
+    }
+
+    /// Translated from `ConsumerProtocolTest.deserializeSubscriptionThrowsSchemaExceptionForEveryTruncation`
+    /// (KAFKA-20570).
+    #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerProtocolTest#deserializeSubscriptionThrowsSchemaExceptionForEveryTruncation"
+    )]
+    fn deserialize_subscription_returns_schema_error_for_every_truncation() {
+        let serialized = ConsumerProtocol::serialize_subscription_versioned(
+            &truncation_test_subscription(),
+            ConsumerProtocolSubscriptionData::HIGHEST_SUPPORTED_VERSION,
+        )
+        .unwrap();
+        assert_schema_error_for_every_truncation(
+            &serialized,
+            "subscription",
+            ConsumerProtocol::deserialize_subscription,
+        );
+    }
+
+    /// Translated from `ConsumerProtocolTest.deserializeAssignmentThrowsSchemaExceptionForEveryTruncation`
+    /// (KAFKA-20570).
+    #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerProtocolTest#deserializeAssignmentThrowsSchemaExceptionForEveryTruncation"
+    )]
+    fn deserialize_assignment_returns_schema_error_for_every_truncation() {
+        let serialized = ConsumerProtocol::serialize_assignment_versioned(
+            &truncation_test_assignment(),
+            ConsumerProtocolAssignmentData::HIGHEST_SUPPORTED_VERSION,
+        )
+        .unwrap();
+        assert_schema_error_for_every_truncation(&serialized, "assignment", ConsumerProtocol::deserialize_assignment);
+    }
+
+    /// Translated from `ConsumerProtocolTest.deserializeConsumerProtocolSubscriptionThrowsSchemaExceptionForEveryTruncation`
+    /// (KAFKA-20570).
+    #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerProtocolTest#deserializeConsumerProtocolSubscriptionThrowsSchemaExceptionForEveryTruncation"
+    )]
+    fn deserialize_consumer_protocol_subscription_returns_schema_error_for_every_truncation() {
+        let serialized = ConsumerProtocol::serialize_subscription_versioned(
+            &truncation_test_subscription(),
+            ConsumerProtocolSubscriptionData::HIGHEST_SUPPORTED_VERSION,
+        )
+        .unwrap();
+        assert_schema_error_for_every_truncation(
+            &serialized,
+            "ConsumerProtocolSubscription",
+            ConsumerProtocol::deserialize_consumer_protocol_subscription,
+        );
+    }
+
+    /// Translated from `ConsumerProtocolTest.deserializeConsumerProtocolAssignmentThrowsSchemaExceptionForEveryTruncation`
+    /// (KAFKA-20570).
+    #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerProtocolTest#deserializeConsumerProtocolAssignmentThrowsSchemaExceptionForEveryTruncation"
+    )]
+    fn deserialize_consumer_protocol_assignment_returns_schema_error_for_every_truncation() {
+        let serialized = ConsumerProtocol::serialize_assignment_versioned(
+            &truncation_test_assignment(),
+            ConsumerProtocolAssignmentData::HIGHEST_SUPPORTED_VERSION,
+        )
+        .unwrap();
+        assert_schema_error_for_every_truncation(
+            &serialized,
+            "ConsumerProtocolAssignment",
+            ConsumerProtocol::deserialize_consumer_protocol_assignment,
         );
     }
 
@@ -534,11 +636,8 @@ mod tests {
     fn deserialize_assignment_rejects_low_version() {
         let err = ConsumerProtocol::deserialize_assignment_versioned(&mut ByteBufferAccessor::new(Vec::new()), -1)
             .expect_err("negative version must be rejected");
-        assert!(
-            err.message().contains("Unsupported assignment version: -1"),
-            "got: {}",
-            err.message()
-        );
+        assert!(matches!(err, Error::Schema(_)), "Java throws SchemaException: {err:?}");
+        assert_eq!("Unsupported assignment version: -1", err.message());
     }
 
     /// A version above the highest supported version is clamped and parsed with

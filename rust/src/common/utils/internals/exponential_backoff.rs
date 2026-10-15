@@ -39,7 +39,7 @@ use rand::Rng;
 ///
 /// This struct is `Send + Sync` since all fields are immutable after construction.
 #[derive(Debug, Clone)]
-#[doc(alias = "org.apache.kafka.common.utils.ExponentialBackoff")]
+#[doc(alias = "org.apache.kafka.common.utils.internals.ExponentialBackoff")]
 pub struct ExponentialBackoff {
     initial_interval: i64,
     multiplier: i32,
@@ -59,7 +59,7 @@ impl ExponentialBackoff {
     ///
     /// # Errors
     /// Returns an error if `jitter` is not between 0.0 and 1.0.
-    #[doc(alias = "org.apache.kafka.common.utils.ExponentialBackoff#ExponentialBackoff")]
+    #[doc(alias = "org.apache.kafka.common.utils.internals.ExponentialBackoff#ExponentialBackoff")]
     pub fn new(initial_interval: i64, multiplier: i32, max_interval: i64, jitter: f64) -> Result<Self, String> {
         if !(0.0..=1.0).contains(&jitter) {
             return Err(format!("jitter must be between 0 and 1, but got {}", jitter));
@@ -74,7 +74,7 @@ impl ExponentialBackoff {
     }
 
     /// Returns the initial interval.
-    #[doc(alias = "org.apache.kafka.common.utils.ExponentialBackoff#initialInterval")]
+    #[doc(alias = "org.apache.kafka.common.utils.internals.ExponentialBackoff#initialInterval")]
     pub fn initial_interval(&self) -> i64 {
         self.initial_interval
     }
@@ -82,7 +82,7 @@ impl ExponentialBackoff {
     /// Computes the backoff value for the given number of attempts.
     ///
     /// The returned value is clamped to `max_interval` and includes jitter if configured.
-    #[doc(alias = "org.apache.kafka.common.utils.ExponentialBackoff#backoff")]
+    #[doc(alias = "org.apache.kafka.common.utils.internals.ExponentialBackoff#backoff")]
     pub fn backoff(&self, attempts: i64) -> i64 {
         if self.exp_max == 0.0 {
             return self.initial_interval;
@@ -116,7 +116,7 @@ mod tests {
 
     /// Translated from `ExponentialBackoffTest.testExponentialBackoff`
     #[test]
-    #[doc(alias = "org.apache.kafka.common.utils.ExponentialBackoffTest#testExponentialBackoff")]
+    #[doc(alias = "org.apache.kafka.common.utils.internals.ExponentialBackoffTest#testExponentialBackoff")]
     fn test_exponential_backoff() {
         let scale_factor: i64 = 100;
         let ratio: i32 = 2;
@@ -154,7 +154,7 @@ mod tests {
 
     /// Translated from `ExponentialBackoffTest.testExponentialBackoffWithoutJitter`
     #[test]
-    #[doc(alias = "org.apache.kafka.common.utils.ExponentialBackoffTest#testExponentialBackoffWithoutJitter")]
+    #[doc(alias = "org.apache.kafka.common.utils.internals.ExponentialBackoffTest#testExponentialBackoffWithoutJitter")]
     fn test_exponential_backoff_without_jitter() {
         let exponential_backoff = ExponentialBackoff::new(100, 2, 400, 0.0).unwrap();
         assert_eq!(100, exponential_backoff.backoff(0));
@@ -165,7 +165,9 @@ mod tests {
 
     /// Translated from `ExponentialBackoffTest.testExponentialBackoffWithInvalidJitter`
     #[test]
-    #[doc(alias = "org.apache.kafka.common.utils.ExponentialBackoffTest#testExponentialBackoffWithInvalidJitter")]
+    #[doc(
+        alias = "org.apache.kafka.common.utils.internals.ExponentialBackoffTest#testExponentialBackoffWithInvalidJitter"
+    )]
     fn test_exponential_backoff_with_invalid_jitter() {
         let err = ExponentialBackoff::new(100, 2, 400, -1.0).unwrap_err();
         assert_eq!("jitter must be between 0 and 1, but got -1", err);

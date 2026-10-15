@@ -31,7 +31,7 @@ use super::{AbstractRequest, AlterUserScramCredentialsResponse, ConcreteResponse
 ///
 /// Corresponds to
 /// `org.apache.kafka.common.requests.AlterUserScramCredentialsRequest`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.AlterUserScramCredentialsRequest")]
 pub struct AlterUserScramCredentialsRequest {
     data: AlterUserScramCredentialsRequestData,
@@ -106,26 +106,54 @@ impl AlterUserScramCredentialsRequest {
         let data = AlterUserScramCredentialsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
     }
+
+    /// Returns a copy of `data` with every upsertion's salt and salted
+    /// password emptied, for rendering.
+    ///
+    /// Mirrors Java's private `maskData`
+    /// (`AlterUserScramCredentialsRequest.java:85-91`), shared, as in Java, by
+    /// the request's `toString()` (`:96-97`) and `Builder.toString()`
+    /// (`:45-46`). Java returns the copy's `toString()`, and the callers here
+    /// render the copy.
+    fn mask_data(data: &AlterUserScramCredentialsRequestData) -> AlterUserScramCredentialsRequestData {
+        let mut temp_data = data.clone();
+        for upsertion in &mut temp_data.upsertions {
+            upsertion.set_salt(Vec::new());
+            upsertion.set_salted_password(Vec::new());
+        }
+        temp_data
+    }
 }
 
 impl std::fmt::Display for AlterUserScramCredentialsRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Mirrors Java's toString, which redacts salt/password rather than
-        // printing credential secrets.
+        // Mirrors Java's `toString()` (`AlterUserScramCredentialsRequest.java:94-98`),
+        // which renders `maskData(data)`: the data with every salt and salted
+        // password emptied ("Do not print salt or saltedPassword").
         write!(
             f,
-            "AlterUserScramCredentialsRequest(version={}, deletions={}, upsertions={})",
+            "AlterUserScramCredentialsRequest(version={}, data={:?})",
             self.version,
-            self.data.deletions.len(),
-            self.data.upsertions.len()
+            Self::mask_data(&self.data)
         )
+    }
+}
+
+/// Renders exactly what the redacting [`Display`](std::fmt::Display) renders.
+///
+/// Java has a single `toString()` (`AlterUserScramCredentialsRequest.java:96-97`);
+/// a derived `Debug` would be a second, unredacted rendering that prints every
+/// upsertion's salt and salted password.
+impl std::fmt::Debug for AlterUserScramCredentialsRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
     }
 }
 
 /// Builder for [`AlterUserScramCredentialsRequest`].
 ///
 /// Corresponds to `AlterUserScramCredentialsRequest.Builder`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.AlterUserScramCredentialsRequest$Builder")]
 pub struct Builder {
     data: AlterUserScramCredentialsRequestData,
@@ -162,6 +190,25 @@ impl RequestBuilder for Builder {
         Ok(AbstractRequest::AlterUserScramCredentials(
             AlterUserScramCredentialsRequest::new(self.data.clone(), version),
         ))
+    }
+}
+
+/// Mirrors Java's `Builder.toString()` (`AlterUserScramCredentialsRequest.java:45-46`),
+/// which returns `maskData(data)`: the data with every salt and salted password
+/// emptied.
+impl std::fmt::Display for Builder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", AlterUserScramCredentialsRequest::mask_data(&self.data))
+    }
+}
+
+/// Renders exactly what the redacting [`Display`](std::fmt::Display) renders.
+///
+/// Java has a single `toString()`; a derived `Debug` would be a second,
+/// unredacted rendering that prints every salt and salted password.
+impl std::fmt::Debug for Builder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
     }
 }
 
@@ -207,6 +254,114 @@ mod tests {
                 .iter()
                 .all(|r| r.error_code == Errors::ClusterAuthorizationFailed.code())
         );
+    }
+
+    /// Distinctive secrets for the rendering tests, so an assertion cannot pass
+    /// by matching some unrelated field.
+    const SALT: &[u8] = b"bob-salt-3c8e5a";
+    const SALTED_PASSWORD: &[u8] = b"bob-salted-pw-6d2f9b";
+
+    /// One deletion (for `alice`) and one upsertion (for `bob`) carrying
+    /// [`SALT`] and [`SALTED_PASSWORD`].
+    fn data_with_secrets() -> AlterUserScramCredentialsRequestData {
+        let mut upsertion = ScramCredentialUpsertion::new();
+        upsertion
+            .set_name("bob".to_string())
+            .set_mechanism(2)
+            .set_iterations(8192)
+            .set_salt(SALT.to_vec())
+            .set_salted_password(SALTED_PASSWORD.to_vec());
+        let mut data = AlterUserScramCredentialsRequestData::new();
+        data.set_deletions(vec![deletion("alice", 1)]);
+        data.set_upsertions(vec![upsertion]);
+        data
+    }
+
+    /// Asserts that `rendered` shows neither secret: not as the byte list a
+    /// derived `Debug` prints, and not as text.
+    fn assert_no_secret(rendered: &str) {
+        for secret in [SALT, SALTED_PASSWORD] {
+            assert!(!rendered.contains(&format!("{secret:?}")), "secret leaked: {rendered}");
+            assert!(
+                !rendered.contains(std::str::from_utf8(secret).unwrap()),
+                "secret leaked: {rendered}"
+            );
+        }
+    }
+
+    /// New test, no Java original: the redacting `Display` renders the data
+    /// with every salt and salted password emptied, as Java's `toString()`
+    /// renders `maskData(data)` (`AlterUserScramCredentialsRequest.java:96-97`),
+    /// so the user names, mechanisms and iterations still show.
+    #[test]
+    fn display_redacts_salt_and_salted_password() {
+        let request = AlterUserScramCredentialsRequest::new(data_with_secrets(), 0);
+        let rendered = request.to_string();
+        let mut masked = data_with_secrets();
+        masked.upsertions[0].set_salt(Vec::new()).set_salted_password(Vec::new());
+        assert_eq!(
+            rendered,
+            format!("AlterUserScramCredentialsRequest(version=0, data={masked:?})")
+        );
+        // The masked fields are empty.
+        assert!(rendered.contains("salt: [], salted_password: []"), "{rendered}");
+        // The fields that are not secret still show.
+        assert!(rendered.contains("name: \"alice\", mechanism: 1,"), "{rendered}");
+        assert!(
+            rendered.contains("name: \"bob\", mechanism: 2, iterations: 8192,"),
+            "{rendered}"
+        );
+        assert_no_secret(&rendered);
+    }
+
+    /// New test, no Java original: `Debug` renders exactly what `Display` does
+    /// (Java has a single `toString()`), never the salt or salted password a
+    /// derived `Debug` would print as their byte values.
+    #[test]
+    fn debug_redacts_salt_and_salted_password() {
+        let request = AlterUserScramCredentialsRequest::new(data_with_secrets(), 0);
+        assert_eq!(request.data().upsertions[0].salt, SALT);
+        assert_eq!(request.data().upsertions[0].salted_password, SALTED_PASSWORD);
+        for rendered in [format!("{request:?}"), format!("{request:#?}")] {
+            assert_eq!(rendered, request.to_string());
+            assert!(rendered.contains("salt: [], salted_password: []"), "{rendered}");
+            assert!(
+                rendered.contains("name: \"bob\", mechanism: 2, iterations: 8192,"),
+                "{rendered}"
+            );
+            assert_no_secret(&rendered);
+        }
+    }
+
+    /// New test, no Java original: the builder renders as Java's
+    /// `Builder.toString()` does, the data with every salt and salted password
+    /// emptied (`maskData`), so the user, mechanism and iterations still show.
+    #[test]
+    fn builder_display_masks_salt_and_salted_password() {
+        let builder = Builder::new(data_with_secrets());
+        let rendered = builder.to_string();
+        let mut masked = data_with_secrets();
+        masked.upsertions[0].set_salt(Vec::new()).set_salted_password(Vec::new());
+        assert_eq!(rendered, masked.to_string());
+        assert!(rendered.contains("name: \"alice\""), "{rendered}");
+        assert!(rendered.contains("name: \"bob\""), "{rendered}");
+        assert!(rendered.contains("iterations: 8192"), "{rendered}");
+        assert!(rendered.contains("salt: []"), "{rendered}");
+        assert!(rendered.contains("salted_password: []"), "{rendered}");
+        assert_no_secret(&rendered);
+    }
+
+    /// New test, no Java original: the builder's `Debug` renders exactly what
+    /// its `Display` does, never the salt or salted password.
+    #[test]
+    fn builder_debug_masks_salt_and_salted_password() {
+        let builder = Builder::new(data_with_secrets());
+        assert_eq!(builder.data.upsertions[0].salt, SALT);
+        for rendered in [format!("{builder:?}"), format!("{builder:#?}")] {
+            assert_eq!(rendered, builder.to_string());
+            assert!(rendered.contains("name: \"bob\""), "{rendered}");
+            assert_no_secret(&rendered);
+        }
     }
 
     #[test]

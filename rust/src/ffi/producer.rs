@@ -612,10 +612,10 @@ type BatchCallbackFn = unsafe extern "C" fn(
 /// destroy, every non-null handle.
 ///
 /// It does **not** cover a producer closed mid-send: Java raises a bare
-/// `KafkaException` there (`RecordAccumulator.java:427-428`,
-/// `BufferPool.java:119`/`:157`), which `doSend` rethrows from its
+/// `KafkaException` there (`RecordAccumulator.java:472-473`,
+/// `BufferPool.java:151`/`:246`), which `doSend` rethrows from its
 /// `catch (KafkaException e)` arm without invoking the callback
-/// (`KafkaProducer.java:1073-1077`). The failure is reported by the return
+/// (`KafkaProducer.java:1147-1151`). The failure is reported by the return
 /// code of the `send` call itself, and this callback never fires.
 pub type kafka_producer_Producer_send_callback_t =
     unsafe extern "C" fn(*mut kafka_producer_RecordMetadata_t, *mut kafka_common_Error_t, *mut std::ffi::c_void);
@@ -2162,9 +2162,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch(
 /// arose, and mirrors Java, whose three callback sites differ:
 ///
 /// - a broker-side or delivery failure passes null metadata
-///   (`ProducerBatch.java:315`);
+///   (`ProducerBatch.java:334`);
 /// - a synchronous `ApiException` inside `send` passes a `RecordMetadata(tp, -1,
-///   -1, NO_TIMESTAMP, -1, -1)` (`KafkaProducer.java:1060-1061`), as does the
+///   -1, NO_TIMESTAMP, -1, -1)` (`KafkaProducer.java:1134-1135`), as does the
 ///   `MockProducer` completion path (`MockProducer.java:578`).
 ///
 /// So do **not** treat the two as mutually exclusive: the caller owns *every*
@@ -3874,10 +3874,10 @@ pub unsafe extern "C" fn kafka_producer_Producer_close_with_timeout(
 /// Converts a C close timeout for `producer` to a [`std::time::Duration`].
 ///
 /// Java's `KafkaProducer.close(Duration)` rejects a negative timeout with "The
-/// timeout cannot be negative." (`KafkaProducer.java:1393-1394`), and so does this
+/// timeout cannot be negative." (`KafkaProducer.java:1480-1481`), and so does this
 /// for a `KafkaProducer` handle (and for a null one, which is no mock).
 /// `MockProducer.close(Duration)` never reads its timeout
-/// (`MockProducer.java:436-442`), so a `MockProducer` handle accepts any value and
+/// (`MockProducer.java:438-444`), so a `MockProducer` handle accepts any value and
 /// a negative one closes as zero.
 ///
 /// # Safety
@@ -4332,7 +4332,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for_async(
 // Transactions
 //
 // The C counterparts of Java's five transaction-control methods
-// (`KafkaProducer.java:648, 674, 733, 779, 813`). Design record:
+// (`KafkaProducer.java:708, 734, 794, 870, 904`). Design record:
 // `design/history/Milestone-11/producer-transactions-ffi-plan.md`.
 //
 // Two properties are load-bearing and are what the plan document argues for:
@@ -6987,7 +6987,7 @@ mod tests {
     }
 
     /// A `KafkaProducer` handle rejects a negative timeout with Java's
-    /// `KafkaProducer.close(Duration)` message (`KafkaProducer.java:1393-1394`):
+    /// `KafkaProducer.close(Duration)` message (`KafkaProducer.java:1480-1481`):
     /// the callback fires once, and the producer is still open for a real close.
     #[test]
     fn test_close_with_timeout_async_negative_timeout() {
@@ -7017,7 +7017,7 @@ mod tests {
     }
 
     /// A `MockProducer` handle closes on a negative timeout: Java's
-    /// `MockProducer.close(Duration)` never reads it (`MockProducer.java:436-442`).
+    /// `MockProducer.close(Duration)` never reads it (`MockProducer.java:438-444`).
     #[test]
     fn test_close_with_timeout_async_negative_timeout_on_mock_closes() {
         let producer = kafka_producer_MockProducer_new(true);
@@ -7937,7 +7937,7 @@ mod tests {
     /// Critic 75 F3: the single-record `send` does not hold the producer lock
     /// across its metadata wait either, so a close started meanwhile proceeds
     /// and fails the send at once, as Java's `doSend` does ("Producer closed
-    /// while send in progress", `KafkaProducer.java:988-990`).
+    /// while send in progress", `KafkaProducer.java:1069-1071`).
     #[test]
     fn test_close_proceeds_while_send_waits_for_metadata() {
         let ((future, err), elapsed) = close_while_sending(|address| {

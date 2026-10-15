@@ -47,12 +47,12 @@ from admin import (
     _to_delete_acls, _to_describe_acls, _to_describe_client_quotas,
     _to_describe_classic_groups, _to_describe_consumer_groups,
     _to_describe_log_dirs, _to_describe_replica_log_dirs,
-    _to_elect_leaders, _to_full_config_entry, _to_keyed_errors,
+    _to_elect_leaders, _to_error, _to_full_config_entry, _to_keyed_errors,
     _to_list_consumer_group_offsets, _to_list_groups, _to_list_offsets,
     _to_list_partition_reassignments, _to_log_dir_description,
     _to_member_description, _to_cluster_description, _to_describe_topics,
     _to_partition_info,
-    _close_ms, _ms,
+    _close_ms, _ms, _MockAdminClientMixin,
 )
 # The admin binding is paused and keeps its flat ``KafkaError`` (code /
 # is_retriable / is_fatal). It now lives in the private package shim that
@@ -601,7 +601,7 @@ def test_describe_cluster():
         # future with an *empty* set, never null.
         described = admin.describe_cluster()
         assert isinstance(described, ClusterDescription)
-        assert described.cluster_id == "4A5xz_QZTB2CtL4wc0X0Jw"
+        assert described.cluster_id == "I4ZmrWqfT2e-upky_4fdPA"
         assert [n.id for n in described.nodes] == [0, 1, 2]
         assert described.nodes[0].host == "localhost"
         assert described.nodes[0].port == 1000
@@ -973,6 +973,18 @@ def test_to_full_config_entry_preserves_nulls_and_empty_synonyms():
     assert entry.documentation is None
     assert entry.synonyms == []
     assert entry.is_default is True
+
+
+def test_config_entry_repr_redacts_sensitive_value():
+    """Java's `toString` prints "Redacted" for every sensitive entry, even one
+    whose value is null, and the value itself otherwise."""
+    sensitive = ConfigEntry("ssl.key.password", "secret", False, True, False)
+    assert repr(sensitive) == "ConfigEntry(name='ssl.key.password', value=Redacted)"
+    assert "secret" not in str(sensitive)
+    assert (repr(ConfigEntry("ssl.key.password", None, False, True, False))
+            == "ConfigEntry(name='ssl.key.password', value=Redacted)")
+    assert (repr(ConfigEntry("retention.ms", "1000", False, False, False))
+            == "ConfigEntry(name='retention.ms', value='1000')")
 
 
 def test_to_log_dir_description_carries_error_and_volume_bytes():
@@ -1814,6 +1826,42 @@ def test_to_keyed_errors_maps_none_to_success():
     assert converted["g"].code == 69
 
 
+def test_to_error_derives_txn_requires_abort_from_code():
+    """A per-key admin error is built via `KafkaError._from_parts` from a copied
+    `(code, message, is_retriable, is_fatal)` tuple -- the borrowed error handle
+    is already destroyed, so the flag cannot come from the Rust predicate and is
+    derived from the code instead. `txn_requires_abort` must be a bool (not raise
+    AttributeError), True only for TRANSACTION_ABORTABLE (120).
+
+    The live-handle `_from_c` path reads the flag from the Rust predicate
+    (`KafkaError_txn_requires_abort`) instead.
+    """
+    abortable = _to_error((120, "aborted", 0, 0))
+    assert abortable.txn_requires_abort is True
+    assert abortable.code == 120
+    assert abortable.message == "aborted"
+
+    not_abortable = _to_error((69, "nope", 0, 0))
+    assert not_abortable.txn_requires_abort is False
+    assert not_abortable.code == 69
+    assert not_abortable.message == "nope"
+
+
+def test_describe_missing_topic_per_key_error_has_txn_requires_abort():
+    """End-to-end through the real C copy-out (`borrowed_error_to_py` ->
+    `_to_error` -> `_from_parts`): a per-key `KafkaError` for a missing topic
+    must expose `txn_requires_abort` as a bool rather than raising
+    AttributeError. UNKNOWN_TOPIC_OR_PARTITION is not abortable, so it is
+    False."""
+    with MockAdminClient(3) as admin:
+        _created(admin, "described", 2, 2)
+        result = admin.describe_topics(["described", "missing"])
+        missing = result["missing"]
+        assert isinstance(missing, KafkaError)
+        assert missing.code == UNKNOWN_TOPIC_OR_PARTITION
+        assert missing.txn_requires_abort is False
+
+
 # ---------------------------------------------------------------------------
 # B5a — ACLs and client quotas
 #
@@ -2427,6 +2475,22 @@ def test_to_delegation_token_unpacks_the_whole_chain():
     assert str(token.token_info.owner) == "User:owner"
 
 
+def test_delegation_token_repr_hides_the_hmac():
+    """The token id and the HMAC together are a delegation-token login, so the
+    repr masks the HMAC as Java's `toString` does. The token id stays: Java
+    prints it too."""
+    raw = ("token-1", ("User", "owner", False), ("User", "owner", False), [],
+           1000, 5000, 9000, b"\x01\x00\x02", "AQAC")
+    token = _to_delegation_token(raw)
+    assert repr(token) == (
+        "DelegationToken(token_info=TokenInformation(token_id='token-1', "
+        "owner=KafkaPrincipal(principal_type='User', name='owner', token_authenticated=False), "
+        "renewers=[], expiry_timestamp=5000), hmac=[*******])")
+    assert "AQAC" not in repr(token)
+    assert "AQAC" not in str(token)
+    assert "token_id='token-1'" in repr(token)
+
+
 def test_to_describe_user_scram_credentials_splits_errors_from_descriptions():
     """The mock throws before any of this is reachable end to end."""
     raw = {
@@ -2899,6 +2963,47 @@ async def test_async_b6_rpcs():
 
         with pytest.raises(KafkaError):
             await admin.force_terminate_transaction("txn-a")
+
+# --- unregisterController (KAFKA-20395) -------------------------------------
+
+def test_unregister_controller_follows_the_mock_raft_controller_setting():
+    """Java's MockAdminClient.unregisterController succeeds with a Raft
+    controller and otherwise fails with UnsupportedVersionException("")."""
+    with MockAdminClient(1) as admin:
+        with pytest.raises(KafkaError) as exc:
+            admin.unregister_controller(1)
+        assert exc.value.code == UNSUPPORTED_VERSION
+        assert str(exc.value) == ""
+
+        admin.set_using_raft_controller(True)
+        assert admin.unregister_controller(1) is None
+        assert admin.unregister_controller(1, timeout=5.0) is None
+
+        admin.set_using_raft_controller(False)
+        with pytest.raises(KafkaError):
+            admin.unregister_controller(1)
+
+
+def test_set_using_raft_controller_rejects_a_real_client():
+    admin = AdminClient({"bootstrap.servers": "localhost:9092"})
+    try:
+        with pytest.raises(KafkaError) as exc:
+            _MockAdminClientMixin.set_using_raft_controller(admin, True)
+        assert str(exc.value) == "this operation is only supported on a MockAdminClient"
+    finally:
+        admin.close(timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_async_unregister_controller():
+    async with AsyncMockAdminClient(1) as admin:
+        with pytest.raises(KafkaError) as exc:
+            await admin.unregister_controller(1)
+        assert exc.value.code == UNSUPPORTED_VERSION
+
+        admin.set_using_raft_controller(True)
+        assert await admin.unregister_controller(1) is None
+
 
 def test_authorized_operations_none_stays_distinct_from_empty():
     """Java's authorizedOperations() is null when the broker did not report the

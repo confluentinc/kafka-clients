@@ -36,7 +36,7 @@ use crate::common::Error;
 use crate::common::KafkaFuture;
 use crate::common::internals::KafkaFutureImpl;
 use crate::common::requests::{ConcreteResponse, RequestBuilder, metadata_request};
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::LogContext;
 use crate::kafka_debug;
 
 use super::AdminApiFuture;
@@ -392,7 +392,7 @@ mod integration_tests {
     use crate::common::Node;
     use crate::common::protocol::{ApiKeys, Errors};
     use crate::common::requests::MetadataResponse;
-    use crate::common::utils::ExponentialBackoff;
+    use crate::common::utils::internals::ExponentialBackoff;
     use crate::metadata_response_data::MetadataResponseBroker;
 
     const TIMEOUT_MS: i64 = 5000;

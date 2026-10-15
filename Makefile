@@ -30,6 +30,7 @@ VENV = . venv/bin/activate
 	test-integration-perf test-integration-perf-rust test-integration-perf-python \
 	producer-perf-test producer-perf-test-c \
 	consumer-perf-test-python producer-perf-test-python \
+	transactional-producer-perf-test-python \
 	verify verify-c verify-python verify-rust \
 	verify-rust-macos-docker verify-python-macos-docker verify-c-macos-docker \
 	verify-sandbox format-check lint doc-check package-check install-rust-analyzer clean
@@ -238,6 +239,9 @@ consumer-perf-test-python: build-python init-venv-librdkafka
 producer-perf-test-python: build-python init-venv-librdkafka
 	@($(VENV) && $(MAKE) -C python $(ROOTS) LIBRDKAFKA_PYTHON=$(LIBRDKAFKA_PYTHON) producer-perf-test)
 
+transactional-producer-perf-test-python: build-python init-venv-librdkafka
+	@($(VENV) && $(MAKE) -C python $(ROOTS) LIBRDKAFKA_PYTHON=$(LIBRDKAFKA_PYTHON) transactional-producer-perf-test)
+
 # c/'s `test` runs ctest and then the C-backend multilanguage arm.
 test-c: build-c
 	$(MAKE) -C c $(ROOTS) test
@@ -294,9 +298,10 @@ install-rust-analyzer:
 format-check:
 	$(MAKE) -C rust format-check
 
-# Checks the generated protocol code's formatting and that the checked-in
-# error-code tables are current; it reads the build's output, so it follows
-# a build in every verify target.
+# Checks that the message specs copied into rust/generator/messages match the
+# kafka submodule's, the generated protocol code's formatting, and that the
+# checked-in error-code tables are current; it reads the build's output, so it
+# follows a build in every verify target.
 check-generated:
 	$(MAKE) -C rust check-generated
 

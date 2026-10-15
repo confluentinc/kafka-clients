@@ -2,7 +2,7 @@
 
 The `confluent_kafka` crate: a high-fidelity, architecture-preserving Rust
 translation of the Apache Kafka Java client (client only), translated from
-`org.apache.kafka.clients` and related Java packages (Apache Kafka 4.3.1, whose
+`org.apache.kafka.clients` and related Java packages (Apache Kafka 4.4.0, whose
 sources are the `kafka/` submodule at the repository root).
 
 - **Architecture:** Mirrors the Java client structure, namespaces, and logic, adapted to Rust module and naming conventions
@@ -91,12 +91,12 @@ cargo xtask format-check
 ```
 - Checks formatting of all code (source + generated). Fails if any file is not properly formatted.
 
-### 4. Check Only Generated Code Formatting
+### 4. Check Generated Code
 
 ```bash
 cargo xtask check-generated
 ```
-- Checks formatting of generated files only, without modifying them. Useful for CI.
+- Checks, without modifying anything, that the message specs in `generator/messages/` match the `kafka` submodule's, that the generated error-code tables are current, and the formatting of generated files. Useful for CI.
 
 ### 5. Lint
 

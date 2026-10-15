@@ -24,6 +24,8 @@
 
 use crate::KafkaClient;
 use crate::MetadataRecoveryStrategy;
+use crate::common::errors::TimeoutError;
+use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, RequestBuilder};
 use crate::common::{Error, Node};
 
@@ -73,6 +75,12 @@ pub(crate) enum HandleResult {
     /// Enqueue a fresh follow-up call (e.g. quota-exceeded retry topics). The
     /// current call is finished.
     NewCall(Box<Call>),
+    /// Issue this same call again, keeping its deadline, tries and backoff
+    /// state: Java's `runnable.call(this, now)` from inside `handleResponse`,
+    /// which `describeTopicPartitions` uses to request the next page
+    /// (`KafkaAdminClient.java:2414-2416`). The Rust hook cannot hand back
+    /// `self`, so the runnable re-queues the call it just dispatched.
+    CallAgain,
     /// The whole call must be retried; route the error through
     /// [`fail`](super::admin_client_runnable) (respecting backoff / retries).
     /// Mirrors an exception escaping Java's `handleResponse` (e.g.
@@ -226,7 +234,7 @@ pub(crate) struct Call {
 }
 
 impl std::fmt::Display for Call {
-    /// `Call.toString()` (`KafkaAdminClient.java:1001-1004`):
+    /// `Call.toString()` (`KafkaAdminClient.java:1082-1085`):
     ///
     /// ```java
     /// return "Call(callName=" + callName + ", deadlineMs=" + deadlineMs +
@@ -344,6 +352,29 @@ impl Call {
     /// Runs the terminal-failure hook.
     pub(crate) fn handle_failure(&mut self, error: &Error) {
         (self.handle_failure_fn)(error);
+    }
+
+    /// Wraps a non-timeout cause as a timeout and fails the call terminally.
+    ///
+    /// Translated from `Call.handleTimeoutFailure`. A cause that already is a
+    /// timeout (`cause instanceof TimeoutException`) is passed through
+    /// unchanged; anything else is wrapped with the call's rendering.
+    pub(crate) fn handle_timeout_failure(&mut self, now: i64, cause: Error) {
+        let error = if cause.error() == Errors::RequestTimedOut {
+            cause
+        } else {
+            // `new TimeoutException(this + " timed out at " + now + " after " + tries
+            // + " attempt(s)", cause)` (`KafkaAdminClient.java:1043-1044`), where `this`
+            // renders through `Call.toString()` (`:1082-1085`).
+            //
+            // The message used to gain an invented `"Aborted due to timeout: "`
+            // prefix (a string that appears nowhere in the Kafka tree), drop the
+            // `Call(...)` rendering, and append the cause as text — which left
+            // `Error::source()` empty where Java's `getCause()` is populated.
+            let message = format!("{} timed out at {} after {} attempt(s)", self, now, self.tries);
+            Error::Timeout(TimeoutError::with_source(message, cause))
+        };
+        self.handle_failure(&error);
     }
 
     /// Runs the unsupported-version hook; returns `true` iff the call should be

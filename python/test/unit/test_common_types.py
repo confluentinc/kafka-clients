@@ -31,6 +31,7 @@ import copy
 import inspect
 import pickle
 import threading
+import types
 from typing import Any
 
 import pytest
@@ -52,7 +53,7 @@ from confluent_kafka.common import (
     TopicPartition,
     Uuid,
 )
-from confluent_kafka.common.headers import _headers_to_string, _read_headers
+from confluent_kafka.common.headers import _hand_out, _headers_to_string, _read_headers
 
 # --------------------------------------------------------------------------- #
 # Uuid: UuidTest
@@ -94,7 +95,7 @@ def test_random_uuid(repetition: int) -> None:
     random_id = Uuid.random_uuid()
     assert Uuid.ZERO_UUID != random_id
     assert Uuid.METADATA_TOPIC_ID != random_id
-    assert not str(random_id).startswith("-")
+    assert "-" not in str(random_id)
 
 
 def test_compare_uuids() -> None:
@@ -413,6 +414,42 @@ def test_constructor_with_null_provider() -> None:
     assert str(exc.value) == "valueProvider must not be null"
 
 
+_METRIC_NAME_2 = MetricName(name="request-latency-avg", group="consumer-fetch-manager-metrics",
+                            description="The average request latency in ms",
+                            tags={"client-id": "consumer-1"})
+
+_METRIC_NAME_2_STR = ("MetricName [name=request-latency-avg, "
+                      "group=consumer-fetch-manager-metrics, "
+                      "description=The average request latency in ms, "
+                      "tags={client-id=consumer-1}]")
+
+
+def _to_string_on_lambda_or_anonymous_class(provider: object) -> None:
+    metric = KafkaMetric(lock=object(), metric_name=_METRIC_NAME_2, value_provider=provider,
+                         config=MetricConfig(), time=_MockTime())
+    assert str(metric) == "KafkaMetric [metricName=" + _METRIC_NAME_2_STR + "]"
+
+
+def test_to_string_with_lambda_provider() -> None:
+    # Java's `(config, now) -> 0`: an inline namespace of lambdas.
+    _to_string_on_lambda_or_anonymous_class(types.SimpleNamespace(measure=lambda config, now: 0))
+
+
+def test_to_string_with_anonymous_class_provider() -> None:
+    # Java's `new Measurable() { ... }`: a class with no name.
+    anonymous = type("", (), {"measure": lambda self, config, now: 0.0})
+    _to_string_on_lambda_or_anonymous_class(anonymous())
+
+
+def test_to_string_with_stat_provider() -> None:
+    # Java uses `stats.Avg`, which has no Python translation; any named
+    # provider class takes the same branch.
+    metric = KafkaMetric(lock=object(), metric_name=_METRIC_NAME_2, value_provider=_Measurable(),
+                         config=MetricConfig(), time=_MockTime())
+    assert str(metric) == ("KafkaMetric [metricName=" + _METRIC_NAME_2_STR + ", "
+                           "metricValueProvider=test.unit.test_common_types._Measurable]")
+
+
 def test_kafka_metric_config_getter_and_setter() -> None:
     config = MetricConfig()
     metric = KafkaMetric(lock=object(), metric_name=_METRIC_NAME, value_provider=_Gauge(1),
@@ -447,6 +484,24 @@ def test_timestamp_type() -> None:
 # --------------------------------------------------------------------------- #
 # Headers and Java's string conversion
 # --------------------------------------------------------------------------- #
+
+
+def test_no_headers_read_and_hand_out_as_the_empty_tuple() -> None:
+    # A record built without headers is given (); it reads, and hands out, as
+    # the empty tuple at once.
+    assert _read_headers(()) == () and type(_read_headers(())) is tuple
+    assert _read_headers(None) == ()
+    assert _read_headers([]) == ()
+    assert _hand_out(()) == () and type(_hand_out(())) is tuple
+
+
+def test_topic_partition_of_is_what_the_constructor_builds() -> None:
+    built = TopicPartition._of("t", 3)  # noqa: SLF001
+    expected = TopicPartition(topic="t", partition=3)
+    assert type(built) is TopicPartition
+    assert (built.topic(), built.partition()) == ("t", 3)
+    assert built == expected and hash(built) == hash(expected)
+    assert str(built) == str(expected) == "t-3"
 
 
 def test_read_headers_views_the_values_without_copying() -> None:

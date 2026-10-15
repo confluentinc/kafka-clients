@@ -155,7 +155,7 @@ def _bridge() -> dict[str, str]:
     body = text[text.index("const BRIDGE:"):]
     body = body[:body.index("];")]
     rows = re.findall(r'\(\s*"([A-Z0-9_]+)"\s*,\s*"([\w.]+)"\s*,?\s*\)', body)
-    assert len(rows) == 161
+    assert len(rows) == 165
     return dict(rows)
 
 
@@ -216,7 +216,7 @@ def test_every_python_error_class_is_a_java_class() -> None:
         "org.apache.kafka.clients.consumer.InvalidOffsetException",
     }
     assert set(_BY_JAVA) == expected
-    assert len(_BY_JAVA) == 169
+    assert len(_BY_JAVA) == 173
 
 
 def test_only_an_exception_suffix_becomes_error() -> None:
@@ -303,7 +303,7 @@ def test_every_ffi_id_is_the_enum_value_of_its_bridge_row() -> None:
         # id -> class -> id round-trips.
         assert class_for_ffi_id(enum[constant]) is cls
         assert to_ffi_id(_instance(cls)) == enum[constant]
-    assert len(ids) == 161
+    assert len(ids) == 165
 
 
 def test_the_base_carries_unknown_server_error_which_unknown_server_error_owns() -> None:
