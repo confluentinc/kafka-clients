@@ -326,7 +326,7 @@ class _ProducerState:
         # Futures of the records sent and not yet completed: flush() waits for
         # the ones sent before it (their callbacks have run by then, as in Java).
         self._futures: set[Any] = set()
-        # Bound once: _track() hands it to every record's future.
+        # Bound once: every completion untracks its record's future with it.
         self._discard_future = self._futures.discard
         self._key_serializer: Serializer[Any] = bytes_serializer()
         self._value_serializer: Serializer[Any] = bytes_serializer()
@@ -438,8 +438,16 @@ class _ProducerState:
         return native, topic, partition
 
     def _track(self, future: Any) -> None:
+        """Track a sent record's future until its completion untracks it, right
+        after completing it (``_discard_future``), so a flush() or
+        commit_transaction() waits for the records sent before it. Untracking
+        in the completion, rather than by a done callback, saves the asyncio
+        loop a scheduled callback per record. A record can complete on the C
+        completion thread before ``send()`` gets here: its future is then
+        already done, and untracked at once."""
         self._futures.add(future)
-        future.add_done_callback(self._discard_future)
+        if future.done():
+            self._futures.discard(future)
 
     def _drain_sync(self, timeout_s: float | None = None, *, closing: bool = False) -> bool:
         """Wait until every record sent so far is with the Rust producer, so a
