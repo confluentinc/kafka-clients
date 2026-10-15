@@ -399,9 +399,11 @@ def test_the_generated_wrapper_matches_the_generic_one_for_every_decorated_metho
                            if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD))
         names = [p.name for p in params if p.kind is p.KEYWORD_ONLY and p.name != "_java_form"]
         states = [None, value, None, UNSET]  # left out, a value, None, UNSET
-        combos = list(itertools.product(range(4), repeat=len(names)))
-        if len(names) > 6:
-            combos = random.Random(f.__qualname__).sample(combos, 4096)
+        if len(names) <= 6:
+            combos = list(itertools.product(range(4), repeat=len(names)))
+        else:  # drawn one by one: 4**12 combinations would not fit in memory
+            rng = random.Random(f.__qualname__)
+            combos = [tuple(rng.randrange(4) for _ in names) for _ in range(4096)]
         cases = [(positional, {n: states[s] for n, s in zip(names, c) if s}) for c in combos]
         full = {n: value for n in names}
         cases += [(positional[:-1], full), (positional + (value,), full),
