@@ -297,10 +297,11 @@ python_for_client_version() {
 # (e.g. Confluent Cloud SASL_SSL). When set it is forwarded to each consumer
 # arm's client, its spawned kafka-producer-perf-test.sh load generator
 # (--producer.config), and kafka-topics.sh (--command-config). The native
-# librdkafka consumer cannot read the Java form, so that arm instead derives
-# librdkafka-style --conf entries from SECURITY_PROTOCOL / SASL_MECHANISM /
-# SASL_USERNAME / SASL_PASSWORD in the .env (the same quartet the producer
-# tests use).
+# librdkafka consumer cannot read the Java form, so that arm instead reads
+# SECURITY_PROTOCOL / SASL_MECHANISM / SASL_USERNAME / SASL_PASSWORD from its
+# environment (the same quartet the producer tests use, exported by the
+# `set -a` above), never from its command line, where `ps` would show the
+# password.
 CONS_FLAGS=()
 if [ -n "${BOOTSTRAP_SERVERS:-}" ]; then CONS_FLAGS+=(--bootstrap "$BOOTSTRAP_SERVERS"); fi
 if [ -n "${TOPIC_NAME:-}" ]; then CONS_FLAGS+=(--topic "$TOPIC_NAME"); fi
@@ -378,14 +379,8 @@ case "$TEST" in
     if [ -n "${WARMUP_MESSAGES:-}" ]; then CONS_FLAGS+=(--warmup "$WARMUP_MESSAGES"); fi
     # Secured cluster: the Java-form CLIENT_CONFIG file only feeds the spawned
     # Java load generator (--producer.config); the native librdkafka consumer
-    # gets librdkafka-form --conf entries derived from the .env SASL quartet.
+    # reads the .env SASL quartet from its environment (exported above).
     if [ -n "${CLIENT_CONFIG:-}" ]; then CONS_FLAGS+=(--producer-config "$CLIENT_CONFIG"); fi
-    if [ -n "${SECURITY_PROTOCOL:-}" ]; then
-      CONS_FLAGS+=(--conf "security.protocol=$SECURITY_PROTOCOL")
-      if [ -n "${SASL_MECHANISM:-}" ]; then CONS_FLAGS+=(--conf "sasl.mechanism=$SASL_MECHANISM"); fi
-      if [ -n "${SASL_USERNAME:-}" ]; then CONS_FLAGS+=(--conf "sasl.username=$SASL_USERNAME"); fi
-      if [ -n "${SASL_PASSWORD:-}" ]; then CONS_FLAGS+=(--conf "sasl.password=$SASL_PASSWORD"); fi
-    fi
     mkdir -p "$RESULTS/librdkafka-consumer"
     "$REPO/rust/consumer-perf/compare/build/librdkafka_e2e" \
       --results-dir "$RESULTS/librdkafka-consumer" \
