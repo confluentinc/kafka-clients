@@ -369,9 +369,13 @@ async fn delete_records_offset_out_of_range_fails<F: AdminBackendFactory>(ctx: &
 /// `default.api.timeout.ms` keeps the test fast.
 async fn delete_records_nonexistent_partition_fails<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     // The original built its client with `admin_for_with_timeout(.., 8000)`; the
-    // shared config plus one override is the same thing.
+    // shared config plus overrides is the same thing. `request.timeout.ms` comes
+    // down with it: an explicit `default.api.timeout.ms` below
+    // `request.timeout.ms` (30000 in the shared config) fails creation, as
+    // `KafkaAdminClient.configureDefaultApiTimeoutMs` does in Java.
     let mut config = admin_config_for(factory, ctx);
     config.insert("default.api.timeout.ms".to_string(), "8000".to_string());
+    config.insert("request.timeout.ms".to_string(), "8000".to_string());
     let admin = factory
         .create(config)
         .await

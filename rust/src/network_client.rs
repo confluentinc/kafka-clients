@@ -601,6 +601,13 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         self.time = Arc::new(PollTime(Arc::clone(&self.poll_time_store)));
     }
 
+    /// The `(socket_send_buffer, socket_receive_buffer)` sizes this client
+    /// passes to every `Selectable::connect`. Visible for testing.
+    #[cfg(test)]
+    pub(crate) fn socket_buffer_sizes(&self) -> (i32, i32) {
+        (self.socket_send_buffer, self.socket_receive_buffer)
+    }
+
     /// Returns whether broker version discovery is enabled.
     #[doc(alias = "org.apache.kafka.clients.NetworkClient#discoverBrokerVersions")]
     pub fn discover_broker_versions(&self) -> bool {

@@ -20,14 +20,18 @@
 //! `AbstractConfig`. In Rust we define a typed struct holding the actual config
 //! values the client needs, plus the config key constants for compatibility.
 //!
-//! Java-specific settings that are not applicable to rustls are omitted:
+//! Java-specific settings that are not applicable to rustls are not kept;
+//! [`SslConfigs::apply_ssl_config_key`] validates them as Java does, logs that
+//! they are ignored when set, and drops them:
 //! - `ssl.provider` — Java security provider
 //! - `ssl.secure.random.implementation` — Java SecureRandom PRNG
-//! - `ssl.engine.factory.class` — Java SSLEngine factory
 //! - `ssl.keymanager.algorithm` — Java JSSE key manager
 //! - `ssl.trustmanager.algorithm` — Java JSSE trust manager
 //! - `ssl.cipher.suites` — rustls has sensible defaults
 //! - `ssl.protocol` — rustls handles protocol negotiation automatically
+//!
+//! `ssl.engine.factory.class` (Java SSLEngine factory) takes a class, which
+//! CLAUDE.md §2 does not allow as configuration, so it is an unknown key.
 
 use crate::common::Error;
 use crate::common::config::config_def::ValidList;
@@ -217,10 +221,13 @@ impl Default for SslConfigs {
 impl SslConfigs {
     /// Applies a single `ssl.*` configuration key/value pair to `ssl`.
     ///
-    /// Shared by [`crate::producer::ProducerConfig`] and
-    /// [`crate::consumer::ConsumerConfig`] so the `ssl.*` parsing logic lives in
+    /// Shared by [`crate::producer::ProducerConfig`],
+    /// [`crate::consumer::ConsumerConfig`] and
+    /// [`crate::admin::AdminClientConfig`] so the `ssl.*` parsing logic lives in
     /// exactly one place. Unknown `ssl.*` keys are logged and ignored, matching
     /// Java's `AbstractConfig` behavior (unknown keys are accepted silently).
+    /// The keys Java defines for its JSSE provider only (see the module docs)
+    /// are logged as unsupported and ignored.
     ///
     /// The caller is responsible for matching the `"ssl."` prefix before calling
     /// this; `key` is the full Java config key (e.g. `"ssl.truststore.location"`).
@@ -284,6 +291,16 @@ impl SslConfigs {
                         key
                     );
                 }
+            },
+            SslConfigs::SSL_PROTOCOL_CONFIG
+            | SslConfigs::SSL_PROVIDER_CONFIG
+            | SslConfigs::SSL_KEYMANAGER_ALGORITHM_CONFIG
+            | SslConfigs::SSL_TRUSTMANAGER_ALGORITHM_CONFIG
+            | SslConfigs::SSL_SECURE_RANDOM_IMPLEMENTATION_CONFIG => {
+                // `Type.STRING` without a validator (`SslConfigs.java:129-130`,
+                // `:143-144`, `:146`), so any value is valid. They configure Java's
+                // JSSE, which the TLS provider here has no counterpart for.
+                log::warn!("{} is not supported by this client and is ignored", key);
             },
             _ => {
                 log::warn!("Unknown SSL configuration key: {}", key);
@@ -468,6 +485,27 @@ mod tests {
         SslConfigs::apply_ssl_config_key(&mut ssl, "ssl.unknown.key", "value").unwrap();
         assert_eq!(ssl.truststore_type, "PEM");
         assert!(ssl.truststore_location.is_none());
+    }
+
+    /// The five keys Java defines for its JSSE provider only (`ssl.protocol`,
+    /// `ssl.provider`, `ssl.keymanager.algorithm`, `ssl.trustmanager.algorithm`,
+    /// `ssl.secure.random.implementation`) are `Type.STRING` without a
+    /// validator: any value is accepted, logged as ignored, and nothing is kept.
+    #[test]
+    fn test_jsse_only_keys_are_accepted_and_ignored() {
+        for key in [
+            SslConfigs::SSL_PROTOCOL_CONFIG,
+            SslConfigs::SSL_PROVIDER_CONFIG,
+            SslConfigs::SSL_KEYMANAGER_ALGORITHM_CONFIG,
+            SslConfigs::SSL_TRUSTMANAGER_ALGORITHM_CONFIG,
+            SslConfigs::SSL_SECURE_RANDOM_IMPLEMENTATION_CONFIG,
+        ] {
+            for value in ["TLSv1.2", "", "a,,b"] {
+                let mut ssl = SslConfigs::default();
+                SslConfigs::apply_ssl_config_key(&mut ssl, key, value).unwrap();
+                assert_eq!(ssl, SslConfigs::default(), "{key}={value:?}");
+            }
+        }
     }
 
     /// `ssl.enabled.protocols` is a `Type.LIST`, parsed like every list by

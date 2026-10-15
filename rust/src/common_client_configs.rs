@@ -18,6 +18,12 @@
 //! Only the constants needed by the Metadata class are included here;
 //! full configuration support will be added as needed.
 
+use std::collections::HashMap;
+
+use crate::common::Error;
+use crate::common::config::SaslConfigs;
+use crate::common::security::auth::SecurityProtocol;
+
 /// Configuration keys shared by producer, consumer and admin clients.
 ///
 /// Translates the Java static-utility class
@@ -106,6 +112,137 @@ impl CommonClientConfigs {
     /// Config key: `security.protocol`
     pub const SECURITY_PROTOCOL_CONFIG: &str = "security.protocol";
 
+    /// Config key: `enable.metrics.push`
+    ///
+    /// Whether to enable pushing of client metrics to the cluster, if the
+    /// cluster has a client metrics subscription which matches this client.
+    ///
+    /// (Text of Java's `CommonClientConfigs.ENABLE_METRICS_PUSH_DOC`, carried as
+    /// rustdoc for the reason given on [`Self::CLIENT_DNS_LOOKUP_CONFIG`].)
+    pub const ENABLE_METRICS_PUSH_CONFIG: &str = "enable.metrics.push";
+
+    /// Config key: `metrics.sample.window.ms`
+    ///
+    /// The window of time a metrics sample is computed over.
+    pub const METRICS_SAMPLE_WINDOW_MS_CONFIG: &str = "metrics.sample.window.ms";
+
+    /// Config key: `metrics.num.samples`
+    ///
+    /// The number of samples maintained to compute metrics.
+    pub const METRICS_NUM_SAMPLES_CONFIG: &str = "metrics.num.samples";
+
+    /// Config key: `metrics.recording.level`
+    ///
+    /// The highest recording level for metrics. It has three levels for
+    /// recording metrics - info, debug, and trace.
+    pub const METRICS_RECORDING_LEVEL_CONFIG: &str = "metrics.recording.level";
+
+    /// Config key: `reconnect.backoff.ms`
+    ///
+    /// The base amount of time to wait before attempting to reconnect to a
+    /// given host. This avoids repeatedly connecting to a host in a tight loop.
+    /// This backoff applies to all connection attempts by the client to a
+    /// broker. This value is the initial backoff value and will increase
+    /// exponentially for each consecutive connection failure, up to the
+    /// `reconnect.backoff.max.ms` value.
+    ///
+    /// (Text of Java's `CommonClientConfigs.RECONNECT_BACKOFF_MS_DOC`, carried as
+    /// rustdoc for the reason given on [`Self::CLIENT_DNS_LOOKUP_CONFIG`].)
+    pub const RECONNECT_BACKOFF_MS_CONFIG: &str = "reconnect.backoff.ms";
+
+    /// Config key: `reconnect.backoff.max.ms`
+    ///
+    /// The maximum amount of time in milliseconds to wait when reconnecting to
+    /// a broker that has repeatedly failed to connect. If provided, the backoff
+    /// per host will increase exponentially for each consecutive connection
+    /// failure, up to this maximum. After calculating the backoff increase, 20%
+    /// random jitter is added to avoid connection storms.
+    ///
+    /// (Text of Java's `CommonClientConfigs.RECONNECT_BACKOFF_MAX_MS_DOC`.)
+    pub const RECONNECT_BACKOFF_MAX_MS_CONFIG: &str = "reconnect.backoff.max.ms";
+
+    /// Config key: `retry.backoff.ms`
+    ///
+    /// The amount of time to wait before attempting to retry a failed request
+    /// to a given topic partition. This avoids repeatedly sending requests in a
+    /// tight loop under some failure scenarios. This value is the initial
+    /// backoff value and will increase exponentially for each failed request,
+    /// up to the `retry.backoff.max.ms` value.
+    ///
+    /// (Text of Java's `CommonClientConfigs.RETRY_BACKOFF_MS_DOC`.)
+    pub const RETRY_BACKOFF_MS_CONFIG: &str = "retry.backoff.ms";
+
+    /// Config key: `retry.backoff.max.ms`
+    ///
+    /// The maximum amount of time in milliseconds to wait when retrying a
+    /// request to the broker that has repeatedly failed. If provided, the
+    /// backoff per client will increase exponentially for each failed request,
+    /// up to this maximum. To prevent all clients from being synchronized upon
+    /// retry, a randomized jitter with a factor of 0.2 will be applied to the
+    /// backoff, resulting in the backoff falling within a range between 20%
+    /// below and 20% above the computed value. If `retry.backoff.ms` is set to
+    /// be higher than `retry.backoff.max.ms`, then `retry.backoff.max.ms` will
+    /// be used as a constant backoff from the beginning without any exponential
+    /// increase.
+    ///
+    /// (Text of Java's `CommonClientConfigs.RETRY_BACKOFF_MAX_MS_DOC`.)
+    pub const RETRY_BACKOFF_MAX_MS_CONFIG: &str = "retry.backoff.max.ms";
+
+    /// Config key: `send.buffer.bytes`
+    ///
+    /// The size of the TCP send buffer (SO_SNDBUF) to use when sending data.
+    /// If the value is -1, the OS default will be used.
+    ///
+    /// (Text of Java's `CommonClientConfigs.SEND_BUFFER_DOC`, carried as rustdoc
+    /// for the reason given on [`Self::CLIENT_DNS_LOOKUP_CONFIG`].)
+    pub const SEND_BUFFER_CONFIG: &str = "send.buffer.bytes";
+
+    /// The lowest valid `send.buffer.bytes`: `-1`, the OS default.
+    pub const SEND_BUFFER_LOWER_BOUND: i32 = -1;
+
+    /// Config key: `receive.buffer.bytes`
+    ///
+    /// The size of the TCP receive buffer (SO_RCVBUF) to use when reading
+    /// data. If the value is -1, the OS default will be used.
+    ///
+    /// (Text of Java's `CommonClientConfigs.RECEIVE_BUFFER_DOC`, carried as
+    /// rustdoc for the reason given on [`Self::CLIENT_DNS_LOOKUP_CONFIG`].)
+    pub const RECEIVE_BUFFER_CONFIG: &str = "receive.buffer.bytes";
+
+    /// The lowest valid `receive.buffer.bytes`: `-1`, the OS default.
+    pub const RECEIVE_BUFFER_LOWER_BOUND: i32 = -1;
+
+    /// Config key: `socket.connection.setup.timeout.ms`
+    ///
+    /// The amount of time the client will wait for the socket connection to be
+    /// established. If the connection is not built before the timeout elapses,
+    /// clients will close the socket channel. This value is the initial backoff
+    /// value and will increase exponentially for each consecutive connection
+    /// failure, up to the `socket.connection.setup.timeout.max.ms` value.
+    ///
+    /// (Text of Java's `CommonClientConfigs.SOCKET_CONNECTION_SETUP_TIMEOUT_MS_DOC`,
+    /// carried as rustdoc for the reason given on [`Self::CLIENT_DNS_LOOKUP_CONFIG`].)
+    pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG: &str = "socket.connection.setup.timeout.ms";
+
+    /// The default `socket.connection.setup.timeout.ms`: 10 seconds.
+    pub const DEFAULT_SOCKET_CONNECTION_SETUP_TIMEOUT_MS: i64 = 10 * 1000;
+
+    /// Config key: `socket.connection.setup.timeout.max.ms`
+    ///
+    /// The maximum amount of time the client will wait for the socket
+    /// connection to be established. The connection setup timeout will increase
+    /// exponentially for each consecutive connection failure up to this
+    /// maximum. To avoid connection storms, a randomization factor of 0.2 will
+    /// be applied to the timeout resulting in a random range between 20% below
+    /// and 20% above the computed value.
+    ///
+    /// (Text of Java's `CommonClientConfigs.SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_DOC`,
+    /// carried as rustdoc for the reason given on [`Self::CLIENT_DNS_LOOKUP_CONFIG`].)
+    pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG: &str = "socket.connection.setup.timeout.max.ms";
+
+    /// The default `socket.connection.setup.timeout.max.ms`: 30 seconds.
+    pub const DEFAULT_SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS: i64 = 30 * 1000;
+
     /// Config key: `metadata.recovery.strategy`
     ///
     /// Controls how the client recovers when none of the brokers known to it is
@@ -150,4 +287,235 @@ impl CommonClientConfigs {
 
     /// The jitter factor for retry backoff.
     pub const RETRY_BACKOFF_JITTER: f64 = 0.2;
+
+    /// Postprocess the configuration so that exponential backoff is disabled
+    /// when reconnect backoff is explicitly configured but the maximum
+    /// reconnect backoff is not explicitly configured.
+    ///
+    /// Java's `postProcessReconnectBackoffConfigs(AbstractConfig config,
+    /// Map<String, Object> parsedValues)` (`CommonClientConfigs.java:282-293`)
+    /// reads `config.originals()` and returns the values to override. This
+    /// crate's configs are not `AbstractConfig`s, so it takes the user's map
+    /// (Java's `originals()`) and the parsed `reconnect.backoff.ms`, and
+    /// returns the new `reconnect.backoff.max.ms`: the parsed
+    /// `reconnect.backoff.ms` when only that key was set, `None` otherwise.
+    #[doc(alias = "org.apache.kafka.clients.CommonClientConfigs#postProcessReconnectBackoffConfigs")]
+    pub(crate) fn post_process_reconnect_backoff_configs(
+        originals: &HashMap<String, String>,
+        reconnect_backoff_ms: i64,
+    ) -> Option<i64> {
+        if !originals.contains_key(Self::RECONNECT_BACKOFF_MAX_MS_CONFIG)
+            && originals.contains_key(Self::RECONNECT_BACKOFF_MS_CONFIG)
+        {
+            log::warn!(
+                "Disabling exponential reconnect backoff because {} is set, but {} is not.",
+                Self::RECONNECT_BACKOFF_MS_CONFIG,
+                Self::RECONNECT_BACKOFF_MAX_MS_CONFIG
+            );
+            return Some(reconnect_backoff_ms);
+        }
+        None
+    }
+
+    /// Rejects a SASL `security.protocol` whose `sasl.mechanism` is empty.
+    ///
+    /// Java's `postValidateSaslMechanismConfig(AbstractConfig config)`
+    /// (`CommonClientConfigs.java:320-329`) reads both values from the config;
+    /// this crate's configs are not `AbstractConfig`s, so it takes them, the
+    /// mechanism already trimmed by `ConfigDef.parseType`. Java also rejects a
+    /// `null` mechanism, which a `String` property cannot be here.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Config`] with Java's `ConfigException(SaslConfigs.SASL_MECHANISM,
+    /// null, ..)` message when the protocol is `SASL_PLAINTEXT` or `SASL_SSL`
+    /// and the mechanism is empty.
+    #[doc(alias = "org.apache.kafka.clients.CommonClientConfigs#postValidateSaslMechanismConfig")]
+    pub(crate) fn post_validate_sasl_mechanism_config(
+        security_protocol: SecurityProtocol,
+        client_sasl_mechanism: &str,
+    ) -> Result<(), Error> {
+        if matches!(security_protocol, SecurityProtocol::SaslPlaintext | SecurityProtocol::SaslSsl)
+            && client_sasl_mechanism.is_empty()
+        {
+            return Err(Error::config_name_value_message(
+                SaslConfigs::SASL_MECHANISM,
+                "null",
+                format!(
+                    "When the {} configuration enables SASL, mechanism must be non-null and non-empty string.",
+                    Self::SECURITY_PROTOCOL_CONFIG
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Log warning if the exponential backoff is disabled due to initial
+    /// backoff value is greater than max backoff value.
+    ///
+    /// Java's `warnDisablingExponentialBackoff(AbstractConfig config)`
+    /// (`CommonClientConfigs.java:300-318`) reads the four values from the
+    /// config; this crate's configs are not `AbstractConfig`s, so it takes them.
+    #[doc(alias = "org.apache.kafka.clients.CommonClientConfigs#warnDisablingExponentialBackoff")]
+    pub(crate) fn warn_disabling_exponential_backoff(
+        retry_backoff_ms: i64,
+        retry_backoff_max_ms: i64,
+        connection_setup_timeout_ms: i64,
+        connection_setup_timeout_max_ms: i64,
+    ) {
+        for warning in Self::exponential_backoff_warnings(
+            retry_backoff_ms,
+            retry_backoff_max_ms,
+            connection_setup_timeout_ms,
+            connection_setup_timeout_max_ms,
+        ) {
+            log::warn!("{warning}");
+        }
+    }
+
+    /// The warnings [`Self::warn_disabling_exponential_backoff`] logs, with
+    /// Java's text, in Java's order.
+    fn exponential_backoff_warnings(
+        retry_backoff_ms: i64,
+        retry_backoff_max_ms: i64,
+        connection_setup_timeout_ms: i64,
+        connection_setup_timeout_max_ms: i64,
+    ) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if retry_backoff_ms > retry_backoff_max_ms {
+            warnings.push(format!(
+                "Configuration '{}' with value '{retry_backoff_ms}' is greater than configuration '{}' with value \
+                 '{retry_backoff_max_ms}'. A static backoff with value '{retry_backoff_max_ms}' will be applied.",
+                Self::RETRY_BACKOFF_MS_CONFIG,
+                Self::RETRY_BACKOFF_MAX_MS_CONFIG,
+            ));
+        }
+        if connection_setup_timeout_ms > connection_setup_timeout_max_ms {
+            warnings.push(format!(
+                "Configuration '{}' with value '{connection_setup_timeout_ms}' is greater than configuration '{}' \
+                 with value '{connection_setup_timeout_max_ms}'. A static connection setup timeout with value \
+                 '{connection_setup_timeout_max_ms}' will be applied.",
+                Self::SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG,
+                Self::SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG,
+            ));
+        }
+        warnings
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::admin::AdminClientConfig;
+
+    // `CommonClientConfigsTest` has three tests. `testExponentialBackoffDefaults`
+    // and `testInvalidSaslMechanism` are translated below. `testMetricsReporters`
+    // is not: it exercises `CommonClientConfigs.metricsReporters`, which
+    // instantiates the classes named by `metric.reporters`. A class is not a
+    // configuration value here (CLAUDE.md §2), so `metric.reporters` is an
+    // unknown key and `metricsReporters` has no counterpart.
+
+    /// Java's `CommonClientConfigsTest.TestConfig` is an `AbstractConfig`
+    /// whose `postProcessParsedConfig` calls this class's statics. This
+    /// crate has no `AbstractConfig`; `AdminClientConfig` stands in for it,
+    /// since its `postProcessParsedConfig` calls the same ones
+    /// (`AdminClientConfig.java:318-323`).
+    fn test_config(props: &[(&str, &str)]) -> Result<AdminClientConfig, crate::common::Error> {
+        let mut map = HashMap::from([("bootstrap.servers".to_string(), "localhost:9092".to_string())]);
+        map.extend(props.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+        AdminClientConfig::new(&map)
+    }
+
+    /// Translated from `CommonClientConfigsTest.testInvalidSaslMechanism`,
+    /// asserting Java's whole message rather than only the key it contains.
+    /// Its first case, a `null` `sasl.mechanism`, has no counterpart: a
+    /// property value here is always a string. The empty mechanism is also
+    /// rejected with `SASL_SSL`, and a blank one once trimmed; with
+    /// `PLAINTEXT` the mechanism is not checked.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.CommonClientConfigsTest#testInvalidSaslMechanism")]
+    fn test_invalid_sasl_mechanism() {
+        let expected = "Invalid value null for configuration sasl.mechanism: When the security.protocol \
+                        configuration enables SASL, mechanism must be non-null and non-empty string.";
+        for (protocol, mechanism) in [("SASL_PLAINTEXT", ""), ("SASL_SSL", ""), ("SASL_PLAINTEXT", "  ")] {
+            let err = test_config(&[("security.protocol", protocol), ("sasl.mechanism", mechanism)]).unwrap_err();
+            assert!(matches!(err, Error::Config(_)), "{protocol} {mechanism:?}: got {err:?}");
+            assert_eq!(err.message(), expected, "{protocol} {mechanism:?}");
+        }
+        test_config(&[("security.protocol", "PLAINTEXT"), ("sasl.mechanism", "")]).unwrap();
+        // The default mechanism (`GSSAPI`) is not empty.
+        test_config(&[("security.protocol", "SASL_SSL")]).unwrap();
+    }
+
+    /// Translated from `CommonClientConfigsTest.testExponentialBackoffDefaults`:
+    /// with only `reconnect.backoff.ms` set, `reconnect.backoff.max.ms` takes
+    /// its value.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.CommonClientConfigsTest#testExponentialBackoffDefaults")]
+    fn test_exponential_backoff_defaults() {
+        let default_conf = test_config(&[]).unwrap();
+        assert_eq!(default_conf.reconnect_backoff_ms(), 50);
+        assert_eq!(default_conf.reconnect_backoff_max_ms(), 1000);
+
+        let both_set_config =
+            test_config(&[("reconnect.backoff.ms", "123"), ("reconnect.backoff.max.ms", "12345")]).unwrap();
+        assert_eq!(both_set_config.reconnect_backoff_ms(), 123);
+        assert_eq!(both_set_config.reconnect_backoff_max_ms(), 12345);
+
+        let reconnect_backoff_set_conf = test_config(&[("reconnect.backoff.ms", "123")]).unwrap();
+        assert_eq!(reconnect_backoff_set_conf.reconnect_backoff_ms(), 123);
+        assert_eq!(reconnect_backoff_set_conf.reconnect_backoff_max_ms(), 123);
+    }
+
+    /// The texts of `CommonClientConfigs.warnDisablingExponentialBackoff`'s
+    /// two warnings (`CommonClientConfigs.java:303-317`): one when
+    /// `retry.backoff.ms` exceeds `retry.backoff.max.ms`, one when
+    /// `socket.connection.setup.timeout.ms` exceeds its max. Equal values do
+    /// not warn.
+    #[test]
+    fn test_exponential_backoff_warnings() {
+        assert!(CommonClientConfigs::exponential_backoff_warnings(100, 1000, 10_000, 30_000).is_empty());
+        assert!(CommonClientConfigs::exponential_backoff_warnings(1000, 1000, 30_000, 30_000).is_empty());
+        assert_eq!(
+            CommonClientConfigs::exponential_backoff_warnings(2000, 1000, 40_000, 30_000),
+            vec![
+                "Configuration 'retry.backoff.ms' with value '2000' is greater than configuration \
+                 'retry.backoff.max.ms' with value '1000'. A static backoff with value '1000' will be applied."
+                    .to_string(),
+                "Configuration 'socket.connection.setup.timeout.ms' with value '40000' is greater than \
+                 configuration 'socket.connection.setup.timeout.max.ms' with value '30000'. A static connection \
+                 setup timeout with value '30000' will be applied."
+                    .to_string(),
+            ]
+        );
+    }
+
+    /// `postProcessReconnectBackoffConfigs` overrides `reconnect.backoff.max.ms`
+    /// with the parsed `reconnect.backoff.ms` only when the user set the base
+    /// and not the max.
+    #[test]
+    fn test_post_process_reconnect_backoff_configs() {
+        let originals = |keys: &[&str]| -> HashMap<String, String> {
+            keys.iter().map(|k| (k.to_string(), "1".to_string())).collect()
+        };
+        assert_eq!(
+            CommonClientConfigs::post_process_reconnect_backoff_configs(&originals(&[]), 50),
+            None
+        );
+        assert_eq!(
+            CommonClientConfigs::post_process_reconnect_backoff_configs(&originals(&["reconnect.backoff.ms"]), 123),
+            Some(123)
+        );
+        assert_eq!(
+            CommonClientConfigs::post_process_reconnect_backoff_configs(
+                &originals(&["reconnect.backoff.ms", "reconnect.backoff.max.ms"]),
+                123
+            ),
+            None
+        );
+        assert_eq!(
+            CommonClientConfigs::post_process_reconnect_backoff_configs(&originals(&["reconnect.backoff.max.ms"]), 50),
+            None
+        );
+    }
 }
