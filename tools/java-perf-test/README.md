@@ -71,6 +71,7 @@ gradle run
 | `LINGER_MS` | `5` | ms. Matches the C/Rust tests. |
 | `COMPRESSION_TYPE` | `none` | `none` / `gzip` / `snappy` / `lz4` / `zstd` |
 | `ENABLE_IDEMPOTENCE` | `false` | |
+| `ACKS` | `all` | `all` / `-1` / `1` / `0`. Matches the C/Rust/Python tests. |
 | `MAX_IN_FLIGHT` | unset | maps to `max.in.flight.requests.per.connection` |
 | `WARMUP_SECONDS` | `120` | Matches the C/Rust tests. |
 | `TEST_DURATION_SECONDS` | `600` | |
@@ -139,7 +140,7 @@ This test is aligned with `c/tests/producer_perf_test.c` and
   reports a fraction of *total* machine capacity — a different scale.)
 - **RSS** is read from `/proc/self/status` VmRSS (Linux), same as C/Rust.
 - **Config defaults** match: `batch.size` 1 MiB, `max.request.size` batch×64
-  capped at 8 MiB, `linger.ms` 5, `WARMUP_SECONDS` 120, `acks=all`.
+  capped at 8 MiB, `linger.ms` 5, `WARMUP_SECONDS` 120, `acks=all` (`ACKS`).
 - **Metrics lifecycle** matches: the collector runs from before warmup, so the
   JSONL captures warmup windows (`measurement_start_ms = -inf`); the measured
   interval is marked by `measurement_start_ms`/`measurement_end_ms`; a post-test
