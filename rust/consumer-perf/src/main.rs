@@ -387,6 +387,9 @@ struct Args {
     /// Kafka client properties file (e.g. SASL_SSL creds for Confluent Cloud).
     /// Merged into the consumer props AND passed to the producer via `--producer.config`.
     client_config: Option<String>,
+    /// Where to also write the run's summary in the shape the producer
+    /// harnesses' `results.json` has (read by `cargo xtask perf-cloud`).
+    results_file: Option<String>,
 }
 
 impl Args {
@@ -420,6 +423,7 @@ impl Args {
             fetch_max_bytes: None,
             max_poll_records: None,
             client_config: None,
+            results_file: None,
         };
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
@@ -453,6 +457,7 @@ impl Args {
                 "--fetch-max-bytes" => a.fetch_max_bytes = Some(next()?.parse().map_err(|e| format!("{e}"))?),
                 "--max-poll-records" => a.max_poll_records = Some(next()?.parse().map_err(|e| format!("{e}"))?),
                 "--client-config" => a.client_config = Some(next()?),
+                "--results-file" => a.results_file = Some(next()?),
                 "--help" | "-h" => return Err("help".to_string()),
                 other => return Err(format!("unknown argument: {other}")),
             }
@@ -473,7 +478,7 @@ fn print_usage() {
            -d, --duration <SECONDS>      Measurement window after warmup (default: 60)\n  \
                --message-size <BYTES>    Record size for the producer (default: 1024)\n  \
                --partitions <N>          Partitions when creating the topic (default: 8)\n  \
-           -w, --warmup-messages <N>     Records to skip before measuring (default: 5000)\n  \
+           -w, --warmup-messages <N>     Records to skip before measuring, 0 for none (default: 5000)\n  \
                --interval <SECONDS>      Metric reporting interval (default: 5)\n  \
                --poll-timeout-ms <MS>    poll() timeout (default: 500)\n  \
                --join-timeout <SECONDS>  Max wait for partition assignment (default: 120)\n  \
@@ -490,6 +495,8 @@ fn print_usage() {
                --max-partition-fetch-bytes <N>  max.partition.fetch.bytes (client default 1MB)\n  \
                --fetch-max-bytes <N>     fetch.max.bytes (client default 50MB)\n  \
                --max-poll-records <N>    max.poll.records (client default 500)\n  \
+               --client-config <FILE>    Client properties file (e.g. SASL), also given to the producer\n  \
+               --results-file <FILE>     Also write the summary as results.json (perf-cloud's shape)\n  \
            -v, --verbose                 Log every poll (record counts / heartbeats)\n"
     );
 }
@@ -794,7 +801,8 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut cpu_max = 0.0f64;
 
     let mut messages_consumed: u64 = 0;
-    let mut warmup_complete = false;
+    // With no warmup the measurement starts with the first poll.
+    let mut warmup_complete = args.warmup_messages == 0;
     let mut measure_start = Instant::now();
     let mut interval_start = Instant::now();
     let mut interval_count: u64 = 0;
@@ -833,7 +841,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         polls += 1;
 
         if records.is_empty() {
-            if !warmup_complete && Instant::now() >= no_data_deadline && messages_consumed == 0 {
+            if Instant::now() >= no_data_deadline && messages_consumed == 0 {
                 return Err("no records received within 120s (producer not running?)".into());
             }
             if warmup_complete && measure_start.elapsed() >= Duration::from_secs(args.duration_s) {
@@ -977,6 +985,8 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     write_summary(
         &mut jsonl,
         &run_dir,
+        &args.topic,
+        args.results_file.as_deref().map(Path::new),
         &overall,
         total_bytes,
         measured_duration_s,
@@ -991,6 +1001,9 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     println!("\nResults written to: {}", run_dir.display());
+    if overall.count == 0 {
+        return Err("no records measured".into());
+    }
     Ok(())
 }
 
@@ -1029,6 +1042,8 @@ fn emit_interval(
 fn write_summary(
     jsonl: &mut File,
     run_dir: &Path,
+    topic: &str,
+    results_file: Option<&Path>,
     hist: &LatencyHistogram,
     total_bytes: u128,
     duration_s: f64,
@@ -1091,6 +1106,49 @@ fn write_summary(
          \"rpp_p99\":{rpp_p99},\"rpp_max\":{rpp_max}}}"
     )?;
     jsonl.flush()?;
+
+    // The same summary in the shape (keys, units, `latency_ms`) of the
+    // producer harnesses' results.json, which `cargo xtask perf-cloud` reads.
+    // Not written when nothing was measured: zeros would read as a result.
+    if let Some(path) = results_file.filter(|_| measured > 0) {
+        let rss_avg_kib = rss_avg * 1024.0;
+        fs::write(
+            path,
+            format!(
+                concat!(
+                    "{{\n",
+                    "  \"test\": \"consumer\",\n",
+                    "  \"client\": \"rust-consumer\",\n",
+                    "  \"topic\": \"{topic}\",\n",
+                    "  \"messages_measured\": {measured},\n",
+                    "  \"duration_s\": {duration_s:.2},\n",
+                    "  \"throughput_msg_s\": {throughput_msg_s:.2},\n",
+                    "  \"throughput_mib_s\": {throughput_mb_s:.2},\n",
+                    "  \"latency_ms\": {{\"min\": {min}, \"avg\": {avg:.2}, \"p50\": {p50}, ",
+                    "\"p90\": {p90}, \"p95\": {p95}, \"p99\": {p99}, \"p999\": {p999}, ",
+                    "\"max\": {max}}},\n",
+                    "  \"cpu_avg_pct\": {cpu_avg:.2},\n",
+                    "  \"rss_avg_kib\": {rss_avg_kib:.2}\n",
+                    "}}\n"
+                ),
+                topic = topic,
+                measured = measured,
+                duration_s = duration_s,
+                throughput_msg_s = throughput_msg_s,
+                throughput_mb_s = throughput_mb_s,
+                min = min,
+                avg = avg,
+                p50 = p50,
+                p90 = p90,
+                p95 = p95,
+                p99 = p99,
+                p999 = p999,
+                max = max,
+                cpu_avg = cpu_avg,
+                rss_avg_kib = rss_avg_kib,
+            ),
+        )?;
+    }
 
     // Human-readable summary alongside the JSONL.
     let mut md = File::create(run_dir.join("summary.md"))?;
