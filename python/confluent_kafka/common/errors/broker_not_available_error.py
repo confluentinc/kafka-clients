@@ -34,7 +34,7 @@ class BrokerNotAvailableError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 8  # kafka_common_ErrorCode_BROKER_NOT_AVAILABLE
+    _ffi_id: ClassVar[int] = 8  # kafka_common_Error_BROKER_NOT_AVAILABLE
 
     def __init__(
         self,

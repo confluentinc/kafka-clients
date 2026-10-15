@@ -38,7 +38,7 @@ class CorruptRecordError(RetriableError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 2  # kafka_common_ErrorCode_CORRUPT_MESSAGE
+    _ffi_id: ClassVar[int] = 2  # kafka_common_Error_CORRUPT_MESSAGE
 
     def __init__(
         self,

@@ -38,7 +38,7 @@ class UnknownSubscriptionIdError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 117  # kafka_common_ErrorCode_UNKNOWN_SUBSCRIPTION_ID
+    _ffi_id: ClassVar[int] = 117  # kafka_common_Error_UNKNOWN_SUBSCRIPTION_ID
 
     def __init__(
         self,

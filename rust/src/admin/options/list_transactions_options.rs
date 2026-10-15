@@ -36,6 +36,7 @@ pub struct ListTransactionsOptions {
 impl ListTransactionsOptions {
     /// Creates default options: no filters, and `filtered_duration_ms == -1`
     /// (no duration filtering), matching Java's defaults.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsOptions#ListTransactionsOptions")]
     pub fn new() -> Self {
         Self { filtered_duration_ms: -1, ..Default::default() }
     }
@@ -43,6 +44,7 @@ impl ListTransactionsOptions {
     /// Set the timeout in milliseconds for this operation, or `None` to use the
     /// default API timeout for the `AdminClient`.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
@@ -50,6 +52,7 @@ impl ListTransactionsOptions {
 
     /// The timeout in milliseconds for this operation, or `None` if the default
     /// API timeout should be used.
+    #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
@@ -58,6 +61,7 @@ impl ListTransactionsOptions {
     ///
     /// Mirrors `filterStates`.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsOptions#filterStates")]
     pub fn filter_states(mut self, states: impl IntoIterator<Item = TransactionState>) -> Self {
         self.filtered_states = states.into_iter().collect();
         self
@@ -68,6 +72,7 @@ impl ListTransactionsOptions {
     ///
     /// Mirrors `filterProducerIds`.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsOptions#filterProducerIds")]
     pub fn filter_producer_ids(mut self, producer_ids: impl IntoIterator<Item = i64>) -> Self {
         self.filtered_producer_ids = producer_ids.into_iter().collect();
         self
@@ -77,6 +82,7 @@ impl ListTransactionsOptions {
     ///
     /// Mirrors `filterOnDuration`.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsOptions#filterOnDuration")]
     pub fn filter_on_duration(mut self, duration_ms: i64) -> Self {
         self.filtered_duration_ms = duration_ms;
         self
@@ -86,6 +92,7 @@ impl ListTransactionsOptions {
     ///
     /// Mirrors `filterOnTransactionalIdPattern`.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsOptions#filterOnTransactionalIdPattern")]
     pub fn filter_on_transactional_id_pattern(mut self, pattern: Option<String>) -> Self {
         self.filtered_transactional_id_pattern = pattern;
         self
@@ -94,6 +101,7 @@ impl ListTransactionsOptions {
     /// The set of states being filtered (empty means no state filter).
     ///
     /// Mirrors `filteredStates`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsOptions#filteredStates")]
     pub fn filtered_states(&self) -> &HashSet<TransactionState> {
         &self.filtered_states
     }
@@ -101,6 +109,7 @@ impl ListTransactionsOptions {
     /// The set of producer ids being filtered (empty means no producer id filter).
     ///
     /// Mirrors `filteredProducerIds`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsOptions#filteredProducerIds")]
     pub fn filtered_producer_ids(&self) -> &HashSet<i64> {
         &self.filtered_producer_ids
     }
@@ -108,6 +117,7 @@ impl ListTransactionsOptions {
     /// The duration filter in milliseconds (negative means no duration filter).
     ///
     /// Mirrors `filteredDuration`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsOptions#filteredDuration")]
     pub fn filtered_duration(&self) -> i64 {
         self.filtered_duration_ms
     }
@@ -115,6 +125,7 @@ impl ListTransactionsOptions {
     /// The transactional id pattern being filtered, if any.
     ///
     /// Mirrors `filteredTransactionalIdPattern`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsOptions#filteredTransactionalIdPattern")]
     pub fn filtered_transactional_id_pattern(&self) -> Option<&str> {
         self.filtered_transactional_id_pattern.as_deref()
     }

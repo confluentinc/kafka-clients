@@ -38,7 +38,7 @@ class InvalidOffsetError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = -13  # kafka_common_ErrorCode_INVALID_OFFSET
+    _ffi_id: ClassVar[int] = -13  # kafka_common_Error_INVALID_OFFSET
 
     def __init__(
         self,

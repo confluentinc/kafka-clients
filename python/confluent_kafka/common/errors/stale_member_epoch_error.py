@@ -40,7 +40,7 @@ class StaleMemberEpochError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 113  # kafka_common_ErrorCode_STALE_MEMBER_EPOCH
+    _ffi_id: ClassVar[int] = 113  # kafka_common_Error_STALE_MEMBER_EPOCH
 
     def __init__(
         self,

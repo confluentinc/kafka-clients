@@ -34,7 +34,7 @@ class InvalidPartitionsError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 37  # kafka_common_ErrorCode_INVALID_PARTITIONS
+    _ffi_id: ClassVar[int] = 37  # kafka_common_Error_INVALID_PARTITIONS
 
     def __init__(
         self,

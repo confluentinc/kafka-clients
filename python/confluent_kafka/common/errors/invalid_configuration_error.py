@@ -34,7 +34,7 @@ class InvalidConfigurationError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 40  # kafka_common_ErrorCode_INVALID_CONFIG
+    _ffi_id: ClassVar[int] = 40  # kafka_common_Error_INVALID_CONFIG
 
     def __init__(
         self,

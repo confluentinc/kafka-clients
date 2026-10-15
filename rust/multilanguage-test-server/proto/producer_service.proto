@@ -328,7 +328,7 @@ message ProducerCallbackLogRequest {
 // ---------------------------------------------------------------------------
 
 // Mirrors crate::common::KafkaError. `code` is the sole discriminator: it is
-// the FFI error code (kafka_common_ErrorCode_t in rust/target/include/confluent_kafka.h),
+// the FFI error code (kafka_common_Error_e in rust/target/include/confluent_kafka.h),
 // which is injective over the client's error classes, so the receiver derives
 // the class from it alone.
 message KafkaError {
@@ -341,7 +341,7 @@ message KafkaError {
   // mean such a reader sees absent fields instead of misparsing `code`.
   reserved 1, 4, 5;
 
-  // kafka_common_ErrorCode_t: Java's wire codes at Java's own values, plus
+  // kafka_common_Error_e: Java's wire codes at Java's own values, plus
   // negatives for the classes only the client raises (e.g.
   // LOCAL_ILLEGAL_STATE = -4, SERIALIZATION = -15, WAKEUP = -18).
   int32 code = 2;

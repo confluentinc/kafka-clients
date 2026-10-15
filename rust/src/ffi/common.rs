@@ -12,18 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Shared C FFI machinery reused across the producer and consumer FFI layers.
+//! Shared C FFI machinery reused across the producer, consumer and admin FFI
+//! layers.
 //!
-//! This module hosts the pieces that are not specific to either the producer
-//! or the consumer:
+//! This module hosts the pieces that are not specific to any one client:
 //!
-//! - The opaque [`kafka_common_Error_t`] error handle and its accessor
-//!   functions. `kafka_common_*` is shared verbatim between FFI surfaces — a
-//!   second definition would make cbindgen emit a duplicate type.
-//! - The async completion-queue / dispatcher-thread abstraction
-//!   ([`CompletionJob`], [`spawn_dispatcher`], [`enqueue_or_run_inline`]).
-//! - The void-returning operation callback machinery ([`OperationCallbackFn`],
-//!   [`OperationCompletion`], [`OperationCallbackTarget`]).
+//! - The opaque [`kafka_common_Error_t`] error handle (CLAUDE.md §4): its
+//!   constructors, one per `Error` static factory
+//!   (`kafka_common_Error_kafka_message`, `kafka_common_Error_timeout`, ...),
+//!   its accessors (`code`, `message`, `source`, `throttle_time_ms`), the
+//!   [`kafka_common_Error_e`] enum a C caller switches on, and the
+//!   per-class payload views (`kafka_common_Error_resource_not_found` ->
+//!   `kafka_common_ResourceNotFoundError_t`). The hierarchy predicates are
+//!   generated into `error_predicates.rs`. `kafka_common_*` is shared verbatim
+//!   between FFI surfaces — a second definition would make cbindgen emit a
+//!   duplicate type.
+//! - The `out_err` slot (CLAUDE.md §4): [`FailValue`], [`deliver_value`] /
+//!   [`deliver_unit`], [`fail_with`], and the panic boundary every export runs
+//!   in ([`ffi_guard_or`], the `deliver_panic*` family), so a body's failure
+//!   value and a panic's cannot diverge. Completions go through the per-client
+//!   callbacks vector in [`callback_queue`](crate::ffi::callback_queue).
+//! - The `destroy` hand-off off a runtime thread ([`in_tokio_runtime`],
+//!   [`spawn_teardown`]), since `Runtime::block_on` panics there.
 //! - The default logger initialization helper ([`init_default_logger`]).
 //!
 //! # Feature Gate
@@ -34,27 +44,60 @@
 // type names, which intentionally differs from Rust's snake_case convention.
 #![expect(non_camel_case_types)]
 
+pub(crate) mod acl;
+pub(crate) mod classic_group_state;
+pub(crate) mod cluster;
+pub(crate) mod cluster_resource;
+pub(crate) mod config;
+pub(crate) mod election_type;
+pub(crate) mod errors;
+pub(crate) mod group_state;
+pub(crate) mod group_type;
+pub(crate) mod header;
+pub(crate) mod isolation_level;
+pub(crate) mod metric;
+pub(crate) mod metric_name;
+pub(crate) mod metric_name_template;
+pub(crate) mod metrics;
+pub(crate) mod node;
+pub(crate) mod partition_info;
+pub(crate) mod quota;
+pub(crate) mod record;
+pub(crate) mod resource;
+pub(crate) mod security;
+pub(crate) mod serialization;
+pub(crate) mod topic_collection;
+pub(crate) mod topic_id_partition;
+pub(crate) mod topic_partition;
+pub(crate) mod topic_partition_info;
+pub(crate) mod topic_partition_replica;
+pub(crate) mod uuid;
+
 use std::any::Any;
-use std::ffi::{CStr, CString, c_char};
+use std::collections::HashSet;
+use std::ffi::{CString, c_char, c_void};
 use std::panic::AssertUnwindSafe;
+use std::sync::OnceLock;
+
+use futures_util::FutureExt;
 
 use crate::common::Error;
 use crate::common::protocol::Errors;
+use crate::ffi::callback_queue::{CallbackJob, SendPtr};
+use crate::ffi::common::errors::local_callback_error::kafka_common_LocalCallbackError_release_fn_t;
 use crate::ffi::ffi_guard;
-// The 166 enumerators are spelled out in full (see
-// [`kafka_common_ErrorCode_t`]), so this glob keeps the match arms in
+use crate::ffi::util::{c_str_to_string, kafka_List_t, list_strings};
+// The 167 enumerators are spelled out in full (see
+// [`kafka_common_Error_e`]), so this glob keeps the match arms in
 // `error_code_of` readable without repeating the type name on each one.
-use kafka_common_ErrorCode_t::*;
+use kafka_common_Error_e::*;
 
-/// Initialize the default stderr log backend if RUST_LOG is set.
-/// Idempotent: succeeds once, silently no-ops on subsequent calls.
-/// A custom log backend (e.g. Python logging bridge) can be set before
-/// the first producer/consumer is created to override this default.
+/// Initializes the default stderr log backend, honouring `RUST_LOG`, the first
+/// time a client is created from C. Idempotent: `try_init` succeeds once and
+/// is a silent no-op afterwards, so a logger a binding installed beforehand
+/// stays in place.
 pub(crate) fn init_default_logger() {
-    #[cfg(feature = "ffi")]
-    {
-        let _ = env_logger::try_init();
-    }
+    let _ = env_logger::try_init();
 }
 
 // ---------------------------------------------------------------------------
@@ -92,17 +135,7 @@ pub(crate) fn init_default_logger() {
 pub(crate) fn ffi_guard_or<R>(fn_name: &'static str, on_panic: impl FnOnce(Error) -> R, body: impl FnOnce() -> R) -> R {
     match std::panic::catch_unwind(AssertUnwindSafe(body)) {
         Ok(value) => value,
-        Err(payload) => {
-            let error = panic_error(fn_name, &*payload);
-            // A payload's destructor is arbitrary code, and one that panicked
-            // would unwind out of this frame after all. Drop it under a second
-            // guard, and leak whatever that second panic carries.
-            if let Err(nested) = std::panic::catch_unwind(AssertUnwindSafe(move || drop(payload))) {
-                std::mem::forget(nested);
-            }
-            log::error!("{}", error.message());
-            on_panic(error)
-        },
+        Err(payload) => on_panic(caught_panic_error(fn_name, payload)),
     }
 }
 
@@ -132,13 +165,16 @@ pub(crate) fn panic_error(fn_name: &str, payload: &(dyn Any + Send)) -> Error {
 /// can panic inside `spawn` after the task is queued: the C caller's thread is
 /// not one of the runtime's workers, so the task is queued and a worker is then
 /// woken, and a failed wake is `expect("failed to wake I/O driver")`
-/// (`runtime/io/driver.rs:260`, tokio 1.52.0). Unwinding from there would fire
-/// the callback from `on_panic` while the queued task fires it too, and would
-/// skip the task's registration after the spawn (`pending_tasks` in the
-/// producer and consumer, `pending_closes` / `pending_calls` in the admin),
-/// which `destroy` relies on. So the process aborts, as every
-/// panic at the boundary did before `#[ffi_guard]`: the OS refused to wake the
-/// runtime. See §4 item 6 of `design/current/appsec-7665-4521-ffi-panic-guard.md`.
+/// (`runtime/io/driver.rs:260`, tokio 1.52.0). Unwinding from there would queue
+/// the completion from `on_panic` while the queued task queues it too, and
+/// would skip the client's `tasks` registration after the spawn, which
+/// `destroy` relies on. So the process aborts, as every panic at the boundary
+/// did before `#[ffi_guard]`: the OS refused to wake the runtime. See §4 item 6
+/// of `design/current/appsec-7665-4521-ffi-panic-guard.md`.
+///
+/// Every task the FFI spawns holding a C callback or `opaque` goes through
+/// here: the producer, consumer and admin `Client::spawn` and
+/// `kafka_common_KafkaFuture_get_cb`.
 ///
 /// No Java counterpart: Java has no C boundary.
 pub(crate) fn spawn_callback_task<F>(runtime: &tokio::runtime::Handle, task: F) -> tokio::task::JoinHandle<F::Output>
@@ -167,6 +203,408 @@ fn spawn_or_abort<J>(spawn: impl FnOnce() -> J) -> J {
 }
 
 // ---------------------------------------------------------------------------
+// Panic completions of the `_cb` entry points
+// ---------------------------------------------------------------------------
+
+/// The completion of a `_cb` entry point that reports only an error.
+pub(crate) type ErrorCompletion = unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+
+/// The completion of a `_cb` entry point that reports an `int64_t` value or an
+/// error.
+pub(crate) type I64Completion = unsafe extern "C" fn(value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+
+/// The completion of a `_cb` entry point that reports nothing but its `opaque`
+/// (a Java `void` method that cannot fail, such as `Admin.close`).
+pub(crate) type OpaqueCompletion = unsafe extern "C" fn(opaque: *mut c_void);
+
+/// Delivers the completion of a `_cb` entry point whose body panicked: `cb`
+/// receives the panic `error` and the caller's `opaque`.
+///
+/// `complete` is where the handle runs its completions: the client's
+/// [`CallbackQueue::push`](crate::ffi::callback_queue::CallbackQueue::push),
+/// so the completion fires from the client's `__execute_callbacks` like any
+/// other, or, for a handle with no callbacks vector (a future with no client,
+/// a standalone listener), a call on the calling thread. Each entry point's
+/// `#[ffi_guard(on_panic = ...)]` calls this, or the helper of its callback's
+/// shape, so the panic is reported exactly once: the guard fires only when
+/// the body did not return, and every body hands its completion over (to a
+/// task, the queue, the submission channel or the C method) as its last step,
+/// after which nothing can panic.
+///
+/// # Safety
+///
+/// `cb` and `opaque` must be the pair the C caller passed to the entry point,
+/// which has not fired `cb`.
+pub(crate) unsafe fn deliver_panic(
+    complete: impl FnOnce(CallbackJob),
+    cb: ErrorCompletion,
+    opaque: *mut c_void,
+    error: Error,
+) {
+    let error = SendPtr(box_error(error) as *mut c_void);
+    let opaque = SendPtr(opaque);
+    complete(Box::new(move || {
+        // SAFETY: Per this function's `# Safety`, `cb` and `opaque` are the pair the C caller
+        // passed to the entry point, which has not fired `cb`, so calling `cb` with `opaque`
+        // is the completion the caller is waiting for. `error` is the fresh `box_error` handle
+        // above, owned by no one else, so handing it to `cb` transfers its ownership; the job
+        // is a `FnOnce`, so `cb` fires exactly once.
+        unsafe { cb(error.get() as *mut kafka_common_Error_t, opaque.get()) }
+    }));
+}
+
+/// [`deliver_panic`] for a completion that also reports a pointer value: the
+/// value is NULL.
+///
+/// # Safety
+///
+/// As [`deliver_panic`].
+pub(crate) unsafe fn deliver_panic_value<P: 'static>(
+    complete: impl FnOnce(CallbackJob),
+    cb: unsafe extern "C" fn(value: *mut P, error: *mut kafka_common_Error_t, opaque: *mut c_void),
+    opaque: *mut c_void,
+    error: Error,
+) {
+    let error = SendPtr(box_error(error) as *mut c_void);
+    let opaque = SendPtr(opaque);
+    complete(Box::new(move || {
+        // SAFETY: Per this function's `# Safety`, `cb` and `opaque` are the pair the C caller
+        // passed to the entry point, which has not fired `cb`, so calling `cb` with `opaque`
+        // is the completion the caller is waiting for. `error` is the fresh `box_error` handle
+        // above, owned by no one else, so handing it to `cb` transfers its ownership; the job
+        // is a `FnOnce`, so `cb` fires exactly once.
+        unsafe { cb(std::ptr::null_mut(), error.get() as *mut kafka_common_Error_t, opaque.get()) }
+    }));
+}
+
+/// [`deliver_panic`] for a completion that also reports an `int64_t` value:
+/// the value is -1, as for every failure of such a completion.
+///
+/// # Safety
+///
+/// As [`deliver_panic`].
+pub(crate) unsafe fn deliver_panic_i64(
+    complete: impl FnOnce(CallbackJob),
+    cb: I64Completion,
+    opaque: *mut c_void,
+    error: Error,
+) {
+    let error = SendPtr(box_error(error) as *mut c_void);
+    let opaque = SendPtr(opaque);
+    complete(Box::new(move || {
+        // SAFETY: Per this function's `# Safety`, `cb` and `opaque` are the pair the C caller
+        // passed to the entry point, which has not fired `cb`, so calling `cb` with `opaque`
+        // is the completion the caller is waiting for. `error` is the fresh `box_error` handle
+        // above, owned by no one else, so handing it to `cb` transfers its ownership; the job
+        // is a `FnOnce`, so `cb` fires exactly once.
+        unsafe { cb(-1, error.get() as *mut kafka_common_Error_t, opaque.get()) }
+    }));
+}
+
+/// [`deliver_panic`] for a completion that reports only `opaque`: the callback
+/// still fires, so the caller gets `opaque` back to release, and the panic is
+/// known only from the error-level line [`ffi_guard_or`] already logged.
+///
+/// # Safety
+///
+/// As [`deliver_panic`].
+pub(crate) unsafe fn deliver_panic_opaque(
+    complete: impl FnOnce(CallbackJob),
+    cb: OpaqueCompletion,
+    opaque: *mut c_void,
+    error: Error,
+) {
+    drop(error);
+    let opaque = SendPtr(opaque);
+    complete(Box::new(move || {
+        // SAFETY: Per this function's `# Safety`, `cb` and `opaque` are the pair the C caller
+        // passed to the entry point, which has not fired `cb`, so calling `cb` with `opaque`
+        // is the completion the caller is waiting for; the job is a `FnOnce`, so `cb` fires
+        // exactly once.
+        unsafe { cb(opaque.get()) }
+    }));
+}
+
+/// The completion sink of a handle with no callbacks vector: runs the
+/// completion on the calling thread, as such a handle runs every completion
+/// (see [`deliver_panic`]).
+pub(crate) fn run_inline(job: CallbackJob) {
+    job();
+}
+
+/// Whether the calling thread is inside a tokio runtime: a worker thread, or a
+/// thread inside some runtime's `block_on`. A `destroy` that must wait for a
+/// handle's tasks cannot do it there, since `Runtime::block_on` panics. The
+/// check is conservative: it is also true on a blocking-pool thread, where
+/// waiting would be allowed, and handing off there only costs a thread.
+///
+/// No Java counterpart: Java has no C boundary.
+pub(crate) fn in_tokio_runtime() -> bool {
+    tokio::runtime::Handle::try_current().is_ok()
+}
+
+/// Runs `teardown(handle)` on a new thread named `name`, for a `destroy` called
+/// where it must not wait: inside a tokio runtime ([`in_tokio_runtime`]).
+/// `destroy` then returns at once, and the wait and the free happen on that
+/// thread.
+///
+/// The handle travels as an address, so a failed spawn drops nothing. It is
+/// logged and the handle is leaked: still in use by its tasks, leaking it is
+/// safe where freeing it would not be.
+///
+/// No Java counterpart: Java has no C boundary.
+///
+/// # Safety
+///
+/// Calling `teardown(handle)` once, on a newly spawned thread, must be sound, and
+/// this must be the handle's only teardown.
+pub(crate) unsafe fn spawn_teardown(name: &str, handle: usize, teardown: unsafe fn(usize)) {
+    // SAFETY: this function's `# Safety` is the one `spawn_teardown_with` requires, and
+    // `Builder::spawn` either runs the body once on the thread it starts or returns an
+    // error without running it. Dropping the `JoinHandle` detaches that thread.
+    unsafe { spawn_teardown_with(name, handle, teardown, |builder, body| builder.spawn(body).map(drop)) }
+}
+
+/// [`spawn_teardown`] with the thread start passed in as `spawn`, so a test can
+/// make it fail.
+///
+/// # Safety
+///
+/// As for [`spawn_teardown`]. `spawn` must either run the body it is given once,
+/// on the thread it starts from the builder it is given, or return an error
+/// without running it.
+unsafe fn spawn_teardown_with(
+    name: &str,
+    handle: usize,
+    teardown: unsafe fn(usize),
+    spawn: impl FnOnce(std::thread::Builder, Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
+) {
+    let body: Box<dyn FnOnce() + Send> = Box::new(move || {
+        // SAFETY: per this function's `# Safety`, `teardown(handle)` is sound to call
+        // once on a newly spawned thread, and this is its only call: the closure is
+        // `FnOnce`, and `spawn` runs it at most once, on the thread it starts.
+        unsafe { teardown(handle) }
+    });
+    if let Err(e) = spawn(std::thread::Builder::new().name(name.to_string()), body) {
+        log::error!("leaking a destroyed handle: could not spawn the {name} thread to free it: {e}");
+    }
+}
+
+/// Runs a `_cb` entry point's task body, turning a panic inside it into the
+/// task's `Err` result, which the task then delivers like any other failure.
+///
+/// The guard of the entry point does not cover the task: the body returned
+/// once the task was spawned. Without this a panicking task would end without
+/// its completion, so the C caller would never get `opaque` back; here the
+/// completion carries the [`panic_error`] of `fn_name`, the entry point that
+/// spawned the task, and the panic is logged as [`ffi_guard_or`] logs one.
+/// The state the task was working on may be inconsistent afterwards, as for
+/// any caught panic: the handle should be destroyed.
+pub(crate) async fn catch_task_panic<T, F>(fn_name: &'static str, task: F) -> Result<T, Error>
+where
+    F: std::future::Future<Output = Result<T, Error>>,
+{
+    match AssertUnwindSafe(task).catch_unwind().await {
+        Ok(result) => result,
+        Err(payload) => Err(caught_panic_error(fn_name, payload)),
+    }
+}
+
+/// The [`panic_error`] for a caught `payload`, logged at `error` level, with
+/// the payload dropped under a second guard: a payload's destructor is
+/// arbitrary code, and one that panicked would unwind out of the catching
+/// frame after all, so whatever that second panic carries is leaked.
+pub(crate) fn caught_panic_error(fn_name: &'static str, payload: Box<dyn Any + Send>) -> Error {
+    let error = panic_error(fn_name, &*payload);
+    if let Err(nested) = std::panic::catch_unwind(AssertUnwindSafe(move || drop(payload))) {
+        std::mem::forget(nested);
+    }
+    log::error!("{}", error.message());
+    error
+}
+
+/// Test-only fail point: makes the next delivery helper reached on this
+/// thread panic before it hands its completion over, so a test can drive a
+/// real `_cb` entry point down its guard's `on_panic` path.
+#[cfg(test)]
+pub(crate) mod fail_point {
+    use std::cell::Cell;
+
+    thread_local! {
+        static ARMED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// The message [`hit`] panics with.
+    pub(crate) const MESSAGE: &str = "fail point before the completion hand-off";
+
+    /// Arms the fail point for the next [`hit`] on this thread.
+    pub(crate) fn arm() {
+        ARMED.with(|armed| armed.set(true));
+    }
+
+    /// Panics, once, when [`arm`] was called on this thread.
+    pub(crate) fn hit() {
+        hit_if(take());
+    }
+
+    /// Disarms the fail point of this thread, returning whether it was armed,
+    /// so a body can carry the arming into a task it spawns and fire it there
+    /// with [`hit_if`].
+    pub(crate) fn take() -> bool {
+        ARMED.with(|armed| armed.replace(false))
+    }
+
+    /// Panics as [`hit`] does when `armed`, a value [`take`] returned.
+    pub(crate) fn hit_if(armed: bool) {
+        if armed {
+            panic!("{MESSAGE}");
+        }
+    }
+}
+
+/// The test side of [`spawn_teardown`]: an `(error, opaque)` completion that
+/// reports which thread fired it, so a test can tell a destroy run inline from
+/// one handed off to its teardown thread.
+#[cfg(test)]
+pub(crate) mod teardown_probe {
+    use std::ffi::c_void;
+    use std::sync::mpsc::{Receiver, Sender, channel};
+    use std::time::Duration;
+
+    use super::kafka_common_Error_t;
+
+    /// Where the completion reports its firing thread's name, and whether it
+    /// carried no error.
+    pub(crate) struct Fired {
+        tx: Sender<(Option<String>, bool)>,
+        rx: Receiver<(Option<String>, bool)>,
+    }
+
+    impl Fired {
+        pub(crate) fn new() -> Self {
+            let (tx, rx) = channel();
+            Self { tx, rx }
+        }
+
+        pub(crate) fn as_opaque(&self) -> *mut c_void {
+            self as *const Self as *mut c_void
+        }
+
+        /// The one firing, waited for up to a few seconds.
+        pub(crate) fn wait(&self) -> (Option<String>, bool) {
+            let fired = self.rx.recv_timeout(Duration::from_secs(10)).expect("the completion fired");
+            assert!(self.rx.try_recv().is_err(), "the completion fired once");
+            fired
+        }
+    }
+
+    /// An `(error, opaque)` completion; the error, if any, is leaked.
+    pub(crate) unsafe extern "C" fn on_fired(error: *mut kafka_common_Error_t, opaque: *mut c_void) {
+        // SAFETY: Test code: every test registering this completion passes `Fired::as_opaque` of
+        // a `Fired` it keeps alive until it has waited for the firing.
+        let fired = unsafe { &*(opaque as *const Fired) };
+        let name = std::thread::current().name().map(str::to_string);
+        let _ = fired.tx.send((name, error.is_null()));
+    }
+}
+
+/// Test-only recorder for the completions a `_cb` entry point fires, one
+/// callback per completion shape, so the tests of every module can check that
+/// a caught panic is delivered exactly once, as the error of [`panic_error`].
+#[cfg(test)]
+pub(crate) mod panic_probe {
+    use std::ffi::c_void;
+    use std::sync::Mutex;
+
+    use super::{kafka_common_Error_t, take_error};
+
+    /// What each completion fired with, in firing order: the error message,
+    /// or `"<no error>"` for a completion without one.
+    #[derive(Default)]
+    pub(crate) struct Probe {
+        fired: Mutex<Vec<String>>,
+    }
+
+    impl Probe {
+        pub(crate) fn as_opaque(&self) -> *mut c_void {
+            self as *const Self as *mut c_void
+        }
+
+        pub(crate) fn fired(&self) -> Vec<String> {
+            self.fired.lock().unwrap().clone()
+        }
+
+        /// Asserts exactly one completion fired, carrying the panic error of
+        /// `fn_name` with the panic message `panic`.
+        pub(crate) fn assert_one_panic(&self, fn_name: &str, panic: &str) {
+            assert_eq!(
+                self.fired(),
+                [format!("Rust panic caught at the FFI boundary in {fn_name}: {panic}")]
+            );
+        }
+
+        /// Records `error`, which must be the `LocalIllegalState` a panic is
+        /// reported as.
+        ///
+        /// # Safety
+        ///
+        /// `error` must be an owned error handle not yet destroyed; it is consumed.
+        unsafe fn record(&self, error: *mut kafka_common_Error_t) {
+            // SAFETY: Test code: per this function's `# Safety`, `error` is an owned handle not
+            // yet destroyed, which `take_error` consumes here, its final use.
+            let error = unsafe { take_error(error) }.expect("a panic completion carries an error");
+            assert!(error.is_local_illegal_state_error(), "{error:?}");
+            self.fired.lock().unwrap().push(error.message().to_string());
+        }
+    }
+
+    /// The [`Probe`] behind a completion's `opaque`.
+    ///
+    /// # Safety
+    ///
+    /// `opaque` must be [`Probe::as_opaque`] of a `Probe` that outlives `'a`.
+    unsafe fn probe<'a>(opaque: *mut c_void) -> &'a Probe {
+        // SAFETY: Test code: per this function's `# Safety`, `opaque` came from
+        // `Probe::as_opaque` of a live `Probe` that outlives `'a`; the reference is shared, and
+        // `Probe` mutates only through its `Mutex`.
+        unsafe { &*(opaque as *const Probe) }
+    }
+
+    /// An `(error, opaque)` completion.
+    pub(crate) unsafe extern "C" fn on_error(error: *mut kafka_common_Error_t, opaque: *mut c_void) {
+        // SAFETY: Test code: every test registering this completion passes `Probe::as_opaque`
+        // of a `Probe` it keeps alive until the completion has fired, and a completion owns
+        // the error handle it receives.
+        unsafe { probe(opaque).record(error) }
+    }
+
+    /// A `(value *, error, opaque)` completion: a failure has a NULL value.
+    pub(crate) unsafe extern "C" fn on_value<P>(value: *mut P, error: *mut kafka_common_Error_t, opaque: *mut c_void) {
+        assert!(value.is_null());
+        // SAFETY: Test code: every test registering this completion passes `Probe::as_opaque`
+        // of a `Probe` it keeps alive until the completion has fired, and a completion owns
+        // the error handle it receives.
+        unsafe { probe(opaque).record(error) }
+    }
+
+    /// An `(int64_t value, error, opaque)` completion: a failure has -1.
+    pub(crate) unsafe extern "C" fn on_i64(value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void) {
+        assert_eq!(value, -1);
+        // SAFETY: Test code: every test registering this completion passes `Probe::as_opaque`
+        // of a `Probe` it keeps alive until the completion has fired, and a completion owns
+        // the error handle it receives.
+        unsafe { probe(opaque).record(error) }
+    }
+
+    /// An `(opaque)` completion, which carries no error.
+    pub(crate) unsafe extern "C" fn on_opaque(opaque: *mut c_void) {
+        // SAFETY: Test code: every test registering this completion passes `Probe::as_opaque`
+        // of a `Probe` it keeps alive until the completion has fired.
+        unsafe { probe(opaque) }.fired.lock().unwrap().push("<no error>".to_string());
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Error handle
 // ---------------------------------------------------------------------------
 
@@ -177,6 +615,42 @@ pub(crate) struct ErrorInner {
     pub(crate) error: Error,
     /// Cached CString for the error message, created once at construction time.
     pub(crate) message_cstring: CString,
+    /// The handle [`kafka_common_Error_source`] borrows out, built on first
+    /// request from [`Error::source`] and owned by this handle so the chain
+    /// of causes lives exactly as long as the outermost error.
+    source: OnceLock<Option<Box<ErrorInner>>>,
+    /// The payload view a `kafka_common_Error_<class>` accessor borrows out
+    /// (an [`errors::Payload`] of the variant's class), built on first request
+    /// and owned by this handle so it lives exactly as long as the error. An
+    /// error has one class, so one slot suffices.
+    payload: OnceLock<Box<dyn Any + Send + Sync>>,
+}
+
+impl ErrorInner {
+    pub(crate) fn new(error: Error) -> Self {
+        let message_cstring = CString::new(error.message()).unwrap_or_default();
+        ErrorInner { error, message_cstring, source: OnceLock::new(), payload: OnceLock::new() }
+    }
+
+    /// The borrowed payload view of this error's class, built from `value`
+    /// (the variant's payload, which the caller has already matched) on the
+    /// first call and cached afterwards.
+    pub(crate) fn payload_view<T: errors::PayloadClass>(&self, value: &T) -> *const errors::Payload<T> {
+        let view = self.payload.get_or_init(|| Box::new(errors::Payload::new(value.clone())));
+        view.downcast_ref::<errors::Payload<T>>()
+            .map_or(std::ptr::null(), |payload| payload as *const _)
+    }
+
+    /// A borrowed handle on the error's cause, or null when it has none.
+    fn source_ptr(&self) -> *const kafka_common_Error_t {
+        match self
+            .source
+            .get_or_init(|| self.error.source().cloned().map(|e| Box::new(ErrorInner::new(e))))
+        {
+            Some(inner) => &**inner as *const ErrorInner as *const kafka_common_Error_t,
+            None => std::ptr::null(),
+        }
+    }
 }
 
 /// Opaque error handle returned by functions that can fail.
@@ -186,6 +660,8 @@ pub(crate) struct ErrorInner {
 ///
 /// A null `kafka_common_Error_t` pointer means success (no error).
 #[repr(C)]
+// the handle over `common::Error` (CLAUDE.md §4)
+#[doc(alias = "rust-only")]
 pub struct kafka_common_Error_t {
     _private: [u8; 0],
 }
@@ -193,137 +669,765 @@ pub struct kafka_common_Error_t {
 /// Wraps a [`Error`] into a heap-allocated opaque error pointer, including
 /// a cached [`CString`] for the error message.
 pub(crate) fn box_error(error: Error) -> *mut kafka_common_Error_t {
-    let message_cstring = CString::new(error.message()).unwrap_or_else(|_| CString::new("").unwrap());
-    let inner = ErrorInner { error, message_cstring };
-    Box::into_raw(Box::new(inner)) as *mut kafka_common_Error_t
+    Box::into_raw(Box::new(ErrorInner::new(error))) as *mut kafka_common_Error_t
+}
+
+/// What a fallible entry point returns beside the error it stored in
+/// `*out_err`: null for a pointer, a null `kafka_Bytes_t`, `0` for an
+/// `int8_t`, `-1` for any wider integer. `#[ffi_guard]` returns the same value
+/// for a caught panic, so a failure and a panic cannot be told apart by the
+/// value, which the caller never reads: it tests `*out_err`.
+///
+/// No Java counterpart: Java has no C boundary.
+pub(crate) trait FailValue {
+    /// The failure value.
+    fn fail() -> Self;
+}
+
+impl FailValue for () {
+    fn fail() -> Self {}
+}
+
+impl<T> FailValue for *mut T {
+    fn fail() -> Self {
+        std::ptr::null_mut()
+    }
+}
+
+impl<T> FailValue for *const T {
+    fn fail() -> Self {
+        std::ptr::null()
+    }
+}
+
+impl FailValue for i8 {
+    fn fail() -> Self {
+        0
+    }
+}
+
+impl FailValue for i16 {
+    fn fail() -> Self {
+        -1
+    }
+}
+
+impl FailValue for i32 {
+    fn fail() -> Self {
+        -1
+    }
+}
+
+impl FailValue for i64 {
+    fn fail() -> Self {
+        -1
+    }
+}
+
+impl FailValue for crate::ffi::util::kafka_Bytes_t {
+    fn fail() -> Self {
+        Self::NULL
+    }
+}
+
+/// Stores `error` in `*out_err`, as an owned handle the caller frees.
+///
+/// # Safety
+///
+/// `out_err` must be valid for one write. It should point at null, as every
+/// entry point taking it requires, or the handle there leaks.
+pub(crate) unsafe fn store_error(out_err: *mut *mut kafka_common_Error_t, error: Error) {
+    // SAFETY: Per this function's `# Safety`, `out_err` is valid for one write. A raw pointer has
+    // no drop glue, so the write reads nothing from the slot.
+    unsafe { out_err.write(box_error(error)) }
+}
+
+/// Stores `error` in `*out_err` and returns the failure value: the tail of
+/// every failing path of a fallible entry point.
+///
+/// # Safety
+///
+/// As [`store_error`].
+pub(crate) unsafe fn fail_with<P: FailValue>(out_err: *mut *mut kafka_common_Error_t, error: Error) -> P {
+    // SAFETY: Per this function's `# Safety`, `out_err` is as `store_error` requires.
+    unsafe { store_error(out_err, error) };
+    P::fail()
+}
+
+/// The value of `result` converted by `to_value`, or, for an error, the
+/// failure value with the error stored in `*out_err`.
+///
+/// # Safety
+///
+/// As [`store_error`].
+pub(crate) unsafe fn deliver_value<T, P: FailValue>(
+    result: Result<T, Error>,
+    out_err: *mut *mut kafka_common_Error_t,
+    to_value: impl FnOnce(T) -> P,
+) -> P {
+    match result {
+        Ok(value) => to_value(value),
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        Err(error) => unsafe { fail_with(out_err, error) },
+    }
+}
+
+/// Stores the error of `result`, if any, in `*out_err`.
+///
+/// # Safety
+///
+/// As [`store_error`].
+pub(crate) unsafe fn deliver_unit(result: Result<(), Error>, out_err: *mut *mut kafka_common_Error_t) {
+    if let Err(error) = result {
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `store_error` requires.
+        unsafe { store_error(out_err, error) }
+    }
 }
 
 /// Casts a `*const kafka_common_Error_t` to a reference to `ErrorInner`.
 ///
 /// # Safety
 ///
-/// The pointer must be non-null and must have been created by [`box_error`].
+/// The pointer must be non-null and point at a live `ErrorInner`: either an
+/// owned handle from [`box_error`], or a borrowed handle a live owner hands out
+/// ([`kafka_common_Error_source`], or a payload's or struct field's error
+/// accessor). The handle, and for a borrowed one its owner, must stay alive
+/// (not passed to [`kafka_common_Error_destroy`] nor consumed by
+/// [`take_error`]) for as long as the returned reference, or anything borrowed
+/// from it, is used: the `'static` lifetime is not real.
 pub(crate) unsafe fn error_ref(error: *const kafka_common_Error_t) -> &'static ErrorInner {
-    // SAFETY: Per this function's `# Safety`, `error` is non-null and was created by
-    // `box_error`, whose `Box::into_raw` of an `ErrorInner` is the single allocation behind
-    // every `kafka_common_Error_t`, so the cast targets a live, correctly typed
-    // `ErrorInner`. The `&'static` is a convenience only: every caller is a
-    // `kafka_common_Error_*` accessor in this module that uses the reference for the
-    // duration of its own call, during which the C caller keeps the handle alive (not yet
-    // passed to `kafka_common_Error_destroy`), and none of them stores or returns it.
+    // SAFETY: Per this function's `# Safety`, `error` is non-null and points at a live
+    // `ErrorInner`: an owned handle (the `Box::into_raw` of `box_error`) or one borrowed from
+    // a live owner (an `ErrorInner` held inside another handle). Either way the cast targets
+    // a live, correctly typed `ErrorInner`. The `&'static` is a convenience only: the same
+    // contract makes the caller
+    // keep the handle alive while it uses the reference, which is shared, so nothing writes
+    // the `ErrorInner` under it (its lazy slots are `OnceLock`s).
     unsafe { &*(error as *const ErrorInner) }
 }
 
-/// Creates a new error handle from an error code and a message.
+// ---------------------------------------------------------------------------
+// Constructors: the `Error` static factories (CLAUDE.md §4, "Static methods")
+// ---------------------------------------------------------------------------
+//
+// These let a C (or Python) callback that must *return* an error to the Rust
+// core build the handle to return. The rebalance-listener callbacks are the
+// motivating case — they return `Result<(), Error>` in the core, i.e. a
+// `kafka_common_Error_t *` in C, and a Python listener that raised an
+// exception has to convert it into one. They mirror `Error`'s own
+// constructors one for one, so C builds exactly the classes Rust can: there
+// is no constructor from a bare numeric code, because a code does not
+// identify a class a C caller may legitimately raise (Java's `Errors.forCode`
+// is a wire concern, and the client-side classes have no wire code at all).
+//
+// Every constructor returns an owned handle the caller frees with
+// [`kafka_common_Error_destroy`] — unless it hands it to a Rust callback that
+// documents taking ownership of it. A `source` parameter is an owned handle
+// the constructor consumes; the caller must not destroy it afterwards.
+
+/// The error behind an owned `source` handle, consumed by the constructor.
 ///
-/// This is the inverse of the [`kafka_common_Error_code`] /
-/// [`kafka_common_Error_message`] accessors: it lets a C (or Python)
-/// callback that must *return* an error to the Rust core build the handle to
-/// return. The rebalance-listener callbacks are the motivating case — they
-/// return `Result<(), Error>` in the core, i.e. a
-/// `kafka_common_Error_t*` in C, and a Python listener that raised an
-/// exception has to convert it into one.
-///
-/// `code` is a [`kafka_common_ErrorCode_t`] value, so the handle reports it back
-/// from [`kafka_common_Error_code`]:
-///
-/// - A Kafka protocol error code (`-1` and up) is looked up as Java's
-///   `Errors.forCode` does; an unknown one maps to `UNKNOWN_SERVER_ERROR`.
-/// - A client-side (negative) code builds that class with `message`, so an
-///   `IllegalStateException` (`LOCAL_ILLEGAL_STATE`, `-4`) or a
-///   `WakeupException` (`WAKEUP`, `-18`) comes back as itself. The classes whose
-///   Java constructors all take a payload the code cannot carry —
-///   `NO_OFFSET_FOR_PARTITION` (`-21`), `CORRELATION_ID_MISMATCH` (`-24`),
-///   `QUOTA_VIOLATION` (`-26`) and `RECORD_DESERIALIZATION` (`-27`) — map to
-///   `UNKNOWN_SERVER_ERROR` with `message`, as does any value that is no
-///   [`kafka_common_ErrorCode_t`]. `LOG_TRUNCATION` (`-20`) and
-///   `CONSUMER_OFFSET_OUT_OF_RANGE` (`-22`) are built with empty partition maps,
-///   as Java's `(String, Map…)` constructors allow.
-///
-/// # Parameters
-///
-/// - `code`: Error code (see [`kafka_common_Error_code`]).
-/// - `message`: Null-terminated error message, or null for an empty message.
-///
-/// # Returns
-///
-/// A non-null error handle owned by the caller, who must free it with
-/// [`kafka_common_Error_destroy`] — unless it is handed to a Rust callback
-/// that documents taking ownership of it.
+/// A null `source` violates the constructor's precondition; the bare
+/// `KafkaException` stands in so the call stays memory-safe.
 ///
 /// # Safety
 ///
-/// `message` must be null or a valid, null-terminated C string.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_new(code: i32, message: *const c_char) -> *mut kafka_common_Error_t {
-    let message = if message.is_null() {
-        String::new()
-    } else {
-        // SAFETY: `message` is non-null (checked above) and, per this function's `#
-        // Safety`, a valid NUL-terminated C string; it is read once here and copied into an
-        // owned `String`, so nothing borrows it past this call.
-        unsafe { CStr::from_ptr(message) }.to_string_lossy().into_owned()
-    };
-    box_error(error_for_code(code, message))
+/// `source` must be null or an owned error handle not yet destroyed.
+unsafe fn owned_source(source: *mut kafka_common_Error_t) -> Error {
+    // SAFETY: Per this function's `# Safety`, `source` is null or an owned error handle not
+    // yet destroyed, as `take_error` requires; the caller hands it over, so consuming it
+    // here is its final use.
+    unsafe { take_error(source) }.unwrap_or_else(Error::kafka)
 }
 
-/// The [`Error`] [`kafka_common_Error_new`] builds for `code` and `message` (see
-/// its documentation for the mapping).
-pub(crate) fn error_for_code(code: i32, message: String) -> Error {
-    use crate::common::errors::{
-        ApiError, AuthenticationError, AuthorizationError, AuthorizerNotReadyError, BootstrapResolutionError,
-        DisconnectError, InterruptError, InvalidOffsetError, SslAuthenticationError,
-    };
-    use crate::common::network::InvalidReceiveError;
-    use crate::consumer::{
-        ConsumerCommitFailedError, ConsumerLogTruncationError, ConsumerOffsetOutOfRangeError,
-        ConsumerRetriableCommitFailedError,
-    };
-    use std::collections::HashMap;
+/// A `kafka_List_t` of `const char *` topic names, read into a set.
+///
+/// # Safety
+///
+/// `topics` must be null or a valid list of NUL-terminated strings.
+unsafe fn topic_set(topics: *const kafka_List_t) -> HashSet<String> {
+    // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list of
+    // NUL-terminated strings, as `list_strings` requires; the names are copied out, so
+    // nothing borrows the list after this call.
+    unsafe { list_strings(topics) }.into_iter().collect()
+}
 
-    if code >= -1 {
-        let error = match i16::try_from(code) {
-            Ok(code) => Errors::for_code(code),
-            Err(_) => Errors::UnknownServerError,
-        };
-        return Error::with_message(error, message);
-    }
-    // One arm per client-side enumerator of `kafka_common_ErrorCode_t`, the
-    // inverse of `error_code_of`.
-    match code {
-        -2 => Error::local_concurrent_modification(message),
-        -3 => Error::local_illegal_argument(message),
-        -4 => Error::local_illegal_state(message),
-        -5 => Error::local_timeout(message),
-        -6 => Error::Api(ApiError::new(message)),
-        -7 => Error::Authentication(AuthenticationError::new(message)),
-        -8 => Error::AuthorizerNotReady(AuthorizerNotReadyError::new(message)),
-        -9 => Error::Authorization(AuthorizationError::new(message)),
-        -10 => Error::config_message(message),
-        -11 => Error::Disconnect(DisconnectError::new(message)),
-        -12 => Error::Interrupt(InterruptError::new(message)),
-        -13 => Error::InvalidOffset(InvalidOffsetError::new(message)),
-        -14 => Error::schema(message),
-        -15 => Error::serialization(message),
-        -16 => Error::SslAuthentication(SslAuthenticationError::new(message)),
-        -17 => Error::transaction_aborted_message(message),
-        -18 => Error::wakeup(message),
-        -19 => Error::ConsumerCommitFailed(ConsumerCommitFailedError::new(message)),
-        -20 => Error::ConsumerLogTruncation(Box::new(ConsumerLogTruncationError::with_message(
-            message,
-            HashMap::new(),
-            HashMap::new(),
-        ))),
-        -22 => Error::ConsumerOffsetOutOfRange(ConsumerOffsetOutOfRangeError::with_message(message, HashMap::new())),
-        -23 => Error::ConsumerRetriableCommitFailed(ConsumerRetriableCommitFailedError::new(message)),
-        -25 => Error::InvalidReceive(InvalidReceiveError::new(message)),
-        -28 => Error::buffer_exhausted(message),
-        -29 => Error::BootstrapResolution(BootstrapResolutionError::new(message)),
-        // -21, -24, -26, -27: every Java constructor takes a payload the code
-        // cannot carry; any other value is no enumerator.
-        _ => Error::with_message(Errors::UnknownServerError, message),
-    }
+/// `new KafkaException()`: the bare Kafka error with the default message.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub extern "C" fn kafka_common_Error_kafka() -> *mut kafka_common_Error_t {
+    box_error(Error::kafka())
+}
+
+/// `new KafkaException(String message)`: the bare Kafka error with `message`.
+///
+/// # Safety
+///
+/// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_kafka_message(message: *const c_char) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
+    box_error(Error::kafka_message(unsafe { c_str_to_string(message) }))
+}
+
+/// `new KafkaException(Throwable cause)`: the bare Kafka error caused by
+/// `source`, which is consumed.
+///
+/// # Safety
+///
+/// `source` must be an owned error handle not yet destroyed.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_kafka_source(
+    source: *mut kafka_common_Error_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `source` is an owned error handle not yet
+    // destroyed, as `owned_source` requires. The caller hands `source` over, so taking it here
+    // is its single, final use.
+    box_error(Error::kafka_source(unsafe { owned_source(source) }))
+}
+
+/// `new KafkaException(String message, Throwable cause)`: the bare Kafka
+/// error with `message`, caused by `source`, which is consumed.
+///
+/// # Safety
+///
+/// `message` must be null or a valid NUL-terminated C string; `source` must
+/// be an owned error handle not yet destroyed.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_kafka_message_source(
+    message: *const c_char,
+    source: *mut kafka_common_Error_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires, and `source` is an owned error handle not yet
+    // destroyed, as `owned_source` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call; the caller hands `source` over, so taking it here is
+    // its single, final use.
+    box_error(Error::kafka_message_source(unsafe { c_str_to_string(message) }, unsafe {
+        owned_source(source)
+    }))
+}
+
+/// `new TopicAuthorizationException(Set<String> unauthorizedTopics)`.
+///
+/// `topics` is a borrowed `kafka_List_t` of `const char *`.
+///
+/// # Safety
+///
+/// `topics` must be null or a valid list of NUL-terminated strings.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_topic_authorization(
+    topics: *const kafka_List_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list of
+    // NUL-terminated strings, as `topic_set` requires. `topics` is only read here, into owned
+    // values, so nothing borrows it after this call.
+    box_error(Error::topic_authorization(unsafe { topic_set(topics) }))
+}
+
+/// `new TopicAuthorizationException(String message, Set<String> unauthorizedTopics)`.
+///
+/// `topics` is a borrowed `kafka_List_t` of `const char *`.
+///
+/// # Safety
+///
+/// `topics` must be null or a valid list of NUL-terminated strings; `message`
+/// must be null or a valid NUL-terminated C string.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_topic_authorization_message(
+    topics: *const kafka_List_t,
+    message: *const c_char,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list of
+    // NUL-terminated strings, as `topic_set` requires, and `message` is null or a valid
+    // NUL-terminated C string, as `c_str_to_string` requires. `topics` and `message` are only
+    // read here, into owned values, so nothing borrows them after this call.
+    box_error(Error::topic_authorization_message(unsafe { topic_set(topics) }, unsafe {
+        c_str_to_string(message)
+    }))
+}
+
+/// `new InvalidTopicException(Set<String> invalidTopics)`.
+///
+/// `topics` is a borrowed `kafka_List_t` of `const char *`.
+///
+/// # Safety
+///
+/// `topics` must be null or a valid list of NUL-terminated strings.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_invalid_topics(topics: *const kafka_List_t) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list of
+    // NUL-terminated strings, as `topic_set` requires. `topics` is only read here, into owned
+    // values, so nothing borrows it after this call.
+    box_error(Error::invalid_topics(unsafe { topic_set(topics) }))
+}
+
+/// `new InvalidTopicException(String message, Set<String> invalidTopics)`.
+///
+/// `topics` is a borrowed `kafka_List_t` of `const char *`.
+///
+/// # Safety
+///
+/// `topics` must be null or a valid list of NUL-terminated strings; `message`
+/// must be null or a valid NUL-terminated C string.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_invalid_topics_message(
+    topics: *const kafka_List_t,
+    message: *const c_char,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list of
+    // NUL-terminated strings, as `topic_set` requires, and `message` is null or a valid
+    // NUL-terminated C string, as `c_str_to_string` requires. `topics` and `message` are only
+    // read here, into owned values, so nothing borrows them after this call.
+    box_error(Error::invalid_topics_message(unsafe { topic_set(topics) }, unsafe {
+        c_str_to_string(message)
+    }))
+}
+
+/// `new GroupAuthorizationException(String groupId)`.
+///
+/// # Safety
+///
+/// `group_id` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_group_authorization(group_id: *const c_char) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `group_id` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `group_id` is only read here, into owned values,
+    // so nothing borrows it after this call.
+    box_error(Error::group_authorization(unsafe { c_str_to_string(group_id) }))
+}
+
+/// `new GroupAuthorizationException(String message, String groupId)`.
+///
+/// # Safety
+///
+/// `group_id` and `message` must each be null or a valid NUL-terminated C
+/// string.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_group_authorization_with_message(
+    group_id: *const c_char,
+    message: *const c_char,
+) -> *mut kafka_common_Error_t {
+    box_error(Error::group_authorization_with_message(
+        // SAFETY: Per this function's `# Safety`, `group_id` is null or a valid NUL-terminated
+        // C string, as `c_str_to_string` requires. `group_id` is only read here, into owned
+        // values, so nothing borrows it after this call.
+        unsafe { c_str_to_string(group_id) },
+        // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+        // string, as `c_str_to_string` requires. `message` is only read here, into owned
+        // values, so nothing borrows it after this call.
+        unsafe { c_str_to_string(message) },
+    ))
+}
+
+/// `new InvalidGroupIdException(String message)`.
+///
+/// # Safety
+///
+/// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_invalid_group_id(message: *const c_char) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
+    box_error(Error::invalid_group_id(unsafe { c_str_to_string(message) }))
+}
+
+/// `new ThrottlingQuotaExceededException(int throttleTimeMs, String message)`.
+///
+/// # Safety
+///
+/// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_throttling_quota_exceeded(
+    throttle_time_ms: i32,
+    message: *const c_char,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
+    box_error(Error::throttling_quota_exceeded(throttle_time_ms, unsafe {
+        c_str_to_string(message)
+    }))
+}
+
+/// `new BufferExhaustedException(String message)`.
+///
+/// # Safety
+///
+/// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_buffer_exhausted(message: *const c_char) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
+    box_error(Error::buffer_exhausted(unsafe { c_str_to_string(message) }))
+}
+
+/// `new IllegalArgumentException(String message)`.
+///
+/// # Safety
+///
+/// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_local_illegal_argument(
+    message: *const c_char,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
+    box_error(Error::local_illegal_argument(unsafe { c_str_to_string(message) }))
+}
+
+/// `new ConfigException(String message)`.
+///
+/// # Safety
+///
+/// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_config_message(message: *const c_char) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
+    box_error(Error::config_message(unsafe { c_str_to_string(message) }))
+}
+
+/// `new ConfigException(String name, Object value)`: the value is its text.
+///
+/// # Safety
+///
+/// `name` and `value` must each be null or a valid NUL-terminated C string.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_config_name_value(
+    name: *const c_char,
+    value: *const c_char,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `name` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires, and `value` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `name` and `value` are only read here, into owned
+    // values, so nothing borrows them after this call.
+    box_error(Error::config_name_value(unsafe { c_str_to_string(name) }, unsafe {
+        c_str_to_string(value)
+    }))
+}
+
+/// `new ConfigException(String name, Object value, String message)`: the
+/// value is its text.
+///
+/// # Safety
+///
+/// `name`, `value` and `message` must each be null or a valid NUL-terminated
+/// C string.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_config_name_value_message(
+    name: *const c_char,
+    value: *const c_char,
+    message: *const c_char,
+) -> *mut kafka_common_Error_t {
+    box_error(Error::config_name_value_message(
+        // SAFETY: Per this function's `# Safety`, `name` is null or a valid NUL-terminated C
+        // string, as `c_str_to_string` requires. `name` is only read here, into owned values,
+        // so nothing borrows it after this call.
+        unsafe { c_str_to_string(name) },
+        // SAFETY: Per this function's `# Safety`, `value` is null or a valid NUL-terminated C
+        // string, as `c_str_to_string` requires. `value` is only read here, into owned values,
+        // so nothing borrows it after this call.
+        unsafe { c_str_to_string(value) },
+        // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+        // string, as `c_str_to_string` requires. `message` is only read here, into owned
+        // values, so nothing borrows it after this call.
+        unsafe { c_str_to_string(message) },
+    ))
+}
+
+/// `new IllegalStateException(String message)`.
+///
+/// # Safety
+///
+/// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_local_illegal_state(message: *const c_char) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
+    box_error(Error::local_illegal_state(unsafe { c_str_to_string(message) }))
+}
+
+/// `new TimeoutException(String message)` — the retriable
+/// `org.apache.kafka.common.errors.TimeoutException`.
+///
+/// # Safety
+///
+/// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_timeout(message: *const c_char) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
+    box_error(Error::timeout(unsafe { c_str_to_string(message) }))
+}
+
+/// `new RecordTooLargeException(String message)`.
+///
+/// # Safety
+///
+/// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_record_too_large(message: *const c_char) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
+    box_error(Error::record_too_large(unsafe { c_str_to_string(message) }))
+}
+
+/// `new CorrelationIdMismatchException(String message, int requestCorrelationId, int responseCorrelationId)`.
+///
+/// # Safety
+///
+/// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_correlation_id_mismatch(
+    message: *const c_char,
+    request_correlation_id: i32,
+    response_correlation_id: i32,
+) -> *mut kafka_common_Error_t {
+    box_error(Error::correlation_id_mismatch(
+        // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+        // string, as `c_str_to_string` requires. `message` is only read here, into owned
+        // values, so nothing borrows it after this call.
+        unsafe { c_str_to_string(message) },
+        request_correlation_id,
+        response_correlation_id,
+    ))
+}
+
+/// `new InvalidReceiveException(String message)`.
+///
+/// # Safety
+///
+/// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_invalid_receive(message: *const c_char) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
+    box_error(Error::invalid_receive(unsafe { c_str_to_string(message) }))
+}
+
+/// `new SchemaException(String message)`.
+///
+/// # Safety
+///
+/// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_schema(message: *const c_char) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
+    box_error(Error::schema(unsafe { c_str_to_string(message) }))
+}
+
+/// `new SchemaException(String message, Throwable cause)`: `source` is
+/// consumed.
+///
+/// # Safety
+///
+/// `message` must be null or a valid NUL-terminated C string; `source` must
+/// be an owned error handle not yet destroyed.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_schema_source(
+    message: *const c_char,
+    source: *mut kafka_common_Error_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires, and `source` is an owned error handle not yet
+    // destroyed, as `owned_source` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call; the caller hands `source` over, so taking it here is
+    // its single, final use.
+    box_error(Error::schema_source(unsafe { c_str_to_string(message) }, unsafe {
+        owned_source(source)
+    }))
+}
+
+/// `new SerializationException(String message)`.
+///
+/// # Safety
+///
+/// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_serialization(message: *const c_char) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
+    box_error(Error::serialization(unsafe { c_str_to_string(message) }))
+}
+
+/// `new UnsupportedVersionException(String message)`.
+///
+/// # Safety
+///
+/// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_unsupported_version(message: *const c_char) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
+    box_error(Error::unsupported_version(unsafe { c_str_to_string(message) }))
+}
+
+/// `new WakeupException()` carrying `message`.
+///
+/// # Safety
+///
+/// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_wakeup(message: *const c_char) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
+    box_error(Error::wakeup(unsafe { c_str_to_string(message) }))
+}
+
+/// `new ConcurrentModificationException(String message)`.
+///
+/// # Safety
+///
+/// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_local_concurrent_modification(
+    message: *const c_char,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
+    box_error(Error::local_concurrent_modification(unsafe { c_str_to_string(message) }))
+}
+
+/// `new java.util.concurrent.TimeoutException(String message)` — the one
+/// `Future.get(timeout, unit)` declares, not the retriable Kafka class.
+///
+/// # Safety
+///
+/// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_local_timeout(message: *const c_char) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
+    box_error(Error::local_timeout(unsafe { c_str_to_string(message) }))
+}
+
+/// The error a callback written in another language reports, from an
+/// interface method through `<Client>__set_callback_result`, when it raised one
+/// of that language's errors: `message` is its text, kept for the client's
+/// logs, and `opaque` the binding's pointer to it. No Java class. The client
+/// treats it as Java treats a listener's foreign `Throwable` (it wraps it, so
+/// it comes back as the cause of the operation's error), and
+/// `kafka_common_Error_local_callback_error` reads the pointer back.
+///
+/// Rust never dereferences `opaque`. When `release` is `NULL` the error does
+/// not own it: the caller keeps what it points at alive for as long as it may
+/// read the pointer back. Otherwise the error owns `opaque`: Rust calls
+/// `release(opaque)` exactly once, when the last copy of the error is dropped
+/// — this handle and every error the client made from it, such as an error
+/// whose cause it is, and the errors handed to other callbacks — and that can
+/// happen on any thread, a Rust task included, and after this function and
+/// the call that reported the error have returned.
+///
+/// # Safety
+///
+/// `message` must be null or a valid NUL-terminated C string. `release`, when
+/// not `NULL`, must be safe to call once with `opaque` from any thread, at any
+/// time until the process exits.
+// a binding's foreign callback error, no Java class (DoD #7)
+#[doc(alias = "rust-only")]
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_local_callback(
+    message: *const c_char,
+    opaque: *mut std::ffi::c_void,
+    release: kafka_common_LocalCallbackError_release_fn_t,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
+    let message = unsafe { c_str_to_string(message) };
+    box_error(match release {
+        // SAFETY: Per this function's `# Safety`, a non-null `release` is safe to call once with
+        // `opaque` from any thread, at any time, as `local_callback_with_release` requires; the
+        // error makes that one call when its last copy drops.
+        Some(release) => unsafe { Error::local_callback_with_release(message, opaque, release) },
+        None => Error::local_callback(message, opaque),
+    })
+}
+
+/// `new TransactionAbortedException()`.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub extern "C" fn kafka_common_Error_transaction_aborted() -> *mut kafka_common_Error_t {
+    box_error(Error::transaction_aborted())
+}
+
+/// `new TransactionAbortedException(String message)`.
+///
+/// # Safety
+///
+/// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_transaction_aborted_message(
+    message: *const c_char,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
+    box_error(Error::transaction_aborted_message(unsafe { c_str_to_string(message) }))
+}
+
+/// `new RecordBatchTooLargeException(String message)`.
+///
+/// # Safety
+///
+/// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_record_batch_too_large(
+    message: *const c_char,
+) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
+    box_error(Error::record_batch_too_large(unsafe { c_str_to_string(message) }))
 }
 
 /// Takes ownership of an error handle **returned by a C callback** and converts
@@ -338,9 +1442,10 @@ pub(crate) fn error_for_code(code: i32, message: String) -> Error {
 ///
 /// # Safety
 ///
-/// `error` must be null or a handle created by [`box_error`] (i.e. by
-/// [`kafka_common_Error_new`] or returned from a fallible FFI function and
-/// not yet destroyed). After this call the pointer is invalid.
+/// `error` must be null or a handle created by [`box_error`] (i.e. by one of
+/// the `kafka_common_Error_<constructor>` functions above or returned from a
+/// fallible FFI function and not yet destroyed). After this call the pointer
+/// is invalid.
 pub(crate) unsafe fn take_error(error: *mut kafka_common_Error_t) -> Option<Error> {
     if error.is_null() {
         return None;
@@ -355,7 +1460,7 @@ pub(crate) unsafe fn take_error(error: *mut kafka_common_Error_t) -> Option<Erro
 }
 
 // ---------------------------------------------------------------------------
-// Error code enum
+// Error enum
 // ---------------------------------------------------------------------------
 
 /// The class of an error, as a named constant a C caller can switch on.
@@ -401,13 +1506,11 @@ pub(crate) unsafe fn take_error(error: *mut kafka_common_Error_t) -> Option<Erro
 ///
 /// # Injectivity and ABI
 ///
-/// The 166 values are pairwise distinct — the code alone identifies the class,
+/// The 167 values are pairwise distinct — the code alone identifies the class,
 /// which is what lets a C caller use it as its sole discriminator. The
 /// negatives are ABI once published: a new class **appends at the most-negative
 /// end**, because inserting one mid-list would silently renumber every class
-/// after it. A table test pins all 28 literally so a renumbering cannot pass.
-///
-/// cbindgen:prefix-with-name=false
+/// after it. A table test pins all 29 literally so a renumbering cannot pass.
 // Implementation notes for Rust readers, kept out of the generated header.
 //
 // **Why the negatives live here and not in `common::protocol::Errors`.**
@@ -417,14 +1520,28 @@ pub(crate) unsafe fn take_error(error: *mut kafka_common_Error_t) -> Option<Erro
 // generated deserializers do no range validation. Keeping the synthetic half in
 // the FFI layer leaves `Errors` and every wire path untouched.
 //
-// **Why `#[repr(C)]` and fully-spelled enumerator names.** cbindgen prefixes
-// enumerators with the type's export name and applies `[export.rename]` before
-// prefixing, so it would push the `_t` suffix into all 166 enumerators; the
-// per-enum `prefix-with-name=false` annotation turns that off locally (leaving
-// the global `[enum] prefix_with_name = true` in `cbindgen.toml` intact for
-// every other enum) and the names are written out in full instead. As a bonus,
-// one `grep kafka_common_ErrorCode_WAKEUP` then finds this definition and every
-// C use of it.
+// **Why fully-spelled enumerator names.** CLAUDE.md §4 ("Enums") names a C
+// enumerator `<prefix>_<VALUE>` — the enum's prefix without the `_e` suffix,
+// then the key in constant case. cbindgen could only prefix with the export
+// name, which would put the `_e` into every enumerator, so `[enum]
+// prefix_with_name = false` in `cbindgen.toml` turns prefixing off for every
+// C enum and each enumerator is written out in full in Rust: the Rust
+// identifier is the C name, which is also what `check-ffi-translation` checks.
+// As a bonus, one `grep kafka_common_Error_WAKEUP` finds this definition
+// and every C use of it.
+//
+// **Why the keys are Java's `Errors` names, not the `Error` variants.** This
+// is `Error`'s C enum, so §4 names it `kafka_common_Error_e`, with
+// `kafka_common_Error__enum` returning it, as every other C enum is named. §4
+// would also take the enumerator keys from the enum's own keys, the `Error`
+// variants in constant case. That does not fit here, so the faithful half
+// keeps Java's `Errors` constants (`CLUSTER_AUTHORIZATION_FAILED`, not
+// `CLUSTER_AUTHORIZATION`; `STALE_CONTROLLER_EPOCH`, not `CONTROLLER_MOVED`):
+// the variants do not map one to one onto the classes, because
+// `Error::KafkaError` stores an `Errors` and reports the class that owns it,
+// and the `Errors` names are the ones a C caller knows from Java and
+// librdkafka. The client-only classes have no `Errors` constant and take their
+// variant's name (`LOCAL_TIMEOUT`, `PRODUCER_BUFFER_EXHAUSTED`).
 //
 // `#[repr(C)]` rather than `#[repr(i32)]` so the C typedef names the enum
 // itself rather than an integer alias beside it: given an explicit integer repr
@@ -433,207 +1550,209 @@ pub(crate) unsafe fn take_error(error: *mut kafka_common_Error_t) -> Option<Erro
 // typedef, so `config.style` is not respected" (`ir/enumeration.rs`). The ABI
 // is identical: a fieldless `#[repr(C)]` enum takes the target C ABI's default
 // enum size, which is `int` on every target Rust supports, and a C enum
-// spanning -29..=136 is `int` too. Naming the enum in the typedef is what lets
+// spanning -30..=136 is `int` too. Naming the enum in the typedef is what lets
 // a C or C++ caller switch on the real type and get the compiler's
 // exhaustiveness warning.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum kafka_common_ErrorCode_t {
+pub enum kafka_common_Error_e {
     // Java's `Errors`, at Java's own values. Names come from
     // `Errors::enum_name()`, so each equals Java's constant.
-    kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR = -1,
-    kafka_common_ErrorCode_NONE = 0,
-    kafka_common_ErrorCode_OFFSET_OUT_OF_RANGE = 1,
-    kafka_common_ErrorCode_CORRUPT_MESSAGE = 2,
-    kafka_common_ErrorCode_UNKNOWN_TOPIC_OR_PARTITION = 3,
-    kafka_common_ErrorCode_INVALID_FETCH_SIZE = 4,
-    kafka_common_ErrorCode_LEADER_NOT_AVAILABLE = 5,
-    kafka_common_ErrorCode_NOT_LEADER_OR_FOLLOWER = 6,
-    kafka_common_ErrorCode_REQUEST_TIMED_OUT = 7,
-    kafka_common_ErrorCode_BROKER_NOT_AVAILABLE = 8,
-    kafka_common_ErrorCode_REPLICA_NOT_AVAILABLE = 9,
-    kafka_common_ErrorCode_MESSAGE_TOO_LARGE = 10,
-    kafka_common_ErrorCode_STALE_CONTROLLER_EPOCH = 11,
-    kafka_common_ErrorCode_OFFSET_METADATA_TOO_LARGE = 12,
-    kafka_common_ErrorCode_NETWORK_ERROR = 13,
-    kafka_common_ErrorCode_COORDINATOR_LOAD_IN_PROGRESS = 14,
-    kafka_common_ErrorCode_COORDINATOR_NOT_AVAILABLE = 15,
-    kafka_common_ErrorCode_NOT_COORDINATOR = 16,
-    kafka_common_ErrorCode_INVALID_TOPIC_ERROR = 17,
-    kafka_common_ErrorCode_RECORD_LIST_TOO_LARGE = 18,
-    kafka_common_ErrorCode_NOT_ENOUGH_REPLICAS = 19,
-    kafka_common_ErrorCode_NOT_ENOUGH_REPLICAS_AFTER_APPEND = 20,
-    kafka_common_ErrorCode_INVALID_REQUIRED_ACKS = 21,
-    kafka_common_ErrorCode_ILLEGAL_GENERATION = 22,
-    kafka_common_ErrorCode_INCONSISTENT_GROUP_PROTOCOL = 23,
-    kafka_common_ErrorCode_INVALID_GROUP_ID = 24,
-    kafka_common_ErrorCode_UNKNOWN_MEMBER_ID = 25,
-    kafka_common_ErrorCode_INVALID_SESSION_TIMEOUT = 26,
-    kafka_common_ErrorCode_REBALANCE_IN_PROGRESS = 27,
-    kafka_common_ErrorCode_INVALID_COMMIT_OFFSET_SIZE = 28,
-    kafka_common_ErrorCode_TOPIC_AUTHORIZATION_FAILED = 29,
-    kafka_common_ErrorCode_GROUP_AUTHORIZATION_FAILED = 30,
-    kafka_common_ErrorCode_CLUSTER_AUTHORIZATION_FAILED = 31,
-    kafka_common_ErrorCode_INVALID_TIMESTAMP = 32,
-    kafka_common_ErrorCode_UNSUPPORTED_SASL_MECHANISM = 33,
-    kafka_common_ErrorCode_ILLEGAL_SASL_STATE = 34,
-    kafka_common_ErrorCode_UNSUPPORTED_VERSION = 35,
-    kafka_common_ErrorCode_TOPIC_ALREADY_EXISTS = 36,
-    kafka_common_ErrorCode_INVALID_PARTITIONS = 37,
-    kafka_common_ErrorCode_INVALID_REPLICATION_FACTOR = 38,
-    kafka_common_ErrorCode_INVALID_REPLICA_ASSIGNMENT = 39,
-    kafka_common_ErrorCode_INVALID_CONFIG = 40,
-    kafka_common_ErrorCode_NOT_CONTROLLER = 41,
-    kafka_common_ErrorCode_INVALID_REQUEST = 42,
-    kafka_common_ErrorCode_UNSUPPORTED_FOR_MESSAGE_FORMAT = 43,
-    kafka_common_ErrorCode_POLICY_VIOLATION = 44,
-    kafka_common_ErrorCode_OUT_OF_ORDER_SEQUENCE_NUMBER = 45,
-    kafka_common_ErrorCode_DUPLICATE_SEQUENCE_NUMBER = 46,
-    kafka_common_ErrorCode_INVALID_PRODUCER_EPOCH = 47,
-    kafka_common_ErrorCode_INVALID_TXN_STATE = 48,
-    kafka_common_ErrorCode_INVALID_PRODUCER_ID_MAPPING = 49,
-    kafka_common_ErrorCode_INVALID_TRANSACTION_TIMEOUT = 50,
-    kafka_common_ErrorCode_CONCURRENT_TRANSACTIONS = 51,
-    kafka_common_ErrorCode_TRANSACTION_COORDINATOR_FENCED = 52,
-    kafka_common_ErrorCode_TRANSACTIONAL_ID_AUTHORIZATION_FAILED = 53,
-    kafka_common_ErrorCode_SECURITY_DISABLED = 54,
-    kafka_common_ErrorCode_OPERATION_NOT_ATTEMPTED = 55,
-    kafka_common_ErrorCode_KAFKA_STORAGE_ERROR = 56,
-    kafka_common_ErrorCode_LOG_DIR_NOT_FOUND = 57,
-    kafka_common_ErrorCode_SASL_AUTHENTICATION_FAILED = 58,
-    kafka_common_ErrorCode_UNKNOWN_PRODUCER_ID = 59,
-    kafka_common_ErrorCode_REASSIGNMENT_IN_PROGRESS = 60,
-    kafka_common_ErrorCode_DELEGATION_TOKEN_AUTH_DISABLED = 61,
-    kafka_common_ErrorCode_DELEGATION_TOKEN_NOT_FOUND = 62,
-    kafka_common_ErrorCode_DELEGATION_TOKEN_OWNER_MISMATCH = 63,
-    kafka_common_ErrorCode_DELEGATION_TOKEN_REQUEST_NOT_ALLOWED = 64,
-    kafka_common_ErrorCode_DELEGATION_TOKEN_AUTHORIZATION_FAILED = 65,
-    kafka_common_ErrorCode_DELEGATION_TOKEN_EXPIRED = 66,
-    kafka_common_ErrorCode_INVALID_PRINCIPAL_TYPE = 67,
-    kafka_common_ErrorCode_NON_EMPTY_GROUP = 68,
-    kafka_common_ErrorCode_GROUP_ID_NOT_FOUND = 69,
-    kafka_common_ErrorCode_FETCH_SESSION_ID_NOT_FOUND = 70,
-    kafka_common_ErrorCode_INVALID_FETCH_SESSION_EPOCH = 71,
-    kafka_common_ErrorCode_LISTENER_NOT_FOUND = 72,
-    kafka_common_ErrorCode_TOPIC_DELETION_DISABLED = 73,
-    kafka_common_ErrorCode_FENCED_LEADER_EPOCH = 74,
-    kafka_common_ErrorCode_UNKNOWN_LEADER_EPOCH = 75,
-    kafka_common_ErrorCode_UNSUPPORTED_COMPRESSION_TYPE = 76,
-    kafka_common_ErrorCode_STALE_BROKER_EPOCH = 77,
-    kafka_common_ErrorCode_OFFSET_NOT_AVAILABLE = 78,
-    kafka_common_ErrorCode_MEMBER_ID_REQUIRED = 79,
-    kafka_common_ErrorCode_PREFERRED_LEADER_NOT_AVAILABLE = 80,
-    kafka_common_ErrorCode_GROUP_MAX_SIZE_REACHED = 81,
-    kafka_common_ErrorCode_FENCED_INSTANCE_ID = 82,
-    kafka_common_ErrorCode_ELIGIBLE_LEADERS_NOT_AVAILABLE = 83,
-    kafka_common_ErrorCode_ELECTION_NOT_NEEDED = 84,
-    kafka_common_ErrorCode_NO_REASSIGNMENT_IN_PROGRESS = 85,
-    kafka_common_ErrorCode_GROUP_SUBSCRIBED_TO_TOPIC = 86,
-    kafka_common_ErrorCode_INVALID_RECORD = 87,
-    kafka_common_ErrorCode_UNSTABLE_OFFSET_COMMIT = 88,
-    kafka_common_ErrorCode_THROTTLING_QUOTA_EXCEEDED = 89,
-    kafka_common_ErrorCode_PRODUCER_FENCED = 90,
-    kafka_common_ErrorCode_RESOURCE_NOT_FOUND = 91,
-    kafka_common_ErrorCode_DUPLICATE_RESOURCE = 92,
-    kafka_common_ErrorCode_UNACCEPTABLE_CREDENTIAL = 93,
-    kafka_common_ErrorCode_INCONSISTENT_VOTER_SET = 94,
-    kafka_common_ErrorCode_INVALID_UPDATE_VERSION = 95,
-    kafka_common_ErrorCode_FEATURE_UPDATE_FAILED = 96,
-    kafka_common_ErrorCode_PRINCIPAL_DESERIALIZATION_FAILURE = 97,
-    kafka_common_ErrorCode_SNAPSHOT_NOT_FOUND = 98,
-    kafka_common_ErrorCode_POSITION_OUT_OF_RANGE = 99,
-    kafka_common_ErrorCode_UNKNOWN_TOPIC_ID = 100,
-    kafka_common_ErrorCode_DUPLICATE_BROKER_REGISTRATION = 101,
-    kafka_common_ErrorCode_BROKER_ID_NOT_REGISTERED = 102,
-    kafka_common_ErrorCode_INCONSISTENT_TOPIC_ID = 103,
-    kafka_common_ErrorCode_INCONSISTENT_CLUSTER_ID = 104,
-    kafka_common_ErrorCode_TRANSACTIONAL_ID_NOT_FOUND = 105,
-    kafka_common_ErrorCode_FETCH_SESSION_TOPIC_ID_ERROR = 106,
-    kafka_common_ErrorCode_INELIGIBLE_REPLICA = 107,
-    kafka_common_ErrorCode_NEW_LEADER_ELECTED = 108,
-    kafka_common_ErrorCode_OFFSET_MOVED_TO_TIERED_STORAGE = 109,
-    kafka_common_ErrorCode_FENCED_MEMBER_EPOCH = 110,
-    kafka_common_ErrorCode_UNRELEASED_INSTANCE_ID = 111,
-    kafka_common_ErrorCode_UNSUPPORTED_ASSIGNOR = 112,
-    kafka_common_ErrorCode_STALE_MEMBER_EPOCH = 113,
-    kafka_common_ErrorCode_MISMATCHED_ENDPOINT_TYPE = 114,
-    kafka_common_ErrorCode_UNSUPPORTED_ENDPOINT_TYPE = 115,
-    kafka_common_ErrorCode_UNKNOWN_CONTROLLER_ID = 116,
-    kafka_common_ErrorCode_UNKNOWN_SUBSCRIPTION_ID = 117,
-    kafka_common_ErrorCode_TELEMETRY_TOO_LARGE = 118,
-    kafka_common_ErrorCode_INVALID_REGISTRATION = 119,
-    kafka_common_ErrorCode_TRANSACTION_ABORTABLE = 120,
-    kafka_common_ErrorCode_INVALID_RECORD_STATE = 121,
-    kafka_common_ErrorCode_SHARE_SESSION_NOT_FOUND = 122,
-    kafka_common_ErrorCode_INVALID_SHARE_SESSION_EPOCH = 123,
-    kafka_common_ErrorCode_FENCED_STATE_EPOCH = 124,
-    kafka_common_ErrorCode_INVALID_VOTER_KEY = 125,
-    kafka_common_ErrorCode_DUPLICATE_VOTER = 126,
-    kafka_common_ErrorCode_VOTER_NOT_FOUND = 127,
-    kafka_common_ErrorCode_INVALID_REGULAR_EXPRESSION = 128,
-    kafka_common_ErrorCode_REBOOTSTRAP_REQUIRED = 129,
-    kafka_common_ErrorCode_STREAMS_INVALID_TOPOLOGY = 130,
-    kafka_common_ErrorCode_STREAMS_INVALID_TOPOLOGY_EPOCH = 131,
-    kafka_common_ErrorCode_STREAMS_TOPOLOGY_FENCED = 132,
-    kafka_common_ErrorCode_SHARE_SESSION_LIMIT_REACHED = 133,
-    kafka_common_ErrorCode_GROUP_DELETION_FAILED = 134,
-    kafka_common_ErrorCode_STREAMS_TOPOLOGY_DESCRIPTION_UPDATE_FAILED = 135,
-    kafka_common_ErrorCode_CONTROLLER_ID_NOT_REGISTERED = 136,
+    kafka_common_Error_UNKNOWN_SERVER_ERROR = -1,
+    kafka_common_Error_NONE = 0,
+    kafka_common_Error_OFFSET_OUT_OF_RANGE = 1,
+    kafka_common_Error_CORRUPT_MESSAGE = 2,
+    kafka_common_Error_UNKNOWN_TOPIC_OR_PARTITION = 3,
+    kafka_common_Error_INVALID_FETCH_SIZE = 4,
+    kafka_common_Error_LEADER_NOT_AVAILABLE = 5,
+    kafka_common_Error_NOT_LEADER_OR_FOLLOWER = 6,
+    kafka_common_Error_REQUEST_TIMED_OUT = 7,
+    kafka_common_Error_BROKER_NOT_AVAILABLE = 8,
+    kafka_common_Error_REPLICA_NOT_AVAILABLE = 9,
+    kafka_common_Error_MESSAGE_TOO_LARGE = 10,
+    kafka_common_Error_STALE_CONTROLLER_EPOCH = 11,
+    kafka_common_Error_OFFSET_METADATA_TOO_LARGE = 12,
+    kafka_common_Error_NETWORK_ERROR = 13,
+    kafka_common_Error_COORDINATOR_LOAD_IN_PROGRESS = 14,
+    kafka_common_Error_COORDINATOR_NOT_AVAILABLE = 15,
+    kafka_common_Error_NOT_COORDINATOR = 16,
+    kafka_common_Error_INVALID_TOPIC_ERROR = 17,
+    kafka_common_Error_RECORD_LIST_TOO_LARGE = 18,
+    kafka_common_Error_NOT_ENOUGH_REPLICAS = 19,
+    kafka_common_Error_NOT_ENOUGH_REPLICAS_AFTER_APPEND = 20,
+    kafka_common_Error_INVALID_REQUIRED_ACKS = 21,
+    kafka_common_Error_ILLEGAL_GENERATION = 22,
+    kafka_common_Error_INCONSISTENT_GROUP_PROTOCOL = 23,
+    kafka_common_Error_INVALID_GROUP_ID = 24,
+    kafka_common_Error_UNKNOWN_MEMBER_ID = 25,
+    kafka_common_Error_INVALID_SESSION_TIMEOUT = 26,
+    kafka_common_Error_REBALANCE_IN_PROGRESS = 27,
+    kafka_common_Error_INVALID_COMMIT_OFFSET_SIZE = 28,
+    kafka_common_Error_TOPIC_AUTHORIZATION_FAILED = 29,
+    kafka_common_Error_GROUP_AUTHORIZATION_FAILED = 30,
+    kafka_common_Error_CLUSTER_AUTHORIZATION_FAILED = 31,
+    kafka_common_Error_INVALID_TIMESTAMP = 32,
+    kafka_common_Error_UNSUPPORTED_SASL_MECHANISM = 33,
+    kafka_common_Error_ILLEGAL_SASL_STATE = 34,
+    kafka_common_Error_UNSUPPORTED_VERSION = 35,
+    kafka_common_Error_TOPIC_ALREADY_EXISTS = 36,
+    kafka_common_Error_INVALID_PARTITIONS = 37,
+    kafka_common_Error_INVALID_REPLICATION_FACTOR = 38,
+    kafka_common_Error_INVALID_REPLICA_ASSIGNMENT = 39,
+    kafka_common_Error_INVALID_CONFIG = 40,
+    kafka_common_Error_NOT_CONTROLLER = 41,
+    kafka_common_Error_INVALID_REQUEST = 42,
+    kafka_common_Error_UNSUPPORTED_FOR_MESSAGE_FORMAT = 43,
+    kafka_common_Error_POLICY_VIOLATION = 44,
+    kafka_common_Error_OUT_OF_ORDER_SEQUENCE_NUMBER = 45,
+    kafka_common_Error_DUPLICATE_SEQUENCE_NUMBER = 46,
+    kafka_common_Error_INVALID_PRODUCER_EPOCH = 47,
+    kafka_common_Error_INVALID_TXN_STATE = 48,
+    kafka_common_Error_INVALID_PRODUCER_ID_MAPPING = 49,
+    kafka_common_Error_INVALID_TRANSACTION_TIMEOUT = 50,
+    kafka_common_Error_CONCURRENT_TRANSACTIONS = 51,
+    kafka_common_Error_TRANSACTION_COORDINATOR_FENCED = 52,
+    kafka_common_Error_TRANSACTIONAL_ID_AUTHORIZATION_FAILED = 53,
+    kafka_common_Error_SECURITY_DISABLED = 54,
+    kafka_common_Error_OPERATION_NOT_ATTEMPTED = 55,
+    kafka_common_Error_KAFKA_STORAGE_ERROR = 56,
+    kafka_common_Error_LOG_DIR_NOT_FOUND = 57,
+    kafka_common_Error_SASL_AUTHENTICATION_FAILED = 58,
+    kafka_common_Error_UNKNOWN_PRODUCER_ID = 59,
+    kafka_common_Error_REASSIGNMENT_IN_PROGRESS = 60,
+    kafka_common_Error_DELEGATION_TOKEN_AUTH_DISABLED = 61,
+    kafka_common_Error_DELEGATION_TOKEN_NOT_FOUND = 62,
+    kafka_common_Error_DELEGATION_TOKEN_OWNER_MISMATCH = 63,
+    kafka_common_Error_DELEGATION_TOKEN_REQUEST_NOT_ALLOWED = 64,
+    kafka_common_Error_DELEGATION_TOKEN_AUTHORIZATION_FAILED = 65,
+    kafka_common_Error_DELEGATION_TOKEN_EXPIRED = 66,
+    kafka_common_Error_INVALID_PRINCIPAL_TYPE = 67,
+    kafka_common_Error_NON_EMPTY_GROUP = 68,
+    kafka_common_Error_GROUP_ID_NOT_FOUND = 69,
+    kafka_common_Error_FETCH_SESSION_ID_NOT_FOUND = 70,
+    kafka_common_Error_INVALID_FETCH_SESSION_EPOCH = 71,
+    kafka_common_Error_LISTENER_NOT_FOUND = 72,
+    kafka_common_Error_TOPIC_DELETION_DISABLED = 73,
+    kafka_common_Error_FENCED_LEADER_EPOCH = 74,
+    kafka_common_Error_UNKNOWN_LEADER_EPOCH = 75,
+    kafka_common_Error_UNSUPPORTED_COMPRESSION_TYPE = 76,
+    kafka_common_Error_STALE_BROKER_EPOCH = 77,
+    kafka_common_Error_OFFSET_NOT_AVAILABLE = 78,
+    kafka_common_Error_MEMBER_ID_REQUIRED = 79,
+    kafka_common_Error_PREFERRED_LEADER_NOT_AVAILABLE = 80,
+    kafka_common_Error_GROUP_MAX_SIZE_REACHED = 81,
+    kafka_common_Error_FENCED_INSTANCE_ID = 82,
+    kafka_common_Error_ELIGIBLE_LEADERS_NOT_AVAILABLE = 83,
+    kafka_common_Error_ELECTION_NOT_NEEDED = 84,
+    kafka_common_Error_NO_REASSIGNMENT_IN_PROGRESS = 85,
+    kafka_common_Error_GROUP_SUBSCRIBED_TO_TOPIC = 86,
+    kafka_common_Error_INVALID_RECORD = 87,
+    kafka_common_Error_UNSTABLE_OFFSET_COMMIT = 88,
+    kafka_common_Error_THROTTLING_QUOTA_EXCEEDED = 89,
+    kafka_common_Error_PRODUCER_FENCED = 90,
+    kafka_common_Error_RESOURCE_NOT_FOUND = 91,
+    kafka_common_Error_DUPLICATE_RESOURCE = 92,
+    kafka_common_Error_UNACCEPTABLE_CREDENTIAL = 93,
+    kafka_common_Error_INCONSISTENT_VOTER_SET = 94,
+    kafka_common_Error_INVALID_UPDATE_VERSION = 95,
+    kafka_common_Error_FEATURE_UPDATE_FAILED = 96,
+    kafka_common_Error_PRINCIPAL_DESERIALIZATION_FAILURE = 97,
+    kafka_common_Error_SNAPSHOT_NOT_FOUND = 98,
+    kafka_common_Error_POSITION_OUT_OF_RANGE = 99,
+    kafka_common_Error_UNKNOWN_TOPIC_ID = 100,
+    kafka_common_Error_DUPLICATE_BROKER_REGISTRATION = 101,
+    kafka_common_Error_BROKER_ID_NOT_REGISTERED = 102,
+    kafka_common_Error_INCONSISTENT_TOPIC_ID = 103,
+    kafka_common_Error_INCONSISTENT_CLUSTER_ID = 104,
+    kafka_common_Error_TRANSACTIONAL_ID_NOT_FOUND = 105,
+    kafka_common_Error_FETCH_SESSION_TOPIC_ID_ERROR = 106,
+    kafka_common_Error_INELIGIBLE_REPLICA = 107,
+    kafka_common_Error_NEW_LEADER_ELECTED = 108,
+    kafka_common_Error_OFFSET_MOVED_TO_TIERED_STORAGE = 109,
+    kafka_common_Error_FENCED_MEMBER_EPOCH = 110,
+    kafka_common_Error_UNRELEASED_INSTANCE_ID = 111,
+    kafka_common_Error_UNSUPPORTED_ASSIGNOR = 112,
+    kafka_common_Error_STALE_MEMBER_EPOCH = 113,
+    kafka_common_Error_MISMATCHED_ENDPOINT_TYPE = 114,
+    kafka_common_Error_UNSUPPORTED_ENDPOINT_TYPE = 115,
+    kafka_common_Error_UNKNOWN_CONTROLLER_ID = 116,
+    kafka_common_Error_UNKNOWN_SUBSCRIPTION_ID = 117,
+    kafka_common_Error_TELEMETRY_TOO_LARGE = 118,
+    kafka_common_Error_INVALID_REGISTRATION = 119,
+    kafka_common_Error_TRANSACTION_ABORTABLE = 120,
+    kafka_common_Error_INVALID_RECORD_STATE = 121,
+    kafka_common_Error_SHARE_SESSION_NOT_FOUND = 122,
+    kafka_common_Error_INVALID_SHARE_SESSION_EPOCH = 123,
+    kafka_common_Error_FENCED_STATE_EPOCH = 124,
+    kafka_common_Error_INVALID_VOTER_KEY = 125,
+    kafka_common_Error_DUPLICATE_VOTER = 126,
+    kafka_common_Error_VOTER_NOT_FOUND = 127,
+    kafka_common_Error_INVALID_REGULAR_EXPRESSION = 128,
+    kafka_common_Error_REBOOTSTRAP_REQUIRED = 129,
+    kafka_common_Error_STREAMS_INVALID_TOPOLOGY = 130,
+    kafka_common_Error_STREAMS_INVALID_TOPOLOGY_EPOCH = 131,
+    kafka_common_Error_STREAMS_TOPOLOGY_FENCED = 132,
+    kafka_common_Error_SHARE_SESSION_LIMIT_REACHED = 133,
+    kafka_common_Error_GROUP_DELETION_FAILED = 134,
+    kafka_common_Error_STREAMS_TOPOLOGY_DESCRIPTION_UPDATE_FAILED = 135,
+    kafka_common_Error_CONTROLLER_ID_NOT_REGISTERED = 136,
 
     // Classes Java gives no code of their own: Rust-local negatives,
     // grouped by origin. These are ABI — new classes append at the
     // most-negative end, never in the middle.
     // JDK-derived (`Local*`).
-    kafka_common_ErrorCode_LOCAL_CONCURRENT_MODIFICATION = -2,
-    kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT = -3,
-    kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE = -4,
-    kafka_common_ErrorCode_LOCAL_TIMEOUT = -5,
+    kafka_common_Error_LOCAL_CONCURRENT_MODIFICATION = -2,
+    kafka_common_Error_LOCAL_ILLEGAL_ARGUMENT = -3,
+    kafka_common_Error_LOCAL_ILLEGAL_STATE = -4,
+    kafka_common_Error_LOCAL_TIMEOUT = -5,
     // `common` client-side classes.
-    kafka_common_ErrorCode_API = -6,
-    kafka_common_ErrorCode_AUTHENTICATION = -7,
-    kafka_common_ErrorCode_AUTHORIZER_NOT_READY = -8,
-    kafka_common_ErrorCode_AUTHORIZATION = -9,
-    kafka_common_ErrorCode_CONFIG = -10,
-    kafka_common_ErrorCode_DISCONNECT = -11,
-    kafka_common_ErrorCode_INTERRUPT = -12,
-    kafka_common_ErrorCode_INVALID_OFFSET = -13,
-    kafka_common_ErrorCode_SCHEMA = -14,
-    kafka_common_ErrorCode_SERIALIZATION = -15,
-    kafka_common_ErrorCode_SSL_AUTHENTICATION = -16,
-    kafka_common_ErrorCode_TRANSACTION_ABORTED = -17,
-    kafka_common_ErrorCode_WAKEUP = -18,
+    kafka_common_Error_API = -6,
+    kafka_common_Error_AUTHENTICATION = -7,
+    kafka_common_Error_AUTHORIZER_NOT_READY = -8,
+    kafka_common_Error_AUTHORIZATION = -9,
+    kafka_common_Error_CONFIG = -10,
+    kafka_common_Error_DISCONNECT = -11,
+    kafka_common_Error_INTERRUPT = -12,
+    kafka_common_Error_INVALID_OFFSET = -13,
+    kafka_common_Error_SCHEMA = -14,
+    kafka_common_Error_SERIALIZATION = -15,
+    kafka_common_Error_SSL_AUTHENTICATION = -16,
+    kafka_common_Error_TRANSACTION_ABORTED = -17,
+    kafka_common_Error_WAKEUP = -18,
     // Hand-written / consumer classes.
-    kafka_common_ErrorCode_CONSUMER_COMMIT_FAILED = -19,
-    kafka_common_ErrorCode_CONSUMER_LOG_TRUNCATION = -20,
-    kafka_common_ErrorCode_CONSUMER_NO_OFFSET_FOR_PARTITION = -21,
-    kafka_common_ErrorCode_CONSUMER_OFFSET_OUT_OF_RANGE = -22,
-    kafka_common_ErrorCode_CONSUMER_RETRIABLE_COMMIT_FAILED = -23,
-    kafka_common_ErrorCode_CORRELATION_ID_MISMATCH = -24,
-    kafka_common_ErrorCode_INVALID_RECEIVE = -25,
-    kafka_common_ErrorCode_QUOTA_VIOLATION = -26,
-    kafka_common_ErrorCode_RECORD_DESERIALIZATION = -27,
+    kafka_common_Error_CONSUMER_COMMIT_FAILED = -19,
+    kafka_common_Error_CONSUMER_LOG_TRUNCATION = -20,
+    kafka_common_Error_CONSUMER_NO_OFFSET_FOR_PARTITION = -21,
+    kafka_common_Error_CONSUMER_OFFSET_OUT_OF_RANGE = -22,
+    kafka_common_Error_CONSUMER_RETRIABLE_COMMIT_FAILED = -23,
+    kafka_common_Error_CORRELATION_ID_MISMATCH = -24,
+    kafka_common_Error_INVALID_RECEIVE = -25,
+    kafka_common_Error_QUOTA_VIOLATION = -26,
+    kafka_common_Error_RECORD_DESERIALIZATION = -27,
     // Code owned by a superclass (`BufferExhaustedException extends TimeoutException`).
-    kafka_common_ErrorCode_PRODUCER_BUFFER_EXHAUSTED = -28,
+    kafka_common_Error_PRODUCER_BUFFER_EXHAUSTED = -28,
     // `common` client-side class added after the groups above were published
     // (KIP-909); appended here because the negatives are ABI.
-    kafka_common_ErrorCode_BOOTSTRAP_RESOLUTION = -29,
+    kafka_common_Error_BOOTSTRAP_RESOLUTION = -29,
+    // A binding's foreign callback error (no Java class).
+    kafka_common_Error_LOCAL_CALLBACK = -30,
 }
 
-/// The [`kafka_common_ErrorCode_t`] of the class that owns a protocol code.
+/// The [`kafka_common_Error_e`] of the class that owns a protocol code.
 ///
 /// This resolves the code through
 /// [`Errors::error`] — the very
-/// ownership relation [`kafka_common_ErrorCode_t`] is defined by — so the two
+/// ownership relation [`kafka_common_Error_e`] is defined by — so the two
 /// halves stay consistent by construction rather than by a second hand-written
 /// table.
 ///
 /// It exists for [`Error::KafkaError`], the one variant whose code is not a
 /// constant: it stores an `Errors` rather than standing for a single class.
-fn code_owned_by(error: Errors) -> kafka_common_ErrorCode_t {
+fn code_owned_by(error: Errors) -> kafka_common_Error_e {
     match error.error() {
         // `Errors::None` is the one code no class owns — Java declares it
         // `NONE(0, null, message -> null)`.
-        None => kafka_common_ErrorCode_NONE,
+        None => kafka_common_Error_NONE,
         // No code is owned by the bare `KafkaException`, so this arm is
         // unreachable. Spelling it out rather than letting it fall into the
         // recursive arm below is what makes that recursion provably one level
@@ -641,12 +1760,12 @@ fn code_owned_by(error: Errors) -> kafka_common_ErrorCode_t {
         // ownership test instead of failing it. `UNKNOWN_SERVER_ERROR` is the
         // answer a bare `KafkaException` gives anyway (`Error::kafka` builds it
         // with `Errors::UnknownServerError`).
-        Some(Error::KafkaError(_)) => kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR,
+        Some(Error::KafkaError(_)) => kafka_common_Error_UNKNOWN_SERVER_ERROR,
         Some(owner) => error_code_of(&owner),
     }
 }
 
-/// The [`kafka_common_ErrorCode_t`] for an error, identifying its class.
+/// The [`kafka_common_Error_e`] for an error, identifying its class.
 ///
 /// This is **not** the same question as
 /// [`Error::error`](crate::common::Error::error), and the two deliberately
@@ -657,7 +1776,7 @@ fn code_owned_by(error: Errors) -> kafka_common_ErrorCode_t {
 /// callers that cannot see enum variants, so its value is unique per class.
 ///
 /// They agree for every class that owns its code, and disagree for exactly the
-/// four inheritance cases named on [`kafka_common_ErrorCode_t`]:
+/// four inheritance cases named on [`kafka_common_Error_e`]:
 /// [`Error::ProducerBufferExhausted`] (Java: 7), [`Error::Authentication`],
 /// [`Error::Authorization`] and [`Error::SslAuthentication`] (Java: 40).
 ///
@@ -665,186 +1784,188 @@ fn code_owned_by(error: Errors) -> kafka_common_ErrorCode_t {
 /// that is what makes adding an [`Error`] variant fail to compile until this
 /// enum learns about it. A `_ =>` fallback is precisely how the two would
 /// drift.
-pub(crate) fn error_code_of(error: &Error) -> kafka_common_ErrorCode_t {
+pub(crate) fn error_code_of(error: &Error) -> kafka_common_Error_e {
     match error {
         // The only non-constant arm: `Error::KafkaError` *stores* an `Errors`,
         // so it reports whatever code that value owns.
         Error::KafkaError(k) => code_owned_by(k.error()),
-        Error::LocalIllegalArgument(_) => kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT,
-        Error::LocalIllegalState(_) => kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE,
-        Error::LocalConcurrentModification(_) => kafka_common_ErrorCode_LOCAL_CONCURRENT_MODIFICATION,
-        Error::LocalTimeout(_) => kafka_common_ErrorCode_LOCAL_TIMEOUT,
-        Error::Api(_) => kafka_common_ErrorCode_API,
-        Error::Authentication(_) => kafka_common_ErrorCode_AUTHENTICATION,
-        Error::Authorization(_) => kafka_common_ErrorCode_AUTHORIZATION,
-        Error::AuthorizerNotReady(_) => kafka_common_ErrorCode_AUTHORIZER_NOT_READY,
-        Error::BootstrapResolution(_) => kafka_common_ErrorCode_BOOTSTRAP_RESOLUTION,
-        Error::BrokerIdNotRegistered(_) => kafka_common_ErrorCode_BROKER_ID_NOT_REGISTERED,
-        Error::BrokerNotAvailable(_) => kafka_common_ErrorCode_BROKER_NOT_AVAILABLE,
-        Error::ProducerBufferExhausted(_) => kafka_common_ErrorCode_PRODUCER_BUFFER_EXHAUSTED,
-        Error::ClusterAuthorization(_) => kafka_common_ErrorCode_CLUSTER_AUTHORIZATION_FAILED,
-        Error::ConcurrentTransactions(_) => kafka_common_ErrorCode_CONCURRENT_TRANSACTIONS,
-        Error::ControllerIdNotRegistered(_) => kafka_common_ErrorCode_CONTROLLER_ID_NOT_REGISTERED,
-        Error::ControllerMoved(_) => kafka_common_ErrorCode_STALE_CONTROLLER_EPOCH,
-        Error::CoordinatorLoadInProgress(_) => kafka_common_ErrorCode_COORDINATOR_LOAD_IN_PROGRESS,
-        Error::CoordinatorNotAvailable(_) => kafka_common_ErrorCode_COORDINATOR_NOT_AVAILABLE,
-        Error::CorrelationIdMismatch(_) => kafka_common_ErrorCode_CORRELATION_ID_MISMATCH,
-        Error::CorruptRecord(_) => kafka_common_ErrorCode_CORRUPT_MESSAGE,
-        Error::DelegationTokenAuthorization(_) => kafka_common_ErrorCode_DELEGATION_TOKEN_AUTHORIZATION_FAILED,
-        Error::DelegationTokenDisabled(_) => kafka_common_ErrorCode_DELEGATION_TOKEN_AUTH_DISABLED,
-        Error::DelegationTokenExpired(_) => kafka_common_ErrorCode_DELEGATION_TOKEN_EXPIRED,
-        Error::DelegationTokenNotFound(_) => kafka_common_ErrorCode_DELEGATION_TOKEN_NOT_FOUND,
-        Error::DelegationTokenOwnerMismatch(_) => kafka_common_ErrorCode_DELEGATION_TOKEN_OWNER_MISMATCH,
-        Error::Disconnect(_) => kafka_common_ErrorCode_DISCONNECT,
-        Error::DuplicateBrokerRegistration(_) => kafka_common_ErrorCode_DUPLICATE_BROKER_REGISTRATION,
-        Error::DuplicateResource(_) => kafka_common_ErrorCode_DUPLICATE_RESOURCE,
-        Error::DuplicateSequence(_) => kafka_common_ErrorCode_DUPLICATE_SEQUENCE_NUMBER,
-        Error::DuplicateVoter(_) => kafka_common_ErrorCode_DUPLICATE_VOTER,
-        Error::ElectionNotNeeded(_) => kafka_common_ErrorCode_ELECTION_NOT_NEEDED,
-        Error::EligibleLeadersNotAvailable(_) => kafka_common_ErrorCode_ELIGIBLE_LEADERS_NOT_AVAILABLE,
-        Error::FeatureUpdateFailed(_) => kafka_common_ErrorCode_FEATURE_UPDATE_FAILED,
-        Error::FencedInstanceId(_) => kafka_common_ErrorCode_FENCED_INSTANCE_ID,
-        Error::FencedLeaderEpoch(_) => kafka_common_ErrorCode_FENCED_LEADER_EPOCH,
-        Error::FencedMemberEpoch(_) => kafka_common_ErrorCode_FENCED_MEMBER_EPOCH,
-        Error::FencedStateEpoch(_) => kafka_common_ErrorCode_FENCED_STATE_EPOCH,
-        Error::FetchSessionIdNotFound(_) => kafka_common_ErrorCode_FETCH_SESSION_ID_NOT_FOUND,
-        Error::FetchSessionTopicId(_) => kafka_common_ErrorCode_FETCH_SESSION_TOPIC_ID_ERROR,
-        Error::GroupAuthorization(_) => kafka_common_ErrorCode_GROUP_AUTHORIZATION_FAILED,
-        Error::GroupDeletionFailed(_) => kafka_common_ErrorCode_GROUP_DELETION_FAILED,
-        Error::GroupIdNotFound(_) => kafka_common_ErrorCode_GROUP_ID_NOT_FOUND,
-        Error::GroupMaxSizeReached(_) => kafka_common_ErrorCode_GROUP_MAX_SIZE_REACHED,
-        Error::GroupNotEmpty(_) => kafka_common_ErrorCode_NON_EMPTY_GROUP,
-        Error::GroupSubscribedToTopic(_) => kafka_common_ErrorCode_GROUP_SUBSCRIBED_TO_TOPIC,
-        Error::IllegalGeneration(_) => kafka_common_ErrorCode_ILLEGAL_GENERATION,
-        Error::IllegalSaslState(_) => kafka_common_ErrorCode_ILLEGAL_SASL_STATE,
-        Error::InconsistentClusterId(_) => kafka_common_ErrorCode_INCONSISTENT_CLUSTER_ID,
-        Error::InconsistentGroupProtocol(_) => kafka_common_ErrorCode_INCONSISTENT_GROUP_PROTOCOL,
-        Error::InconsistentTopicId(_) => kafka_common_ErrorCode_INCONSISTENT_TOPIC_ID,
-        Error::InconsistentVoterSet(_) => kafka_common_ErrorCode_INCONSISTENT_VOTER_SET,
-        Error::IneligibleReplica(_) => kafka_common_ErrorCode_INELIGIBLE_REPLICA,
-        Error::Interrupt(_) => kafka_common_ErrorCode_INTERRUPT,
-        Error::InvalidCommitOffsetSize(_) => kafka_common_ErrorCode_INVALID_COMMIT_OFFSET_SIZE,
-        Error::InvalidConfiguration(_) => kafka_common_ErrorCode_INVALID_CONFIG,
-        Error::InvalidFetchSessionEpoch(_) => kafka_common_ErrorCode_INVALID_FETCH_SESSION_EPOCH,
-        Error::InvalidFetchSize(_) => kafka_common_ErrorCode_INVALID_FETCH_SIZE,
-        Error::InvalidGroupId(_) => kafka_common_ErrorCode_INVALID_GROUP_ID,
-        Error::InvalidOffset(_) => kafka_common_ErrorCode_INVALID_OFFSET,
-        Error::InvalidPartitions(_) => kafka_common_ErrorCode_INVALID_PARTITIONS,
-        Error::InvalidPidMapping(_) => kafka_common_ErrorCode_INVALID_PRODUCER_ID_MAPPING,
-        Error::InvalidPrincipalType(_) => kafka_common_ErrorCode_INVALID_PRINCIPAL_TYPE,
-        Error::InvalidProducerEpoch(_) => kafka_common_ErrorCode_INVALID_PRODUCER_EPOCH,
-        Error::InvalidRecord(_) => kafka_common_ErrorCode_INVALID_RECORD,
-        Error::InvalidRecordState(_) => kafka_common_ErrorCode_INVALID_RECORD_STATE,
-        Error::InvalidRegistration(_) => kafka_common_ErrorCode_INVALID_REGISTRATION,
-        Error::InvalidRegularExpression(_) => kafka_common_ErrorCode_INVALID_REGULAR_EXPRESSION,
-        Error::InvalidReplicaAssignment(_) => kafka_common_ErrorCode_INVALID_REPLICA_ASSIGNMENT,
-        Error::InvalidReplicationFactor(_) => kafka_common_ErrorCode_INVALID_REPLICATION_FACTOR,
-        Error::InvalidRequest(_) => kafka_common_ErrorCode_INVALID_REQUEST,
-        Error::InvalidRequiredAcks(_) => kafka_common_ErrorCode_INVALID_REQUIRED_ACKS,
-        Error::InvalidSessionTimeout(_) => kafka_common_ErrorCode_INVALID_SESSION_TIMEOUT,
-        Error::InvalidShareSessionEpoch(_) => kafka_common_ErrorCode_INVALID_SHARE_SESSION_EPOCH,
-        Error::InvalidTimestamp(_) => kafka_common_ErrorCode_INVALID_TIMESTAMP,
-        Error::InvalidTopic(_) => kafka_common_ErrorCode_INVALID_TOPIC_ERROR,
-        Error::InvalidTxnState(_) => kafka_common_ErrorCode_INVALID_TXN_STATE,
-        Error::InvalidTxnTimeout(_) => kafka_common_ErrorCode_INVALID_TRANSACTION_TIMEOUT,
-        Error::InvalidUpdateVersion(_) => kafka_common_ErrorCode_INVALID_UPDATE_VERSION,
-        Error::InvalidVoterKey(_) => kafka_common_ErrorCode_INVALID_VOTER_KEY,
-        Error::KafkaStorage(_) => kafka_common_ErrorCode_KAFKA_STORAGE_ERROR,
-        Error::LeaderNotAvailable(_) => kafka_common_ErrorCode_LEADER_NOT_AVAILABLE,
-        Error::ListenerNotFound(_) => kafka_common_ErrorCode_LISTENER_NOT_FOUND,
-        Error::LogDirNotFound(_) => kafka_common_ErrorCode_LOG_DIR_NOT_FOUND,
-        Error::MemberIdRequired(_) => kafka_common_ErrorCode_MEMBER_ID_REQUIRED,
-        Error::MismatchedEndpointType(_) => kafka_common_ErrorCode_MISMATCHED_ENDPOINT_TYPE,
-        Error::Network(_) => kafka_common_ErrorCode_NETWORK_ERROR,
-        Error::NewLeaderElected(_) => kafka_common_ErrorCode_NEW_LEADER_ELECTED,
-        Error::NoReassignmentInProgress(_) => kafka_common_ErrorCode_NO_REASSIGNMENT_IN_PROGRESS,
-        Error::NotController(_) => kafka_common_ErrorCode_NOT_CONTROLLER,
-        Error::NotCoordinator(_) => kafka_common_ErrorCode_NOT_COORDINATOR,
-        Error::NotEnoughReplicas(_) => kafka_common_ErrorCode_NOT_ENOUGH_REPLICAS,
-        Error::NotEnoughReplicasAfterAppend(_) => kafka_common_ErrorCode_NOT_ENOUGH_REPLICAS_AFTER_APPEND,
-        Error::NotLeaderOrFollower(_) => kafka_common_ErrorCode_NOT_LEADER_OR_FOLLOWER,
-        Error::OffsetMetadataTooLarge(_) => kafka_common_ErrorCode_OFFSET_METADATA_TOO_LARGE,
-        Error::OffsetMovedToTieredStorage(_) => kafka_common_ErrorCode_OFFSET_MOVED_TO_TIERED_STORAGE,
-        Error::OffsetNotAvailable(_) => kafka_common_ErrorCode_OFFSET_NOT_AVAILABLE,
-        Error::OffsetOutOfRange(_) => kafka_common_ErrorCode_OFFSET_OUT_OF_RANGE,
-        Error::OperationNotAttempted(_) => kafka_common_ErrorCode_OPERATION_NOT_ATTEMPTED,
-        Error::OutOfOrderSequence(_) => kafka_common_ErrorCode_OUT_OF_ORDER_SEQUENCE_NUMBER,
-        Error::PolicyViolation(_) => kafka_common_ErrorCode_POLICY_VIOLATION,
-        Error::PositionOutOfRange(_) => kafka_common_ErrorCode_POSITION_OUT_OF_RANGE,
-        Error::PreferredLeaderNotAvailable(_) => kafka_common_ErrorCode_PREFERRED_LEADER_NOT_AVAILABLE,
-        Error::PrincipalDeserialization(_) => kafka_common_ErrorCode_PRINCIPAL_DESERIALIZATION_FAILURE,
-        Error::ProducerFenced(_) => kafka_common_ErrorCode_PRODUCER_FENCED,
-        Error::QuotaViolation(_) => kafka_common_ErrorCode_QUOTA_VIOLATION,
-        Error::ReassignmentInProgress(_) => kafka_common_ErrorCode_REASSIGNMENT_IN_PROGRESS,
-        Error::RebalanceInProgress(_) => kafka_common_ErrorCode_REBALANCE_IN_PROGRESS,
-        Error::RebootstrapRequired(_) => kafka_common_ErrorCode_REBOOTSTRAP_REQUIRED,
-        Error::RecordBatchTooLarge(_) => kafka_common_ErrorCode_RECORD_LIST_TOO_LARGE,
-        Error::RecordDeserialization(_) => kafka_common_ErrorCode_RECORD_DESERIALIZATION,
-        Error::RecordTooLarge(_) => kafka_common_ErrorCode_MESSAGE_TOO_LARGE,
-        Error::InvalidReceive(_) => kafka_common_ErrorCode_INVALID_RECEIVE,
-        Error::Config(_) => kafka_common_ErrorCode_CONFIG,
-        Error::ConsumerRetriableCommitFailed(_) => kafka_common_ErrorCode_CONSUMER_RETRIABLE_COMMIT_FAILED,
-        Error::ConsumerCommitFailed(_) => kafka_common_ErrorCode_CONSUMER_COMMIT_FAILED,
-        Error::ConsumerNoOffsetForPartition(_) => kafka_common_ErrorCode_CONSUMER_NO_OFFSET_FOR_PARTITION,
-        Error::ConsumerOffsetOutOfRange(_) => kafka_common_ErrorCode_CONSUMER_OFFSET_OUT_OF_RANGE,
-        Error::ConsumerLogTruncation(_) => kafka_common_ErrorCode_CONSUMER_LOG_TRUNCATION,
-        Error::ReplicaNotAvailable(_) => kafka_common_ErrorCode_REPLICA_NOT_AVAILABLE,
-        Error::ResourceNotFound(_) => kafka_common_ErrorCode_RESOURCE_NOT_FOUND,
-        Error::SaslAuthentication(_) => kafka_common_ErrorCode_SASL_AUTHENTICATION_FAILED,
-        Error::Schema(_) => kafka_common_ErrorCode_SCHEMA,
-        Error::SecurityDisabled(_) => kafka_common_ErrorCode_SECURITY_DISABLED,
-        Error::Serialization(_) => kafka_common_ErrorCode_SERIALIZATION,
-        Error::ShareSessionLimitReached(_) => kafka_common_ErrorCode_SHARE_SESSION_LIMIT_REACHED,
-        Error::ShareSessionNotFound(_) => kafka_common_ErrorCode_SHARE_SESSION_NOT_FOUND,
-        Error::SnapshotNotFound(_) => kafka_common_ErrorCode_SNAPSHOT_NOT_FOUND,
-        Error::SslAuthentication(_) => kafka_common_ErrorCode_SSL_AUTHENTICATION,
-        Error::StaleBrokerEpoch(_) => kafka_common_ErrorCode_STALE_BROKER_EPOCH,
-        Error::StaleMemberEpoch(_) => kafka_common_ErrorCode_STALE_MEMBER_EPOCH,
-        Error::StreamsInvalidTopology(_) => kafka_common_ErrorCode_STREAMS_INVALID_TOPOLOGY,
-        Error::StreamsInvalidTopologyEpoch(_) => kafka_common_ErrorCode_STREAMS_INVALID_TOPOLOGY_EPOCH,
+        Error::LocalIllegalArgument(_) => kafka_common_Error_LOCAL_ILLEGAL_ARGUMENT,
+        Error::LocalIllegalState(_) => kafka_common_Error_LOCAL_ILLEGAL_STATE,
+        Error::LocalConcurrentModification(_) => kafka_common_Error_LOCAL_CONCURRENT_MODIFICATION,
+        Error::LocalTimeout(_) => kafka_common_Error_LOCAL_TIMEOUT,
+        Error::LocalCallback(_) => kafka_common_Error_LOCAL_CALLBACK,
+        Error::Api(_) => kafka_common_Error_API,
+        Error::Authentication(_) => kafka_common_Error_AUTHENTICATION,
+        Error::Authorization(_) => kafka_common_Error_AUTHORIZATION,
+        Error::AuthorizerNotReady(_) => kafka_common_Error_AUTHORIZER_NOT_READY,
+        Error::BootstrapResolution(_) => kafka_common_Error_BOOTSTRAP_RESOLUTION,
+        Error::BrokerIdNotRegistered(_) => kafka_common_Error_BROKER_ID_NOT_REGISTERED,
+        Error::BrokerNotAvailable(_) => kafka_common_Error_BROKER_NOT_AVAILABLE,
+        Error::ProducerBufferExhausted(_) => kafka_common_Error_PRODUCER_BUFFER_EXHAUSTED,
+        Error::ClusterAuthorization(_) => kafka_common_Error_CLUSTER_AUTHORIZATION_FAILED,
+        Error::ConcurrentTransactions(_) => kafka_common_Error_CONCURRENT_TRANSACTIONS,
+        Error::ControllerIdNotRegistered(_) => kafka_common_Error_CONTROLLER_ID_NOT_REGISTERED,
+        Error::ControllerMoved(_) => kafka_common_Error_STALE_CONTROLLER_EPOCH,
+        Error::CoordinatorLoadInProgress(_) => kafka_common_Error_COORDINATOR_LOAD_IN_PROGRESS,
+        Error::CoordinatorNotAvailable(_) => kafka_common_Error_COORDINATOR_NOT_AVAILABLE,
+        Error::CorrelationIdMismatch(_) => kafka_common_Error_CORRELATION_ID_MISMATCH,
+        Error::CorruptRecord(_) => kafka_common_Error_CORRUPT_MESSAGE,
+        Error::DelegationTokenAuthorization(_) => kafka_common_Error_DELEGATION_TOKEN_AUTHORIZATION_FAILED,
+        Error::DelegationTokenDisabled(_) => kafka_common_Error_DELEGATION_TOKEN_AUTH_DISABLED,
+        Error::DelegationTokenExpired(_) => kafka_common_Error_DELEGATION_TOKEN_EXPIRED,
+        Error::DelegationTokenNotFound(_) => kafka_common_Error_DELEGATION_TOKEN_NOT_FOUND,
+        Error::DelegationTokenOwnerMismatch(_) => kafka_common_Error_DELEGATION_TOKEN_OWNER_MISMATCH,
+        Error::Disconnect(_) => kafka_common_Error_DISCONNECT,
+        Error::DuplicateBrokerRegistration(_) => kafka_common_Error_DUPLICATE_BROKER_REGISTRATION,
+        Error::DuplicateResource(_) => kafka_common_Error_DUPLICATE_RESOURCE,
+        Error::DuplicateSequence(_) => kafka_common_Error_DUPLICATE_SEQUENCE_NUMBER,
+        Error::DuplicateVoter(_) => kafka_common_Error_DUPLICATE_VOTER,
+        Error::ElectionNotNeeded(_) => kafka_common_Error_ELECTION_NOT_NEEDED,
+        Error::EligibleLeadersNotAvailable(_) => kafka_common_Error_ELIGIBLE_LEADERS_NOT_AVAILABLE,
+        Error::FeatureUpdateFailed(_) => kafka_common_Error_FEATURE_UPDATE_FAILED,
+        Error::FencedInstanceId(_) => kafka_common_Error_FENCED_INSTANCE_ID,
+        Error::FencedLeaderEpoch(_) => kafka_common_Error_FENCED_LEADER_EPOCH,
+        Error::FencedMemberEpoch(_) => kafka_common_Error_FENCED_MEMBER_EPOCH,
+        Error::FencedStateEpoch(_) => kafka_common_Error_FENCED_STATE_EPOCH,
+        Error::FetchSessionIdNotFound(_) => kafka_common_Error_FETCH_SESSION_ID_NOT_FOUND,
+        Error::FetchSessionTopicId(_) => kafka_common_Error_FETCH_SESSION_TOPIC_ID_ERROR,
+        Error::GroupAuthorization(_) => kafka_common_Error_GROUP_AUTHORIZATION_FAILED,
+        Error::GroupDeletionFailed(_) => kafka_common_Error_GROUP_DELETION_FAILED,
+        Error::GroupIdNotFound(_) => kafka_common_Error_GROUP_ID_NOT_FOUND,
+        Error::GroupMaxSizeReached(_) => kafka_common_Error_GROUP_MAX_SIZE_REACHED,
+        Error::GroupNotEmpty(_) => kafka_common_Error_NON_EMPTY_GROUP,
+        Error::GroupSubscribedToTopic(_) => kafka_common_Error_GROUP_SUBSCRIBED_TO_TOPIC,
+        Error::IllegalGeneration(_) => kafka_common_Error_ILLEGAL_GENERATION,
+        Error::IllegalSaslState(_) => kafka_common_Error_ILLEGAL_SASL_STATE,
+        Error::InconsistentClusterId(_) => kafka_common_Error_INCONSISTENT_CLUSTER_ID,
+        Error::InconsistentGroupProtocol(_) => kafka_common_Error_INCONSISTENT_GROUP_PROTOCOL,
+        Error::InconsistentTopicId(_) => kafka_common_Error_INCONSISTENT_TOPIC_ID,
+        Error::InconsistentVoterSet(_) => kafka_common_Error_INCONSISTENT_VOTER_SET,
+        Error::IneligibleReplica(_) => kafka_common_Error_INELIGIBLE_REPLICA,
+        Error::Interrupt(_) => kafka_common_Error_INTERRUPT,
+        Error::InvalidCommitOffsetSize(_) => kafka_common_Error_INVALID_COMMIT_OFFSET_SIZE,
+        Error::InvalidConfiguration(_) => kafka_common_Error_INVALID_CONFIG,
+        Error::InvalidFetchSessionEpoch(_) => kafka_common_Error_INVALID_FETCH_SESSION_EPOCH,
+        Error::InvalidFetchSize(_) => kafka_common_Error_INVALID_FETCH_SIZE,
+        Error::InvalidGroupId(_) => kafka_common_Error_INVALID_GROUP_ID,
+        Error::InvalidOffset(_) => kafka_common_Error_INVALID_OFFSET,
+        Error::InvalidPartitions(_) => kafka_common_Error_INVALID_PARTITIONS,
+        Error::InvalidPidMapping(_) => kafka_common_Error_INVALID_PRODUCER_ID_MAPPING,
+        Error::InvalidPrincipalType(_) => kafka_common_Error_INVALID_PRINCIPAL_TYPE,
+        Error::InvalidProducerEpoch(_) => kafka_common_Error_INVALID_PRODUCER_EPOCH,
+        Error::InvalidRecord(_) => kafka_common_Error_INVALID_RECORD,
+        Error::InvalidRecordState(_) => kafka_common_Error_INVALID_RECORD_STATE,
+        Error::InvalidRegistration(_) => kafka_common_Error_INVALID_REGISTRATION,
+        Error::InvalidRegularExpression(_) => kafka_common_Error_INVALID_REGULAR_EXPRESSION,
+        Error::InvalidReplicaAssignment(_) => kafka_common_Error_INVALID_REPLICA_ASSIGNMENT,
+        Error::InvalidReplicationFactor(_) => kafka_common_Error_INVALID_REPLICATION_FACTOR,
+        Error::InvalidRequest(_) => kafka_common_Error_INVALID_REQUEST,
+        Error::InvalidRequiredAcks(_) => kafka_common_Error_INVALID_REQUIRED_ACKS,
+        Error::InvalidSessionTimeout(_) => kafka_common_Error_INVALID_SESSION_TIMEOUT,
+        Error::InvalidShareSessionEpoch(_) => kafka_common_Error_INVALID_SHARE_SESSION_EPOCH,
+        Error::InvalidTimestamp(_) => kafka_common_Error_INVALID_TIMESTAMP,
+        Error::InvalidTopic(_) => kafka_common_Error_INVALID_TOPIC_ERROR,
+        Error::InvalidTxnState(_) => kafka_common_Error_INVALID_TXN_STATE,
+        Error::InvalidTxnTimeout(_) => kafka_common_Error_INVALID_TRANSACTION_TIMEOUT,
+        Error::InvalidUpdateVersion(_) => kafka_common_Error_INVALID_UPDATE_VERSION,
+        Error::InvalidVoterKey(_) => kafka_common_Error_INVALID_VOTER_KEY,
+        Error::KafkaStorage(_) => kafka_common_Error_KAFKA_STORAGE_ERROR,
+        Error::LeaderNotAvailable(_) => kafka_common_Error_LEADER_NOT_AVAILABLE,
+        Error::ListenerNotFound(_) => kafka_common_Error_LISTENER_NOT_FOUND,
+        Error::LogDirNotFound(_) => kafka_common_Error_LOG_DIR_NOT_FOUND,
+        Error::MemberIdRequired(_) => kafka_common_Error_MEMBER_ID_REQUIRED,
+        Error::MismatchedEndpointType(_) => kafka_common_Error_MISMATCHED_ENDPOINT_TYPE,
+        Error::Network(_) => kafka_common_Error_NETWORK_ERROR,
+        Error::NewLeaderElected(_) => kafka_common_Error_NEW_LEADER_ELECTED,
+        Error::NoReassignmentInProgress(_) => kafka_common_Error_NO_REASSIGNMENT_IN_PROGRESS,
+        Error::NotController(_) => kafka_common_Error_NOT_CONTROLLER,
+        Error::NotCoordinator(_) => kafka_common_Error_NOT_COORDINATOR,
+        Error::NotEnoughReplicas(_) => kafka_common_Error_NOT_ENOUGH_REPLICAS,
+        Error::NotEnoughReplicasAfterAppend(_) => kafka_common_Error_NOT_ENOUGH_REPLICAS_AFTER_APPEND,
+        Error::NotLeaderOrFollower(_) => kafka_common_Error_NOT_LEADER_OR_FOLLOWER,
+        Error::OffsetMetadataTooLarge(_) => kafka_common_Error_OFFSET_METADATA_TOO_LARGE,
+        Error::OffsetMovedToTieredStorage(_) => kafka_common_Error_OFFSET_MOVED_TO_TIERED_STORAGE,
+        Error::OffsetNotAvailable(_) => kafka_common_Error_OFFSET_NOT_AVAILABLE,
+        Error::OffsetOutOfRange(_) => kafka_common_Error_OFFSET_OUT_OF_RANGE,
+        Error::OperationNotAttempted(_) => kafka_common_Error_OPERATION_NOT_ATTEMPTED,
+        Error::OutOfOrderSequence(_) => kafka_common_Error_OUT_OF_ORDER_SEQUENCE_NUMBER,
+        Error::PolicyViolation(_) => kafka_common_Error_POLICY_VIOLATION,
+        Error::PositionOutOfRange(_) => kafka_common_Error_POSITION_OUT_OF_RANGE,
+        Error::PreferredLeaderNotAvailable(_) => kafka_common_Error_PREFERRED_LEADER_NOT_AVAILABLE,
+        Error::PrincipalDeserialization(_) => kafka_common_Error_PRINCIPAL_DESERIALIZATION_FAILURE,
+        Error::ProducerFenced(_) => kafka_common_Error_PRODUCER_FENCED,
+        Error::QuotaViolation(_) => kafka_common_Error_QUOTA_VIOLATION,
+        Error::ReassignmentInProgress(_) => kafka_common_Error_REASSIGNMENT_IN_PROGRESS,
+        Error::RebalanceInProgress(_) => kafka_common_Error_REBALANCE_IN_PROGRESS,
+        Error::RebootstrapRequired(_) => kafka_common_Error_REBOOTSTRAP_REQUIRED,
+        Error::RecordBatchTooLarge(_) => kafka_common_Error_RECORD_LIST_TOO_LARGE,
+        Error::RecordDeserialization(_) => kafka_common_Error_RECORD_DESERIALIZATION,
+        Error::RecordTooLarge(_) => kafka_common_Error_MESSAGE_TOO_LARGE,
+        Error::InvalidReceive(_) => kafka_common_Error_INVALID_RECEIVE,
+        Error::Config(_) => kafka_common_Error_CONFIG,
+        Error::ConsumerRetriableCommitFailed(_) => kafka_common_Error_CONSUMER_RETRIABLE_COMMIT_FAILED,
+        Error::ConsumerCommitFailed(_) => kafka_common_Error_CONSUMER_COMMIT_FAILED,
+        Error::ConsumerNoOffsetForPartition(_) => kafka_common_Error_CONSUMER_NO_OFFSET_FOR_PARTITION,
+        Error::ConsumerOffsetOutOfRange(_) => kafka_common_Error_CONSUMER_OFFSET_OUT_OF_RANGE,
+        Error::ConsumerLogTruncation(_) => kafka_common_Error_CONSUMER_LOG_TRUNCATION,
+        Error::ReplicaNotAvailable(_) => kafka_common_Error_REPLICA_NOT_AVAILABLE,
+        Error::ResourceNotFound(_) => kafka_common_Error_RESOURCE_NOT_FOUND,
+        Error::SaslAuthentication(_) => kafka_common_Error_SASL_AUTHENTICATION_FAILED,
+        Error::Schema(_) => kafka_common_Error_SCHEMA,
+        Error::SecurityDisabled(_) => kafka_common_Error_SECURITY_DISABLED,
+        Error::Serialization(_) => kafka_common_Error_SERIALIZATION,
+        Error::ShareSessionLimitReached(_) => kafka_common_Error_SHARE_SESSION_LIMIT_REACHED,
+        Error::ShareSessionNotFound(_) => kafka_common_Error_SHARE_SESSION_NOT_FOUND,
+        Error::SnapshotNotFound(_) => kafka_common_Error_SNAPSHOT_NOT_FOUND,
+        Error::SslAuthentication(_) => kafka_common_Error_SSL_AUTHENTICATION,
+        Error::StaleBrokerEpoch(_) => kafka_common_Error_STALE_BROKER_EPOCH,
+        Error::StaleMemberEpoch(_) => kafka_common_Error_STALE_MEMBER_EPOCH,
+        Error::StreamsInvalidTopology(_) => kafka_common_Error_STREAMS_INVALID_TOPOLOGY,
+        Error::StreamsInvalidTopologyEpoch(_) => kafka_common_Error_STREAMS_INVALID_TOPOLOGY_EPOCH,
         Error::StreamsTopologyDescriptionUpdateFailed(_) => {
-            kafka_common_ErrorCode_STREAMS_TOPOLOGY_DESCRIPTION_UPDATE_FAILED
+            kafka_common_Error_STREAMS_TOPOLOGY_DESCRIPTION_UPDATE_FAILED
         },
-        Error::StreamsTopologyFenced(_) => kafka_common_ErrorCode_STREAMS_TOPOLOGY_FENCED,
-        Error::TelemetryTooLarge(_) => kafka_common_ErrorCode_TELEMETRY_TOO_LARGE,
-        Error::ThrottlingQuotaExceeded(_) => kafka_common_ErrorCode_THROTTLING_QUOTA_EXCEEDED,
-        Error::Timeout(_) => kafka_common_ErrorCode_REQUEST_TIMED_OUT,
-        Error::TopicAuthorization(_) => kafka_common_ErrorCode_TOPIC_AUTHORIZATION_FAILED,
-        Error::TopicDeletionDisabled(_) => kafka_common_ErrorCode_TOPIC_DELETION_DISABLED,
-        Error::TopicExists(_) => kafka_common_ErrorCode_TOPIC_ALREADY_EXISTS,
-        Error::TransactionAbortable(_) => kafka_common_ErrorCode_TRANSACTION_ABORTABLE,
-        Error::TransactionAborted(_) => kafka_common_ErrorCode_TRANSACTION_ABORTED,
-        Error::TransactionCoordinatorFenced(_) => kafka_common_ErrorCode_TRANSACTION_COORDINATOR_FENCED,
-        Error::TransactionalIdAuthorization(_) => kafka_common_ErrorCode_TRANSACTIONAL_ID_AUTHORIZATION_FAILED,
-        Error::TransactionalIdNotFound(_) => kafka_common_ErrorCode_TRANSACTIONAL_ID_NOT_FOUND,
-        Error::UnacceptableCredential(_) => kafka_common_ErrorCode_UNACCEPTABLE_CREDENTIAL,
-        Error::UnknownControllerId(_) => kafka_common_ErrorCode_UNKNOWN_CONTROLLER_ID,
-        Error::UnknownLeaderEpoch(_) => kafka_common_ErrorCode_UNKNOWN_LEADER_EPOCH,
-        Error::UnknownMemberId(_) => kafka_common_ErrorCode_UNKNOWN_MEMBER_ID,
-        Error::UnknownProducerId(_) => kafka_common_ErrorCode_UNKNOWN_PRODUCER_ID,
-        Error::UnknownServer(_) => kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR,
-        Error::UnknownSubscriptionId(_) => kafka_common_ErrorCode_UNKNOWN_SUBSCRIPTION_ID,
-        Error::UnknownTopicId(_) => kafka_common_ErrorCode_UNKNOWN_TOPIC_ID,
-        Error::UnknownTopicOrPartition(_) => kafka_common_ErrorCode_UNKNOWN_TOPIC_OR_PARTITION,
-        Error::UnreleasedInstanceId(_) => kafka_common_ErrorCode_UNRELEASED_INSTANCE_ID,
-        Error::UnstableOffsetCommit(_) => kafka_common_ErrorCode_UNSTABLE_OFFSET_COMMIT,
-        Error::UnsupportedAssignor(_) => kafka_common_ErrorCode_UNSUPPORTED_ASSIGNOR,
-        Error::UnsupportedByAuthentication(_) => kafka_common_ErrorCode_DELEGATION_TOKEN_REQUEST_NOT_ALLOWED,
-        Error::UnsupportedCompressionType(_) => kafka_common_ErrorCode_UNSUPPORTED_COMPRESSION_TYPE,
-        Error::UnsupportedEndpointType(_) => kafka_common_ErrorCode_UNSUPPORTED_ENDPOINT_TYPE,
-        Error::UnsupportedForMessageFormat(_) => kafka_common_ErrorCode_UNSUPPORTED_FOR_MESSAGE_FORMAT,
-        Error::UnsupportedSaslMechanism(_) => kafka_common_ErrorCode_UNSUPPORTED_SASL_MECHANISM,
-        Error::UnsupportedVersion(_) => kafka_common_ErrorCode_UNSUPPORTED_VERSION,
-        Error::VoterNotFound(_) => kafka_common_ErrorCode_VOTER_NOT_FOUND,
-        Error::Wakeup(_) => kafka_common_ErrorCode_WAKEUP,
+        Error::StreamsTopologyFenced(_) => kafka_common_Error_STREAMS_TOPOLOGY_FENCED,
+        Error::TelemetryTooLarge(_) => kafka_common_Error_TELEMETRY_TOO_LARGE,
+        Error::ThrottlingQuotaExceeded(_) => kafka_common_Error_THROTTLING_QUOTA_EXCEEDED,
+        Error::Timeout(_) => kafka_common_Error_REQUEST_TIMED_OUT,
+        Error::TopicAuthorization(_) => kafka_common_Error_TOPIC_AUTHORIZATION_FAILED,
+        Error::TopicDeletionDisabled(_) => kafka_common_Error_TOPIC_DELETION_DISABLED,
+        Error::TopicExists(_) => kafka_common_Error_TOPIC_ALREADY_EXISTS,
+        Error::TransactionAbortable(_) => kafka_common_Error_TRANSACTION_ABORTABLE,
+        Error::TransactionAborted(_) => kafka_common_Error_TRANSACTION_ABORTED,
+        Error::TransactionCoordinatorFenced(_) => kafka_common_Error_TRANSACTION_COORDINATOR_FENCED,
+        Error::TransactionalIdAuthorization(_) => kafka_common_Error_TRANSACTIONAL_ID_AUTHORIZATION_FAILED,
+        Error::TransactionalIdNotFound(_) => kafka_common_Error_TRANSACTIONAL_ID_NOT_FOUND,
+        Error::UnacceptableCredential(_) => kafka_common_Error_UNACCEPTABLE_CREDENTIAL,
+        Error::UnknownControllerId(_) => kafka_common_Error_UNKNOWN_CONTROLLER_ID,
+        Error::UnknownLeaderEpoch(_) => kafka_common_Error_UNKNOWN_LEADER_EPOCH,
+        Error::UnknownMemberId(_) => kafka_common_Error_UNKNOWN_MEMBER_ID,
+        Error::UnknownProducerId(_) => kafka_common_Error_UNKNOWN_PRODUCER_ID,
+        Error::UnknownServer(_) => kafka_common_Error_UNKNOWN_SERVER_ERROR,
+        Error::UnknownSubscriptionId(_) => kafka_common_Error_UNKNOWN_SUBSCRIPTION_ID,
+        Error::UnknownTopicId(_) => kafka_common_Error_UNKNOWN_TOPIC_ID,
+        Error::UnknownTopicOrPartition(_) => kafka_common_Error_UNKNOWN_TOPIC_OR_PARTITION,
+        Error::UnreleasedInstanceId(_) => kafka_common_Error_UNRELEASED_INSTANCE_ID,
+        Error::UnstableOffsetCommit(_) => kafka_common_Error_UNSTABLE_OFFSET_COMMIT,
+        Error::UnsupportedAssignor(_) => kafka_common_Error_UNSUPPORTED_ASSIGNOR,
+        Error::UnsupportedByAuthentication(_) => kafka_common_Error_DELEGATION_TOKEN_REQUEST_NOT_ALLOWED,
+        Error::UnsupportedCompressionType(_) => kafka_common_Error_UNSUPPORTED_COMPRESSION_TYPE,
+        Error::UnsupportedEndpointType(_) => kafka_common_Error_UNSUPPORTED_ENDPOINT_TYPE,
+        Error::UnsupportedForMessageFormat(_) => kafka_common_Error_UNSUPPORTED_FOR_MESSAGE_FORMAT,
+        Error::UnsupportedSaslMechanism(_) => kafka_common_Error_UNSUPPORTED_SASL_MECHANISM,
+        Error::UnsupportedVersion(_) => kafka_common_Error_UNSUPPORTED_VERSION,
+        Error::VoterNotFound(_) => kafka_common_Error_VOTER_NOT_FOUND,
+        Error::Wakeup(_) => kafka_common_Error_WAKEUP,
     }
 }
 
-/// Returns the error code from a [`kafka_common_Error_t`] handle.
+/// Returns the [`kafka_common_Error_e`] enumerator of a [`kafka_common_Error_t`]
+/// handle, as `__enum` does for every C enum (CLAUDE.md §4 "Enums").
 ///
 /// The value identifies the error's **class**, not merely its protocol code:
-/// the codes are pairwise distinct, so a `switch` on this value is enough to
-/// tell any two errors apart. See [`kafka_common_ErrorCode_t`] for the
+/// the values are pairwise distinct, so a `switch` on this value is enough to
+/// tell any two errors apart. See [`kafka_common_Error_e`] for the
 /// assignment rule and for the four classes whose value deliberately differs
 /// from the code Java's `Errors.forException` would report.
 ///
@@ -854,8 +1975,8 @@ pub(crate) fn error_code_of(error: &Error) -> kafka_common_ErrorCode_t {
 ///
 /// # Returns
 ///
-/// The error's [`kafka_common_ErrorCode_t`], or
-/// `kafka_common_ErrorCode_NONE` (`0`) if the error handle is null. The
+/// The error's [`kafka_common_Error_e`], or
+/// `kafka_common_Error_NONE` (`0`) if the error handle is null. The
 /// enumerators have explicit values that fit an `int`, so a C caller that was
 /// comparing the previous `int32_t` return against integers keeps compiling
 /// and keeps getting the same answers for every broker-reported code.
@@ -865,22 +1986,24 @@ pub(crate) fn error_code_of(error: &Error) -> kafka_common_ErrorCode_t {
 /// `error` must be a valid handle from a function that returned an error, or null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_code(error: *const kafka_common_Error_t) -> kafka_common_ErrorCode_t {
+pub unsafe extern "C" fn kafka_common_Error__enum(error: *const kafka_common_Error_t) -> kafka_common_Error_e {
     if error.is_null() {
-        return kafka_common_ErrorCode_NONE;
+        return kafka_common_Error_NONE;
     }
     // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. one created by `box_error`
-    // and not yet passed to `kafka_common_Error_destroy`, which is exactly `error_ref`'s
-    // precondition. The `&'static ErrorInner` is used only to read `.error` for the
-    // duration of this call, during which the C caller keeps the handle alive.
+    // valid error handle: an owned one from `box_error`, not yet destroyed, or a borrowed one
+    // whose owner is still alive, so it points at a live `ErrorInner`, as `error_ref` requires.
+    // The `&'static ErrorInner` is used only to read `.error` for the duration of this
+    // call, during which the C caller keeps the handle alive.
     error_code_of(&unsafe { error_ref(error) }.error)
 }
 
 /// Returns the error message as a null-terminated C string.
 ///
-/// The returned pointer is valid until [`kafka_common_Error_destroy`] is called on
-/// the same handle.
+/// The returned pointer is valid as long as `error` is: until
+/// [`kafka_common_Error_destroy`] is called on it or, for a borrowed handle
+/// (from [`kafka_common_Error_source`] or a payload or struct-field accessor),
+/// until its owner is destroyed by that owner's own `_destroy`.
 ///
 /// # Parameters
 ///
@@ -902,68 +2025,62 @@ pub unsafe extern "C" fn kafka_common_Error_message(error: *const kafka_common_E
         return std::ptr::null();
     }
     // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet destroyed, which is `error_ref`'s precondition. The returned
-    // `message_cstring.as_ptr()` points into that same `ErrorInner` allocation and, as this
-    // function's rustdoc states, stays valid until `kafka_common_Error_destroy` is called
-    // on the handle.
+    // valid error handle: an owned one from `box_error`, not yet destroyed, or a borrowed one
+    // whose owner is still alive, so it points at a live `ErrorInner`, as `error_ref` requires.
+    // The returned `message_cstring.as_ptr()` points into that same `ErrorInner`, so, as
+    // this function's rustdoc states, it stays valid while the handle does: until
+    // `kafka_common_Error_destroy` is called on it, or, for a borrowed one, until its owner
+    // is destroyed by that owner's own `_destroy`.
     unsafe { error_ref(error) }.message_cstring.as_ptr()
 }
 
-/// Returns the underlying cause of `error` as a NEW owned error handle (Java's
-/// `Throwable.getCause()`), or null when there is none. The returned handle is
-/// owned by the caller and must be freed with [`kafka_common_Error_destroy`].
+/// Returns the error's cause (`Throwable.getCause()`), or null when it has
+/// none.
 ///
-/// This lets the binding reconstruct Java's cause chain as Python's `__cause__`:
-/// e.g. `KafkaConsumer` wraps a construction failure in
-/// `KafkaException("Failed to construct kafka consumer", cause)`, and the cause
-/// (`InvalidGroupIdException`) is only reachable through this accessor.
+/// The returned handle is *borrowed*: it is owned by `error` and valid until
+/// [`kafka_common_Error_destroy`] is called on `error`. It must not be passed
+/// to `kafka_common_Error_destroy` itself. Calling this on the returned handle
+/// walks one more step down the chain of causes.
 ///
 /// # Safety
 ///
-/// `error` must be null or a valid handle from a function that returned an
-/// error. The returned handle (if non-null) is a fresh allocation.
-#[ffi_guard]
+/// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_source(error: *const kafka_common_Error_t) -> *mut kafka_common_Error_t {
+pub unsafe extern "C" fn kafka_common_Error_source(error: *const kafka_common_Error_t) -> *const kafka_common_Error_t {
     if error.is_null() {
-        return std::ptr::null_mut();
+        return std::ptr::null();
     }
     // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet destroyed, which is `error_ref`'s precondition. The borrow ends within this
-    // call: the cause is cloned into a fresh handle the caller owns.
-    match unsafe { error_ref(error) }.error.source() {
-        Some(source) => box_error(source.clone()),
-        None => std::ptr::null_mut(),
-    }
+    // valid error handle: an owned one from `box_error`, not yet destroyed, or a borrowed one
+    // whose owner is still alive, so it points at a live `ErrorInner`, as `error_ref` requires.
+    // The returned cause is a borrowed handle owned by that `ErrorInner` (its `source`
+    // slot), so, as this function's rustdoc states, it stays valid while `error` does.
+    unsafe { error_ref(error) }.source_ptr()
 }
 
-/// Returns whether the error is retriable.
+/// Returns the throttle time the broker reported with this error
+/// (`ThrottlingQuotaExceededException.throttleTimeMs()`), or `-1` when the
+/// error carries none.
 ///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the error is retriable, `false` if not or if the handle is null.
+/// A caught Rust panic returns -1, as for no throttle time: Java's
+/// `ThrottlingQuotaExceededException(int, String)` stores any `int`, and the C
+/// constructors pass it through, so no value is outside its domain.
 ///
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_retriable_error(error: *const kafka_common_Error_t) -> bool {
+pub unsafe extern "C" fn kafka_common_Error_throttle_time_ms(error: *const kafka_common_Error_t) -> i32 {
     if error.is_null() {
-        return false;
+        return -1;
     }
     // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet passed to `kafka_common_Error_destroy`, which is exactly `error_ref`'s
-    // precondition. The `&'static ErrorInner` is used only to evaluate `is_retriable_error`
-    // on `.error` within this call, during which the C caller keeps the handle alive.
-    unsafe { error_ref(error) }.error.is_retriable_error()
+    // valid error handle: an owned one from `box_error`, not yet destroyed, or a borrowed one
+    // whose owner is still alive, so it points at a live `ErrorInner`, as `error_ref` requires.
+    // The borrow lasts only for this call, while the caller keeps the handle alive.
+    unsafe { error_ref(error) }.error.throttle_time_ms().unwrap_or(-1)
 }
 
 // NOTE: fatality (`RequestUtils.isFatalException`) is deliberately NOT exported
@@ -974,537 +2091,6 @@ pub unsafe extern "C" fn kafka_common_Error_is_retriable_error(error: *const kaf
 // the exported predicates (`kafka_common_Error_is_authentication_error`,
 // `kafka_common_Error_is_authorization_error`) and the error code.
 
-/// Returns whether this is a Kafka error rather than a generic programming
-/// error.
-///
-/// `true` for errors originating from Kafka — the protocol error codes, plus
-/// serialization and wakeup. `false` for errors raised by misuse of the client
-/// itself: an invalid argument, an illegal state, or concurrent access from
-/// more than one thread. Mirrors Java's `t instanceof KafkaException` test,
-/// which separates Kafka's own exception hierarchy from the generic
-/// `java.lang` / `java.util` runtime exceptions beside it.
-///
-/// Note this is NOT a test for a specific error kind: most errors are Kafka
-/// errors. Use [`kafka_common_Error_code`] to identify a particular one.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the error came from Kafka, `false` if it is a generic
-/// programming error or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_kafka_error(error: *const kafka_common_Error_t) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet passed to `kafka_common_Error_destroy`, which is exactly `error_ref`'s
-    // precondition. The `&'static ErrorInner` is used only to evaluate `is_kafka_error` on
-    // `.error` within this call, during which the C caller keeps the handle alive.
-    unsafe { error_ref(error) }.error.is_kafka_error()
-}
-
-/// Returns whether the error's Java exception extends `ApiException` — an error the broker can report over the protocol, as opposed to a client-side programming or serialization failure.
-///
-/// Mirrors `Error::is_api_error` — see CLAUDE.md §12.4. Exposed because C cannot see
-/// enum variants, so predicates are the only way a C caller classifies an error
-/// beyond its numeric code.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the predicate holds, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_api_error(error: *const kafka_common_Error_t) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet passed to `kafka_common_Error_destroy`, which is exactly `error_ref`'s
-    // precondition. The `&'static ErrorInner` is used only to evaluate `is_api_error` on
-    // `.error` within this call, during which the C caller keeps the handle alive.
-    unsafe { error_ref(error) }.error.is_api_error()
-}
-
-/// Returns whether the error is retriable AND a metadata/coordinator refresh is what clears it (Java `RefreshRetriableException`).
-///
-/// Mirrors `Error::is_refresh_retriable_error` — see CLAUDE.md §12.4. Exposed because C cannot see
-/// enum variants, so predicates are the only way a C caller classifies an error
-/// beyond its numeric code.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the predicate holds, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_refresh_retriable_error(error: *const kafka_common_Error_t) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet passed to `kafka_common_Error_destroy`, which is exactly `error_ref`'s
-    // precondition. The `&'static ErrorInner` is used only to evaluate
-    // `is_refresh_retriable_error` on `.error` within this call, during which the C caller
-    // keeps the handle alive.
-    unsafe { error_ref(error) }.error.is_refresh_retriable_error()
-}
-
-/// Returns whether the error means the client's cached metadata may be stale (Java `InvalidMetadataException`).
-///
-/// Mirrors `Error::is_invalid_metadata_error` — see CLAUDE.md §12.4. Exposed because C cannot see
-/// enum variants, so predicates are the only way a C caller classifies an error
-/// beyond its numeric code.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the predicate holds, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_invalid_metadata_error(error: *const kafka_common_Error_t) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet passed to `kafka_common_Error_destroy`, which is exactly `error_ref`'s
-    // precondition. The `&'static ErrorInner` is used only to evaluate
-    // `is_invalid_metadata_error` on `.error` within this call, during which the C caller
-    // keeps the handle alive.
-    unsafe { error_ref(error) }.error.is_invalid_metadata_error()
-}
-
-/// Returns whether the error is an authentication failure reported by the broker (Java `AuthenticationException`).
-///
-/// Mirrors `Error::is_authentication_error` — see CLAUDE.md §12.4. Exposed because C cannot see
-/// enum variants, so predicates are the only way a C caller classifies an error
-/// beyond its numeric code.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the predicate holds, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_authentication_error(error: *const kafka_common_Error_t) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet passed to `kafka_common_Error_destroy`, which is exactly `error_ref`'s
-    // precondition. The `&'static ErrorInner` is used only to evaluate
-    // `is_authentication_error` on `.error` within this call, during which the C caller
-    // keeps the handle alive.
-    unsafe { error_ref(error) }.error.is_authentication_error()
-}
-
-/// Returns whether the error is an authorization failure — a missing ACL (Java `AuthorizationException`).
-///
-/// Mirrors `Error::is_authorization_error` — see CLAUDE.md §12.4. Exposed because C cannot see
-/// enum variants, so predicates are the only way a C caller classifies an error
-/// beyond its numeric code.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the predicate holds, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_authorization_error(error: *const kafka_common_Error_t) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet passed to `kafka_common_Error_destroy`, which is exactly `error_ref`'s
-    // precondition. The `&'static ErrorInner` is used only to evaluate
-    // `is_authorization_error` on `.error` within this call, during which the C caller
-    // keeps the handle alive.
-    unsafe { error_ref(error) }.error.is_authorization_error()
-}
-
-/// Returns whether the error's Java class extends `InvalidConfigurationException` — the parent of both the authentication and
-/// authorization families, so a broad classification a C caller cannot make from
-/// the numeric code alone.
-///
-/// Mirrors `Error::is_invalid_configuration_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
-/// variants, so predicates are the only way a C caller classifies an error
-/// beyond its numeric code.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the predicate holds, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_invalid_configuration_error(error: *const kafka_common_Error_t) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet passed to `kafka_common_Error_destroy`, which is exactly `error_ref`'s
-    // precondition. The `&'static ErrorInner` is used only to evaluate
-    // `is_invalid_configuration_error` on `.error` within this call, during which the C
-    // caller keeps the handle alive.
-    unsafe { error_ref(error) }.error.is_invalid_configuration_error()
-}
-
-/// Returns whether the error's Java class extends `UnsupportedVersionException` — the
-/// version-mismatch class. It was already intermediate before Kafka 4.4, through
-/// `NoBatchedFindCoordinatorsException` / `NoBatchedOffsetFetchRequestException`; 4.4 adds the
-/// crate-private `UnsupportedProtocolFieldException` (a request field the negotiated version
-/// cannot carry).
-///
-/// Mirrors `Error::is_unsupported_version_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
-/// variants, so predicates are the only way a C caller classifies an error
-/// beyond its numeric code.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the predicate holds, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_unsupported_version_error(error: *const kafka_common_Error_t) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet passed to `kafka_common_Error_destroy`, which is exactly `error_ref`'s
-    // precondition. The `&'static ErrorInner` is used only to evaluate
-    // `is_unsupported_version_error` on `.error` within this call, during which the C
-    // caller keeps the handle alive.
-    unsafe { error_ref(error) }.error.is_unsupported_version_error()
-}
-
-/// Returns whether the error's Java class extends `ApplicationRecoverableException` — recoverable by re-initialising the
-/// producer or rejoining the group.
-///
-/// Mirrors `Error::is_application_recoverable_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
-/// variants, so predicates are the only way a C caller classifies an error
-/// beyond its numeric code.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the predicate holds, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_application_recoverable_error(
-    error: *const kafka_common_Error_t,
-) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet passed to `kafka_common_Error_destroy`, which is exactly `error_ref`'s
-    // precondition. The `&'static ErrorInner` is used only to evaluate
-    // `is_application_recoverable_error` on `.error` within this call, during which the C
-    // caller keeps the handle alive.
-    unsafe { error_ref(error) }.error.is_application_recoverable_error()
-}
-
-/// Returns whether the error's Java class extends `InvalidOffsetException` (common.errors).
-///
-/// Mirrors `Error::is_invalid_offset_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
-/// variants, so predicates are the only way a C caller classifies an error
-/// beyond its numeric code.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the predicate holds, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_invalid_offset_error(error: *const kafka_common_Error_t) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet passed to `kafka_common_Error_destroy`, which is exactly `error_ref`'s
-    // precondition. The `&'static ErrorInner` is used only to evaluate
-    // `is_invalid_offset_error` on `.error` within this call, during which the C caller
-    // keeps the handle alive.
-    unsafe { error_ref(error) }.error.is_invalid_offset_error()
-}
-
-/// Returns whether the error's Java class extends `OutOfOrderSequenceException`.
-///
-/// Mirrors `Error::is_out_of_order_sequence_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
-/// variants, so predicates are the only way a C caller classifies an error
-/// beyond its numeric code.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the predicate holds, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_out_of_order_sequence_error(error: *const kafka_common_Error_t) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet passed to `kafka_common_Error_destroy`, which is exactly `error_ref`'s
-    // precondition. The `&'static ErrorInner` is used only to evaluate
-    // `is_out_of_order_sequence_error` on `.error` within this call, during which the C
-    // caller keeps the handle alive.
-    unsafe { error_ref(error) }.error.is_out_of_order_sequence_error()
-}
-
-/// Returns whether the error's Java class extends `SerializationException`.
-///
-/// Mirrors `Error::is_serialization_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
-/// variants, so predicates are the only way a C caller classifies an error
-/// beyond its numeric code.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the predicate holds, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_serialization_error(error: *const kafka_common_Error_t) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet passed to `kafka_common_Error_destroy`, which is exactly `error_ref`'s
-    // precondition. The `&'static ErrorInner` is used only to evaluate
-    // `is_serialization_error` on `.error` within this call, during which the C caller
-    // keeps the handle alive.
-    unsafe { error_ref(error) }.error.is_serialization_error()
-}
-
-/// Returns whether the error's Java class extends `TimeoutException` (also covers `BufferExhaustedException`).
-///
-/// Mirrors `Error::is_timeout_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
-/// variants, so predicates are the only way a C caller classifies an error
-/// beyond its numeric code.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the predicate holds, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_timeout_error(error: *const kafka_common_Error_t) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet passed to `kafka_common_Error_destroy`, which is exactly `error_ref`'s
-    // precondition. The `&'static ErrorInner` is used only to evaluate `is_timeout_error`
-    // on `.error` within this call, during which the C caller keeps the handle alive.
-    unsafe { error_ref(error) }.error.is_timeout_error()
-}
-
-/// Returns whether the error's Java class extends the consumer package's `InvalidOffsetException`.
-///
-/// Mirrors `Error::is_consumer_invalid_offset_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
-/// variants, so predicates are the only way a C caller classifies an error
-/// beyond its numeric code.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the predicate holds, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_consumer_invalid_offset_error(
-    error: *const kafka_common_Error_t,
-) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet passed to `kafka_common_Error_destroy`, which is exactly `error_ref`'s
-    // precondition. The `&'static ErrorInner` is used only to evaluate
-    // `is_consumer_invalid_offset_error` on `.error` within this call, during which the C
-    // caller keeps the handle alive.
-    unsafe { error_ref(error) }.error.is_consumer_invalid_offset_error()
-}
-
-/// Returns whether the error's Java class extends the consumer package's `OffsetOutOfRangeException` (also covers
-/// `LogTruncationException`).
-///
-/// Mirrors `Error::is_consumer_offset_out_of_range_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
-/// variants, so predicates are the only way a C caller classifies an error
-/// beyond its numeric code.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the predicate holds, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_consumer_offset_out_of_range_error(
-    error: *const kafka_common_Error_t,
-) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet passed to `kafka_common_Error_destroy`, which is exactly `error_ref`'s
-    // precondition. The `&'static ErrorInner` is used only to evaluate
-    // `is_consumer_offset_out_of_range_error` on `.error` within this call, during which
-    // the C caller keeps the handle alive.
-    unsafe { error_ref(error) }.error.is_consumer_offset_out_of_range_error()
-}
-
-/// Returns whether the error's Java class extends `TransactionAbortableException` — the transaction may be aborted and retried.
-///
-/// Mirrors `Error::is_transaction_abortable_error` (CLAUDE.md §4/§12.4). Exposed because C cannot see enum
-/// variants, so predicates are the only way a C caller classifies an error
-/// beyond its numeric code.
-///
-/// # Parameters
-///
-/// - `error`: Non-null error handle.
-///
-/// # Returns
-///
-/// `true` if the predicate holds, `false` if not or if the handle is null.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_is_transaction_abortable_error(error: *const kafka_common_Error_t) -> bool {
-    if error.is_null() {
-        return false;
-    }
-    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet passed to `kafka_common_Error_destroy`, which is exactly `error_ref`'s
-    // precondition. The `&'static ErrorInner` is used only to evaluate
-    // `is_transaction_abortable_error` on `.error` within this call, during which the C
-    // caller keeps the handle alive.
-    unsafe { error_ref(error) }.error.is_transaction_abortable_error()
-}
-
 /// Destroys an error handle, freeing all associated resources.
 ///
 /// Safe to call with a null pointer (no-op).
@@ -1512,1743 +2098,23 @@ pub unsafe extern "C" fn kafka_common_Error_is_transaction_abortable_error(error
 /// # Safety
 ///
 /// - `error` must be null or a valid handle from a function that returned an error.
+///   It must be an owned handle: a borrowed one ([`kafka_common_Error_source`], a
+///   payload's or struct field's error accessor) belongs to its owner and is
+///   never passed here.
 /// - After this call, the pointer is invalid and must not be used.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_destroy(error: *mut kafka_common_Error_t) {
     if !error.is_null() {
         // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`,
-        // a valid handle from a function that returned an error, i.e. the `ErrorInner` that
-        // `box_error` leaked with `Box::into_raw` (the one allocation behind every
-        // `kafka_common_Error_t`). The contract declares the pointer invalid after this
+        // an owned handle from a function that returned an error, i.e. the `ErrorInner` that
+        // `box_error` leaked with `Box::into_raw` (a borrowed handle, which points into its
+        // owner, is never passed here). The contract declares the pointer invalid after this
         // call, and `take_error`'s contract forbids destroying a handle it already
         // consumed, so this `Box::from_raw` is the single, final use of the allocation.
         unsafe {
             drop(Box::from_raw(error as *mut ErrorInner));
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Per-variant payload accessors (CLAUDE.md §4: "Exceptions having additional
-// fields in Java")
-//
-// Of the ~156 `Error` variants, the twelve below carry state beyond
-// `message`/`source` — each gets an opaque `kafka_common_Error_<Variant>_t`,
-// retrieved from a `kafka_common_Error_t` via `kafka_common_Error_<Variant>`,
-// which returns null if the handle is not that variant. The returned pointer
-// is a *borrowed* view into the same `ErrorInner` allocation — valid until
-// `kafka_common_Error_destroy` is called on the parent handle, same as
-// `kafka_common_Error_message` above.
-//
-// Collection-valued fields reuse the existing `kafka_consumer_*` collection
-// handles verbatim (`StringList`, `TopicPartitionList`, `LongOffsetMap`,
-// `OffsetMap`) rather than introducing new ones — `kafka_common_Error_t`
-// already crosses into `kafka_consumer_*`/`kafka_producer_*` signatures
-// throughout the FFI layer. Those accessors build the collection fresh on
-// each call and return an *owned* handle, which the caller destroys with the
-// matching `kafka_consumer_*_destroy`, independent of the parent error's
-// lifetime — the same contract `subscription()`/`assignment()`/
-// `beginning_offsets()` already have.
-// ---------------------------------------------------------------------------
-
-use crate::common::header::Header;
-use crate::ffi::consumer::{
-    box_long_offset_map, box_offset_map, box_string_list, box_topic_partition, box_topic_partition_list,
-    kafka_common_TopicPartition_t, kafka_common_TopicPartitionList_t, kafka_consumer_LongOffsetMap_t,
-    kafka_consumer_OffsetMap_t, kafka_consumer_StringList_t,
-};
-
-/// `TopicAuthorizationException` -> `kafka_common_TopicAuthorizationError_t`.
-#[repr(C)]
-pub struct kafka_common_TopicAuthorizationError_t {
-    _private: [u8; 0],
-}
-
-/// Returns the error's `TopicAuthorizationException` payload, or null if the
-/// error is not that variant.
-/// The returned pointer is borrowed from `error` and valid until `error` is
-/// destroyed with [`kafka_common_Error_destroy`]; do not free it.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_topic_authorization(
-    error: *const kafka_common_Error_t,
-) -> *const kafka_common_TopicAuthorizationError_t {
-    if error.is_null() {
-        return std::ptr::null();
-    }
-    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet destroyed, which is `error_ref`'s precondition. The returned pointer is a
-    // borrow of the `TopicAuthorizationError` stored inline in the `Error` enum inside that
-    // same `ErrorInner` allocation, so it is valid exactly as long as the parent handle,
-    // until `kafka_common_Error_destroy` (see the `Per-variant payload accessors` comment
-    // above); the C caller must not destroy the error while using the payload, a condition
-    // this function's rustdoc does not yet state (see flags).
-    match &unsafe { error_ref(error) }.error {
-        Error::TopicAuthorization(e) => e as *const _ as *const kafka_common_TopicAuthorizationError_t,
-        _ => std::ptr::null(),
-    }
-}
-
-/// Returns the set of unauthorized topics, as an owned handle the caller must
-/// destroy with [`kafka_consumer_StringList_destroy`](crate::ffi::consumer::kafka_consumer_StringList_destroy).
-///
-/// # Safety
-///
-/// `handle` must be a valid, non-null [`kafka_common_TopicAuthorizationError_t`].
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TopicAuthorizationError_unauthorized_topics(
-    handle: *const kafka_common_TopicAuthorizationError_t,
-) -> *mut kafka_consumer_StringList_t {
-    // SAFETY: Per this function's `# Safety`, `handle` is a valid, non-null
-    // `kafka_common_TopicAuthorizationError_t`; the only producer of such a pointer is
-    // `kafka_common_Error_topic_authorization`, which returns the address of the
-    // `TopicAuthorizationError` inside a live `ErrorInner`, so the cast back is exact. The
-    // reference is used only for the duration of this call, to clone the topics into the
-    // fresh owned `StringList` handed to the caller, and the parent error must still be
-    // alive (the payload is a borrow that dies with `kafka_common_Error_destroy`, see the
-    // `Per-variant payload accessors` comment).
-    let e = unsafe { &*(handle as *const crate::common::errors::TopicAuthorizationError) };
-    box_string_list(e.unauthorized_topics().iter().cloned())
-}
-
-/// `GroupAuthorizationException` -> `kafka_common_GroupAuthorizationError_t`.
-#[repr(C)]
-pub struct kafka_common_GroupAuthorizationError_t {
-    _private: [u8; 0],
-}
-
-/// Returns the error's `GroupAuthorizationException` payload, or null if the
-/// error is not that variant.
-/// The returned pointer is borrowed from `error` and valid until `error` is
-/// destroyed with [`kafka_common_Error_destroy`]; do not free it.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_group_authorization(
-    error: *const kafka_common_Error_t,
-) -> *const kafka_common_GroupAuthorizationError_t {
-    if error.is_null() {
-        return std::ptr::null();
-    }
-    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet destroyed, which is `error_ref`'s precondition. The returned pointer is a
-    // borrow of the `GroupAuthorizationError` stored inline in the `Error` enum inside that
-    // same `ErrorInner` allocation, so it is valid exactly as long as the parent handle,
-    // until `kafka_common_Error_destroy` (see the `Per-variant payload accessors` comment
-    // above); the C caller must not destroy the error while using the payload, a condition
-    // this function's rustdoc does not yet state (see flags).
-    match &unsafe { error_ref(error) }.error {
-        Error::GroupAuthorization(e) => e as *const _ as *const kafka_common_GroupAuthorizationError_t,
-        _ => std::ptr::null(),
-    }
-}
-
-/// Returns the offending group id as an owned, NUL-terminated C string. The
-/// caller must free it with [`kafka_consumer_string_destroy`](crate::ffi::consumer::kafka_consumer_string_destroy).
-///
-/// # Safety
-///
-/// `handle` must be a valid, non-null [`kafka_common_GroupAuthorizationError_t`].
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_group_id(
-    handle: *const kafka_common_GroupAuthorizationError_t,
-) -> *mut c_char {
-    // SAFETY: Per this function's `# Safety`, `handle` is a valid, non-null
-    // `kafka_common_GroupAuthorizationError_t`; the only producer of such a pointer is
-    // `kafka_common_Error_group_authorization`, which returns the address of the
-    // `GroupAuthorizationError` inside a live `ErrorInner`, so the cast back is exact. The
-    // reference is used only for the duration of this call, to copy `group_id()` into the
-    // fresh owned `CString` handed to the caller, and the parent error must still be alive
-    // (the payload is a borrow that dies with `kafka_common_Error_destroy`, see the
-    // `Per-variant payload accessors` comment).
-    let e = unsafe { &*(handle as *const crate::common::errors::GroupAuthorizationError) };
-    CString::new(e.group_id()).unwrap_or_default().into_raw()
-}
-
-/// `InvalidTopicException` -> `kafka_common_InvalidTopicError_t`.
-#[repr(C)]
-pub struct kafka_common_InvalidTopicError_t {
-    _private: [u8; 0],
-}
-
-/// Returns the error's `InvalidTopicException` payload, or null if the error
-/// is not that variant.
-/// The returned pointer is borrowed from `error` and valid until `error` is
-/// destroyed with [`kafka_common_Error_destroy`]; do not free it.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_invalid_topic(
-    error: *const kafka_common_Error_t,
-) -> *const kafka_common_InvalidTopicError_t {
-    if error.is_null() {
-        return std::ptr::null();
-    }
-    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet destroyed, which is `error_ref`'s precondition. The returned pointer is a
-    // borrow of the `InvalidTopicError` stored inline in the `Error` enum inside that same
-    // `ErrorInner` allocation, so it is valid exactly as long as the parent handle, until
-    // `kafka_common_Error_destroy` (see the `Per-variant payload accessors` comment above);
-    // the C caller must not destroy the error while using the payload, a condition this
-    // function's rustdoc does not yet state (see flags).
-    match &unsafe { error_ref(error) }.error {
-        Error::InvalidTopic(e) => e as *const _ as *const kafka_common_InvalidTopicError_t,
-        _ => std::ptr::null(),
-    }
-}
-
-/// Returns the set of invalid topics, as an owned handle the caller must
-/// destroy with [`kafka_consumer_StringList_destroy`](crate::ffi::consumer::kafka_consumer_StringList_destroy).
-///
-/// # Safety
-///
-/// `handle` must be a valid, non-null [`kafka_common_InvalidTopicError_t`].
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_InvalidTopicError_invalid_topics(
-    handle: *const kafka_common_InvalidTopicError_t,
-) -> *mut kafka_consumer_StringList_t {
-    // SAFETY: Per this function's `# Safety`, `handle` is a valid, non-null
-    // `kafka_common_InvalidTopicError_t`; the only producer of such a pointer is
-    // `kafka_common_Error_invalid_topic`, which returns the address of the
-    // `InvalidTopicError` inside a live `ErrorInner`, so the cast back is exact. The
-    // reference is used only for the duration of this call, to clone the topics into the
-    // fresh owned `StringList` handed to the caller, and the parent error must still be
-    // alive (the payload is a borrow that dies with `kafka_common_Error_destroy`, see the
-    // `Per-variant payload accessors` comment).
-    let e = unsafe { &*(handle as *const crate::common::errors::InvalidTopicError) };
-    box_string_list(e.invalid_topics().iter().cloned())
-}
-
-/// `DuplicateResourceException` -> `kafka_common_DuplicateResourceError_t`.
-#[repr(C)]
-pub struct kafka_common_DuplicateResourceError_t {
-    _private: [u8; 0],
-}
-
-/// Returns the error's `DuplicateResourceException` payload, or null if the
-/// error is not that variant.
-/// The returned pointer is borrowed from `error` and valid until `error` is
-/// destroyed with [`kafka_common_Error_destroy`]; do not free it.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_duplicate_resource(
-    error: *const kafka_common_Error_t,
-) -> *const kafka_common_DuplicateResourceError_t {
-    if error.is_null() {
-        return std::ptr::null();
-    }
-    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet destroyed, which is `error_ref`'s precondition. The returned pointer is a
-    // borrow of the `DuplicateResourceError` stored inline in the `Error` enum inside that
-    // same `ErrorInner` allocation, so it is valid exactly as long as the parent handle,
-    // until `kafka_common_Error_destroy` (see the `Per-variant payload accessors` comment
-    // above); the C caller must not destroy the error while using the payload, a condition
-    // this function's rustdoc does not yet state (see flags).
-    match &unsafe { error_ref(error) }.error {
-        Error::DuplicateResource(e) => e as *const _ as *const kafka_common_DuplicateResourceError_t,
-        _ => std::ptr::null(),
-    }
-}
-
-/// Returns the offending resource name as an owned, NUL-terminated C string,
-/// or null if not recorded. The caller must free a non-null result with
-/// [`kafka_consumer_string_destroy`](crate::ffi::consumer::kafka_consumer_string_destroy).
-///
-/// # Safety
-///
-/// `handle` must be a valid, non-null [`kafka_common_DuplicateResourceError_t`].
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_DuplicateResourceError_resource(
-    handle: *const kafka_common_DuplicateResourceError_t,
-) -> *mut c_char {
-    // SAFETY: Per this function's `# Safety`, `handle` is a valid, non-null
-    // `kafka_common_DuplicateResourceError_t`; the only producer of such a pointer is
-    // `kafka_common_Error_duplicate_resource`, which returns the address of the
-    // `DuplicateResourceError` inside a live `ErrorInner`, so the cast back is exact. The
-    // reference is used only for the duration of this call, to copy `resource()` into a
-    // fresh owned `CString` (or return null when absent), and the parent error must still
-    // be alive (the payload is a borrow that dies with `kafka_common_Error_destroy`, see
-    // the `Per-variant payload accessors` comment).
-    let e = unsafe { &*(handle as *const crate::common::errors::DuplicateResourceError) };
-    match e.resource() {
-        Some(r) => CString::new(r).unwrap_or_default().into_raw(),
-        None => std::ptr::null_mut(),
-    }
-}
-
-/// `ResourceNotFoundException` -> `kafka_common_ResourceNotFoundError_t`.
-#[repr(C)]
-pub struct kafka_common_ResourceNotFoundError_t {
-    _private: [u8; 0],
-}
-
-/// Returns the error's `ResourceNotFoundException` payload, or null if the
-/// error is not that variant.
-/// The returned pointer is borrowed from `error` and valid until `error` is
-/// destroyed with [`kafka_common_Error_destroy`]; do not free it.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_resource_not_found(
-    error: *const kafka_common_Error_t,
-) -> *const kafka_common_ResourceNotFoundError_t {
-    if error.is_null() {
-        return std::ptr::null();
-    }
-    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet destroyed, which is `error_ref`'s precondition. The returned pointer is a
-    // borrow of the `ResourceNotFoundError` stored inline in the `Error` enum inside that
-    // same `ErrorInner` allocation, so it is valid exactly as long as the parent handle,
-    // until `kafka_common_Error_destroy` (see the `Per-variant payload accessors` comment
-    // above); the C caller must not destroy the error while using the payload, a condition
-    // this function's rustdoc does not yet state (see flags).
-    match &unsafe { error_ref(error) }.error {
-        Error::ResourceNotFound(e) => e as *const _ as *const kafka_common_ResourceNotFoundError_t,
-        _ => std::ptr::null(),
-    }
-}
-
-/// Returns the missing resource name as an owned, NUL-terminated C string, or
-/// null if not recorded. The caller must free a non-null result with
-/// [`kafka_consumer_string_destroy`](crate::ffi::consumer::kafka_consumer_string_destroy).
-///
-/// # Safety
-///
-/// `handle` must be a valid, non-null [`kafka_common_ResourceNotFoundError_t`].
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_ResourceNotFoundError_resource(
-    handle: *const kafka_common_ResourceNotFoundError_t,
-) -> *mut c_char {
-    // SAFETY: Per this function's `# Safety`, `handle` is a valid, non-null
-    // `kafka_common_ResourceNotFoundError_t`; the only producer of such a pointer is
-    // `kafka_common_Error_resource_not_found`, which returns the address of the
-    // `ResourceNotFoundError` inside a live `ErrorInner`, so the cast back is exact. The
-    // reference is used only for the duration of this call, to copy `resource()` into a
-    // fresh owned `CString` (or return null when absent), and the parent error must still
-    // be alive (the payload is a borrow that dies with `kafka_common_Error_destroy`, see
-    // the `Per-variant payload accessors` comment).
-    let e = unsafe { &*(handle as *const crate::common::errors::ResourceNotFoundError) };
-    match e.resource() {
-        Some(r) => CString::new(r).unwrap_or_default().into_raw(),
-        None => std::ptr::null_mut(),
-    }
-}
-
-/// `ThrottlingQuotaExceededException` -> `kafka_common_ThrottlingQuotaExceededError_t`.
-#[repr(C)]
-pub struct kafka_common_ThrottlingQuotaExceededError_t {
-    _private: [u8; 0],
-}
-
-/// Returns the error's `ThrottlingQuotaExceededException` payload, or null if
-/// the error is not that variant.
-/// The returned pointer is borrowed from `error` and valid until `error` is
-/// destroyed with [`kafka_common_Error_destroy`]; do not free it.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_throttling_quota_exceeded(
-    error: *const kafka_common_Error_t,
-) -> *const kafka_common_ThrottlingQuotaExceededError_t {
-    if error.is_null() {
-        return std::ptr::null();
-    }
-    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet destroyed, which is `error_ref`'s precondition. The returned pointer is a
-    // borrow of the `ThrottlingQuotaExceededError` stored inline in the `Error` enum inside
-    // that same `ErrorInner` allocation, so it is valid exactly as long as the parent
-    // handle, until `kafka_common_Error_destroy` (see the `Per-variant payload accessors`
-    // comment above); the C caller must not destroy the error while using the payload, a
-    // condition this function's rustdoc does not yet state (see flags).
-    match &unsafe { error_ref(error) }.error {
-        Error::ThrottlingQuotaExceeded(e) => e as *const _ as *const kafka_common_ThrottlingQuotaExceededError_t,
-        _ => std::ptr::null(),
-    }
-}
-
-/// Returns the throttle time in milliseconds.
-///
-/// # Safety
-///
-/// `handle` must be a valid, non-null [`kafka_common_ThrottlingQuotaExceededError_t`].
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_ThrottlingQuotaExceededError_throttle_time_ms(
-    handle: *const kafka_common_ThrottlingQuotaExceededError_t,
-) -> i32 {
-    // SAFETY: Per this function's `# Safety`, `handle` is a valid, non-null
-    // `kafka_common_ThrottlingQuotaExceededError_t`; the only producer of such a pointer is
-    // `kafka_common_Error_throttling_quota_exceeded`, which returns the address of the
-    // `ThrottlingQuotaExceededError` inside a live `ErrorInner`, so the cast back is exact.
-    // The reference is used only within this call to copy out the scalar
-    // `throttle_time_ms()`, and the parent error must still be alive (the payload is a
-    // borrow that dies with `kafka_common_Error_destroy`, see the `Per-variant payload
-    // accessors` comment).
-    let e = unsafe { &*(handle as *const crate::common::errors::ThrottlingQuotaExceededError) };
-    e.throttle_time_ms()
-}
-
-/// `RecordDeserializationException` -> `kafka_common_RecordDeserializationError_t`.
-#[repr(C)]
-pub struct kafka_common_RecordDeserializationError_t {
-    _private: [u8; 0],
-}
-
-/// Returns the error's `RecordDeserializationException` payload, or null if
-/// the error is not that variant.
-/// The returned pointer is borrowed from `error` and valid until `error` is
-/// destroyed with [`kafka_common_Error_destroy`]; do not free it.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_record_deserialization(
-    error: *const kafka_common_Error_t,
-) -> *const kafka_common_RecordDeserializationError_t {
-    if error.is_null() {
-        return std::ptr::null();
-    }
-    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet destroyed, which is `error_ref`'s precondition. The returned pointer is a
-    // borrow of the `RecordDeserializationError` in the `Box` owned by the `Error` enum
-    // inside that same `ErrorInner` allocation (`e.as_ref()`), so its address is stable and
-    // valid exactly as long as the parent handle, until `kafka_common_Error_destroy` (see
-    // the `Per-variant payload accessors` comment above); the C caller must not destroy the
-    // error while using the payload, a condition this function's rustdoc does not yet state
-    // (see flags).
-    match &unsafe { error_ref(error) }.error {
-        Error::RecordDeserialization(e) => e.as_ref() as *const _ as *const kafka_common_RecordDeserializationError_t,
-        _ => std::ptr::null(),
-    }
-}
-
-/// Returns which side of the record failed to deserialize, as the ordinal of
-/// Java's `DeserializationExceptionOrigin` (`0` = key, `1` = value).
-///
-/// # Safety
-///
-/// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`].
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_RecordDeserializationError_origin(
-    handle: *const kafka_common_RecordDeserializationError_t,
-) -> i32 {
-    // SAFETY: Per this function's `# Safety`, `handle` is a valid, non-null
-    // `kafka_common_RecordDeserializationError_t`; the only producer of such a pointer is
-    // `kafka_common_Error_record_deserialization`, which returns the address of the boxed
-    // `RecordDeserializationError` owned by a live `ErrorInner`, so the cast back is exact.
-    // The reference is used only within this call to read `origin()`, and the parent error
-    // must still be alive (the payload is a borrow that dies with
-    // `kafka_common_Error_destroy`, see the `Per-variant payload accessors` comment).
-    let e = unsafe { &*(handle as *const crate::common::errors::RecordDeserializationError) };
-    match e.origin() {
-        crate::common::errors::DeserializationErrorOrigin::Key => 0,
-        crate::common::errors::DeserializationErrorOrigin::Value => 1,
-    }
-}
-
-/// Returns the partition of the offending record, as an owned handle the
-/// caller must destroy with [`kafka_common_TopicPartition_destroy`](crate::ffi::consumer::kafka_common_TopicPartition_destroy).
-///
-/// # Safety
-///
-/// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`].
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_RecordDeserializationError_partition(
-    handle: *const kafka_common_RecordDeserializationError_t,
-) -> *mut kafka_common_TopicPartition_t {
-    // SAFETY: Per this function's `# Safety`, `handle` is a valid, non-null
-    // `kafka_common_RecordDeserializationError_t`; the only producer of such a pointer is
-    // `kafka_common_Error_record_deserialization`, which returns the address of the boxed
-    // `RecordDeserializationError` owned by a live `ErrorInner`, so the cast back is exact.
-    // The reference is used only within this call to clone `topic_partition()` into the
-    // fresh owned `kafka_common_TopicPartition_t` handed to the caller, and the parent
-    // error must still be alive (the payload is a borrow that dies with
-    // `kafka_common_Error_destroy`, see the `Per-variant payload accessors` comment).
-    let e = unsafe { &*(handle as *const crate::common::errors::RecordDeserializationError) };
-    box_topic_partition(e.topic_partition().clone())
-}
-
-/// Returns the offset of the offending record.
-///
-/// # Safety
-///
-/// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`].
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_RecordDeserializationError_offset(
-    handle: *const kafka_common_RecordDeserializationError_t,
-) -> i64 {
-    // SAFETY: Per this function's `# Safety`, `handle` is a valid, non-null
-    // `kafka_common_RecordDeserializationError_t`; the only producer of such a pointer is
-    // `kafka_common_Error_record_deserialization`, which returns the address of the boxed
-    // `RecordDeserializationError` owned by a live `ErrorInner`, so the cast back is exact.
-    // The reference is used only within this call to copy out the scalar `offset()`, and
-    // the parent error must still be alive (the payload is a borrow that dies with
-    // `kafka_common_Error_destroy`, see the `Per-variant payload accessors` comment).
-    let e = unsafe { &*(handle as *const crate::common::errors::RecordDeserializationError) };
-    e.offset()
-}
-
-/// Returns the timestamp of the offending record.
-///
-/// # Safety
-///
-/// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`].
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_RecordDeserializationError_timestamp(
-    handle: *const kafka_common_RecordDeserializationError_t,
-) -> i64 {
-    // SAFETY: Per this function's `# Safety`, `handle` is a valid, non-null
-    // `kafka_common_RecordDeserializationError_t`; the only producer of such a pointer is
-    // `kafka_common_Error_record_deserialization`, which returns the address of the boxed
-    // `RecordDeserializationError` owned by a live `ErrorInner`, so the cast back is exact.
-    // The reference is used only within this call to copy out the scalar `timestamp()`, and
-    // the parent error must still be alive (the payload is a borrow that dies with
-    // `kafka_common_Error_destroy`, see the `Per-variant payload accessors` comment).
-    let e = unsafe { &*(handle as *const crate::common::errors::RecordDeserializationError) };
-    e.timestamp()
-}
-
-/// Returns the timestamp type of the offending record as its numeric id
-/// (`-1` = NoTimestampType, `0` = CreateTime, `1` = LogAppendTime), matching
-/// [`kafka_consumer_ConsumerRecord_timestamp_type`](crate::ffi::consumer::kafka_consumer_ConsumerRecord_timestamp_type).
-///
-/// # Safety
-///
-/// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`].
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_RecordDeserializationError_timestamp_type(
-    handle: *const kafka_common_RecordDeserializationError_t,
-) -> i32 {
-    // SAFETY: Per this function's `# Safety`, `handle` is a valid, non-null
-    // `kafka_common_RecordDeserializationError_t`; the only producer of such a pointer is
-    // `kafka_common_Error_record_deserialization`, which returns the address of the boxed
-    // `RecordDeserializationError` owned by a live `ErrorInner`, so the cast back is exact.
-    // The reference is used only within this call to copy out `timestamp_type().id()`, and
-    // the parent error must still be alive (the payload is a borrow that dies with
-    // `kafka_common_Error_destroy`, see the `Per-variant payload accessors` comment).
-    let e = unsafe { &*(handle as *const crate::common::errors::RecordDeserializationError) };
-    e.timestamp_type().id()
-}
-
-/// Returns the raw key bytes of the offending record as a (ptr, len) pair, or
-/// (null, -1) if absent. The pointer is borrowed and valid until the parent
-/// error is destroyed.
-///
-/// # Safety
-///
-/// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`];
-/// `out_len` must be a valid pointer.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_RecordDeserializationError_key_buffer(
-    handle: *const kafka_common_RecordDeserializationError_t,
-    out_len: *mut i32,
-) -> *const u8 {
-    // SAFETY: Per this function's `# Safety`, `handle` is a valid, non-null
-    // `kafka_common_RecordDeserializationError_t`; the only producer of such a pointer is
-    // `kafka_common_Error_record_deserialization`, which returns the address of the boxed
-    // `RecordDeserializationError` owned by a live `ErrorInner`, so the cast back is exact.
-    // `key_buffer()` returns `Option<&[u8]>` borrowed from the error's own `Vec<u8>`, so
-    // the `k.as_ptr()` returned to the caller points into the parent `ErrorInner`
-    // allocation and, as the rustdoc states, is valid until the parent error is destroyed;
-    // the parent must still be alive for this call (the payload is a borrow that dies with
-    // `kafka_common_Error_destroy`).
-    let e = unsafe { &*(handle as *const crate::common::errors::RecordDeserializationError) };
-    match e.key_buffer() {
-        Some(k) => {
-            if !out_len.is_null() {
-                // SAFETY: `out_len` is non-null (checked above) and, per this function's `#
-                // Safety`, a valid pointer, so exactly one `i32` (the key length) is
-                // written through it.
-                unsafe { *out_len = k.len() as i32 };
-            }
-            k.as_ptr()
-        },
-        None => {
-            if !out_len.is_null() {
-                // SAFETY: `out_len` is non-null (checked above) and, per this function's `#
-                // Safety`, a valid pointer, so exactly one `i32` (the absent marker `-1`)
-                // is written through it.
-                unsafe { *out_len = -1 };
-            }
-            std::ptr::null()
-        },
-    }
-}
-
-/// Returns the raw value bytes of the offending record as a (ptr, len) pair,
-/// or (null, -1) if absent. The pointer is borrowed and valid until the
-/// parent error is destroyed.
-///
-/// # Safety
-///
-/// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`];
-/// `out_len` must be a valid pointer.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_RecordDeserializationError_value_buffer(
-    handle: *const kafka_common_RecordDeserializationError_t,
-    out_len: *mut i32,
-) -> *const u8 {
-    // SAFETY: Per this function's `# Safety`, `handle` is a valid, non-null
-    // `kafka_common_RecordDeserializationError_t`; the only producer of such a pointer is
-    // `kafka_common_Error_record_deserialization`, which returns the address of the boxed
-    // `RecordDeserializationError` owned by a live `ErrorInner`, so the cast back is exact.
-    // `value_buffer()` returns `Option<&[u8]>` borrowed from the error's own `Vec<u8>`, so
-    // the `v.as_ptr()` returned to the caller points into the parent `ErrorInner`
-    // allocation and, as the rustdoc states, is valid until the parent error is destroyed;
-    // the parent must still be alive for this call (the payload is a borrow that dies with
-    // `kafka_common_Error_destroy`).
-    let e = unsafe { &*(handle as *const crate::common::errors::RecordDeserializationError) };
-    match e.value_buffer() {
-        Some(v) => {
-            if !out_len.is_null() {
-                // SAFETY: `out_len` is non-null (checked above) and, per this function's `#
-                // Safety`, a valid pointer, so exactly one `i32` (the value length) is
-                // written through it.
-                unsafe { *out_len = v.len() as i32 };
-            }
-            v.as_ptr()
-        },
-        None => {
-            if !out_len.is_null() {
-                // SAFETY: `out_len` is non-null (checked above) and, per this function's `#
-                // Safety`, a valid pointer, so exactly one `i32` (the absent marker `-1`)
-                // is written through it.
-                unsafe { *out_len = -1 };
-            }
-            std::ptr::null()
-        },
-    }
-}
-
-/// Returns the number of headers attached to the offending record (`0` if
-/// there are none recorded).
-///
-/// # Safety
-///
-/// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`].
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_RecordDeserializationError_header_count(
-    handle: *const kafka_common_RecordDeserializationError_t,
-) -> i32 {
-    // SAFETY: Per this function's `# Safety`, `handle` is a valid, non-null
-    // `kafka_common_RecordDeserializationError_t`; the only producer of such a pointer is
-    // `kafka_common_Error_record_deserialization`, which returns the address of the boxed
-    // `RecordDeserializationError` owned by a live `ErrorInner`, so the cast back is exact.
-    // The reference is used only within this call to count `headers()` (an
-    // `Option<&RecordHeaders>` borrow), and the parent error must still be alive (the
-    // payload is a borrow that dies with `kafka_common_Error_destroy`, see the `Per-variant
-    // payload accessors` comment).
-    let e = unsafe { &*(handle as *const crate::common::errors::RecordDeserializationError) };
-    e.headers().into_iter().flatten().count() as i32
-}
-
-/// Returns the key of the header at `index` (insertion order) as a (ptr, len)
-/// pair (NOT NUL-terminated), or (null, -1) if out of range.
-/// The pointer is borrowed and valid until the parent error is destroyed.
-///
-/// # Safety
-///
-/// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`];
-/// `out_len` must be a valid pointer.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_RecordDeserializationError_header_key(
-    handle: *const kafka_common_RecordDeserializationError_t,
-    index: i32,
-    out_len: *mut i32,
-) -> *const c_char {
-    // SAFETY: Per this function's `# Safety`, `handle` is a valid, non-null
-    // `kafka_common_RecordDeserializationError_t`; the only producer of such a pointer is
-    // `kafka_common_Error_record_deserialization`, which returns the address of the boxed
-    // `RecordDeserializationError` owned by a live `ErrorInner`, so the cast back is exact.
-    // `headers()` returns `Option<&RecordHeaders>` and `&RecordHeaders` iterates
-    // `&RecordHeader`, so `header.key()` borrows the error's own header storage and the
-    // `key.as_ptr()` returned to the caller points into the parent `ErrorInner` allocation,
-    // valid until the parent error is destroyed (not stated in this function's rustdoc, see
-    // flags); the parent must still be alive for this call.
-    let e = unsafe { &*(handle as *const crate::common::errors::RecordDeserializationError) };
-    let header = if index < 0 {
-        None
-    } else {
-        e.headers().into_iter().flatten().nth(index as usize)
-    };
-    match header {
-        Some(header) => {
-            let key = header.key();
-            if !out_len.is_null() {
-                // SAFETY: `out_len` is non-null (checked above) and, per this function's `#
-                // Safety`, a valid pointer, so exactly one `i32` (the header key length) is
-                // written through it.
-                unsafe { *out_len = key.len() as i32 };
-            }
-            key.as_ptr() as *const c_char
-        },
-        None => {
-            if !out_len.is_null() {
-                // SAFETY: `out_len` is non-null (checked above) and, per this function's `#
-                // Safety`, a valid pointer, so exactly one `i32` (the out-of-range marker
-                // `-1`) is written through it.
-                unsafe { *out_len = -1 };
-            }
-            std::ptr::null()
-        },
-    }
-}
-
-/// Returns the value of the header at `index` as a (ptr, len) pair, or
-/// (null, -1) if out of range or the header value is null.
-/// The pointer is borrowed and valid until the parent error is destroyed.
-///
-/// # Safety
-///
-/// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`];
-/// `out_len` must be a valid pointer.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_RecordDeserializationError_header_value(
-    handle: *const kafka_common_RecordDeserializationError_t,
-    index: i32,
-    out_len: *mut i32,
-) -> *const u8 {
-    // SAFETY: Per this function's `# Safety`, `handle` is a valid, non-null
-    // `kafka_common_RecordDeserializationError_t`; the only producer of such a pointer is
-    // `kafka_common_Error_record_deserialization`, which returns the address of the boxed
-    // `RecordDeserializationError` owned by a live `ErrorInner`, so the cast back is exact.
-    // `headers()` returns `Option<&RecordHeaders>` and `&RecordHeaders` iterates
-    // `&RecordHeader`, so `h.value()` (`Option<&[u8]>`) borrows the error's own header
-    // storage and the `value.as_ptr()` returned to the caller points into the parent
-    // `ErrorInner` allocation, valid until the parent error is destroyed (not stated in
-    // this function's rustdoc, see flags); the parent must still be alive for this call.
-    let e = unsafe { &*(handle as *const crate::common::errors::RecordDeserializationError) };
-    let header = if index < 0 {
-        None
-    } else {
-        e.headers().into_iter().flatten().nth(index as usize)
-    };
-    match header.and_then(|h| h.value()) {
-        Some(value) => {
-            if !out_len.is_null() {
-                // SAFETY: `out_len` is non-null (checked above) and, per this function's `#
-                // Safety`, a valid pointer, so exactly one `i32` (the header value length)
-                // is written through it.
-                unsafe { *out_len = value.len() as i32 };
-            }
-            value.as_ptr()
-        },
-        None => {
-            if !out_len.is_null() {
-                // SAFETY: `out_len` is non-null (checked above) and, per this function's `#
-                // Safety`, a valid pointer, so exactly one `i32` (the out-of-range /
-                // null-value marker `-1`) is written through it.
-                unsafe { *out_len = -1 };
-            }
-            std::ptr::null()
-        },
-    }
-}
-
-/// `QuotaViolationException` -> `kafka_common_QuotaViolationError_t`.
-#[repr(C)]
-pub struct kafka_common_QuotaViolationError_t {
-    _private: [u8; 0],
-}
-
-/// Returns the error's `QuotaViolationException` payload, or null if the
-/// error is not that variant.
-/// The returned pointer is borrowed from `error` and valid until `error` is
-/// destroyed with [`kafka_common_Error_destroy`]; do not free it.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_quota_violation(
-    error: *const kafka_common_Error_t,
-) -> *const kafka_common_QuotaViolationError_t {
-    if error.is_null() {
-        return std::ptr::null();
-    }
-    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet destroyed, which is `error_ref`'s precondition. The returned pointer is a
-    // borrow of the `QuotaViolationError` in the `Box` owned by the `Error` enum inside
-    // that same `ErrorInner` allocation (`e.as_ref()`), so its address is stable and valid
-    // exactly as long as the parent handle, until `kafka_common_Error_destroy` (see the
-    // `Per-variant payload accessors` comment above); the C caller must not destroy the
-    // error while using the payload, a condition this function's rustdoc does not yet state
-    // (see flags).
-    match &unsafe { error_ref(error) }.error {
-        Error::QuotaViolation(e) => e.as_ref() as *const _ as *const kafka_common_QuotaViolationError_t,
-        _ => std::ptr::null(),
-    }
-}
-
-/// Returns the metric's name as an owned, NUL-terminated C string. The caller
-/// must free it with [`kafka_consumer_string_destroy`](crate::ffi::consumer::kafka_consumer_string_destroy).
-///
-/// Only `name`/`group` are exposed — Java's own `toString()` uses only
-/// `metric.metricName()`, and the client has no caller of `metric()`.
-///
-/// # Safety
-///
-/// `handle` must be a valid, non-null [`kafka_common_QuotaViolationError_t`].
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_QuotaViolationError_metric_name(
-    handle: *const kafka_common_QuotaViolationError_t,
-) -> *mut c_char {
-    // SAFETY: Per this function's `# Safety`, `handle` is a valid, non-null
-    // `kafka_common_QuotaViolationError_t`; the only producer of such a pointer is
-    // `kafka_common_Error_quota_violation`, which returns the address of the boxed
-    // `QuotaViolationError` owned by a live `ErrorInner`, so the cast back is exact. The
-    // reference is used only within this call to copy `metric_name().name()` into the fresh
-    // owned `CString` handed to the caller, and the parent error must still be alive (the
-    // payload is a borrow that dies with `kafka_common_Error_destroy`, see the `Per-variant
-    // payload accessors` comment).
-    let e = unsafe { &*(handle as *const crate::common::metrics::QuotaViolationError) };
-    CString::new(e.metric_name().name()).unwrap_or_default().into_raw()
-}
-
-/// Returns the metric's group as an owned, NUL-terminated C string. The
-/// caller must free it with [`kafka_consumer_string_destroy`](crate::ffi::consumer::kafka_consumer_string_destroy).
-///
-/// # Safety
-///
-/// `handle` must be a valid, non-null [`kafka_common_QuotaViolationError_t`].
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_QuotaViolationError_metric_group(
-    handle: *const kafka_common_QuotaViolationError_t,
-) -> *mut c_char {
-    // SAFETY: Per this function's `# Safety`, `handle` is a valid, non-null
-    // `kafka_common_QuotaViolationError_t`; the only producer of such a pointer is
-    // `kafka_common_Error_quota_violation`, which returns the address of the boxed
-    // `QuotaViolationError` owned by a live `ErrorInner`, so the cast back is exact. The
-    // reference is used only within this call to copy `metric_name().group()` into the
-    // fresh owned `CString` handed to the caller, and the parent error must still be alive
-    // (the payload is a borrow that dies with `kafka_common_Error_destroy`, see the
-    // `Per-variant payload accessors` comment).
-    let e = unsafe { &*(handle as *const crate::common::metrics::QuotaViolationError) };
-    CString::new(e.metric_name().group()).unwrap_or_default().into_raw()
-}
-
-/// Returns the recorded value that violated the quota.
-///
-/// # Safety
-///
-/// `handle` must be a valid, non-null [`kafka_common_QuotaViolationError_t`].
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_QuotaViolationError_value(
-    handle: *const kafka_common_QuotaViolationError_t,
-) -> f64 {
-    // SAFETY: Per this function's `# Safety`, `handle` is a valid, non-null
-    // `kafka_common_QuotaViolationError_t`; the only producer of such a pointer is
-    // `kafka_common_Error_quota_violation`, which returns the address of the boxed
-    // `QuotaViolationError` owned by a live `ErrorInner`, so the cast back is exact. The
-    // reference is used only within this call to copy out the scalar `value()`, and the
-    // parent error must still be alive (the payload is a borrow that dies with
-    // `kafka_common_Error_destroy`, see the `Per-variant payload accessors` comment).
-    let e = unsafe { &*(handle as *const crate::common::metrics::QuotaViolationError) };
-    e.value()
-}
-
-/// Returns the configured bound the value violated.
-///
-/// # Safety
-///
-/// `handle` must be a valid, non-null [`kafka_common_QuotaViolationError_t`].
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_QuotaViolationError_bound(
-    handle: *const kafka_common_QuotaViolationError_t,
-) -> f64 {
-    // SAFETY: Per this function's `# Safety`, `handle` is a valid, non-null
-    // `kafka_common_QuotaViolationError_t`; the only producer of such a pointer is
-    // `kafka_common_Error_quota_violation`, which returns the address of the boxed
-    // `QuotaViolationError` owned by a live `ErrorInner`, so the cast back is exact. The
-    // reference is used only within this call to copy out the scalar `bound()`, and the
-    // parent error must still be alive (the payload is a borrow that dies with
-    // `kafka_common_Error_destroy`, see the `Per-variant payload accessors` comment).
-    let e = unsafe { &*(handle as *const crate::common::metrics::QuotaViolationError) };
-    e.bound()
-}
-
-/// `LogTruncationException` -> `kafka_common_ConsumerLogTruncationError_t`.
-#[repr(C)]
-pub struct kafka_common_ConsumerLogTruncationError_t {
-    _private: [u8; 0],
-}
-
-/// Returns the error's `LogTruncationException` payload, or null if the error
-/// is not that variant.
-/// The returned pointer is borrowed from `error` and valid until `error` is
-/// destroyed with [`kafka_common_Error_destroy`]; do not free it.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_consumer_log_truncation(
-    error: *const kafka_common_Error_t,
-) -> *const kafka_common_ConsumerLogTruncationError_t {
-    if error.is_null() {
-        return std::ptr::null();
-    }
-    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet destroyed, which is `error_ref`'s precondition. The returned pointer is a
-    // borrow of the `ConsumerLogTruncationError` in the `Box` owned by the `Error` enum
-    // inside that same `ErrorInner` allocation (`e.as_ref()`), so its address is stable and
-    // valid exactly as long as the parent handle, until `kafka_common_Error_destroy` (see
-    // the `Per-variant payload accessors` comment above); the C caller must not destroy the
-    // error while using the payload, a condition this function's rustdoc does not yet state
-    // (see flags).
-    match &unsafe { error_ref(error) }.error {
-        Error::ConsumerLogTruncation(e) => e.as_ref() as *const _ as *const kafka_common_ConsumerLogTruncationError_t,
-        _ => std::ptr::null(),
-    }
-}
-
-/// Returns the out-of-range offset per partition, as an owned handle the
-/// caller must destroy with [`kafka_consumer_LongOffsetMap_destroy`](crate::ffi::consumer::kafka_consumer_LongOffsetMap_destroy).
-///
-/// # Safety
-///
-/// `handle` must be a valid, non-null [`kafka_common_ConsumerLogTruncationError_t`].
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_offset_out_of_range_partitions(
-    handle: *const kafka_common_ConsumerLogTruncationError_t,
-) -> *mut kafka_consumer_LongOffsetMap_t {
-    // SAFETY: Per this function's `# Safety`, `handle` is a valid, non-null
-    // `kafka_common_ConsumerLogTruncationError_t`; the only producer of such a pointer is
-    // `kafka_common_Error_consumer_log_truncation`, which returns the address of the boxed
-    // `ConsumerLogTruncationError` owned by a live `ErrorInner`, so the cast back is exact.
-    // The reference is used only within this call to clone
-    // `offset_out_of_range_partitions()` into the fresh owned `LongOffsetMap` handed to the
-    // caller, and the parent error must still be alive (the payload is a borrow that dies
-    // with `kafka_common_Error_destroy`, see the `Per-variant payload accessors` comment).
-    let e = unsafe { &*(handle as *const crate::consumer::ConsumerLogTruncationError) };
-    box_long_offset_map(e.offset_out_of_range_partitions().clone())
-}
-
-/// Returns the divergent offset per partition, as an owned handle the caller
-/// must destroy with [`kafka_consumer_OffsetMap_destroy`](crate::ffi::consumer::kafka_consumer_OffsetMap_destroy).
-///
-/// # Safety
-///
-/// `handle` must be a valid, non-null [`kafka_common_ConsumerLogTruncationError_t`].
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_divergent_offsets(
-    handle: *const kafka_common_ConsumerLogTruncationError_t,
-) -> *mut kafka_consumer_OffsetMap_t {
-    // SAFETY: Per this function's `# Safety`, `handle` is a valid, non-null
-    // `kafka_common_ConsumerLogTruncationError_t`; the only producer of such a pointer is
-    // `kafka_common_Error_consumer_log_truncation`, which returns the address of the boxed
-    // `ConsumerLogTruncationError` owned by a live `ErrorInner`, so the cast back is exact.
-    // The reference is used only within this call to clone `divergent_offsets()` into the
-    // fresh owned `OffsetMap` handed to the caller, and the parent error must still be
-    // alive (the payload is a borrow that dies with `kafka_common_Error_destroy`, see the
-    // `Per-variant payload accessors` comment).
-    let e = unsafe { &*(handle as *const crate::consumer::ConsumerLogTruncationError) };
-    box_offset_map(e.divergent_offsets().clone())
-}
-
-/// `NoOffsetForPartitionException` -> `kafka_common_ConsumerNoOffsetForPartitionError_t`.
-#[repr(C)]
-pub struct kafka_common_ConsumerNoOffsetForPartitionError_t {
-    _private: [u8; 0],
-}
-
-/// Returns the error's `NoOffsetForPartitionException` payload, or null if
-/// the error is not that variant.
-/// The returned pointer is borrowed from `error` and valid until `error` is
-/// destroyed with [`kafka_common_Error_destroy`]; do not free it.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_consumer_no_offset_for_partition(
-    error: *const kafka_common_Error_t,
-) -> *const kafka_common_ConsumerNoOffsetForPartitionError_t {
-    if error.is_null() {
-        return std::ptr::null();
-    }
-    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet destroyed, which is `error_ref`'s precondition. The returned pointer is a
-    // borrow of the `ConsumerNoOffsetForPartitionError` stored inline in the `Error` enum
-    // inside that same `ErrorInner` allocation, so it is valid exactly as long as the
-    // parent handle, until `kafka_common_Error_destroy` (see the `Per-variant payload
-    // accessors` comment above); the C caller must not destroy the error while using the
-    // payload, a condition this function's rustdoc does not yet state (see flags).
-    match &unsafe { error_ref(error) }.error {
-        Error::ConsumerNoOffsetForPartition(e) => {
-            e as *const _ as *const kafka_common_ConsumerNoOffsetForPartitionError_t
-        },
-        _ => std::ptr::null(),
-    }
-}
-
-/// Returns the partitions with no defined offset and no reset policy, as an
-/// owned handle the caller must destroy with
-/// [`kafka_common_TopicPartitionList_destroy`](crate::ffi::consumer::kafka_common_TopicPartitionList_destroy).
-///
-/// # Safety
-///
-/// `handle` must be a valid, non-null [`kafka_common_ConsumerNoOffsetForPartitionError_t`].
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_partitions(
-    handle: *const kafka_common_ConsumerNoOffsetForPartitionError_t,
-) -> *mut kafka_common_TopicPartitionList_t {
-    // SAFETY: Per this function's `# Safety`, `handle` is a valid, non-null
-    // `kafka_common_ConsumerNoOffsetForPartitionError_t`; the only producer of such a
-    // pointer is `kafka_common_Error_consumer_no_offset_for_partition`, which returns the
-    // address of the `ConsumerNoOffsetForPartitionError` inside a live `ErrorInner`, so the
-    // cast back is exact. The reference is used only within this call to clone
-    // `partitions()` into the fresh owned `TopicPartitionList` handed to the caller, and
-    // the parent error must still be alive (the payload is a borrow that dies with
-    // `kafka_common_Error_destroy`, see the `Per-variant payload accessors` comment).
-    let e = unsafe { &*(handle as *const crate::consumer::ConsumerNoOffsetForPartitionError) };
-    box_topic_partition_list(e.partitions().iter().cloned())
-}
-
-/// Consumer-package `OffsetOutOfRangeException` -> `kafka_common_ConsumerOffsetOutOfRangeError_t`.
-#[repr(C)]
-pub struct kafka_common_ConsumerOffsetOutOfRangeError_t {
-    _private: [u8; 0],
-}
-
-/// Returns the error's consumer-package `OffsetOutOfRangeException` payload,
-/// or null if the error is not that variant.
-/// The returned pointer is borrowed from `error` and valid until `error` is
-/// destroyed with [`kafka_common_Error_destroy`]; do not free it.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_consumer_offset_out_of_range(
-    error: *const kafka_common_Error_t,
-) -> *const kafka_common_ConsumerOffsetOutOfRangeError_t {
-    if error.is_null() {
-        return std::ptr::null();
-    }
-    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet destroyed, which is `error_ref`'s precondition. The returned pointer is a
-    // borrow of the `ConsumerOffsetOutOfRangeError` stored inline in the `Error` enum
-    // inside that same `ErrorInner` allocation, so it is valid exactly as long as the
-    // parent handle, until `kafka_common_Error_destroy` (see the `Per-variant payload
-    // accessors` comment above); the C caller must not destroy the error while using the
-    // payload, a condition this function's rustdoc does not yet state (see flags).
-    match &unsafe { error_ref(error) }.error {
-        Error::ConsumerOffsetOutOfRange(e) => e as *const _ as *const kafka_common_ConsumerOffsetOutOfRangeError_t,
-        _ => std::ptr::null(),
-    }
-}
-
-/// Returns the out-of-range offset per partition, as an owned handle the
-/// caller must destroy with [`kafka_consumer_LongOffsetMap_destroy`](crate::ffi::consumer::kafka_consumer_LongOffsetMap_destroy).
-///
-/// # Safety
-///
-/// `handle` must be a valid, non-null [`kafka_common_ConsumerOffsetOutOfRangeError_t`].
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_offset_out_of_range_partitions(
-    handle: *const kafka_common_ConsumerOffsetOutOfRangeError_t,
-) -> *mut kafka_consumer_LongOffsetMap_t {
-    // SAFETY: Per this function's `# Safety`, `handle` is a valid, non-null
-    // `kafka_common_ConsumerOffsetOutOfRangeError_t`; the only producer of such a pointer
-    // is `kafka_common_Error_consumer_offset_out_of_range`, which returns the address of
-    // the `ConsumerOffsetOutOfRangeError` inside a live `ErrorInner`, so the cast back is
-    // exact. The reference is used only within this call to clone
-    // `offset_out_of_range_partitions()` into the fresh owned `LongOffsetMap` handed to the
-    // caller, and the parent error must still be alive (the payload is a borrow that dies
-    // with `kafka_common_Error_destroy`, see the `Per-variant payload accessors` comment).
-    let e = unsafe { &*(handle as *const crate::consumer::ConsumerOffsetOutOfRangeError) };
-    box_long_offset_map(e.offset_out_of_range_partitions().clone())
-}
-
-/// `RecordTooLargeException` -> `kafka_common_RecordTooLargeError_t`.
-#[repr(C)]
-pub struct kafka_common_RecordTooLargeError_t {
-    _private: [u8; 0],
-}
-
-/// Returns the error's `RecordTooLargeException` payload, or null if the
-/// error is not that variant.
-/// The returned pointer is borrowed from `error` and valid until `error` is
-/// destroyed with [`kafka_common_Error_destroy`]; do not free it.
-///
-/// # Safety
-///
-/// `error` must be a valid handle from a function that returned an error, or null.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_record_too_large(
-    error: *const kafka_common_Error_t,
-) -> *const kafka_common_RecordTooLargeError_t {
-    if error.is_null() {
-        return std::ptr::null();
-    }
-    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet destroyed, which is `error_ref`'s precondition. The returned pointer is a
-    // borrow of the `RecordTooLargeError` stored inline in the `Error` enum inside that
-    // same `ErrorInner` allocation, so it is valid exactly as long as the parent handle,
-    // until `kafka_common_Error_destroy` (see the `Per-variant payload accessors` comment
-    // above); the C caller must not destroy the error while using the payload, a condition
-    // this function's rustdoc does not yet state (see flags).
-    match &unsafe { error_ref(error) }.error {
-        Error::RecordTooLarge(e) => e as *const _ as *const kafka_common_RecordTooLargeError_t,
-        _ => std::ptr::null(),
-    }
-}
-
-/// Returns the per-partition record size that exceeded the limit, as an
-/// owned handle the caller must destroy with
-/// [`kafka_consumer_LongOffsetMap_destroy`](crate::ffi::consumer::kafka_consumer_LongOffsetMap_destroy),
-/// or null if Java's field is `null` (the constructor that does not record
-/// per-partition sizes was used).
-///
-/// # Safety
-///
-/// `handle` must be a valid, non-null [`kafka_common_RecordTooLargeError_t`].
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_RecordTooLargeError_record_too_large_partitions(
-    handle: *const kafka_common_RecordTooLargeError_t,
-) -> *mut kafka_consumer_LongOffsetMap_t {
-    // SAFETY: Per this function's `# Safety`, `handle` is a valid, non-null
-    // `kafka_common_RecordTooLargeError_t`; the only producer of such a pointer is
-    // `kafka_common_Error_record_too_large`, which returns the address of the
-    // `RecordTooLargeError` inside a live `ErrorInner`, so the cast back is exact. The
-    // reference is used only within this call to clone `record_too_large_partitions()` into
-    // a fresh owned `LongOffsetMap` (or return null when Java's field is null), and the
-    // parent error must still be alive (the payload is a borrow that dies with
-    // `kafka_common_Error_destroy`, see the `Per-variant payload accessors` comment).
-    let e = unsafe { &*(handle as *const crate::common::errors::RecordTooLargeError) };
-    match e.record_too_large_partitions() {
-        Some(partitions) => box_long_offset_map(partitions.clone()),
-        None => std::ptr::null_mut(),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Async (callback-based) delivery machinery
-// ---------------------------------------------------------------------------
-//
-// The async API mirrors the librdkafka delivery-report model: each operation
-// returns immediately and its result is delivered later through a C callback.
-// Completions are invoked from a single per-handle **dispatcher thread** that
-// drains a completion queue, so user callbacks normally run on one predictable
-// thread and never on a tokio worker (a slow callback cannot stall I/O). The
-// exceptions fire inline on the calling thread: a request rejected before it is
-// queued (null handle, busy access guard, marshaling failure, caught panic) and
-// the post-teardown fallback in `enqueue_or_run_inline`.
-
-/// A unit of work executed by the dispatcher thread. Each async operation
-/// captures its own C callback, `user_data`, and owned result handles into the
-/// closure and bakes in the correct invocation, so the queue stays uniform
-/// (one element type) while every operation delivers exactly the outputs its
-/// sync counterpart produces.
-pub(crate) type CompletionJob = Box<dyn FnOnce() + Send>;
-
-/// Spawns a dispatcher thread that drains the completion queue, running each
-/// queued [`CompletionJob`] in order. The thread exits once all senders are
-/// dropped (after draining any queued jobs).
-///
-/// Returns the sender half of the completion queue and the thread join handle.
-/// The caller stores the sender on its handle (cloned into each async op) and
-/// keeps the join handle for teardown.
-pub(crate) fn spawn_dispatcher(name: &str) -> (std::sync::mpsc::Sender<CompletionJob>, std::thread::JoinHandle<()>) {
-    let (completion_tx, completion_rx) = std::sync::mpsc::channel::<CompletionJob>();
-    let dispatcher = std::thread::Builder::new()
-        .name(name.to_string())
-        .spawn(move || {
-            // Run each completion closure; exits once all senders are dropped
-            // (after draining any queued jobs).
-            while let Ok(job) = completion_rx.recv() {
-                job();
-            }
-        })
-        .expect("failed to spawn FFI callback dispatcher thread");
-    (completion_tx, dispatcher)
-}
-
-/// Enqueues a [`CompletionJob`] on the dispatcher's completion queue. If the
-/// dispatcher is gone (post-teardown), runs the job inline to honor the
-/// callback obligation rather than leak the owned handles it captured.
-pub(crate) fn enqueue_or_run_inline(tx: &std::sync::mpsc::Sender<CompletionJob>, job: CompletionJob) {
-    if let Err(returned) = tx.send(job) {
-        (returned.0)();
-    }
-}
-
-/// Runs `f` on the dispatcher thread and awaits its return value.
-///
-/// This is how an **async** FFI adapter invokes a C callback whose *completion*
-/// the Rust core must observe, rather than firing and forgetting it:
-///
-/// - the rebalance-listener callbacks return `Result<(), Error>` (a
-///   `kafka_common_Error_t*` in C), so the adapter has to wait for the
-///   return value;
-/// - the commit callback returns nothing, but Java runs `onComplete` on the
-///   thread inside `poll()` / `commitSync()`, so the adapter must not let that
-///   call return before the C callback has (and must not let the C caller
-///   release `user_data` while the job is still queued).
-///
-/// `f` therefore builds the owned C handles, calls the C function pointer, and
-/// maps the result; all of that happens on the dispatcher thread, upholding the
-/// invariant that user code never runs on a tokio worker. The awaiting task
-/// yields its worker meanwhile, and because the dispatcher is a plain OS thread
-/// the user callback may legally `block_on` a nested consumer operation.
-///
-/// **Head-of-line blocking caveat:** the job shares the single per-handle
-/// dispatcher FIFO with every completion callback. A dispatcher callback that
-/// block-waits on consumer progress (e.g. a delivery / commit callback that
-/// waits for a rebalance to finish) deadlocks, because the job that would make
-/// that progress is queued behind it. Dispatcher callbacks must not block on
-/// consumer progress.
-///
-/// **Post-teardown:** once the dispatcher's receiver is gone,
-/// [`enqueue_or_run_inline`] runs the job inline on the calling task instead —
-/// so the returned value is still produced, but on a tokio worker, where a
-/// nested `block_on` inside the user callback would panic.
-pub(crate) async fn dispatch_and_wait<T, F>(tx: &std::sync::mpsc::Sender<CompletionJob>, f: F) -> T
-where
-    T: Send + 'static,
-    F: FnOnce() -> T + Send + 'static,
-{
-    let (result_tx, result_rx) = tokio::sync::oneshot::channel::<T>();
-    enqueue_or_run_inline(
-        tx,
-        Box::new(move || {
-            // The receiver is awaited below and never dropped early, so the
-            // only way `send` fails is a cancelled awaiting task — in which
-            // case nobody observes the value anyway.
-            let _ = result_tx.send(f());
-        }),
-    );
-    // Infallible: `enqueue_or_run_inline` either hands the job to the live
-    // dispatcher (which runs every queued job before exiting) or runs it inline,
-    // so `result_tx` is always used before it is dropped.
-    result_rx.await.expect("dispatch_and_wait job dropped without sending a result")
-}
-
-/// Whether the calling thread is inside a tokio runtime: a worker thread, or a
-/// thread inside some runtime's `block_on`. A `destroy` that must wait for a
-/// handle's tasks cannot do it there, since `Runtime::block_on` panics. The
-/// check is conservative: it is also true on a blocking-pool thread, where
-/// waiting would be allowed, and handing off there only costs a thread.
-///
-/// No Java counterpart: Java has no C boundary.
-pub(crate) fn in_tokio_runtime() -> bool {
-    tokio::runtime::Handle::try_current().is_ok()
-}
-
-/// Whether the calling thread is the dispatcher thread whose join handle
-/// `dispatcher` holds, i.e. whether the call is running inside a C callback that
-/// dispatcher fired. A `destroy` there must not wait for the handle's tasks: a
-/// task may be waiting on this very thread ([`dispatch_and_wait`]).
-///
-/// No Java counterpart: Java has no C boundary.
-pub(crate) fn is_dispatcher_thread(dispatcher: &std::sync::Mutex<Option<std::thread::JoinHandle<()>>>) -> bool {
-    let current = std::thread::current().id();
-    // Poison-tolerant: `destroy` is the one call that must still work on a handle
-    // poisoned by a panic `#[ffi_guard]` caught.
-    dispatcher
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .as_ref()
-        .is_some_and(|join| join.thread().id() == current)
-}
-
-/// Runs `teardown(handle)` on a new thread named `name`, for a `destroy` called
-/// where it must not wait: on the handle's dispatcher thread, or inside a tokio
-/// runtime. `destroy` then returns at once, and the wait and the free happen on
-/// that thread.
-///
-/// The handle travels as an address, so a failed spawn drops nothing. It is
-/// logged and the handle is leaked: still in use by its tasks, leaking it is
-/// safe where freeing it would not be.
-///
-/// No Java counterpart: Java has no C boundary.
-///
-/// # Safety
-///
-/// Calling `teardown(handle)` once, on a newly spawned thread, must be sound, and
-/// this must be the handle's only teardown.
-pub(crate) unsafe fn spawn_teardown(name: &str, handle: usize, teardown: unsafe fn(usize)) {
-    // SAFETY: this function's `# Safety` is the one `spawn_teardown_with` requires, and
-    // `Builder::spawn` either runs the body once on the thread it starts or returns an
-    // error without running it. Dropping the `JoinHandle` detaches that thread.
-    unsafe { spawn_teardown_with(name, handle, teardown, |builder, body| builder.spawn(body).map(drop)) }
-}
-
-/// [`spawn_teardown`] with the thread start passed in as `spawn`, so a test can
-/// make it fail.
-///
-/// # Safety
-///
-/// As for [`spawn_teardown`]. `spawn` must either run the body it is given once,
-/// on the thread it starts from the builder it is given, or return an error
-/// without running it.
-unsafe fn spawn_teardown_with(
-    name: &str,
-    handle: usize,
-    teardown: unsafe fn(usize),
-    spawn: impl FnOnce(std::thread::Builder, Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
-) {
-    let body: Box<dyn FnOnce() + Send> = Box::new(move || {
-        // SAFETY: per this function's `# Safety`, `teardown(handle)` is sound to call
-        // once on a newly spawned thread, and this is its only call: the closure is
-        // `FnOnce`, and `spawn` runs it at most once, on the thread it starts.
-        unsafe { teardown(handle) }
-    });
-    if let Err(e) = spawn(std::thread::Builder::new().name(name.to_string()), body) {
-        log::error!("leaking a destroyed handle: could not spawn the {name} thread to free it: {e}");
-    }
-}
-
-/// Canonical operation callback signature (not exported). A null `error` means
-/// success. The public per-method typedefs alias this shape.
-pub(crate) type OperationCallbackFn = unsafe extern "C" fn(*mut kafka_common_Error_t, *mut std::ffi::c_void);
-
-/// Owned operation completion payload, fired by the dispatcher thread for
-/// void-returning operations (`flush` / `close` / consumer void ops).
-pub(crate) struct OperationCompletion {
-    pub(crate) callback: OperationCallbackFn,
-    pub(crate) user_data: *mut std::ffi::c_void,
-    pub(crate) error: *mut kafka_common_Error_t,
-}
-// SAFETY: the raw pointers are owned handles moved to the dispatcher thread;
-// the C user is responsible for the thread-safety of `user_data`.
-unsafe impl Send for OperationCompletion {}
-impl OperationCompletion {
-    /// # Safety
-    /// Must be called exactly once, on the dispatcher thread.
-    pub(crate) unsafe fn fire(self) {
-        // SAFETY: `callback` and `user_data` were supplied together by the C caller as one
-        // `OperationCallbackTarget`, and `error` is null or a fresh `box_error` handle
-        // (every constructor site in `admin.rs`, `consumer.rs` and `producer.rs` builds it
-        // as `null_mut()` on `Ok` or `box_error(e)` on `Err`) whose ownership transfers to
-        // the callee. `fire` takes `self` by value, so the pair fires exactly once per
-        // completion, and per this method's `# Safety` the caller invokes it from the
-        // `CompletionJob` drained by the dispatcher thread (or inline on the enqueuing task
-        // once the dispatcher is gone, the documented `enqueue_or_run_inline` fallback);
-        // the C user is responsible for the thread-safety of `user_data`, which the
-        // callback contract keeps valid until the callback fires.
-        unsafe { (self.callback)(self.error, self.user_data) };
-    }
-}
-
-/// A C operation-callback target (function pointer + opaque `user_data`).
-/// Wrapped so it can cross the tokio task / dispatcher thread boundary.
-#[derive(Clone, Copy)]
-pub(crate) struct OperationCallbackTarget {
-    pub(crate) callback: OperationCallbackFn,
-    pub(crate) user_data: *mut std::ffi::c_void,
-}
-// SAFETY: the C user owns the thread-safety of `user_data`; the function
-// pointer is trivially shareable.
-unsafe impl Send for OperationCallbackTarget {}
-
-/// Ownership primitive for **multi-shot** callback registrations.
-///
-/// [`OperationCallbackTarget`] is `Copy` and fits one-shot operations, where the
-/// C caller keeps `user_data` alive across a single completion. A long-lived
-/// registration — a rebalance listener passed to `subscribe`, a commit callback
-/// passed to `commit_async` — instead hands `user_data` to Rust for the whole
-/// lifetime of the registration, so someone has to release it when the
-/// registration goes away. `CallbackTarget` is that owner: it holds `user_data`
-/// and an optional `destroy` hook that fires **exactly once**, when the adapter
-/// holding this target is dropped (i.e. when the consumer drops the listener /
-/// callback, on unsubscribe or close).
-///
-/// The hook is what lets a managed-runtime binding balance its reference count:
-/// Python stores the listener `PyObject*` as `user_data`, `Py_INCREF`s it once
-/// at registration time, and passes a `destroy` trampoline that takes the GIL
-/// and `Py_DECREF`s it.
-///
-/// `destroy` may fire on **any thread** — whichever one drops the adapter (a
-/// tokio worker running the consumer's background task, the dispatcher thread,
-/// or the C thread calling `_destroy`). It must therefore be thread-agnostic
-/// (Python: `PyGILState_Ensure`) and must not assume the calling thread already
-/// holds any of the binding's locks.
-pub(crate) struct CallbackTarget {
-    /// Opaque pointer owned by this target for the lifetime of the registration.
-    pub(crate) user_data: *mut std::ffi::c_void,
-    /// Optional release hook, fired once from [`Drop`]. `None` means the C
-    /// caller retains ownership of `user_data` (nothing to release).
-    pub(crate) destroy: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
-}
-
-// SAFETY: `user_data` is an opaque pointer whose thread-safety is the C user's
-// responsibility (identical to `OperationCompletion` / `OperationCallbackTarget`);
-// the `destroy` function pointer is trivially shareable and, per the type's
-// contract, callable from any thread. `CallbackTarget` itself never dereferences
-// `user_data`.
-unsafe impl Send for CallbackTarget {}
-// SAFETY: a `&CallbackTarget` exposes only the opaque `user_data` value and the
-// `Copy` function pointer, neither of which the type dereferences, so sharing it
-// across threads adds no access beyond what the C contract on `user_data`
-// already allows; `Drop`, the one use of both fields, takes `&mut self`.
-unsafe impl Sync for CallbackTarget {}
-
-impl Drop for CallbackTarget {
-    fn drop(&mut self) {
-        if let Some(destroy) = self.destroy {
-            // SAFETY: `destroy` was supplied by the C caller together with
-            // `user_data` and documented as callable from any thread. `Drop`
-            // runs exactly once per target, so the hook fires exactly once.
-            unsafe { destroy(self.user_data) };
-        }
-    }
-}
-
-/// Metric value kinds, mirroring [`crate::common::MetricValue`]'s variants.
-///
-/// Returned as a plain `int32_t` by the `..._MetricMap_get_value_kind`
-/// accessor on each FFI surface to tell the caller which `get_value_*` accessor
-/// is valid:
-///
-/// - `0` — `Double`: a measurable (or `Double`-valued gauge). Use
-///   `get_value_double`.
-/// - `1` — `String`: a string-valued gauge. Use `get_value_string`.
-/// - `2` — `Long`: a long-valued gauge. Use `get_value_long`.
-/// - `3` — `Int`: an integer-valued gauge. Use `get_value_int`.
-///
-/// These are plain integers rather than a C enum because `cbindgen.toml`
-/// restricts `item_types` to functions/structs/typedefs — the generated header
-/// contains no enums at all, and adding one type would mean exporting every
-/// other enum reachable in the crate. (For the same reason cbindgen does not
-/// emit these constants into the header; they are the Rust-side source of truth
-/// shared by the consumer and producer surfaces and by their tests.)
-pub(crate) const METRIC_VALUE_DOUBLE: i32 = 0;
-/// See [`METRIC_VALUE_DOUBLE`].
-pub(crate) const METRIC_VALUE_STRING: i32 = 1;
-/// See [`METRIC_VALUE_DOUBLE`].
-pub(crate) const METRIC_VALUE_LONG: i32 = 2;
-/// See [`METRIC_VALUE_DOUBLE`].
-pub(crate) const METRIC_VALUE_INT: i32 = 3;
-
-/// One flattened metric entry. `MetricName`'s four fields plus the measured
-/// value; tags are parallel key/value vectors so the C side can walk them by
-/// index without another opaque type.
-pub(crate) struct MetricEntry {
-    pub(crate) name_c: CString,
-    pub(crate) group_c: CString,
-    pub(crate) description_c: CString,
-    pub(crate) tag_keys: Vec<CString>,
-    pub(crate) tag_values: Vec<CString>,
-    pub(crate) kind: i32,
-    pub(crate) double_value: f64,
-    pub(crate) string_value: CString,
-    pub(crate) long_value: i64,
-    pub(crate) int_value: i32,
-}
-
-/// The heap-owned backing of an opaque `kafka_*_MetricMap_t` handle. Each
-/// namespaced opaque type is a `#[repr(C)]` zero-sized placeholder that is cast
-/// to `*const MetricMapInner` inside the accessors.
-pub(crate) struct MetricMapInner {
-    pub(crate) entries: Vec<MetricEntry>,
-}
-
-/// Builds the snapshot backing from a `metrics()` map. Each value is measured
-/// exactly once here — the resulting handle is a point-in-time snapshot, the
-/// only thing that can cross an FFI boundary without an upcall per read.
-pub(crate) fn build_metric_map_inner(
-    metrics: std::collections::HashMap<crate::common::MetricName, std::sync::Arc<crate::common::metrics::KafkaMetric>>,
-) -> Box<MetricMapInner> {
-    use crate::common::{Metric, MetricValue};
-    let mut entries = Vec::with_capacity(metrics.len());
-    for (name, metric) in metrics {
-        // `metric_value()` is the one measurement taken for this snapshot.
-        let value = metric.metric_value();
-        let mut tag_keys = Vec::with_capacity(name.tags().len());
-        let mut tag_values = Vec::with_capacity(name.tags().len());
-        for (k, v) in name.tags() {
-            tag_keys.push(CString::new(k.as_bytes()).unwrap_or_default());
-            tag_values.push(CString::new(v.as_bytes()).unwrap_or_default());
-        }
-        let (kind, double_value, string_value, long_value, int_value) = match value {
-            MetricValue::Double(d) => (METRIC_VALUE_DOUBLE, d, CString::default(), 0, 0),
-            MetricValue::String(s) => (METRIC_VALUE_STRING, 0.0, CString::new(s.as_bytes()).unwrap_or_default(), 0, 0),
-            MetricValue::Long(l) => (METRIC_VALUE_LONG, 0.0, CString::default(), l, 0),
-            MetricValue::Int(i) => (METRIC_VALUE_INT, 0.0, CString::default(), 0, i),
-        };
-        entries.push(MetricEntry {
-            name_c: CString::new(name.name().as_bytes()).unwrap_or_default(),
-            group_c: CString::new(name.group().as_bytes()).unwrap_or_default(),
-            description_c: CString::new(name.description().as_bytes()).unwrap_or_default(),
-            tag_keys,
-            tag_values,
-            kind,
-            double_value,
-            string_value,
-            long_value,
-            int_value,
-        });
-    }
-    Box::new(MetricMapInner { entries })
-}
-
-/// Resolves the entry at `index`, or `None` if out of range.
-///
-/// Returns a caller-scoped borrow rather than `&'static` — the entry is only
-/// valid as long as the backing [`MetricMapInner`] allocation is, and it must
-/// not be held past the matching `*_MetricMap_destroy` call.
-///
-/// # Safety
-/// `inner` must be a valid pointer obtained from [`build_metric_map_inner`].
-pub(crate) unsafe fn metric_entry<'a>(inner: *const MetricMapInner, index: i32) -> Option<&'a MetricEntry> {
-    if index < 0 {
-        return None;
-    }
-    // SAFETY: Per this function's `# Safety`, `inner` is a valid pointer obtained from
-    // `build_metric_map_inner`, i.e. the `Box<MetricMapInner>` that
-    // `kafka_producer_Producer_metrics` / the consumer's `box_metric_map` leaked with
-    // `Box::into_raw` and that has not yet been passed to `*_MetricMap_destroy`. `index` is
-    // rejected when negative and `entries.get` bounds-checks it. The `&'a MetricEntry` is
-    // consumed by the `metric_map_get_*` wrappers within the same call, to copy a scalar or
-    // take a `CString` pointer that lives in this allocation until that destroy, as the
-    // wrappers' rustdoc (`borrowed; valid until the map is destroyed`) promises.
-    unsafe { &*inner }.entries.get(index as usize)
-}
-
-/// # Safety
-/// `inner` must be a valid metric-map backing pointer.
-pub(crate) unsafe fn metric_map_count(inner: *const MetricMapInner) -> i32 {
-    // SAFETY: Per this function's `# Safety`, `inner` is a valid metric-map backing
-    // pointer: the `Box<MetricMapInner>` that `kafka_producer_Producer_metrics` / the
-    // consumer's `box_metric_map` leaked with `Box::into_raw` and that has not yet been
-    // passed to `*_MetricMap_destroy`; the reference is used only to read `entries.len()`
-    // within this call.
-    unsafe { &*inner }.entries.len() as i32
-}
-
-/// # Safety
-/// `inner` must be a valid metric-map backing pointer.
-pub(crate) unsafe fn metric_map_get_name(inner: *const MetricMapInner, index: i32) -> *const c_char {
-    // SAFETY: `metric_entry` requires `inner` to be a valid pointer from
-    // `build_metric_map_inner`; per this function's `# Safety`, `inner` is a valid
-    // metric-map backing pointer, and the only way to obtain one is that builder's `Box`
-    // leaked via `Box::into_raw` in the `*_metrics` entry points and not yet destroyed.
-    // `metric_entry` range-checks `index` itself, and the entry borrow is used only within
-    // this call to take the `name_c` pointer, which lives in the same allocation until
-    // `*_MetricMap_destroy`.
-    unsafe { metric_entry(inner, index) }.map_or(std::ptr::null(), |e| e.name_c.as_ptr())
-}
-
-/// # Safety
-/// `inner` must be a valid metric-map backing pointer.
-pub(crate) unsafe fn metric_map_get_group(inner: *const MetricMapInner, index: i32) -> *const c_char {
-    // SAFETY: `metric_entry` requires `inner` to be a valid pointer from
-    // `build_metric_map_inner`; per this function's `# Safety`, `inner` is a valid
-    // metric-map backing pointer, and the only way to obtain one is that builder's `Box`
-    // leaked via `Box::into_raw` in the `*_metrics` entry points and not yet destroyed.
-    // `metric_entry` range-checks `index` itself, and the entry borrow is used only within
-    // this call to take the `group_c` pointer, which lives in the same allocation until
-    // `*_MetricMap_destroy`.
-    unsafe { metric_entry(inner, index) }.map_or(std::ptr::null(), |e| e.group_c.as_ptr())
-}
-
-/// # Safety
-/// `inner` must be a valid metric-map backing pointer.
-pub(crate) unsafe fn metric_map_get_description(inner: *const MetricMapInner, index: i32) -> *const c_char {
-    // SAFETY: `metric_entry` requires `inner` to be a valid pointer from
-    // `build_metric_map_inner`; per this function's `# Safety`, `inner` is a valid
-    // metric-map backing pointer, and the only way to obtain one is that builder's `Box`
-    // leaked via `Box::into_raw` in the `*_metrics` entry points and not yet destroyed.
-    // `metric_entry` range-checks `index` itself, and the entry borrow is used only within
-    // this call to take the `description_c` pointer, which lives in the same allocation
-    // until `*_MetricMap_destroy`.
-    unsafe { metric_entry(inner, index) }.map_or(std::ptr::null(), |e| e.description_c.as_ptr())
-}
-
-/// # Safety
-/// `inner` must be a valid metric-map backing pointer.
-pub(crate) unsafe fn metric_map_get_tag_count(inner: *const MetricMapInner, index: i32) -> i32 {
-    // SAFETY: `metric_entry` requires `inner` to be a valid pointer from
-    // `build_metric_map_inner`; per this function's `# Safety`, `inner` is a valid
-    // metric-map backing pointer, and the only way to obtain one is that builder's `Box`
-    // leaked via `Box::into_raw` in the `*_metrics` entry points and not yet destroyed.
-    // `metric_entry` range-checks `index` itself, and the entry borrow is used only within
-    // this call to read `tag_keys.len()`.
-    unsafe { metric_entry(inner, index) }.map_or(-1, |e| e.tag_keys.len() as i32)
-}
-
-/// # Safety
-/// `inner` must be a valid metric-map backing pointer.
-pub(crate) unsafe fn metric_map_get_tag_key(inner: *const MetricMapInner, index: i32, tag_index: i32) -> *const c_char {
-    if tag_index < 0 {
-        return std::ptr::null();
-    }
-    // SAFETY: `metric_entry` requires `inner` to be a valid pointer from
-    // `build_metric_map_inner`; per this function's `# Safety`, `inner` is a valid
-    // metric-map backing pointer, and the only way to obtain one is that builder's `Box`
-    // leaked via `Box::into_raw` in the `*_metrics` entry points and not yet destroyed.
-    // `metric_entry` range-checks `index`, `tag_index` is rejected when negative (checked
-    // above) and `tag_keys.get` bounds-checks it; the entry borrow is used only within this
-    // call to take a tag-key `CString` pointer, which lives in the same allocation until
-    // `*_MetricMap_destroy`.
-    unsafe { metric_entry(inner, index) }
-        .and_then(|e| e.tag_keys.get(tag_index as usize))
-        .map_or(std::ptr::null(), |k| k.as_ptr())
-}
-
-/// # Safety
-/// `inner` must be a valid metric-map backing pointer.
-pub(crate) unsafe fn metric_map_get_tag_value(
-    inner: *const MetricMapInner,
-    index: i32,
-    tag_index: i32,
-) -> *const c_char {
-    if tag_index < 0 {
-        return std::ptr::null();
-    }
-    // SAFETY: `metric_entry` requires `inner` to be a valid pointer from
-    // `build_metric_map_inner`; per this function's `# Safety`, `inner` is a valid
-    // metric-map backing pointer, and the only way to obtain one is that builder's `Box`
-    // leaked via `Box::into_raw` in the `*_metrics` entry points and not yet destroyed.
-    // `metric_entry` range-checks `index`, `tag_index` is rejected when negative (checked
-    // above) and `tag_values.get` bounds-checks it; the entry borrow is used only within
-    // this call to take a tag-value `CString` pointer, which lives in the same allocation
-    // until `*_MetricMap_destroy`.
-    unsafe { metric_entry(inner, index) }
-        .and_then(|e| e.tag_values.get(tag_index as usize))
-        .map_or(std::ptr::null(), |v| v.as_ptr())
-}
-
-/// # Safety
-/// `inner` must be a valid metric-map backing pointer.
-pub(crate) unsafe fn metric_map_get_value_kind(inner: *const MetricMapInner, index: i32) -> i32 {
-    // SAFETY: `metric_entry` requires `inner` to be a valid pointer from
-    // `build_metric_map_inner`; per this function's `# Safety`, `inner` is a valid
-    // metric-map backing pointer, and the only way to obtain one is that builder's `Box`
-    // leaked via `Box::into_raw` in the `*_metrics` entry points and not yet destroyed.
-    // `metric_entry` range-checks `index` itself, and the entry borrow is used only within
-    // this call to copy out the scalar `kind`.
-    unsafe { metric_entry(inner, index) }.map_or(METRIC_VALUE_DOUBLE, |e| e.kind)
-}
-
-/// # Safety
-/// `inner` must be a valid metric-map backing pointer.
-pub(crate) unsafe fn metric_map_get_value_double(inner: *const MetricMapInner, index: i32) -> f64 {
-    // SAFETY: `metric_entry` requires `inner` to be a valid pointer from
-    // `build_metric_map_inner`; per this function's `# Safety`, `inner` is a valid
-    // metric-map backing pointer, and the only way to obtain one is that builder's `Box`
-    // leaked via `Box::into_raw` in the `*_metrics` entry points and not yet destroyed.
-    // `metric_entry` range-checks `index` itself, and the entry borrow is used only within
-    // this call to copy out the scalar `double_value`.
-    unsafe { metric_entry(inner, index) }.map_or(0.0, |e| e.double_value)
-}
-
-/// # Safety
-/// `inner` must be a valid metric-map backing pointer.
-pub(crate) unsafe fn metric_map_get_value_string(inner: *const MetricMapInner, index: i32) -> *const c_char {
-    // SAFETY: `metric_entry` requires `inner` to be a valid pointer from
-    // `build_metric_map_inner`; per this function's `# Safety`, `inner` is a valid
-    // metric-map backing pointer, and the only way to obtain one is that builder's `Box`
-    // leaked via `Box::into_raw` in the `*_metrics` entry points and not yet destroyed.
-    // `metric_entry` range-checks `index` itself, and the entry borrow is used only within
-    // this call to take the `string_value` pointer, which lives in the same allocation
-    // until `*_MetricMap_destroy`.
-    unsafe { metric_entry(inner, index) }.map_or(std::ptr::null(), |e| e.string_value.as_ptr())
-}
-
-/// # Safety
-/// `inner` must be a valid metric-map backing pointer.
-pub(crate) unsafe fn metric_map_get_value_long(inner: *const MetricMapInner, index: i32) -> i64 {
-    // SAFETY: `metric_entry` requires `inner` to be a valid pointer from
-    // `build_metric_map_inner`; per this function's `# Safety`, `inner` is a valid
-    // metric-map backing pointer, and the only way to obtain one is that builder's `Box`
-    // leaked via `Box::into_raw` in the `*_metrics` entry points and not yet destroyed.
-    // `metric_entry` range-checks `index` itself, and the entry borrow is used only within
-    // this call to copy out the scalar `long_value`.
-    unsafe { metric_entry(inner, index) }.map_or(0, |e| e.long_value)
-}
-
-/// # Safety
-/// `inner` must be a valid metric-map backing pointer.
-pub(crate) unsafe fn metric_map_get_value_int(inner: *const MetricMapInner, index: i32) -> i32 {
-    // SAFETY: `metric_entry` requires `inner` to be a valid pointer from
-    // `build_metric_map_inner`; per this function's `# Safety`, `inner` is a valid
-    // metric-map backing pointer, and the only way to obtain one is that builder's `Box`
-    // leaked via `Box::into_raw` in the `*_metrics` entry points and not yet destroyed.
-    // `metric_entry` range-checks `index` itself, and the entry borrow is used only within
-    // this call to copy out the scalar `int_value`.
-    unsafe { metric_entry(inner, index) }.map_or(0, |e| e.int_value)
-}
-
-/// Reclaims a metric-map backing pointer. Safe with null (no-op).
-///
-/// # Safety
-/// `inner` must be null or a valid metric-map backing pointer.
-pub(crate) unsafe fn metric_map_destroy(inner: *mut MetricMapInner) {
-    if !inner.is_null() {
-        // SAFETY: `inner` is non-null (checked above) and, per this function's `# Safety`,
-        // a valid metric-map backing pointer: the `Box<MetricMapInner>` that
-        // `kafka_producer_Producer_metrics` / the consumer's `box_metric_map` leaked with
-        // `Box::into_raw`. Its only callers are the `*_MetricMap_destroy` entry points,
-        // whose contract makes the handle invalid afterwards, so this `Box::from_raw` is
-        // the single, final use of the allocation.
-        unsafe { drop(Box::from_raw(inner)) };
     }
 }
 
@@ -3259,9 +2125,7 @@ mod tests {
     use crate::common::error::ErrorName;
     use crate::common::errors::{
         ApiError, AuthenticationError, AuthorizationError, AuthorizerNotReadyError, BootstrapResolutionError,
-        DisconnectError, DuplicateResourceError, GroupAuthorizationError, InterruptError, InvalidOffsetError,
-        InvalidTopicError, RecordTooLargeError, ResourceNotFoundError, SslAuthenticationError,
-        ThrottlingQuotaExceededError, TopicAuthorizationError,
+        DisconnectError, InterruptError, InvalidOffsetError, SslAuthenticationError,
     };
     use crate::common::metrics::QuotaViolationError;
     use crate::common::network::InvalidReceiveError;
@@ -3270,14 +2134,8 @@ mod tests {
         ConsumerCommitFailedError, ConsumerLogTruncationError, ConsumerNoOffsetForPartitionError,
         ConsumerOffsetOutOfRangeError, ConsumerRetriableCommitFailedError,
     };
-    use crate::ffi::consumer::{
-        kafka_common_TopicPartition_destroy, kafka_common_TopicPartition_partition, kafka_common_TopicPartition_topic,
-        kafka_common_TopicPartitionList_count, kafka_common_TopicPartitionList_destroy,
-        kafka_common_TopicPartitionList_get, kafka_consumer_LongOffsetMap_count, kafka_consumer_LongOffsetMap_destroy,
-        kafka_consumer_LongOffsetMap_get_value, kafka_consumer_OffsetMap_count, kafka_consumer_OffsetMap_destroy,
-        kafka_consumer_StringList_count, kafka_consumer_StringList_destroy, kafka_consumer_StringList_get,
-        kafka_consumer_string_destroy,
-    };
+    use crate::ffi::common::isolation_level::kafka_common_IsolationLevel_e;
+    use crate::ffi::util::kafka_Bytes_t;
     use std::cell::RefCell;
     use std::collections::{BTreeMap, HashMap, HashSet};
     use std::ffi::CStr;
@@ -3287,138 +2145,99 @@ mod tests {
     const FIRST_CODE: i16 = -1;
     const LAST_CODE: i16 = Errors::MAX_CODE;
 
-    /// `kafka_common_Error_is_unsupported_version_error` answers exactly as
-    /// `Error::is_unsupported_version_error` over every error code, in both
-    /// directions, and for the crate-private `UnsupportedProtocolFieldException`.
-    #[test]
-    fn test_is_unsupported_version_error_matches_the_rust_predicate() {
-        for code in FIRST_CODE..=LAST_CODE {
-            let errors = crate::common::protocol::Errors::for_code(code);
-            if errors == crate::common::protocol::Errors::None {
-                continue;
-            }
-            let expected = errors == crate::common::protocol::Errors::UnsupportedVersion;
-            let handle = box_error(Error::new(errors));
-            // SAFETY: `handle` is a fresh, non-null error handle from `box_error`, queried
-            // while alive and then destroyed exactly once with `kafka_common_Error_destroy`,
-            // so both calls meet their `# Safety`.
-            unsafe {
-                assert_eq!(expected, kafka_common_Error_is_unsupported_version_error(handle), "{errors:?}");
-                kafka_common_Error_destroy(handle);
-            }
-        }
-        let handle = box_error(crate::common::internals::UnsupportedProtocolFieldError::with_message("m"));
-        // SAFETY: as above, `handle` is a fresh `box_error` handle, queried while alive and
-        // destroyed exactly once; the predicate's `# Safety` also allows the null pointer,
-        // which it answers `false` without dereferencing.
-        unsafe {
-            assert!(kafka_common_Error_is_unsupported_version_error(handle));
-            kafka_common_Error_destroy(handle);
-            assert!(!kafka_common_Error_is_unsupported_version_error(std::ptr::null()));
-        }
-    }
-
-    /// The 28 classes that own no Java code, each paired with the enumerator it
+    /// The 29 classes that own no Java code, each paired with the enumerator it
     /// must map to and that enumerator's literal value.
     ///
     /// Both halves matter. The instance checks that `error_code_of`'s arm points
     /// at the right constant; the literal checks that the constant still has the
-    /// value it was published with. See [`kafka_common_ErrorCode_t`] — the
+    /// value it was published with. See [`kafka_common_Error_e`] — the
     /// negatives are ABI, so a renumbering must fail here rather than silently
     /// reach a C caller.
-    fn client_side_classes() -> Vec<(Error, kafka_common_ErrorCode_t, i32)> {
+    fn client_side_classes() -> Vec<(Error, kafka_common_Error_e, i32)> {
         vec![
             // -2 ..= -5: JDK-derived (`Local*`).
             (
                 Error::local_concurrent_modification("m"),
-                kafka_common_ErrorCode_LOCAL_CONCURRENT_MODIFICATION,
+                kafka_common_Error_LOCAL_CONCURRENT_MODIFICATION,
                 -2,
             ),
             (
                 Error::local_illegal_argument("m"),
-                kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT,
+                kafka_common_Error_LOCAL_ILLEGAL_ARGUMENT,
                 -3,
             ),
-            (Error::local_illegal_state("m"), kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE, -4),
-            (Error::local_timeout("m"), kafka_common_ErrorCode_LOCAL_TIMEOUT, -5),
+            (Error::local_illegal_state("m"), kafka_common_Error_LOCAL_ILLEGAL_STATE, -4),
+            (Error::local_timeout("m"), kafka_common_Error_LOCAL_TIMEOUT, -5),
             // -6 ..= -18: `common` client-side classes.
-            (Error::Api(ApiError::new("m")), kafka_common_ErrorCode_API, -6),
+            (Error::Api(ApiError::new("m")), kafka_common_Error_API, -6),
             (
                 Error::Authentication(AuthenticationError::new("m")),
-                kafka_common_ErrorCode_AUTHENTICATION,
+                kafka_common_Error_AUTHENTICATION,
                 -7,
             ),
             (
                 Error::AuthorizerNotReady(AuthorizerNotReadyError::new("m")),
-                kafka_common_ErrorCode_AUTHORIZER_NOT_READY,
+                kafka_common_Error_AUTHORIZER_NOT_READY,
                 -8,
             ),
             (
                 Error::Authorization(AuthorizationError::new("m")),
-                kafka_common_ErrorCode_AUTHORIZATION,
+                kafka_common_Error_AUTHORIZATION,
                 -9,
             ),
-            (Error::config_message("m"), kafka_common_ErrorCode_CONFIG, -10),
-            (
-                Error::Disconnect(DisconnectError::new("m")),
-                kafka_common_ErrorCode_DISCONNECT,
-                -11,
-            ),
-            (
-                Error::Interrupt(InterruptError::new("m")),
-                kafka_common_ErrorCode_INTERRUPT,
-                -12,
-            ),
+            (Error::config_message("m"), kafka_common_Error_CONFIG, -10),
+            (Error::Disconnect(DisconnectError::new("m")), kafka_common_Error_DISCONNECT, -11),
+            (Error::Interrupt(InterruptError::new("m")), kafka_common_Error_INTERRUPT, -12),
             (
                 Error::InvalidOffset(InvalidOffsetError::new("m")),
-                kafka_common_ErrorCode_INVALID_OFFSET,
+                kafka_common_Error_INVALID_OFFSET,
                 -13,
             ),
-            (Error::schema("m"), kafka_common_ErrorCode_SCHEMA, -14),
-            (Error::serialization("m"), kafka_common_ErrorCode_SERIALIZATION, -15),
+            (Error::schema("m"), kafka_common_Error_SCHEMA, -14),
+            (Error::serialization("m"), kafka_common_Error_SERIALIZATION, -15),
             (
                 Error::SslAuthentication(SslAuthenticationError::new("m")),
-                kafka_common_ErrorCode_SSL_AUTHENTICATION,
+                kafka_common_Error_SSL_AUTHENTICATION,
                 -16,
             ),
-            (Error::transaction_aborted(), kafka_common_ErrorCode_TRANSACTION_ABORTED, -17),
-            (Error::wakeup("m"), kafka_common_ErrorCode_WAKEUP, -18),
+            (Error::transaction_aborted(), kafka_common_Error_TRANSACTION_ABORTED, -17),
+            (Error::wakeup("m"), kafka_common_Error_WAKEUP, -18),
             // -19 ..= -27: hand-written / consumer classes.
             (
                 Error::ConsumerCommitFailed(ConsumerCommitFailedError::with_default_message()),
-                kafka_common_ErrorCode_CONSUMER_COMMIT_FAILED,
+                kafka_common_Error_CONSUMER_COMMIT_FAILED,
                 -19,
             ),
             (
                 Error::ConsumerLogTruncation(Box::new(ConsumerLogTruncationError::new(HashMap::new(), HashMap::new()))),
-                kafka_common_ErrorCode_CONSUMER_LOG_TRUNCATION,
+                kafka_common_Error_CONSUMER_LOG_TRUNCATION,
                 -20,
             ),
             (
                 Error::ConsumerNoOffsetForPartition(ConsumerNoOffsetForPartitionError::new(TopicPartition::new(
                     "t", 0,
                 ))),
-                kafka_common_ErrorCode_CONSUMER_NO_OFFSET_FOR_PARTITION,
+                kafka_common_Error_CONSUMER_NO_OFFSET_FOR_PARTITION,
                 -21,
             ),
             (
                 Error::ConsumerOffsetOutOfRange(ConsumerOffsetOutOfRangeError::new(HashMap::new())),
-                kafka_common_ErrorCode_CONSUMER_OFFSET_OUT_OF_RANGE,
+                kafka_common_Error_CONSUMER_OFFSET_OUT_OF_RANGE,
                 -22,
             ),
             (
                 Error::ConsumerRetriableCommitFailed(ConsumerRetriableCommitFailedError::with_default_message()),
-                kafka_common_ErrorCode_CONSUMER_RETRIABLE_COMMIT_FAILED,
+                kafka_common_Error_CONSUMER_RETRIABLE_COMMIT_FAILED,
                 -23,
             ),
             (
                 Error::correlation_id_mismatch("m", 1, 2),
-                kafka_common_ErrorCode_CORRELATION_ID_MISMATCH,
+                kafka_common_Error_CORRELATION_ID_MISMATCH,
                 -24,
             ),
             (
                 Error::InvalidReceive(InvalidReceiveError::new("m")),
-                kafka_common_ErrorCode_INVALID_RECEIVE,
+                kafka_common_Error_INVALID_RECEIVE,
                 -25,
             ),
             (
@@ -3427,33 +2246,75 @@ mod tests {
                     1.0,
                     0.5,
                 ))),
-                kafka_common_ErrorCode_QUOTA_VIOLATION,
+                kafka_common_Error_QUOTA_VIOLATION,
                 -26,
             ),
             (
                 Error::RecordDeserialization(Box::new(record_deserialization_error())),
-                kafka_common_ErrorCode_RECORD_DESERIALIZATION,
+                kafka_common_Error_RECORD_DESERIALIZATION,
                 -27,
             ),
             // -28: code owned by a superclass.
-            (
-                Error::buffer_exhausted("m"),
-                kafka_common_ErrorCode_PRODUCER_BUFFER_EXHAUSTED,
-                -28,
-            ),
+            (Error::buffer_exhausted("m"), kafka_common_Error_PRODUCER_BUFFER_EXHAUSTED, -28),
             // -29: `common` client-side class appended after publication.
             (
                 Error::BootstrapResolution(BootstrapResolutionError::new("m")),
-                kafka_common_ErrorCode_BOOTSTRAP_RESOLUTION,
+                kafka_common_Error_BOOTSTRAP_RESOLUTION,
                 -29,
             ),
+            // -30: a binding's foreign callback error.
+            (
+                Error::local_callback("m", std::ptr::null_mut()),
+                kafka_common_Error_LOCAL_CALLBACK,
+                -30,
+            ),
         ]
+    }
+
+    /// `catch_task_panic` passes a task's own result through and turns a
+    /// panic, of either string payload, into the entry point's panic error.
+    #[tokio::test]
+    async fn catch_task_panic_turns_a_task_panic_into_its_error() {
+        assert_eq!(catch_task_panic("f", async { Ok::<_, Error>(7) }).await.unwrap(), 7);
+        let own = catch_task_panic("f", async { Err::<(), _>(Error::local_illegal_argument("own")) })
+            .await
+            .unwrap_err();
+        assert!(own.is_local_illegal_argument_error());
+        assert_eq!(own.message(), "own");
+
+        let literal = catch_task_panic("kafka_x_cb", async {
+            if std::hint::black_box(true) {
+                panic!("literal");
+            }
+            Ok::<(), Error>(())
+        })
+        .await
+        .unwrap_err();
+        assert!(literal.is_local_illegal_state_error());
+        assert_eq!(
+            literal.message(),
+            "Rust panic caught at the FFI boundary in kafka_x_cb: literal"
+        );
+
+        let formatted = catch_task_panic("kafka_y_cb", async {
+            let n = 2;
+            if std::hint::black_box(true) {
+                panic!("formatted {n}");
+            }
+            Ok::<(), Error>(())
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(
+            formatted.message(),
+            "Rust panic caught at the FFI boundary in kafka_y_cb: formatted 2"
+        );
     }
 
     /// Every code whose `Errors::error()` names a class reports that class's own
     /// value, and the value equals `Errors::code()`.
     ///
-    /// This machine-checks the faithful half of [`kafka_common_ErrorCode_t`]
+    /// This machine-checks the faithful half of [`kafka_common_Error_e`]
     /// against `Errors` itself, so the two cannot drift: a code renamed, renumbered
     /// or re-pointed at a different class in `Errors` fails here.
     #[test]
@@ -3468,7 +2329,7 @@ mod tests {
                 // one code no class owns.
                 None => {
                     assert_eq!(code, 0, "only NONE may map to no class, but {code} does");
-                    assert_eq!(kafka_common_ErrorCode_NONE as i32, 0);
+                    assert_eq!(kafka_common_Error_NONE as i32, 0);
                 },
                 Some(owner) => {
                     owned += 1;
@@ -3487,21 +2348,21 @@ mod tests {
         // stores an `Errors`, so it reports whatever that value owns.
         assert_eq!(
             error_code_of(&Error::KafkaError(KafkaError::new(Errors::CorruptMessage))),
-            kafka_common_ErrorCode_CORRUPT_MESSAGE
+            kafka_common_Error_CORRUPT_MESSAGE
         );
         assert_eq!(
             error_code_of(&Error::KafkaError(KafkaError::new(Errors::None))),
-            kafka_common_ErrorCode_NONE
+            kafka_common_Error_NONE
         );
         // A bare `KafkaException` reports -1, which is what Java's
         // `Errors.forException` answers for it.
         assert_eq!(
             error_code_of(&Error::kafka_message("m")),
-            kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR
+            kafka_common_Error_UNKNOWN_SERVER_ERROR
         );
     }
 
-    /// The 166 values are pairwise distinct, so the code alone identifies the
+    /// The 167 values are pairwise distinct, so the code alone identifies the
     /// class. A C caller has no other discriminator, and the gRPC test harness
     /// derives the error type from this value — a collision would silently
     /// misclassify one of the two classes involved.
@@ -3510,7 +2371,7 @@ mod tests {
         let mut seen: HashMap<i32, String> = HashMap::new();
 
         // `NONE` belongs to no class but occupies 0 in the space.
-        seen.insert(kafka_common_ErrorCode_NONE as i32, "NONE".to_string());
+        seen.insert(kafka_common_Error_NONE as i32, "NONE".to_string());
 
         for code in FIRST_CODE..=LAST_CODE {
             let error = Errors::for_code(code);
@@ -3530,19 +2391,139 @@ mod tests {
             }
         }
 
-        assert_eq!(seen.len(), 166, "expected 166 distinct error codes");
+        assert_eq!(seen.len(), 167, "expected 167 distinct error codes");
+    }
+
+    /// One instance of each of the 167 error classes: the owner of every Java code,
+    /// the client-side classes, and the bare `KafkaException`, which reports
+    /// `UNKNOWN_SERVER_ERROR` rather than a code of its own. The codes are pairwise
+    /// distinct ([`ffi_error_code_values_are_injective`]), so no class appears twice.
+    fn one_error_per_class() -> Vec<Error> {
+        let coded = (FIRST_CODE..=LAST_CODE).filter_map(|code| Errors::for_code(code).error());
+        let local = client_side_classes().into_iter().map(|(error, _, _)| error);
+        coded.chain(local).chain([Error::kafka_message("m")]).collect()
+    }
+
+    /// `is_` + `payload` snake_cased with a trailing `Error` dropped + `_error`, the
+    /// class-predicate name `cargo xtask lint-custom` (check-error-predicate)
+    /// enforces.
+    fn class_predicate(payload: &str) -> String {
+        let base = payload.strip_suffix("Error").filter(|b| !b.is_empty()).unwrap_or(payload);
+        let mut snake = String::new();
+        for (i, c) in base.char_indices() {
+            if c.is_ascii_uppercase() && i > 0 {
+                snake.push('_');
+            }
+            snake.push(c.to_ascii_lowercase());
+        }
+        format!("is_{snake}_error")
+    }
+
+    /// The predicates for Java's intermediate (non-leaf) classes. Their exact
+    /// coverage is asserted in both directions by the hierarchy tests in
+    /// `common::error` (CLAUDE.md §12.4), so here they are only checked to answer
+    /// `true` for their own class.
+    const INTERMEDIATE_PREDICATES: [&str; 15] = [
+        "is_kafka_error",
+        "is_api_error",
+        "is_retriable_error",
+        "is_refresh_retriable_error",
+        "is_invalid_metadata_error",
+        "is_authentication_error",
+        "is_authorization_error",
+        "is_invalid_configuration_error",
+        "is_application_recoverable_error",
+        "is_invalid_offset_error",
+        "is_out_of_order_sequence_error",
+        "is_serialization_error",
+        "is_timeout_error",
+        "is_consumer_invalid_offset_error",
+        "is_consumer_offset_out_of_range_error",
+    ];
+
+    /// The leaf classes that nonetheless have a Java subclass, as
+    /// `(class predicate, subclass's own predicate)`. Every other leaf predicate is
+    /// `true` for its own class only.
+    const LEAF_SUBCLASSES: [(&str, &str); 1] = [
+        // `CorrelationIdMismatchException extends IllegalStateException`
+        // (`CorrelationIdMismatchException.java:23`).
+        ("is_local_illegal_state_error", "is_correlation_id_mismatch_error"),
+    ];
+
+    /// Every error class has its own C predicate, `kafka_common_Error_<is_x_error>`,
+    /// and each export answers like Java's `instanceof <class>`: `true` for the class
+    /// itself and its subclasses, `false` for every other class (CLAUDE.md §3).
+    ///
+    /// Exercises the generated exports themselves, through the handle a C caller
+    /// holds, against one instance of every class.
+    #[test]
+    fn ffi_every_class_has_its_own_predicate() {
+        let predicates: HashMap<&str, _> = super::super::error_predicates::PREDICATES.iter().copied().collect();
+        let errors: Vec<(String, *mut kafka_common_Error_t)> = one_error_per_class()
+            .into_iter()
+            .map(|error| (class_predicate(ErrorName::name(&error)), box_error(error)))
+            .collect();
+        assert_eq!(errors.len(), 167, "expected one error per class");
+
+        let owners: HashSet<&str> = errors.iter().map(|(own, _)| own.as_str()).collect();
+        assert_eq!(owners.len(), errors.len(), "two classes share a predicate name");
+
+        for (own, handle) in &errors {
+            let export = predicates
+                .get(own.as_str())
+                .unwrap_or_else(|| panic!("no C export for `{own}`"));
+            // SAFETY: Test code: `handle` is a live `box_error` handle from `errors`, destroyed
+            // only by the final loop below.
+            assert_eq!(unsafe { export(*handle) }, 1, "`{own}` is false for its own class");
+        }
+
+        // Every export is either an intermediate predicate or some class's own.
+        for name in predicates.keys() {
+            assert!(
+                owners.contains(name) || INTERMEDIATE_PREDICATES.contains(name),
+                "`{name}` belongs to no error class"
+            );
+        }
+
+        for (name, export) in &predicates {
+            if INTERMEDIATE_PREDICATES.contains(name) {
+                continue;
+            }
+            for (own, handle) in &errors {
+                let expected = own == name || LEAF_SUBCLASSES.contains(&(*name, own.as_str()));
+                assert_eq!(
+                    // SAFETY: Test code: `handle` is a live `box_error` handle from `errors`,
+                    // destroyed only by the final loop below.
+                    unsafe { export(*handle) },
+                    i8::from(expected),
+                    "`{name}` on an instance of the class `{own}` names"
+                );
+            }
+            assert_eq!(
+                // SAFETY: Test code: every predicate export accepts a null handle.
+                unsafe { export(std::ptr::null()) },
+                0,
+                "`{name}` must be false for a null handle"
+            );
+        }
+
+        for (_, handle) in errors {
+            // SAFETY: Test code: each `handle` is a `box_error` handle from `errors`, consumed
+            // by this loop, so it is destroyed exactly once and not used afterwards.
+            unsafe { kafka_common_Error_destroy(handle) };
+        }
     }
 
     /// The 28 Rust-local negatives keep the values they were published with, and
     /// each client-side class maps to the enumerator named after it.
     ///
-    /// These values are ABI (see [`kafka_common_ErrorCode_t`]): a new class
+    /// These values are ABI (see [`kafka_common_Error_e`]): a new class
     /// appends at the most-negative end, so inserting one mid-list — which would
     /// renumber everything after it — must fail here.
     #[test]
     fn ffi_error_code_client_side_negatives_are_stable() {
         let classes = client_side_classes();
-        assert_eq!(classes.len(), 28, "expected 28 classes with no Java code");
+        assert_eq!(classes.len(), 29, "expected 29 classes with no Java code");
 
         for (error, expected, value) in classes {
             assert_eq!(expected as i32, value, "{expected:?} moved off its published value");
@@ -3552,65 +2533,6 @@ mod tests {
                 "{} maps to the wrong code",
                 ErrorName::name(&error)
             );
-        }
-    }
-
-    /// `kafka_common_Error_new` builds the class of a client-side (negative)
-    /// code, so the handle reports that code back with the message; the four
-    /// classes whose every Java constructor takes a payload fall back to
-    /// `UNKNOWN_SERVER_ERROR`.
-    #[test]
-    fn error_new_builds_client_side_classes_from_their_code() {
-        let payload_only = [
-            kafka_common_ErrorCode_CONSUMER_NO_OFFSET_FOR_PARTITION,
-            kafka_common_ErrorCode_CORRELATION_ID_MISMATCH,
-            kafka_common_ErrorCode_QUOTA_VIOLATION,
-            kafka_common_ErrorCode_RECORD_DESERIALIZATION,
-        ];
-        let message = CString::new("boom").unwrap();
-        for (_, expected, value) in client_side_classes() {
-            // SAFETY: Test code: `kafka_common_Error_new` accepts any code, and `message` is a live
-            // `CString` for the whole loop, so its pointer is a valid C string; it returns a fresh
-            // handle this iteration destroys exactly once.
-            let handle = unsafe { kafka_common_Error_new(value, message.as_ptr()) };
-            // SAFETY: Test code: `handle` is the fresh, not yet destroyed handle
-            // `kafka_common_Error_new` returned above, which is the accessor's `# Safety`.
-            let code = unsafe { kafka_common_Error_code(handle) };
-            // SAFETY: Test code: `handle` is the fresh, not yet destroyed handle from
-            // `kafka_common_Error_new`; the message pointer it returns stays valid until the
-            // destroy below, and the text is copied out before then.
-            let text = unsafe { CStr::from_ptr(kafka_common_Error_message(handle)) }
-                .to_str()
-                .unwrap()
-                .to_owned();
-            // SAFETY: Test code: `handle` is the fresh handle from `kafka_common_Error_new`, not used
-            // after this single destroy (`text` was copied out above).
-            unsafe { kafka_common_Error_destroy(handle) };
-            if payload_only.contains(&expected) {
-                assert_eq!(code, kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR, "{expected:?}");
-            } else {
-                assert_eq!(code, expected, "code {value} does not come back as itself");
-            }
-            assert_eq!(text, "boom", "{expected:?} lost its message");
-        }
-        // A protocol code and a value that is no enumerator.
-        for (value, expected) in [
-            (-1, kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR),
-            (7, kafka_common_ErrorCode_REQUEST_TIMED_OUT),
-            (-30, kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR),
-            (i32::MIN, kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR),
-            (40_000, kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR),
-        ] {
-            // SAFETY: Test code: `kafka_common_Error_new` accepts any code, and `message` is a live
-            // `CString` for the whole loop, so its pointer is a valid C string; it returns a fresh
-            // handle this iteration destroys exactly once.
-            let handle = unsafe { kafka_common_Error_new(value, message.as_ptr()) };
-            // SAFETY: Test code: `handle` is the fresh, not yet destroyed handle
-            // `kafka_common_Error_new` returned above, which is the accessor's `# Safety`.
-            assert_eq!(unsafe { kafka_common_Error_code(handle) }, expected, "code {value}");
-            // SAFETY: Test code: `handle` is the fresh handle from `kafka_common_Error_new`, not used
-            // after this single destroy.
-            unsafe { kafka_common_Error_destroy(handle) };
         }
     }
 
@@ -3631,443 +2553,6 @@ mod tests {
             "m",
         )
     }
-
-    // -----------------------------------------------------------------------
-    // Per-variant `kafka_common_Error_<Variant>` payload accessors
-    //
-    // Each test covers both halves of the rule: the real class returns a
-    // non-null payload whose fields match, and a *different* variant's handle
-    // returns null from the extraction function.
-    // -----------------------------------------------------------------------
-
-    /// A `RecordDeserializationError` with every optional field populated, for
-    /// the header/buffer/origin accessor tests.
-    fn record_deserialization_error_full() -> crate::common::errors::RecordDeserializationError {
-        use crate::common::errors::DeserializationErrorOrigin;
-        use crate::common::header::{RecordHeader, RecordHeaders};
-        use crate::common::record::TimestampType;
-        crate::common::errors::RecordDeserializationError::new(
-            DeserializationErrorOrigin::Key,
-            TopicPartition::new("t2", 5),
-            42,
-            99,
-            TimestampType::LogAppendTime,
-            Some(vec![1, 2, 3]),
-            Some(vec![4, 5]),
-            Some(RecordHeaders::with_header_iter(vec![RecordHeader::new(
-                "h1".to_string(),
-                Some(vec![9, 9]),
-            )])),
-            "m",
-        )
-    }
-
-    /// A benign error of a different variant, used to assert every extraction
-    /// function returns null when the handle is not its variant.
-    fn other_error() -> Error {
-        Error::kafka_message("other")
-    }
-
-    #[test]
-    fn topic_authorization_payload() {
-        let mut topics = HashSet::new();
-        topics.insert("t1".to_string());
-        let error = box_error(Error::TopicAuthorization(TopicAuthorizationError::new(topics.clone())));
-        // SAFETY: Test code: `error` and `other` are fresh handles from `box_error` created
-        // in this test, each passed to `kafka_common_Error_destroy` exactly once after its
-        // last use, so every call satisfies the accessors' `# Safety` (a valid, not yet
-        // destroyed handle). `handle` is a borrow into `error` used only before that
-        // destroy; `list` is the owned `StringList` the accessor hands over, read while
-        // alive (`count` asserted 1 before `get(list, 0)`, and the string copied out via
-        // `CStr::from_ptr`) and destroyed exactly once with
-        // `kafka_consumer_StringList_destroy`.
-        unsafe {
-            let handle = kafka_common_Error_topic_authorization(error);
-            assert!(!handle.is_null());
-            let list = kafka_common_TopicAuthorizationError_unauthorized_topics(handle);
-            assert_eq!(kafka_consumer_StringList_count(list), 1);
-            let got = CStr::from_ptr(kafka_consumer_StringList_get(list, 0)).to_str().unwrap();
-            assert_eq!(got, "t1");
-            kafka_consumer_StringList_destroy(list);
-            kafka_common_Error_destroy(error);
-
-            let other = box_error(other_error());
-            assert!(kafka_common_Error_topic_authorization(other).is_null());
-            kafka_common_Error_destroy(other);
-        }
-    }
-
-    #[test]
-    fn group_authorization_payload() {
-        let error = box_error(Error::GroupAuthorization(GroupAuthorizationError::for_group_id("g1")));
-        // SAFETY: Test code: `error` and `other` are fresh handles from `box_error` created
-        // in this test, each passed to `kafka_common_Error_destroy` exactly once after its
-        // last use, so every call satisfies the accessors' `# Safety`. `handle` is a borrow
-        // into `error` used only before that destroy; `group_id_ptr` is the owned
-        // NUL-terminated string the accessor hands over, read via `CStr::from_ptr` and
-        // freed exactly once with `kafka_consumer_string_destroy`.
-        unsafe {
-            let handle = kafka_common_Error_group_authorization(error);
-            assert!(!handle.is_null());
-            let group_id_ptr = kafka_common_GroupAuthorizationError_group_id(handle);
-            let group_id = CStr::from_ptr(group_id_ptr).to_str().unwrap();
-            assert_eq!(group_id, "g1");
-            kafka_consumer_string_destroy(group_id_ptr);
-            kafka_common_Error_destroy(error);
-
-            let other = box_error(other_error());
-            assert!(kafka_common_Error_group_authorization(other).is_null());
-            kafka_common_Error_destroy(other);
-        }
-    }
-
-    #[test]
-    fn invalid_topic_payload() {
-        let mut topics = HashSet::new();
-        topics.insert("bad".to_string());
-        let error = box_error(Error::InvalidTopic(InvalidTopicError::new(topics)));
-        // SAFETY: Test code: `error` and `other` are fresh handles from `box_error` created
-        // in this test, each passed to `kafka_common_Error_destroy` exactly once after its
-        // last use, so every call satisfies the accessors' `# Safety`. `handle` is a borrow
-        // into `error` used only before that destroy; `list` is the owned `StringList` the
-        // accessor hands over, read while alive (`count` asserted 1 before `get(list, 0)`,
-        // and the string copied out via `CStr::from_ptr`) and destroyed exactly once with
-        // `kafka_consumer_StringList_destroy`.
-        unsafe {
-            let handle = kafka_common_Error_invalid_topic(error);
-            assert!(!handle.is_null());
-            let list = kafka_common_InvalidTopicError_invalid_topics(handle);
-            assert_eq!(kafka_consumer_StringList_count(list), 1);
-            let got = CStr::from_ptr(kafka_consumer_StringList_get(list, 0)).to_str().unwrap();
-            assert_eq!(got, "bad");
-            kafka_consumer_StringList_destroy(list);
-            kafka_common_Error_destroy(error);
-
-            let other = box_error(other_error());
-            assert!(kafka_common_Error_invalid_topic(other).is_null());
-            kafka_common_Error_destroy(other);
-        }
-    }
-
-    #[test]
-    fn duplicate_resource_payload() {
-        let error = box_error(Error::DuplicateResource(DuplicateResourceError::with_resource("res1", "m")));
-        // SAFETY: Test code: `error`, `no_resource` and `other` are fresh handles from
-        // `box_error` created in this test, each passed to `kafka_common_Error_destroy`
-        // exactly once after its last use, so every call satisfies the accessors' `#
-        // Safety`. `handle` and `no_resource_handle` are borrows into their parent used
-        // only before that parent's destroy; `resource_ptr` is the owned NUL-terminated
-        // string the accessor hands over, read via `CStr::from_ptr` and freed exactly once
-        // with `kafka_consumer_string_destroy`, while the no-resource case only tests the
-        // returned pointer for null.
-        unsafe {
-            let handle = kafka_common_Error_duplicate_resource(error);
-            assert!(!handle.is_null());
-            let resource_ptr = kafka_common_DuplicateResourceError_resource(handle);
-            let resource = CStr::from_ptr(resource_ptr).to_str().unwrap();
-            assert_eq!(resource, "res1");
-            kafka_consumer_string_destroy(resource_ptr);
-            kafka_common_Error_destroy(error);
-
-            // No resource recorded -> the accessor returns null.
-            let no_resource = box_error(Error::DuplicateResource(DuplicateResourceError::new("m")));
-            let no_resource_handle = kafka_common_Error_duplicate_resource(no_resource);
-            assert!(kafka_common_DuplicateResourceError_resource(no_resource_handle).is_null());
-            kafka_common_Error_destroy(no_resource);
-
-            let other = box_error(other_error());
-            assert!(kafka_common_Error_duplicate_resource(other).is_null());
-            kafka_common_Error_destroy(other);
-        }
-    }
-
-    #[test]
-    fn resource_not_found_payload() {
-        let error = box_error(Error::ResourceNotFound(ResourceNotFoundError::with_resource("res2", "m")));
-        // SAFETY: Test code: `error` and `other` are fresh handles from `box_error` created
-        // in this test, each passed to `kafka_common_Error_destroy` exactly once after its
-        // last use, so every call satisfies the accessors' `# Safety`. `handle` is a borrow
-        // into `error` used only before that destroy; `resource_ptr` is the owned
-        // NUL-terminated string the accessor hands over, read via `CStr::from_ptr` and
-        // freed exactly once with `kafka_consumer_string_destroy`.
-        unsafe {
-            let handle = kafka_common_Error_resource_not_found(error);
-            assert!(!handle.is_null());
-            let resource_ptr = kafka_common_ResourceNotFoundError_resource(handle);
-            let resource = CStr::from_ptr(resource_ptr).to_str().unwrap();
-            assert_eq!(resource, "res2");
-            kafka_consumer_string_destroy(resource_ptr);
-            kafka_common_Error_destroy(error);
-
-            let other = box_error(other_error());
-            assert!(kafka_common_Error_resource_not_found(other).is_null());
-            kafka_common_Error_destroy(other);
-        }
-    }
-
-    #[test]
-    fn throttling_quota_exceeded_payload() {
-        let error = box_error(Error::ThrottlingQuotaExceeded(ThrottlingQuotaExceededError::new(123, "m")));
-        // SAFETY: Test code: `error` and `other` are fresh handles from `box_error` created
-        // in this test, each passed to `kafka_common_Error_destroy` exactly once after its
-        // last use, so every call satisfies the accessors' `# Safety`. `handle` is a borrow
-        // into `error` used only before that destroy, and the accessor merely copies out a
-        // scalar.
-        unsafe {
-            let handle = kafka_common_Error_throttling_quota_exceeded(error);
-            assert!(!handle.is_null());
-            assert_eq!(kafka_common_ThrottlingQuotaExceededError_throttle_time_ms(handle), 123);
-            kafka_common_Error_destroy(error);
-
-            let other = box_error(other_error());
-            assert!(kafka_common_Error_throttling_quota_exceeded(other).is_null());
-            kafka_common_Error_destroy(other);
-        }
-    }
-
-    #[test]
-    fn record_deserialization_payload() {
-        let error = box_error(Error::RecordDeserialization(Box::new(record_deserialization_error_full())));
-        // SAFETY: Test code: `error`, `sparse` and `other` are fresh handles from
-        // `box_error` created in this test, each passed to `kafka_common_Error_destroy`
-        // exactly once after its last use, so every call satisfies the accessors' `#
-        // Safety`. `handle` and `sparse_handle` are borrows into their parent used only
-        // before that parent's destroy; `partition` is the owned `TopicPartition` the
-        // accessor hands over, read and destroyed exactly once; `key_ptr`, `value_ptr`,
-        // `hkey_ptr` and `hvalue_ptr` borrow buffers inside `error` and are read with
-        // `slice::from_raw_parts` using exactly the lengths the accessors wrote, all before
-        // `kafka_common_Error_destroy(error)`; the `&mut *_len` out-pointers are live
-        // locals that outlive each call.
-        unsafe {
-            let handle = kafka_common_Error_record_deserialization(error);
-            assert!(!handle.is_null());
-
-            assert_eq!(kafka_common_RecordDeserializationError_origin(handle), 0, "Key -> 0");
-
-            let partition = kafka_common_RecordDeserializationError_partition(handle);
-            assert!(!partition.is_null());
-            let topic = CStr::from_ptr(kafka_common_TopicPartition_topic(partition)).to_str().unwrap();
-            assert_eq!(topic, "t2");
-            assert_eq!(kafka_common_TopicPartition_partition(partition), 5);
-            kafka_common_TopicPartition_destroy(partition);
-
-            assert_eq!(kafka_common_RecordDeserializationError_offset(handle), 42);
-            assert_eq!(kafka_common_RecordDeserializationError_timestamp(handle), 99);
-            assert_eq!(
-                kafka_common_RecordDeserializationError_timestamp_type(handle),
-                1,
-                "LogAppendTime -> 1"
-            );
-
-            let mut key_len = -2;
-            let key_ptr = kafka_common_RecordDeserializationError_key_buffer(handle, &mut key_len);
-            assert_eq!(key_len, 3);
-            assert_eq!(std::slice::from_raw_parts(key_ptr, 3), &[1, 2, 3]);
-
-            let mut value_len = -2;
-            let value_ptr = kafka_common_RecordDeserializationError_value_buffer(handle, &mut value_len);
-            assert_eq!(value_len, 2);
-            assert_eq!(std::slice::from_raw_parts(value_ptr, 2), &[4, 5]);
-
-            assert_eq!(kafka_common_RecordDeserializationError_header_count(handle), 1);
-            let mut hkey_len = -2;
-            let hkey_ptr = kafka_common_RecordDeserializationError_header_key(handle, 0, &mut hkey_len);
-            assert_eq!(hkey_len, 2);
-            assert_eq!(
-                std::str::from_utf8(std::slice::from_raw_parts(hkey_ptr as *const u8, 2)).unwrap(),
-                "h1"
-            );
-            let mut hvalue_len = -2;
-            let hvalue_ptr = kafka_common_RecordDeserializationError_header_value(handle, 0, &mut hvalue_len);
-            assert_eq!(hvalue_len, 2);
-            assert_eq!(std::slice::from_raw_parts(hvalue_ptr, 2), &[9, 9]);
-            // Out of range -> (null, -1).
-            let mut oob_len = -2;
-            assert!(kafka_common_RecordDeserializationError_header_key(handle, 1, &mut oob_len).is_null());
-            assert_eq!(oob_len, -1);
-
-            kafka_common_Error_destroy(error);
-
-            // No key/value/headers -> absent conventions.
-            let sparse = box_error(Error::RecordDeserialization(Box::new(record_deserialization_error())));
-            let sparse_handle = kafka_common_Error_record_deserialization(sparse);
-            // `record_deserialization_error()` uses `DeserializationErrorOrigin::Value`.
-            assert_eq!(kafka_common_RecordDeserializationError_origin(sparse_handle), 1, "Value -> 1");
-            let mut none_len = -2;
-            assert!(kafka_common_RecordDeserializationError_key_buffer(sparse_handle, &mut none_len).is_null());
-            assert_eq!(none_len, -1);
-            assert_eq!(kafka_common_RecordDeserializationError_header_count(sparse_handle), 0);
-            kafka_common_Error_destroy(sparse);
-
-            let other = box_error(other_error());
-            assert!(kafka_common_Error_record_deserialization(other).is_null());
-            kafka_common_Error_destroy(other);
-        }
-    }
-
-    #[test]
-    fn quota_violation_payload() {
-        let error = box_error(Error::QuotaViolation(Box::new(QuotaViolationError::new(
-            MetricName::new("n1", "g1", "d", BTreeMap::new()),
-            1.0,
-            0.5,
-        ))));
-        // SAFETY: Test code: `error` and `other` are fresh handles from `box_error` created
-        // in this test, each passed to `kafka_common_Error_destroy` exactly once after its
-        // last use, so every call satisfies the accessors' `# Safety`. `handle` is a borrow
-        // into `error` used only before that destroy; `name_ptr` and `group_ptr` are owned
-        // NUL-terminated strings the accessors hand over, each read via `CStr::from_ptr`
-        // and freed exactly once with `kafka_consumer_string_destroy`; the remaining
-        // accessors copy out scalars.
-        unsafe {
-            let handle = kafka_common_Error_quota_violation(error);
-            assert!(!handle.is_null());
-            let name_ptr = kafka_common_QuotaViolationError_metric_name(handle);
-            assert_eq!(CStr::from_ptr(name_ptr).to_str().unwrap(), "n1");
-            kafka_consumer_string_destroy(name_ptr);
-            let group_ptr = kafka_common_QuotaViolationError_metric_group(handle);
-            assert_eq!(CStr::from_ptr(group_ptr).to_str().unwrap(), "g1");
-            kafka_consumer_string_destroy(group_ptr);
-            assert_eq!(kafka_common_QuotaViolationError_value(handle), 1.0);
-            assert_eq!(kafka_common_QuotaViolationError_bound(handle), 0.5);
-            kafka_common_Error_destroy(error);
-
-            let other = box_error(other_error());
-            assert!(kafka_common_Error_quota_violation(other).is_null());
-            kafka_common_Error_destroy(other);
-        }
-    }
-
-    #[test]
-    fn consumer_log_truncation_payload() {
-        let mut offsets = HashMap::new();
-        offsets.insert(TopicPartition::new("t", 0), 10i64);
-        let mut divergent = HashMap::new();
-        divergent.insert(TopicPartition::new("t", 0), crate::consumer::OffsetAndMetadata::new(5).unwrap());
-        let error = box_error(Error::ConsumerLogTruncation(Box::new(ConsumerLogTruncationError::new(
-            offsets, divergent,
-        ))));
-        // SAFETY: Test code: `error` and `other` are fresh handles from `box_error` created
-        // in this test, each passed to `kafka_common_Error_destroy` exactly once after its
-        // last use, so every call satisfies the accessors' `# Safety`. `handle` is a borrow
-        // into `error` used only before that destroy; `offset_map` and `divergent_map` are
-        // owned handles the accessors hand over, read while alive (`count` asserted 1
-        // before `get_value(offset_map, 0)`) and each destroyed exactly once with its
-        // matching `*_destroy`.
-        unsafe {
-            let handle = kafka_common_Error_consumer_log_truncation(error);
-            assert!(!handle.is_null());
-
-            let offset_map = kafka_common_ConsumerLogTruncationError_offset_out_of_range_partitions(handle);
-            assert_eq!(kafka_consumer_LongOffsetMap_count(offset_map), 1);
-            assert_eq!(kafka_consumer_LongOffsetMap_get_value(offset_map, 0), 10);
-            kafka_consumer_LongOffsetMap_destroy(offset_map);
-
-            let divergent_map = kafka_common_ConsumerLogTruncationError_divergent_offsets(handle);
-            assert_eq!(kafka_consumer_OffsetMap_count(divergent_map), 1);
-            kafka_consumer_OffsetMap_destroy(divergent_map);
-
-            kafka_common_Error_destroy(error);
-
-            let other = box_error(other_error());
-            assert!(kafka_common_Error_consumer_log_truncation(other).is_null());
-            kafka_common_Error_destroy(other);
-        }
-    }
-
-    #[test]
-    fn consumer_no_offset_for_partition_payload() {
-        let error = box_error(Error::ConsumerNoOffsetForPartition(ConsumerNoOffsetForPartitionError::new(
-            TopicPartition::new("t", 3),
-        )));
-        // SAFETY: Test code: `error` and `other` are fresh handles from `box_error` created
-        // in this test, each passed to `kafka_common_Error_destroy` exactly once after its
-        // last use, so every call satisfies the accessors' `# Safety`. `handle` is a borrow
-        // into `error` used only before that destroy; `list` is the owned
-        // `TopicPartitionList` the accessor hands over, `tp` is a borrow into `list` read
-        // before `kafka_common_TopicPartitionList_destroy` (`count` asserted 1 before
-        // `get(list, 0)`), and `list` is destroyed exactly once.
-        unsafe {
-            let handle = kafka_common_Error_consumer_no_offset_for_partition(error);
-            assert!(!handle.is_null());
-            let list = kafka_common_ConsumerNoOffsetForPartitionError_partitions(handle);
-            assert_eq!(kafka_common_TopicPartitionList_count(list), 1);
-            let tp = kafka_common_TopicPartitionList_get(list, 0);
-            assert_eq!(kafka_common_TopicPartition_partition(tp), 3);
-            kafka_common_TopicPartitionList_destroy(list);
-            kafka_common_Error_destroy(error);
-
-            let other = box_error(other_error());
-            assert!(kafka_common_Error_consumer_no_offset_for_partition(other).is_null());
-            kafka_common_Error_destroy(other);
-        }
-    }
-
-    #[test]
-    fn consumer_offset_out_of_range_payload() {
-        let mut offsets = HashMap::new();
-        offsets.insert(TopicPartition::new("t", 0), 77i64);
-        let error = box_error(Error::ConsumerOffsetOutOfRange(ConsumerOffsetOutOfRangeError::new(offsets)));
-        // SAFETY: Test code: `error` and `other` are fresh handles from `box_error` created
-        // in this test, each passed to `kafka_common_Error_destroy` exactly once after its
-        // last use, so every call satisfies the accessors' `# Safety`. `handle` is a borrow
-        // into `error` used only before that destroy; `map` is the owned `LongOffsetMap`
-        // the accessor hands over, read while alive (`count` asserted 1 before
-        // `get_value(map, 0)`) and destroyed exactly once with
-        // `kafka_consumer_LongOffsetMap_destroy`.
-        unsafe {
-            let handle = kafka_common_Error_consumer_offset_out_of_range(error);
-            assert!(!handle.is_null());
-            let map = kafka_common_ConsumerOffsetOutOfRangeError_offset_out_of_range_partitions(handle);
-            assert_eq!(kafka_consumer_LongOffsetMap_count(map), 1);
-            assert_eq!(kafka_consumer_LongOffsetMap_get_value(map, 0), 77);
-            kafka_consumer_LongOffsetMap_destroy(map);
-            kafka_common_Error_destroy(error);
-
-            let other = box_error(other_error());
-            assert!(kafka_common_Error_consumer_offset_out_of_range(other).is_null());
-            kafka_common_Error_destroy(other);
-        }
-    }
-
-    #[test]
-    fn record_too_large_payload() {
-        let mut partitions = HashMap::new();
-        partitions.insert(TopicPartition::new("t", 0), 999i64);
-        let error = box_error(Error::RecordTooLarge(RecordTooLargeError::with_record_too_large_partitions(
-            "m", partitions,
-        )));
-        // SAFETY: Test code: `error`, `no_partitions` and `other` are fresh handles from
-        // `box_error` created in this test, each passed to `kafka_common_Error_destroy`
-        // exactly once after its last use, so every call satisfies the accessors' `#
-        // Safety`. `handle` and `no_partitions_handle` are borrows into their parent used
-        // only before that parent's destroy; `map` is the owned `LongOffsetMap` the
-        // accessor hands over, read while alive (`count` asserted 1 before `get_value(map,
-        // 0)`) and destroyed exactly once, while the null-field case only tests the
-        // returned pointer for null.
-        unsafe {
-            let handle = kafka_common_Error_record_too_large(error);
-            assert!(!handle.is_null());
-            let map = kafka_common_RecordTooLargeError_record_too_large_partitions(handle);
-            assert!(!map.is_null());
-            assert_eq!(kafka_consumer_LongOffsetMap_count(map), 1);
-            assert_eq!(kafka_consumer_LongOffsetMap_get_value(map, 0), 999);
-            kafka_consumer_LongOffsetMap_destroy(map);
-            kafka_common_Error_destroy(error);
-
-            // Java's field defaults to `null` -> the accessor returns null, not
-            // an empty map.
-            let no_partitions = box_error(Error::RecordTooLarge(RecordTooLargeError::new("m")));
-            let no_partitions_handle = kafka_common_Error_record_too_large(no_partitions);
-            assert!(kafka_common_RecordTooLargeError_record_too_large_partitions(no_partitions_handle).is_null());
-            kafka_common_Error_destroy(no_partitions);
-
-            let other = box_error(other_error());
-            assert!(kafka_common_Error_record_too_large(other).is_null());
-            kafka_common_Error_destroy(other);
-        }
-    }
-
     // -----------------------------------------------------------------------
     // #[ffi_guard] — decisions D2–D5 of
     // design/current/appsec-7665-4521-ffi-panic-guard.md
@@ -4084,11 +2569,11 @@ mod tests {
     ///
     /// `error` must be a live error handle returned by an FFI call (null fails the
     /// assertion); it is freed here and must not be used afterwards.
-    unsafe fn take_error(error: *mut kafka_common_Error_t) -> (String, kafka_common_ErrorCode_t) {
+    unsafe fn take_error(error: *mut kafka_common_Error_t) -> (String, kafka_common_Error_e) {
         assert!(!error.is_null(), "expected an error handle");
         // SAFETY: Test helper: `error` is non-null (asserted above) and every caller passes
         // a handle freshly produced by `#[ffi_guard]`'s panic path
-        // (`box_error(panic_error(..))`, either returned or stored through `out_error`) and
+        // (`box_error(panic_error(..))`, returned by the guarded call) and
         // not yet destroyed, which satisfies `kafka_common_Error_message`'s `# Safety`. For
         // a non-null handle it returns the NUL-terminated `message_cstring` pointer, valid
         // until destroy, and the text is copied into an owned `String` before the handle is
@@ -4099,8 +2584,8 @@ mod tests {
             .to_owned();
         // SAFETY: Test helper: `error` is non-null (asserted above) and a fresh, not yet
         // destroyed `box_error` handle from `#[ffi_guard]`'s panic path, which satisfies
-        // `kafka_common_Error_code`'s `# Safety`; the call only copies out the code.
-        let code = unsafe { kafka_common_Error_code(error) };
+        // `kafka_common_Error__enum`'s `# Safety`; the call only copies out the code.
+        let code = unsafe { kafka_common_Error__enum(error) };
         // SAFETY: Test helper: `error` is non-null (asserted above) and a fresh `box_error`
         // handle from `#[ffi_guard]`'s panic path that no other code frees (callers pass it
         // here exactly once), so this `kafka_common_Error_destroy` is the single, final
@@ -4118,7 +2603,7 @@ mod tests {
         /// Set by `guarded_unit` just before it panics.
         static UNIT_BODY_RAN: RefCell<bool> = const { RefCell::new(false) };
         /// What `guarded_on_panic`'s closure received.
-        static ON_PANIC_SAW: RefCell<Option<(String, kafka_common_ErrorCode_t)>> = const { RefCell::new(None) };
+        static ON_PANIC_SAW: RefCell<Option<(String, kafka_common_Error_e)>> = const { RefCell::new(None) };
     }
 
     /// # Safety
@@ -4220,11 +2705,11 @@ mod tests {
     /// `unsafe` only because `#[ffi_guard]` requires the `unsafe extern "C"` entry-point
     /// shape; the function takes no pointer, so the caller has nothing to uphold.
     #[ffi_guard]
-    unsafe extern "C" fn guarded_error_code(panic: bool) -> kafka_common_ErrorCode_t {
+    unsafe extern "C" fn guarded_error_code(panic: bool) -> kafka_common_Error_e {
         if panic {
             panic!("code boom");
         }
-        kafka_common_ErrorCode_NONE
+        kafka_common_Error_NONE
     }
 
     /// # Safety
@@ -4278,12 +2763,80 @@ mod tests {
     /// # Safety
     ///
     /// `unsafe` only because `#[ffi_guard]` requires the `unsafe extern "C"` entry-point
-    /// shape; `out_error` must be null or point to a writable slot, because the guard
-    /// stores the panic's error handle there.
+    /// shape; the function takes no pointer, so the caller has nothing to uphold.
     #[ffi_guard]
-    unsafe extern "C" fn guarded_new(panic: bool, out_error: *mut *mut kafka_common_Error_t) -> *mut u8 {
+    unsafe extern "C" fn guarded_i8(panic: bool) -> i8 {
+        if panic {
+            panic!("i8 boom");
+        }
+        1
+    }
+
+    /// An `int8_t` carrying a Java `byte` code whose 0 is valid, in the shape of
+    /// `kafka_common_IsolationLevel_id`.
+    ///
+    /// # Safety
+    ///
+    /// `unsafe` only because `#[ffi_guard]` requires the `unsafe extern "C"` entry-point
+    /// shape; the function takes no pointer, so the caller has nothing to uphold.
+    #[ffi_guard(fallback = -1)]
+    unsafe extern "C" fn guarded_byte_code(panic: bool) -> i8 {
+        if panic {
+            panic!("byte code boom");
+        }
+        0
+    }
+
+    /// # Safety
+    ///
+    /// `unsafe` only because `#[ffi_guard]` requires the `unsafe extern "C"` entry-point
+    /// shape; the function takes no pointer, so the caller has nothing to uphold.
+    #[ffi_guard]
+    unsafe extern "C" fn guarded_topics_size(panic: bool) -> i32 {
+        if panic {
+            panic!("size boom");
+        }
+        4
+    }
+
+    /// # Safety
+    ///
+    /// `unsafe` only because `#[ffi_guard]` requires the `unsafe extern "C"` entry-point
+    /// shape; the function takes no pointer, so the caller has nothing to uphold.
+    #[ffi_guard]
+    unsafe extern "C" fn guarded_bytes(panic: bool) -> kafka_Bytes_t {
+        if panic {
+            panic!("bytes boom");
+        }
+        kafka_Bytes_t::from_slice(b"value")
+    }
+
+    /// # Safety
+    ///
+    /// `unsafe` only because `#[ffi_guard]` requires the `unsafe extern "C"` entry-point
+    /// shape; the function takes no pointer, so the caller has nothing to uphold.
+    #[ffi_guard(fallback = kafka_common_IsolationLevel_e::kafka_common_IsolationLevel_READ_UNCOMMITTED)]
+    unsafe extern "C" fn guarded_enum(panic: bool) -> kafka_common_IsolationLevel_e {
+        if panic {
+            panic!("enum boom");
+        }
+        kafka_common_IsolationLevel_e::kafka_common_IsolationLevel_READ_COMMITTED
+    }
+
+    /// A fallible entry point in the CLAUDE.md §4 shape: it returns its value and
+    /// stores an error in `*out_err`, here when `fail` asks for one.
+    ///
+    /// # Safety
+    ///
+    /// `out_err` must be a valid slot pointing at null.
+    #[ffi_guard]
+    unsafe extern "C" fn guarded_new(panic: bool, fail: bool, out_err: *mut *mut kafka_common_Error_t) -> *mut u8 {
         if panic {
             panic!("constructor boom");
+        }
+        if fail {
+            // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+            return unsafe { fail_with(out_err, Error::local_illegal_argument("constructor failed")) };
         }
         std::ptr::dangling_mut()
     }
@@ -4291,35 +2844,21 @@ mod tests {
     /// # Safety
     ///
     /// `unsafe` only because `#[ffi_guard]` requires the `unsafe extern "C"` entry-point
-    /// shape; `out_error` must be null or point to a writable slot, because the guard
-    /// stores the panic's error handle there.
-    #[ffi_guard]
-    unsafe extern "C" fn guarded_flush(out_error: *mut *mut kafka_common_Error_t) {
-        panic!("flush boom");
-    }
-
-    /// # Safety
-    ///
-    /// `unsafe` only because `#[ffi_guard]` requires the `unsafe extern "C"` entry-point
-    /// shape; `out_error` must be null or point to a writable slot, because the guard
-    /// stores the panic's error handle there.
+    /// shape; the function takes no pointer, so the caller has nothing to uphold.
     #[ffi_guard(fallback = 42)]
-    unsafe extern "C" fn guarded_fallback(out_error: *mut *mut kafka_common_Error_t) -> i32 {
+    unsafe extern "C" fn guarded_fallback() -> i32 {
         panic!("fallback boom");
     }
 
     /// # Safety
     ///
     /// `unsafe` only because `#[ffi_guard]` requires the `unsafe extern "C"` entry-point
-    /// shape; `out_error` is read by nothing (the custom `on_panic` path does not store
-    /// into it), so the caller has nothing to uphold.
+    /// shape; the function takes no pointer, so the caller has nothing to uphold.
     #[ffi_guard(on_panic = |err| {
         ON_PANIC_SAW.with(|saw| *saw.borrow_mut() = Some((err.message().to_owned(), error_code_of(&err))));
         7
     })]
-    unsafe extern "C" fn guarded_on_panic(out_error: *mut *mut kafka_common_Error_t) -> i32 {
-        // Named `out_error` on purpose: the test checks nothing is stored there.
-        let _ = out_error;
+    unsafe extern "C" fn guarded_on_panic() -> i32 {
         panic!("custom path");
     }
 
@@ -4444,7 +2983,7 @@ mod tests {
         let code = unsafe { guarded_error_code(true) };
         // The enumerator `error_code_of` produces for `Errors::UnknownServerError`.
         assert_eq!(code, code_owned_by(Errors::UnknownServerError));
-        assert_eq!(code, kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR);
+        assert_eq!(code, kafka_common_Error_UNKNOWN_SERVER_ERROR);
     }
 
     #[test]
@@ -4456,7 +2995,7 @@ mod tests {
         // non-null and frees it exactly once.
         let (message, code) = unsafe { take_error(guarded_error_return(true)) };
         assert_eq!(message, panic_message("guarded_error_return", "error boom"));
-        assert_eq!(code, kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE);
+        assert_eq!(code, kafka_common_Error_LOCAL_ILLEGAL_STATE);
     }
 
     #[test]
@@ -4473,7 +3012,7 @@ mod tests {
         // (which asserts non-null) is the single, final use, as the comment above records.
         let (message, code) = unsafe { take_error(error as *mut kafka_common_Error_t) };
         assert_eq!(message, panic_message("guarded_borrowed_error", "borrowed boom"));
-        assert_eq!(code, kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE);
+        assert_eq!(code, kafka_common_Error_LOCAL_ILLEGAL_STATE);
     }
 
     #[test]
@@ -4491,76 +3030,157 @@ mod tests {
     }
 
     #[test]
-    fn ffi_guard_stores_the_error_in_out_error() {
-        let mut out_error: *mut kafka_common_Error_t = std::ptr::null_mut();
-        // SAFETY: Test code: `out_error` is a live local that outlives the call, so `&mut
-        // out_error` is a valid `*mut *mut kafka_common_Error_t`; the guard's generated
-        // store writes exactly one fresh `box_error` handle into it when the body panics
-        // (`ffi-macros`, D3), and the `bool` argument needs nothing further.
-        let result = unsafe { guarded_new(true, &mut out_error) };
-        assert!(result.is_null());
-        // SAFETY: Test code: `out_error` now holds the fresh handle the guard stored on the
-        // panic path, not yet freed by anyone, so `take_error` (which asserts non-null)
-        // consumes it exactly once.
-        let (message, code) = unsafe { take_error(out_error) };
-        assert_eq!(message, panic_message("guarded_new", "constructor boom"));
-        assert_eq!(code, kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE);
-
-        // A unit function reports through `out_error` too.
-        let mut out_error: *mut kafka_common_Error_t = std::ptr::null_mut();
-        // SAFETY: Test code: `out_error` is a live local that outlives the call, so `&mut
-        // out_error` is a valid `*mut *mut kafka_common_Error_t`; the guard's generated
-        // store writes exactly one fresh `box_error` handle into it when the body panics
-        // (`ffi-macros`, D3).
-        unsafe { guarded_flush(&mut out_error) };
-        // SAFETY: Test code: `out_error` now holds the fresh handle the guard stored on the
-        // panic path, not yet freed by anyone, so `take_error` (which asserts non-null)
-        // consumes it exactly once.
-        let (message, _) = unsafe { take_error(out_error) };
-        assert_eq!(message, panic_message("guarded_flush", "flush boom"));
-    }
-
-    #[test]
-    fn ffi_guard_tolerates_null_out_error() {
-        // SAFETY: Test code: a NULL `out_error` is passed deliberately to exercise the
-        // guard's documented null tolerance: the generated store is skipped when the
-        // pointer is null, so nothing is written through it, and the `bool` argument needs
-        // nothing further.
+    fn ffi_guard_i8_size_and_bytes_fallbacks() {
+        // SAFETY: Test code: `guarded_i8`, `guarded_topics_size` and `guarded_bytes` are
+        // `extern "C"` test functions under `#[ffi_guard]` taking only a `bool`; the calls are
+        // `unsafe` solely because the functions are declared `unsafe extern "C"`, with no
+        // pointer arguments or preconditions to uphold. The returned `kafka_Bytes_t` is only
+        // inspected, never dereferenced.
         unsafe {
-            assert!(guarded_new(true, std::ptr::null_mut()).is_null());
-            guarded_flush(std::ptr::null_mut());
+            assert_eq!(guarded_i8(true), 0, "an int8_t boolean reads as false");
+            assert_eq!(guarded_topics_size(true), 0, "a size reads as empty");
+            let bytes = guarded_bytes(true);
+            assert!(bytes.data.is_null(), "Java's null array");
+            assert_eq!(bytes.len, 0);
         }
     }
 
     #[test]
-    fn ffi_guard_fallback_override_keeps_the_out_error_store() {
-        let mut out_error: *mut kafka_common_Error_t = std::ptr::null_mut();
-        // SAFETY: Test code: `out_error` is a live local that outlives the call, so `&mut
-        // out_error` is a valid `*mut *mut kafka_common_Error_t`; the `fallback = 42`
-        // override replaces only the return value and keeps the generated store, which
-        // writes exactly one fresh `box_error` handle into it when the body panics
-        // (`ffi-macros`, D3).
-        assert_eq!(unsafe { guarded_fallback(&mut out_error) }, 42);
-        // SAFETY: Test code: `out_error` now holds the fresh handle the guard stored on the
-        // panic path, not yet freed by anyone, so `take_error` (which asserts non-null)
-        // consumes it exactly once.
-        let (message, _) = unsafe { take_error(out_error) };
-        assert_eq!(message, panic_message("guarded_fallback", "fallback boom"));
+    fn ffi_guard_byte_code_takes_its_declared_fallback() {
+        // SAFETY: Test code: `guarded_byte_code` is an `extern "C"` test function under
+        // `#[ffi_guard(fallback = -1)]` taking only a `bool`; the calls are `unsafe` solely
+        // because it is declared `unsafe extern "C"`, with no pointer arguments or
+        // preconditions to uphold.
+        unsafe {
+            assert_eq!(guarded_byte_code(false), 0, "0 is a valid code");
+            assert_eq!(guarded_byte_code(true), -1, "a panic is no code");
+        }
+    }
+
+    #[test]
+    fn ffi_guard_enum_takes_the_named_fallback() {
+        // SAFETY: Test code: `guarded_enum` is an `extern "C"` test function under
+        // `#[ffi_guard]` taking only a `bool`; the call is `unsafe` solely because it is
+        // declared `unsafe extern "C"`, with no pointer arguments or preconditions to uphold.
+        let level = unsafe { guarded_enum(true) };
+        assert_eq!(
+            level,
+            kafka_common_IsolationLevel_e::kafka_common_IsolationLevel_READ_UNCOMMITTED
+        );
+    }
+
+    #[test]
+    fn ffi_guard_stores_a_fallible_panic_in_out_err() {
+        let mut err = std::ptr::null_mut();
+        // SAFETY: Test code: `err` is a live local pointing at null, the slot `guarded_new`'s
+        // `# Safety` asks for.
+        let value = unsafe { guarded_new(true, false, &mut err) };
+        assert!(value.is_null(), "a panic returns the failure value");
+        // SAFETY: Test code: `err` holds the fresh handle the guard stored on the panic path, not
+        // yet freed by anyone, so `take_error` (which asserts non-null) consumes it exactly once.
+        let (message, code) = unsafe { take_error(err) };
+        assert_eq!(message, panic_message("guarded_new", "constructor boom"));
+        assert_eq!(code, kafka_common_Error_LOCAL_ILLEGAL_STATE);
+
+        // The body's own failure takes the same path: the same failure value, the error in
+        // `*out_err`.
+        let mut err = std::ptr::null_mut();
+        // SAFETY: Test code: as above, with a fresh slot pointing at null.
+        let value = unsafe { guarded_new(false, true, &mut err) };
+        assert!(value.is_null(), "a failure returns the failure value");
+        // SAFETY: Test code: `err` holds the fresh handle the body stored, consumed once.
+        let (message, code) = unsafe { take_error(err) };
+        assert_eq!(message, "constructor failed");
+        assert_eq!(code, kafka_common_Error_LOCAL_ILLEGAL_ARGUMENT);
+
+        let mut err = std::ptr::null_mut();
+        // SAFETY: Test code: as above, with a fresh slot pointing at null.
+        let value = unsafe { guarded_new(false, false, &mut err) };
+        assert!(err.is_null(), "success leaves `*out_err` untouched");
+        assert_eq!(value, std::ptr::dangling_mut());
+    }
+
+    #[test]
+    fn ffi_guard_fallback_override_replaces_the_value() {
+        // SAFETY: Test code: `guarded_fallback` takes no arguments and has no preconditions;
+        // the call is `unsafe` solely because it is declared `unsafe extern "C"`.
+        assert_eq!(unsafe { guarded_fallback() }, 42);
     }
 
     #[test]
     fn ffi_guard_on_panic_closure_takes_full_control() {
-        let mut out_error: *mut kafka_common_Error_t = std::ptr::null_mut();
-        // SAFETY: Test code: `out_error` is a live local that outlives the call, so `&mut
-        // out_error` is a valid `*mut *mut kafka_common_Error_t`; with an explicit
-        // `on_panic` closure no store is generated (asserted null afterwards), so nothing
-        // is written through it.
-        assert_eq!(unsafe { guarded_on_panic(&mut out_error) }, 7);
+        // SAFETY: Test code: `guarded_on_panic` takes no arguments and has no preconditions;
+        // the call is `unsafe` solely because it is declared `unsafe extern "C"`.
+        assert_eq!(unsafe { guarded_on_panic() }, 7);
         let (message, code) = ON_PANIC_SAW.with(|saw| saw.borrow_mut().take()).expect("the closure ran");
         assert_eq!(message, panic_message("guarded_on_panic", "custom path"));
-        assert_eq!(code, kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE);
-        // No `out_error` store is generated around an explicit closure.
-        assert!(out_error.is_null());
+        assert_eq!(code, kafka_common_Error_LOCAL_ILLEGAL_STATE);
+    }
+
+    // The `_err` twins `#[ffi_guard]` emits beside each guarded function without an
+    // error channel, which `confluent_kafka_bindings.h` declares for language bindings.
+
+    #[test]
+    fn ffi_guard_err_twin_stores_the_panic() {
+        let mut err = std::ptr::null_mut();
+        // SAFETY: Test code: `err` is a live local pointing at null, the slot the twin's
+        // `# Safety` asks for; `guarded_unit` itself has no preconditions.
+        unsafe { guarded_unit_err(&mut err) };
+        // SAFETY: Test code: `err` holds the fresh handle the twin stored on the panic path, not
+        // yet freed by anyone, so `take_error` consumes it exactly once.
+        let (message, code) = unsafe { take_error(err) };
+        assert_eq!(message, panic_message("guarded_unit_err", "unit boom"));
+        assert_eq!(code, kafka_common_Error_LOCAL_ILLEGAL_STATE);
+
+        // A value-returning twin returns the entry point's own panic value.
+        let mut err = std::ptr::null_mut();
+        // SAFETY: Test code: as above, with a fresh slot pointing at null.
+        assert!(!unsafe { guarded_bool_err(true, &mut err) }, "guarded_bool's derived false");
+        // SAFETY: Test code: `err` holds the fresh panic handle, consumed exactly once.
+        let (message, code) = unsafe { take_error(err) };
+        assert_eq!(message, panic_message("guarded_bool_err", "bool boom"));
+        assert_eq!(code, kafka_common_Error_LOCAL_ILLEGAL_STATE);
+
+        // `fallback` is that value too; only `*out_err` tells it from a real 42.
+        let mut err = std::ptr::null_mut();
+        // SAFETY: Test code: as above, with a fresh slot pointing at null.
+        assert_eq!(unsafe { guarded_fallback_err(&mut err) }, 42);
+        // SAFETY: Test code: `err` holds the fresh panic handle, consumed exactly once.
+        let (message, _) = unsafe { take_error(err) };
+        assert_eq!(message, panic_message("guarded_fallback_err", "fallback boom"));
+
+        let mut err = std::ptr::null_mut();
+        // SAFETY: Test code: as above, with a fresh slot pointing at null.
+        unsafe { guarded_formatted_err(3, &mut err) };
+        // SAFETY: Test code: `err` holds the fresh panic handle, consumed exactly once.
+        let (message, _) = unsafe { take_error(err) };
+        assert_eq!(message, panic_message("guarded_formatted_err", "formatted payload 3"));
+
+        // A twin of a function returning an error as its value (an error factory)
+        // returns null: the panic is in `*out_err`, never mistaken for the value.
+        let mut err = std::ptr::null_mut();
+        // SAFETY: Test code: as above, with a fresh slot pointing at null.
+        assert!(unsafe { guarded_error_return_err(true, &mut err) }.is_null());
+        // SAFETY: Test code: `err` holds the fresh panic handle, consumed exactly once.
+        let (message, _) = unsafe { take_error(err) };
+        assert_eq!(message, panic_message("guarded_error_return_err", "error boom"));
+    }
+
+    #[test]
+    fn ffi_guard_err_twin_returns_the_value_on_success() {
+        let mut err = std::ptr::null_mut();
+        // SAFETY: Test code: `err` is a live local pointing at null, the slot the twin's
+        // `# Safety` asks for.
+        assert!(unsafe { guarded_bool_err(false, &mut err) });
+        assert!(err.is_null(), "success leaves `*out_err` untouched");
+        // `return` in the body still returns the entry point's value.
+        for (early, expected) in [(true, 5), (false, 6)] {
+            // SAFETY: Test code: `err` is still null (asserted above or in the previous
+            // iteration), the slot the twin's `# Safety` asks for.
+            let value = unsafe { guarded_early_return_err(early, &mut err) };
+            assert_eq!(value, expected, "for early = {early}");
+            assert!(err.is_null());
+        }
     }
 
     /// A teardown thread that cannot be started leaks the handle rather than freeing
@@ -4583,6 +3203,20 @@ mod tests {
             TEARDOWNS.load(std::sync::atomic::Ordering::SeqCst),
             0,
             "a failed spawn must free nothing"
+        );
+    }
+
+    /// `in_tokio_runtime` is what routes a `destroy` to its teardown thread: true on
+    /// a runtime's worker and inside its `block_on`, false on a plain thread.
+    #[test]
+    fn in_tokio_runtime_tells_a_runtime_thread_from_a_plain_one() {
+        assert!(!in_tokio_runtime());
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        assert!(runtime.block_on(async { in_tokio_runtime() }));
+        assert!(
+            runtime
+                .block_on(runtime.spawn(async { in_tokio_runtime() }))
+                .expect("the task ran")
         );
     }
 
@@ -4691,7 +3325,7 @@ mod tests {
         let payload: Box<dyn Any + Send> = Box::new(42_u32);
         let error = panic_error("f", &*payload);
         assert_eq!(error.message(), panic_message("f", "non-string panic payload"));
-        assert_eq!(error_code_of(&error), kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE);
+        assert_eq!(error_code_of(&error), kafka_common_Error_LOCAL_ILLEGAL_STATE);
         // SAFETY: Test code: `guarded_non_string_payload` is a parameterless `extern "C"`
         // test function under `#[ffi_guard]`; the call is `unsafe` solely because it is
         // declared `unsafe extern "C"`, with no pointer arguments or preconditions to
@@ -4713,12 +3347,13 @@ mod tests {
     #[test]
     fn ffi_guard_passes_through_when_nothing_panics() {
         // SAFETY: Test code: every `guarded_*` call here takes only a `bool`, no argument,
-        // or `&mut out_error`, a live local that outlives the call;
-        // `guarded_const_pointer(false)` returns a pointer to the `c"value"` literal, which
-        // is `'static`, so `CStr::from_ptr` reads a valid NUL-terminated string;
-        // `guarded_mut_pointer(false)` returns a dangling pointer that is only compared
-        // against null, never dereferenced; and `guarded_new(false, ..)` does not panic, so
-        // the guard writes nothing through `out_error` (asserted null afterwards).
+        // or `&mut err`, a live local pointing at null that outlives the call, the slot
+        // `guarded_new` asks for; `guarded_const_pointer(false)` returns a pointer to the
+        // `c"value"` literal, which is `'static`, so `CStr::from_ptr` reads a valid
+        // NUL-terminated string; `guarded_bytes(false)` views the `'static` `b"value"`
+        // literal, so the slice built from it is valid; and `guarded_mut_pointer(false)` and
+        // the value written into `out_new` are dangling pointers that are only compared
+        // against null, never dereferenced.
         unsafe {
             assert!(guarded_bool(false));
             assert_eq!(guarded_i16(false), 16);
@@ -4727,7 +3362,7 @@ mod tests {
             assert_eq!(guarded_topics_count(false), 3);
             assert_eq!(guarded_offsets_count(false), 3);
             assert_eq!(guarded_f64(false), 1.5);
-            assert_eq!(guarded_error_code(false), kafka_common_ErrorCode_NONE);
+            assert_eq!(guarded_error_code(false), kafka_common_Error_NONE);
             assert!(guarded_error_return(false).is_null());
             assert!(guarded_borrowed_error(false).is_null());
             assert!(!guarded_mut_pointer(false).is_null());
@@ -4736,9 +3371,18 @@ mod tests {
             assert_eq!(guarded_early_return(true), 5);
             assert_eq!(guarded_early_return(false), 6);
 
-            let mut out_error: *mut kafka_common_Error_t = std::ptr::null_mut();
-            assert!(!guarded_new(false, &mut out_error).is_null());
-            assert!(out_error.is_null(), "a call that does not panic leaves out_error alone");
+            assert_eq!(guarded_i8(false), 1);
+            assert_eq!(guarded_topics_size(false), 4);
+            let bytes = guarded_bytes(false);
+            assert_eq!(std::slice::from_raw_parts(bytes.data, bytes.len as usize), b"value");
+            assert_eq!(
+                guarded_enum(false),
+                kafka_common_IsolationLevel_e::kafka_common_IsolationLevel_READ_COMMITTED
+            );
+
+            let mut err = std::ptr::null_mut();
+            assert!(!guarded_new(false, false, &mut err).is_null(), "success returns the value");
+            assert!(err.is_null(), "and stores no error");
         }
     }
 }

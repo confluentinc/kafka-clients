@@ -1,4 +1,4 @@
-[submodule "bindings/c/tests/unity"]
+[submodule "c/tests/unity"]
 	path = c/tests/unity
 	url = https://github.com/ThrowTheSwitch/Unity.git
 [submodule "kafka"]

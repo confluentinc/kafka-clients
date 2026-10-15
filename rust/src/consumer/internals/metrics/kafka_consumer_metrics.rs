@@ -84,7 +84,7 @@ impl KafkaConsumerMetrics {
 
         let time_between_poll_sensor = metrics.sensor("time-between-poll").expect("creating time-between-poll sensor");
         time_between_poll_sensor
-            .add_metric_name(
+            .add_with_metric_name(
                 metrics.metric_name(
                     "time-between-poll-avg",
                     metric_group_name,
@@ -94,7 +94,7 @@ impl KafkaConsumerMetrics {
             )
             .expect("adding time-between-poll-avg");
         time_between_poll_sensor
-            .add_metric_name(
+            .add_with_metric_name(
                 metrics.metric_name(
                     "time-between-poll-max",
                     metric_group_name,
@@ -108,7 +108,7 @@ impl KafkaConsumerMetrics {
             .sensor("poll-idle-ratio-avg")
             .expect("creating poll-idle-ratio-avg sensor");
         poll_idle_sensor
-            .add_metric_name(
+            .add_with_metric_name(
                 metrics.metric_name(
                     "poll-idle-ratio-avg",
                     metric_group_name,
@@ -122,7 +122,7 @@ impl KafkaConsumerMetrics {
             .sensor("commit-sync-time-ns-total")
             .expect("creating commit-sync-time-ns-total sensor");
         commit_sync_sensor
-            .add_metric_name(
+            .add_with_metric_name(
                 metrics.metric_name(
                     "commit-sync-time-ns-total",
                     metric_group_name,
@@ -136,7 +136,7 @@ impl KafkaConsumerMetrics {
             .sensor("committed-time-ns-total")
             .expect("creating committed-time-ns-total sensor");
         committed_sensor
-            .add_metric_name(
+            .add_with_metric_name(
                 metrics.metric_name(
                     "committed-time-ns-total",
                     metric_group_name,
@@ -168,7 +168,7 @@ impl KafkaConsumerMetrics {
             0
         };
         self.time_since_last_poll_ms.store(time_since_last_poll_ms, Ordering::SeqCst);
-        self.time_between_poll_sensor.record_value(time_since_last_poll_ms as f64);
+        self.time_between_poll_sensor.record_with_value(time_since_last_poll_ms as f64);
         self.last_poll_ms.store(poll_start_ms, Ordering::SeqCst);
     }
 
@@ -185,17 +185,17 @@ impl KafkaConsumerMetrics {
         } else {
             poll_time_ms as f64 * 1.0 / poll_cycle_time_ms as f64
         };
-        self.poll_idle_sensor.record_value(poll_idle_ratio);
+        self.poll_idle_sensor.record_with_value(poll_idle_ratio);
     }
 
     /// Java: `recordCommitSync(long duration)`.
     pub(crate) fn record_commit_sync(&self, duration: i64) {
-        self.commit_sync_sensor.record_value(duration as f64);
+        self.commit_sync_sensor.record_with_value(duration as f64);
     }
 
     /// Java: `recordCommitted(long duration)`.
     pub(crate) fn record_committed(&self, duration: i64) {
-        self.committed_sensor.record_value(duration as f64);
+        self.committed_sensor.record_with_value(duration as f64);
     }
 
     /// Removes every sensor and metric this manager registered. Since

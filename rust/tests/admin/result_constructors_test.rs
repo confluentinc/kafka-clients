@@ -37,7 +37,7 @@ async fn delete_records_result_is_constructible_outside_the_crate() {
     let tp = TopicPartition::new("t".to_string(), 0);
     let result = DeleteRecordsResult::new(HashMap::from([(
         tp.clone(),
-        KafkaFuture::completed(Ok(DeletedRecords::new(42))),
+        KafkaFuture::completed_future(Ok(DeletedRecords::new(42))),
     )]));
     let deleted = result.low_watermarks()[&tp].get().await.expect("completed future");
     assert_eq!(deleted.low_watermark(), 42);
@@ -57,8 +57,10 @@ async fn describe_consumer_groups_result_is_constructible_outside_the_crate() {
         None,
         None,
     );
-    let result =
-        DescribeConsumerGroupsResult::new(HashMap::from([("g".to_string(), KafkaFuture::completed(Ok(description)))]));
+    let result = DescribeConsumerGroupsResult::new(HashMap::from([(
+        "g".to_string(),
+        KafkaFuture::completed_future(Ok(description)),
+    )]));
     let described = result.described_groups()["g"].get().await.expect("completed future");
     assert_eq!(described.group_id(), "g");
 }
@@ -67,8 +69,10 @@ async fn describe_consumer_groups_result_is_constructible_outside_the_crate() {
 async fn describe_classic_groups_result_is_constructible_outside_the_crate() {
     let description =
         ClassicGroupDescription::new("g", "consumer", "range", Vec::new(), ClassicGroupState::Stable, None, None);
-    let result =
-        DescribeClassicGroupsResult::new(HashMap::from([("g".to_string(), KafkaFuture::completed(Ok(description)))]));
+    let result = DescribeClassicGroupsResult::new(HashMap::from([(
+        "g".to_string(),
+        KafkaFuture::completed_future(Ok(description)),
+    )]));
     let described = result.described_groups()["g"].get().await.expect("completed future");
     assert_eq!(described.group_id(), "g");
 }
@@ -78,7 +82,7 @@ async fn list_offsets_result_is_constructible_outside_the_crate() {
     let tp = TopicPartition::new("t".to_string(), 0);
     let result = ListOffsetsResult::new(HashMap::from([(
         tp.clone(),
-        KafkaFuture::completed(Ok(ListOffsetsResultInfo::new(7, -1, Some(3)))),
+        KafkaFuture::completed_future(Ok(ListOffsetsResultInfo::new(7, -1, Some(3)))),
     )]));
     let info = result
         .partition_result(&tp)

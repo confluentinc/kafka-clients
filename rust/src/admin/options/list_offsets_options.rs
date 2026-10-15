@@ -41,6 +41,7 @@ impl ListOffsetsOptions {
     /// Creates default options (default API timeout, `READ_UNCOMMITTED`).
     ///
     /// Mirrors `new ListOffsetsOptions()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListOffsetsOptions#ListOffsetsOptions")]
     pub fn new() -> Self {
         Self::default()
     }
@@ -48,6 +49,7 @@ impl ListOffsetsOptions {
     /// Creates options with the given isolation level.
     ///
     /// Mirrors `new ListOffsetsOptions(IsolationLevel)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListOffsetsOptions#ListOffsetsOptions")]
     pub fn with_isolation_level(isolation_level: IsolationLevel) -> Self {
         Self { timeout_ms: None, isolation_level }
     }
@@ -55,6 +57,7 @@ impl ListOffsetsOptions {
     /// Set the timeout in milliseconds for this operation, or `None` to use the
     /// default API timeout for the `AdminClient`.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
@@ -62,6 +65,7 @@ impl ListOffsetsOptions {
 
     /// The timeout in milliseconds for this operation, or `None` if the default
     /// API timeout should be used.
+    #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
@@ -69,6 +73,7 @@ impl ListOffsetsOptions {
     /// The isolation level for this operation.
     ///
     /// Mirrors `isolationLevel()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListOffsetsOptions#isolationLevel")]
     pub fn isolation_level(&self) -> IsolationLevel {
         self.isolation_level
     }

@@ -36,7 +36,7 @@ class EligibleLeadersNotAvailableError(InvalidMetadataError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 83  # kafka_common_ErrorCode_ELIGIBLE_LEADERS_NOT_AVAILABLE
+    _ffi_id: ClassVar[int] = 83  # kafka_common_Error_ELIGIBLE_LEADERS_NOT_AVAILABLE
 
     def __init__(
         self,

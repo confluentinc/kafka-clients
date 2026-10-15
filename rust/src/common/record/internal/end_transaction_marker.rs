@@ -183,7 +183,7 @@ impl EndTransactionMarker {
     /// Translated from `endTxnMarkerValueSize()` (Java 105-110).
     #[doc(alias = "org.apache.kafka.common.record.internal.EndTransactionMarker#endTxnMarkerValueSize")]
     pub(crate) fn end_txn_marker_value_size(&self) -> i32 {
-        DefaultRecord::size_in_bytes_for(
+        DefaultRecord::do_size_in_bytes_with_key_size_value_size(
             0,
             0,
             self.control_type.control_record_key_size() as i32,

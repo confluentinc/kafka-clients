@@ -39,7 +39,7 @@ class OperationNotAttemptedError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 55  # kafka_common_ErrorCode_OPERATION_NOT_ATTEMPTED
+    _ffi_id: ClassVar[int] = 55  # kafka_common_Error_OPERATION_NOT_ATTEMPTED
 
     def __init__(
         self,

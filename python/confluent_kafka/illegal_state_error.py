@@ -33,7 +33,7 @@ class IllegalStateError(RuntimeError):
 
     __module__ = "confluent_kafka"
 
-    _ffi_id: ClassVar[int] = -4  # kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE
+    _ffi_id: ClassVar[int] = -4  # kafka_common_Error_LOCAL_ILLEGAL_STATE
 
     def __init__(
         self,

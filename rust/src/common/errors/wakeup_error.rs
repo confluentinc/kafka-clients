@@ -32,5 +32,6 @@ kafka_error_type! {
     WakeupError,
     extends: [
         is_kafka_error,
+        is_wakeup_error,
     ],
 }

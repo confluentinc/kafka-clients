@@ -190,7 +190,7 @@ def test_serializer_close() -> None:
 def test_should_close_properly_and_throw_if_interrupted() -> None:
     # Java interrupts the thread blocked in close() and expects an
     # InterruptException after the close force-closed the sender
-    # (KafkaProducer.close(Duration, boolean), :1419-1437). The Python analog of
+    # (KafkaProducer.close(Duration, boolean), :1506-1524). The Python analog of
     # the interrupt is Ctrl+C: SIGINT, which only the main thread receives, so
     # close() runs here and a timer sends the signal. Java's MockClient holds
     # the send in flight; here an unreachable broker keeps the record waiting

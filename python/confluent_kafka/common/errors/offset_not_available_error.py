@@ -39,7 +39,7 @@ class OffsetNotAvailableError(RetriableError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 78  # kafka_common_ErrorCode_OFFSET_NOT_AVAILABLE
+    _ffi_id: ClassVar[int] = 78  # kafka_common_Error_OFFSET_NOT_AVAILABLE
 
     def __init__(
         self,

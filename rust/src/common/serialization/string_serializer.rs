@@ -37,6 +37,7 @@ pub struct StringSerializer;
 
 impl StringSerializer {
     /// Create a new `StringSerializer`.
+    #[doc(alias = "org.apache.kafka.common.serialization.StringSerializer#StringSerializer")]
     pub fn new() -> Self {
         Self
     }

@@ -269,6 +269,16 @@ def _consumer_family_types(c: object = None) -> None:
     kc.commit_nowait(callback=callback)
     kc.commit_nowait(offsets={tp: OffsetAndMetadata(offset=5)}, callback=callback)
     kc.commit_nowait(offsets={tp: OffsetAndMetadata(offset=5)}, callback=None)
+
+    async def async_callback(offsets: dict[TopicPartition, OffsetAndMetadata] | None,
+                             exception: Exception | None) -> None:
+        pass
+
+    # Only an async consumer awaits an `async def` commit callback; the sync
+    # client rejects one (strict mode's warn_unused_ignores checks the ignores).
+    kc.commit_nowait(callback=async_callback)  # type: ignore[arg-type]
+    kc.commit_nowait(offsets={tp: OffsetAndMetadata(offset=5)},
+                     callback=async_callback)  # type: ignore[arg-type]
     kc.commit()
     kc.commit(offsets={tp: OffsetAndMetadata(offset=5)})
     kc.close()
@@ -294,7 +304,14 @@ def _consumer_family_types(c: object = None) -> None:
         assert_type(await ac.position(partition=tp), int)
         assert_type(ac.assignment(), "set[TopicPartition]")
         assert_type(ac.current_lag(topic_partition=tp), "int | None")
-        ac.commit_nowait(callback=callback)
+        # commit_nowait is async def on the async peers: awaited, it yields None.
+        assert_type(await ac.commit_nowait(), None)
+        assert_type(await ac.commit_nowait(callback=callback), None)
+        assert_type(await ac.commit_nowait(callback=async_callback), None)
+        assert_type(await ac.commit_nowait(offsets={tp: OffsetAndMetadata(offset=5)},
+                                           callback=async_callback), None)
+        assert_type(await ac.commit_nowait(offsets={tp: OffsetAndMetadata(offset=5)},
+                                           callback=None), None)
         await ac.commit()
         await ac.seek(partition=tp, offset=5)
         await ac.close(option=CloseOptions.timeout(1.0))
@@ -302,6 +319,10 @@ def _consumer_family_types(c: object = None) -> None:
         assert_type(await abase.poll(timeout=0), "ConsumerRecords[str, bytes]")
         am: AsyncMockConsumer[int, int] = AsyncMockConsumer(offset_reset_strategy="latest")
         await am.rebalance(new_assignment=[tp])
+        assert_type(await am.commit_nowait(callback=async_callback), None)
+        assert_type(await am.commit_nowait(offsets={tp: OffsetAndMetadata(offset=5)},
+                                           callback=async_callback), None)
+        assert_type(await abase.commit_nowait(callback=async_callback), None)
         await am.lose_partitions(partitions_lost=[tp])
         assert_type(await am.poll(timeout=0), "ConsumerRecords[int, int]")
 
@@ -388,6 +409,20 @@ def _producer_family_types(p: object = None) -> None:
         assert_type(await future, RecordMetadata)
         assert_type(await (await ap.send(record=ProducerRecord(topic="t", value="v"))),
                     RecordMetadata)
+
+        async def async_callback(metadata: RecordMetadata,
+                                 exception: Exception | None) -> None:
+            del metadata, exception
+        # Only the asyncio producers await an `async def` send callback; the
+        # sync producers take the plain Callback alias.
+        assert_type(await ap.send(record=ProducerRecord(topic="t", value="v"),
+                                  callback=async_callback),
+                    "asyncio.Future[RecordMetadata]")
+        await ap.send(record=ProducerRecord(topic="t", value="v"), callback=callback)
+        amp = AsyncMockProducer(auto_complete=True, partitioner=None)
+        await amp.send(record=ProducerRecord(topic="t", value=b"v"), callback=async_callback)
+        kp.send(record=ProducerRecord(topic="t", value="v"),
+                callback=async_callback)  # type: ignore[arg-type]
 
     del _async, Future, asyncio
 

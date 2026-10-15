@@ -42,5 +42,6 @@ kafka_error_type! {
     BootstrapResolutionError,
     extends: [
         is_kafka_error,
+        is_bootstrap_resolution_error,
     ],
 }

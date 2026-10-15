@@ -96,6 +96,8 @@ impl ConsumerOffsetOutOfRangeError {
     }
 
     /// The error message.
+    // Java's Throwable.getMessage, a JDK method
+    #[doc(alias = "rust-only")]
     pub fn message(&self) -> &str {
         &self.message
     }
@@ -136,6 +138,8 @@ impl ErrorSource for ConsumerOffsetOutOfRangeError {
 impl ConsumerOffsetOutOfRangeError {
     /// The underlying source, if any. Mirrors Java's `getCause()`
     /// (`OffsetOutOfRangeException(String, Throwable)`).
+    // Java's Throwable.getCause, a JDK method
+    #[doc(alias = "rust-only")]
     pub fn source(&self) -> Option<&Error> {
         self.source.as_deref()
     }

@@ -54,8 +54,11 @@ Each async client lives in the same module as its sync peer, `Async`-prefixed
 (`AsyncKafkaProducer`, `AsyncKafkaConsumer`). A method is `async def` on the
 async class iff Java waits in it (on the background thread, the network, or a
 rebalance listener it runs); the others (`assignment()`, `subscription()`,
-`metrics()`, `group_metadata()`, `commit_nowait()`, `wakeup()`) stay plain
-`def` on both.
+`metrics()`, `group_metadata()`, `wakeup()`) stay plain `def` on both.
+`commit_nowait()` is `async def` on the async consumers, since Java's
+`commitAsync` waits for the background thread to take the offsets to commit:
+`await consumer.commit_nowait(callback=cb)` returns once the commit is sent,
+raising the call's own failure, and `cb` gets the result later.
 
 ## Producer
 
@@ -64,14 +67,16 @@ rebalance listener it runs); the others (`assignment()`, `subscription()`,
   exception)` is Java's `Callback`: it runs on the producer's background
   completion thread (`KafkaProducer`) or on the event loop
   (`AsyncKafkaProducer`), one at a time in completion order, before the future
-  completes; a raising callback is logged. `metadata` is never `None`: on
+  completes; a raising callback fails nothing, and the client's core logs its
+  exception once, with Java's message. `metadata` is never `None`: on
   failure every field but the topic and partition is -1.
 - `close()` waits for the records sent before it; `close(timeout=…)` waits at
   most `timeout`, then fails what is left. Neither cancels a future.
 - A `send()` that returned belongs to the `flush()` or transaction call after it
   (`commit_transaction()` includes it, `abort_transaction()` discards it).
 - `MockProducer` is Java's `MockProducer`: sends complete, and callbacks run, on
-  the calling thread.
+  the calling thread, and a raising callback's exception propagates out of the
+  call that completed the record.
 
 ## Consumer
 

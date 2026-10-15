@@ -1106,7 +1106,7 @@ mod tests {
         let aggregator = agg_for(&partition);
         CompletedFetch::with_full(
             h.subs.clone(),
-            Arc::new(crate::common::memory::BufferSupplier::create()),
+            Arc::new(crate::common::utils::internals::BufferSupplier::create()),
             partition,
             partition_data,
             aggregator,
@@ -1573,7 +1573,7 @@ mod tests {
         let aggregator = agg_for(&partition);
         CompletedFetch::with_full(
             h.subs.clone(),
-            Arc::new(crate::common::memory::BufferSupplier::create()),
+            Arc::new(crate::common::utils::internals::BufferSupplier::create()),
             partition,
             partition_data,
             aggregator,
@@ -2050,7 +2050,7 @@ mod tests {
         let aggregator = agg_for(&partition);
         CompletedFetch::with_full(
             h.subs.clone(),
-            Arc::new(crate::common::memory::BufferSupplier::create()),
+            Arc::new(crate::common::utils::internals::BufferSupplier::create()),
             partition,
             partition_data,
             aggregator,
@@ -2578,7 +2578,7 @@ mod tests {
         let aggregator = agg_for(&partition);
         CompletedFetch::with_full(
             h.subs.clone(),
-            Arc::new(crate::common::memory::BufferSupplier::create()),
+            Arc::new(crate::common::utils::internals::BufferSupplier::create()),
             partition,
             partition_data,
             aggregator,
@@ -2728,7 +2728,7 @@ mod tests {
             partition_data.set_records(Some(bytes::Bytes::from(make_records(0, record_count))));
             CompletedFetch::with_full(
                 h.subs.clone(),
-                Arc::new(crate::common::memory::BufferSupplier::create()),
+                Arc::new(crate::common::utils::internals::BufferSupplier::create()),
                 partition,
                 partition_data,
                 Arc::clone(&aggregator),
@@ -2745,7 +2745,7 @@ mod tests {
         assert_eq!(3, fetch.count(), "only the non-stale partition contributes records");
 
         let records_total = metrics
-            .metric_instance_key_value(&registry.records_consumed_total, &[])
+            .metric_instance_with_key_value(&registry.records_consumed_total, &[])
             .unwrap();
         assert_eq!(
             MetricValue::Double(3.0),

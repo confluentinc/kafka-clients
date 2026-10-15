@@ -77,7 +77,7 @@ impl RebalanceCallbackMetricsManager {
             "The average time taken for a partition-revoked rebalance listener callback",
         );
         partition_revoke_callback_sensor
-            .add_metric_name(partition_revoke_latency_avg.clone(), Box::new(Avg::new()))
+            .add_with_metric_name(partition_revoke_latency_avg.clone(), Box::new(Avg::new()))
             .expect("adding partition-revoked-latency-avg");
         let partition_revoke_latency_max = metrics.metric_name(
             "partition-revoked-latency-max",
@@ -85,7 +85,7 @@ impl RebalanceCallbackMetricsManager {
             "The max time taken for a partition-revoked rebalance listener callback",
         );
         partition_revoke_callback_sensor
-            .add_metric_name(partition_revoke_latency_max.clone(), Box::new(Max::new()))
+            .add_with_metric_name(partition_revoke_latency_max.clone(), Box::new(Max::new()))
             .expect("adding partition-revoked-latency-max");
 
         let partition_assign_callback_sensor = metrics
@@ -97,7 +97,7 @@ impl RebalanceCallbackMetricsManager {
             "The average time taken for a partition-assigned rebalance listener callback",
         );
         partition_assign_callback_sensor
-            .add_metric_name(partition_assign_latency_avg.clone(), Box::new(Avg::new()))
+            .add_with_metric_name(partition_assign_latency_avg.clone(), Box::new(Avg::new()))
             .expect("adding partition-assigned-latency-avg");
         let partition_assign_latency_max = metrics.metric_name(
             "partition-assigned-latency-max",
@@ -105,7 +105,7 @@ impl RebalanceCallbackMetricsManager {
             "The max time taken for a partition-assigned rebalance listener callback",
         );
         partition_assign_callback_sensor
-            .add_metric_name(partition_assign_latency_max.clone(), Box::new(Max::new()))
+            .add_with_metric_name(partition_assign_latency_max.clone(), Box::new(Max::new()))
             .expect("adding partition-assigned-latency-max");
 
         let partition_lost_callback_sensor = metrics
@@ -117,7 +117,7 @@ impl RebalanceCallbackMetricsManager {
             "The average time taken for a partition-lost rebalance listener callback",
         );
         partition_lost_callback_sensor
-            .add_metric_name(partition_lost_latency_avg.clone(), Box::new(Avg::new()))
+            .add_with_metric_name(partition_lost_latency_avg.clone(), Box::new(Avg::new()))
             .expect("adding partition-lost-latency-avg");
         let partition_lost_latency_max = metrics.metric_name(
             "partition-lost-latency-max",
@@ -125,7 +125,7 @@ impl RebalanceCallbackMetricsManager {
             "The max time taken for a partition-lost rebalance listener callback",
         );
         partition_lost_callback_sensor
-            .add_metric_name(partition_lost_latency_max.clone(), Box::new(Max::new()))
+            .add_with_metric_name(partition_lost_latency_max.clone(), Box::new(Max::new()))
             .expect("adding partition-lost-latency-max");
 
         Self {
@@ -150,17 +150,17 @@ impl RebalanceCallbackMetricsManager {
 
     /// Java: `recordPartitionsRevokedLatency(long latencyMs)`.
     pub(crate) fn record_partitions_revoked_latency(&self, latency_ms: i64) {
-        self.partition_revoke_callback_sensor.record_value(latency_ms as f64);
+        self.partition_revoke_callback_sensor.record_with_value(latency_ms as f64);
     }
 
     /// Java: `recordPartitionsAssignedLatency(long latencyMs)`.
     pub(crate) fn record_partitions_assigned_latency(&self, latency_ms: i64) {
-        self.partition_assign_callback_sensor.record_value(latency_ms as f64);
+        self.partition_assign_callback_sensor.record_with_value(latency_ms as f64);
     }
 
     /// Java: `recordPartitionsLostLatency(long latencyMs)`.
     pub(crate) fn record_partitions_lost_latency(&self, latency_ms: i64) {
-        self.partition_lost_callback_sensor.record_value(latency_ms as f64);
+        self.partition_lost_callback_sensor.record_with_value(latency_ms as f64);
     }
 
     /// Removes every sensor and metric this manager registered. Java inherits

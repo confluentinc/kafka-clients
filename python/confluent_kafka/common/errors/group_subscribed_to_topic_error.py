@@ -34,7 +34,7 @@ class GroupSubscribedToTopicError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 86  # kafka_common_ErrorCode_GROUP_SUBSCRIBED_TO_TOPIC
+    _ffi_id: ClassVar[int] = 86  # kafka_common_Error_GROUP_SUBSCRIBED_TO_TOPIC
 
     def __init__(
         self,
