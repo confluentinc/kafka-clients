@@ -43,7 +43,8 @@ its own loop reports by returning, any other once it ran on its loop, or once
 its task ended (see ``_send``).
 
 *(deviation)* Backpressure is the core's ``max.block.ms`` wait on the
-submission task, not a wait in ``send()`` (see ``_base``).
+submission task, not a wait in ``send()``: a record the producer cannot take at
+once is queued there (see ``_base``).
 """
 
 from __future__ import annotations
@@ -259,7 +260,8 @@ class AsyncProducer(Generic[K, V], _ProducerState):
     def _deliver(self, loop: asyncio.AbstractEventLoop,
                  item: _Pending) -> BaseException | bool | None:
         """Hand one record's completion to its ``loop`` (called by the pump on
-        any thread). Run inline when the pump runs on ``loop`` with nothing
+        any thread, or by ``send()`` on ``loop`` for a record refused as it was
+        handed over). Run inline when the caller runs on ``loop`` with nothing
         before it there: ``None``, or the exception the callback raised, which
         the caller reports by returning or raising (see ``_send``). Otherwise
         ``True``, the report coming later: buffered, then resolved on the loop
@@ -433,7 +435,9 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         wait end, then raises ``CancelledError``. The returned
         ``asyncio.Future`` resolves with the record's metadata. The
         ``callback`` runs on the event loop, before the future completes, and
-        must not block it. By rule 3 it may be an ``async def``: it is then
+        must not block it; for a record the producer refuses as ``send()``
+        hands it over it runs inside ``send()``. By rule 3 it may be an
+        ``async def``: it is then
         awaited in a task on the loop before the future completes, the loop's
         later callbacks waiting for it, and ``flush()``,
         ``commit_transaction()``, ``abort_transaction()`` and ``close()`` wait
@@ -487,7 +491,10 @@ class AsyncProducer(Generic[K, V], _ProducerState):
             return outcome
 
         def resolve(error: int) -> None:
-            # The handover: the error the Rust send() returned, if any.
+            # The handover: the error the Rust send() returned, if any. On the
+            # loop, inside Producer_try_send_cb, for a record the producer
+            # takes or refuses at once; from the pump for one queued on the
+            # submission task.
             nonlocal rethrown
             if error:
                 exception = cast("Exception", from_ffi_error(error))
@@ -504,16 +511,21 @@ class AsyncProducer(Generic[K, V], _ProducerState):
                     outcome = complete(metadata, exception, 0)
                     if isinstance(outcome, BaseException):
                         log_unreported_callback_error(metadata, outcome)
-            if waiting and not loop.is_closed():
-                try:
-                    loop.call_soon_threadsafe(_set_result, handed_over)
-                except RuntimeError:  # the loop closed since the check
-                    pass
+            if waiting:
+                if _running_loop() is loop:
+                    # On the loop already: send() itself, or the pump run on
+                    # it. No hop, as _deliver runs inline.
+                    _set_result(handed_over)
+                elif not loop.is_closed():
+                    try:
+                        loop.call_soon_threadsafe(_set_result, handed_over)
+                    except RuntimeError:  # the loop closed since the check
+                        pass
 
         # A close() that began since the check above (the serializers ran in
         # between) refuses the record as Java's RecordAccumulator.append does.
         with self._use(KafkaError(message=CLOSED_WHILE_SENDING_MESSAGE)) as c_producer:
-            raise_if_error(_lib.Producer_send_cb(c_producer, native, on_completion, resolve))
+            raise_if_error(_lib.Producer_try_send_cb(c_producer, native, on_completion, resolve))
             if not waiting:
                 self._track(future)
         if waiting:

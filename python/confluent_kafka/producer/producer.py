@@ -35,7 +35,8 @@ whenever the C API's notify hook signals it (CLAUDE.md, Python Binding
 Conventions, Threads and callbacks).
 
 *(deviation)* Backpressure is the core's ``max.block.ms`` wait on the
-submission task, not a wait in ``send()`` (see ``_base``).
+submission task, not a wait in ``send()``: a record the producer cannot take at
+once is queued there (see ``_base``).
 
 *(deviation)* A call from a ``send()`` callback cannot have its completion run,
 since that runs on the thread the callback blocks: ``send()`` there does not
@@ -326,11 +327,14 @@ class Producer(Generic[K, V], _ProducerState):
 
         The send is asynchronous and this method will return immediately
         (except for rare cases described below) once the record has been stored
-        in the buffer of records waiting to be sent. It can block 1) for the
+        in the buffer of records waiting to be sent. Java's blocks 1) for the
         first record sent to a topic, up to ``max.block.ms`` while waiting for
-        the topic's metadata, and 2) while the buffer is full. The key and value
-        are serialized on the calling thread, and a serializer's error is raised
-        here.
+        the topic's metadata, and 2) while the buffer is full; here
+        *(deviation)* such a record, or one behind a record still queued, is
+        queued on the core's submission task, which waits for it up to
+        ``max.block.ms`` as Java's ``send()`` would, and the method returns at
+        once (see ``_base``). The key and value are serialized on the calling
+        thread, and a serializer's error is raised here.
 
         The result of the send is a ``RecordMetadata`` specifying the partition
         the record was sent to, the offset it was assigned and the timestamp of
@@ -340,8 +344,9 @@ class Producer(Generic[K, V], _ProducerState):
         Java's.
 
         The ``callback`` runs on the producer's background completion thread,
-        never on the calling thread, after the record completes and before its
-        future does. Callbacks for records being sent to the same partition are
+        never on the calling thread (but see the last paragraph), after the
+        record completes and before its future does. Callbacks for records
+        being sent to the same partition are
         guaranteed to execute in order. A raising callback fails nothing: its
         exception is reported to the core, which logs it once with Java's
         message, "Error executing user-provided callback on message for
@@ -378,7 +383,10 @@ class Producer(Generic[K, V], _ProducerState):
         record reaches the producer inside a started transaction or without a
         ``transactional.id``: the ``KafkaError`` of a producer in a previous
         fatal or abortable error state, which ``commit_transaction()`` then
-        raises.
+        raises. A record the producer refuses as ``send()`` hands it over gets
+        that error on the calling thread, its ``callback`` running inside
+        ``send()`` *(deviation: the thread; Java rethrows it)*; one refused
+        after being queued gets it on the completion thread.
         """
         if callback is UNSET:
             callback = None
@@ -397,7 +405,8 @@ class Producer(Generic[K, V], _ProducerState):
         # ApiException reaches the callback and the future (:1056-1068). Inside
         # a started transaction the record is not waited for (see
         # _ProducerState._in_transaction), nor from a send() callback, whose
-        # thread runs the handover (see the module docstring).
+        # thread runs the handover of a queued record (see the module
+        # docstring).
         waiting = self._transactional and not self._in_transaction and not in_callback(self)
         handed_over = threading.Event()
         lock = threading.Lock()
@@ -431,8 +440,10 @@ class Producer(Generic[K, V], _ProducerState):
                 raise failure
 
         def resolve(error: int) -> None:
-            # The handover, on the completion thread: the error the Rust send()
-            # returned, if any.
+            # The handover: the error the Rust send() returned, if any. On this
+            # thread, inside Producer_try_send_cb, for a record the producer
+            # takes or refuses at once; on the completion thread for one queued
+            # on the submission task.
             nonlocal rethrown
             if error:
                 exception = cast("Exception", from_ffi_error(error))
@@ -459,7 +470,7 @@ class Producer(Generic[K, V], _ProducerState):
         # A close() that began since the check above (the serializers ran in
         # between) refuses the record as Java's RecordAccumulator.append does.
         with self._use(KafkaError(message=CLOSED_WHILE_SENDING_MESSAGE)) as c_producer:
-            raise_if_error(_lib.Producer_send_cb(c_producer, native, on_completion, resolve))
+            raise_if_error(_lib.Producer_try_send_cb(c_producer, native, on_completion, resolve))
             if not waiting:
                 self._track(future)
         if waiting:
