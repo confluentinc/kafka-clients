@@ -1140,6 +1140,35 @@ mod tests {
         }
     }
 
+    /// Waits until a connect to `127.0.0.1:<port>` is in `SYN_SENT`, which
+    /// means the admin's background task is awaiting it. A fixed sleep is not
+    /// enough under load: the task may not reach the connect in time. Reads
+    /// `/proc/net/tcp`; where it is missing, falls back to a fixed sleep.
+    fn wait_for_syn_sent(port: u16) {
+        // `rem_address` of a socket connecting to 127.0.0.1:<port>, in the
+        // table's little-endian hex, and the `SYN_SENT` state.
+        let remote = format!("0100007F:{port:04X}");
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let Ok(table) = std::fs::read_to_string("/proc/net/tcp") else {
+                std::thread::sleep(Duration::from_millis(500));
+                return;
+            };
+            let connecting = table.lines().skip(1).any(|line| {
+                let mut columns = line.split_whitespace().skip(2);
+                columns.next() == Some(remote.as_str()) && columns.next() == Some("02")
+            });
+            if connecting {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the admin never started connecting to port {port}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// A destroy whose background task is stuck inside a TCP connect the
     /// broker never answers cannot fail the call still pending: the bounded
     /// join misses and the runtime cancels the task where it stands. The
@@ -1211,8 +1240,9 @@ mod tests {
                     })
                 })
                 .collect();
-            // Let the background task reach the connect.
-            std::thread::sleep(Duration::from_millis(500));
+            // Let the background task reach the connect: a destroy before it
+            // gets there fails the call normally instead.
+            wait_for_syn_sent(address.port());
 
             kafka_admin_Admin_destroy(admin);
             let destroyed = "The client was destroyed before the future completed";
