@@ -437,7 +437,9 @@ case "$TEST" in
     "$KB/kafka-producer-perf-test.sh" "${PROD_ARGS[@]}" \
       > "$OUT/producer.log" 2>&1 &
     PRODUCER_PID=$!
-    JARGS=(--bootstrap "$BS" --topic "$TN" --duration "$DUR" --warmup "$WARM")
+    # JavaE2E keeps the client's max.poll.records unless told; these runs
+    # have always used 2500.
+    JARGS=(--bootstrap "$BS" --topic "$TN" --duration "$DUR" --warmup "$WARM" --max-poll-records 2500)
     if [ -n "${INTERVAL_SECONDS:-}" ]; then JARGS+=(--interval "$INTERVAL_SECONDS"); fi
     if [ -n "${GROUP_ID:-}" ]; then JARGS+=(--group-id "$GROUP_ID"); fi
     if [ -n "${CLIENT_CONFIG:-}" ]; then JARGS+=(--client-config "$CLIENT_CONFIG"); fi

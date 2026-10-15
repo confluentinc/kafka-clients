@@ -93,6 +93,7 @@ python3 tools/deploy_and_run_perf/deploy_and_run_perf.py user@host \
 | `--offset-reset` | `latest` | `latest` (live) or `earliest` (drains backlog) |
 | `--kafka-bin` | `~/dev/opensource/kafka/bin` | Kafka CLI scripts dir |
 | `--results-dir` | `consumer-perf/results` | output directory |
+| `--results-file` | (none) | also write the summary there in the `cargo xtask perf-cloud` `results.json` format, when records were measured |
 | `--no-produce` | (off) | don't launch a producer |
 | `--no-create-topic` | (off) | don't create/verify the topic |
 | `--compression-type` | (producer default) | producer `compression.type`: `none` / `gzip` / `snappy` / `lz4` / `zstd` |
