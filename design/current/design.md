@@ -1203,7 +1203,9 @@ sync call returning a `<Rpc>Result_t` whose `_values()` map holds one
 `kafka_common_KafkaFuture_t` per key, with `_all()` and the typed refinements
 (`CreateTopicsResult_num_partitions(topic)`); only `close` has `_cb` twins.
 `AdminClient_create(config, &out)` returns an owned `kafka_admin_Admin_t`;
-`MockAdminClient_create` returns a class handle viewed through `__as_Admin`.
+`MockAdminClient_create` returns a `MockAdminClient_Builder_t` (Java's static
+`create()` returning a `Builder`), whose `_build` returns a class handle viewed
+through `__as_Admin`, as do the `MockAdminClient_new` constructors.
 
 The first client created from C initializes the default `RUST_LOG` logger
 (`src/ffi/common.rs`, `init_default_logger`).

@@ -102,7 +102,11 @@ static void on_closed(void *opaque) {
  * `__execute_callbacks_err`, which reports how many it ran. */
 static void test_cb_function_completes_through_the_callback_queue(void) {
     kafka_common_Error_t *err = NULL;
-    kafka_admin_MockAdminClient_t *mock = kafka_admin_MockAdminClient_create(1, &err);
+    kafka_admin_MockAdminClient_Builder_t *builder = kafka_admin_MockAdminClient_create_err(&err);
+    assert_ok(err);
+    kafka_admin_MockAdminClient_t *mock = kafka_admin_MockAdminClient_Builder_build(builder, &err);
+    assert_ok(err);
+    kafka_admin_MockAdminClient_Builder_destroy_err(builder, &err);
     assert_ok(err);
     TEST_ASSERT_NOT_NULL(mock);
     const kafka_admin_Admin_t *admin = kafka_admin_MockAdminClient__as_Admin_err(mock, &err);

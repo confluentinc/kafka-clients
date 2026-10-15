@@ -21,7 +21,9 @@ use std::ffi::{c_char, c_void};
 
 use crate::admin::{ListOffsetsResult, ListOffsetsResultInfo};
 use crate::common::TopicPartition;
-use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_map_element, destroy_result, result_ref};
+use crate::ffi::admin::{
+    FutureCtx, ResultHandle, box_result, destroy_map_element, destroy_result, resolved_future, result_ref,
+};
 use crate::ffi::common::deliver_value;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::common::topic_partition::{
@@ -30,7 +32,7 @@ use crate::ffi::common::topic_partition::{
 };
 use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
-use crate::ffi::util::{box_map, into_c_string};
+use crate::ffi::util::{box_map, into_c_string, kafka_Map_t, map_entries};
 
 // ---------------------------------------------------------------------------
 // ListOffsetsResult.ListOffsetsResultInfo
@@ -314,6 +316,56 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_all(
     // the handle holds only owned data and no thread-bound state, so it may be freed from any
     // thread and read from several at once, as `handle_future` requires.
     unsafe { h.ctx.handle_future(&h.result.all(), infos_map, destroy_map_element) }
+}
+
+/// `new ListOffsetsResult(Map<TopicPartition, KafkaFuture<ListOffsetsResultInfo>> futures)`:
+/// `futures` is a borrowed map of `const kafka_common_TopicPartition_t *` to
+/// `const kafka_common_KafkaFuture_t *` whose value is a `kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t *`,
+/// copied during the call; the caller keeps ownership of the map, its keys,
+/// its futures and their values. Only futures that are already complete
+/// (`kafka_common_KafkaFuture_is_done`) can be copied across the boundary:
+/// the outcome of each is taken as it stands, and a future still pending
+/// stands as one failed with the translation of `IllegalArgumentException`.
+/// Owned, freed with [`kafka_admin_ListOffsetsResult_destroy`].
+///
+/// # Safety
+///
+/// `futures` must be null or a valid map whose keys are valid topic-partition handles
+/// and whose values are valid future handles, each successful one's value a
+/// valid `kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t *`.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_new(
+    futures: *const kafka_Map_t,
+) -> *mut kafka_admin_ListOffsetsResult_t {
+    // SAFETY: Per this function's `# Safety`, `futures` is null or a valid map handle. The borrow
+    // of its entries ends with this call, while the caller keeps the map alive, and nothing mutates
+    // it meanwhile: `kafka_Map_put`, its one mutator, requires that no other call uses the map at
+    // the same time. That is what `map_entries` requires.
+    let futures = unsafe { map_entries(futures) }
+        .iter()
+        .map(|&(k, v)| {
+            (
+                // SAFETY: Per this function's `# Safety`, the key `k` is a valid topic-partition
+                // handle, which the caller keeps alive for this call, as `topic_partition_ref`
+                // requires; the borrow ends with the `clone`.
+                unsafe { topic_partition_ref(k as *const kafka_common_TopicPartition_t) }.clone(),
+                // SAFETY: Per this function's `# Safety`, the value `v` is a valid future handle,
+                // alive for this call, and a successful one's value a valid `kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t *`
+                // borrowed from it, as `list_offsets_result_info_ref` requires; the value is cloned, so the borrow
+                // ends within the call, as `resolved_future` requires.
+                unsafe {
+                    resolved_future(v as *const kafka_common_KafkaFuture_t, "ListOffsetsResult", |value| {
+                        list_offsets_result_info_ref(
+                            value as *const kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t,
+                        )
+                        .clone()
+                    })
+                },
+            )
+        })
+        .collect();
+    box_result(ListOffsetsResult::new(futures), &FutureCtx::detached())
 }
 
 /// Frees a result handle; null is a no-op. Futures already taken from it

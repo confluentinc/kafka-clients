@@ -5690,7 +5690,7 @@ static PyObject* py_MockConsumer_last_poll_timeout(PyObject* self, PyObject* arg
 // which is valid until the mock handle itself is destroyed.
 typedef struct {
     kafka_admin_Admin_t* owned;              // AdminClient_create result, or NULL
-    kafka_admin_MockAdminClient_t* mock;     // MockAdminClient_create result, or NULL
+    kafka_admin_MockAdminClient_t* mock;     // MockAdminClient_Builder_build result, or NULL
     const kafka_admin_Admin_t* admin;        // `owned` or the mock's __as_Admin view
     PyObject* notify_cb;                     // Python notify hook, or NULL
 } AdminHandle;
@@ -5790,8 +5790,20 @@ static PyObject* py_Admin_MockAdminClient_new(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
     int num_brokers;
     if (!PyArg_ParseTuple(args, "i", &num_brokers)) return NULL;
+    // MockAdminClient.create().numBrokers(num_brokers).build(); the builder is
+    // freed whether or not a step failed.
+    kafka_admin_MockAdminClient_Builder_t* builder = NULL;
     kafka_admin_MockAdminClient_t* mock = NULL;
-    kafka_common_Error_t* err = (mock = kafka_admin_MockAdminClient_create((int32_t)num_brokers, &ffi_err), ffi_take(&ffi_err));
+    kafka_common_Error_t* err = (builder = kafka_admin_MockAdminClient_create_err(&ffi_err), ffi_take(&ffi_err));
+    if (err == NULL) {
+        err = (kafka_admin_MockAdminClient_Builder_set_num_brokers(builder, (int32_t)num_brokers, &ffi_err), ffi_take(&ffi_err));
+    }
+    if (err == NULL) {
+        err = (mock = kafka_admin_MockAdminClient_Builder_build(builder, &ffi_err), ffi_take(&ffi_err));
+    }
+    if (builder != NULL) {
+        ffi_unraisable((kafka_admin_MockAdminClient_Builder_destroy_err(builder, &ffi_err), ffi_take(&ffi_err)));
+    }
     if (err != NULL) {
         const char* msg = NULL;
         if (!ffi_raise((msg = kafka_common_Error_message_err(err, &ffi_err), ffi_take(&ffi_err)))) {

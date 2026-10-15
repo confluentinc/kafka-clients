@@ -75,12 +75,18 @@ typedef struct {
     callback_pump_t pump;
 } fixture_t;
 
-/* `MockAdminClient.create(numBrokers)`: brokers `localhost:1000 + id`,
- * controller 0, default replication factor `min(numBrokers, 3)`. */
+/* `MockAdminClient.create().numBrokers(numBrokers).build()`: brokers
+ * `localhost:1000 + id`, controller 0, default replication factor
+ * `min(numBrokers, 3)`. The builder is freed once the mock is built. */
 static void fixture_init(fixture_t *f, int32_t num_brokers) {
     kafka_common_Error_t *err = NULL;
-    f->mock = kafka_admin_MockAdminClient_create(num_brokers, &err);
-    TEST_ASSERT_NULL(err);
+    kafka_admin_MockAdminClient_Builder_t *builder = kafka_admin_MockAdminClient_create();
+    TEST_ASSERT_NOT_NULL(builder);
+    TEST_ASSERT_EQUAL_PTR(builder, kafka_admin_MockAdminClient_Builder_set_num_brokers(builder, num_brokers, &err));
+    assert_ok(err, "Builder_set_num_brokers");
+    f->mock = kafka_admin_MockAdminClient_Builder_build(builder, &err);
+    assert_ok(err, "Builder_build");
+    kafka_admin_MockAdminClient_Builder_destroy(builder);
     TEST_ASSERT_NOT_NULL(f->mock);
     f->admin = kafka_admin_MockAdminClient__as_Admin(f->mock);
     TEST_ASSERT_NOT_NULL(f->admin);
@@ -339,20 +345,630 @@ static void test_mock_admin_create_close_destroy(void) {
 /* Java's MockAdminClient.Builder throws for a zero broker count (build()
  * reads brokers.get(0), MockAdminClient.java:212) and for a negative one
  * (numBrokers calls brokers.subList(0, n), :154), rather than yielding a mock.
- * The C constructor stores the Builder's error, with the JDK's message, in
- * out_err and returns NULL. */
+ * The C setter and `_build` store the Builder's error, with the JDK's
+ * message, in out_err and return NULL. */
 static void test_mock_admin_rejects_zero_brokers(void) {
     kafka_common_Error_t *err = NULL;
-    kafka_admin_MockAdminClient_t *mock = kafka_admin_MockAdminClient_create(0, &err);
+    kafka_admin_MockAdminClient_Builder_t *builder = kafka_admin_MockAdminClient_create();
+    TEST_ASSERT_EQUAL_PTR(builder, kafka_admin_MockAdminClient_Builder_set_num_brokers(builder, 0, &err));
+    assert_ok(err, "Builder_set_num_brokers(0)");
+    kafka_admin_MockAdminClient_t *mock = kafka_admin_MockAdminClient_Builder_build(builder, &err);
     TEST_ASSERT_NULL(mock);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
     assert_error_message(err, "Index 0 out of bounds for length 0");
     err = NULL;
-    mock = kafka_admin_MockAdminClient_create(-1, &err);
-    TEST_ASSERT_NULL(mock);
+    TEST_ASSERT_NULL(kafka_admin_MockAdminClient_Builder_set_num_brokers(builder, -1, &err));
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
     assert_error_message(err, "fromIndex(0) > toIndex(-1)");
+    kafka_admin_MockAdminClient_Builder_destroy(builder);
+    kafka_admin_MockAdminClient_Builder_destroy(NULL);
+}
+
+// ---------------------------------------------------------------------------
+// MockAdminClient.Builder and the MockAdminClient constructors
+// ---------------------------------------------------------------------------
+
+static int16_t finalized_level(fixture_t *f, const char *feature); /* defined with the features tests */
+
+/* Builds `builder` into a fixture; the builder stays the caller's. */
+static void fixture_from_builder(fixture_t *f, kafka_admin_MockAdminClient_Builder_t *builder) {
+    kafka_common_Error_t *err = NULL;
+    f->mock = kafka_admin_MockAdminClient_Builder_build(builder, &err);
+    assert_ok(err, "Builder_build");
+    TEST_ASSERT_NOT_NULL(f->mock);
+    f->admin = kafka_admin_MockAdminClient__as_Admin(f->mock);
+    admin_callback_pump_install(&f->pump, f->admin);
+}
+
+/* Wraps an owned mock into a fixture. */
+static void fixture_from_mock(fixture_t *f, kafka_admin_MockAdminClient_t *mock) {
+    TEST_ASSERT_NOT_NULL(mock);
+    f->mock = mock;
+    f->admin = kafka_admin_MockAdminClient__as_Admin(f->mock);
+    admin_callback_pump_install(&f->pump, f->admin);
+}
+
+/* `describeCluster()`: asserts the cluster id (unless NULL), the broker
+ * count and the controller id. */
+static void assert_cluster(fixture_t *f, const char *cluster_id, int32_t brokers, int32_t controller_id) {
+    kafka_admin_DescribeClusterResult_t *result = kafka_admin_Admin_describe_cluster(f->admin);
+    TEST_ASSERT_NOT_NULL(result);
+    if (cluster_id != NULL) {
+        kafka_common_KafkaFuture_t *id = kafka_admin_DescribeClusterResult_cluster_id(result);
+        TEST_ASSERT_EQUAL_STRING(cluster_id, (const char *)get_ok(id));
+        kafka_common_KafkaFuture_destroy(id);
+    }
+    kafka_common_KafkaFuture_t *nodes = kafka_admin_DescribeClusterResult_nodes(result);
+    TEST_ASSERT_EQUAL_INT32(brokers, kafka_List_size((const kafka_List_t *)get_ok(nodes)));
+    kafka_common_KafkaFuture_destroy(nodes);
+    kafka_common_KafkaFuture_t *controller = kafka_admin_DescribeClusterResult_controller(result);
+    TEST_ASSERT_EQUAL_INT32(controller_id, kafka_common_Node_id((const kafka_common_Node_t *)get_ok(controller)));
+    kafka_common_KafkaFuture_destroy(controller);
+    kafka_admin_DescribeClusterResult_destroy(result);
+}
+
+/* `MockAdminClient.create()` and `new MockAdminClient.Builder()` are the same
+ * builder: one broker `localhost:1000` (id 0), the controller, and Java's
+ * DEFAULT_CLUSTER_ID. */
+static void test_mock_admin_builder_defaults(void) {
+    kafka_admin_MockAdminClient_Builder_t *builders[2] = {
+        kafka_admin_MockAdminClient_create(),
+        kafka_admin_MockAdminClient_Builder_new(),
+    };
+    for (int i = 0; i < 2; i++) {
+        TEST_ASSERT_NOT_NULL(builders[i]);
+        fixture_t f;
+        fixture_from_builder(&f, builders[i]);
+        assert_cluster(&f, "I4ZmrWqfT2e-upky_4fdPA", 1, 0);
+        kafka_admin_DescribeClusterResult_t *result = kafka_admin_Admin_describe_cluster(f.admin);
+        kafka_common_KafkaFuture_t *nodes = kafka_admin_DescribeClusterResult_nodes(result);
+        const kafka_common_Node_t *node = (const kafka_common_Node_t *)kafka_List_get((const kafka_List_t *)get_ok(nodes), 0);
+        TEST_ASSERT_EQUAL_STRING("localhost", kafka_common_Node_host(node));
+        TEST_ASSERT_EQUAL_INT32(1000, kafka_common_Node_port(node));
+        kafka_common_KafkaFuture_destroy(nodes);
+        kafka_admin_DescribeClusterResult_destroy(result);
+        fixture_destroy(&f);
+        kafka_admin_MockAdminClient_Builder_destroy(builders[i]);
+    }
+}
+
+/* `clusterId`, `numBrokers` and `controller(index)`: the fluent setters that
+ * can fail hand back the same builder. */
+static void test_mock_admin_builder_cluster_shape_setters(void) {
+    kafka_common_Error_t *err = NULL;
+    kafka_admin_MockAdminClient_Builder_t *builder = kafka_admin_MockAdminClient_Builder_new();
+    kafka_admin_MockAdminClient_Builder_set_cluster_id(builder, "my-cluster");
+    TEST_ASSERT_EQUAL_PTR(builder, kafka_admin_MockAdminClient_Builder_set_num_brokers(builder, 3, &err));
+    assert_ok(err, "Builder_set_num_brokers");
+    TEST_ASSERT_EQUAL_PTR(builder, kafka_admin_MockAdminClient_Builder_set_controller(builder, 2, &err));
+    assert_ok(err, "Builder_set_controller");
+    fixture_t f;
+    fixture_from_builder(&f, builder);
+    kafka_admin_MockAdminClient_Builder_destroy(builder);
+    assert_cluster(&f, "my-cluster", 3, 2);
+    /* Grown brokers are `localhost:1000 + id`. */
+    kafka_admin_DescribeClusterResult_t *result = kafka_admin_Admin_describe_cluster(f.admin);
+    kafka_common_KafkaFuture_t *nodes = kafka_admin_DescribeClusterResult_nodes(result);
+    const kafka_List_t *list = (const kafka_List_t *)get_ok(nodes);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_common_Node_id((const kafka_common_Node_t *)kafka_List_get(list, 2)));
+    TEST_ASSERT_EQUAL_INT32(1002, kafka_common_Node_port((const kafka_common_Node_t *)kafka_List_get(list, 2)));
+    kafka_common_KafkaFuture_destroy(nodes);
+    kafka_admin_DescribeClusterResult_destroy(result);
+    fixture_destroy(&f);
+}
+
+/* `brokers(List<Node>)` replaces the broker list; the nodes are copied, so the
+ * caller frees its own right after. */
+static void test_mock_admin_builder_set_brokers(void) {
+    kafka_common_Error_t *err = NULL;
+    kafka_common_Node_t *b7 = kafka_common_Node_with_rack(7, "broker-7", 9097, "rack-a");
+    kafka_common_Node_t *b9 = kafka_common_Node_new(9, "broker-9", 9099);
+    kafka_List_t *brokers = kafka_List_new();
+    kafka_List_add(brokers, b7);
+    kafka_List_add(brokers, b9);
+    kafka_admin_MockAdminClient_Builder_t *builder = kafka_admin_MockAdminClient_create();
+    TEST_ASSERT_EQUAL_PTR(builder, kafka_admin_MockAdminClient_Builder_set_brokers(builder, brokers, &err));
+    assert_ok(err, "Builder_set_brokers");
+    TEST_ASSERT_EQUAL_PTR(builder, kafka_admin_MockAdminClient_Builder_set_controller(builder, 1, &err));
+    assert_ok(err, "Builder_set_controller");
+    kafka_List_destroy(brokers);
+    kafka_common_Node_destroy(b7);
+    kafka_common_Node_destroy(b9);
+    fixture_t f;
+    fixture_from_builder(&f, builder);
+    kafka_admin_MockAdminClient_Builder_destroy(builder);
+    assert_cluster(&f, NULL, 2, 9);
+    kafka_admin_DescribeClusterResult_t *result = kafka_admin_Admin_describe_cluster(f.admin);
+    kafka_common_KafkaFuture_t *nodes = kafka_admin_DescribeClusterResult_nodes(result);
+    const kafka_common_Node_t *first = (const kafka_common_Node_t *)kafka_List_get((const kafka_List_t *)get_ok(nodes), 0);
+    TEST_ASSERT_EQUAL_INT32(7, kafka_common_Node_id(first));
+    TEST_ASSERT_EQUAL_STRING("broker-7", kafka_common_Node_host(first));
+    TEST_ASSERT_EQUAL_INT32(9097, kafka_common_Node_port(first));
+    TEST_ASSERT_EQUAL_STRING("rack-a", kafka_common_Node_rack(first));
+    kafka_common_KafkaFuture_destroy(nodes);
+    kafka_admin_DescribeClusterResult_destroy(result);
+    fixture_destroy(&f);
+}
+
+/* `defaultPartitions` and `defaultReplicationFactor` are what `createTopics`
+ * applies to a topic that gives neither. */
+static void test_mock_admin_builder_topic_defaults(void) {
+    kafka_common_Error_t *err = NULL;
+    kafka_admin_MockAdminClient_Builder_t *builder = kafka_admin_MockAdminClient_create();
+    TEST_ASSERT_EQUAL_PTR(builder, kafka_admin_MockAdminClient_Builder_set_num_brokers(builder, 3, &err));
+    assert_ok(err, "Builder_set_num_brokers");
+    kafka_admin_MockAdminClient_Builder_set_default_partitions(builder, 4);
+    kafka_admin_MockAdminClient_Builder_set_default_replication_factor(builder, 2);
+    fixture_t f;
+    fixture_from_builder(&f, builder);
+    kafka_admin_MockAdminClient_Builder_destroy(builder);
+    kafka_admin_NewTopic_t *topic = kafka_admin_NewTopic_with_num_partitions_replication_factor("defaults", -1, -1);
+    kafka_List_t *topics = kafka_List_new();
+    kafka_List_add(topics, topic);
+    kafka_admin_CreateTopicsResult_t *result = kafka_admin_Admin_create_topics(f.admin, topics);
+    kafka_common_KafkaFuture_t *partitions = kafka_admin_CreateTopicsResult_num_partitions(result, "defaults");
+    TEST_ASSERT_EQUAL_INT32(4, *(const int32_t *)get_ok(partitions));
+    kafka_common_KafkaFuture_destroy(partitions);
+    kafka_common_KafkaFuture_t *rf = kafka_admin_CreateTopicsResult_replication_factor(result, "defaults");
+    TEST_ASSERT_EQUAL_INT32(2, *(const int32_t *)get_ok(rf));
+    kafka_common_KafkaFuture_destroy(rf);
+    kafka_admin_CreateTopicsResult_destroy(result);
+    kafka_List_destroy(topics);
+    kafka_admin_NewTopic_destroy(topic);
+    fixture_destroy(&f);
+}
+
+/* `usingRaftController(true)` makes `unregisterController` succeed, where the
+ * default (false) fails it with UnsupportedVersionException(""). */
+static void test_mock_admin_builder_raft_controller(void) {
+    for (int8_t raft = 0; raft <= 1; raft++) {
+        kafka_admin_MockAdminClient_Builder_t *builder = kafka_admin_MockAdminClient_create();
+        kafka_admin_MockAdminClient_Builder_set_using_raft_controller(builder, raft);
+        fixture_t f;
+        fixture_from_builder(&f, builder);
+        kafka_admin_MockAdminClient_Builder_destroy(builder);
+        kafka_admin_UnregisterControllerResult_t *result = kafka_admin_Admin_unregister_controller(f.admin, 1);
+        kafka_common_KafkaFuture_t *all = kafka_admin_UnregisterControllerResult_all(result);
+        if (raft) {
+            TEST_ASSERT_NULL(get_ok(all));
+        } else {
+            kafka_common_Error_t *err = get_err(all);
+            TEST_ASSERT_TRUE(kafka_common_Error_is_unsupported_version_error(err));
+            assert_error_message(err, "");
+        }
+        kafka_common_KafkaFuture_destroy(all);
+        kafka_admin_UnregisterControllerResult_destroy(result);
+        fixture_destroy(&f);
+    }
+}
+
+/* `featureLevels`, `minSupportedFeatureLevels` and
+ * `maxSupportedFeatureLevels` are what `describeFeatures` reports; the maps
+ * are copied, so the caller frees them right after. */
+static void test_mock_admin_builder_feature_levels(void) {
+    int16_t level = 17, min = 14, max = 21;
+    kafka_Map_t *levels = kafka_Map_new();
+    kafka_Map_t *mins = kafka_Map_new();
+    kafka_Map_t *maxs = kafka_Map_new();
+    kafka_Map_put(levels, (void *)"metadata.version", &level);
+    kafka_Map_put(mins, (void *)"metadata.version", &min);
+    kafka_Map_put(maxs, (void *)"metadata.version", &max);
+    kafka_admin_MockAdminClient_Builder_t *builder = kafka_admin_MockAdminClient_create();
+    kafka_admin_MockAdminClient_Builder_set_feature_levels(builder, levels);
+    kafka_admin_MockAdminClient_Builder_set_min_supported_feature_levels(builder, mins);
+    kafka_admin_MockAdminClient_Builder_set_max_supported_feature_levels(builder, maxs);
+    kafka_Map_destroy(levels);
+    kafka_Map_destroy(mins);
+    kafka_Map_destroy(maxs);
+    fixture_t f;
+    fixture_from_builder(&f, builder);
+    kafka_admin_MockAdminClient_Builder_destroy(builder);
+    TEST_ASSERT_EQUAL_INT16(17, finalized_level(&f, "metadata.version"));
+    kafka_admin_DescribeFeaturesResult_t *result = kafka_admin_Admin_describe_features(f.admin);
+    kafka_common_KafkaFuture_t *future = kafka_admin_DescribeFeaturesResult_feature_metadata(result);
+    const kafka_admin_FeatureMetadata_t *metadata = (const kafka_admin_FeatureMetadata_t *)get_ok(future);
+    kafka_Map_t *supported = kafka_admin_FeatureMetadata_supported_features(metadata);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_Map_size(supported));
+    const kafka_admin_SupportedVersionRange_t *range =
+        (const kafka_admin_SupportedVersionRange_t *)kafka_Map_get(supported, (void *)"metadata.version");
+    TEST_ASSERT_NOT_NULL(range);
+    TEST_ASSERT_EQUAL_INT16(14, kafka_admin_SupportedVersionRange_min_version(range));
+    TEST_ASSERT_EQUAL_INT16(21, kafka_admin_SupportedVersionRange_max_version(range));
+    kafka_Map_destroy(supported);
+    kafka_common_KafkaFuture_destroy(future);
+    kafka_admin_DescribeFeaturesResult_destroy(result);
+    fixture_destroy(&f);
+}
+
+/* `brokerLogDirs`: a topic's replicas land in the first log dir of their
+ * leader, which `describeLogDirs` reports. */
+static void test_mock_admin_builder_broker_log_dirs(void) {
+    kafka_List_t *dirs0 = kafka_List_new();
+    kafka_List_add(dirs0, (void *)"/data/b0-first");
+    kafka_List_add(dirs0, (void *)"/data/b0-second");
+    kafka_List_t *log_dirs = kafka_List_new();
+    kafka_List_add(log_dirs, dirs0);
+    kafka_admin_MockAdminClient_Builder_t *builder = kafka_admin_MockAdminClient_create();
+    kafka_admin_MockAdminClient_Builder_set_broker_log_dirs(builder, log_dirs);
+    kafka_List_destroy(log_dirs);
+    kafka_List_destroy(dirs0);
+    fixture_t f;
+    fixture_from_builder(&f, builder);
+    kafka_admin_MockAdminClient_Builder_destroy(builder);
+    create_one(&f, "ld-builder", 1, 1);
+    int32_t broker0 = 0;
+    kafka_List_t *brokers = kafka_List_new();
+    kafka_List_add(brokers, &broker0);
+    kafka_admin_DescribeLogDirsResult_t *result = kafka_admin_Admin_describe_log_dirs(f.admin, brokers);
+    kafka_Map_t *descriptions = kafka_admin_DescribeLogDirsResult_descriptions(result);
+    const kafka_Map_t *dirs = (const kafka_Map_t *)get_ok(future_for(descriptions, &broker0));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_Map_size(dirs));
+    TEST_ASSERT_EQUAL_STRING("/data/b0-first", (const char *)kafka_Map_key(dirs, 0));
+    kafka_Map_destroy(descriptions);
+    kafka_admin_DescribeLogDirsResult_destroy(result);
+    kafka_List_destroy(brokers);
+    fixture_destroy(&f);
+}
+
+/* `defaultGroupConfigs` is overlaid onto every group's configs, under the
+ * group's own values. */
+static void test_mock_admin_builder_default_group_configs(void) {
+    kafka_Map_t *defaults = kafka_Map_new();
+    kafka_Map_put(defaults, (void *)"consumer.session.timeout.ms", (void *)"30000");
+    kafka_Map_put(defaults, (void *)"consumer.heartbeat.interval.ms", (void *)"4000");
+    kafka_admin_MockAdminClient_Builder_t *builder = kafka_admin_MockAdminClient_create();
+    kafka_admin_MockAdminClient_Builder_set_default_group_configs(builder, defaults);
+    kafka_Map_destroy(defaults);
+    fixture_t f;
+    fixture_from_builder(&f, builder);
+    kafka_admin_MockAdminClient_Builder_destroy(builder);
+    seed_group(&f, "g1"); /* consumer.session.timeout.ms = 45000 */
+    kafka_common_config_ConfigResource_t *group =
+        kafka_common_config_ConfigResource_new(kafka_common_config_ConfigResource_Type_group(), "g1");
+    kafka_List_t *resources = kafka_List_new();
+    kafka_List_add(resources, group);
+    kafka_admin_DescribeConfigsResult_t *result = kafka_admin_Admin_describe_configs(f.admin, resources);
+    kafka_Map_t *values = kafka_admin_DescribeConfigsResult_values(result);
+    const kafka_admin_Config_t *config = (const kafka_admin_Config_t *)get_ok(future_for(values, group));
+    const kafka_admin_ConfigEntry_t *session = kafka_admin_Config_get(config, "consumer.session.timeout.ms");
+    TEST_ASSERT_NOT_NULL(session);
+    TEST_ASSERT_EQUAL_STRING("45000", kafka_admin_ConfigEntry_value(session));
+    const kafka_admin_ConfigEntry_t *heartbeat = kafka_admin_Config_get(config, "consumer.heartbeat.interval.ms");
+    TEST_ASSERT_NOT_NULL(heartbeat);
+    TEST_ASSERT_EQUAL_STRING("4000", kafka_admin_ConfigEntry_value(heartbeat));
+    kafka_Map_destroy(values);
+    kafka_admin_DescribeConfigsResult_destroy(result);
+    kafka_List_destroy(resources);
+    kafka_common_config_ConfigResource_destroy(group);
+    fixture_destroy(&f);
+}
+
+/* A failing setter returns NULL with Java's message and leaves the builder as
+ * it was, as Java throws before it assigns: the builder still builds the
+ * three-broker mock it described before the failed calls. */
+static void test_mock_admin_builder_failures_leave_it_unchanged(void) {
+    kafka_common_Error_t *err = NULL;
+    kafka_admin_MockAdminClient_Builder_t *builder = kafka_admin_MockAdminClient_create();
+    TEST_ASSERT_EQUAL_PTR(builder, kafka_admin_MockAdminClient_Builder_set_num_brokers(builder, 3, &err));
+    assert_ok(err, "Builder_set_num_brokers");
+
+    TEST_ASSERT_NULL(kafka_admin_MockAdminClient_Builder_set_num_brokers(builder, -2, &err));
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
+    assert_error_message(err, "fromIndex(0) > toIndex(-2)");
+    err = NULL;
+    TEST_ASSERT_NULL(kafka_admin_MockAdminClient_Builder_set_controller(builder, 5, &err));
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
+    assert_error_message(err, "Index 5 out of bounds for length 3");
+    err = NULL;
+    TEST_ASSERT_NULL(kafka_admin_MockAdminClient_Builder_set_controller(builder, -1, &err));
+    assert_error_message(err, "Index -1 out of bounds for length 3");
+    err = NULL;
+
+    /* Shrinking past a shorter log-dir list fails in Java's subList. */
+    kafka_List_t *dirs = kafka_List_new();
+    kafka_List_add(dirs, (void *)"/only");
+    kafka_List_t *log_dirs = kafka_List_new();
+    kafka_List_add(log_dirs, dirs);
+    kafka_admin_MockAdminClient_Builder_t *short_dirs = kafka_admin_MockAdminClient_create();
+    TEST_ASSERT_EQUAL_PTR(short_dirs, kafka_admin_MockAdminClient_Builder_set_num_brokers(short_dirs, 3, &err));
+    assert_ok(err, "Builder_set_num_brokers");
+    kafka_admin_MockAdminClient_Builder_set_broker_log_dirs(short_dirs, log_dirs);
+    TEST_ASSERT_NULL(kafka_admin_MockAdminClient_Builder_set_num_brokers(short_dirs, 2, &err));
+    assert_error_message(err, "toIndex = 2");
+    err = NULL;
+    kafka_common_Node_t *node = kafka_common_Node_new(0, "localhost", 1000);
+    kafka_common_Node_t *other = kafka_common_Node_new(1, "localhost", 1001);
+    kafka_List_t *two = kafka_List_new();
+    kafka_List_add(two, node);
+    kafka_List_add(two, other);
+    TEST_ASSERT_NULL(kafka_admin_MockAdminClient_Builder_set_brokers(short_dirs, two, &err));
+    assert_error_message(err, "toIndex = 2");
+    err = NULL;
+    kafka_admin_MockAdminClient_Builder_destroy(short_dirs);
+    kafka_List_destroy(two);
+    kafka_common_Node_destroy(node);
+    kafka_common_Node_destroy(other);
+    kafka_List_destroy(log_dirs);
+    kafka_List_destroy(dirs);
+
+    fixture_t f;
+    fixture_from_builder(&f, builder);
+    kafka_admin_MockAdminClient_Builder_destroy(builder);
+    assert_cluster(&f, NULL, 3, 0);
+    fixture_destroy(&f);
+}
+
+/* `controller(index)` reads `brokers.get(index)` at the call: shrinking the
+ * broker list afterwards leaves a controller that `build()` rejects with
+ * Java's message. */
+static void test_mock_admin_builder_controller_dropped_from_brokers(void) {
+    kafka_common_Error_t *err = NULL;
+    kafka_admin_MockAdminClient_Builder_t *builder = kafka_admin_MockAdminClient_create();
+    TEST_ASSERT_EQUAL_PTR(builder, kafka_admin_MockAdminClient_Builder_set_num_brokers(builder, 3, &err));
+    assert_ok(err, "Builder_set_num_brokers");
+    TEST_ASSERT_EQUAL_PTR(builder, kafka_admin_MockAdminClient_Builder_set_controller(builder, 2, &err));
+    assert_ok(err, "Builder_set_controller");
+    TEST_ASSERT_EQUAL_PTR(builder, kafka_admin_MockAdminClient_Builder_set_num_brokers(builder, 1, &err));
+    assert_ok(err, "Builder_set_num_brokers");
+    TEST_ASSERT_NULL(kafka_admin_MockAdminClient_Builder_build(builder, &err));
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
+    assert_error_message(err, "The controller node must be in the list of brokers");
+    kafka_admin_MockAdminClient_Builder_destroy(builder);
+}
+
+/* `build()` leaves the builder usable, as Java's does: two builds give two
+ * independent mocks, and a later setter affects only later builds. */
+static void test_mock_admin_builder_builds_again(void) {
+    kafka_common_Error_t *err = NULL;
+    kafka_admin_MockAdminClient_Builder_t *builder = kafka_admin_MockAdminClient_create();
+    fixture_t first;
+    fixture_from_builder(&first, builder);
+    TEST_ASSERT_EQUAL_PTR(builder, kafka_admin_MockAdminClient_Builder_set_num_brokers(builder, 2, &err));
+    assert_ok(err, "Builder_set_num_brokers");
+    fixture_t second;
+    fixture_from_builder(&second, builder);
+    kafka_admin_MockAdminClient_Builder_destroy(builder);
+    create_one(&first, "only-in-first", 1, 1);
+    assert_cluster(&first, NULL, 1, 0);
+    assert_cluster(&second, NULL, 2, 0);
+    kafka_admin_ListTopicsResult_t *result = kafka_admin_Admin_list_topics(second.admin);
+    kafka_common_KafkaFuture_t *names = kafka_admin_ListTopicsResult_names(result);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_List_size((const kafka_List_t *)get_ok(names)));
+    kafka_common_KafkaFuture_destroy(names);
+    kafka_admin_ListTopicsResult_destroy(result);
+    fixture_destroy(&first);
+    fixture_destroy(&second);
+}
+
+/* `new MockAdminClient()`: one broker, `Node.noNode()`, also the controller. */
+static void test_mock_admin_new(void) {
+    fixture_t f;
+    fixture_from_mock(&f, kafka_admin_MockAdminClient_new());
+    assert_cluster(&f, "I4ZmrWqfT2e-upky_4fdPA", 1, -1);
+    kafka_admin_DescribeClusterResult_t *result = kafka_admin_Admin_describe_cluster(f.admin);
+    kafka_common_KafkaFuture_t *controller = kafka_admin_DescribeClusterResult_controller(result);
+    const kafka_common_Node_t *node = (const kafka_common_Node_t *)get_ok(controller);
+    TEST_ASSERT_TRUE(kafka_common_Node_is_empty(node));
+    TEST_ASSERT_EQUAL_STRING("", kafka_common_Node_host(node));
+    TEST_ASSERT_EQUAL_INT32(-1, kafka_common_Node_port(node));
+    kafka_common_KafkaFuture_destroy(controller);
+    kafka_admin_DescribeClusterResult_destroy(result);
+    fixture_destroy(&f);
+}
+
+/* `new MockAdminClient(brokers, controller)`; a controller outside `brokers`
+ * fails with Java's message. The nodes are copied. */
+static void test_mock_admin_with_brokers_controller(void) {
+    kafka_common_Error_t *err = NULL;
+    kafka_common_Node_t *b0 = kafka_common_Node_new(0, "h0", 9090);
+    kafka_common_Node_t *b1 = kafka_common_Node_new(1, "h1", 9091);
+    kafka_common_Node_t *stranger = kafka_common_Node_new(5, "h5", 9095);
+    kafka_List_t *brokers = kafka_List_new();
+    kafka_List_add(brokers, b0);
+    kafka_List_add(brokers, b1);
+    kafka_admin_MockAdminClient_t *mock = kafka_admin_MockAdminClient_with_brokers_controller(brokers, b1, &err);
+    assert_ok(err, "MockAdminClient_with_brokers_controller");
+    TEST_ASSERT_NULL(kafka_admin_MockAdminClient_with_brokers_controller(brokers, stranger, &err));
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
+    assert_error_message(err, "The controller node must be in the list of brokers");
+    kafka_List_destroy(brokers);
+    kafka_common_Node_destroy(b0);
+    kafka_common_Node_destroy(b1);
+    kafka_common_Node_destroy(stranger);
+    fixture_t f;
+    fixture_from_mock(&f, mock);
+    assert_cluster(&f, "I4ZmrWqfT2e-upky_4fdPA", 2, 1);
+    fixture_destroy(&f);
+}
+
+/* `setController(Node)` moves the controller to another broker; a node that
+ * is not one of the brokers fails with Java's message and changes nothing. */
+static void test_mock_admin_set_controller(void) {
+    kafka_common_Error_t *err = NULL;
+    fixture_t f;
+    fixture_init(&f, 3);
+    kafka_common_Node_t *b2 = kafka_common_Node_new(2, "localhost", 1002);
+    kafka_admin_MockAdminClient_set_controller(f.mock, b2, &err);
+    assert_ok(err, "MockAdminClient_set_controller");
+    kafka_common_Node_destroy(b2);
+    assert_cluster(&f, NULL, 3, 2);
+    kafka_common_Node_t *stranger = kafka_common_Node_new(9, "localhost", 1009);
+    kafka_admin_MockAdminClient_set_controller(f.mock, stranger, &err);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
+    assert_error_message(err, "The controller node must be in the list of brokers");
+    kafka_common_Node_destroy(stranger);
+    assert_cluster(&f, NULL, 3, 2);
+    fixture_destroy(&f);
+}
+
+/* `listTopics().names()`: the number of topics listed. */
+static int32_t listed_topics(fixture_t *f) {
+    kafka_admin_ListTopicsResult_t *result = kafka_admin_Admin_list_topics(f->admin);
+    kafka_common_KafkaFuture_t *names = kafka_admin_ListTopicsResult_names(result);
+    int32_t count = kafka_List_size((const kafka_List_t *)get_ok(names));
+    kafka_common_KafkaFuture_destroy(names);
+    kafka_admin_ListTopicsResult_destroy(result);
+    return count;
+}
+
+/* `setFetchesRemainingUntilVisible(topic, n)` hides the topic from the next n
+ * fetches; an unknown topic fails with Java's message. */
+static void test_mock_admin_set_fetches_remaining_until_visible(void) {
+    kafka_common_Error_t *err = NULL;
+    fixture_t f;
+    fixture_init(&f, 1);
+    create_one(&f, "hidden", 1, 1);
+    kafka_admin_MockAdminClient_set_fetches_remaining_until_visible(f.mock, "hidden", 2, &err);
+    assert_ok(err, "MockAdminClient_set_fetches_remaining_until_visible");
+    TEST_ASSERT_EQUAL_INT32(0, listed_topics(&f));
+    TEST_ASSERT_EQUAL_INT32(0, listed_topics(&f));
+    TEST_ASSERT_EQUAL_INT32(1, listed_topics(&f));
+    kafka_admin_MockAdminClient_set_fetches_remaining_until_visible(f.mock, "nope", 1, &err);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
+    assert_error_message(err, "No such topic as nope");
+    fixture_destroy(&f);
+}
+
+// ---------------------------------------------------------------------------
+// *Result constructors from a map of futures
+// ---------------------------------------------------------------------------
+
+/* `new DeleteRecordsResult(futures)`: each complete future's outcome is
+ * copied, value or error, so the caller frees its map, keys, futures and
+ * values right after. */
+static void test_mock_admin_delete_records_result_new(void) {
+    kafka_common_TopicPartition_t *ok_tp = tp_new("t", 0);
+    kafka_common_TopicPartition_t *bad_tp = tp_new("t", 1);
+    kafka_admin_DeletedRecords_t *deleted = kafka_admin_DeletedRecords_new(42);
+    kafka_common_KafkaFuture_t *ok = kafka_common_KafkaFuture_completed_future(deleted, NULL);
+    kafka_common_KafkaFuture_t *bad =
+        kafka_common_KafkaFuture_completed_future(NULL, kafka_common_Error_local_illegal_state("gone"));
+    kafka_Map_t *futures = kafka_Map_new();
+    kafka_Map_put(futures, ok_tp, ok);
+    kafka_Map_put(futures, bad_tp, bad);
+    kafka_admin_DeleteRecordsResult_t *result = kafka_admin_DeleteRecordsResult_new(futures);
+    kafka_Map_destroy(futures);
+    kafka_common_KafkaFuture_destroy(ok);
+    kafka_common_KafkaFuture_destroy(bad);
+    kafka_admin_DeletedRecords_destroy(deleted);
+    TEST_ASSERT_NOT_NULL(result);
+    kafka_Map_t *watermarks = kafka_admin_DeleteRecordsResult_low_watermarks(result);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_Map_size(watermarks));
+    const kafka_admin_DeletedRecords_t *copied = (const kafka_admin_DeletedRecords_t *)get_ok(future_for(watermarks, ok_tp));
+    TEST_ASSERT_EQUAL_INT64(42, kafka_admin_DeletedRecords_low_watermark(copied));
+    kafka_common_Error_t *err = get_err(future_for(watermarks, bad_tp));
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_state_error(err));
+    assert_error_message(err, "gone");
+    kafka_Map_destroy(watermarks);
+    expect_fails_with(kafka_admin_DeleteRecordsResult_all(result), "gone");
+    kafka_admin_DeleteRecordsResult_destroy(result);
+    kafka_common_TopicPartition_destroy(ok_tp);
+    kafka_common_TopicPartition_destroy(bad_tp);
+
+    /* An empty map: `all()` succeeds. */
+    kafka_Map_t *empty = kafka_Map_new();
+    result = kafka_admin_DeleteRecordsResult_new(empty);
+    kafka_Map_destroy(empty);
+    expect_void_ok(kafka_admin_DeleteRecordsResult_all(result));
+    kafka_admin_DeleteRecordsResult_destroy(result);
+}
+
+/* `new ListOffsetsResult(futures)`. */
+static void test_mock_admin_list_offsets_result_new(void) {
+    kafka_common_Error_t *err = NULL;
+    kafka_common_TopicPartition_t *tp = tp_new("lo", 3);
+    kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t *info =
+        kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_new(100, 1234, 7);
+    kafka_common_KafkaFuture_t *future = kafka_common_KafkaFuture_completed_future(info, NULL);
+    kafka_Map_t *futures = kafka_Map_new();
+    kafka_Map_put(futures, tp, future);
+    kafka_admin_ListOffsetsResult_t *result = kafka_admin_ListOffsetsResult_new(futures);
+    kafka_Map_destroy(futures);
+    kafka_common_KafkaFuture_destroy(future);
+    kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_destroy(info);
+    TEST_ASSERT_NOT_NULL(result);
+    kafka_common_KafkaFuture_t *partition = kafka_admin_ListOffsetsResult_partition_result(result, tp, &err);
+    assert_ok(err, "ListOffsetsResult_partition_result");
+    const kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t *copied =
+        (const kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t *)get_ok(partition);
+    TEST_ASSERT_EQUAL_INT64(100, kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_offset(copied));
+    TEST_ASSERT_EQUAL_INT64(1234, kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_timestamp(copied));
+    TEST_ASSERT_EQUAL_INT32(7, kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_leader_epoch(copied));
+    kafka_common_KafkaFuture_destroy(partition);
+    kafka_common_KafkaFuture_t *all = kafka_admin_ListOffsetsResult_all(result);
+    const kafka_Map_t *all_map = (const kafka_Map_t *)get_ok(all);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_Map_size(all_map));
+    kafka_common_KafkaFuture_destroy(all);
+    kafka_admin_ListOffsetsResult_destroy(result);
+    kafka_common_TopicPartition_destroy(tp);
+}
+
+/* `new DescribeConsumerGroupsResult(futures)`, keyed by group id. */
+static void test_mock_admin_describe_consumer_groups_result_new(void) {
+    kafka_admin_ConsumerGroupDescription_t *description = kafka_admin_ConsumerGroupDescription_new(
+        "cg", 0, NULL, "uniform", kafka_common_GroupType_consumer(), kafka_common_GroupState_stable(), NULL, NULL, 3,
+        4);
+    TEST_ASSERT_NOT_NULL(description);
+    kafka_common_KafkaFuture_t *ok = kafka_common_KafkaFuture_completed_future(description, NULL);
+    kafka_common_KafkaFuture_t *bad =
+        kafka_common_KafkaFuture_completed_future(NULL, kafka_common_Error_group_authorization("denied"));
+    kafka_Map_t *futures = kafka_Map_new();
+    kafka_Map_put(futures, (void *)"cg", ok);
+    kafka_Map_put(futures, (void *)"denied", bad);
+    kafka_admin_DescribeConsumerGroupsResult_t *result = kafka_admin_DescribeConsumerGroupsResult_new(futures);
+    kafka_Map_destroy(futures);
+    kafka_common_KafkaFuture_destroy(ok);
+    kafka_common_KafkaFuture_destroy(bad);
+    kafka_admin_ConsumerGroupDescription_destroy(description);
+    TEST_ASSERT_NOT_NULL(result);
+    kafka_Map_t *groups = kafka_admin_DescribeConsumerGroupsResult_described_groups(result);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_Map_size(groups));
+    const kafka_admin_ConsumerGroupDescription_t *copied =
+        (const kafka_admin_ConsumerGroupDescription_t *)get_ok(future_for(groups, "cg"));
+    TEST_ASSERT_EQUAL_STRING("cg", kafka_admin_ConsumerGroupDescription_group_id(copied));
+    TEST_ASSERT_EQUAL_STRING("uniform", kafka_admin_ConsumerGroupDescription_partition_assignor(copied));
+    TEST_ASSERT_EQUAL_INT32(3, kafka_admin_ConsumerGroupDescription_group_epoch(copied));
+    TEST_ASSERT_EQUAL_INT32(4, kafka_admin_ConsumerGroupDescription_target_assignment_epoch(copied));
+    kafka_common_Error_t *err = get_err(future_for(groups, "denied"));
+    TEST_ASSERT_TRUE(kafka_common_Error_is_group_authorization_error(err));
+    kafka_common_Error_destroy(err);
+    kafka_Map_destroy(groups);
+    kafka_common_KafkaFuture_t *all = kafka_admin_DescribeConsumerGroupsResult_all(result);
+    err = get_err(all);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_group_authorization_error(err));
+    kafka_common_Error_destroy(err);
+    kafka_common_KafkaFuture_destroy(all);
+    kafka_admin_DescribeConsumerGroupsResult_destroy(result);
+}
+
+/* `new DescribeClassicGroupsResult(futures)`, keyed by group id. */
+static void test_mock_admin_describe_classic_groups_result_new(void) {
+    kafka_admin_ClassicGroupDescription_t *description = kafka_admin_ClassicGroupDescription_new(
+        "classic", "consumer", "range", NULL, kafka_common_ClassicGroupState_stable(), NULL, NULL);
+    TEST_ASSERT_NOT_NULL(description);
+    kafka_common_KafkaFuture_t *future = kafka_common_KafkaFuture_completed_future(description, NULL);
+    kafka_Map_t *futures = kafka_Map_new();
+    kafka_Map_put(futures, (void *)"classic", future);
+    kafka_admin_DescribeClassicGroupsResult_t *result = kafka_admin_DescribeClassicGroupsResult_new(futures);
+    kafka_Map_destroy(futures);
+    kafka_common_KafkaFuture_destroy(future);
+    kafka_admin_ClassicGroupDescription_destroy(description);
+    TEST_ASSERT_NOT_NULL(result);
+    kafka_Map_t *groups = kafka_admin_DescribeClassicGroupsResult_described_groups(result);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_Map_size(groups));
+    const kafka_admin_ClassicGroupDescription_t *copied =
+        (const kafka_admin_ClassicGroupDescription_t *)get_ok(future_for(groups, "classic"));
+    TEST_ASSERT_EQUAL_STRING("classic", kafka_admin_ClassicGroupDescription_group_id(copied));
+    TEST_ASSERT_EQUAL_STRING("consumer", kafka_admin_ClassicGroupDescription_protocol(copied));
+    TEST_ASSERT_EQUAL_STRING("range", kafka_admin_ClassicGroupDescription_protocol_data(copied));
+    TEST_ASSERT_TRUE(kafka_admin_ClassicGroupDescription_state(copied) == kafka_common_ClassicGroupState_stable());
+    kafka_Map_destroy(groups);
+    kafka_common_KafkaFuture_t *all = kafka_admin_DescribeClassicGroupsResult_all(result);
+    const kafka_Map_t *all_map = (const kafka_Map_t *)get_ok(all);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_Map_size(all_map));
+    kafka_common_KafkaFuture_destroy(all);
+    kafka_admin_DescribeClassicGroupsResult_destroy(result);
 }
 
 typedef struct {
@@ -4547,6 +5163,25 @@ int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_mock_admin_create_close_destroy);
     RUN_TEST(test_mock_admin_rejects_zero_brokers);
+    RUN_TEST(test_mock_admin_builder_defaults);
+    RUN_TEST(test_mock_admin_builder_cluster_shape_setters);
+    RUN_TEST(test_mock_admin_builder_set_brokers);
+    RUN_TEST(test_mock_admin_builder_topic_defaults);
+    RUN_TEST(test_mock_admin_builder_raft_controller);
+    RUN_TEST(test_mock_admin_builder_feature_levels);
+    RUN_TEST(test_mock_admin_builder_broker_log_dirs);
+    RUN_TEST(test_mock_admin_builder_default_group_configs);
+    RUN_TEST(test_mock_admin_builder_failures_leave_it_unchanged);
+    RUN_TEST(test_mock_admin_builder_controller_dropped_from_brokers);
+    RUN_TEST(test_mock_admin_builder_builds_again);
+    RUN_TEST(test_mock_admin_new);
+    RUN_TEST(test_mock_admin_with_brokers_controller);
+    RUN_TEST(test_mock_admin_set_controller);
+    RUN_TEST(test_mock_admin_set_fetches_remaining_until_visible);
+    RUN_TEST(test_mock_admin_delete_records_result_new);
+    RUN_TEST(test_mock_admin_list_offsets_result_new);
+    RUN_TEST(test_mock_admin_describe_consumer_groups_result_new);
+    RUN_TEST(test_mock_admin_describe_classic_groups_result_new);
     RUN_TEST(test_mock_admin_close_async);
     RUN_TEST(test_mock_admin_destroy_runs_pending_close_callback);
     RUN_TEST(test_admin_client_config_lifecycle);

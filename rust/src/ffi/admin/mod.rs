@@ -19,8 +19,10 @@
 //! `kafka_admin_Admin_t` is the `Admin` trait: one invoker per method,
 //! taking the interface handle first. `kafka_admin_AdminClient_create`
 //! returns an owned `Admin_t` (Rust's `Box<dyn Admin>`), freed with
-//! `kafka_admin_Admin_destroy`; `kafka_admin_MockAdminClient_create` returns
-//! the class handle [`kafka_admin_MockAdminClient_t`], freed with its own
+//! `kafka_admin_Admin_destroy`; the `MockAdminClient` constructors
+//! (`kafka_admin_MockAdminClient_new`, `_with_brokers_controller` and
+//! `kafka_admin_MockAdminClient_Builder_build`) return the class handle
+//! [`kafka_admin_MockAdminClient_t`], freed with its own
 //! `_destroy` and reached as an `Admin` through
 //! `kafka_admin_MockAdminClient__as_Admin`, a borrowed view valid until the
 //! class handle is destroyed and never passed to `Admin_destroy`
@@ -93,11 +95,12 @@ use crate::common::{Error, KafkaFuture};
 use crate::ffi::callback_queue::{CallbackJob, CallbackQueue, SendPtr};
 use crate::ffi::common::{
     catch_task_panic, deliver_panic_opaque, in_tokio_runtime, init_default_logger, spawn_callback_task, spawn_teardown,
+    take_error,
 };
 use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::{
-    FfiFuture, FfiValue, block_on, box_future, kafka_common_KafkaFuture_destroy, kafka_common_KafkaFuture_t,
-    map_future, map_future_handle, map_void_future,
+    FfiFuture, FfiValue, block_on, box_future, kafka_common_KafkaFuture_destroy, kafka_common_KafkaFuture_get,
+    kafka_common_KafkaFuture_is_done, kafka_common_KafkaFuture_t, map_future, map_future_handle, map_void_future,
 };
 use crate::ffi::util::{
     ElementDestroy, KeyEq, box_map, box_string_keyed_map, destroy_string_element, into_c_string, kafka_List_destroy,
@@ -318,35 +321,48 @@ impl AdminClassHandle {
         Self::build(|| make().map(|admin| (Arc::from(admin), None)))
     }
 
-    /// Builds a `MockAdminClient` with `make` and wraps it like [`Self::new`],
-    /// keeping the concrete client for the mock's inherent methods.
-    pub(crate) fn new_mock(make: impl FnOnce() -> Result<MockAdminClient, Error>) -> Result<Box<Self>, Error> {
-        Self::build(|| {
-            let mock = Arc::new(make()?);
-            Ok((Arc::clone(&mock) as Arc<dyn Admin>, Some(mock)))
-        })
+    /// Wraps an already built `MockAdminClient` like [`Self::new`], keeping
+    /// the concrete client for the mock's inherent methods. Infallible: the
+    /// mock spawns nothing, so it needs no runtime context to be built and
+    /// only the wrapping is left.
+    pub(crate) fn from_mock(mock: MockAdminClient) -> Box<Self> {
+        let mock = Arc::new(mock);
+        Self::assemble(Self::runtime(), Arc::clone(&mock) as Arc<dyn Admin>, Some(mock))
     }
 
     fn build(
         make: impl FnOnce() -> Result<(Arc<dyn Admin>, Option<Arc<MockAdminClient>>), Error>,
     ) -> Result<Box<Self>, Error> {
-        init_default_logger();
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .thread_name("kafka-admin-ffi")
-            .build()
-            .expect("tokio runtime");
+        let runtime = Self::runtime();
         let (admin, mock) = {
             let _enter = runtime.enter();
             make()?
         };
+        Ok(Self::assemble(runtime, admin, mock))
+    }
+
+    /// The fresh multi-thread runtime every class handle owns.
+    fn runtime() -> tokio::runtime::Runtime {
+        init_default_logger();
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_name("kafka-admin-ffi")
+            .build()
+            .expect("tokio runtime")
+    }
+
+    fn assemble(
+        runtime: tokio::runtime::Runtime,
+        admin: Arc<dyn Admin>,
+        mock: Option<Arc<MockAdminClient>>,
+    ) -> Box<Self> {
         let client = Arc::new(Client {
             admin,
             runtime: runtime.handle().clone(),
             queue: Arc::new(CallbackQueue::new()),
             tasks: Mutex::new(Vec::new()),
         });
-        Ok(Box::new(Self { client, runtime, mock }))
+        Box::new(Self { client, runtime, mock })
     }
 
     /// The `Admin` view of this handle (see the module docs).
@@ -354,7 +370,7 @@ impl AdminClassHandle {
         &self.client as *const Arc<Client> as *const kafka_admin_Admin_t
     }
 
-    /// The concrete mock, when this handle was built by [`Self::new_mock`].
+    /// The concrete mock, when this handle was built by [`Self::from_mock`].
     pub(crate) fn mock(&self) -> Option<&MockAdminClient> {
         self.mock.as_deref()
     }
@@ -625,6 +641,46 @@ pub(crate) unsafe fn destroy_list_element(element: *mut c_void) {
     unsafe { kafka_List_destroy(element as *mut kafka_List_t) }
 }
 
+/// The Rust `KafkaFuture<T>` standing for a C future that is already
+/// complete, for a `*Result` constructor taking a map of futures (Java's
+/// `new XxxResult(Map<K, KafkaFuture<V>>)`): its outcome is copied, the value
+/// through `value_of`, which receives the future's value pointer. A future
+/// that is not yet complete yields one failed with the translation of
+/// `IllegalArgumentException`, "The futures passed to `class` must already be
+/// complete": a C future without a client can only be complete
+/// (`kafka_future.rs`'s module docs), and copying a pending one would lose its
+/// completion.
+///
+/// # Safety
+///
+/// `future` must be a valid future handle, alive for this call; `value_of`
+/// must be sound for the value of a successful `future`, which stays borrowed
+/// from it for the call.
+pub(crate) unsafe fn resolved_future<T: Clone + Send + Sync + 'static>(
+    future: *const kafka_common_KafkaFuture_t,
+    class: &str,
+    value_of: impl FnOnce(*mut c_void) -> T,
+) -> KafkaFuture<T> {
+    // SAFETY: Per this function's `# Safety`, `future` is a valid future handle, as
+    // `kafka_common_KafkaFuture_is_done` requires; the borrow lasts for this call.
+    if unsafe { kafka_common_KafkaFuture_is_done(future) } == 0 {
+        return KafkaFuture::completed_future(Err(Error::local_illegal_argument(format!(
+            "The futures passed to {class} must already be complete"
+        ))));
+    }
+    let mut error = std::ptr::null_mut();
+    // SAFETY: Per this function's `# Safety`, `future` is a valid future handle, and `&mut error`
+    // points at a local null, so it is a valid slot, as `kafka_common_KafkaFuture_get` requires.
+    let value = unsafe { kafka_common_KafkaFuture_get(future, &mut error) };
+    // SAFETY: `error` is null or the owned error handle `kafka_common_KafkaFuture_get` just
+    // returned, not yet destroyed, as `take_error` requires; nothing uses it afterwards.
+    let result = match unsafe { take_error(error) } {
+        Some(error) => Err(error),
+        None => Ok(value_of(value)),
+    };
+    KafkaFuture::completed_future(result)
+}
+
 /// Frees a `kafka_Map_t *` element of an owned container or future.
 ///
 /// # Safety
@@ -872,8 +928,10 @@ mod tests {
         kafka_admin_ListTopicsResult_destroy, kafka_admin_ListTopicsResult_names,
     };
     use crate::ffi::admin::mock_admin_client::{
-        kafka_admin_MockAdminClient__as_Admin, kafka_admin_MockAdminClient_create, kafka_admin_MockAdminClient_destroy,
-        kafka_admin_MockAdminClient_set_using_raft_controller,
+        kafka_admin_MockAdminClient__as_Admin, kafka_admin_MockAdminClient_Builder_build,
+        kafka_admin_MockAdminClient_Builder_destroy, kafka_admin_MockAdminClient_create,
+        kafka_admin_MockAdminClient_destroy, kafka_admin_MockAdminClient_set_using_raft_controller,
+        kafka_admin_MockAdminClient_t,
     };
     use crate::ffi::admin::options::unregister_controller_options::{
         kafka_admin_UnregisterControllerOptions_destroy, kafka_admin_UnregisterControllerOptions_new,
@@ -900,6 +958,23 @@ mod tests {
     use crate::ffi::util::{kafka_Map_destroy, kafka_Map_new, kafka_Map_put};
     use std::sync::Mutex;
 
+    /// A one-broker mock, built as a C caller builds one: `create()`, then
+    /// `Builder_build`, then the builder freed.
+    ///
+    /// # Safety
+    ///
+    /// `err` must point at null.
+    unsafe fn built_mock(err: &mut *mut kafka_common_Error_t) -> *mut kafka_admin_MockAdminClient_t {
+        let builder = kafka_admin_MockAdminClient_create();
+        // SAFETY: Test code: `builder` is the live handle `create` just returned and `err` points at
+        // null, per this function's `# Safety`; the builder is freed once, after its last use.
+        unsafe {
+            let mock = kafka_admin_MockAdminClient_Builder_build(builder, err);
+            kafka_admin_MockAdminClient_Builder_destroy(builder);
+            mock
+        }
+    }
+
     /// A `close` `_cb` whose body panics before handing its completion over
     /// still fires `cb` once, queued: the callback carries no error, so the
     /// caller gets its `opaque` back and the panic is only logged.
@@ -909,7 +984,7 @@ mod tests {
         // destroyed below.
         unsafe {
             let mut err = std::ptr::null_mut();
-            let mock = kafka_admin_MockAdminClient_create(1, &mut err);
+            let mock = built_mock(&mut err);
             assert!(err.is_null());
             let admin = kafka_admin_MockAdminClient__as_Admin(mock);
 
@@ -942,7 +1017,7 @@ mod tests {
         // future, options and error handle is owned and destroyed once, after its last use.
         unsafe {
             let mut err = std::ptr::null_mut();
-            let mock = kafka_admin_MockAdminClient_create(1, &mut err);
+            let mock = built_mock(&mut err);
             assert!(err.is_null());
             let admin = kafka_admin_MockAdminClient__as_Admin(mock);
 
@@ -1219,7 +1294,7 @@ mod tests {
         // destroyed, once, inside the runtime; `fired` outlives the completion it waits for.
         unsafe {
             let mut err = std::ptr::null_mut();
-            let mock = kafka_admin_MockAdminClient_create(1, &mut err);
+            let mock = built_mock(&mut err);
             assert!(err.is_null());
             kafka_admin_Admin_close_cb(kafka_admin_MockAdminClient__as_Admin(mock), complete_close, fired.as_opaque());
             let mock = mock as usize;
@@ -1232,6 +1307,42 @@ mod tests {
         unsafe extern "C" fn complete_close(opaque: *mut c_void) {
             // SAFETY: Test code: `opaque` is the `Fired` above, alive until it has waited.
             unsafe { on_fired(std::ptr::null_mut(), opaque) }
+        }
+    }
+
+    /// `resolved_future` copies a complete C future's outcome, value or error,
+    /// and stands a pending one as Java's `IllegalArgumentException`: the
+    /// `*Result` constructors that take a map of futures rely on it.
+    #[test]
+    fn resolved_future_copies_a_complete_outcome_and_rejects_a_pending_one() {
+        use crate::common::internals::KafkaFutureImpl;
+        use crate::ffi::kafka_future::{box_future, map_future};
+        let value = box_future(map_future(&KafkaFuture::completed_future(Ok(7i64))), None, None);
+        let failed = box_future(
+            map_future(&KafkaFuture::<i64>::completed_future(Err(Error::local_illegal_state("broken")))),
+            None,
+            None,
+        );
+        let pending_impl = KafkaFutureImpl::<i64>::new();
+        let pending = box_future(map_future(&pending_impl.future()), None, None);
+        let runtime = tokio::runtime::Builder::new_current_thread().build().expect("runtime");
+        // SAFETY: Test code: each handle is a fresh `box_future` handle, alive until it is destroyed
+        // once below; a successful one's value is the boxed `i64` `map_future` delivers, read while
+        // its handle is alive.
+        unsafe {
+            let copied = resolved_future(value, "TestResult", |v| *(v as *const i64));
+            assert_eq!(runtime.block_on(copied.get()).expect("copied value"), 7);
+            let copied = resolved_future(failed, "TestResult", |v| *(v as *const i64));
+            let err = runtime.block_on(copied.get()).unwrap_err();
+            assert!(err.is_local_illegal_state_error());
+            assert_eq!(err.message(), "broken");
+            let copied = resolved_future(pending, "TestResult", |v| *(v as *const i64));
+            let err = runtime.block_on(copied.get()).unwrap_err();
+            assert!(err.is_local_illegal_argument_error());
+            assert_eq!(err.message(), "The futures passed to TestResult must already be complete");
+            kafka_common_KafkaFuture_destroy(value);
+            kafka_common_KafkaFuture_destroy(failed);
+            kafka_common_KafkaFuture_destroy(pending);
         }
     }
 }

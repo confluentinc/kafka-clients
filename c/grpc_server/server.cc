@@ -2880,7 +2880,13 @@ class AdminServiceImpl final : public AdminService::Service {
     if (selects_mock(req->config())) {
       const int32_t num_brokers = req->has_num_brokers() ? req->num_brokers() : 1;
       kafka_common_Error_t* err = nullptr;
-      entry.mock = kafka_admin_MockAdminClient_create(num_brokers, &err);
+      // MockAdminClient.create().numBrokers(n).build(); the builder is freed
+      // whether or not a step failed.
+      kafka_admin_MockAdminClient_Builder_t* builder = kafka_admin_MockAdminClient_create();
+      if (kafka_admin_MockAdminClient_Builder_set_num_brokers(builder, num_brokers, &err) != nullptr) {
+        entry.mock = kafka_admin_MockAdminClient_Builder_build(builder, &err);
+      }
+      kafka_admin_MockAdminClient_Builder_destroy(builder);
       if (err != nullptr) {
         fill_proto_error(resp->mutable_error(), err);
         return grpc::Status::OK;

@@ -18,14 +18,17 @@ use std::ffi::c_void;
 
 use crate::admin::{DeleteRecordsResult, DeletedRecords};
 use crate::common::{KafkaFuture, TopicPartition};
-use crate::ffi::admin::deleted_records::{box_deleted_records, destroy_deleted_records_element};
-use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_result, result_ref};
+use crate::ffi::admin::deleted_records::{
+    box_deleted_records, deleted_records_ref, destroy_deleted_records_element, kafka_admin_DeletedRecords_t,
+};
+use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_result, resolved_future, result_ref};
 use crate::ffi::common::topic_partition::{
     box_topic_partition, kafka_common_TopicPartition_destroy, kafka_common_TopicPartition_t, topic_partition_key_eq,
+    topic_partition_ref,
 };
 use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
-use crate::ffi::util::kafka_Map_t;
+use crate::ffi::util::{kafka_Map_t, map_entries};
 
 /// Opaque handle to a [`DeleteRecordsResult`], owned by the caller and
 /// freed with [`kafka_admin_DeleteRecordsResult_destroy`].
@@ -123,6 +126,53 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_all(
     // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     h.ctx.void_future(&h.result.all())
+}
+
+/// `new DeleteRecordsResult(Map<TopicPartition, KafkaFuture<DeletedRecords>> futures)`:
+/// `futures` is a borrowed map of `const kafka_common_TopicPartition_t *` to
+/// `const kafka_common_KafkaFuture_t *` whose value is a `kafka_admin_DeletedRecords_t *`,
+/// copied during the call; the caller keeps ownership of the map, its keys,
+/// its futures and their values. Only futures that are already complete
+/// (`kafka_common_KafkaFuture_is_done`) can be copied across the boundary:
+/// the outcome of each is taken as it stands, and a future still pending
+/// stands as one failed with the translation of `IllegalArgumentException`.
+/// Owned, freed with [`kafka_admin_DeleteRecordsResult_destroy`].
+///
+/// # Safety
+///
+/// `futures` must be null or a valid map whose keys are valid topic-partition handles
+/// and whose values are valid future handles, each successful one's value a
+/// valid `kafka_admin_DeletedRecords_t *`.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_new(
+    futures: *const kafka_Map_t,
+) -> *mut kafka_admin_DeleteRecordsResult_t {
+    // SAFETY: Per this function's `# Safety`, `futures` is null or a valid map handle. The borrow
+    // of its entries ends with this call, while the caller keeps the map alive, and nothing mutates
+    // it meanwhile: `kafka_Map_put`, its one mutator, requires that no other call uses the map at
+    // the same time. That is what `map_entries` requires.
+    let futures = unsafe { map_entries(futures) }
+        .iter()
+        .map(|&(k, v)| {
+            (
+                // SAFETY: Per this function's `# Safety`, the key `k` is a valid topic-partition
+                // handle, which the caller keeps alive for this call, as `topic_partition_ref`
+                // requires; the borrow ends with the `clone`.
+                unsafe { topic_partition_ref(k as *const kafka_common_TopicPartition_t) }.clone(),
+                // SAFETY: Per this function's `# Safety`, the value `v` is a valid future handle,
+                // alive for this call, and a successful one's value a valid `kafka_admin_DeletedRecords_t *`
+                // borrowed from it, as `deleted_records_ref` requires; the value is copied, so the borrow
+                // ends within the call, as `resolved_future` requires.
+                unsafe {
+                    resolved_future(v as *const kafka_common_KafkaFuture_t, "DeleteRecordsResult", |value| {
+                        *deleted_records_ref(value as *const kafka_admin_DeletedRecords_t)
+                    })
+                },
+            )
+        })
+        .collect();
+    box_result(DeleteRecordsResult::new(futures), &FutureCtx::detached())
 }
 
 /// Frees a result handle; null is a no-op. Maps and futures taken from the

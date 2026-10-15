@@ -15,16 +15,19 @@
 //! C bindings for `org.apache.kafka.clients.admin.DescribeClassicGroupsResult`.
 
 use std::collections::{BTreeMap, HashMap};
-use std::ffi::c_void;
+use std::ffi::{c_char, c_void};
 
 use crate::admin::{ClassicGroupDescription, DescribeClassicGroupsResult};
 use crate::ffi::admin::classic_group_description::{
-    box_classic_group_description, destroy_classic_group_description_element,
+    box_classic_group_description, classic_group_description_ref, destroy_classic_group_description_element,
+    kafka_admin_ClassicGroupDescription_t,
 };
-use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_map_element, destroy_result, result_ref};
+use crate::ffi::admin::{
+    FutureCtx, ResultHandle, box_result, destroy_map_element, destroy_result, resolved_future, result_ref,
+};
 use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
-use crate::ffi::util::{box_string_keyed_map, kafka_Map_t};
+use crate::ffi::util::{box_string_keyed_map, c_str_to_string, kafka_Map_t, map_entries};
 
 /// Opaque handle to a [`DescribeClassicGroupsResult`], owned by the caller
 /// and freed with [`kafka_admin_DescribeClassicGroupsResult_destroy`].
@@ -128,6 +131,53 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_all(
             destroy_map_element,
         )
     }
+}
+
+/// `new DescribeClassicGroupsResult(Map<String, KafkaFuture<ClassicGroupDescription>> futures)`:
+/// `futures` is a borrowed map of `const char *` group ids to
+/// `const kafka_common_KafkaFuture_t *` whose value is a `kafka_admin_ClassicGroupDescription_t *`,
+/// copied during the call; the caller keeps ownership of the map, its keys,
+/// its futures and their values. Only futures that are already complete
+/// (`kafka_common_KafkaFuture_is_done`) can be copied across the boundary:
+/// the outcome of each is taken as it stands, and a future still pending
+/// stands as one failed with the translation of `IllegalArgumentException`.
+/// Owned, freed with [`kafka_admin_DescribeClassicGroupsResult_destroy`].
+///
+/// # Safety
+///
+/// `futures` must be null or a valid map whose keys are valid NUL-terminated strings
+/// and whose values are valid future handles, each successful one's value a
+/// valid `kafka_admin_ClassicGroupDescription_t *`.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_new(
+    futures: *const kafka_Map_t,
+) -> *mut kafka_admin_DescribeClassicGroupsResult_t {
+    // SAFETY: Per this function's `# Safety`, `futures` is null or a valid map handle. The borrow
+    // of its entries ends with this call, while the caller keeps the map alive, and nothing mutates
+    // it meanwhile: `kafka_Map_put`, its one mutator, requires that no other call uses the map at
+    // the same time. That is what `map_entries` requires.
+    let futures = unsafe { map_entries(futures) }
+        .iter()
+        .map(|&(k, v)| {
+            (
+                // SAFETY: Per this function's `# Safety`, the key `k` is a valid NUL-terminated
+                // string, which the caller keeps alive for this call, as `c_str_to_string`
+                // requires; it is copied.
+                unsafe { c_str_to_string(k as *const c_char) },
+                // SAFETY: Per this function's `# Safety`, the value `v` is a valid future handle,
+                // alive for this call, and a successful one's value a valid `kafka_admin_ClassicGroupDescription_t *`
+                // borrowed from it, as `classic_group_description_ref` requires; the value is cloned, so the borrow
+                // ends within the call, as `resolved_future` requires.
+                unsafe {
+                    resolved_future(v as *const kafka_common_KafkaFuture_t, "DescribeClassicGroupsResult", |value| {
+                        classic_group_description_ref(value as *const kafka_admin_ClassicGroupDescription_t).clone()
+                    })
+                },
+            )
+        })
+        .collect();
+    box_result(DescribeClassicGroupsResult::new(futures), &FutureCtx::detached())
 }
 
 /// Frees a result handle; null is a no-op. Maps and futures taken from the
