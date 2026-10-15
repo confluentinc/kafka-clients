@@ -88,8 +88,9 @@ impl AdminClientConfig {
     pub const RETRY_BACKOFF_MS_CONFIG: &'static str = "retry.backoff.ms";
     /// `retry.backoff.max.ms`
     pub const RETRY_BACKOFF_MAX_MS_CONFIG: &'static str = "retry.backoff.max.ms";
-    /// `bootstrap.resolve.timeout.ms` (KIP-909). See
-    /// [`Self::bootstrap_resolve_timeout_ms`].
+    /// `bootstrap.resolve.timeout.ms` (KIP-909): `0` (the default) resolves
+    /// `bootstrap.servers` synchronously when the client is created; a
+    /// positive value resolves asynchronously, retrying for at most this long.
     pub const BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG: &'static str =
         CommonClientConfigs::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG;
     /// `reconnect.backoff.ms`
