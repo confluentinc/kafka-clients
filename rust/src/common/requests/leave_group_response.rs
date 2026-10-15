@@ -99,7 +99,7 @@ impl LeaveGroupResponse {
     /// first non-`NONE` member-level error, otherwise `NONE`.
     ///
     /// Mirrors Java's `LeaveGroupResponse.error()`.
-    #[doc(alias = "org.apache.kafka.common.requests.LeaveGroupResponse#getError")]
+    #[doc(alias = "org.apache.kafka.common.requests.LeaveGroupResponse#error")]
     pub fn error(&self) -> Errors {
         Self::get_error(self.top_level_error(), &self.data.members)
     }

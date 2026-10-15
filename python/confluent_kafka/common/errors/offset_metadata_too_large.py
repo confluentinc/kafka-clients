@@ -38,7 +38,7 @@ class OffsetMetadataTooLarge(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 12  # kafka_common_ErrorCode_OFFSET_METADATA_TOO_LARGE
+    _ffi_id: ClassVar[int] = 12  # kafka_common_Error_OFFSET_METADATA_TOO_LARGE
 
     def __init__(
         self,

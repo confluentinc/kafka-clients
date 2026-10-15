@@ -17,6 +17,8 @@
 
 use std::cmp::Ordering;
 
+use crate::common::Error;
+
 /// This class defines an immutable universally unique identifier (UUID).
 /// It represents a 128-bit value.
 ///
@@ -49,7 +51,7 @@ impl Uuid {
     }
 
     /// Creates a zero UUID (all bits are zero).
-    pub const fn zero() -> Self {
+    pub(crate) const fn zero() -> Self {
         Self::ZERO_UUID
     }
 
@@ -74,23 +76,28 @@ impl Uuid {
     }
 
     /// Returns the most significant 64 bits of this UUID.
-    pub const fn most_sig_bits(&self) -> u64 {
+    #[doc(alias = "org.apache.kafka.common.Uuid#getMostSignificantBits")]
+    pub const fn most_significant_bits(&self) -> u64 {
         self.most_sig_bits
     }
 
     /// Returns the least significant 64 bits of this UUID.
-    pub const fn least_sig_bits(&self) -> u64 {
+    #[doc(alias = "org.apache.kafka.common.Uuid#getLeastSignificantBits")]
+    pub const fn least_significant_bits(&self) -> u64 {
         self.least_sig_bits
     }
 
     /// Checks if this is the zero UUID (all bits are zero).
-    pub const fn is_zero(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) const fn is_zero(&self) -> bool {
         self.most_sig_bits == 0 && self.least_sig_bits == 0
     }
 
     /// Creates a UUID from a 16-byte array in big-endian order.
-    #[doc(alias = "org.apache.kafka.common.Uuid#Uuid")]
-    pub fn with_bytes(bytes: [u8; 16]) -> Self {
+    ///
+    /// Java has no such constructor (only `Uuid(long, long)`); this decodes
+    /// `fromString`'s bytes, so it is crate-private.
+    pub(crate) fn with_bytes(bytes: [u8; 16]) -> Self {
         let most_sig_bits = u64::from_be_bytes([
             bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
         ]);
@@ -101,7 +108,7 @@ impl Uuid {
     }
 
     /// Converts this UUID to a 16-byte array in big-endian order.
-    pub fn to_bytes(self) -> [u8; 16] {
+    pub(crate) fn to_bytes(self) -> [u8; 16] {
         let mut bytes = [0u8; 16];
         bytes[0..8].copy_from_slice(&self.most_sig_bits.to_be_bytes());
         bytes[8..16].copy_from_slice(&self.least_sig_bits.to_be_bytes());
@@ -110,24 +117,29 @@ impl Uuid {
 
     /// Creates a UUID based on a base64 URL encoded string (without padding).
     /// This matches the Java implementation's fromString() method.
+    ///
+    /// Java throws `IllegalArgumentException` for a string that is not a
+    /// base64 UUID; this returns the corresponding `LocalIllegalArgument`
+    /// error.
     #[doc(alias = "org.apache.kafka.common.Uuid#fromString")]
-    pub fn from_string(s: &str) -> Result<Self, String> {
+    pub fn from_string(s: &str) -> Result<Self, Error> {
         if s.len() > 24 {
-            return Err(format!(
+            return Err(Error::local_illegal_argument(format!(
                 "Input string with prefix `{}` is too long to be decoded as a base64 UUID",
                 &s[..24.min(s.len())]
-            ));
+            )));
         }
 
         // Decode base64 URL without padding
-        let decoded = base64_url_decode(s).map_err(|e| format!("Failed to decode base64 string: {}", e))?;
+        let decoded = base64_url_decode(s)
+            .map_err(|e| Error::local_illegal_argument(format!("Failed to decode base64 string: {}", e)))?;
 
         if decoded.len() != 16 {
-            return Err(format!(
+            return Err(Error::local_illegal_argument(format!(
                 "Input string `{}` decoded as {} bytes, which is not equal to the expected 16 bytes of a base64-encoded UUID",
                 s,
                 decoded.len()
-            ));
+            )));
         }
 
         let mut bytes = [0u8; 16];
@@ -137,7 +149,7 @@ impl Uuid {
 
     /// Returns a base64 URL encoded string (without padding) of the UUID.
     /// This matches the Java implementation's toString() method.
-    pub fn to_base64_string(self) -> String {
+    pub(crate) fn to_base64_string(self) -> String {
         let bytes = self.to_bytes();
         base64_url_encode(&bytes)
     }
@@ -259,8 +271,8 @@ mod tests {
     #[test]
     fn test_zero_uuid() {
         let uuid = Uuid::zero();
-        assert_eq!(uuid.most_sig_bits(), 0);
-        assert_eq!(uuid.least_sig_bits(), 0);
+        assert_eq!(uuid.most_significant_bits(), 0);
+        assert_eq!(uuid.least_significant_bits(), 0);
         assert!(uuid.is_zero());
         assert_eq!(uuid, Uuid::ZERO_UUID);
     }
@@ -268,16 +280,16 @@ mod tests {
     #[test]
     fn test_one_uuid() {
         let uuid = Uuid::ONE_UUID;
-        assert_eq!(uuid.most_sig_bits(), 0);
-        assert_eq!(uuid.least_sig_bits(), 1);
+        assert_eq!(uuid.most_significant_bits(), 0);
+        assert_eq!(uuid.least_significant_bits(), 1);
         assert!(!uuid.is_zero());
     }
 
     #[test]
     fn test_new_uuid() {
         let uuid = Uuid::new(0x0123456789ABCDEF, 0xFEDCBA9876543210);
-        assert_eq!(uuid.most_sig_bits(), 0x0123456789ABCDEF);
-        assert_eq!(uuid.least_sig_bits(), 0xFEDCBA9876543210);
+        assert_eq!(uuid.most_significant_bits(), 0x0123456789ABCDEF);
+        assert_eq!(uuid.least_significant_bits(), 0xFEDCBA9876543210);
         assert!(!uuid.is_zero());
     }
 
@@ -287,8 +299,8 @@ mod tests {
             0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10,
         ];
         let uuid = Uuid::with_bytes(bytes);
-        assert_eq!(uuid.most_sig_bits(), 0x0123456789ABCDEF);
-        assert_eq!(uuid.least_sig_bits(), 0xFEDCBA9876543210);
+        assert_eq!(uuid.most_significant_bits(), 0x0123456789ABCDEF);
+        assert_eq!(uuid.least_significant_bits(), 0xFEDCBA9876543210);
     }
 
     #[test]
@@ -454,13 +466,17 @@ mod tests {
     fn test_from_string_too_long() {
         let result = Uuid::from_string("AAAAAAAAAAAAAAAAAAAAAA_THIS_IS_TOO_LONG");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("too long"));
+        let error = result.unwrap_err();
+        assert!(error.is_local_illegal_argument_error());
+        assert!(error.to_string().contains("too long"));
     }
 
     #[test]
     fn test_from_string_invalid_length() {
         let result = Uuid::from_string("AAAA");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not equal to the expected 16 bytes"));
+        let error = result.unwrap_err();
+        assert!(error.is_local_illegal_argument_error());
+        assert!(error.to_string().contains("not equal to the expected 16 bytes"));
     }
 }

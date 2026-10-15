@@ -37,6 +37,7 @@ impl Default for RenewDelegationTokenOptions {
 impl RenewDelegationTokenOptions {
     /// Creates default options (default API timeout, server-default renew
     /// period).
+    #[doc(alias = "org.apache.kafka.clients.admin.RenewDelegationTokenOptions#RenewDelegationTokenOptions")]
     pub fn new() -> Self {
         Self::default()
     }
@@ -45,6 +46,7 @@ impl RenewDelegationTokenOptions {
     ///
     /// Mirrors `RenewDelegationTokenOptions.renewTimePeriodMs`.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.RenewDelegationTokenOptions#renewTimePeriodMs")]
     pub fn set_renew_time_period_ms(mut self, renew_time_period_ms: i64) -> Self {
         self.renew_time_period_ms = renew_time_period_ms;
         self
@@ -53,6 +55,7 @@ impl RenewDelegationTokenOptions {
     /// The renew time period in milliseconds.
     ///
     /// Mirrors `RenewDelegationTokenOptions.renewTimePeriodMs`.
+    #[doc(alias = "org.apache.kafka.clients.admin.RenewDelegationTokenOptions#renewTimePeriodMs")]
     pub fn renew_time_period_ms(&self) -> i64 {
         self.renew_time_period_ms
     }
@@ -60,6 +63,7 @@ impl RenewDelegationTokenOptions {
     /// Set the timeout in milliseconds for this operation, or `None` to use the
     /// default API timeout for the `AdminClient`.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
@@ -67,6 +71,7 @@ impl RenewDelegationTokenOptions {
 
     /// The timeout in milliseconds for this operation, or `None` if the default
     /// API timeout should be used.
+    #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }

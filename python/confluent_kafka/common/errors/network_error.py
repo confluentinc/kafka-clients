@@ -39,7 +39,7 @@ class NetworkError(InvalidMetadataError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 13  # kafka_common_ErrorCode_NETWORK_ERROR
+    _ffi_id: ClassVar[int] = 13  # kafka_common_Error_NETWORK_ERROR
 
     def __init__(
         self,

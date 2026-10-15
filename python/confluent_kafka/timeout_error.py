@@ -34,7 +34,7 @@ class TimeoutError(builtins.TimeoutError):
 
     __module__ = "confluent_kafka"
 
-    _ffi_id: ClassVar[int] = -5  # kafka_common_ErrorCode_LOCAL_TIMEOUT
+    _ffi_id: ClassVar[int] = -5  # kafka_common_Error_LOCAL_TIMEOUT
 
     def __init__(
         self,

@@ -38,7 +38,7 @@ class AuthorizerNotReadyError(RetriableError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = -8  # kafka_common_ErrorCode_AUTHORIZER_NOT_READY
+    _ffi_id: ClassVar[int] = -8  # kafka_common_Error_AUTHORIZER_NOT_READY
 
     def __init__(self) -> None:
         _throwable.init(self, None, None)

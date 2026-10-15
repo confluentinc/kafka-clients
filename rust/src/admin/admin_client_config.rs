@@ -35,7 +35,7 @@ use crate::{ClientDnsLookup, CommonClientConfigs};
 // the derive with a hand-written `Debug` that renders that map as its key set
 // only, as `ProducerConfig`'s `Debug` does: the map also holds keys this client
 // does not parse, and Java never prints a raw `originals` value.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 #[doc(alias = "org.apache.kafka.clients.admin.AdminClientConfig")]
 pub struct AdminClientConfig {
     bootstrap_servers: Vec<String>,
@@ -88,8 +88,9 @@ impl AdminClientConfig {
     pub const RETRY_BACKOFF_MS_CONFIG: &'static str = "retry.backoff.ms";
     /// `retry.backoff.max.ms`
     pub const RETRY_BACKOFF_MAX_MS_CONFIG: &'static str = "retry.backoff.max.ms";
-    /// `bootstrap.resolve.timeout.ms` (KIP-909). See
-    /// [`Self::bootstrap_resolve_timeout_ms`].
+    /// `bootstrap.resolve.timeout.ms` (KIP-909): `0` (the default) resolves
+    /// `bootstrap.servers` synchronously when the client is created; a
+    /// positive value resolves asynchronously, retrying for at most this long.
     pub const BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG: &'static str =
         CommonClientConfigs::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG;
     /// `reconnect.backoff.ms`
@@ -230,7 +231,7 @@ impl AdminClientConfig {
     }
 
     /// The `bootstrap.servers` list.
-    pub fn bootstrap_servers(&self) -> &[String] {
+    pub(crate) fn bootstrap_servers(&self) -> &[String] {
         &self.bootstrap_servers
     }
 
@@ -240,32 +241,32 @@ impl AdminClientConfig {
     }
 
     /// The `client.id`.
-    pub fn client_id(&self) -> &str {
+    pub(crate) fn client_id(&self) -> &str {
         &self.client_id
     }
 
     /// `request.timeout.ms`.
-    pub fn request_timeout_ms(&self) -> i32 {
+    pub(crate) fn request_timeout_ms(&self) -> i32 {
         self.request_timeout_ms
     }
 
     /// `default.api.timeout.ms`.
-    pub fn default_api_timeout_ms(&self) -> i32 {
+    pub(crate) fn default_api_timeout_ms(&self) -> i32 {
         self.default_api_timeout_ms
     }
 
     /// `retries`.
-    pub fn retries(&self) -> i32 {
+    pub(crate) fn retries(&self) -> i32 {
         self.retries
     }
 
     /// `retry.backoff.ms`.
-    pub fn retry_backoff_ms(&self) -> i64 {
+    pub(crate) fn retry_backoff_ms(&self) -> i64 {
         self.retry_backoff_ms
     }
 
     /// `retry.backoff.max.ms`.
-    pub fn retry_backoff_max_ms(&self) -> i64 {
+    pub(crate) fn retry_backoff_max_ms(&self) -> i64 {
         self.retry_backoff_max_ms
     }
 
@@ -279,32 +280,32 @@ impl AdminClientConfig {
     /// the client must then be closed and re-created. Setting a positive value
     /// enables an evolving feature whose compatibility may be broken in a minor
     /// release.
-    pub fn bootstrap_resolve_timeout_ms(&self) -> i64 {
+    pub(crate) fn bootstrap_resolve_timeout_ms(&self) -> i64 {
         self.bootstrap_resolve_timeout_ms
     }
 
     /// `reconnect.backoff.ms`.
-    pub fn reconnect_backoff_ms(&self) -> i64 {
+    pub(crate) fn reconnect_backoff_ms(&self) -> i64 {
         self.reconnect_backoff_ms
     }
 
     /// `reconnect.backoff.max.ms`.
-    pub fn reconnect_backoff_max_ms(&self) -> i64 {
+    pub(crate) fn reconnect_backoff_max_ms(&self) -> i64 {
         self.reconnect_backoff_max_ms
     }
 
     /// `connections.max.idle.ms`.
-    pub fn connections_max_idle_ms(&self) -> i64 {
+    pub(crate) fn connections_max_idle_ms(&self) -> i64 {
         self.connections_max_idle_ms
     }
 
     /// `metadata.max.age.ms`.
-    pub fn metadata_max_age_ms(&self) -> i64 {
+    pub(crate) fn metadata_max_age_ms(&self) -> i64 {
         self.metadata_max_age_ms
     }
 
     /// `socket.connection.setup.timeout.ms`.
-    pub fn socket_connection_setup_timeout_ms(&self) -> i64 {
+    pub(crate) fn socket_connection_setup_timeout_ms(&self) -> i64 {
         self.socket_connection_setup_timeout_ms
     }
 
@@ -324,17 +325,17 @@ impl AdminClientConfig {
     }
 
     /// `security.protocol`.
-    pub fn security_protocol(&self) -> SecurityProtocol {
+    pub(crate) fn security_protocol(&self) -> SecurityProtocol {
         self.security_protocol
     }
 
     /// SASL configuration (mechanism, JAAS config, credentials).
-    pub fn sasl_config(&self) -> &SaslConfigs {
+    pub(crate) fn sasl_config(&self) -> &SaslConfigs {
         &self.sasl_config
     }
 
     /// SSL/TLS configuration.
-    pub fn ssl_config(&self) -> &SslConfigs {
+    pub(crate) fn ssl_config(&self) -> &SslConfigs {
         &self.ssl_config
     }
 }

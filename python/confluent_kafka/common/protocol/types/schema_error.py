@@ -38,7 +38,7 @@ class SchemaError(KafkaError):
 
     __module__ = "confluent_kafka.common.protocol.types"
 
-    _ffi_id: ClassVar[int] = -14  # kafka_common_ErrorCode_SCHEMA
+    _ffi_id: ClassVar[int] = -14  # kafka_common_Error_SCHEMA
 
     def __init__(
         self,

@@ -34,7 +34,7 @@ class IneligibleReplicaError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 107  # kafka_common_ErrorCode_INELIGIBLE_REPLICA
+    _ffi_id: ClassVar[int] = 107  # kafka_common_Error_INELIGIBLE_REPLICA
 
     def __init__(
         self,

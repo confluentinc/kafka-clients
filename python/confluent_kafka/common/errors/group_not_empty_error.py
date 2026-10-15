@@ -34,7 +34,7 @@ class GroupNotEmptyError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 68  # kafka_common_ErrorCode_NON_EMPTY_GROUP
+    _ffi_id: ClassVar[int] = 68  # kafka_common_Error_NON_EMPTY_GROUP
 
     def __init__(
         self,

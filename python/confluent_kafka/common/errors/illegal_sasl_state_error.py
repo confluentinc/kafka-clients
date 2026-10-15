@@ -39,7 +39,7 @@ class IllegalSaslStateError(AuthenticationError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 34  # kafka_common_ErrorCode_ILLEGAL_SASL_STATE
+    _ffi_id: ClassVar[int] = 34  # kafka_common_Error_ILLEGAL_SASL_STATE
 
     def __init__(
         self,

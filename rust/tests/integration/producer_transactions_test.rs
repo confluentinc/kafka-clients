@@ -1103,7 +1103,9 @@ pub(crate) fn producer_record_with_expected_transaction_status(
     } else {
         ABORTED_VALUE
     };
-    headers.add_key_value(TRANSACTION_STATUS_KEY, Some(status)).expect("add header");
+    headers
+        .add_with_key_value(TRANSACTION_STATUS_KEY, Some(status))
+        .expect("add header");
     ProducerRecord::with_partition_key_headers(
         topic.to_string(),
         partition,
@@ -3066,7 +3068,7 @@ async fn test_transaction_after_transaction_id_expires_but_producer_id_remains()
     admin.close().await;
     producer.close().await.expect("producer close");
     consumer
-        .close_with_options(CloseOptions::new_timeout(Duration::from_secs(1)))
+        .close_with_options(CloseOptions::new_with_timeout(Duration::from_secs(1)))
         .await
         .expect("consumer close");
     ctx.cleanup().await;

@@ -52,6 +52,8 @@ Suggestions for changes are possible through the process highlighted in [agent-r
      **in case if the final names would collide**, use the Rust parameter type name instead of the parameter name to discriminate, only for the parameters with same name while continue using the parameter name for rest of parameters.
      In case the difference is **only** Optional use Rust's `Option` and a single method name
      - constructor translation from Java always uses `new`, not `from`. If there are parameters use `.with_<a>_<b>_<c>(a,b,c)`, not `.new_with_<a>_<b>_<c>(a,b,c)`
+     - a static factory method sharing its name with an instance method keeps the name on the instance one and becomes `new_with_<parameters>` if the corresponding `with_<parameters>` is also taken by an instance method: `CloseOptions.timeout(Duration)` beside the getter `timeout()` and `withTimeout()` -> `CloseOptions::new_with_timeout`
+     - a static NON-factory method sharing its name with an instance method becomes `do_<method_name>(_with_<parameters>)?`
      - if there a static method `from_<something>` that is translated from Java and a corresponding constructor `with_<something>` with same final signature, keep only the method `with_<something>`
      - if there are more than three parameters in the method name, add a dedicated non-exhaustive `Options` struct that is the only parameter to the method name with `_with_options` suffix. Also in case Java API makes some parameters of the intersection set optional in a later version, add this method with only the `options` parameter
      The `Options` struct must have a `OptionsBuilder` with a `new` parameterless constructor. All optional parameters have fluent setters in the builder. Finally the user calls `build` before passing the `Options` struct, there the different sets of mandatory parameters are validated and a `IllegalArgumentError` error is returned in case they weren't passed. Semantic validation is left to the method where the `Options` is passed.
@@ -72,42 +74,46 @@ Suggestions for changes are possible through the process highlighted in [agent-r
     - methods that are translated from Java methods must not be public if they're not public in Java implementation
     - package names must be compatible with Java: in case two classes with same name are added to the Java clients, they must not collide in the same Rust package
     - deprecated API MUST NOT be translated since the first major version of the client. Ensure this is not affecting the ability to implement later some large features that are not implemented at the moment such as the classic consumer group, because of changes to public traits
+    - NEVER EVER accept or return a fixed size array from a public interface
+    - Every Error should have the corresponding predicate. Users must use a predicate instead of enum matching to make sure that when we match an error we also match all future subclasses of it in Java client
 4. **C FFI Conventions**:
     - Always define types ending with '_t' for opaque or public structures
     - The crate's base error type `common::Error` -> `kafka_common_Error_t`. Note this
       is NOT Java's `KafkaException`: the handle wraps the whole flat `Error` enum and it allows to map other exceptions that aren't subclasses of `KafkaException`.
       (§12.3). Java's `KafkaException` maps to the embedded `common::KafkaError`
       struct, which never crosses the boundary on its own.
+    - Fallible functions return their value (or `void`) and take a trailing `kafka_common_Error_t **out_err`, never NULL, with `*out_err` NULL on entry; on failure they store an owned error there and return NULL / 0 / -1, so the caller tests `*out_err`, not the value. The caller owns the error and the returned value. Interface method pointers that can fail take the same shape.
+    - Language bindings include only `confluent_kafka_bindings.h`: it declares the fallible and `_cb` functions under their own names and every other function only as its `_err` twin, which takes the same trailing `out_err` and stores a caught panic there.
     - the word "exception" MUST never appear in C API and ffi code, except in comments about the Java client.
     - Classes that aren't public in Rust crate MUST NOT have C bindings.
     - Predicates on `Error` keep their Rust name behind the type prefix:
-      `is_retriable` -> `kafka_common_Error_is_retriable`, and likewise every
+      `is_retriable_error` -> `kafka_common_Error_is_retriable_error`, and likewise every
       hierarchy predicate from §12.4, e.g. `is_kafka_error` ->
       `kafka_common_Error_is_kafka_error`. A predicate added on the Rust side is
       expected on the C side too — C cannot see enum variants, so these are the
-      only way a C caller can classify an error beyond its numeric code.
+      only way a C caller can classify an error beyond its numeric code. The C
+      exports are generated from the predicates on `impl Error` by
+      `cargo xtask generate-error-predicates` (`check-generated` fails when they
+      are stale), never written by hand.
     - Exceptions having additional fields in Java: expose the corresponding C opaque type that can be retrieved from the `kafka_common_Error_t` like `kafka_common_Error_resource_not_found`. In case that error is not that type it returns `NULL`, otherwise the returned pointer can be used to access the additional fields with accessor functions. An example of these types and accessors is `kafka_common_ResourceNotFoundError_t` and `kafka_common_ResourceNotFoundError_resource`.
     - preserve Java namespaces in first part of the function name, skipping `clients`:
       - `org.apache.kafka.clients.producer.KafkaProducer` -> `kafka_producer_KafkaProducer_t`
       - `org.apache.kafka.clients.producer.MockProducer` -> `kafka_producer_MockProducer_t`
     - Don't check for failing programming preconditions like NULLs on required parameters
       or parameters not following the function parameters preconditions.
-    - For async completion callbacks the typedef is named after the **Java** method whose result it
-      carries, plus `_callback` suffix — like `kafka_producer_KafkaProducer_send_callback_t` or
-      `kafka_producer_KafkaProducer_send_batch_callback_t` — not after the C entry point, which may be
-      one of several overload-collapsed names sharing the typedef (e.g.
-      `kafka_consumer_Consumer_commit_async_callback_t` serves both `..._commit_async_with_callback`
-      and `..._commit_async_offsets_with_callback`).
-    - Multi-shot registration callbacks (a callback set registered once and fired N times, e.g. a
-      listener interface) are named `<Type>_<javaMethod>_callback_t` after the Java interface method
-      (like `kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_callback_t`), with the
-      registration's release hook named `<Type>_user_data_destroy_t`.
-    - An entry point that can wait — a Rust `async fn`, or an FFI-side wait such as the
-      submission-queue drain before a transaction-control op — has an `_async` completion form
-      beside its plain form; one that cannot wait has none. Bindings read the `_async` form as the
-      sign that a method waits (Python Binding Conventions, Class family).
-
-
+    - Overloaded C function names MUST correspond to the Rust methods plus the corresponding prefix, `Option` struct builder MUST also
+      be available to C when it's present in Rust.
+    - Enums: as with errors given `base_package_Foo` is the enum name, we MUST have for every value, let's say `a` or `b` the corresponding function:
+      `base_package_Foo_a` and `base_package_Foo_b` that return the value or structure corresponding to that enum key. A value without data is returned as a `const base_package_Foo_t *` static singleton, never freed and comparable with `==`; a value carrying data is built by the Java static factory and returned owned, freed with `_destroy`.
+      There's also a corresponding C enum `base_package_Foo_e`, with enumerators `base_package_Foo_A` and `base_package_Foo_A`, to use in a switch and `base_package_Foo__enum()` returns the enum value. The enumerator keys MUST always be added in constant case as in `base_package_Foo_A` and without `_e_`.
+    - Traits: when returning a trait we create a C interface by having a type whose constructor takes a void* and a list of typed function pointers corresponding to the methods (`base_package_FooInterface_<method>_fn_t`), each function is then invoked with the given void* as first argument when we call the corresponding method on the interface.
+    Example: `base_package_FooInterface_t`, `base_package_FooInterface_t *base_package_FooInterface_new(void *self, base_package_FooInterface_do_foo_fn_t do_foo)`, `base_package_FooInterface_do_foo()` -> calls `do_foo` with `self` as first argument. The caller owns `self` and keeps it alive until the registration is released (each registering function documents its release point); there is no destroy hook. A Java default method is a nullable pointer, `NULL` meaning the Java default. A method whose Rust counterpart is `async fn` returns `void`, takes a trailing `int64_t callback_id` and reports its result through `base_package_Client__set_callback_result(client, callback_id, void *result)` (`NULL` = success or void, `kafka_common_Error_t *` = failure), from any thread, synchronously or later. A class can be converted into an interface with the suffix `__as_FooInterface`: the result is a borrowed view valid until the class handle is destroyed and is never passed to the interface's `_destroy`. The double underscore marks functions derived by convention (`__enum`, `__as_`) that have no Java counterpart.
+    - Primitive types: always use fixed size values like int8_t, int16_t, int32_t, int64_t for byte or boolean, short, int, long in Java, `double` for double. Unsigned types never appear in a signature: byte buffers cross as `kafka_Bytes_t` (`const uint8_t *data`, `int32_t len`), the only place `uint8_t` is used.
+    - Async variants of blocking methods: given a blocking function `f_a` a second non-blocking `f_a_cb` is created. It takes `f_a_cb_t` as last argument together with an opaque pointer; `f_a_cb_t` receives the return value (always a pointer, omitted for void functions), a `kafka_common_Error_t *` (`NULL` on success) and the opaque pointer. When the non blocking function completes it adds (callback, return value, error, opaque) to a vector. There's no Rust thread executing these callbacks but each client has its `__execute_callbacks` function that runs the pending ones serially on the calling thread and returns how many it executed, and a `__set_callbacks_notify(fn, opaque)` whose hook is fired from a Rust task once each time the vector goes from empty to non-empty; the hook may only schedule, never run callbacks. `_destroy` runs the still pending callbacks so each fires exactly once. A blocking function invokes interface methods directly on the calling thread, a `_cb` function queues them; callbacks fired by Rust background tasks (delivery callbacks) are always queued. Once a callback finishes it runs `__set_callback_result` on the client to set the return value. The Rust task corresponding to that callback is then completed with the returned value.
+    - Generic types: every time there's a generic argument it'll be replaced by a void* when it's used. Key and value serializers and deserializers are interfaces; when `NULL` is passed the `void*` is a `kafka_Bytes_t *`. Helpers standing for `java.util` types carry no package segment: `kafka_List_t`, `kafka_Map_t`, `kafka_Bytes_t`.
+    - Nested types: `ClassA.ClassB` -> `package_prefix_ClassA_ClassB_t`
+    - Static methods: `ClassA::static_method_a(a,b,c)` -> `package_prefix_ClassA_static_method_a(a,b,c)`
+    - Instance methods: `a.instance_method_a(a,b,c)` -> `package_prefix_ClassA_instance_method_a(package_prefix_ClassA_t *self,a,b,c)`
 5. **Tests**: Keep the same tests, after translating a class, also translate and run all its corresponding tests.
 6. **Comments and documentation**: Keep similar comments as the Java source,
 translate javadoc to rustdoc. Never change the contract of public API.
@@ -138,13 +144,13 @@ translate javadoc to rustdoc. Never change the contract of public API.
        sit beside it. Java's `KafkaException` base class maps to the `KafkaError`
        struct (error code + optional message), embedded in each specific error
        struct.
-    4. Because the hierarchy is flattened, every **intermediate** (non-leaf) class in
+    4. Because the hierarchy is flattened, every class in
        Java's error hierarchy MUST be recoverable as a predicate on `Error`, named
        `is_` + the class name snake_cased with the Exception suffix replaced by
        `Error` (§2). The `_error` suffix is applied uniformly — no exceptions, so
        the name is derivable from the Java class without judgement:
 
-       | Java intermediate class     | predicate                      |
+       | Java class                  | predicate                      |
        |-----------------------------|--------------------------------|
        | `KafkaException`            | `is_kafka_error()`             |
        | `ApiException`              | `is_api_error()`               |
@@ -155,7 +161,7 @@ translate javadoc to rustdoc. Never change the contract of public API.
        | `AuthorizationException`    | `is_authorization_error()`     |
 
        These predicates encode Java's `extends` chain, so the family contains
-       ONLY intermediate classes. A Java *static* that classifies an exception is
+       all Java subclasses. A Java *static* that classifies an exception is
        NOT a predicate on `Error` and MUST NOT be added to this trait — it is
        translated as a free function in the module matching its Java home, taking
        `&Error`. The one such case is fatality: `RequestUtils.isFatalException`
@@ -172,8 +178,23 @@ translate javadoc to rustdoc. Never change the contract of public API.
        mirrors that shape. Being in an API that is not public 
        `common::requests::request_utils::is_fatal_error` is not exposed in C FFI.
 
-       Leaf classes need no predicate — match the `Error` variant or compare the
-       error code instead. Each predicate MUST:
+       Leaf classes get a predicate too (§3): every `Error` variant has its own
+       *class predicate*, named the same way after its payload type
+       (`TopicExistsError` -> `is_topic_exists_error`, `InvalidRegularExpression`
+       -> `is_invalid_regular_expression_error`), meaning Java's `instanceof` —
+       true for the class and for every class that extends it. Users classify
+       with these, not by matching the variant or comparing the code: a subclass
+       a later Java release adds becomes a new variant that a `matches!` misses,
+       while its payload answers `true` to its parent's predicate. So every
+       predicate, leaf or intermediate, is an `ErrorHierarchy` method the payloads
+       override — never an inherent `matches!` — with a `Box<T>` forwarder and a
+       UFCS forwarder on `Error`. `cargo xtask lint-custom`
+       (`check-error-predicate`) enforces each piece, and
+       `ffi_every_class_has_its_own_predicate` checks every class predicate
+       against one instance of every class. The crate's own code may still match
+       variants internally.
+
+       Each predicate additionally MUST:
          - document the exact set of variants it covers and cite the Java class it
            translates, because a flattened enum gives the reader no other way to
            see the hierarchy;
@@ -297,7 +318,7 @@ The Python client, package `confluent_kafka` in `python/`, is built only on the 
   | `Partitioner`, `Cluster`, `MetricConfig`, `Measurable` | placeholder aliases of `object` of the same name in their module *(deviation)*; a mock uses them as Java's mock does (Implementation over the FFI) |
 
 - **Errors**
-  - One class per Java exception class the FFI enum `kafka_common_ErrorCode_t` names, plus Java's abstract bases and the Java built-in exceptions of Types, with Java's `extends` chain; the base is `KafkaError(RuntimeError)` (`KafkaException`).
+  - One class per Java exception class the FFI enum `kafka_common_Error_e` names, plus Java's abstract bases and the Java built-in exceptions of Types, with Java's `extends` chain; the base is `KafkaError(RuntimeError)` (`KafkaException`).
   - `cargo xtask generate-error-codes` emits them as `.py` plus `.pyi` from the Java exception sources, cross-checked against the FFI enum: a Kafka class without an id, an id without a class or a different `extends` chain fails the build (a Java built-in exception has an id only where the enum has one: `NoSuchElementError` and `NullPointerError` have none); `check-generated` fails on stale output.
   - A Java `abstract` exception is a catch-only base: constructing it raises `TypeError`; it has no FFI id.
   - Constructors collapse Java's by Signatures, with these changes:

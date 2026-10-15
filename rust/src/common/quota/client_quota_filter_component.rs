@@ -28,6 +28,8 @@
 /// `equals`/wire encoding.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+// the match kind Java encodes as nullable Optional fields of ClientQuotaFilterComponent
+#[doc(alias = "rust-only")]
 pub enum ClientQuotaMatch {
     /// Matches the provided entity name exactly (`Optional.of(name)`).
     Exact(String),
@@ -93,7 +95,8 @@ impl ClientQuotaFilterComponent {
     ///   - `Exact(name)`: the name that's matched exactly,
     ///   - `Default`: matches the default name,
     ///   - `Any`: matches any specified name.
-    pub fn match_spec(&self) -> &ClientQuotaMatch {
+    #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaFilterComponent#match")]
+    pub fn r#match(&self) -> &ClientQuotaMatch {
         &self.match_spec
     }
 }
@@ -158,14 +161,14 @@ mod tests {
     fn accessors_return_expected_values() {
         let c = ClientQuotaFilterComponent::of_entity(ClientQuotaEntity::USER, "u1");
         assert_eq!(c.entity_type(), ClientQuotaEntity::USER);
-        assert_eq!(c.match_spec(), &ClientQuotaMatch::Exact("u1".to_string()));
+        assert_eq!(c.r#match(), &ClientQuotaMatch::Exact("u1".to_string()));
 
         assert_eq!(
-            ClientQuotaFilterComponent::of_default_entity(ClientQuotaEntity::USER).match_spec(),
+            ClientQuotaFilterComponent::of_default_entity(ClientQuotaEntity::USER).r#match(),
             &ClientQuotaMatch::Default
         );
         assert_eq!(
-            ClientQuotaFilterComponent::of_entity_type(ClientQuotaEntity::USER).match_spec(),
+            ClientQuotaFilterComponent::of_entity_type(ClientQuotaEntity::USER).r#match(),
             &ClientQuotaMatch::Any
         );
     }

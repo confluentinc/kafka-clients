@@ -39,7 +39,7 @@ class LogDirNotFoundError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 57  # kafka_common_ErrorCode_LOG_DIR_NOT_FOUND
+    _ffi_id: ClassVar[int] = 57  # kafka_common_Error_LOG_DIR_NOT_FOUND
 
     @java_forms(
         Form("message"),

@@ -44,7 +44,8 @@ use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource}
 /// unrelated to a SASL request.
 ///
 /// Crate-private although `Error::CorrelationIdMismatch` is public: Java's class sits in
-/// `common.requests`, which is "not a supported API". Callers match the variant and
+/// `common.requests`, which is "not a supported API". Callers test it with
+/// [`Error::is_correlation_id_mismatch_error`](crate::common::Error::is_correlation_id_mismatch_error) and
 /// use `Display` / `source()`; the payload itself is not reachable by name.
 #[expect(unnameable_types)]
 #[derive(Clone, Debug)]
@@ -141,10 +142,18 @@ impl ErrorMessage for CorrelationIdMismatchError {
 // `UNKNOWN_SERVER_ERROR` — the trait default.
 impl ErrorCode for CorrelationIdMismatchError {}
 
-// `IllegalStateException` is a `java.lang` runtime exception sitting BESIDE
-// `KafkaException`, not below it, so every predicate is false and the empty impl
-// is the statement that this class is outside the hierarchy.
-impl ErrorHierarchy for CorrelationIdMismatchError {}
+// `CorrelationIdMismatchException extends IllegalStateException`
+// (`CorrelationIdMismatchException.java:23`), a `java.lang` runtime exception
+// sitting BESIDE `KafkaException`, not below it. So every Kafka hierarchy
+// predicate is false, and only the class itself and its JDK parent answer `true`.
+impl ErrorHierarchy for CorrelationIdMismatchError {
+    fn is_local_illegal_state_error(&self) -> bool {
+        true
+    }
+    fn is_correlation_id_mismatch_error(&self) -> bool {
+        true
+    }
+}
 
 impl ErrorSource for CorrelationIdMismatchError {
     fn source(&self) -> Option<&Error> {

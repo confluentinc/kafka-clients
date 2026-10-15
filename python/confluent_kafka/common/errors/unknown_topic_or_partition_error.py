@@ -40,7 +40,7 @@ class UnknownTopicOrPartitionError(InvalidMetadataError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 3  # kafka_common_ErrorCode_UNKNOWN_TOPIC_OR_PARTITION
+    _ffi_id: ClassVar[int] = 3  # kafka_common_Error_UNKNOWN_TOPIC_OR_PARTITION
 
     def __init__(
         self,

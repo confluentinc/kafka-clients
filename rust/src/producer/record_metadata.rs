@@ -120,11 +120,6 @@ impl RecordMetadata {
     pub fn partition(&self) -> i32 {
         self.topic_partition.partition()
     }
-
-    /// The topic and partition the record was sent to.
-    pub fn topic_partition(&self) -> &TopicPartition {
-        &self.topic_partition
-    }
 }
 
 impl fmt::Display for RecordMetadata {

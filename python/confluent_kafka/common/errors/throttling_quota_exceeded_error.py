@@ -39,7 +39,7 @@ class ThrottlingQuotaExceededError(RetriableError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 89  # kafka_common_ErrorCode_THROTTLING_QUOTA_EXCEEDED
+    _ffi_id: ClassVar[int] = 89  # kafka_common_Error_THROTTLING_QUOTA_EXCEEDED
 
     def __init__(
         self,

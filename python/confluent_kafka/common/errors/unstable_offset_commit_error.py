@@ -38,7 +38,7 @@ class UnstableOffsetCommitError(RetriableError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 88  # kafka_common_ErrorCode_UNSTABLE_OFFSET_COMMIT
+    _ffi_id: ClassVar[int] = 88  # kafka_common_Error_UNSTABLE_OFFSET_COMMIT
 
     def __init__(
         self,

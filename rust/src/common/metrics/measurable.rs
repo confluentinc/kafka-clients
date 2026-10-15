@@ -41,6 +41,8 @@ pub trait Measurable: Send + Sync {
     /// lambda. Rust has no reflection, so the provider reports it: the default is
     /// the implementing type's [`std::any::type_name`], and the closure adapters
     /// answer `None`, as Java's lambdas do.
+    // stands in for Java's reflective `getClass().getName()` in `KafkaMetric.toString`
+    #[doc(alias = "rust-only")]
     fn type_name(&self) -> Option<&'static str> {
         Some(std::any::type_name::<Self>())
     }
@@ -50,6 +52,8 @@ pub trait Measurable: Send + Sync {
 /// usage of `Measurable` (e.g. `(config, now) -> TimeUnit.SECONDS.convert(...)`
 /// in `KafkaConsumerMetrics` / `HeartbeatMetricsManager`). The symmetric
 /// counterpart of [`crate::common::metrics::ClosureGauge`].
+// a Measurable from a closure, standing in for a Java lambda
+#[doc(alias = "rust-only")]
 pub struct ClosureMeasurable<F>(F)
 where
     F: Fn(&MetricConfig, i64) -> f64 + Send + Sync;

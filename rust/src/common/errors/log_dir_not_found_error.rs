@@ -30,5 +30,6 @@ kafka_error_type! {
     extends: [
         is_kafka_error,
         is_api_error,
+        is_log_dir_not_found_error,
     ],
 }

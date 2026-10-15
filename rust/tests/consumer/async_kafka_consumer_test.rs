@@ -229,8 +229,114 @@ async fn test_metrics_removed_on_close() {
 
     assert_metrics_map(consumer.as_ref(), true);
     consumer
-        .close_with_options(CloseOptions::new_timeout(Duration::ZERO))
+        .close_with_options(CloseOptions::new_with_timeout(Duration::ZERO))
         .await
         .expect("close");
     assert_metrics_map(consumer.as_ref(), false);
+}
+
+/// Translated from
+/// `KafkaConsumerTest.testConsumerBootstrapResolutionExceptionPropagatedToPoll`
+/// (KIP-909), for `GroupProtocol.CONSUMER`; the `CLASSIC` case is out of
+/// scope (consumer-threading.md §20: `KafkaConsumer::new` rejects it before
+/// any bootstrap work). With a positive `bootstrap.resolve.timeout.ms` and
+/// an unresolvable host the consumer is created; `poll` fails with the
+/// `BootstrapResolutionException` once the budget runs out, and so does
+/// every later call.
+#[tokio::test(flavor = "multi_thread")]
+#[doc(
+    alias = "org.apache.kafka.clients.consumer.KafkaConsumerTest#testConsumerBootstrapResolutionExceptionPropagatedToPoll"
+)]
+async fn test_consumer_bootstrap_resolution_error_propagated_to_poll() {
+    // Use an invalid hostname that will fail DNS resolution (using RFC 6761 reserved .invalid TLD)
+    let props = HashMap::from([
+        (
+            ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(),
+            "unresolvable.invalid:9092".to_string(),
+        ),
+        // Set a short bootstrap timeout so the test doesn't take too long
+        (
+            ConsumerConfig::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG.to_string(),
+            "3000".to_string(),
+        ),
+        (ConsumerConfig::GROUP_PROTOCOL_CONFIG.to_string(), "consumer".to_string()),
+        (ConsumerConfig::GROUP_ID_CONFIG.to_string(), "test-group".to_string()),
+    ]);
+    let mut consumer = KafkaConsumer::new::<String, String>(
+        ConsumerConfig::new(&props).unwrap(),
+        Box::new(StringDeserializer),
+        Box::new(StringDeserializer),
+    )
+    .expect("a positive timeout defers resolution, so construction succeeds");
+
+    // Subscribe to a topic to trigger metadata fetch
+    consumer.subscribe_with_topics(vec!["test-topic".to_string()]).await.unwrap();
+
+    // Poll continuously until we get the BootstrapResolutionException
+    // The error should be returned after bootstrap.resolve.timeout.ms expires
+    let start = std::time::Instant::now();
+    let max_wait = std::time::Duration::from_millis(15000); // 15 seconds max to prevent test hanging
+    let error = loop {
+        assert!(
+            start.elapsed() < max_wait,
+            "Expected the BootstrapResolutionError within {}ms",
+            max_wait.as_millis()
+        );
+        if let Err(error) = consumer.poll(std::time::Duration::from_millis(100)).await
+            && error.is_bootstrap_resolution_error()
+        {
+            break error;
+        }
+    };
+
+    // Verify the error message contains information about DNS resolution failure
+    assert_eq!(
+        error.message(),
+        "Failed to resolve bootstrap servers after 3000ms. \
+         Please check your bootstrap.servers configuration and DNS settings."
+    );
+
+    // After the first failure, any further API call must also fail. This guards against
+    // accidentally clearing the bootstrap error from the metadata layer.
+    let again = consumer.poll(std::time::Duration::from_millis(100)).await;
+    assert!(
+        again.as_ref().is_err_and(Error::is_bootstrap_resolution_error),
+        "got {:?}",
+        again.err()
+    );
+    consumer.close().await.unwrap();
+}
+
+/// Translated from
+/// `KafkaConsumerTest.testConsumerConstructorFailsWithConfigExceptionOnUnresolvableBootstrapWhenTimeoutZero`
+/// (KAFKA-20939), for `GroupProtocol.CONSUMER` (`CLASSIC` is out of scope,
+/// as above): the default `bootstrap.resolve.timeout.ms=0` resolves DNS
+/// synchronously in the constructor, so an unresolvable host fails
+/// construction with the `ConfigException` wrapped in the constructor's
+/// `KafkaException`, and no consumer instance is created.
+#[tokio::test(flavor = "multi_thread")]
+#[doc(
+    alias = "org.apache.kafka.clients.consumer.KafkaConsumerTest#testConsumerConstructorFailsWithConfigExceptionOnUnresolvableBootstrapWhenTimeoutZero"
+)]
+async fn test_consumer_constructor_fails_with_config_error_on_unresolvable_bootstrap_when_timeout_zero() {
+    let props = HashMap::from([
+        (
+            ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(),
+            "unresolvable.invalid:9092".to_string(),
+        ),
+        (ConsumerConfig::GROUP_PROTOCOL_CONFIG.to_string(), "consumer".to_string()),
+        (ConsumerConfig::GROUP_ID_CONFIG.to_string(), "test-group".to_string()),
+    ]);
+    let config = ConsumerConfig::new(&props).unwrap();
+    assert_eq!(config.bootstrap_resolve_timeout_ms(), 0);
+    let error =
+        KafkaConsumer::new::<String, String>(config, Box::new(StringDeserializer), Box::new(StringDeserializer))
+            .err()
+            .expect("construction must fail");
+    assert_eq!(error.message(), "Failed to construct kafka consumer");
+    let cause: &Error = std::error::Error::source(&error)
+        .and_then(|e| e.downcast_ref::<Error>())
+        .expect("the cause is a crate Error");
+    assert!(cause.is_config_error(), "got {cause:?}");
+    assert_eq!(cause.message(), "No resolvable bootstrap urls given in bootstrap.servers");
 }

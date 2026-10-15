@@ -48,7 +48,7 @@ class UnsupportedVersionError(InvalidConfigurationError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 35  # kafka_common_ErrorCode_UNSUPPORTED_VERSION
+    _ffi_id: ClassVar[int] = 35  # kafka_common_Error_UNSUPPORTED_VERSION
 
     def __init__(
         self,

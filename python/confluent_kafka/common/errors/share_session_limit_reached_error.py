@@ -38,7 +38,7 @@ class ShareSessionLimitReachedError(RetriableError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 133  # kafka_common_ErrorCode_SHARE_SESSION_LIMIT_REACHED
+    _ffi_id: ClassVar[int] = 133  # kafka_common_Error_SHARE_SESSION_LIMIT_REACHED
 
     def __init__(
         self,

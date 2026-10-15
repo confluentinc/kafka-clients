@@ -41,7 +41,7 @@ class QuotaViolationError(KafkaError):
 
     __module__ = "confluent_kafka.common.metrics"
 
-    _ffi_id: ClassVar[int] = -26  # kafka_common_ErrorCode_QUOTA_VIOLATION
+    _ffi_id: ClassVar[int] = -26  # kafka_common_Error_QUOTA_VIOLATION
 
     def __init__(
         self,

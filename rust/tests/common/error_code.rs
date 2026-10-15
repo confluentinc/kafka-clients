@@ -14,7 +14,7 @@
 
 //! Error-code constants -- GENERATED, DO NOT EDIT.
 //!
-//! Generated from `kafka_common_ErrorCode_t` in `src/ffi/common.rs` by
+//! Generated from `kafka_common_Error_e` in `src/ffi/common.rs` by
 //! `cargo xtask generate-error-codes`, and checked for staleness by
 //! `cargo xtask check-generated`.
 //!
@@ -199,6 +199,7 @@ pub const QUOTA_VIOLATION: i32 = -26;
 pub const RECORD_DESERIALIZATION: i32 = -27;
 pub const PRODUCER_BUFFER_EXHAUSTED: i32 = -28;
 pub const BOOTSTRAP_RESOLUTION: i32 = -29;
+pub const LOCAL_CALLBACK: i32 = -30;
 
 /// Rebuild the error class that owns the protocol error `code`, carrying
 /// `message` -- the table of `Errors::error_with_message` (Java's

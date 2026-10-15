@@ -39,7 +39,7 @@ class ConfigError(KafkaError):
 
     __module__ = "confluent_kafka.common.config"
 
-    _ffi_id: ClassVar[int] = -10  # kafka_common_ErrorCode_CONFIG
+    _ffi_id: ClassVar[int] = -10  # kafka_common_Error_CONFIG
 
     @java_forms(
         Form("message"),

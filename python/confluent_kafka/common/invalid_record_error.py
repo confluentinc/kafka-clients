@@ -34,7 +34,7 @@ class InvalidRecordError(InvalidConfigurationError):
 
     __module__ = "confluent_kafka.common"
 
-    _ffi_id: ClassVar[int] = 87  # kafka_common_ErrorCode_INVALID_RECORD
+    _ffi_id: ClassVar[int] = 87  # kafka_common_Error_INVALID_RECORD
 
     def __init__(
         self,

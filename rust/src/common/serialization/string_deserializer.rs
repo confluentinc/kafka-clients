@@ -40,6 +40,7 @@ pub struct StringDeserializer;
 
 impl StringDeserializer {
     /// Create a new `StringDeserializer`.
+    #[doc(alias = "org.apache.kafka.common.serialization.StringDeserializer#StringDeserializer")]
     pub fn new() -> Self {
         Self
     }

@@ -47,7 +47,7 @@ pub struct MetricName {
 impl MetricName {
     /// Create a `MetricName`.
     ///
-    /// Please create `MetricName` via [`crate::common::metrics::Metrics::metric_name_description_tags`].
+    /// Please create `MetricName` via [`crate::common::metrics::Metrics::metric_name_with_description_tags`].
     ///
     /// * `name` - The name of the metric
     /// * `group` - logical group name of the metrics to which this metric belongs
