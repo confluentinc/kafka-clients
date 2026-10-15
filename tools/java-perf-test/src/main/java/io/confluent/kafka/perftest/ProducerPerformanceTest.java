@@ -43,6 +43,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Random;
@@ -65,6 +66,8 @@ import java.util.concurrent.atomic.AtomicLong;
  *   NUM_MESSAGES            total messages to produce (0 = time-based)
  *   LIMIT_RPS               rate limit in msg/s (0 = unlimited); when set, the run
  *                           is bounded by LIMIT_RPS * TEST_DURATION_SECONDS messages
+ *                           or TEST_DURATION_SECONDS + 10 s, whichever comes first
+ *                           (the time cap prints a `capped:` line, not a failure)
  *   KEY_SIZE                key size in bytes (0 = no key, default 0)
  *   VALUE_SIZE              value size in bytes (default 2048)
  *   BATCH_SIZE              batch.size in KB (default 977 ≈ 1MB; matches Python default)
@@ -98,8 +101,12 @@ public class ProducerPerformanceTest {
     private static long measuredSent = 0;
     private static long completedMessages = 0;
     private static long verified = 0;
-    private static long maxLatencyMs = 0;
-    private static long totalLatencyMs = 0;
+    // Exact per-record latency statistics in ns (System.nanoTime stamps), kept
+    // outside the 1 ms histogram so avg/min/max are not bucket indices.
+    private static long latencySamples = 0;
+    private static long totalLatencyNs = 0;
+    private static long minLatencyNs = Long.MAX_VALUE;
+    private static long maxLatencyNs = 0;
 
     // --- Config from env -----------------------------------------------------
     private static final int KEY_SIZE = envInt("KEY_SIZE", 0);
@@ -114,6 +121,10 @@ public class ProducerPerformanceTest {
     private static final long NUM_MESSAGES = LIMIT_RPS > 0
         ? LIMIT_RPS * TEST_DURATION_SECONDS
         : envLong("NUM_MESSAGES", 0);
+    // A counted run (NUM_MESSAGES > 0) also stops once the measured interval
+    // reaches TEST_DURATION_SECONDS + this grace, so a client that cannot hold
+    // the target rate ends on time; the shortfall is reported, not failed.
+    private static final int COUNTED_RUN_GRACE_SECONDS = 10;
     private static final boolean DO_VERIFY = envBool("DO_VERIFY", true);
     private static final boolean VERIFY_CONSUMED = envBool("VERIFY_CONSUMED", false);
     // When true (default), delete + re-create the topic before the run. -1
@@ -138,6 +149,9 @@ public class ProducerPerformanceTest {
     // Set when the verified / completed / expected counts disagree on a run
     // that was not interrupted; fails the run (results.json is still written).
     private static boolean countMismatch = false;
+    // Set when a counted run stopped at the time cap before NUM_MESSAGES were
+    // sent: the expected count is then the records actually sent.
+    private static boolean timeCapped = false;
 
     public static void main(String[] args) throws Exception {
         installSignalHandler();
@@ -237,15 +251,30 @@ public class ProducerPerformanceTest {
 
             long messagesSent = 0;
             boolean continueSending = NUM_MESSAGES > 0 ? messagesSent < NUM_MESSAGES : !terminating;
+            long countedCapNs = (TEST_DURATION_SECONDS + COUNTED_RUN_GRACE_SECONDS) * 1_000_000_000L;
 
             while (continueSending) {
+                // A counted run stops at the time cap, checked before every
+                // send; reaching it is reported (`capped:`) and does not fail
+                // the run.
+                if (NUM_MESSAGES > 0) {
+                    long elapsedNs = System.nanoTime() - firstMessageNs;
+                    if (elapsedNs >= countedCapNs) {
+                        timeCapped = true;
+                        System.out.println(String.format(Locale.ROOT,
+                            "capped: sent %d of %d records in %.2f s (TEST_DURATION_SECONDS + %d s)",
+                            messagesSent, NUM_MESSAGES, elapsedNs / 1e9, COUNTED_RUN_GRACE_SECONDS));
+                        break;
+                    }
+                }
                 KeyValue m = generated.get((int) (messagesSent % generated.size()));
-                long startTime = System.currentTimeMillis();
-                PendingProduce pp = new PendingProduce(startTime);
+                // Monotonic ns stamps: a wall-clock ms difference would both
+                // quantize the latency and jump with clock adjustments.
+                PendingProduce pp = new PendingProduce(System.nanoTime());
                 // Stamp per-record latency at ack time in the delivery callback —
                 // the Java analog of the C harness's `test_v2_dr` done_ns. Runs on
                 // the producer's I/O thread when the record is acknowledged.
-                Callback cb = (metadata, exception) -> pp.completionMs = System.currentTimeMillis();
+                Callback cb = (metadata, exception) -> pp.completionNs = System.nanoTime();
                 Future<RecordMetadata> f = producer.send(
                     new ProducerRecord<>(TOPIC_NAME, m.key, m.value), cb);
                 pp.future = f;
@@ -261,10 +290,11 @@ public class ProducerPerformanceTest {
                     }
                 }
 
-                if (messagesSent % 10_000 == 0) {
+                // A time-based run (no message target) ends here; a counted
+                // run's time cap is checked before every send above.
+                if (NUM_MESSAGES == 0 && messagesSent % 10_000 == 0) {
                     long durationNs = System.nanoTime() - firstMessageNs;
-                    long extraSeconds = NUM_MESSAGES > 0 ? 10 : 1;
-                    if (durationNs > (TEST_DURATION_SECONDS + extraSeconds) * 1_000_000_000L) {
+                    if (durationNs > (TEST_DURATION_SECONDS + 1) * 1_000_000_000L) {
                         System.out.println("Test duration reached, "
                             + (durationNs / 1e9) + " seconds. Interrupting...");
                         break;
@@ -286,15 +316,18 @@ public class ProducerPerformanceTest {
             metrics.measurementEndMs = afterMs;
 
             // A count mismatch fails the run (unless it was interrupted), but
-            // the summary below is still written.
+            // the summary below is still written. A time-capped run is
+            // expected to complete exactly the records it sent: the shortfall
+            // against NUM_MESSAGES is reported by `capped:`, not failed.
             if (!terminating) {
+                long expected = timeCapped ? messagesSent : NUM_MESSAGES;
                 if (verified != completedMessages) {
                     System.err.println("Verified messages " + verified
                         + " does not match completed messages " + completedMessages);
                     countMismatch = true;
-                } else if (NUM_MESSAGES > 0 && completedMessages != NUM_MESSAGES) {
+                } else if (NUM_MESSAGES > 0 && completedMessages != expected) {
                     System.err.println("Completed messages " + completedMessages
-                        + " does not match produced messages " + NUM_MESSAGES);
+                        + " does not match produced messages " + expected);
                     countMismatch = true;
                 }
             }
@@ -302,7 +335,10 @@ public class ProducerPerformanceTest {
             double durationS = (afterMs - beforeMs) / 1000.0;
             double rate = completedMessages / durationS;
             double mibRate = (completedMessages * (double) MESSAGE_SIZE) / (1024.0 * 1024.0) / durationS;
-            double avgLatencyMs = completedMessages == 0 ? 0 : (double) totalLatencyMs / completedMessages;
+            // Exact avg / min / max from the ns totals (never bucket indices).
+            double avgLatencyMs = latencySamples == 0 ? 0 : totalLatencyNs / 1e6 / latencySamples;
+            double minLatencyMs = latencySamples == 0 ? 0 : minLatencyNs / 1e6;
+            double maxLatencyMs = latencySamples == 0 ? 0 : maxLatencyNs / 1e6;
             long p99Ms = percentileFromHist(latencyHist, 0.99);
 
             // CPU/RSS averaged over the measured interval only (collector-side).
@@ -323,7 +359,7 @@ public class ProducerPerformanceTest {
             System.out.println("Average rate msg/s: " + String.format("%.2f msg/s", rate));
             System.out.println("Average rate MiB/s: " + String.format("%.2f MiB/s", mibRate));
             System.out.println("Average latency: " + String.format("%.2f ms", avgLatencyMs));
-            System.out.println("Max latency: " + maxLatencyMs + " ms");
+            System.out.println("Max latency: " + String.format("%.2f ms", maxLatencyMs));
             System.out.println("p99 latency: " + p99Ms + " ms");
             // Latency budget — only asserted when set (matches C/Rust).
             if (P99_LIMIT_MS > 0 && p99Ms > P99_LIMIT_MS && !terminating) {
@@ -334,20 +370,17 @@ public class ProducerPerformanceTest {
             // Machine-readable summary, kept in sync with the other producer
             // performance tests (same file name, keys and latency_ms shape as
             // the consumer performance test's results.json; `client`
-            // identifies which implementation wrote it).
-            long minLatencyMs = 0;
-            for (int i = 0; i < latencyHist.length; i++) {
-                if (latencyHist[i] > 0) { minLatencyMs = i; break; }
-            }
+            // identifies which implementation wrote it). min / avg / max are
+            // exact (ms as a float); the percentiles are 1 ms bucket indices.
             Map<String, Object> latency = new LinkedHashMap<>();
-            latency.put("min", minLatencyMs);
+            latency.put("min", Math.round(minLatencyMs * 100.0) / 100.0);
             latency.put("avg", Math.round(avgLatencyMs * 100.0) / 100.0);
             latency.put("p50", percentileFromHist(latencyHist, 0.50));
             latency.put("p90", percentileFromHist(latencyHist, 0.90));
             latency.put("p95", percentileFromHist(latencyHist, 0.95));
             latency.put("p99", p99Ms);
             latency.put("p999", percentileFromHist(latencyHist, 0.999));
-            latency.put("max", maxLatencyMs);
+            latency.put("max", Math.round(maxLatencyMs * 100.0) / 100.0);
             Map<String, Object> results = new LinkedHashMap<>();
             results.put("test", "producer");
             results.put("client", "java");
@@ -564,18 +597,20 @@ public class ProducerPerformanceTest {
 
     static class PendingProduce {
         // Assigned right after producer.send() returns; the delivery callback
-        // that stamps completionMs only fires at ack (strictly after send
+        // that stamps completionNs only fires at ack (strictly after send
         // returns), so the field is set before it can be read via future.get().
         Future<RecordMetadata> future;
-        final long startTimeMs;
-        // Stamped in the delivery callback at ack time (onCompletion), the Java
-        // analog of the C harness's `test_v2_dr` done_ns. Kafka fires callbacks
-        // before completing the future, so a returned future.get() guarantees
-        // this is set and visible (volatile) to the recorder thread. Measuring
-        // latency here — rather than when the recorder reaches the future —
-        // keeps the recorder's own drain backlog out of the reported latency.
-        volatile long completionMs;
-        PendingProduce(long s) { this.startTimeMs = s; }
+        // System.nanoTime() just before producer.send().
+        final long startTimeNs;
+        // Stamped (System.nanoTime) in the delivery callback at ack time
+        // (onCompletion), the Java analog of the C harness's `test_v2_dr`
+        // done_ns. Kafka fires callbacks before completing the future, so a
+        // returned future.get() guarantees this is set and visible (volatile)
+        // to the recorder thread. Measuring latency here — rather than when
+        // the recorder reaches the future — keeps the recorder's own drain
+        // backlog out of the reported latency.
+        volatile long completionNs;
+        PendingProduce(long s) { this.startTimeNs = s; }
     }
 
     private static Thread startRecorder(BlockingQueue<PendingProduce> q, AtomicBoolean recording,
@@ -598,16 +633,20 @@ public class ProducerPerformanceTest {
                     }
                     completedMessages++;
                     // Latency is stamped at ack in the delivery callback
-                    // (p.completionMs), NOT read from this thread's clock, so the
+                    // (p.completionNs), NOT read from this thread's clock, so the
                     // recorder's own drain backlog cannot inflate it. Mirrors the
                     // C harness computing done_ns - start_time.
-                    long latency = p.completionMs - p.startTimeMs;
-                    metrics.latency.addMeasurement(latency);
+                    long latencyNs = p.completionNs - p.startTimeNs;
+                    metrics.latency.addMeasurement(latencyNs / 1e6);
                     metrics.messages.addMeasurement(1);
                     metrics.bytes.addMeasurement(messageSize);
-                    if (latency > maxLatencyMs) maxLatencyMs = latency;
-                    totalLatencyMs += latency;
-                    int ms = (int) Math.min(Math.max(latency, 0), MAX_LATENCY_MS + 1);
+                    latencySamples++;
+                    totalLatencyNs += latencyNs;
+                    if (latencyNs < minLatencyNs) minLatencyNs = latencyNs;
+                    if (latencyNs > maxLatencyNs) maxLatencyNs = latencyNs;
+                    // Percentile bucket: floor(latency_ns / 1 ms), clamped to
+                    // the top (overflow) bucket.
+                    int ms = (int) Math.min(Math.max(latencyNs / 1_000_000L, 0), MAX_LATENCY_MS + 1);
                     latencyHist[ms]++;
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
