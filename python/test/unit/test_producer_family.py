@@ -1002,14 +1002,25 @@ async def test_an_async_call_that_passed_its_closed_check_before_close_never_tou
 
 
 def _count_teardowns(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[int]]:
-    """Count Producer_shutdown / Producer_destroy per handle; a second destroy
-    of one handle is counted, not run (it would free the struct twice)."""
-    calls: dict[str, list[int]] = {"shutdown": [], "destroy": []}
-    real_shutdown, real_destroy = _lib.Producer_shutdown, _lib.Producer_destroy
+    """Count Producer_shutdown / Producer_join / Producer_release_owner /
+    Producer_destroy per handle. close() runs the first three; the finalizer
+    runs destroy once the producer is collected. A second destroy of one
+    handle is counted, not run (it would free the struct twice)."""
+    calls: dict[str, list[int]] = {"shutdown": [], "join": [], "release": [], "destroy": []}
+    real_shutdown, real_join = _lib.Producer_shutdown, _lib.Producer_join
+    real_release, real_destroy = _lib.Producer_release_owner, _lib.Producer_destroy
 
     def shutdown(c_producer: int) -> None:
         calls["shutdown"].append(c_producer)
         real_shutdown(c_producer)
+
+    def join(c_producer: int) -> None:
+        calls["join"].append(c_producer)
+        real_join(c_producer)
+
+    def release(c_producer: int) -> None:
+        calls["release"].append(c_producer)
+        real_release(c_producer)
 
     def destroy(c_producer: int) -> None:
         calls["destroy"].append(c_producer)
@@ -1017,8 +1028,18 @@ def _count_teardowns(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[int]]:
             real_destroy(c_producer)
 
     monkeypatch.setattr(_lib, "Producer_shutdown", shutdown)
+    monkeypatch.setattr(_lib, "Producer_join", join)
+    monkeypatch.setattr(_lib, "Producer_release_owner", release)
     monkeypatch.setattr(_lib, "Producer_destroy", destroy)
     return calls
+
+
+def _collect() -> None:
+    """A producer is in a reference cycle (its guards point back at it), so the
+    cycle collector is what runs its finalizer."""
+    import gc
+
+    gc.collect()
 
 
 def _close_from_two_threads(p: KafkaProducer[Any, Any]) -> None:
@@ -1051,7 +1072,12 @@ def test_concurrent_closes_tear_down_once(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(module, "in_callback", slow_in_callback)
     p = KafkaProducer(configs=UNREACHABLE)
     _close_from_two_threads(p)
-    assert calls == {"shutdown": [p._c_producer], "destroy": [p._c_producer]}  # noqa: SLF001
+    c_producer = p._c_producer  # noqa: SLF001
+    assert calls == {"shutdown": [c_producer], "join": [c_producer],
+                     "release": [c_producer], "destroy": []}
+    del p
+    _collect()
+    assert calls["destroy"] == [c_producer]
 
 
 def test_concurrent_closes_tear_down_once_at_a_short_switch_interval(
@@ -1063,11 +1089,14 @@ def test_concurrent_closes_tear_down_once_at_a_short_switch_interval(
     sys.setswitchinterval(1e-6)
     try:
         for _ in range(30):
-            calls["shutdown"].clear()
-            calls["destroy"].clear()
+            for made in calls.values():
+                made.clear()
             p = KafkaProducer(configs=UNREACHABLE)
             _close_from_two_threads(p)
-            assert len(calls["shutdown"]) == 1 and len(calls["destroy"]) == 1
+            assert len(calls["shutdown"]) == 1 and len(calls["join"]) == 1
+            del p
+            _collect()
+            assert len(calls["destroy"]) == 1
     finally:
         sys.setswitchinterval(previous)
 
@@ -1082,7 +1111,137 @@ def test_concurrent_async_closes_tear_down_once(monkeypatch: pytest.MonkeyPatch)
         return c_producer
 
     c_producer = asyncio.run(main())
-    assert calls == {"shutdown": [c_producer], "destroy": [c_producer]}
+    _collect()
+    assert calls == {"shutdown": [c_producer], "join": [c_producer],
+                     "release": [c_producer], "destroy": [c_producer]}
+
+
+def test_close_leaves_the_handle_valid_until_the_producer_is_collected(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # close() joins the C threads and lets go of the producer, but leaves the
+    # handle valid: a send that passed the closed check just before the close
+    # began still reaches it. The finalizer frees it once the producer is
+    # collected, and only then.
+    calls = _count_teardowns(monkeypatch)
+    p = KafkaProducer(configs=UNREACHABLE)
+    c_producer = p._c_producer  # noqa: SLF001
+    p.close()
+    assert calls == {"shutdown": [c_producer], "join": [c_producer],
+                     "release": [c_producer], "destroy": []}
+    with pytest.raises(IllegalStateError) as err:
+        p.send(record=RECORD)
+    assert str(err.value) == CLOSED
+    p.close()
+    assert calls["destroy"] == []
+    del p, err  # the error's traceback holds send()'s frame, and so the producer
+    _collect()
+    assert calls["destroy"] == [c_producer]
+
+
+def test_close_returns_after_every_delivery_callback_has_run() -> None:
+    # The C poll thread runs the delivery callbacks; close() joins it, as
+    # Java's close() joins its I/O thread, so none runs after close() returns.
+    ran: list[Exception | None] = []
+
+    def callback(md: RecordMetadata, e: Exception | None) -> None:
+        time.sleep(0.02)
+        ran.append(e)
+
+    p = KafkaProducer(configs=UNREACHABLE)
+    for _ in range(10):
+        p.send(record=RECORD, callback=callback)
+    p.close()
+    assert len(ran) == 10
+
+
+async def test_async_close_returns_after_every_delivery_callback_has_run() -> None:
+    ran: list[Exception | None] = []
+
+    def callback(md: RecordMetadata, e: Exception | None) -> None:
+        time.sleep(0.02)
+        ran.append(e)
+
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    for _ in range(10):
+        await p.send(record=RECORD, callback=callback)
+    await p.close()
+    assert len(ran) == 10
+
+
+def test_a_record_that_completes_before_send_tracks_it_is_not_kept(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # The completion untracks a record's future right after completing it. It
+    # can run on the C completion thread before send() tracks the future; then
+    # send() finds the future done and does not keep it, so a later flush()
+    # does not hold it for ever.
+    def complete_at_once(c_producer: int, native: object, cb: Any) -> bool:
+        cb(0, 0, False)
+        return False
+
+    monkeypatch.setattr(_lib, "Producer_send", complete_at_once)
+    p = KafkaProducer(configs=UNREACHABLE)
+    try:
+        future = p.send(record=RECORD)
+        assert future.done()
+        assert not p._futures  # noqa: SLF001
+    finally:
+        monkeypatch.undo()
+        p.close(timeout=0)
+
+
+def test_the_completion_untracks_its_future_without_a_done_callback(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # No done callback of the producer's own is added to a record's future
+    # (asyncio would schedule each one as a loop callback): the completion
+    # removes the future from the tracked set itself.
+    captured: dict[str, Any] = {}
+
+    def hold(c_producer: int, native: object, cb: Any) -> bool:
+        captured["cb"] = cb
+        return False
+
+    monkeypatch.setattr(_lib, "Producer_send", hold)
+    p = KafkaProducer(configs=UNREACHABLE)
+    try:
+        future = p.send(record=RECORD)
+        assert future in p._futures  # noqa: SLF001
+        assert future._done_callbacks == []  # noqa: SLF001 - concurrent.futures' own list
+        captured["cb"](0, 0, False)
+        assert future.done()
+        assert future not in p._futures  # noqa: SLF001
+    finally:
+        monkeypatch.undo()
+        p.close(timeout=0)
+
+
+async def test_an_async_future_its_awaiter_cancelled_is_untracked_by_its_completion(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def hold(c_producer: int, native: object, cb: Any) -> bool:
+        captured["cb"] = cb
+        return False
+
+    monkeypatch.setattr(_lib, "Producer_send", hold)
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    try:
+        future = await p.send(record=RECORD)
+        future.cancel()
+        # Tracked until its completion arrives; a flush() meanwhile sees it as
+        # done and does not wait for it.
+        assert future in p._futures  # noqa: SLF001
+        completer = threading.Thread(target=captured["cb"], args=(0, 0, False))
+        completer.start()
+        completer.join(5)
+        for _ in range(500):
+            if future not in p._futures:  # noqa: SLF001
+                break
+            await asyncio.sleep(0.01)
+        assert future not in p._futures  # noqa: SLF001
+        assert future.cancelled()
+    finally:
+        monkeypatch.undo()
+        await p.close(timeout=0)
 
 
 def test_an_async_send_racing_close_is_refused_after_its_serializer() -> None:
