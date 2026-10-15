@@ -66,7 +66,21 @@
 //
 // A produce rejected inside a transaction (producev error other than a retried
 // QUEUE_FULL) aborts that transaction — in EOS mode its offsets are not sent —
-// and fails the run. A failed commit is aborted and counted as aborted.
+// and fails the run. Rejections are logged rate-limited, and a producer whose
+// produces are rejected MAX_CONSECUTIVE_PRODUCE_REJECTIONS times in a row (no
+// accepted produce in between) stops, since a persistent rejection would only
+// spin through begin/abort cycles. A failed commit is aborted and counted as
+// aborted.
+//
+// Rate limiting (LIMIT_RPS): each producer paces to its exact share
+// LIMIT_RPS / NUM_TRANSACTIONAL_PRODUCERS at a transaction boundary only:
+// immediately before begin_transaction it sleeps until
+// measured-start + records-sent / share. It never sleeps between begin and
+// commit/abort, where the sleep would be counted in commit latency and in the
+// latency of the records already sent. A counted run (NUM_MESSAGES, also set by
+// LIMIT_RPS) stops at its target or, at a transaction boundary, once the
+// measured interval reaches TEST_DURATION_SECONDS + 10 s; the latter prints a
+// `capped:` line and is not a failure.
 //
 // KIP-848: all consumers across the transactional perf harnesses
 // (Rust / librdkafka-C / Java / Python) run on the KIP-848 consumer group
@@ -220,6 +234,24 @@ static atomic_long eos_last_record_ns = 0;
 // summary is still written. Fails the run unless it was interrupted.
 static bool summary_mismatch = false;
 static bool interrupted = false;
+// Counted runs (NUM_MESSAGES > 0) stop at the message target or once the
+// measured interval reaches TEST_DURATION_S + COUNTED_RUN_GRACE_S, whichever
+// comes first; both are checked only at a transaction boundary, so a
+// transaction is never split. Hitting the time cap is not a failure: run_test
+// prints a `capped:` line and writes the real measured numbers, and the
+// driver's report flags a client that held less than 95% of the target rate.
+#define COUNTED_RUN_GRACE_S 10
+static atomic_bool run_capped = false;
+// Records produced by all workers (attempted, whatever their transaction's
+// outcome), added by each worker when it stops; reported by the `capped:` line.
+static atomic_long records_sent_total = 0;
+// A producer stops once this many of its produces in a row were rejected
+// synchronously with none accepted in between (see the header).
+#define MAX_CONSECUTIVE_PRODUCE_REJECTIONS 1000
+// All synchronous produce rejections, and when one was last logged
+// (CLOCK_MONOTONIC ns), for the rate-limited log.
+static atomic_long produce_rejections = 0;
+static atomic_long last_rejection_log_ns = 0;
 
 // --- shared statistics, written by all producer threads (guarded by
 // stats_mutex; contention is low: once per committed record for the latency
@@ -230,14 +262,19 @@ static long verified = 0;             // committed records that passed verificat
 static long committed_transactions = 0;
 static long aborted_transactions = 0;
 static long aborted_records = 0;
+// Exact latency statistics (CLOCK_MONOTONIC ns): the summary's avg/min/max
+// come from these, never from the histogram buckets.
 static long total_latency = 0;        // per-record, ns
 static long max_latency = 0;          // per-record, ns
+static long min_latency = LONG_MAX;   // per-record, ns
 static long total_commit_latency = 0; // per-transaction, ns
 static long max_commit_latency = 0;   // per-transaction, ns
+static long min_commit_latency = LONG_MAX; // per-transaction, ns
 static long total_abort_latency = 0;  // per-transaction, ns (deterministic abort)
 static long max_abort_latency = 0;    // per-transaction, ns (deterministic abort)
+static long min_abort_latency = LONG_MAX;  // per-transaction, ns (deterministic abort)
 // Per-record, per-transaction commit and per-transaction abort latency
-// histograms (ms) for the summary percentiles.
+// histograms (ms, floor) for the summary percentiles.
 static long latency_hist[MAX_LATENCY_MS + 2];
 static long commit_latency_hist[MAX_LATENCY_MS + 2];
 static long abort_latency_hist[MAX_LATENCY_MS + 2];
@@ -271,6 +308,28 @@ static long current_time_ns() {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (ts.tv_sec * 1000000000L) + ts.tv_nsec;
+}
+
+// Logs a synchronous produce rejection, rate-limited across all producers to the
+// first one and then at most one line per second carrying the running total, so
+// a persistent rejection cannot flood stderr.
+static void log_produce_rejection(const char* reason) {
+    long count = atomic_fetch_add(&produce_rejections, 1) + 1;
+    long now = current_time_ns();
+    bool should_log;
+    if (count == 1) {
+        atomic_store(&last_rejection_log_ns, now);
+        should_log = true;
+    } else {
+        // Only the producer that advances the timestamp logs.
+        long last = atomic_load(&last_rejection_log_ns);
+        should_log = now - last >= 1000000000L &&
+            atomic_compare_exchange_strong(&last_rejection_log_ns, &last, now);
+    }
+    if (should_log) {
+        fprintf(stderr, "producev failed: %s (%ld rejection(s) so far; the transaction "
+                "will be aborted)\n", reason, count);
+    }
 }
 
 // Deterministic, evenly-spread abort selection (Bresenham). Per-producer 0-based
@@ -1001,16 +1060,13 @@ static double per_producer_rate(void) {
     return LIMIT_RPS > 0 ? (double)LIMIT_RPS / (double)NUM_TRANSACTIONAL_PRODUCERS : 0.0;
 }
 
-// Records between two pacing checkpoints: max(floor(r / 10), 1).
-static long rate_checkpoint_interval(double rate) {
-    if (rate <= 0.0) return 0;
-    long c = (long)floor(rate / 10.0);
-    return c > 0 ? c : 1;
-}
-
-// Rate limiter (per producer): sleep until first_message_time + records_sent / rate,
+// Rate limiter (per producer), called only at a transaction boundary, right
+// before begin_transaction: sleep until first_message_time + records_sent / rate,
 // a deadline derived from the cumulative count (not "previous deadline + 100 ms"),
-// so this producer's rate converges on its exact share. Mirrors producer_perf_test.c.
+// so this producer's rate converges on its exact share. Never called between
+// begin and commit/abort: a sleep there would be counted in commit latency and
+// in the latency of the records already sent, so a faster client would sleep
+// longer and look slower.
 static void sleep_until_rate_limit_met(long records_sent, long first_message_time_ns,
                                        double rate) {
     if (rate <= 0.0) {
@@ -1022,6 +1078,32 @@ static void sleep_until_rate_limit_met(long records_sent, long first_message_tim
         struct timespec ts = { .tv_sec = sleep_ns / 1000000000L, .tv_nsec = sleep_ns % 1000000000L };
         nanosleep(&ts, NULL);
     }
+}
+
+// The counted-run time cap (see run_capped): true, and flags the run as capped,
+// once the measured interval has reached TEST_DURATION_S + COUNTED_RUN_GRACE_S.
+static bool counted_run_time_capped(const ProducerArgs* pa) {
+    long elapsed = current_time_ns() - pa->first_message_time_ns;
+    if (elapsed < (long)(TEST_DURATION_S + COUNTED_RUN_GRACE_S) * 1000000000L) {
+        return false;
+    }
+    atomic_store(&run_capped, true);
+    return true;
+}
+
+// The produce-mode loop bound, evaluated at every transaction boundary so a
+// transaction is never split. Count mode (num_messages > 0): stop at this
+// producer's share or at the time cap. Duration mode: stop once
+// TEST_DURATION_S has elapsed since the measured-interval start.
+static bool produce_should_continue(const ProducerArgs* pa, long records_sent) {
+    if (pa->num_messages > 0) {
+        return records_sent < pa->num_messages && !counted_run_time_capped(pa);
+    }
+    if (interrupted) {
+        return false;
+    }
+    long duration = current_time_ns() - pa->first_message_time_ns;
+    return duration <= (long)TEST_DURATION_S * 1000000000L;
 }
 
 static void* producer_thread_func(void* arg) {
@@ -1042,17 +1124,17 @@ static void* producer_thread_func(void* arg) {
     }
 
     double per_producer_rps = per_producer_rate();
-    long checkpoint_interval = rate_checkpoint_interval(per_producer_rps);
-    long next_checkpoint = checkpoint_interval;
 
     long txn_index = 0;
     long records_sent = 0;
+    long consecutive_rejections = 0;
     long n = RECORDS_PER_TRANSACTION;
     TxnFuture** futures = malloc(sizeof(TxnFuture*) * n);
     long* produce_ts = malloc(sizeof(long) * n);
 
-    bool continue_sending = pa->num_messages > 0 ? records_sent < pa->num_messages : !interrupted;
-    while (continue_sending) {
+    while (produce_should_continue(pa, records_sent)) {
+        // Rate pacing, at the transaction boundary only.
+        sleep_until_rate_limit_met(records_sent, pa->first_message_time_ns, per_producer_rps);
         long begin_ns = current_time_ns();
         if (check_txn_error(rd_kafka_begin_transaction(rk), "begin_transaction")) {
             atomic_store(&worker_failed, true);
@@ -1088,17 +1170,16 @@ static void* producer_thread_func(void* arg) {
                 // complete the future here as failed instead of leaving the
                 // drain below waiting on it forever. A rejected produce aborts
                 // the whole transaction below and fails the run.
-                fprintf(stderr, "producev failed: %s\n", rd_kafka_err2str(err));
+                log_produce_rejection(rd_kafka_err2str(err));
                 f->err = err;
                 atomic_store_explicit(&f->done, true, memory_order_release);
                 txn_rejected = true;
+                consecutive_rejections++;
+            } else {
+                consecutive_rejections = 0;
             }
 
             records_sent++;
-            if (per_producer_rps > 0 && records_sent >= next_checkpoint) {
-                sleep_until_rate_limit_met(records_sent, pa->first_message_time_ns, per_producer_rps);
-                next_checkpoint += checkpoint_interval;
-            }
         }
 
         // --- commit or abort ---
@@ -1119,6 +1200,13 @@ static void* producer_thread_func(void* arg) {
             aborted_transactions++;
             aborted_records += n;
             pthread_mutex_unlock(&stats_mutex);
+            if (consecutive_rejections >= MAX_CONSECUTIVE_PRODUCE_REJECTIONS) {
+                fprintf(stderr,
+                    "Producer %d: %ld consecutive produces rejected with none accepted in "
+                    "between; stopping this producer (the run fails)\n",
+                    pa->index, consecutive_rejections);
+                break;
+            }
         } else if (should_abort(txn_index, ABORT_RATE)) {
             // Aborted transactions STILL produced their N records above; on abort
             // they count toward neither throughput nor latency.
@@ -1141,6 +1229,7 @@ static void* producer_thread_func(void* arg) {
             aborted_records += n;
             total_abort_latency += abort_latency;
             if (abort_latency > max_abort_latency) max_abort_latency = abort_latency;
+            if (abort_latency < min_abort_latency) min_abort_latency = abort_latency;
             long alat_ms = abort_latency / 1000000L;
             if (alat_ms < 0) alat_ms = 0;
             if (alat_ms > MAX_LATENCY_MS + 1) alat_ms = MAX_LATENCY_MS + 1;
@@ -1175,6 +1264,7 @@ static void* producer_thread_func(void* arg) {
                 committed_transactions++;
                 total_commit_latency += commit_latency;
                 if (commit_latency > max_commit_latency) max_commit_latency = commit_latency;
+                if (commit_latency < min_commit_latency) min_commit_latency = commit_latency;
                 long clat_ms = commit_latency / 1000000L;
                 if (clat_ms < 0) clat_ms = 0;
                 if (clat_ms > MAX_LATENCY_MS + 1) clat_ms = MAX_LATENCY_MS + 1;
@@ -1201,6 +1291,7 @@ static void* producer_thread_func(void* arg) {
                     completed_messages++;
                     if (ok) verified++;
                     if (latency > max_latency) max_latency = latency;
+                    if (latency < min_latency) min_latency = latency;
                     total_latency += latency;
                     long latency_ms = latency / 1000000L;
                     if (latency_ms < 0) latency_ms = 0;
@@ -1214,18 +1305,9 @@ static void* producer_thread_func(void* arg) {
         }
 
         txn_index++;
-
-        // Duration bound for a time-based run (checked at a transaction boundary
-        // so a transaction is never split).
-        if (pa->num_messages <= 0) {
-            long duration = current_time_ns() - pa->first_message_time_ns;
-            if (duration > (long)TEST_DURATION_S * 1000000000L) {
-                break;
-            }
-        }
-        continue_sending = pa->num_messages > 0 ? records_sent < pa->num_messages : !interrupted;
     }
 
+    atomic_fetch_add(&records_sent_total, records_sent);
     free(futures);
     free(produce_ts);
     rd_kafka_destroy(rk);
@@ -1254,14 +1336,16 @@ static void eos_accumulate_offset(rd_kafka_topic_partition_list_t* offsets,
 // The EOS loop bound, evaluated as the loop condition so every round — an empty
 // poll, a rejected/aborted/failed transaction or a committed one — passes
 // through it. Count mode (num_messages > 0): stop once the shared
-// eos_records_processed counter reaches NUM_MESSAGES. Duration mode: stop once
-// TEST_DURATION_S has elapsed since the measured-interval start.
+// eos_records_processed counter reaches NUM_MESSAGES, or at the time cap.
+// Duration mode: stop once TEST_DURATION_S has elapsed since the
+// measured-interval start.
 static bool eos_should_continue(const ProducerArgs* pa) {
     if (interrupted) {
         return false;
     }
     if (pa->num_messages > 0) {
-        return atomic_load(&eos_records_processed) < pa->num_messages;
+        return atomic_load(&eos_records_processed) < pa->num_messages &&
+            !counted_run_time_capped(pa);
     }
     long duration = current_time_ns() - pa->first_message_time_ns;
     return duration <= (long)TEST_DURATION_S * 1000000000L;
@@ -1290,11 +1374,10 @@ static void* eos_producer_thread_func(void* arg) {
     }
 
     double per_producer_rps = per_producer_rate();
-    long checkpoint_interval = rate_checkpoint_interval(per_producer_rps);
-    long next_checkpoint = checkpoint_interval;
 
     long txn_index = 0;
     long records_sent = 0;
+    long consecutive_rejections = 0;
     long n = RECORDS_PER_TRANSACTION;
     TxnFuture** futures = malloc(sizeof(TxnFuture*) * n);
     long* produce_ts = malloc(sizeof(long) * n);
@@ -1325,8 +1408,10 @@ static void* eos_producer_thread_func(void* arg) {
                 continue;
             }
 
-            // The first real record of the batch opens the transaction.
+            // The first real record of the batch opens the transaction, after
+            // the rate pacing (at the transaction boundary only).
             if (batch == 0) {
+                sleep_until_rate_limit_met(records_sent, pa->first_message_time_ns, per_producer_rps);
                 begin_ns = current_time_ns();
                 if (check_txn_error(rd_kafka_begin_transaction(producer), "begin_transaction")) {
                     atomic_store(&worker_failed, true);
@@ -1360,10 +1445,13 @@ static void* eos_producer_thread_func(void* arg) {
                 // report will fire for it) so the drain cannot hang on it. A
                 // rejected produce aborts the whole transaction below (its
                 // offsets are not sent) and fails the run.
-                fprintf(stderr, "producev failed: %s\n", rd_kafka_err2str(perr));
+                log_produce_rejection(rd_kafka_err2str(perr));
                 f->err = perr;
                 atomic_store_explicit(&f->done, true, memory_order_release);
                 txn_rejected = true;
+                consecutive_rejections++;
+            } else {
+                consecutive_rejections = 0;
             }
             futures[batch] = f;
 
@@ -1374,11 +1462,6 @@ static void* eos_producer_thread_func(void* arg) {
             rd_kafka_message_destroy(msg);
             records_sent++;
             batch++;
-
-            if (per_producer_rps > 0 && records_sent >= next_checkpoint) {
-                sleep_until_rate_limit_met(records_sent, pa->first_message_time_ns, per_producer_rps);
-                next_checkpoint += checkpoint_interval;
-            }
         }
 
         if (batch == 0) {
@@ -1437,6 +1520,13 @@ static void* eos_producer_thread_func(void* arg) {
             pthread_mutex_unlock(&stats_mutex);
             txn_index++;
             atomic_fetch_add(&eos_records_processed, batch);
+            if (consecutive_rejections >= MAX_CONSECUTIVE_PRODUCE_REJECTIONS) {
+                fprintf(stderr,
+                    "EOS producer %d: %ld consecutive produces rejected with none accepted "
+                    "in between; stopping this producer (the run fails)\n",
+                    pa->index, consecutive_rejections);
+                break;
+            }
             continue; // back to the loop condition (the bound check)
         }
 
@@ -1475,6 +1565,7 @@ static void* eos_producer_thread_func(void* arg) {
                 pthread_mutex_lock(&stats_mutex);
                 total_abort_latency += abort_latency;
                 if (abort_latency > max_abort_latency) max_abort_latency = abort_latency;
+                if (abort_latency < min_abort_latency) min_abort_latency = abort_latency;
                 long alat_ms = abort_latency / 1000000L;
                 if (alat_ms < 0) alat_ms = 0;
                 if (alat_ms > MAX_LATENCY_MS + 1) alat_ms = MAX_LATENCY_MS + 1;
@@ -1515,6 +1606,7 @@ static void* eos_producer_thread_func(void* arg) {
                 committed_transactions++;
                 total_commit_latency += commit_latency;
                 if (commit_latency > max_commit_latency) max_commit_latency = commit_latency;
+                if (commit_latency < min_commit_latency) min_commit_latency = commit_latency;
                 long clat_ms = commit_latency / 1000000L;
                 if (clat_ms < 0) clat_ms = 0;
                 if (clat_ms > MAX_LATENCY_MS + 1) clat_ms = MAX_LATENCY_MS + 1;
@@ -1541,6 +1633,7 @@ static void* eos_producer_thread_func(void* arg) {
                     completed_messages++;
                     if (ok) verified++;
                     if (latency > max_latency) max_latency = latency;
+                    if (latency < min_latency) min_latency = latency;
                     total_latency += latency;
                     long latency_ms = latency / 1000000L;
                     if (latency_ms < 0) latency_ms = 0;
@@ -1560,6 +1653,7 @@ static void* eos_producer_thread_func(void* arg) {
     }
 
 cleanup:
+    atomic_fetch_add(&records_sent_total, records_sent);
     free(futures);
     free(produce_ts);
     rd_kafka_consumer_close(consumer);
@@ -1689,13 +1783,26 @@ static void run_warmup(Message* messages) {
         Message* message = &messages[i % GENERATED_MESSAGE_COUNT];
         TxnFuture* f = calloc(1, sizeof(TxnFuture));
         atomic_init(&f->done, false);
-        rd_kafka_producev(
+        rd_kafka_resp_err_t err = rd_kafka_producev(
             rk, RD_KAFKA_V_TOPIC(TOPIC),
             RD_KAFKA_V_KEY(KEY_SIZE > 0 ? message->key : NULL, KEY_SIZE),
             RD_KAFKA_V_VALUE(message->value, VALUE_SIZE),
             RD_KAFKA_V_OPAQUE(f),
             RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_BLOCK),
             RD_KAFKA_V_END);
+        if (err != RD_KAFKA_RESP_ERR_NO_ERROR) {
+            // Never enqueued, so no delivery report will fire (waiting for one
+            // would hang the warmup): abort the warmup transaction and stop
+            // warming up. A rejected produce fails the run, as in the measured
+            // loop; one record every 100 ms cannot be rejected for load.
+            log_produce_rejection(rd_kafka_err2str(err));
+            atomic_store(&produce_rejected, true);
+            free(f);
+            check_txn_error(rd_kafka_abort_transaction(rk, 60000), "warmup abort_transaction");
+            rd_kafka_destroy(rk);
+            fprintf(stderr, "Warmup stopped: a produce was rejected (see above)\n");
+            return;
+        }
         check_txn_error(rd_kafka_commit_transaction(rk, 60000), "warmup commit_transaction");
         while (!atomic_load_explicit(&f->done, memory_order_acquire)) {
             rd_kafka_poll(rk, 100);
@@ -1906,6 +2013,17 @@ static void run_test() {
     long after_ms = current_time_ms();
     metrics_set_measurement_end_ms(&metrics, after_ms);
 
+    // The time cap stopped a counted run: report it (not a failure; see
+    // run_capped). The duration is the measured one written to results.json.
+    if (atomic_load(&run_capped)) {
+        printf("capped: sent %ld of %ld records in %.2f s (TEST_DURATION_SECONDS + %d s)\n",
+            atomic_load(&records_sent_total), NUM_MESSAGES,
+            (after_ns - first_message_time_ns) / 1e9, COUNTED_RUN_GRACE_S);
+    }
+    if (atomic_load(&produce_rejections) > 0) {
+        fprintf(stderr, "Produce rejections: %ld\n", atomic_load(&produce_rejections));
+    }
+
     // An inconsistent summary fails the run (unless it was interrupted), but the
     // summary below is still written so the run's numbers are not lost.
     if (verified != completed_messages) {
@@ -1939,45 +2057,44 @@ static void run_test() {
     printf("Average rate MiB/s: %.2f MiB/s\n",
         total_time_s > 0 ? (completed_messages * MESSAGE_SIZE / (1024.0 * 1024.0)) / total_time_s : 0.0);
     printf("Transactions/s: %.2f\n", txn_rate);
-    printf("Average per-record latency: %.2f ms\n",
-        completed_messages > 0 ? (double)total_latency / completed_messages / 1e6 : 0.0);
-    printf("Max per-record latency: %.2f ms\n", (double)max_latency / 1e6);
-    printf("Average commit latency: %.2f ms\n",
-        committed_transactions > 0 ? (double)total_commit_latency / committed_transactions / 1e6 : 0.0);
+    // Exact avg / min / max (from the ns totals, never from the histogram
+    // buckets, which only feed the percentiles). Every committed record and
+    // committed transaction records a latency; aborts only on the
+    // deterministic-abort path, counted by their histogram.
     long abort_lat_count = 0;
     for (size_t i = 0; i < MAX_LATENCY_MS + 2; i++) {
         abort_lat_count += abort_latency_hist[i];
     }
-    printf("Average abort latency: %.2f ms\n",
-        abort_lat_count > 0 ? (double)total_abort_latency / abort_lat_count / 1e6 : 0.0);
+    double avg_ms = completed_messages > 0 ? (double)total_latency / completed_messages / 1e6 : 0.0;
+    double min_ms = completed_messages > 0 ? (double)min_latency / 1e6 : 0.0;
+    double max_ms = completed_messages > 0 ? (double)max_latency / 1e6 : 0.0;
+    double cavg_ms = committed_transactions > 0
+        ? (double)total_commit_latency / committed_transactions / 1e6 : 0.0;
+    double cmin_ms = committed_transactions > 0 ? (double)min_commit_latency / 1e6 : 0.0;
+    double cmax_ms = committed_transactions > 0 ? (double)max_commit_latency / 1e6 : 0.0;
+    double aavg_ms = abort_lat_count > 0 ? (double)total_abort_latency / abort_lat_count / 1e6 : 0.0;
+    double amin_ms = abort_lat_count > 0 ? (double)min_abort_latency / 1e6 : 0.0;
+    double amax_ms = abort_lat_count > 0 ? (double)max_abort_latency / 1e6 : 0.0;
+    printf("Average per-record latency: %.2f ms\n", avg_ms);
+    printf("Max per-record latency: %.2f ms\n", max_ms);
+    printf("Average commit latency: %.2f ms\n", cavg_ms);
+    printf("Average abort latency: %.2f ms\n", aavg_ms);
 
     long p50_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.50);
     long p90_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.90);
     long p95_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.95);
     long p99_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.99);
     long p999_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.999);
-    long min_latency_ms = 0;
-    for (size_t i = 0; i < MAX_LATENCY_MS + 2; i++) {
-        if (latency_hist[i] > 0) { min_latency_ms = (long)i; break; }
-    }
     long cp50 = percentile_from_hist(commit_latency_hist, MAX_LATENCY_MS + 2, 0.50);
     long cp90 = percentile_from_hist(commit_latency_hist, MAX_LATENCY_MS + 2, 0.90);
     long cp95 = percentile_from_hist(commit_latency_hist, MAX_LATENCY_MS + 2, 0.95);
     long cp99 = percentile_from_hist(commit_latency_hist, MAX_LATENCY_MS + 2, 0.99);
     long cp999 = percentile_from_hist(commit_latency_hist, MAX_LATENCY_MS + 2, 0.999);
-    long cmin_ms = 0;
-    for (size_t i = 0; i < MAX_LATENCY_MS + 2; i++) {
-        if (commit_latency_hist[i] > 0) { cmin_ms = (long)i; break; }
-    }
     long ap50 = percentile_from_hist(abort_latency_hist, MAX_LATENCY_MS + 2, 0.50);
     long ap90 = percentile_from_hist(abort_latency_hist, MAX_LATENCY_MS + 2, 0.90);
     long ap95 = percentile_from_hist(abort_latency_hist, MAX_LATENCY_MS + 2, 0.95);
     long ap99 = percentile_from_hist(abort_latency_hist, MAX_LATENCY_MS + 2, 0.99);
     long ap999 = percentile_from_hist(abort_latency_hist, MAX_LATENCY_MS + 2, 0.999);
-    long amin_ms = 0;
-    for (size_t i = 0; i < MAX_LATENCY_MS + 2; i++) {
-        if (abort_latency_hist[i] > 0) { amin_ms = (long)i; break; }
-    }
 
     printf("p99 per-record latency: %ld ms\n", p99_ms);
     // Per-record latency budget — only asserted when set (P99_LIMIT_MS=0
@@ -2003,13 +2120,13 @@ static void run_test() {
             "  \"aborted_transactions\": %ld,\n"
             "  \"aborted_records\": %ld,\n"
             "  \"transactions_per_s\": %.2f,\n"
-            "  \"latency_ms\": {\"min\": %ld, \"avg\": %.2f, \"p50\": %ld, "
+            "  \"latency_ms\": {\"min\": %.2f, \"avg\": %.2f, \"p50\": %ld, "
             "\"p90\": %ld, \"p95\": %ld, \"p99\": %ld, \"p999\": %ld, "
             "\"max\": %.2f},\n"
-            "  \"commit_latency_ms\": {\"min\": %ld, \"avg\": %.2f, \"p50\": %ld, "
+            "  \"commit_latency_ms\": {\"min\": %.2f, \"avg\": %.2f, \"p50\": %ld, "
             "\"p90\": %ld, \"p95\": %ld, \"p99\": %ld, \"p999\": %ld, "
             "\"max\": %.2f},\n"
-            "  \"abort_latency_ms\": {\"min\": %ld, \"avg\": %.2f, \"p50\": %ld, "
+            "  \"abort_latency_ms\": {\"min\": %.2f, \"avg\": %.2f, \"p50\": %ld, "
             "\"p90\": %ld, \"p95\": %ld, \"p99\": %ld, \"p999\": %ld, "
             "\"max\": %.2f},\n"
             "  \"cpu_avg_pct\": %.2f,\n"
@@ -2024,18 +2141,15 @@ static void run_test() {
             aborted_transactions,
             aborted_records,
             txn_rate,
-            min_latency_ms,
-            completed_messages > 0 ? (double)total_latency / completed_messages / 1e6 : 0.0,
+            min_ms, avg_ms,
             p50_ms, p90_ms, p95_ms, p99_ms, p999_ms,
-            (double)max_latency / 1e6,
-            cmin_ms,
-            committed_transactions > 0 ? (double)total_commit_latency / committed_transactions / 1e6 : 0.0,
+            max_ms,
+            cmin_ms, cavg_ms,
             cp50, cp90, cp95, cp99, cp999,
-            (double)max_commit_latency / 1e6,
-            amin_ms,
-            abort_lat_count > 0 ? (double)total_abort_latency / abort_lat_count / 1e6 : 0.0,
+            cmax_ms,
+            amin_ms, aavg_ms,
             ap50, ap90, ap95, ap99, ap999,
-            (double)max_abort_latency / 1e6,
+            amax_ms,
             average_cpu,
             average_rss / 1024.0);
         if (fclose(results_fp) != 0) {
