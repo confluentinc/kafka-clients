@@ -90,17 +90,19 @@ impl AdminClientConfig {
     /// `retries`
     pub const RETRIES_CONFIG: &'static str = "retries";
     /// `retry.backoff.ms`
-    pub const RETRY_BACKOFF_MS_CONFIG: &'static str = "retry.backoff.ms";
+    pub const RETRY_BACKOFF_MS_CONFIG: &'static str = CommonClientConfigs::RETRY_BACKOFF_MS_CONFIG;
     /// `retry.backoff.max.ms`
-    pub const RETRY_BACKOFF_MAX_MS_CONFIG: &'static str = "retry.backoff.max.ms";
+    pub const RETRY_BACKOFF_MAX_MS_CONFIG: &'static str = CommonClientConfigs::RETRY_BACKOFF_MAX_MS_CONFIG;
     /// `bootstrap.resolve.timeout.ms` (KIP-909). See
     /// [`Self::bootstrap_resolve_timeout_ms`].
     pub const BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG: &'static str =
         CommonClientConfigs::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG;
     /// `reconnect.backoff.ms`
-    pub const RECONNECT_BACKOFF_MS_CONFIG: &'static str = "reconnect.backoff.ms";
-    /// `reconnect.backoff.max.ms`
-    pub const RECONNECT_BACKOFF_MAX_MS_CONFIG: &'static str = "reconnect.backoff.max.ms";
+    pub const RECONNECT_BACKOFF_MS_CONFIG: &'static str = CommonClientConfigs::RECONNECT_BACKOFF_MS_CONFIG;
+    /// `reconnect.backoff.max.ms`. When only `reconnect.backoff.ms` is set, it
+    /// defaults to that value, which disables the exponential reconnect backoff
+    /// (see [`Self::reconnect_backoff_max_ms`]).
+    pub const RECONNECT_BACKOFF_MAX_MS_CONFIG: &'static str = CommonClientConfigs::RECONNECT_BACKOFF_MAX_MS_CONFIG;
     /// `connections.max.idle.ms`
     pub const CONNECTIONS_MAX_IDLE_MS_CONFIG: &'static str = "connections.max.idle.ms";
     /// `metadata.max.age.ms`
@@ -312,6 +314,8 @@ impl AdminClientConfig {
             }
         }
 
+        config.post_process_parsed_config(props);
+
         // `KafkaAdminClient.determineBootstrapType` (KIP-909 moved it there from
         // the deleted `AdminBootstrapAddresses.fromConfig`). Java runs it in
         // `createInternal`; this crate has always run the check here, when the
@@ -332,6 +336,29 @@ impl AdminClientConfig {
             .client_dns_lookup
             .warn_if_tls_hostname_verification_affected(config.security_protocol, &config.ssl_config);
         Ok(config)
+    }
+
+    /// Java's `AbstractConfig.postProcessParsedConfig` hook as
+    /// `AdminClientConfig` overrides it (`AdminClientConfig.java:318-323`), run
+    /// once every key is parsed, before the bootstrap check:
+    /// `warnDisablingExponentialBackoff`, then
+    /// `postProcessReconnectBackoffConfigs`, whose override replaces the parsed
+    /// `reconnect.backoff.max.ms`.
+    ///
+    /// `originals` is the user's map, Java's `originals()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.AdminClientConfig#postProcessParsedConfig")]
+    fn post_process_parsed_config(&mut self, originals: &HashMap<String, String>) {
+        CommonClientConfigs::warn_disabling_exponential_backoff(
+            self.retry_backoff_ms,
+            self.retry_backoff_max_ms,
+            self.socket_connection_setup_timeout_ms,
+            self.socket_connection_setup_timeout_max_ms,
+        );
+        if let Some(reconnect_backoff_max_ms) =
+            CommonClientConfigs::post_process_reconnect_backoff_configs(originals, self.reconnect_backoff_ms)
+        {
+            self.reconnect_backoff_max_ms = reconnect_backoff_max_ms;
+        }
     }
 
     /// The `bootstrap.servers` list.
@@ -393,7 +420,9 @@ impl AdminClientConfig {
         self.reconnect_backoff_ms
     }
 
-    /// `reconnect.backoff.max.ms`.
+    /// `reconnect.backoff.max.ms`. When the user set `reconnect.backoff.ms` and
+    /// not this key, this is the `reconnect.backoff.ms` value, as in Java
+    /// (`CommonClientConfigs.postProcessReconnectBackoffConfigs`).
     pub fn reconnect_backoff_max_ms(&self) -> i64 {
         self.reconnect_backoff_max_ms
     }
@@ -831,6 +860,24 @@ mod tests {
             err.message(),
             "Invalid value abc for configuration socket.connection.setup.timeout.max.ms: Not a number of type LONG"
         );
+    }
+
+    /// `reconnect.backoff.ms` alone sets the max to its value whether it is
+    /// above or below the default max of 1000, and an explicit max is kept.
+    #[test]
+    fn test_reconnect_backoff_alone_sets_the_max() {
+        let max = |extra: &[(&str, &str)]| {
+            AdminClientConfig::new(&with_bootstrap(extra))
+                .unwrap()
+                .reconnect_backoff_max_ms()
+        };
+        assert_eq!(max(&[("reconnect.backoff.ms", "5000")]), 5000);
+        assert_eq!(max(&[("reconnect.backoff.ms", "200")]), 200);
+        assert_eq!(
+            max(&[("reconnect.backoff.ms", "200"), ("reconnect.backoff.max.ms", "2000")]),
+            2000
+        );
+        assert_eq!(max(&[("reconnect.backoff.max.ms", "2000")]), 2000);
     }
 
     /// Translated from `ProducerConfigTest.testInvalidSecurityProtocol`, adapted
