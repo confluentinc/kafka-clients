@@ -30,22 +30,21 @@ future type a completion resolves and where the user's callback runs (CLAUDE.md,
 Python Binding Conventions, Implementation over the FFI and Threads and
 callbacks).
 
-*(deviation)* Backpressure is the core's ``max.block.ms`` wait: ``send()``
-returns once the record is queued on the submission task, which hands records
-to the producer one at a time, in order; there the metadata wait and the wait
-for ``buffer.memory`` space are bounded by ``max.block.ms`` as in Java, and a
-record that times out fails through its callback and future. Java's
-``send()`` blocks its caller for those waits instead; here the caller is not
-blocked, and records queued behind a full buffer are held by the submission
-task meanwhile. Two consequences follow:
+Backpressure is Java's: ``send()`` returns only once its record is with the
+producer, as Java's returns once ``doSend`` appended it. The submission task
+hands records to the producer one at a time, in order, and there the metadata
+wait and the wait for ``buffer.memory`` space are bounded by ``max.block.ms``.
+``send()`` waits for that handover on an internal future, which the
+``send_with_callback_cb`` completion resolves, then returns the record's own
+future, which the record's delivery callback completes, or raises what Java's
+``doSend`` rethrows. So a record not yet in the buffer has a caller waiting for
+it: at most one per sending thread or task.
 
-- The submission queue is unbounded, so the records waiting in it are not
-  bounded by ``buffer.memory``: a caller that sends faster than the producer
-  drains keeps growing it.
-- The submission task waits for one record at a time, so the k-th record queued
-  behind a full buffer can wait up to k × ``max.block.ms`` before it fails,
-  where each Java ``send()`` waits at most ``max.block.ms``, whatever the number
-  of sending threads.
+*(deviation)* The submission task waits for one record at a time, so the k-th
+caller waiting behind a full buffer can wait up to k × ``max.block.ms`` before
+its record fails, where each Java ``send()`` waits at most ``max.block.ms``,
+whatever the number of sending threads. A ``send()`` from a sync producer's
+callback does not wait (see ``producer``).
 """
 
 from __future__ import annotations
@@ -53,7 +52,9 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, Any, cast
+from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FutureTimeoutError
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
@@ -112,8 +113,6 @@ def closed_while_sending() -> KafkaError:
     send in progress")``. Built only then, so a send that goes through
     allocates no error."""
     return KafkaError(message=CLOSED_WHILE_SENDING_MESSAGE)
-
-_TRANSACTIONAL_ID = "transactional.id"
 
 # ProducerConfig.MAX_BLOCK_MS_CONFIG and its default (60 s).
 _MAX_BLOCK_MS = "max.block.ms"
@@ -258,6 +257,28 @@ def wait_sliced(event: threading.Event, deadline: float | None = None,
             raise interrupted
 
 
+_T = TypeVar("_T")
+
+
+def result_sliced(future: Future[_T]) -> _T:
+    """``future.result()``, waited for as :func:`wait_sliced` waits: in
+    :data:`WAIT_SLICE_S` slices, a Ctrl+C letting the wait end and then raised
+    instead of the result."""
+    interrupted: KeyboardInterrupt | None = None
+    try:
+        while True:
+            try:
+                return future.result(WAIT_SLICE_S)
+            except FutureTimeoutError:
+                continue
+            except KeyboardInterrupt as exc:
+                if interrupted is None:
+                    interrupted = exc
+    finally:
+        if interrupted is not None:
+            raise interrupted
+
+
 def wait_futures(futures: list[Any]) -> None:
     """Wait (as :func:`wait_sliced`) until every future of ``futures`` is done."""
     if not futures:
@@ -386,15 +407,6 @@ class _ProducerState:
         self._lifecycle_lock = threading.RLock()
         self._lifecycle = threading.Condition(self._lifecycle_lock)
         self._uses = 0
-        # Whether transactional.id is set, and whether a transaction this
-        # producer began is open (begin_transaction() returned; commit / abort
-        # not called since). While a transactional producer has none open,
-        # send() waits for its record to reach the Rust producer and raises
-        # what Java's doSend rethrows (every such send fails there: the
-        # transaction manager is not IN_TRANSACTION). Inside one, records go
-        # through the batching engine without that wait.
-        self._transactional = False
-        self._in_transaction = False
         # Futures of the records sent and not yet completed: flush() waits for
         # the ones sent before it (their callbacks have run by then, as in Java).
         self._futures: set[Any] = set()
@@ -483,7 +495,6 @@ class _ProducerState:
         self._key_serializer = key
         self._value_serializer = value
         self._c_producer = handle
-        self._transactional = bool(configs.get(_TRANSACTIONAL_ID))
         max_block_ms = native.get(_MAX_BLOCK_MS)
         if max_block_ms is not None:
             self._max_block_ms = int(max_block_ms)

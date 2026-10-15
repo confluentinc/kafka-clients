@@ -1309,35 +1309,33 @@ the records already sent, like every transaction-control operation
 families wait on it like the other control operations.
 
 Deviations recorded in the package's module docstrings:
-- Backpressure is the core's `max.block.ms` wait on the submission task, not
-  master's `Producer_drain` / on-space-available machinery. `send()` returns
-  once the record is queued on the submission task, which hands records to the
-  producer one at a time, in order. There the metadata wait and the wait for
-  `buffer.memory` space are bounded by `max.block.ms`, as in Java, and a record
-  that times out fails through its callback and future. Java blocks the
-  `send()` caller for those waits; here records queued behind a full buffer are
-  held by the submission task instead. Two consequences follow:
-  - the submission queue is an unbounded channel (`ffi/producer/mod.rs`,
-    `ProducerHandle::new`), so the records waiting in it are not bounded by
-    `buffer.memory`;
-  - `submission_loop` waits for one record at a time, so the k-th record queued
-    behind a full buffer can wait up to k × `max.block.ms` before it fails,
-    where each Java `send()` waits at most `max.block.ms`, whatever the number
-    of sending threads.
+- Backpressure is Java's, not master's `Producer_drain` / on-space-available
+  machinery: `send()` returns only once its record is with the producer, as
+  Java's returns once `doSend` appended it. The record is queued on the
+  submission task, which hands records to the producer one at a time, in
+  order; there the metadata wait and the wait for `buffer.memory` space are
+  bounded by `max.block.ms`, as in Java. `send()` waits on two futures: an
+  internal one, which the `send_with_callback_cb` completion resolves at the
+  handover with the record's future or with the error Java's `doSend`
+  rethrows (which `send()` raises), and the record's own future, which
+  `send()` returns and the delivery callback completes. So the submission
+  queue holds at most one record per sending thread or task. The one
+  deviation: `submission_loop` waits for one record at a time, so the k-th
+  caller waiting behind a full buffer can wait up to k × `max.block.ms` before
+  its record fails, where each Java `send()` waits at most `max.block.ms`,
+  whatever the number of sending threads.
 - A call from inside a `send()` callback cannot have its completion run,
   since that runs on the thread the callback blocks. There, `send()` does not
   wait for its record to reach the producer. `init_transactions`,
   `begin_transaction`, `send_offsets_to_transaction`, `commit_transaction`,
   `abort_transaction` and `partitions_for` raise `TimeoutError` after
   `max.block.ms`; the operation itself may still complete. For
-  `begin_transaction` that leaves the core in a transaction while the
-  binding's `_in_transaction` stays `False`, the result arriving only once the
-  callback returns: a retry raises Java's `IllegalStateError` (the
-  transaction is already in progress), and sends from outside a callback keep
-  waiting for their handover until `commit_transaction` or
-  `abort_transaction` ends the transaction. No binding-side fix: a timed-out
-  wait cannot tell whether the core began, and not waiting would drop
-  `begin_transaction`'s own errors.
+  `begin_transaction` that can leave the core in a transaction although the
+  call raised: a retry raises Java's `IllegalStateError` (the transaction is
+  already in progress). No binding-side fix: a timed-out wait cannot tell
+  whether the core began, and not waiting would drop `begin_transaction`'s
+  own errors. What a `send()` from a callback would raise goes to its
+  callback and future instead.
 - Inside a consumer callback, a listener re-enters the consumer through the
   guard-free `ConsumerHandle`, since the outer call holds the single-owner
   guard. Two calls raise `ConcurrentModificationError` at once, because their

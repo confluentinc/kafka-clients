@@ -99,6 +99,7 @@ import os
 import signal
 import threading
 import time
+from concurrent.futures import Future
 from types import FrameType
 from typing import Any
 
@@ -195,11 +196,24 @@ def test_should_close_properly_and_throw_if_interrupted() -> None:
     # close() runs here and a timer sends the signal. Java's MockClient holds
     # the send in flight; here an unreachable broker keeps the record waiting
     # for metadata (max.block.ms 60 s), so close() cannot end on its own sooner.
+    # That send() waits for the metadata as Java's does, so it runs on a thread
+    # of its own; the forced close ends its wait.
     configs = {"bootstrap.servers": "localhost:9999", "batch.size": "1",
                "max.block.ms": 60000}
     producer = KafkaProducer(configs=configs, key_serializer=string_serializer(),
                              value_serializer=string_serializer())
-    future = producer.send(record=ProducerRecord(topic="topic", key="key", value="value"))
+    outcome: list[BaseException | Future[RecordMetadata]] = []
+
+    def send() -> None:
+        try:
+            outcome.append(producer.send(
+                record=ProducerRecord(topic="topic", key="key", value="value")))
+        except BaseException as e:  # noqa: BLE001 - checked below
+            outcome.append(e)
+
+    sender = threading.Thread(target=send, daemon=True)
+    sender.start()
+    time.sleep(0.05)  # the record is with the submission task
 
     armed = True
 
@@ -226,9 +240,16 @@ def test_should_close_properly_and_throw_if_interrupted() -> None:
     # Close did not complete without waiting for the send, and the interrupt
     # surfaced once the close was forced, not after max.block.ms.
     assert 0.1 <= elapsed < 10, elapsed
-    # Closed properly: the pending record failed, and the producer is closed.
-    assert future.done()
-    assert isinstance(future.exception(), KafkaError)
+    # Closed properly: the pending record failed (its send() raising, or its
+    # future failing), and the producer is closed.
+    sender.join(10)
+    assert not sender.is_alive()
+    (result,) = outcome
+    if isinstance(result, BaseException):
+        assert isinstance(result, KafkaError), result
+    else:
+        assert result.done()
+        assert isinstance(result.exception(), KafkaError)
     with pytest.raises(IllegalStateError) as err:
         producer.send(record=ProducerRecord(topic="topic", key="key", value="value"))
     assert str(err.value) == "Cannot perform operation after producer has been closed"

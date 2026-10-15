@@ -160,8 +160,9 @@ def log_unreported_callback_error(metadata: RecordMetadata, error: BaseException
     """Log a callback's exception that has no core report to go to, with the
     message the core logs a reported one with (Java's
     ``ProducerBatch.completeFutureAndFireCallbacks``): the callback of a
-    completion the core does not deliver, a record the Rust ``send()`` rejected
-    before the accumulator, which Python completes itself (the callback id 0).
+    completion the core does not deliver: a record sent from a ``send()``
+    callback, which does not wait for its handover, and that the Rust
+    ``send()`` rejected before the accumulator, so Python completes it itself.
     Every other callback's exception is reported, and only the core logs it."""
     _LOG.error("Error executing user-provided callback on message for topic-partition '%s'",
                f"{metadata.topic()}-{metadata.partition()}", exc_info=error)
