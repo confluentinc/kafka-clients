@@ -297,16 +297,47 @@ impl AdminMetadataManager {
         rebootstrap(&mut self.inner.lock().unwrap(), now, &self.log_context);
     }
 
-    /// Records a failed metadata update, storing a fatal exception if the error
-    /// is not retriable.
+    /// Records a failed metadata update and returns to `QUIESCENT`. A fatal
+    /// error (`RequestUtils.isFatalException`) is logged as a warning and kept,
+    /// so that [`is_ready`](Self::is_ready) returns it until the next
+    /// successful update; any other error is logged at info level.
+    ///
+    /// Translated from `AdminMetadataManager.updateFailed`
+    /// (`AdminMetadataManager.java:317-339`).
     #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManager#updateFailed")]
     pub(crate) fn update_failed(&self, error: Error) {
         let mut inner = self.inner.lock().unwrap();
+        // We depend on pending calls to request another metadata update
         inner.state = State::Quiescent;
-        // We depend on pending calls to request another metadata update.
+
         if crate::common::requests::RequestUtils::is_fatal_error(&error) {
-            inner.fatal_error = Some(error);
+            kafka_warn!(self.log_context, "Fatal error during metadata update: {}", error);
+            if let Some(warning) = Self::unsupported_version_warning(&error, self.using_bootstrap_controllers) {
+                kafka_warn!(self.log_context, "{}: {}", warning, error);
+            }
+            // avoid unchecked/unconfirmed cast to ApiException
+            if error.is_api_error() {
+                inner.fatal_error = Some(error);
+            }
+        } else {
+            kafka_info!(self.log_context, "Metadata update failed: {}", error);
         }
+    }
+
+    /// The warning `updateFailed` adds for a fatal `UnsupportedVersionException`
+    /// (`AdminMetadataManager.java:328-335`), which names the API the remote
+    /// node does not support: KIP-919's `DESCRIBE_CLUSTER` for a
+    /// `bootstrap.controllers` client, `METADATA` otherwise. `None` for any
+    /// other error.
+    fn unsupported_version_warning(error: &Error, using_bootstrap_controllers: bool) -> Option<&'static str> {
+        if !matches!(error, Error::UnsupportedVersion(_)) {
+            return None;
+        }
+        Some(if using_bootstrap_controllers {
+            "The remote node is not a CONTROLLER that supports the KIP-919 DESCRIBE_CLUSTER api."
+        } else {
+            "The remote node is not a BROKER that supports the METADATA api."
+        })
     }
 }
 
@@ -446,6 +477,7 @@ impl MetadataUpdater for AdminMetadataUpdater {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::errors::{AuthenticationError, AuthorizationError};
     use crate::common::utils::{MockTime, Time};
     use std::collections::HashSet;
     use std::net::SocketAddr;
@@ -516,6 +548,141 @@ mod tests {
             Some(controller),
             HashMap::new(),
         )
+    }
+
+    /// Translated from `AdminMetadataManagerTest.testSetUsingBootstrapControllers`
+    /// (`@ValueSource(booleans = {false, true})`).
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManagerTest#testSetUsingBootstrapControllers")]
+    fn test_set_using_bootstrap_controllers() {
+        for using_bootstrap_controllers in [false, true] {
+            let manager = AdminMetadataManager::new(
+                REFRESH_BACKOFF_MS,
+                METADATA_EXPIRE_MS,
+                using_bootstrap_controllers,
+                LogContext::empty(),
+            );
+            assert_eq!(using_bootstrap_controllers, manager.using_bootstrap_controllers());
+        }
+    }
+
+    /// Java's `new MockTime()`, whose clock starts at the wall-clock time: any
+    /// time past `REFRESH_BACKOFF_MS` behaves the same.
+    fn mock_time() -> MockTime {
+        MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 1_000_000, 0)
+    }
+
+    /// Translated from `AdminMetadataManagerTest.testMetadataReady`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManagerTest#testMetadataReady")]
+    fn test_metadata_ready() {
+        let time = mock_time();
+        let mgr = mgr();
+        // Metadata is not ready on initialization
+        assert!(!mgr.is_ready().unwrap());
+        assert_eq!(0, mgr.metadata_fetch_delay_ms(time.milliseconds()));
+
+        // Metadata is not ready when bootstrap servers are set
+        let bootstrap_address: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        mgr.update(
+            Cluster::bootstrap(&[("localhost".to_string(), bootstrap_address)]),
+            time.milliseconds(),
+        );
+        assert!(!mgr.is_ready().unwrap());
+        assert_eq!(0, mgr.metadata_fetch_delay_ms(time.milliseconds()));
+
+        mgr.update(mock_cluster(), time.milliseconds());
+        assert!(mgr.is_ready().unwrap());
+        assert_eq!(METADATA_EXPIRE_MS, mgr.metadata_fetch_delay_ms(time.milliseconds()));
+
+        time.sleep(METADATA_EXPIRE_MS);
+        assert_eq!(0, mgr.metadata_fetch_delay_ms(time.milliseconds()));
+    }
+
+    /// Translated from `AdminMetadataManagerTest.testMetadataRefreshBackoff`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManagerTest#testMetadataRefreshBackoff")]
+    fn test_metadata_refresh_backoff() {
+        let time = mock_time();
+        let mgr = mgr();
+        mgr.transition_to_update_pending(time.milliseconds());
+        assert_eq!(i64::MAX, mgr.metadata_fetch_delay_ms(time.milliseconds()));
+
+        // Java passes a bare `RuntimeException`: any non-fatal error.
+        mgr.update_failed(Error::local_illegal_state(""));
+        assert_eq!(REFRESH_BACKOFF_MS, mgr.metadata_fetch_delay_ms(time.milliseconds()));
+
+        // Even if we explicitly request an update, the backoff should be respected
+        mgr.request_update();
+        assert_eq!(REFRESH_BACKOFF_MS, mgr.metadata_fetch_delay_ms(time.milliseconds()));
+
+        time.sleep(REFRESH_BACKOFF_MS);
+        assert_eq!(0, mgr.metadata_fetch_delay_ms(time.milliseconds()));
+    }
+
+    /// Translated from `AdminMetadataManagerTest.testAuthenticationFailure`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManagerTest#testAuthenticationFailure")]
+    fn test_authentication_failure() {
+        let time = mock_time();
+        let mgr = mgr();
+        mgr.transition_to_update_pending(time.milliseconds());
+        mgr.update_failed(Error::Authentication(AuthenticationError::new("Authentication failed")));
+        assert_eq!(REFRESH_BACKOFF_MS, mgr.metadata_fetch_delay_ms(time.milliseconds()));
+        let error = mgr.is_ready().unwrap_err();
+        assert!(matches!(error, Error::Authentication(_)), "got {error:?}");
+        mgr.update(mock_cluster(), time.milliseconds());
+        assert!(mgr.is_ready().unwrap());
+    }
+
+    /// Translated from `AdminMetadataManagerTest.testAuthorizationFailure`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManagerTest#testAuthorizationFailure")]
+    fn test_authorization_failure() {
+        let time = mock_time();
+        let mgr = mgr();
+        mgr.transition_to_update_pending(time.milliseconds());
+        mgr.update_failed(Error::Authorization(AuthorizationError::new("Authorization failed")));
+        assert_eq!(REFRESH_BACKOFF_MS, mgr.metadata_fetch_delay_ms(time.milliseconds()));
+        let error = mgr.is_ready().unwrap_err();
+        assert!(matches!(error, Error::Authorization(_)), "got {error:?}");
+        mgr.update(mock_cluster(), time.milliseconds());
+        assert!(mgr.is_ready().unwrap());
+    }
+
+    /// `updateFailed`'s KIP-919 branch (`AdminMetadataManager.java:328-335`): a
+    /// fatal `UnsupportedVersionException` names the API the remote node lacks,
+    /// `DESCRIBE_CLUSTER` for a `bootstrap.controllers` client and `METADATA`
+    /// otherwise; other errors add no such warning. The error is stored either
+    /// way, and a non-fatal one is not.
+    #[test]
+    fn update_failed_names_the_unsupported_metadata_api() {
+        let unsupported = Error::unsupported_version("The node does not support DESCRIBE_CLUSTER");
+        assert_eq!(
+            AdminMetadataManager::unsupported_version_warning(&unsupported, true),
+            Some("The remote node is not a CONTROLLER that supports the KIP-919 DESCRIBE_CLUSTER api.")
+        );
+        assert_eq!(
+            AdminMetadataManager::unsupported_version_warning(&unsupported, false),
+            Some("The remote node is not a BROKER that supports the METADATA api.")
+        );
+        let mismatched = Error::new(crate::common::protocol::Errors::MismatchedEndpointType);
+        assert_eq!(AdminMetadataManager::unsupported_version_warning(&mismatched, true), None);
+
+        for using_bootstrap_controllers in [false, true] {
+            let manager = AdminMetadataManager::new(
+                REFRESH_BACKOFF_MS,
+                METADATA_EXPIRE_MS,
+                using_bootstrap_controllers,
+                LogContext::empty(),
+            );
+            manager.update(mock_cluster(), 1000);
+            manager.update_failed(Error::timeout("not fatal"));
+            assert!(manager.is_ready().unwrap(), "a non-fatal error is not kept");
+            manager.update_failed(unsupported.clone());
+            let error = manager.is_ready().unwrap_err();
+            assert!(matches!(error, Error::UnsupportedVersion(_)), "got {error:?}");
+        }
     }
 
     /// Translated from `AdminMetadataManagerTest.testNeedsRebootstrap`.

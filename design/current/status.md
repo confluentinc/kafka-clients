@@ -72,7 +72,7 @@
 >   reason for the delegation-token and SCRAM integration deferral no longer
 >   applies. Authenticating with those credentials still needs SASL/SCRAM,
 >   which is not implemented (SASL is PLAIN only). `bootstrap.controllers`
->   (KIP-919) is still unsupported (`:313`).
+>   (KIP-919) is supported.
 > - **44 admin RPCs, not 46.** Java's deprecated `listConsumerGroups` and
 >   `listClientMetricsResources` were removed (CLAUDE.md §3). The trait at
 >   `src/admin/mod.rs:240` declares 94 sync `fn`s (44 of them required) plus
