@@ -356,7 +356,7 @@ def test_kafka_producer_config_route_serializer() -> None:
         _UpperSerializer.configured.clear()
         p = cls(configs={**UNREACHABLE, "key.serializer": route, "value.serializer": route})
         try:
-            native = p._native_record(ProducerRecord(topic=TOPIC, key="k", value="abc"))  # noqa: SLF001
+            native = p._native_parts(ProducerRecord(topic=TOPIC, key="k", value="abc"))[0]  # noqa: SLF001
             assert (native.key, native.value) == (b"K", b"ABC")
             assert _UpperSerializer.configured == [True, False]
         finally:
@@ -365,7 +365,7 @@ def test_kafka_producer_config_route_serializer() -> None:
         p = cls(configs={**UNREACHABLE, "key.serializer": route, "value.serializer": route},
                 value_serializer=string_serializer())
         try:
-            native = p._native_record(ProducerRecord(topic=TOPIC, key="k", value="abc"))  # noqa: SLF001
+            native = p._native_parts(ProducerRecord(topic=TOPIC, key="k", value="abc"))[0]  # noqa: SLF001
             assert (native.key, native.value) == (b"K", b"abc")
             assert _UpperSerializer.configured == [True]
         finally:
@@ -412,7 +412,7 @@ class _UpperSerializer:
 def _native(record: ProducerRecord[Any, Any], **kwargs: Any) -> Any:
     p = KafkaProducer(configs=UNREACHABLE, **kwargs)
     try:
-        return p._native_record(record)  # noqa: SLF001 - the struct the FFI reads
+        return p._native_parts(record)[0]  # noqa: SLF001 - the struct the FFI reads
     finally:
         p.close(timeout=0)
 
@@ -1736,7 +1736,7 @@ def test_send_without_memory_for_a_new_batch_raises_memory_error() -> None:
     _run_without_memory("""
 from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
 p = KafkaProducer(configs=UNREACHABLE)
-record = p._native_record(ProducerRecord(topic="t", value=b"v"))
+record = p._native_parts(ProducerRecord(topic="t", value=b"v"))[0]
 refs = sys.getrefcount(record), sys.getrefcount(on_complete)
 outcome = without_memory(_lib.Producer_send, p._c_producer, record, on_complete)
 assert isinstance(outcome, MemoryError), outcome
@@ -1759,7 +1759,7 @@ def test_waiting_for_space_without_memory_does_not_wait() -> None:
 p = KafkaProducer(configs=UNREACHABLE)
 _lib.Producer_test_set_paused(p._c_producer, True)
 futures = [p.send(record=ProducerRecord(topic="t", value=b"v")) for _ in range(BACKPRESSURE_BOUND - 1)]
-record = p._native_record(ProducerRecord(topic="t", value=b"v"))
+record = p._native_parts(ProducerRecord(topic="t", value=b"v"))[0]
 assert _lib.Producer_send(p._c_producer, record, on_complete) is True
 space_cb = lambda: None
 refs = sys.getrefcount(space_cb)
