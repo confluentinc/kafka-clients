@@ -358,9 +358,9 @@ void test_send_cb_unreachable_broker_fails_future_with_timeout(void) {
     callback_pump_destroy(&pump);
 }
 
-void test_try_send_cb_unreachable_broker_queues_the_record(void) {
+void test_try_send_unreachable_broker_queues_the_record(void) {
     /* The producer would have to wait on metadata it can never fetch, so
-     * `try_send_cb` returns at once with NULL and no error: the record was
+     * `try_send` returns at once with NULL and no error: the record was
      * queued for the submission task, as by `send_cb`, and `cb` fires later,
      * on the pumping thread, with the future `send` would have returned,
      * failed on the metadata timeout. */
@@ -383,7 +383,7 @@ void test_try_send_cb_unreachable_broker_queues_the_record(void) {
     kafka_common_Error_t *err = NULL;
     struct timespec before, after;
     clock_gettime(CLOCK_MONOTONIC, &before);
-    future = kafka_producer_Producer_try_send_cb(view, record, on_send, &result, &err);
+    future = kafka_producer_Producer_try_send(view, record, on_send, &result, &err);
     clock_gettime(CLOCK_MONOTONIC, &after);
     kafka_producer_ProducerRecord_destroy(record);
 
@@ -391,7 +391,7 @@ void test_try_send_cb_unreachable_broker_queues_the_record(void) {
     TEST_ASSERT_NULL(future);
     TEST_ASSERT_NULL(err);
     long elapsed_ms = (after.tv_sec - before.tv_sec) * 1000 + (after.tv_nsec - before.tv_nsec) / 1000000;
-    TEST_ASSERT_TRUE_MESSAGE(elapsed_ms < 500, "try_send_cb waited on metadata");
+    TEST_ASSERT_TRUE_MESSAGE(elapsed_ms < 500, "try_send waited on metadata");
     TEST_ASSERT_EQUAL_INT(0, atomic_load(&result.fired));
 
     TEST_ASSERT_TRUE(callback_pump_until(&pump, &result.fired, 1));
@@ -889,7 +889,7 @@ int main(void) {
 
     /* Send */
     RUN_TEST(test_send_cb_unreachable_broker_fails_future_with_timeout);
-    RUN_TEST(test_try_send_cb_unreachable_broker_queues_the_record);
+    RUN_TEST(test_try_send_unreachable_broker_queues_the_record);
     RUN_TEST(test_delivery_callback_cannot_flush_and_closes_without_blocking);
 
     /* Transactions */

@@ -240,11 +240,14 @@ const C_ONLY_DRAINING_CB_TWINS: &[&str] = &[
 /// and has no non-blocking form, so CLAUDE.md §2 derives no method and §4 no
 /// `_cb` twin. The C form runs the crate-internal `KafkaProducer::try_send` on
 /// the calling thread and queues the record, as `send_cb` does, only when the
-/// producer would have waited (see `ffi::producer`, "Non-blocking send").
+/// producer would have waited (see `ffi::producer`, "Non-blocking send"). It
+/// is fallible, reporting a refusal and a caught panic through `out_err`, and
+/// fires its completion only for a record it queued, so it carries no `_cb`
+/// suffix; its typedefs keep the `_cb_t` form of a completion.
 const C_ONLY_NON_BLOCKING_SENDS: &[&str] = &[
-    "kafka_producer_Producer_try_send_cb",
+    "kafka_producer_Producer_try_send",
     "kafka_producer_Producer_try_send_cb_t",
-    "kafka_producer_Producer_try_send_with_callback_cb",
+    "kafka_producer_Producer_try_send_with_callback",
     "kafka_producer_Producer_try_send_with_callback_cb_t",
 ];
 
@@ -3690,7 +3693,7 @@ mod tests {
     #[test]
     fn test_producer_non_blocking_sends_are_accepted_as_c_only() {
         // Java's `send` has no non-blocking form, so nothing is derived for
-        // `try_send_cb` and `try_send_with_callback_cb`: they are admitted as
+        // `try_send` and `try_send_with_callback`: they are admitted as
         // C-only with their `_cb_t` typedefs, and nothing else under the name.
         let ffi = format!("{PRODUCER_CALLBACK_FFI}\n{NON_BLOCKING_SEND_FFI}");
         let findings = run("non-blocking-sends", PRODUCER_CALLBACK_RUST, &ffi);
@@ -3703,8 +3706,8 @@ mod tests {
     const NON_BLOCKING_SEND_FFI: &str = r#"
         pub type kafka_producer_Producer_try_send_cb_t = unsafe extern "C" fn(value: *mut c_void, error: *mut kafka_common_Error_t, opaque: *mut c_void);
         pub type kafka_producer_Producer_try_send_with_callback_cb_t = unsafe extern "C" fn(value: *mut c_void, error: *mut kafka_common_Error_t, opaque: *mut c_void);
-        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer_try_send_cb(self_: *const kafka_producer_Producer_t, record: *const c_void, cb: kafka_producer_Producer_try_send_cb_t, opaque: *mut c_void, out_err: *mut *mut kafka_common_Error_t) -> *mut c_void { std::ptr::null_mut() }
-        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer_try_send_with_callback_cb(self_: *const kafka_producer_Producer_t, record: *const c_void, callback: *const kafka_producer_Callback_t, cb: kafka_producer_Producer_try_send_with_callback_cb_t, opaque: *mut c_void, out_err: *mut *mut kafka_common_Error_t) -> *mut c_void { std::ptr::null_mut() }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer_try_send(self_: *const kafka_producer_Producer_t, record: *const c_void, cb: kafka_producer_Producer_try_send_cb_t, opaque: *mut c_void, out_err: *mut *mut kafka_common_Error_t) -> *mut c_void { std::ptr::null_mut() }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer_try_send_with_callback(self_: *const kafka_producer_Producer_t, record: *const c_void, callback: *const kafka_producer_Callback_t, cb: kafka_producer_Producer_try_send_with_callback_cb_t, opaque: *mut c_void, out_err: *mut *mut kafka_common_Error_t) -> *mut c_void { std::ptr::null_mut() }
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer_try_send_stray_cb(self_: *const kafka_producer_Producer_t, cb: kafka_producer_Producer_try_send_cb_t, opaque: *mut c_void) {}
     "#;
 

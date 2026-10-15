@@ -17,7 +17,7 @@
 ``Producer`` / ``KafkaProducer`` and ``AsyncProducer`` / ``AsyncKafkaProducer``
 call the C FFI through the C extension (``_confluentkafka``). Every operation
 uses the C API's queued ``_cb`` form (CLAUDE.md §4, "Async variants of blocking
-methods"): a send is ``kafka_producer_Producer_try_send_with_callback_cb``,
+methods"): a send is ``kafka_producer_Producer_try_send_with_callback``,
 which hands the record to the producer on the calling thread when it can take
 it at once (and no earlier record is still queued) and otherwise queues it on
 the core's submission task, and a flush, close or transaction-control call is

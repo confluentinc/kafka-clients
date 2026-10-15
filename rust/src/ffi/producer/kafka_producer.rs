@@ -571,7 +571,7 @@ mod tests {
         client_ref, kafka_producer_Producer__execute_callbacks, kafka_producer_Producer_close,
         kafka_producer_Producer_close_cb, kafka_producer_Producer_close_with_timeout,
         kafka_producer_Producer_close_with_timeout_cb, kafka_producer_Producer_flush, kafka_producer_Producer_send_cb,
-        kafka_producer_Producer_try_send_cb,
+        kafka_producer_Producer_try_send,
     };
     use crate::ffi::util::{box_string_map, c_str_to_string, kafka_Map_destroy};
 
@@ -962,12 +962,12 @@ mod tests {
         }
     }
 
-    /// `try_send_cb` on a producer that would have to wait — here on metadata
+    /// `try_send` on a producer that would have to wait — here on metadata
     /// it can never fetch — returns at once with `NULL` and no error: the
     /// record was queued, and `cb` fires later with the future `send` would
     /// have returned (failed on the metadata timeout, as `send_cb`'s is).
     #[test]
-    fn try_send_cb_queues_a_record_the_producer_cannot_take_at_once() {
+    fn try_send_queues_a_record_the_producer_cannot_take_at_once() {
         let topic = CString::new("topic").unwrap();
         let bytes = kafka_Bytes_t::from_slice(b"v");
         let seen = std::sync::Mutex::new(Vec::new());
@@ -983,7 +983,7 @@ mod tests {
                 kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
             let mut err = std::ptr::null_mut();
             let started = Instant::now();
-            let future = kafka_producer_Producer_try_send_cb(
+            let future = kafka_producer_Producer_try_send(
                 view,
                 record,
                 record_send,
@@ -1013,12 +1013,12 @@ mod tests {
         }
     }
 
-    /// A panic in a `try_send_cb` body before the hand-off is reported through
+    /// A panic in a `try_send` body before the hand-off is reported through
     /// `*out_err`, as from any fallible function, and never through `cb`: the
     /// completion has not been handed over, so there is nothing to fire later,
     /// and the queue accounting is untouched, so a `flush` does not wait for it.
     #[test]
-    fn a_panicking_try_send_cb_body_reports_through_out_err_not_the_completion() {
+    fn a_panicking_try_send_body_reports_through_out_err_not_the_completion() {
         let topic = CString::new("topic").unwrap();
         let bytes = kafka_Bytes_t::from_slice(b"v");
         let seen = std::sync::Mutex::new(Vec::new());
@@ -1034,7 +1034,7 @@ mod tests {
                 kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
             let mut err = std::ptr::null_mut();
             fail_point::arm();
-            let future = kafka_producer_Producer_try_send_cb(
+            let future = kafka_producer_Producer_try_send(
                 view,
                 record,
                 record_send,
@@ -1046,7 +1046,7 @@ mod tests {
             assert_eq!(
                 c_str_to_string(kafka_common_Error_message(err)),
                 format!(
-                    "Rust panic caught at the FFI boundary in kafka_producer_Producer_try_send_with_callback_cb: {}",
+                    "Rust panic caught at the FFI boundary in kafka_producer_Producer_try_send_with_callback: {}",
                     fail_point::MESSAGE
                 )
             );

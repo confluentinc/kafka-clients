@@ -2428,7 +2428,7 @@ void test_send_with_callback_validation_error_no_callback(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Non-blocking send: `try_send_cb` / `try_send_with_callback_cb`
+// Non-blocking send: `try_send` / `try_send_with_callback`
 //
 // Three outcomes, told apart by the return value and `*out_err`: the owned
 // future when the producer took the record at once (`cb` never fires); NULL
@@ -2438,7 +2438,7 @@ void test_send_with_callback_validation_error_no_callback(void) {
 // queued outcome is test_kafka_producer.c's.
 // ---------------------------------------------------------------------------
 
-void test_try_send_cb_returns_the_future_of_a_record_taken_at_once(void) {
+void test_try_send_returns_the_future_of_a_record_taken_at_once(void) {
     fixture_t f;
     fixture_init(&f, 1);
 
@@ -2447,7 +2447,7 @@ void test_try_send_cb_returns_the_future_of_a_record_taken_at_once(void) {
     memset(&result, 0, sizeof(result));
     kafka_common_KafkaFuture_t *future = NULL;
     kafka_common_Error_t *err = NULL;
-    future = kafka_producer_Producer_try_send_cb(f.producer, record, on_send, &result, &err);
+    future = kafka_producer_Producer_try_send(f.producer, record, on_send, &result, &err);
     kafka_producer_ProducerRecord_destroy(record);
 
     /* Taken at once: the future comes back, `cb` never fires. */
@@ -2467,9 +2467,9 @@ void test_try_send_cb_returns_the_future_of_a_record_taken_at_once(void) {
     TEST_ASSERT_EQUAL_INT(0, atomic_load(&result.fired));
 }
 
-void test_try_send_cb_on_closed_producer_refuses_synchronously(void) {
+void test_try_send_on_closed_producer_refuses_synchronously(void) {
     /* Where `send_cb` on a closed producer delivers the error through `cb`
-     * (test_send_async_on_closed_producer_fires_callback), `try_send_cb`
+     * (test_send_async_on_closed_producer_fires_callback), `try_send`
      * refuses before any hand-off: the error is in `*out_err`, and `cb` never
      * fires. */
     fixture_t f;
@@ -2481,7 +2481,7 @@ void test_try_send_cb_on_closed_producer_refuses_synchronously(void) {
     memset(&result, 0, sizeof(result));
     kafka_common_KafkaFuture_t *future = NULL;
     kafka_common_Error_t *err = NULL;
-    future = kafka_producer_Producer_try_send_cb(f.producer, record, on_send, &result, &err);
+    future = kafka_producer_Producer_try_send(f.producer, record, on_send, &result, &err);
     kafka_producer_ProducerRecord_destroy(record);
 
     TEST_ASSERT_NULL(future);
@@ -2496,7 +2496,7 @@ void test_try_send_cb_on_closed_producer_refuses_synchronously(void) {
     TEST_ASSERT_EQUAL_INT(0, atomic_load(&result.fired));
 }
 
-void test_try_send_with_callback_cb_future_completes_after_the_callback_reported(void) {
+void test_try_send_with_callback_future_completes_after_the_callback_reported(void) {
     /* With a delivery callback, the returned future completes once the
      * callback reported, as `send_with_callback`'s does. */
     fixture_t f;
@@ -2511,7 +2511,7 @@ void test_try_send_with_callback_cb_future_completes_after_the_callback_reported
     memset(&result, 0, sizeof(result));
     kafka_common_KafkaFuture_t *future = NULL;
     kafka_common_Error_t *err = NULL;
-    future = kafka_producer_Producer_try_send_with_callback_cb(f.producer, record, callback, on_send, &result, &err);
+    future = kafka_producer_Producer_try_send_with_callback(f.producer, record, callback, on_send, &result, &err);
     kafka_producer_Callback_destroy(callback);
     kafka_producer_ProducerRecord_destroy(record);
 
@@ -2641,10 +2641,10 @@ int main(void) {
     RUN_TEST(test_destroy_completes_a_future_whose_callback_never_reported);
     RUN_TEST(test_send_with_callback_validation_error_no_callback);
 
-    /* Non-blocking send (`try_send_cb`) */
-    RUN_TEST(test_try_send_cb_returns_the_future_of_a_record_taken_at_once);
-    RUN_TEST(test_try_send_cb_on_closed_producer_refuses_synchronously);
-    RUN_TEST(test_try_send_with_callback_cb_future_completes_after_the_callback_reported);
+    /* Non-blocking send (`try_send`) */
+    RUN_TEST(test_try_send_returns_the_future_of_a_record_taken_at_once);
+    RUN_TEST(test_try_send_on_closed_producer_refuses_synchronously);
+    RUN_TEST(test_try_send_with_callback_future_completes_after_the_callback_reported);
 
     return UNITY_END();
 }
