@@ -1621,9 +1621,14 @@ static PyObject* py_Producer_send_cb(PyObject* self, PyObject* args) {
     ctx->record = rec_obj;
     ctx->producer = p;
 
-    Py_BEGIN_ALLOW_THREADS
+    // With the GIL held, which saves each send a GIL handoff: the call only
+    // hands the record to the submission task, under the client's submit_tx
+    // mutex (held by other sends, the drain barrier and _destroy only around
+    // the channel send) and tokio's scheduler locks when it wakes the task;
+    // none is held while waiting for the GIL. It never queues a completion
+    // (whose notify hook would wait for the GIL): when the task is gone it
+    // calls producer_send_cb here, which re-enters the GIL this thread holds.
     kafka_producer_Producer_send_with_callback_cb(p->producer, rec, cb, producer_send_cb, ctx);
-    Py_END_ALLOW_THREADS
     // Both are copied by the call; the record's key/value bytes stay borrowed
     // until producer_send_cb (ctx->record holds them).
     ffi_unraisable((kafka_producer_Callback_destroy_err(cb, &ffi_err), ffi_take(&ffi_err)));

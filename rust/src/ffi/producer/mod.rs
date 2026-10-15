@@ -507,9 +507,9 @@ fn deliver_send(
     let error = SendPtr(error as *mut c_void);
     // SAFETY: `cb` and `opaque` are the pair the C caller passed to
     // `kafka_producer_Producer_send_with_callback_cb` (or `send_cb`, which forwards to it): that
-    // function puts them in one `SubmitRequest::Send`, which `submission_loop` delivers here once,
-    // or, when the channel refused the request, delivers them here itself, so calling `cb` with
-    // `opaque` is the completion the caller is waiting for. `value` and `error` are each null or
+    // function puts them in one `SubmitRequest::Send`, which `submission_loop` delivers here once
+    // (when the channel refuses the request, that function calls `cb` itself instead), so calling
+    // `cb` with `opaque` is the completion the caller is waiting for. `value` and `error` are each null or
     // the fresh `box_future` / `box_error` handle above, owned by no one else, so handing them to
     // `cb` transfers their ownership, as `kafka_producer_Producer_send_cb_t` documents; the job is
     // a `FnOnce`, so `cb` fires exactly once.
@@ -1407,7 +1407,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_send(
 
 /// `Producer.send(ProducerRecord)`, completion queued: the record is copied
 /// and handed to the producer by the submission task (see the module docs);
-/// its key and value `void *` stay borrowed until `cb` fires.
+/// its key and value `void *` stay borrowed until `cb` fires. On a producer
+/// already closed `cb` fires on the calling thread instead, before this
+/// function returns (see [`kafka_producer_Producer_send_with_callback_cb`]).
 ///
 /// # Safety
 ///
@@ -1493,7 +1495,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
 }
 
 /// `Producer.send(ProducerRecord, Callback)`, completion queued as
-/// [`kafka_producer_Producer_send_cb`].
+/// [`kafka_producer_Producer_send_cb`], except on a producer already closed:
+/// `cb` then receives the `IllegalStateError` on the calling thread, before
+/// this function returns.
 ///
 /// When `cb` receives an error, `callback` may still fire later, exactly
 /// once, if the record had reached the accumulator, as for
@@ -1510,8 +1514,8 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `completion_sink`
     // requires. The guard runs this only when the body did not return. The body hands `cb` over
     // once, as its last step, after which nothing can panic: in the request the submission channel
-    // accepts or, when the channel refuses it (dropping it unfired), to `deliver_send`. So `cb` has
-    // not fired for this `opaque`, as `deliver_panic_value` requires.
+    // accepts or, when the channel refuses it (dropping it unfired), by calling it. So `cb` has not
+    // fired for this `opaque`, as `deliver_panic_value` requires.
     unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) }
 })]
 #[unsafe(no_mangle)]
@@ -1545,14 +1549,19 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback_cb(
     };
     if !sent {
         client.queued_sends.fetch_sub(1, Ordering::AcqRel);
-        deliver_send(
-            client,
-            cb,
-            opaque,
-            Err(Error::local_illegal_state(
-                "Cannot perform operation after producer has been closed",
-            )),
-        );
+        // Completed during the call: `cb` runs here, before the call returns,
+        // not through the callback vector. A caller that holds its
+        // interpreter lock across this call (the Python binding does) then
+        // never queues a completion, whose notify hook would wait for that
+        // lock, from inside it.
+        let error = box_error(Error::local_illegal_state(
+            "Cannot perform operation after producer has been closed",
+        ));
+        // SAFETY: `cb` and `opaque` are the pair the C caller passed, and the channel refused the
+        // request that carried them (dropping it unfired), so this is their one completion.
+        // `error` is the fresh `box_error` handle above, owned by no one else, so handing it to
+        // `cb` transfers its ownership, as `kafka_producer_Producer_send_cb_t` documents.
+        unsafe { cb(std::ptr::null_mut(), error, opaque.get()) };
     }
 }
 
@@ -2215,6 +2224,58 @@ mod tests {
         unsafe { kafka_common_KafkaFuture_destroy(value) };
         // SAFETY: `opaque` is the test's counter, alive until destroy returns.
         unsafe { &*(opaque as *const AtomicI32) }.fetch_add(1, Ordering::SeqCst);
+    }
+
+    unsafe extern "C" fn record_refused_send(
+        value: *mut kafka_common_KafkaFuture_t,
+        error: *mut kafka_common_Error_t,
+        opaque: *mut c_void,
+    ) {
+        assert!(value.is_null());
+        // SAFETY: `error` is the error this completion owns; it is read, then freed once.
+        let message = unsafe { c_str_to_string(kafka_common_Error_message(error)) };
+        // SAFETY: as above.
+        unsafe { kafka_common_Error_destroy(error) };
+        // SAFETY: `opaque` is the test's slot, alive until the test ends.
+        let fired = unsafe { &*(opaque as *const Mutex<Vec<(String, std::thread::ThreadId)>>) };
+        fired.lock().unwrap().push((message, std::thread::current().id()));
+    }
+
+    /// A send the submission channel refuses (its task gone) completes
+    /// during the call: `cb` runs on the calling thread before
+    /// `send_with_callback_cb` returns, and nothing is queued, so a caller
+    /// holding its interpreter lock across the call never fires the notify
+    /// hook from inside it.
+    #[test]
+    fn a_refused_send_fires_its_completion_on_the_calling_thread_before_returning() {
+        let fired = Mutex::new(Vec::<(String, std::thread::ThreadId)>::new());
+        let topic = CString::new("topic").unwrap();
+        // SAFETY: every handle is live until it is destroyed below, and `fired` outlives the one
+        // completion that writes it.
+        unsafe {
+            let mock = kafka_producer_MockProducer_with_auto_complete(1);
+            let view = kafka_producer_MockProducer__as_Producer(mock);
+            let record = kafka_producer_ProducerRecord_new(topic.as_ptr(), std::ptr::null());
+            drop(client_ref(view).submit_tx.lock().unwrap().take());
+            kafka_producer_Producer_send_cb(
+                view,
+                record,
+                record_refused_send,
+                &fired as *const Mutex<Vec<(String, std::thread::ThreadId)>> as *mut c_void,
+            );
+            assert_eq!(
+                *fired.lock().unwrap(),
+                [(
+                    "Cannot perform operation after producer has been closed".to_owned(),
+                    std::thread::current().id()
+                )]
+            );
+            assert_eq!(kafka_producer_Producer__execute_callbacks(view), 0);
+            assert_eq!(client_ref(view).queued_sends.load(Ordering::SeqCst), 0);
+            kafka_producer_MockProducer_destroy(mock);
+            assert_eq!(fired.lock().unwrap().len(), 1);
+            kafka_producer_ProducerRecord_destroy(record);
+        }
     }
 
     /// A panic that poisoned the client's locks does not stop `_destroy`: it

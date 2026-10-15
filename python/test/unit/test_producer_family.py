@@ -2065,9 +2065,20 @@ def test_drain_waits_until_the_accumulation_is_handed_over(
         monkeypatch: pytest.MonkeyPatch) -> None:
     # The queued flush drains the submission queue first, so its completion
     # waits for the send before it, whose future completes first (the
-    # callbacks run in completion order).
+    # callbacks run in completion order). The flush's completion reads the
+    # record's own completion, not the future send() returned: the handover,
+    # the record's completion and the flush's can run in one drain, which
+    # holds the GIL, so the sending thread may not have returned yet.
     p = KafkaProducer(configs={**UNREACHABLE, "max.block.ms": HELD_MS})
     submitted = _count_submissions(monkeypatch)
+    completions: list[Any] = []
+    counting = _lib.Producer_send_cb
+
+    def capturing(*args: Any) -> Any:
+        completions.append(args[2])
+        return counting(*args)
+
+    monkeypatch.setattr(_lib, "Producer_send_cb", capturing)
     try:
         sender, sent = _send_in_the_background(p, submitted)
         fired = threading.Event()
@@ -2076,7 +2087,7 @@ def test_drain_waits_until_the_accumulation_is_handed_over(
         def flushed(error: int) -> None:
             if error:
                 _lib.KafkaError_destroy(error)
-            future_done.append(bool(sent) and sent[0].done())
+            future_done.append(completions[0].completed)
             fired.set()
 
         _lib.Producer_flush_cb(p._c_producer, flushed)  # noqa: SLF001
@@ -2084,6 +2095,7 @@ def test_drain_waits_until_the_accumulation_is_handed_over(
         assert fired.wait(30)
         sender.join(30)
         assert future_done == [True]
+        assert sent[0].done()
     finally:
         p.close(timeout=0)
 
