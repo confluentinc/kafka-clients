@@ -20,9 +20,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 
 use crate::common::Error;
-use crate::common::config::config_def::{ConfigDef, Range, ValidList};
-use crate::common::config::types::Password;
-use crate::common::config::{SaslConfigs, SslConfigs};
+use crate::common::config::config_def::{Range, ValidList};
+use crate::common::config::{ConfigDef, SaslConfigs, SslConfigs};
 use crate::common::security::auth::SecurityProtocol;
 use crate::{ClientDnsLookup, CommonClientConfigs, MetadataRecoveryStrategy};
 
@@ -222,6 +221,24 @@ impl AdminClientConfig {
         CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG;
     /// `security.protocol`
     pub const SECURITY_PROTOCOL_CONFIG: &'static str = CommonClientConfigs::SECURITY_PROTOCOL_CONFIG;
+    /// `metrics.sample.window.ms`. Java's `AdminClientConfig.java` declares it as
+    /// its own public alias of `CommonClientConfigs.METRICS_SAMPLE_WINDOW_MS_CONFIG`.
+    /// This client's admin keeps no metrics, so the value is validated and has
+    /// no effect.
+    pub const METRICS_SAMPLE_WINDOW_MS_CONFIG: &'static str = CommonClientConfigs::METRICS_SAMPLE_WINDOW_MS_CONFIG;
+    /// `metrics.num.samples`. Validated, with no effect (see
+    /// [`Self::METRICS_SAMPLE_WINDOW_MS_CONFIG`]).
+    pub const METRICS_NUM_SAMPLES_CONFIG: &'static str = CommonClientConfigs::METRICS_NUM_SAMPLES_CONFIG;
+    /// `metrics.recording.level`. Validated, with no effect (see
+    /// [`Self::METRICS_SAMPLE_WINDOW_MS_CONFIG`]).
+    pub const METRICS_RECORDING_LEVEL_CONFIG: &'static str = CommonClientConfigs::METRICS_RECORDING_LEVEL_CONFIG;
+    /// `enable.metrics.push` (KIP-714), default `false` for the admin client.
+    /// This client does not push metrics, so `true` is logged as ignored.
+    pub const ENABLE_METRICS_PUSH_CONFIG: &'static str = CommonClientConfigs::ENABLE_METRICS_PUSH_CONFIG;
+    /// `config.providers`: Java's `AbstractConfig.CONFIG_PROVIDERS_CONFIG`, which
+    /// `AdminClientConfig` inherits. Config providers are not implemented, so a
+    /// non-empty list makes [`Self::new`] fail (see there).
+    pub const CONFIG_PROVIDERS_CONFIG: &'static str = "config.providers";
     /// `sasl.mechanism`
     pub const SASL_MECHANISM_CONFIG: &'static str = SaslConfigs::SASL_MECHANISM;
     /// `sasl.jaas.config`
@@ -252,7 +269,10 @@ impl AdminClientConfig {
     /// ([`Error::unsupported_version`]): Java
     /// accepts it (KIP-919), but this client does not implement bootstrapping
     /// through controllers, and silently ignoring the key would leave the
-    /// client with no bootstrap address at all.
+    /// client with no bootstrap address at all. A non-empty `config.providers`
+    /// also returns an `UNSUPPORTED_VERSION` error: config providers are not
+    /// implemented, and the `${provider:..}` references they would resolve
+    /// must not be used as literal values.
     #[doc(alias = "org.apache.kafka.clients.admin.AdminClientConfig#AdminClientConfig(Map)")]
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
         // Java's `AbstractConfig` keeps the user's map as `originals()`.
@@ -351,7 +371,52 @@ impl AdminClientConfig {
                 },
                 Self::METADATA_CLUSTER_CHECK_ENABLE_CONFIG => {
                     // `Type.BOOLEAN`, default `true` (`AdminClientConfig.java:305-309`).
-                    config.metadata_cluster_check_enable = parse_bool(key, value)?;
+                    config.metadata_cluster_check_enable = ConfigDef::parse_boolean(key, value)?;
+                },
+                // The metrics keys (`AdminClientConfig.java:213-217`, `:251-269`):
+                // validated as Java validates them, then dropped, since this
+                // client's admin keeps no metrics.
+                Self::METRICS_SAMPLE_WINDOW_MS_CONFIG => {
+                    // `Type.LONG`, `atLeast(0)`.
+                    Range::at_least(0).ensure_valid(key, ConfigDef::parse_long(key, value)?)?;
+                },
+                Self::METRICS_NUM_SAMPLES_CONFIG => {
+                    // `Type.INT`, `atLeast(1)`.
+                    Range::at_least(1).ensure_valid(key, ConfigDef::parse_int(key, value)?)?;
+                },
+                Self::METRICS_RECORDING_LEVEL_CONFIG => {
+                    // A trimmed `Type.STRING` checked by `ValidString.in("INFO", "DEBUG",
+                    // "TRACE")`, which is case-sensitive (`ConfigDef.java:1113-1118`).
+                    let trimmed = ConfigDef::trim(value);
+                    if !["INFO", "DEBUG", "TRACE"].contains(&trimmed) {
+                        return Err(Error::config_name_value_message(
+                            key,
+                            trimmed,
+                            "String must be one of: INFO, DEBUG, TRACE",
+                        ));
+                    }
+                },
+                Self::ENABLE_METRICS_PUSH_CONFIG => {
+                    // `Type.BOOLEAN`, default `false` for the admin client. Java pushes
+                    // client metrics when the broker subscribes this client (KIP-714);
+                    // this client does not, so a `true` is logged as ignored.
+                    let enable_metrics_push = ConfigDef::parse_boolean(key, value)?;
+                    if enable_metrics_push {
+                        log::warn!(
+                            "{key} is not supported by this client and is ignored; client metrics are not pushed to the cluster"
+                        );
+                    }
+                },
+                Self::CONFIG_PROVIDERS_CONFIG => {
+                    // `Type.LIST`, `ValidList.anyNonDuplicateValues(true, false)`
+                    // (`AdminClientConfig.java:310-315`). Java resolves `${provider:..}`
+                    // references in the other values through these providers; this
+                    // client does not, so it fails rather than pass such a reference on
+                    // as a literal value (a password, for instance).
+                    let config_providers = ValidList::parse_any_non_duplicate_values(key, value, true)?;
+                    if !config_providers.is_empty() {
+                        return Err(Error::unsupported_version(format!("{key} is not supported by this client")));
+                    }
                 },
                 Self::SECURITY_PROTOCOL_CONFIG => {
                     // A trimmed `Type.STRING` (`ConfigDef.java:731-733`), checked by
@@ -374,19 +439,11 @@ impl AdminClientConfig {
                     config.metadata_recovery_rebootstrap_trigger_ms = ConfigDef::parse_long(key, value)?;
                     Range::at_least(0).ensure_valid(key, config.metadata_recovery_rebootstrap_trigger_ms)?;
                 },
-                Self::SASL_MECHANISM_CONFIG => {
-                    // A trimmed `Type.STRING` (`ConfigDef.java:731-733`).
-                    config.sasl_config.mechanism = ConfigDef::trim(value).to_string();
-                },
-                Self::SASL_JAAS_CONFIG => {
-                    // `Type.PASSWORD`: `parseType` wraps the trimmed value
-                    // (`ConfigDef.java:724-728`). An empty value means unset here.
-                    let trimmed = ConfigDef::trim(value);
-                    config.sasl_config.jaas_config = if trimmed.is_empty() {
-                        None
-                    } else {
-                        Some(Password::new(trimmed))
-                    };
+                key if key.starts_with("sasl.") => {
+                    // `sasl.mechanism`, `sasl.jaas.config` and the rest of
+                    // `SaslConfigs.addClientSaslSupport` (`SaslConfigs.java:387-431`).
+                    // The helper trims the value as each key's type requires.
+                    SaslConfigs::apply_sasl_config_key(&mut config.sasl_config, key, value)?;
                 },
                 key if key.starts_with("ssl.") => {
                     // `parseType` trims a `String` value whatever the key's type
@@ -395,7 +452,17 @@ impl AdminClientConfig {
                     // is trimmed before its parser or validator sees it.
                     SslConfigs::apply_ssl_config_key(&mut config.ssl_config, key, ConfigDef::trim(value))?;
                 },
-                // Unknown keys are accepted silently, as in Java.
+                // Unknown keys are accepted silently, as in Java. So are the keys
+                // Java's `AdminClientConfig` defines with a class, or a list of
+                // classes, as their value: `metric.reporters`, `security.providers`,
+                // `ssl.engine.factory.class`, `sasl.client.callback.handler.class`,
+                // `sasl.login.callback.handler.class`, `sasl.login.class`,
+                // `sasl.oauthbearer.jwt.retriever.class` and
+                // `sasl.oauthbearer.jwt.validator.class` (the `ssl.*` and `sasl.*`
+                // ones reach the helpers above, which treat them as unknown keys
+                // too). CLAUDE.md §2 does not allow a class as a configuration
+                // value: the Rust counterpart is a trait set through a setter, and
+                // those traits belong to features this client does not implement.
                 _ => {},
             }
         }
@@ -638,28 +705,6 @@ impl Default for AdminClientConfig {
     }
 }
 
-/// Parses a string value as `bool`.
-///
-/// Java's `ConfigDef.parseType(BOOLEAN)` (`ConfigDef.java:703-737`) trims the
-/// value, then accepts `equalsIgnoreCase("true")` / `("false")`; anything else
-/// throws `ConfigException(name, value, "Expected value to be either true or
-/// false")`, where `value` is the **original, untrimmed** string. Same rule as
-/// the producer and consumer configs.
-fn parse_bool(key: &str, value: &str) -> Result<bool, Error> {
-    let trimmed = value.trim();
-    if trimmed.eq_ignore_ascii_case("true") {
-        Ok(true)
-    } else if trimmed.eq_ignore_ascii_case("false") {
-        Ok(false)
-    } else {
-        Err(Error::config_name_value_message(
-            key,
-            value,
-            "Expected value to be either true or false",
-        ))
-    }
-}
-
 /// `metadata.recovery.strategy`: a trimmed `Type.STRING` (`ConfigDef.java:731-733`)
 /// validated by `CaseInsensitiveValidString.in(Utils.enumOptions(MetadataRecoveryStrategy.class))`
 /// (`AdminClientConfig.java:292-297`), then read through
@@ -680,6 +725,7 @@ fn parse_metadata_recovery_strategy(key: &str, value: &str) -> Result<MetadataRe
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::config::types::Password;
 
     #[test]
     fn defaults_and_required_bootstrap() {
@@ -1001,6 +1047,160 @@ mod tests {
             2000
         );
         assert_eq!(max(&[("reconnect.backoff.max.ms", "2000")]), 2000);
+    }
+
+    /// The metrics keys are validated with Java's type and validator
+    /// (`AdminClientConfig.java:213-217`, `:251-269`), then dropped:
+    /// `metrics.num.samples` is an `INT` with `atLeast(1)`,
+    /// `metrics.sample.window.ms` a `LONG` with `atLeast(0)`,
+    /// `metrics.recording.level` a trimmed `STRING` in `INFO`, `DEBUG`, `TRACE`
+    /// (case-sensitive) and `enable.metrics.push` a `BOOLEAN`.
+    #[test]
+    fn test_metrics_keys_are_validated() {
+        assert_eq!(AdminClientConfig::METRICS_NUM_SAMPLES_CONFIG, "metrics.num.samples");
+        assert_eq!(AdminClientConfig::METRICS_SAMPLE_WINDOW_MS_CONFIG, "metrics.sample.window.ms");
+        assert_eq!(AdminClientConfig::METRICS_RECORDING_LEVEL_CONFIG, "metrics.recording.level");
+        assert_eq!(AdminClientConfig::ENABLE_METRICS_PUSH_CONFIG, "enable.metrics.push");
+        for (key, value) in [
+            ("metrics.num.samples", "1"),
+            ("metrics.sample.window.ms", "0"),
+            ("metrics.recording.level", " DEBUG "),
+            ("metrics.recording.level", "TRACE"),
+            ("enable.metrics.push", "true"),
+            ("enable.metrics.push", "FALSE"),
+        ] {
+            AdminClientConfig::new(&with_bootstrap(&[(key, value)])).unwrap_or_else(|e| panic!("{key}={value}: {e:?}"));
+        }
+        for (key, value, message) in [
+            (
+                "metrics.num.samples",
+                "0",
+                "Invalid value 0 for configuration metrics.num.samples: Value must be at least 1",
+            ),
+            (
+                "metrics.num.samples",
+                "two",
+                "Invalid value two for configuration metrics.num.samples: Not a number of type INT",
+            ),
+            (
+                "metrics.sample.window.ms",
+                "-1",
+                "Invalid value -1 for configuration metrics.sample.window.ms: Value must be at least 0",
+            ),
+            (
+                "metrics.recording.level",
+                "FOO",
+                "Invalid value FOO for configuration metrics.recording.level: String must be one of: INFO, DEBUG, TRACE",
+            ),
+            (
+                "metrics.recording.level",
+                " debug ",
+                "Invalid value debug for configuration metrics.recording.level: String must be one of: INFO, DEBUG, TRACE",
+            ),
+            (
+                "enable.metrics.push",
+                "maybe",
+                "Invalid value maybe for configuration enable.metrics.push: Expected value to be either true or false",
+            ),
+        ] {
+            let err = AdminClientConfig::new(&with_bootstrap(&[(key, value)])).unwrap_err();
+            assert!(matches!(err, Error::Config(_)), "{key}={value}: got {err:?}");
+            assert_eq!(err.message(), message);
+        }
+    }
+
+    /// `config.providers` is a `LIST` validated by
+    /// `ValidList.anyNonDuplicateValues(true, false)`
+    /// (`AdminClientConfig.java:310-315`). Config providers are not
+    /// implemented, so a non-empty list fails with an unsupported error rather
+    /// than leave `${provider:..}` references unresolved; an empty one is
+    /// Java's default.
+    #[test]
+    fn test_config_providers() {
+        assert_eq!(AdminClientConfig::CONFIG_PROVIDERS_CONFIG, "config.providers");
+        let err = AdminClientConfig::new(&with_bootstrap(&[("config.providers", "file")])).unwrap_err();
+        assert_eq!(err.error(), crate::common::protocol::Errors::UnsupportedVersion, "{err:?}");
+        assert_eq!(err.message(), "config.providers is not supported by this client");
+
+        let err = AdminClientConfig::new(&with_bootstrap(&[("config.providers", "a,,b")])).unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "got {err:?}");
+        assert_eq!(err.message(), "Configuration 'config.providers' values must not be empty.");
+
+        for value in ["", " "] {
+            AdminClientConfig::new(&with_bootstrap(&[("config.providers", value)])).unwrap();
+        }
+    }
+
+    /// The `sasl.*` keys of the mechanisms this client does not support are
+    /// validated as Java validates them (the full table is in
+    /// `SaslConfigs`' tests), here through the admin config.
+    #[test]
+    fn test_unsupported_sasl_keys_are_validated() {
+        for (key, value, message) in [
+            (
+                "sasl.login.refresh.window.factor",
+                "2.0",
+                "Invalid value 2.0 for configuration sasl.login.refresh.window.factor: Value must be no more than 1.0",
+            ),
+            (
+                "sasl.login.refresh.min.period.seconds",
+                "40000",
+                "Invalid value 40000 for configuration sasl.login.refresh.min.period.seconds: Not a number of type SHORT",
+            ),
+            (
+                "sasl.kerberos.min.time.before.relogin",
+                "x",
+                "Invalid value x for configuration sasl.kerberos.min.time.before.relogin: Not a number of type LONG",
+            ),
+            (
+                "sasl.oauthbearer.assertion.algorithm",
+                "HS256",
+                "Invalid value HS256 for configuration sasl.oauthbearer.assertion.algorithm: \
+                 String must be one of (case insensitive): ES256, RS256",
+            ),
+            (
+                "sasl.oauthbearer.expected.audience",
+                "a,,b",
+                "Configuration 'sasl.oauthbearer.expected.audience' values must not be empty.",
+            ),
+        ] {
+            let err = AdminClientConfig::new(&with_bootstrap(&[(key, value)])).unwrap_err();
+            assert!(matches!(err, Error::Config(_)), "{key}={value}: got {err:?}");
+            assert_eq!(err.message(), message);
+        }
+        let config = AdminClientConfig::new(&with_bootstrap(&[
+            ("sasl.kerberos.service.name", "kafka"),
+            ("sasl.login.connect.timeout.ms", "1000"),
+            ("sasl.oauthbearer.token.endpoint.url", "https://x"),
+            ("sasl.oauthbearer.client.credentials.client.secret", "oauth-S3cr3t"),
+        ]))
+        .unwrap();
+        assert_eq!(config.sasl_config(), &SaslConfigs::default());
+        assert!(!format!("{config:?}").contains("oauth-S3cr3t"));
+    }
+
+    /// Keys this client deliberately leaves as they are: the class-valued
+    /// keys stay unknown keys (accepted unvalidated, even where Java would
+    /// reject the value), because CLAUDE.md §2 does not allow a class as a
+    /// configuration value; and the SSL store types keep defaulting to PEM,
+    /// since this client's TLS provider reads PEM only.
+    #[test]
+    fn test_class_valued_keys_stay_unknown_keys() {
+        let config = AdminClientConfig::new(&with_bootstrap(&[
+            ("metric.reporters", "a,,b"),
+            ("security.providers", "com.example.Provider"),
+            ("ssl.engine.factory.class", "com.example.Factory"),
+            ("sasl.client.callback.handler.class", "com.example.Handler"),
+            ("sasl.login.callback.handler.class", "com.example.Handler"),
+            ("sasl.login.class", "com.example.Login"),
+            ("sasl.oauthbearer.jwt.retriever.class", "com.example.Retriever"),
+            ("sasl.oauthbearer.jwt.validator.class", "com.example.Validator"),
+        ]))
+        .unwrap();
+        assert_eq!(config.sasl_config(), &SaslConfigs::default());
+        assert_eq!(config.ssl_config(), &SslConfigs::default());
+        assert_eq!(config.ssl_config().keystore_type, "PEM");
+        assert_eq!(config.ssl_config().truststore_type, "PEM");
     }
 
     /// Translated from `ProducerConfigTest.testInvalidSecurityProtocol`, adapted

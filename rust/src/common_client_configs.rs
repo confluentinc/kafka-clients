@@ -112,6 +112,31 @@ impl CommonClientConfigs {
     /// Config key: `security.protocol`
     pub const SECURITY_PROTOCOL_CONFIG: &str = "security.protocol";
 
+    /// Config key: `enable.metrics.push`
+    ///
+    /// Whether to enable pushing of client metrics to the cluster, if the
+    /// cluster has a client metrics subscription which matches this client.
+    ///
+    /// (Text of Java's `CommonClientConfigs.ENABLE_METRICS_PUSH_DOC`, carried as
+    /// rustdoc for the reason given on [`Self::CLIENT_DNS_LOOKUP_CONFIG`].)
+    pub const ENABLE_METRICS_PUSH_CONFIG: &str = "enable.metrics.push";
+
+    /// Config key: `metrics.sample.window.ms`
+    ///
+    /// The window of time a metrics sample is computed over.
+    pub const METRICS_SAMPLE_WINDOW_MS_CONFIG: &str = "metrics.sample.window.ms";
+
+    /// Config key: `metrics.num.samples`
+    ///
+    /// The number of samples maintained to compute metrics.
+    pub const METRICS_NUM_SAMPLES_CONFIG: &str = "metrics.num.samples";
+
+    /// Config key: `metrics.recording.level`
+    ///
+    /// The highest recording level for metrics. It has three levels for
+    /// recording metrics - info, debug, and trace.
+    pub const METRICS_RECORDING_LEVEL_CONFIG: &str = "metrics.recording.level";
+
     /// Config key: `reconnect.backoff.ms`
     ///
     /// The base amount of time to wait before attempting to reconnect to a
