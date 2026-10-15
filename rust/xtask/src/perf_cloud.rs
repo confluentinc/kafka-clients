@@ -1243,7 +1243,11 @@ fn run_info(options: &RunOptions) -> RunInfo {
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty());
-    let ingress = env("PERF_CLUSTER_INGRESS_MB_S").and_then(|v| v.parse::<f64>().ok());
+    // A limit is positive; anything else (e.g. a `0` meaning "not reported")
+    // would flag every result as near it.
+    let ingress = env("PERF_CLUSTER_INGRESS_MB_S")
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0);
     for (label, value) in [
         ("Commit", commit),
         ("Workflow", env("SEMAPHORE_WORKFLOW_ID")),
