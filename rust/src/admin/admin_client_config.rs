@@ -52,6 +52,8 @@ pub struct AdminClientConfig {
     connections_max_idle_ms: i64,
     metadata_max_age_ms: i64,
     socket_connection_setup_timeout_ms: i64,
+    send_buffer_bytes: i32,
+    receive_buffer_bytes: i32,
     metadata_cluster_check_enable: bool,
     metadata_recovery_strategy: MetadataRecoveryStrategy,
     metadata_recovery_rebootstrap_trigger_ms: i64,
@@ -104,6 +106,12 @@ impl AdminClientConfig {
     pub const METADATA_MAX_AGE_MS_CONFIG: &'static str = "metadata.max.age.ms";
     /// `socket.connection.setup.timeout.ms`
     pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG: &'static str = "socket.connection.setup.timeout.ms";
+    /// `send.buffer.bytes`. Java's `AdminClientConfig.java` declares it as its own
+    /// public alias of `CommonClientConfigs.SEND_BUFFER_CONFIG`.
+    pub const SEND_BUFFER_CONFIG: &'static str = CommonClientConfigs::SEND_BUFFER_CONFIG;
+    /// `receive.buffer.bytes`. Java's `AdminClientConfig.java` declares it as its own
+    /// public alias of `CommonClientConfigs.RECEIVE_BUFFER_CONFIG`.
+    pub const RECEIVE_BUFFER_CONFIG: &'static str = CommonClientConfigs::RECEIVE_BUFFER_CONFIG;
     /// `metadata.cluster.check.enable` (KIP-1242).
     ///
     /// Whether the client should send cluster and node information when
@@ -227,6 +235,20 @@ impl AdminClientConfig {
                 Self::SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG => {
                     // `Type.LONG`, no validator (`AdminClientConfig.java:224-228`).
                     config.socket_connection_setup_timeout_ms = ConfigDef::parse_long(key, value)?;
+                },
+                Self::SEND_BUFFER_CONFIG => {
+                    // `Type.INT`, `atLeast(CommonClientConfigs.SEND_BUFFER_LOWER_BOUND)`
+                    // (`AdminClientConfig.java:181`).
+                    config.send_buffer_bytes = ConfigDef::parse_int(key, value)?;
+                    Range::at_least(CommonClientConfigs::SEND_BUFFER_LOWER_BOUND)
+                        .ensure_valid(key, config.send_buffer_bytes)?;
+                },
+                Self::RECEIVE_BUFFER_CONFIG => {
+                    // `Type.INT`, `atLeast(CommonClientConfigs.RECEIVE_BUFFER_LOWER_BOUND)`
+                    // (`AdminClientConfig.java:182`).
+                    config.receive_buffer_bytes = ConfigDef::parse_int(key, value)?;
+                    Range::at_least(CommonClientConfigs::RECEIVE_BUFFER_LOWER_BOUND)
+                        .ensure_valid(key, config.receive_buffer_bytes)?;
                 },
                 Self::METADATA_CLUSTER_CHECK_ENABLE_CONFIG => {
                     // `Type.BOOLEAN`, default `true` (`AdminClientConfig.java:305-309`).
@@ -380,6 +402,19 @@ impl AdminClientConfig {
         self.socket_connection_setup_timeout_ms
     }
 
+    /// `send.buffer.bytes`: the TCP send buffer (SO_SNDBUF) size, `-1` for the
+    /// OS default. Default: 128 KiB.
+    pub fn send_buffer_bytes(&self) -> i32 {
+        self.send_buffer_bytes
+    }
+
+    /// `receive.buffer.bytes`: the TCP receive buffer (SO_RCVBUF) size, `-1`
+    /// for the OS default. Default: 64 KiB for the admin client (the producer
+    /// and consumer default to 32 KiB and 64 KiB respectively).
+    pub fn receive_buffer_bytes(&self) -> i32 {
+        self.receive_buffer_bytes
+    }
+
     /// `metadata.cluster.check.enable` (KIP-1242): whether the client sends the
     /// cluster id and node id it expects in ApiVersions so the broker can detect
     /// a misrouted connection.
@@ -437,6 +472,9 @@ impl Default for AdminClientConfig {
             connections_max_idle_ms: 300_000,
             metadata_max_age_ms: 300_000,
             socket_connection_setup_timeout_ms: 10_000,
+            // `128 * 1024` and `64 * 1024` (`AdminClientConfig.java:181-182`).
+            send_buffer_bytes: 128 * 1024,
+            receive_buffer_bytes: 64 * 1024,
             metadata_cluster_check_enable: true,
             metadata_recovery_strategy: MetadataRecoveryStrategy::Rebootstrap,
             metadata_recovery_rebootstrap_trigger_ms: Self::DEFAULT_METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS,
@@ -714,6 +752,43 @@ mod tests {
         .unwrap();
         assert_eq!(config.socket_connection_setup_timeout_ms(), -1);
         assert_eq!(config.connections_max_idle_ms(), -1);
+    }
+
+    /// `send.buffer.bytes` / `receive.buffer.bytes` are `Type.INT` with
+    /// `atLeast(-1)`, defaulting to 128 KiB and 64 KiB
+    /// (`AdminClientConfig.java:181-182`); `-1` selects the OS default.
+    #[test]
+    fn test_socket_buffer_sizes() {
+        assert_eq!(AdminClientConfig::SEND_BUFFER_CONFIG, "send.buffer.bytes");
+        assert_eq!(AdminClientConfig::RECEIVE_BUFFER_CONFIG, "receive.buffer.bytes");
+        let config = AdminClientConfig::new(&with_bootstrap(&[])).unwrap();
+        assert_eq!((config.send_buffer_bytes(), config.receive_buffer_bytes()), (131_072, 65_536));
+
+        let config = AdminClientConfig::new(&with_bootstrap(&[
+            ("send.buffer.bytes", "262144"),
+            ("receive.buffer.bytes", "32768"),
+        ]))
+        .unwrap();
+        assert_eq!((config.send_buffer_bytes(), config.receive_buffer_bytes()), (262_144, 32_768));
+
+        let config =
+            AdminClientConfig::new(&with_bootstrap(&[("send.buffer.bytes", "-1"), ("receive.buffer.bytes", "-1")]))
+                .unwrap();
+        assert_eq!((config.send_buffer_bytes(), config.receive_buffer_bytes()), (-1, -1));
+
+        for key in ["send.buffer.bytes", "receive.buffer.bytes"] {
+            let err = AdminClientConfig::new(&with_bootstrap(&[(key, "-2")])).unwrap_err();
+            assert!(matches!(err, Error::Config(_)), "{key}: got {err:?}");
+            assert_eq!(
+                err.message(),
+                format!("Invalid value -2 for configuration {key}: Value must be at least -1")
+            );
+            let err = AdminClientConfig::new(&with_bootstrap(&[(key, "64k")])).unwrap_err();
+            assert_eq!(
+                err.message(),
+                format!("Invalid value 64k for configuration {key}: Not a number of type INT")
+            );
+        }
     }
 
     /// Translated from `ProducerConfigTest.testInvalidSecurityProtocol`, adapted

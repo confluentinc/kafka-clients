@@ -83,7 +83,6 @@ use crate::common::internals::KafkaFutureImpl;
 use crate::common::network::ChannelBuilders;
 use crate::common::network::Selectable;
 use crate::common::network::Selector;
-use crate::common::network::selectable::USE_DEFAULT_BUFFER_SIZE;
 use crate::common::protocol::Errors;
 use crate::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter};
 use crate::common::requests::{
@@ -536,9 +535,9 @@ impl KafkaAdminClient {
             1, // maxInFlightRequestsPerConnection (`KafkaAdminClient.java:625`)
             config.reconnect_backoff_ms(),
             config.reconnect_backoff_max_ms(),
-            USE_DEFAULT_BUFFER_SIZE,
-            USE_DEFAULT_BUFFER_SIZE,
-            3_600_000, // defaultRequestTimeoutMs: `(int) TimeUnit.HOURS.toMillis(1)` (`:626`)
+            config.send_buffer_bytes(),    // `ClientUtils.java:294`
+            config.receive_buffer_bytes(), // `ClientUtils.java:295`
+            3_600_000,                     // defaultRequestTimeoutMs: `(int) TimeUnit.HOURS.toMillis(1)` (`:626`)
             config.socket_connection_setup_timeout_ms(),
             config.socket_connection_setup_timeout_ms(),
             true, // discover_broker_versions
@@ -15835,6 +15834,36 @@ mod tests {
             i64::MAX,
             "update(..) was not called, so the manager stays UPDATE_PENDING until the rebootstrap"
         );
+    }
+
+    /// `ClientUtils.createNetworkClient` passes `send.buffer.bytes` and
+    /// `receive.buffer.bytes` to the `NetworkClient` (`ClientUtils.java:294-295`),
+    /// which hands them to every `Selectable::connect`. The admin client used
+    /// to pass `USE_DEFAULT_BUFFER_SIZE` for both.
+    #[test]
+    fn create_network_client_passes_the_socket_buffer_sizes() {
+        for (extra, expected) in [
+            (vec![], (128 * 1024, 64 * 1024)),
+            (
+                vec![("send.buffer.bytes", "262144"), ("receive.buffer.bytes", "32768")],
+                (262_144, 32_768),
+            ),
+        ] {
+            let mut props = HashMap::from([("bootstrap.servers".to_string(), "localhost:9092".to_string())]);
+            props.extend(extra.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+            let config = AdminClientConfig::new(&props).unwrap();
+            let manager = AdminMetadataManager::new(100, 300_000, false, LogContext::empty());
+            let client = KafkaAdminClient::create_network_client(
+                &config,
+                crate::common::network::MockSelector::new(),
+                manager.updater(),
+                "admin",
+                Arc::new(ApiVersions::new()),
+                DefaultHostResolver::new(),
+                LogContext::empty(),
+            );
+            assert_eq!(client.socket_buffer_sizes(), expected, "{extra:?}");
+        }
     }
 
     /// `ClientUtils.createNetworkClient` passes `metadata.recovery.strategy` and

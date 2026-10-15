@@ -106,6 +106,30 @@ impl CommonClientConfigs {
     /// Config key: `security.protocol`
     pub const SECURITY_PROTOCOL_CONFIG: &str = "security.protocol";
 
+    /// Config key: `send.buffer.bytes`
+    ///
+    /// The size of the TCP send buffer (SO_SNDBUF) to use when sending data.
+    /// If the value is -1, the OS default will be used.
+    ///
+    /// (Text of Java's `CommonClientConfigs.SEND_BUFFER_DOC`, carried as rustdoc
+    /// for the reason given on [`Self::CLIENT_DNS_LOOKUP_CONFIG`].)
+    pub const SEND_BUFFER_CONFIG: &str = "send.buffer.bytes";
+
+    /// The lowest valid `send.buffer.bytes`: `-1`, the OS default.
+    pub const SEND_BUFFER_LOWER_BOUND: i32 = -1;
+
+    /// Config key: `receive.buffer.bytes`
+    ///
+    /// The size of the TCP receive buffer (SO_RCVBUF) to use when reading
+    /// data. If the value is -1, the OS default will be used.
+    ///
+    /// (Text of Java's `CommonClientConfigs.RECEIVE_BUFFER_DOC`, carried as
+    /// rustdoc for the reason given on [`Self::CLIENT_DNS_LOOKUP_CONFIG`].)
+    pub const RECEIVE_BUFFER_CONFIG: &str = "receive.buffer.bytes";
+
+    /// The lowest valid `receive.buffer.bytes`: `-1`, the OS default.
+    pub const RECEIVE_BUFFER_LOWER_BOUND: i32 = -1;
+
     /// Config key: `metadata.recovery.strategy`
     ///
     /// Controls how the client recovers when none of the brokers known to it is
