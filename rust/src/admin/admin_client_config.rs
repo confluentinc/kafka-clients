@@ -161,10 +161,13 @@ impl fmt::Debug for AdminClientConfig {
 impl AdminClientConfig {
     /// `bootstrap.servers`
     pub const BOOTSTRAP_SERVERS_CONFIG: &'static str = "bootstrap.servers";
-    /// `bootstrap.controllers` (KIP-919). Accepted and validated as in Java,
-    /// but connecting through controllers is not implemented, so a client
-    /// configured with it alone fails to be created
-    /// ([`AdminClient::create`](crate::admin::AdminClient::create)).
+    /// `bootstrap.controllers` (KIP-919): a list of host/port pairs to use for
+    /// establishing the initial connection to the KRaft controller quorum. This
+    /// list should be in the form `host1:port1,host2:port2,...`.
+    ///
+    /// Set it in place of `bootstrap.servers`. The client then talks to the
+    /// controllers directly, and fails at once every call the controllers
+    /// cannot serve.
     pub const BOOTSTRAP_CONTROLLERS_CONFIG: &'static str = "bootstrap.controllers";
     /// Config key: `client.dns.lookup`. Java's `AdminClientConfig.java` declares it as its
     /// own public alias of `CommonClientConfigs.CLIENT_DNS_LOOKUP_CONFIG`.
