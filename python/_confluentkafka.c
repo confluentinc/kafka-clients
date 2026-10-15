@@ -608,10 +608,6 @@ typedef struct {
     // itself: Producer_destroy then sets destroy_on_exit and the poll task
     // frees the producer as it exits.
     int destroy_on_exit;
-    // Set by Producer_join once both tasks are joined (the end of a close), so
-    // Producer_destroy, called later by the finalizer, only frees. Read and set
-    // with the GIL held.
-    int joined;
     // Test-only: when set, the send task stops draining accumulated batches so
     // backpressure can be exercised deterministically (the mock otherwise
     // accepts instantly and never fills). Always 0 in production.
@@ -986,8 +982,8 @@ static int Producer_send_thread(void* arg) {
 }
 
 // Wrap a Rust producer handle in the C batching engine and start its send and
-// poll tasks. `producer_obj` (the Python producer) is kept alive until the end
-// of its close (Producer_release_owner), or until the producer is freed. Returns NULL with a Python exception set on failure; the
+// poll tasks. `producer_obj` (the Python producer) is kept alive until the
+// producer is freed. Returns NULL with a Python exception set on failure; the
 // Rust handle is then destroyed.
 static Producer* Producer_start(kafka_producer_Producer_t* rust_producer, PyObject* producer_obj) {
     Producer* producer = (Producer*)PyMem_RawMalloc(sizeof(Producer));
@@ -1405,66 +1401,18 @@ static PyObject* py_Producer_close_with_timeout_async(PyObject* self, PyObject* 
     Py_RETURN_NONE;
 }
 
-// Drop the reference to the Python producer that Producer_start took. The end
-// of a close calls it: the handle then stays valid until the Python producer is
-// collected, when a finalizer calls Producer_destroy, and this reference would
-// otherwise keep the Python producer, and so the handle, alive for ever. A
-// completion still pending holds the Python producer through its own callback.
-static PyObject* py_Producer_release_owner(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
-    if (!PyArg_ParseTuple(args, "K", &producer_ptr)) {
-        return NULL;
-    }
-    Producer* producer = (Producer*)producer_ptr;
-    Py_CLEAR(producer->py_producer);
-    Py_RETURN_NONE;
-}
-
-// Join the send and the poll task, so that every delivery callback has run when
-// a close returns, as Java's close() returns once its I/O thread, which runs
-// the callbacks, has ended. Call at the end of a close, after Producer_shutdown
-// and after the close (Producer_close_async) has completed, so the send task has
-// finished its last round and every future the poll task waits on has resolved.
-// Called on the send or the poll task (a close from a delivery callback, with a
-// zero timeout), it does not wait: that task cannot join itself, and
-// Producer_destroy then frees the producer as it does without a join.
-static PyObject* py_Producer_join(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
-    if (!PyArg_ParseTuple(args, "K", &producer_ptr)) {
-        return NULL;
-    }
-    Producer* producer = (Producer*)producer_ptr;
-    thrd_t current = thrd_current();
-    if (producer->joined || thrd_equal(current, producer->send_thread)
-        || thrd_equal(current, producer->poll_futures_thread)) {
-        Py_RETURN_NONE;
-    }
-    Py_BEGIN_ALLOW_THREADS
-    thrd_join(producer->send_thread, NULL);
-    thrd_join(producer->poll_futures_thread, NULL);
-    Py_END_ALLOW_THREADS
-    producer->joined = 1;
-    Py_RETURN_NONE;
-}
-
-// Free the Rust producer handle and the C struct: the finalizer of the Python
-// producer calls it once the producer is collected, after its close. If the
-// close joined both tasks (Producer_join), only the free is left. Otherwise
-// (a close from a delivery callback) it joins them first; called on the send or
-// the poll task, it only marks the producer for the poll task to free as it
-// exits.
+// Join the send and the poll task and free the Rust producer handle and the C
+// struct. Call after Producer_shutdown and after the close
+// (Producer_close_async) has completed, so the send task has finished its last
+// round and every future the poll task waits on has resolved. Called on the send
+// or the poll task (a close from a delivery callback), it only marks the
+// producer for the poll task to free as it exits.
 static PyObject* py_Producer_destroy(PyObject* self, PyObject* args) {
     unsigned long long producer_ptr;
     if (!PyArg_ParseTuple(args, "K", &producer_ptr)) {
         return NULL;
     }
     Producer* producer = (Producer*)producer_ptr;
-    if (producer->joined) {
-        Py_BEGIN_ALLOW_THREADS
-        Producer_free(producer);
-        Py_END_ALLOW_THREADS
-        Py_RETURN_NONE;
-    }
     thrd_t current = thrd_current();
     if (thrd_equal(current, producer->send_thread)
         || thrd_equal(current, producer->poll_futures_thread)) {
@@ -7552,12 +7500,8 @@ static PyMethodDef ProducerNativeMethods[] = {
      "Async Rust-side close; cb(error_int) (step 2 of close)"},
     {"Producer_close_with_timeout_async", py_Producer_close_with_timeout_async, METH_VARARGS,
      "Async Rust-side close(Duration); (producer, timeout_ms, cb) (step 2 of a timed close)"},
-    {"Producer_join", py_Producer_join, METH_VARARGS,
-     "Join the send and poll tasks, so every callback has run (end of close)"},
-    {"Producer_release_owner", py_Producer_release_owner, METH_VARARGS,
-     "Drop the C struct's reference to the Python producer (end of close)"},
     {"Producer_destroy", py_Producer_destroy, METH_VARARGS,
-     "Join the poll task, free the Rust handle + C struct (finalizer, after close)"},
+     "Join the poll task, free the Rust handle + C struct (step 3 of close)"},
     {"Producer_metrics", py_Producer_metrics, METH_VARARGS,
      "Point-in-time metrics snapshot; returns list[dict] or None"},
     {"Producer_flush_async", py_Producer_flush_async, METH_VARARGS,
