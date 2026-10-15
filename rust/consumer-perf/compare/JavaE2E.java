@@ -1,6 +1,9 @@
 import java.io.BufferedReader;
 import java.io.FileInputStream;
 import java.io.FileReader;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.Properties;
@@ -13,7 +16,11 @@ import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 /* Time-based e2e latency benchmark, Java kafka-clients consumer.
  * Methodology matches the repo librdkafka_e2e.c (Run A): exact 1ms histogram,
  * per-batch clock, message-count warmup. Reports latency stddev (from the
- * histogram) and CURRENT RSS avg/min/max (/proc/self/status VmRSS) like B. */
+ * histogram) and CURRENT RSS avg/min/max (/proc/self/status VmRSS) like B.
+ * Fetch settings left unset keep the client defaults. With --results-file the
+ * summary is also written in the shape of the producer harnesses'
+ * results.json (client "java-consumer"), which `cargo xtask perf-cloud`
+ * reads. Exits 1 when no record arrives within 120 s or none is measured. */
 public class JavaE2E {
     static final int MAXLAT = 600000;
     static long[] B = new long[MAXLAT + 1];
@@ -79,7 +86,10 @@ public class JavaE2E {
 
     public static void main(String[] a) throws Exception {
         String bootstrap = "localhost:9092", topic = "bench", proto = "consumer", cfg = null, gid = null;
-        int durationS = 1800, warmup = 200000, intervalS = 10, pollMs = 500, maxPoll = 2500;
+        String resultsFile = null, fetchMinBytes = null, fetchMaxWaitMs = null, maxPartitionFetchBytes = null,
+            maxPoll = null;
+        int durationS = 1800, intervalS = 10, pollMs = 500;
+        long warmup = 200000;
         for (int i = 0; i < a.length; i++) switch (a[i]) {
             case "--bootstrap": bootstrap = a[++i]; break;
             case "--topic": topic = a[++i]; break;
@@ -87,10 +97,14 @@ public class JavaE2E {
             case "--client-config": cfg = a[++i]; break;
             case "--group-id": gid = a[++i]; break;
             case "--duration": durationS = Integer.parseInt(a[++i]); break;
-            case "--warmup": warmup = Integer.parseInt(a[++i]); break;
+            case "--warmup": warmup = Long.parseLong(a[++i]); break;
             case "--interval": intervalS = Integer.parseInt(a[++i]); break;
             case "--poll-timeout": pollMs = Integer.parseInt(a[++i]); break;
-            case "--max-poll-records": maxPoll = Integer.parseInt(a[++i]); break;
+            case "--max-poll-records": maxPoll = a[++i]; break;
+            case "--fetch-min-bytes": fetchMinBytes = a[++i]; break;
+            case "--fetch-max-wait-ms": fetchMaxWaitMs = a[++i]; break;
+            case "--max-partition-fetch-bytes": maxPartitionFetchBytes = a[++i]; break;
+            case "--results-file": resultsFile = a[++i]; break;
         }
         Properties p = new Properties();
         if (cfg != null) try (FileInputStream f = new FileInputStream(cfg)) { p.load(f); }
@@ -100,14 +114,23 @@ public class JavaE2E {
         p.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "true");
         p.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
         p.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
-        p.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, String.valueOf(maxPoll));
+        if (maxPoll != null) p.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, maxPoll);
+        if (fetchMinBytes != null) p.put(ConsumerConfig.FETCH_MIN_BYTES_CONFIG, fetchMinBytes);
+        if (fetchMaxWaitMs != null) p.put(ConsumerConfig.FETCH_MAX_WAIT_MS_CONFIG, fetchMaxWaitMs);
+        if (maxPartitionFetchBytes != null) p.put(ConsumerConfig.MAX_PARTITION_FETCH_BYTES_CONFIG, maxPartitionFetchBytes);
         p.put("group.protocol", proto);
 
-        System.out.printf("Java e2e: bootstrap=%s topic=%s proto=%s maxPoll=%d fetch.min=4MiB partFetch=4MiB crc=off dur=%ds warmup=%d%n",
-                bootstrap, topic, proto, maxPoll, durationS, warmup);
+        String dflt = "default";
+        System.out.printf("Java e2e: bootstrap=%s topic=%s proto=%s max.poll.records=%s fetch.min.bytes=%s "
+                + "fetch.max.wait.ms=%s max.partition.fetch.bytes=%s dur=%ds warmup=%d%n",
+                bootstrap, topic, proto, maxPoll != null ? maxPoll : dflt, fetchMinBytes != null ? fetchMinBytes : dflt,
+                fetchMaxWaitMs != null ? fetchMaxWaitMs : dflt,
+                maxPartitionFetchBytes != null ? maxPartitionFetchBytes : dflt, durationS, warmup);
         long durationMs = durationS * 1000L, intervalMs = intervalS * 1000L, totalBytes = 0;
         long seen = 0, measured = 0, measureStart = 0, deadline = 0, ivStart = 0; int ivIdx = 0;
         boolean warm = false;
+        // A dead or missing producer must not leave the run waiting forever.
+        long noDataDeadline = System.currentTimeMillis() + 120_000L;
         double rssSum = 0, rssMin = Double.MAX_VALUE, rssMax = 0; long rssN = 0;
         double cpuSum = 0, cpuMin = Double.MAX_VALUE, cpuMax = 0; long cpuN = 0;
         try (KafkaConsumer<byte[], byte[]> c = new KafkaConsumer<>(p)) {
@@ -116,14 +139,21 @@ public class JavaE2E {
             while (true) {
                 ConsumerRecords<byte[], byte[]> recs = c.poll(Duration.ofMillis(pollMs));
                 long now = System.currentTimeMillis();
-                if (recs.isEmpty()) { if (warm && now >= deadline) break; else continue; }
+                if (recs.isEmpty()) {
+                    if (seen == 0 && measured == 0 && now >= noDataDeadline) {
+                        System.err.println("ERROR: no records within 120s (producer not running?)");
+                        System.exit(1);
+                    }
+                    if (warm && now >= deadline) break; else continue;
+                }
                 for (ConsumerRecord<byte[], byte[]> r : recs) {
                     if (!warm) {
-                        if (++seen >= warmup) { warm = true; measureStart = System.currentTimeMillis();
+                        // With no warmup the first record starts the measurement (and is measured).
+                        if (warmup <= 0 || ++seen >= warmup) { warm = true; measureStart = System.currentTimeMillis();
                             deadline = measureStart + durationMs; ivStart = measureStart;
                             sampleCpuPct(); // prime the CPU baseline at measure start
                             System.out.printf("warmup complete (%d msgs); measuring %ds now%n", warmup, durationS); }
-                        continue;
+                        if (warmup > 0) continue;
                     }
                     long lat = now - r.timestamp();
                     rec(B, lat, false); rec(iB, lat, true);
@@ -163,5 +193,28 @@ public class JavaE2E {
             proto, cnt, durS, thrMsg, thrMiB, cnt == 0 ? 0 : min, cnt == 0 ? 0.0 : (double) sum / cnt, sdv,
             pct(B, cnt, 50), pct(B, cnt, 90), pct(B, cnt, 95), pct(B, cnt, 99), pct(B, cnt, 99.9), cnt == 0 ? 0 : max,
             cpuAvg, cpuMin, cpuMax, rssAvg, rssMin, rssMax);
+        if (cnt == 0) {
+            System.err.println("ERROR: no records measured");
+            System.exit(1);
+        }
+        if (resultsFile != null) {
+            String json = String.format(java.util.Locale.ROOT,
+                "{%n"
+                + "  \"test\": \"consumer\",%n"
+                + "  \"client\": \"java-consumer\",%n"
+                + "  \"topic\": \"%s\",%n"
+                + "  \"messages_measured\": %d,%n"
+                + "  \"duration_s\": %.2f,%n"
+                + "  \"throughput_msg_s\": %.2f,%n"
+                + "  \"throughput_mib_s\": %.2f,%n"
+                + "  \"latency_ms\": {\"min\": %d, \"avg\": %.2f, \"p50\": %d, \"p90\": %d, \"p95\": %d, "
+                + "\"p99\": %d, \"p999\": %d, \"max\": %d},%n"
+                + "  \"cpu_avg_pct\": %.2f,%n"
+                + "  \"rss_avg_kib\": %.2f%n"
+                + "}%n",
+                topic, cnt, durS, thrMsg, thrMiB, min, (double) sum / cnt, pct(B, cnt, 50), pct(B, cnt, 90),
+                pct(B, cnt, 95), pct(B, cnt, 99), pct(B, cnt, 99.9), max, cpuAvg, rssAvg * 1024.0);
+            Files.write(Paths.get(resultsFile), json.getBytes(StandardCharsets.UTF_8));
+        }
     }
 }
