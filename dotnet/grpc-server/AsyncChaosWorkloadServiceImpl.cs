@@ -270,8 +270,11 @@ internal sealed class AsyncChaosWorkloadServiceImpl : Proto.ChaosWorkloadService
         catch (Exception e)
         {
             // A server-side fault inside the loop (the client's own errors are all reported as
-            // ConsumerError). Close the client so a shared server does not leak it.
+            // ConsumerError). Close the client so a shared server does not leak it. Python
+            // leaves its consumer open here. Closing first, as the drain does: the close-time
+            // revoke must not queue a read-back, which would wait out the API timeout.
             ChaosEvents.Log($"chaos consumer {workload.Id}: poll loop died: {e}");
+            listener.Closing = true;
             await CloseQuietly(consumer, handle).ConfigureAwait(false);
             workload.Emit(ChaosEvents.Failed(e));
             return;
@@ -304,8 +307,9 @@ internal sealed class AsyncChaosWorkloadServiceImpl : Proto.ChaosWorkloadService
             workload.Emit(ChaosEvents.ConsumerError(Proto.ConsumerOp.Close, e));
         }
 
-        // No close-spec split (§3.5 item 4): the handle ref-counts its consumer, so disposing it
-        // after Close and then the consumer is the plain, correct order.
+        // Close, then the handle, then the consumer: the handle ref-counts its consumer, so this
+        // plain order is correct. Python's plain close() matches it since #187 removed its
+        // close-spec split, so PLAN §3.5 item 4 is no longer a difference.
         DisposeHandleQuietly(handle);
         await DisposeQuietly(consumer).ConfigureAwait(false);
         workload.Emit(ChaosEvents.Closed());
@@ -409,10 +413,7 @@ internal sealed class AsyncChaosWorkloadServiceImpl : Proto.ChaosWorkloadService
         await DisposeQuietly(producer).ConfigureAwait(false);
     }
 
-    /// <summary>
-    /// Python <c>_close_consumer_async</c> after a failed setup or loop: close, then the handle,
-    /// then the consumer.
-    /// </summary>
+    /// <summary>The consumer's close after a failed setup or loop: close, then the handle, then the consumer.</summary>
     private static async Task CloseQuietly(IAsyncConsumer<byte[], byte[]> consumer, ConsumerHandle? handle)
     {
         try

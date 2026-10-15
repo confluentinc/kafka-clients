@@ -40,13 +40,13 @@ internal static class ChaosEvents
 
     /// <summary>
     /// <c>kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT</c> — the duplicate-<c>workload_id</c>
-    /// code (Python <c>ec.LOCAL_ILLEGAL_ARGUMENT</c>).
+    /// code (Python <c>_LOCAL_ILLEGAL_ARGUMENT</c>, from <c>grpc_translate.py</c>).
     /// </summary>
     internal const int LocalIllegalArgumentCode = -3;
 
     /// <summary>
     /// <c>kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE</c> — the code of the server-made
-    /// "neither metadata nor error" outcome (Python <c>ec.LOCAL_ILLEGAL_STATE</c>), and the
+    /// "neither metadata nor error" outcome (Python <c>_LOCAL_ILLEGAL_STATE</c>), and the
     /// one <see cref="Translate.ToProto"/> stamps on any non-Kafka exception.
     /// </summary>
     internal const int LocalIllegalStateCode = -4;

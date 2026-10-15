@@ -250,8 +250,11 @@ internal sealed class ChaosWorkloadServiceImpl : Proto.ChaosWorkloadService.Chao
         catch (Exception e)
         {
             // A server-side fault inside the loop (the client's own errors are all reported as
-            // ConsumerError above). Close the client so a shared server does not leak it.
+            // ConsumerError above). Close the client so a shared server does not leak it. Python
+            // leaves its consumer open here. Closing first, as the drain does: the close-time
+            // revoke must not queue a read-back, which would wait out the API timeout.
             ChaosEvents.Log($"chaos consumer {workload.Id}: poll loop died: {e}");
+            listener.Closing = true;
             CloseQuietly(consumer, handle);
             workload.Emit(ChaosEvents.Failed(e));
             return;
@@ -284,8 +287,9 @@ internal sealed class ChaosWorkloadServiceImpl : Proto.ChaosWorkloadService.Chao
             workload.Emit(ChaosEvents.ConsumerError(Proto.ConsumerOp.Close, e));
         }
 
-        // No close-spec split (§3.5 item 4): the handle ref-counts its consumer, so disposing it
-        // after Close and then the consumer is the plain, correct order.
+        // Close, then the handle, then the consumer: the handle ref-counts its consumer, so this
+        // plain order is correct. Python's plain close() matches it since #187 removed its
+        // close-spec split, so PLAN §3.5 item 4 is no longer a difference.
         DisposeQuietly(handle);
         DisposeQuietly(consumer);
         workload.Emit(ChaosEvents.Closed());

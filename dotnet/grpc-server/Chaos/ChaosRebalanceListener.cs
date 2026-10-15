@@ -32,7 +32,9 @@ namespace Confluent.Kafka.GrpcServer.Chaos;
 /// consumer — then reads the commit back, unless the consumer is <see cref="Closing"/>: once
 /// closing, the client only drains commits, so an offset fetch queued from here would wait out
 /// the API timeout, and the workload's own read-back after its final commit already covers that
-/// state.
+/// state. Since #187 Python's listener calls <c>commit()</c> / <c>committed()</c> on the consumer
+/// itself, and the package routes those through the same core <c>ConsumerHandle</c>; .NET has no
+/// such routing, so it calls the handle directly.
 /// </para>
 /// <para>
 /// <see cref="OnPartitionsLost"/> is implemented, not inherited: this type implements
@@ -43,6 +45,11 @@ namespace Confluent.Kafka.GrpcServer.Chaos;
 /// <b>Threading.</b> The methods are sync <c>void</c> in both flavours and run on the core's
 /// callback-dispatcher thread (CLAUDE.md §4, the rebalance-listener divergence); the handle's
 /// <c>Commit</c> / <c>Committed</c> are blocking calls meant for exactly that thread (ffi §B1).
+/// Since #187 Python's listener runs on the caller's thread instead (the workload's thread, or
+/// the event loop, where <c>on_partitions_revoked</c> is an <c>async def</c>). The events still
+/// arrive in the same order: the rebalance waits for the listener, so its events are queued
+/// before the records of the poll that ran it, and the dispatcher runs one callback at a time,
+/// so nothing else from this consumer lands between a revoke and its read-back.
 /// Each body only builds events and queues them, and is a catch-all: a failed commit is
 /// <b>reported, never raised</b>. A failure to build an event — a server-side fault, not the
 /// client's — is logged and reported as <c>Failed</c> rather than handed to the binding (which

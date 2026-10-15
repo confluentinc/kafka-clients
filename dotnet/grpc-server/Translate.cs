@@ -133,7 +133,7 @@ internal static class Translate
     /// <c>kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE</c> — the code this server stamps
     /// on errors it manufactures itself (an unexpected non-Kafka exception, or an
     /// unknown <c>consumer_id</c>), mirroring <c>grpc_translate.py</c>'s
-    /// <c>ec.LOCAL_ILLEGAL_STATE</c> (also -4).
+    /// <c>_LOCAL_ILLEGAL_STATE</c> (also -4).
     /// </summary>
     private const int LocalIllegalStateCode = -4;
 
