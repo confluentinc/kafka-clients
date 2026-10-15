@@ -14,18 +14,20 @@
 
 //! `report.md` and `junit.xml` of a `perf-cloud run`.
 //!
-//! The markdown has one table per test with a row per client, then a row per comparison giving the change of
-//! the Rust-based client against its baseline, banded:
+//! The markdown has one table per test: a row per metric, a column per client
+//! that ran, and after each baseline a Δ column giving the change of the
+//! Rust-based client against it, banded:
 //!
 //! - 🟢 better, or at most 10 % worse;
 //! - 🟡 10–20 % worse;
 //! - 🔴 more than 20 % worse.
 //!
-//! "Worse" follows the metric: lower throughput, higher latency, CPU or RSS.
+//! "Worse" follows the metric: lower throughput or transactions/s, higher
+//! latency, CPU or RSS. Counts (messages, transactions) get no Δ.
 
 use std::fmt::Write as _;
 
-use super::{Arm, ArmResult, Group, Metrics, Outcome, PerfTest, RunInfo, TestResult};
+use super::{Arm, ArmResult, Group, Metrics, Outcome, PerfTest, RunInfo, TestResult, Workload};
 
 /// Above this share of the cluster's ingress limit a result may be capped by
 /// the cluster rather than by the client.
@@ -37,13 +39,17 @@ const HELD_RATE_SHARE: f64 = 0.95;
 
 const MIB: f64 = 1024.0 * 1024.0;
 
-/// The comparisons of a group: `(candidate, baseline)`.
-pub(crate) fn comparisons(group: Group) -> &'static [(Arm, Arm)] {
+/// The comparisons of a group: `(candidate, baseline, Δ column header)`. The
+/// candidate runs before its baseline.
+pub(crate) fn comparisons(group: Group) -> &'static [(Arm, Arm, &'static str)] {
     match group {
-        Group::Rust => &[(Arm::Rust, Arm::Librdkafka), (Arm::Rust, Arm::Java)],
+        Group::Rust => &[
+            (Arm::Rust, Arm::Librdkafka, "Δ Rust vs librdkafka"),
+            (Arm::Rust, Arm::Java, "Δ Rust vs Java"),
+        ],
         Group::Python => &[
-            (Arm::PythonSyncRust, Arm::PythonSyncLibrdkafka),
-            (Arm::PythonAsyncRust, Arm::PythonAsyncLibrdkafka),
+            (Arm::PythonSyncRust, Arm::PythonSyncLibrdkafka, "Δ sync: Rust vs librdkafka"),
+            (Arm::PythonAsyncRust, Arm::PythonAsyncLibrdkafka, "Δ async: Rust vs librdkafka"),
         ],
     }
 }
@@ -55,32 +61,98 @@ enum Better {
     Lower,
 }
 
-/// A report column: header, how to read it from [`Metrics`], its decimals,
-/// and which way is better.
-struct Column {
-    header: &'static str,
-    value: fn(&Metrics) -> f64,
+/// A report row: its label, how to read it from [`Metrics`] (`None` when
+/// the client did not report it), its decimals, which way is better (`None`
+/// for counts, which get no Δ), and whether only transactional tests have it.
+struct Row {
+    label: &'static str,
+    value: fn(&Metrics) -> Option<f64>,
     decimals: usize,
-    better: Better,
+    better: Option<Better>,
+    transactional: bool,
 }
 
-const COLUMNS: &[Column] = &[
-    Column { header: "msg/s", value: |m| m.msg_s, decimals: 0, better: Better::Higher },
-    Column { header: "MiB/s", value: |m| m.mib_s, decimals: 2, better: Better::Higher },
-    Column { header: "avg ms", value: |m| m.avg, decimals: 2, better: Better::Lower },
-    Column { header: "p50 ms", value: |m| m.p50, decimals: 2, better: Better::Lower },
-    Column { header: "p90 ms", value: |m| m.p90, decimals: 2, better: Better::Lower },
-    Column { header: "p95 ms", value: |m| m.p95, decimals: 2, better: Better::Lower },
-    Column { header: "p99 ms", value: |m| m.p99, decimals: 2, better: Better::Lower },
-    Column { header: "p99.9 ms", value: |m| m.p999, decimals: 2, better: Better::Lower },
-    Column { header: "max ms", value: |m| m.max, decimals: 2, better: Better::Lower },
-    Column { header: "CPU %", value: |m| m.cpu_pct, decimals: 1, better: Better::Lower },
-    Column { header: "RSS MiB", value: |m| m.rss_mib, decimals: 1, better: Better::Lower },
+const fn row(
+    label: &'static str,
+    value: fn(&Metrics) -> Option<f64>,
+    decimals: usize,
+    better: Option<Better>,
+    transactional: bool,
+) -> Row {
+    Row { label, value, decimals, better, transactional }
+}
+
+const ROWS: &[Row] = &[
+    row("Throughput (msg/s)", |m| Some(m.msg_s), 0, Some(Better::Higher), false),
+    row("Throughput (MiB/s)", |m| Some(m.mib_s), 2, Some(Better::Higher), false),
+    row(
+        "Transactions/s",
+        |m| m.txn.as_ref().map(|t| t.per_s),
+        2,
+        Some(Better::Higher),
+        true,
+    ),
+    row("Latency avg (ms)", |m| Some(m.avg), 2, Some(Better::Lower), false),
+    row("Latency p50 (ms)", |m| Some(m.p50), 2, Some(Better::Lower), false),
+    row("Latency p90 (ms)", |m| Some(m.p90), 2, Some(Better::Lower), false),
+    row("Latency p95 (ms)", |m| Some(m.p95), 2, Some(Better::Lower), false),
+    row("Latency p99 (ms)", |m| Some(m.p99), 2, Some(Better::Lower), false),
+    row("Latency p99.9 (ms)", |m| Some(m.p999), 2, Some(Better::Lower), false),
+    row("Latency max (ms)", |m| Some(m.max), 2, Some(Better::Lower), false),
+    row(
+        "Commit latency p50 (ms)",
+        |m| m.txn.as_ref().map(|t| t.commit_p50),
+        2,
+        Some(Better::Lower),
+        true,
+    ),
+    row(
+        "Commit latency p99 (ms)",
+        |m| m.txn.as_ref().map(|t| t.commit_p99),
+        2,
+        Some(Better::Lower),
+        true,
+    ),
+    row("CPU (%)", |m| Some(m.cpu_pct), 1, Some(Better::Lower), false),
+    row("RSS (MiB)", |m| Some(m.rss_mib), 1, Some(Better::Lower), false),
+    row("Messages measured", |m| Some(m.messages), 0, None, false),
+    row("Committed transactions", |m| m.txn.as_ref().map(|t| t.committed), 0, None, true),
+    row("Aborted transactions", |m| m.txn.as_ref().map(|t| t.aborted), 0, None, true),
 ];
+
+/// A column of a test's table after the metric names.
+enum Column {
+    Client(Arm),
+    Delta {
+        candidate: Arm,
+        baseline: Arm,
+        header: &'static str,
+    },
+}
+
+/// The run's clients in order, each baseline followed by its Δ column when
+/// its candidate ran too.
+fn columns(info: &RunInfo) -> Vec<Column> {
+    let mut columns = Vec::new();
+    for &arm in &info.arms {
+        columns.push(Column::Client(arm));
+        for &(candidate, baseline, header) in comparisons(info.group) {
+            if baseline == arm && info.arms.contains(&candidate) {
+                columns.push(Column::Delta { candidate, baseline, header });
+            }
+        }
+    }
+    columns
+}
 
 /// A one-line description of a test's settings.
 pub(crate) fn scenario(test: &PerfTest) -> String {
+    let workload = match test.workload {
+        Workload::Producer => "producer".to_string(),
+        Workload::Transactional => format!("transactional ({})", test.setting("TXN_MODE").unwrap_or("produce")),
+    };
     let mut parts = vec![
+        workload,
         format!("{} partitions", test.setting("PARTITIONS").unwrap_or("?")),
         format!("{} B values", test.setting("VALUE_SIZE").unwrap_or("?")),
     ];
@@ -90,13 +162,17 @@ pub(crate) fn scenario(test: &PerfTest) -> String {
     }
     let units = [
         ("KEY_SIZE", "key", " B"),
+        ("ACKS", "acks", ""),
+        ("COMPRESSION_TYPE", "compression", ""),
         ("BATCH_SIZE", "batch", " KiB"),
         ("LINGER_MS", "linger", " ms"),
+        ("ENABLE_IDEMPOTENCE", "idempotence", ""),
         ("MAX_IN_FLIGHT", "in-flight", ""),
         ("BUFFER_MEMORY", "buffer", " MiB"),
         ("MAX_REQUEST_SIZE", "max request", " KiB"),
-        ("COMPRESSION_TYPE", "compression", ""),
-        ("ENABLE_IDEMPOTENCE", "idempotence", ""),
+        ("RECORDS_PER_TRANSACTION", "records per transaction", ""),
+        ("ABORT_RATE", "abort rate", ""),
+        ("NUM_TRANSACTIONAL_PRODUCERS", "transactional producers", ""),
     ];
     for (key, label, unit) in units {
         if let Some(v) = test.setting(key) {
@@ -113,6 +189,35 @@ pub(crate) fn hours_minutes(minutes: u64) -> String {
         (h, 0) => format!("{h} h"),
         (h, m) => format!("{h} h {m} min"),
     }
+}
+
+/// `value` with `decimals` decimals and a `,` between thousands
+/// (`1234567.891` → `1,234,567.89`).
+fn number(value: f64, decimals: usize) -> String {
+    let text = format!("{value:.decimals$}");
+    if !value.is_finite() {
+        return text;
+    }
+    let (sign, unsigned) = match text.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", text.as_str()),
+    };
+    let (whole, fraction) = match unsigned.split_once('.') {
+        Some((whole, fraction)) => (whole, Some(fraction)),
+        None => (unsigned, None),
+    };
+    let mut out = String::from(sign);
+    for (i, digit) in whole.chars().enumerate() {
+        if i > 0 && (whole.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    if let Some(fraction) = fraction {
+        out.push('.');
+        out.push_str(fraction);
+    }
+    out
 }
 
 /// The relative change of `candidate` against `baseline` and its band.
@@ -145,6 +250,10 @@ fn find(arms: &[ArmResult], arm: Arm) -> Option<&ArmResult> {
     arms.iter().find(|a| a.arm == arm)
 }
 
+fn metrics_of(arms: &[ArmResult], arm: Arm) -> Option<&Metrics> {
+    find(arms, arm).and_then(|a| a.metrics.as_ref())
+}
+
 fn mb_s(m: &Metrics) -> f64 {
     m.mib_s * MIB / 1e6
 }
@@ -153,6 +262,8 @@ pub(crate) fn markdown(info: &RunInfo, results: &[TestResult]) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "# Performance test results: {} client group\n", info.group.name());
     let _ = writeln!(out, "- Started: {}", info.started);
+    let labels: Vec<&str> = info.arms.iter().map(|a| a.label()).collect();
+    let _ = writeln!(out, "- Clients: {}", labels.join(", "));
     let _ = writeln!(
         out,
         "- Each client: {} min warmup, then {} min measured",
@@ -161,89 +272,126 @@ pub(crate) fn markdown(info: &RunInfo, results: &[TestResult]) -> String {
     for (label, value) in &info.facts {
         let _ = writeln!(out, "- {label}: {}", cell(value));
     }
-    let _ = writeln!(
-        out,
-        "\nComparison rows give the change against the baseline: 🟢 better or at most 10% worse, 🟡 10–20% worse, \
-         🔴 more than 20% worse (lower throughput; higher latency, CPU or RSS)."
-    );
+    let columns = columns(info);
+    if columns.iter().any(|c| matches!(c, Column::Delta { .. })) {
+        let _ = writeln!(
+            out,
+            "\nA Δ column gives the Rust-based client's change against the baseline it names: 🟢 better or at most \
+             10% worse, 🟡 10–20% worse, 🔴 more than 20% worse (lower throughput or transactions/s; higher latency, \
+             CPU or RSS)."
+        );
+    }
     if results.is_empty() {
         let _ = writeln!(out, "\nNo test has finished yet.");
     }
 
-    let header: Vec<&str> = COLUMNS.iter().map(|c| c.header).collect();
     for result in results {
-        let _ = writeln!(out, "\n## {}\n\n{}\n", result.test.id, scenario(&result.test));
-        let _ = writeln!(out, "| Client | {} | Result |", header.join(" | "));
-        let _ = writeln!(out, "|---|{}---|", "---:|".repeat(COLUMNS.len()));
-        let mut notes = Vec::new();
-        for arm in info.group.arms() {
-            let Some(a) = find(&result.arms, *arm) else {
-                let _ = writeln!(out, "| {} |{} not run |", arm.label(), " – |".repeat(COLUMNS.len()));
-                continue;
-            };
-            let values: Vec<String> = match &a.metrics {
-                Some(m) => COLUMNS.iter().map(|c| format!("{:.*}", c.decimals, (c.value)(m))).collect(),
-                None => vec!["–".to_string(); COLUMNS.len()],
-            };
-            let status = match &a.outcome {
-                Outcome::Passed => "✅".to_string(),
-                Outcome::Failed(reason) => format!("❌ {}", cell(reason)),
-            };
-            let _ = writeln!(out, "| {} | {} | {status} |", arm.label(), values.join(" | "));
-            if let (Some(m), Some(limit)) = (&a.metrics, info.ingress_mb_s) {
-                if mb_s(m) >= NEAR_INGRESS_SHARE * limit {
-                    notes.push(format!(
-                        "⚠️ {} produced {:.0} MB/s, {:.0}% of the cluster's {limit:.0} MB/s ingress limit: the cluster \
-                         may have capped it.",
-                        arm.label(),
-                        mb_s(m),
-                        100.0 * mb_s(m) / limit
-                    ));
-                }
-            }
-            let target: f64 = result.test.setting("LIMIT_RPS").and_then(|v| v.parse().ok()).unwrap_or(0.0);
-            if let Some(m) = &a.metrics {
-                if target > 0.0 && m.msg_s < HELD_RATE_SHARE * target {
-                    notes.push(format!(
-                        "⚠️ {} reached {:.0} msg/s, below the {target:.0} msg/s target (capped): its latency is not \
-                         comparable with a client that held the rate.",
-                        arm.label(),
-                        m.msg_s
-                    ));
-                }
-            }
-        }
-        for (candidate, baseline) in comparisons(info.group) {
-            let pair = (
-                find(&result.arms, *candidate).and_then(|a| a.metrics.as_ref()),
-                find(&result.arms, *baseline).and_then(|a| a.metrics.as_ref()),
-            );
-            let cells: Vec<String> = match pair {
-                (Some(c), Some(b)) => COLUMNS
-                    .iter()
-                    .map(|col| match delta((col.value)(c), (col.value)(b), col.better) {
-                        Some((pct, band)) => format!("{band} {pct:+.1}%"),
-                        None => "n/a".to_string(),
-                    })
-                    .collect(),
-                _ => vec!["n/a".to_string(); COLUMNS.len()],
-            };
-            let _ = writeln!(
-                out,
-                "| **{} vs {}** | {} | |",
-                candidate.label(),
-                baseline.label(),
-                cells.join(" | ")
-            );
-        }
-        if !notes.is_empty() {
-            out.push('\n');
-            for note in notes {
-                let _ = writeln!(out, "{note}");
-            }
-        }
+        test_table(&mut out, info, &columns, result);
     }
     out
+}
+
+/// A test's section: its id, settings, table and notes.
+fn test_table(out: &mut String, info: &RunInfo, columns: &[Column], result: &TestResult) {
+    let test = &result.test;
+    let _ = writeln!(out, "\n## {}\n\n{}\n", test.id, cell(&scenario(test)));
+    let headers: Vec<&str> = columns
+        .iter()
+        .map(|c| match c {
+            Column::Client(arm) => arm.label(),
+            Column::Delta { header, .. } => header,
+        })
+        .collect();
+    let _ = writeln!(out, "| Metric | {} |", headers.join(" | "));
+    let _ = writeln!(out, "|---|{}", "---:|".repeat(columns.len()));
+
+    let results: Vec<String> = columns
+        .iter()
+        .map(|c| match c {
+            Column::Client(arm) => match find(&result.arms, *arm) {
+                None => "not run".to_string(),
+                Some(a) => match &a.outcome {
+                    Outcome::Passed => "✅".to_string(),
+                    Outcome::Failed(reason) => format!("❌ {}", cell(reason)),
+                },
+            },
+            Column::Delta { .. } => String::new(),
+        })
+        .collect();
+    let _ = writeln!(out, "| Result | {} |", results.join(" | "));
+
+    let transactional = test.workload == Workload::Transactional;
+    for row in ROWS.iter().filter(|r| transactional || !r.transactional) {
+        let cells: Vec<String> = columns
+            .iter()
+            .map(|c| match c {
+                Column::Client(arm) => match metrics_of(&result.arms, *arm).and_then(row.value) {
+                    Some(v) => number(v, row.decimals),
+                    None => "–".to_string(),
+                },
+                Column::Delta { candidate, baseline, .. } => {
+                    let Some(better) = row.better else {
+                        return String::new();
+                    };
+                    let pair = (
+                        metrics_of(&result.arms, *candidate).and_then(row.value),
+                        metrics_of(&result.arms, *baseline).and_then(row.value),
+                    );
+                    match pair {
+                        (Some(c), Some(b)) => match delta(c, b, better) {
+                            Some((pct, band)) => format!("{band} {pct:+.1}%"),
+                            None => "n/a".to_string(),
+                        },
+                        _ => "n/a".to_string(),
+                    }
+                },
+            })
+            .collect();
+        let _ = writeln!(out, "| {} | {} |", row.label, cells.join(" | "));
+    }
+
+    let mut notes = Vec::new();
+    if transactional {
+        notes.push(
+            "Throughput counts committed records; a record's latency runs from its send to its transaction's commit."
+                .to_string(),
+        );
+    }
+    // The committed rate a fixed-rate test aims at: its aborted transactions'
+    // records are sent but not counted.
+    let abort_rate: f64 = test.setting("ABORT_RATE").and_then(|v| v.parse().ok()).unwrap_or(0.0);
+    let target = test.setting("LIMIT_RPS").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) * (1.0 - abort_rate);
+    for &arm in &info.arms {
+        let Some(m) = metrics_of(&result.arms, arm) else {
+            continue;
+        };
+        if let Some(limit) = info.ingress_mb_s {
+            if mb_s(m) >= NEAR_INGRESS_SHARE * limit {
+                notes.push(format!(
+                    "⚠️ {} produced {:.0} MB/s, {:.0}% of the cluster's {limit:.0} MB/s ingress limit: the cluster may \
+                     have capped it.",
+                    arm.label(),
+                    mb_s(m),
+                    100.0 * mb_s(m) / limit
+                ));
+            }
+        }
+        if target > 0.0 && m.msg_s < HELD_RATE_SHARE * target {
+            notes.push(format!(
+                "⚠️ {} reached {} msg/s, below the {} msg/s target (capped): its latency is not comparable with a \
+                 client that held the rate.",
+                arm.label(),
+                number(m.msg_s, 0),
+                number(target, 0)
+            ));
+        }
+    }
+    if !notes.is_empty() {
+        out.push('\n');
+        for note in notes {
+            let _ = writeln!(out, "{note}\n");
+        }
+    }
 }
 
 /// XML 1.0 text: escaped, without the control characters it cannot carry.
@@ -298,11 +446,19 @@ pub(crate) fn junit(results: &[TestResult]) -> String {
                 a.elapsed.as_secs_f64()
             );
             let summary = a.metrics.as_ref().map(|m| {
-                format!(
+                let mut s = format!(
                     "client={} messages={:.0} msg/s={:.0} MiB/s={:.2} p50={:.2}ms p99={:.2}ms p99.9={:.2}ms \
                      max={:.2}ms cpu={:.1}% rss={:.1}MiB",
                     m.client, m.messages, m.msg_s, m.mib_s, m.p50, m.p99, m.p999, m.max, m.cpu_pct, m.rss_mib
-                )
+                );
+                if let Some(t) = &m.txn {
+                    let _ = write!(
+                        s,
+                        " txn/s={:.2} committed={:.0} aborted={:.0} commit_p50={:.2}ms commit_p99={:.2}ms",
+                        t.per_s, t.committed, t.aborted, t.commit_p50, t.commit_p99
+                    );
+                }
+                s
             });
             match (&a.outcome, summary) {
                 (Outcome::Passed, None) => out.push_str("/>\n"),
@@ -328,7 +484,7 @@ pub(crate) fn junit(results: &[TestResult]) -> String {
 mod tests {
     use std::time::Duration;
 
-    use super::super::parse_tests;
+    use super::super::{parse_tests, TxnMetrics};
     use super::*;
 
     fn metrics(client: &str, msg_s: f64, p99: f64) -> Metrics {
@@ -346,6 +502,20 @@ mod tests {
             cpu_pct: 50.0,
             rss_mib: 100.0,
             messages: msg_s * 60.0,
+            txn: None,
+        }
+    }
+
+    fn txn_metrics(client: &str, msg_s: f64, commit_p99: f64) -> Metrics {
+        Metrics {
+            txn: Some(TxnMetrics {
+                per_s: msg_s / 100.0,
+                committed: msg_s * 60.0 / 100.0,
+                aborted: msg_s * 60.0 / 100.0,
+                commit_p50: 20.0,
+                commit_p99,
+            }),
+            ..metrics(client, msg_s, 30.0)
         }
     }
 
@@ -353,9 +523,10 @@ mod tests {
         ArmResult { arm, outcome, metrics, elapsed: Duration::from_secs(90) }
     }
 
-    fn info(group: Group, ingress: Option<f64>) -> RunInfo {
+    fn info(group: Group, arms: &[Arm], ingress: Option<f64>) -> RunInfo {
         RunInfo {
             group,
+            arms: arms.to_vec(),
             duration_min: 30,
             warmup_min: 5,
             started: "2026-10-14T10:00:00Z".to_string(),
@@ -366,6 +537,29 @@ mod tests {
 
     fn test(line: &str) -> PerfTest {
         parse_tests(line).unwrap().remove(0)
+    }
+
+    /// Every table row of `md` has as many cells as its header.
+    fn assert_rectangular(md: &str) {
+        let mut width = None;
+        for line in md.lines() {
+            if !line.starts_with('|') {
+                width = None;
+                continue;
+            }
+            // Escaped pipes inside a cell are not separators.
+            let cells = line.replace("\\|", "").matches('|').count();
+            match width {
+                None => width = Some(cells),
+                Some(w) => assert_eq!(w, cells, "{line}\n{md}"),
+            }
+        }
+    }
+
+    fn line_starting<'a>(md: &'a str, prefix: &str) -> &'a str {
+        md.lines()
+            .find(|l| l.starts_with(prefix))
+            .unwrap_or_else(|| panic!("no line starting with `{prefix}`:\n{md}"))
     }
 
     #[test]
@@ -384,21 +578,46 @@ mod tests {
     }
 
     #[test]
+    fn formats_numbers() {
+        assert_eq!(number(1_234_567.891, 2), "1,234,567.89");
+        assert_eq!(number(999.0, 0), "999");
+        assert_eq!(number(1000.0, 0), "1,000");
+        assert_eq!(number(100_000.4, 0), "100,000");
+        assert_eq!(number(-1234.5, 1), "-1,234.5");
+        assert_eq!(number(0.0, 2), "0.00");
+    }
+
+    #[test]
     fn formats_durations_and_scenarios() {
         assert_eq!(hours_minutes(45), "45 min");
         assert_eq!(hours_minutes(120), "2 h");
         assert_eq!(hours_minutes(1350), "22 h 30 min");
-        let t = test("t rust PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=10000 BATCH_SIZE=1024 COMPRESSION_TYPE=lz4");
+        let t =
+            test("t rust PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=10000 BATCH_SIZE=1024 COMPRESSION_TYPE=lz4 ACKS=1");
         assert_eq!(
             scenario(&t),
-            "200 partitions, 1024 B values, 10000 msg/s, batch 1024 KiB, compression lz4"
+            "producer, 200 partitions, 1024 B values, 10000 msg/s, acks 1, compression lz4, batch 1024 KiB"
         );
         let t = test("t rust PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0");
-        assert_eq!(scenario(&t), "1 partitions, 1 B values, unbounded rate");
+        assert_eq!(scenario(&t), "producer, 1 partitions, 1 B values, unbounded rate");
+        let t = test(
+            "t rust WORKLOAD=transactional TXN_MODE=eos PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=1000 \
+             RECORDS_PER_TRANSACTION=1000 ABORT_RATE=0.5 NUM_TRANSACTIONAL_PRODUCERS=16",
+        );
+        assert_eq!(
+            scenario(&t),
+            "transactional (eos), 36 partitions, 1024 B values, 1000 msg/s, records per transaction 1000, abort rate \
+             0.5, transactional producers 16"
+        );
+        let t = test("t rust WORKLOAD=transactional PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0");
+        assert_eq!(
+            scenario(&t),
+            "transactional (produce), 1 partitions, 1 B values, unbounded rate"
+        );
     }
 
     #[test]
-    fn markdown_has_rows_comparisons_and_failures() {
+    fn markdown_has_columns_deltas_and_failures() {
         let results = vec![TestResult {
             test: test("producer-max rust PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=0"),
             arms: vec![
@@ -407,34 +626,73 @@ mod tests {
                 arm(Arm::Java, Outcome::Failed("harness exited | with 1".to_string()), None),
             ],
         }];
-        let md = markdown(&info(Group::Rust, Some(600.0)), &results);
+        let all = [Arm::Rust, Arm::Librdkafka, Arm::Java];
+        let md = markdown(&info(Group::Rust, &all, Some(600.0)), &results);
         assert!(md.starts_with("# Performance test results: rust client group\n"), "{md}");
+        assert!(md.contains("- Clients: Rust (native), librdkafka (C), Java\n"), "{md}");
         assert!(md.contains("- Cluster: lkc-abc"), "{md}");
+        assert!(md.contains("A Δ column gives the Rust-based client's change"), "{md}");
         assert!(
-            md.contains("## producer-max\n\n200 partitions, 1024 B values, unbounded rate\n"),
+            md.contains("## producer-max\n\nproducer, 200 partitions, 1024 B values, unbounded rate\n"),
             "{md}"
         );
-        assert!(md.contains("| Rust (native) | 500000 | 488.28 | 2.50 |"), "{md}");
-        assert!(md.contains("| Java | – |"), "{md}");
-        assert!(md.contains("❌ harness exited \\| with 1 |"), "{md}");
-        assert!(
-            md.contains("| **Rust (native) vs librdkafka (C)** | 🟢 +25.0% | 🟢 +25.0% | 🟢 +0.0% |"),
-            "{md}"
+        assert_eq!(
+            line_starting(&md, "| Metric |"),
+            "| Metric | Rust (native) | librdkafka (C) | Δ Rust vs librdkafka | Java | Δ Rust vs Java |"
         );
-        assert!(md.contains("| **Rust (native) vs Java** | n/a |"), "{md}");
+        assert_eq!(line_starting(&md, "|---|"), "|---|---:|---:|---:|---:|---:|");
+        assert_eq!(
+            line_starting(&md, "| Result |"),
+            "| Result | ✅ | ✅ |  | ❌ harness exited \\| with 1 |  |"
+        );
+        assert_eq!(
+            line_starting(&md, "| Throughput (msg/s) |"),
+            "| Throughput (msg/s) | 500,000 | 400,000 | 🟢 +25.0% | – | n/a |"
+        );
+        assert_eq!(
+            line_starting(&md, "| Latency p99 (ms) |"),
+            "| Latency p99 (ms) | 9.00 | 10.00 | 🟢 -10.0% | – | n/a |"
+        );
+        assert_eq!(
+            line_starting(&md, "| Messages measured |"),
+            "| Messages measured | 30,000,000 | 24,000,000 |  | – |  |"
+        );
+        // No transaction rows for a producer test.
+        assert!(!md.contains("Transactions/s"), "{md}");
         // 500k × 1 KiB/s is 512 MB/s, 85 % of 600.
         assert!(
             md.contains("⚠️ Rust (native) produced 512 MB/s, 85% of the cluster's 600 MB/s ingress limit"),
             "{md}"
         );
         assert!(!md.contains("⚠️ librdkafka"), "{md}");
-        // Every table row has the same number of cells as the header.
-        let widths: Vec<usize> = md
-            .lines()
-            .filter(|l| l.starts_with('|') && !l.starts_with("|---"))
-            .map(|l| l.matches(" |").count())
-            .collect();
-        assert!(widths.iter().all(|w| *w == widths[0]), "{widths:?}\n{md}");
+        assert_rectangular(&md);
+    }
+
+    #[test]
+    fn markdown_shows_only_the_clients_that_ran() {
+        let results = vec![TestResult {
+            test: test("t rust PARTITIONS=1 VALUE_SIZE=1024 LIMIT_RPS=0"),
+            arms: vec![
+                arm(Arm::Rust, Outcome::Passed, Some(metrics("rust", 1000.0, 9.0))),
+                arm(Arm::Java, Outcome::Passed, Some(metrics("java", 1500.0, 9.0))),
+            ],
+        }];
+        let md = markdown(&info(Group::Rust, &[Arm::Rust, Arm::Java], None), &results);
+        assert!(md.contains("- Clients: Rust (native), Java\n"), "{md}");
+        assert_eq!(
+            line_starting(&md, "| Metric |"),
+            "| Metric | Rust (native) | Java | Δ Rust vs Java |"
+        );
+        assert_eq!(
+            line_starting(&md, "| Throughput (msg/s) |"),
+            "| Throughput (msg/s) | 1,000 | 1,500 | 🔴 -33.3% |"
+        );
+        assert!(!md.contains("librdkafka"), "{md}");
+        assert_rectangular(&md);
+
+        // Without a candidate and its baseline there is no Δ, nor its legend.
+        let md = markdown(&info(Group::Rust, &[Arm::Librdkafka, Arm::Java], None), &[]);
+        assert!(!md.contains("Δ"), "{md}");
     }
 
     #[test]
@@ -447,14 +705,23 @@ mod tests {
                 None,
             )],
         }];
-        let md = markdown(&info(Group::Python, None), &results);
-        assert!(md.contains("| python-sync (librdkafka) | – |"), "{md}");
-        assert!(md.contains("not run |"), "{md}");
-        assert!(
-            md.contains("| **python-async (Rust) vs python-async (librdkafka)** | n/a |"),
-            "{md}"
+        let python = Group::Python.arms();
+        let md = markdown(&info(Group::Python, python, None), &results);
+        assert_eq!(
+            line_starting(&md, "| Metric |"),
+            "| Metric | python-sync (Rust) | python-sync (librdkafka) | Δ sync: Rust vs librdkafka | python-async (Rust) \
+             | python-async (librdkafka) | Δ async: Rust vs librdkafka |"
         );
-        assert!(markdown(&info(Group::Python, None), &[]).contains("No test has finished yet."));
+        assert_eq!(
+            line_starting(&md, "| Result |"),
+            "| Result | ❌ interrupted | not run |  | not run | not run |  |"
+        );
+        assert_eq!(
+            line_starting(&md, "| Throughput (msg/s) |"),
+            "| Throughput (msg/s) | – | – | n/a | – | – | n/a |"
+        );
+        assert_rectangular(&md);
+        assert!(markdown(&info(Group::Python, python, None), &[]).contains("No test has finished yet."));
     }
 
     #[test]
@@ -466,12 +733,49 @@ mod tests {
                 arm(Arm::Librdkafka, Outcome::Passed, Some(metrics("librdkafka", 9_000.0, 10.0))),
             ],
         }];
-        let md = markdown(&info(Group::Rust, None), &results);
+        let md = markdown(&info(Group::Rust, &[Arm::Rust, Arm::Librdkafka], None), &results);
         assert!(
-            md.contains("⚠️ librdkafka (C) reached 9000 msg/s, below the 10000 msg/s target (capped)"),
+            md.contains("⚠️ librdkafka (C) reached 9,000 msg/s, below the 10,000 msg/s target (capped)"),
             "{md}"
         );
         assert!(!md.contains("⚠️ Rust (native)"), "{md}");
+    }
+
+    #[test]
+    fn markdown_has_transaction_rows() {
+        let results = vec![TestResult {
+            test: test("txn rust WORKLOAD=transactional PARTITIONS=1 VALUE_SIZE=1024 LIMIT_RPS=10000 ABORT_RATE=0.5"),
+            arms: vec![
+                arm(Arm::Rust, Outcome::Passed, Some(txn_metrics("rust-txn", 5_000.0, 40.0))),
+                arm(
+                    Arm::Librdkafka,
+                    Outcome::Passed,
+                    Some(txn_metrics("librdkafka-txn", 4_000.0, 50.0)),
+                ),
+            ],
+        }];
+        let md = markdown(&info(Group::Rust, &[Arm::Rust, Arm::Librdkafka], None), &results);
+        assert_eq!(
+            line_starting(&md, "| Transactions/s |"),
+            "| Transactions/s | 50.00 | 40.00 | 🟢 +25.0% |"
+        );
+        assert_eq!(
+            line_starting(&md, "| Commit latency p99 (ms) |"),
+            "| Commit latency p99 (ms) | 40.00 | 50.00 | 🟢 -20.0% |"
+        );
+        assert_eq!(
+            line_starting(&md, "| Committed transactions |"),
+            "| Committed transactions | 3,000 | 2,400 |  |"
+        );
+        assert!(md.contains("Throughput counts committed records"), "{md}");
+        // Half the transactions abort, so 5,000 committed msg/s holds the
+        // 10,000 msg/s rate.
+        assert!(!md.contains("⚠️ Rust (native)"), "{md}");
+        assert!(
+            md.contains("⚠️ librdkafka (C) reached 4,000 msg/s, below the 5,000 msg/s target (capped)"),
+            "{md}"
+        );
+        assert_rectangular(&md);
     }
 
     #[test]
@@ -481,20 +785,25 @@ mod tests {
             arms: vec![
                 arm(Arm::Rust, Outcome::Passed, Some(metrics("rust", 1000.0, 9.0))),
                 arm(Arm::Librdkafka, Outcome::Failed("bad <\"&'> \u{1}end".to_string()), None),
+                arm(Arm::Java, Outcome::Passed, Some(txn_metrics("java-txn", 1000.0, 9.0))),
             ],
         }];
         let xml = junit(&results);
         assert!(
-            xml.contains("<testsuites name=\"perf-cloud\" tests=\"2\" failures=\"1\" errors=\"0\" time=\"180.0\">"),
+            xml.contains("<testsuites name=\"perf-cloud\" tests=\"3\" failures=\"1\" errors=\"0\" time=\"270.0\">"),
             "{xml}"
         );
-        assert!(xml.contains("<testsuite name=\"t\" tests=\"2\" failures=\"1\""), "{xml}");
+        assert!(xml.contains("<testsuite name=\"t\" tests=\"3\" failures=\"1\""), "{xml}");
         assert!(
             xml.contains("<testcase classname=\"t\" name=\"librdkafka (C)\" time=\"90.0\">"),
             "{xml}"
         );
         assert!(xml.contains("<failure message=\"bad &lt;&quot;&amp;&apos;&gt; end\">"), "{xml}");
         assert!(xml.contains("<system-out>client=rust messages=60000 msg/s=1000"), "{xml}");
+        assert!(
+            xml.contains("rss=100.0MiB txn/s=10.00 committed=600 aborted=600 commit_p50=20.00ms commit_p99=9.00ms"),
+            "{xml}"
+        );
         assert_eq!(
             junit(&[]).lines().nth(1),
             Some("<testsuites name=\"perf-cloud\" tests=\"0\" failures=\"0\" errors=\"0\" time=\"0.0\">")

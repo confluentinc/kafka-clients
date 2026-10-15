@@ -24,7 +24,7 @@
 // implementations. Configure via the same environment variables
 // (BOOTSTRAP_SERVERS, NUM_MESSAGES, LIMIT_RPS, KEY_SIZE, VALUE_SIZE,
 // BATCH_SIZE, MAX_REQUEST_SIZE, BUFFER_MEMORY, LINGER_MS, MAX_IN_FLIGHT,
-// COMPRESSION_TYPE, ENABLE_IDEMPOTENCE, USE_DEFAULTS, WARMUP_SECONDS,
+// COMPRESSION_TYPE, ENABLE_IDEMPOTENCE, ACKS, USE_DEFAULTS, WARMUP_SECONDS,
 // TEST_DURATION_SECONDS,
 // DO_VERIFY, P99_LIMIT_MS, TOPIC_NAME, SECURITY_PROTOCOL, SASL_MECHANISM,
 // SASL_USERNAME, SASL_PASSWORD, SSL_CA_LOCATION). P99_LIMIT_MS (ms) asserts a
@@ -79,6 +79,8 @@ static const char *SASL_USERNAME = NULL;
 static const char *SASL_PASSWORD = NULL;
 static const char *SSL_CA_LOCATION = NULL;
 static const char *ENABLE_IDEMPOTENCE = "false";
+// acks: all (default), -1, 1 or 0.
+static const char *ACKS = "all";
 static int BATCH_SIZE_KB = 1024;
 static int MAX_REQUEST_SIZE_KB = -1;
 static const char *MAX_IN_FLIGHT = "1000";
@@ -1322,7 +1324,7 @@ static void run_test() {
             kafka_Map_put(properties, (void*)"max.request.size", max_request_size_str);
             kafka_Map_put(properties, (void*)"compression.type", (void*)COMPRESSION_TYPE);
             kafka_Map_put(properties, (void*)"linger.ms", (void*)LINGER_MS);
-            kafka_Map_put(properties, (void*)"acks", (void*)"all");
+            kafka_Map_put(properties, (void*)"acks", (void*)ACKS);
             kafka_Map_put(properties, (void*)"enable.idempotence", (void*)ENABLE_IDEMPOTENCE);
             kafka_Map_put(properties, (void*)"max.in.flight.requests.per.connection", (void*)MAX_IN_FLIGHT);
         }
@@ -1380,7 +1382,7 @@ static void run_test() {
             rd_kafka_conf_set(conf, "message.max.bytes", buffer, NULL, 0);
             rd_kafka_conf_set(conf, "compression.type", COMPRESSION_TYPE, NULL, 0);
             rd_kafka_conf_set(conf, "linger.ms", LINGER_MS, NULL, 0);
-            rd_kafka_conf_set(conf, "acks", "all", NULL, 0);
+            rd_kafka_conf_set(conf, "acks", ACKS, NULL, 0);
             rd_kafka_conf_set(conf, "enable.idempotence", ENABLE_IDEMPOTENCE, NULL, 0);
             rd_kafka_conf_set(conf, "max.in.flight.requests.per.connection", MAX_IN_FLIGHT, NULL, 0);
         }
@@ -1840,6 +1842,11 @@ int main(int argc, char** argv) {
         ENABLE_IDEMPOTENCE = "true";
     }
 
+    const char *acks_env = getenv("ACKS");
+    if (acks_env != NULL) {
+        ACKS = acks_env;
+    }
+
     const char *max_in_flight_env = getenv("MAX_IN_FLIGHT");
     if (max_in_flight_env != NULL) {
         MAX_IN_FLIGHT = max_in_flight_env;
@@ -1934,6 +1941,7 @@ int main(int argc, char** argv) {
     printf("Value size: %ld bytes\n", VALUE_SIZE);
     printf("Bootstrap servers: %s\n", BOOTSTRAP_SERVERS);
     printf("Enable idempotence: %s\n", ENABLE_IDEMPOTENCE);
+    printf("Acks: %s\n", ACKS);
     printf("Max in flight requests: %s\n", MAX_IN_FLIGHT);
     printf("Compression type: %s\n", COMPRESSION_TYPE);
     if (buffer_memory_bytes < 0)
