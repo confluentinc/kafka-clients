@@ -2427,6 +2427,125 @@ void test_send_with_callback_validation_error_no_callback(void) {
     fixture_destroy(&f);
 }
 
+// ---------------------------------------------------------------------------
+// Non-blocking send: `try_send_cb` / `try_send_with_callback_cb`
+//
+// Three outcomes, told apart by the return value and `*out_err`: the owned
+// future when the producer took the record at once (`cb` never fires); NULL
+// and no error when the record was queued for the submission task as by
+// `send_cb` (`cb` fires later); NULL and an error when the producer refused
+// the record (`cb` never fires). The mock never waits, so it never queues; the
+// queued outcome is test_kafka_producer.c's.
+// ---------------------------------------------------------------------------
+
+void test_try_send_cb_returns_the_future_of_a_record_taken_at_once(void) {
+    fixture_t f;
+    fixture_init(&f, 1);
+
+    kafka_producer_ProducerRecord_t *record = make_record("topic", 2, &KEY, &VALUE);
+    send_result_t result;
+    memset(&result, 0, sizeof(result));
+    kafka_common_KafkaFuture_t *future = NULL;
+    kafka_common_Error_t *err = NULL;
+    future = kafka_producer_Producer_try_send_cb(f.producer, record, on_send, &result, &err);
+    kafka_producer_ProducerRecord_destroy(record);
+
+    /* Taken at once: the future comes back, `cb` never fires. */
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(future);
+    TEST_ASSERT_TRUE(kafka_common_KafkaFuture_is_done(future));
+    const kafka_producer_RecordMetadata_t *metadata = get_metadata(future);
+    TEST_ASSERT_EQUAL_STRING("topic", kafka_producer_RecordMetadata_topic(metadata));
+    TEST_ASSERT_EQUAL_INT32(2, kafka_producer_RecordMetadata_partition(metadata));
+    TEST_ASSERT_EQUAL_INT64(0, kafka_producer_RecordMetadata_offset(metadata));
+    kafka_common_KafkaFuture_destroy(future);
+    TEST_ASSERT_EQUAL_INT32(1, history_count(f.mock));
+    TEST_ASSERT_EQUAL_INT32(0, callback_pump_execute(&f.pump));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&result.fired));
+
+    fixture_destroy(&f);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&result.fired));
+}
+
+void test_try_send_cb_on_closed_producer_refuses_synchronously(void) {
+    /* Where `send_cb` on a closed producer delivers the error through `cb`
+     * (test_send_async_on_closed_producer_fires_callback), `try_send_cb`
+     * refuses before any hand-off: the error is in `*out_err`, and `cb` never
+     * fires. */
+    fixture_t f;
+    fixture_init(&f, 1);
+    ASSERT_OK(kafka_producer_Producer_close(f.producer, &err));
+
+    kafka_producer_ProducerRecord_t *record = make_record("topic", -1, NULL, &VALUE);
+    send_result_t result;
+    memset(&result, 0, sizeof(result));
+    kafka_common_KafkaFuture_t *future = NULL;
+    kafka_common_Error_t *err = NULL;
+    future = kafka_producer_Producer_try_send_cb(f.producer, record, on_send, &result, &err);
+    kafka_producer_ProducerRecord_destroy(record);
+
+    TEST_ASSERT_NULL(future);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_INT32(kafka_common_Error_LOCAL_ILLEGAL_STATE, kafka_common_Error__enum(err));
+    TEST_ASSERT_EQUAL_STRING("MockProducer is already closed.", kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
+    TEST_ASSERT_EQUAL_INT32(0, callback_pump_execute(&f.pump));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&result.fired));
+
+    fixture_destroy(&f);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&result.fired));
+}
+
+void test_try_send_with_callback_cb_future_completes_after_the_callback_reported(void) {
+    /* With a delivery callback, the returned future completes once the
+     * callback reported, as `send_with_callback`'s does. */
+    fixture_t f;
+    fixture_init(&f, 0);
+
+    record_result_t delivery;
+    memset(&delivery, 0, sizeof(delivery));
+    delivery.producer = f.producer;
+    kafka_producer_Callback_t *callback = kafka_producer_Callback_new(&delivery, on_completion);
+    kafka_producer_ProducerRecord_t *record = make_record("cb-topic", 4, &KEY, &VALUE);
+    send_result_t result;
+    memset(&result, 0, sizeof(result));
+    kafka_common_KafkaFuture_t *future = NULL;
+    kafka_common_Error_t *err = NULL;
+    future = kafka_producer_Producer_try_send_with_callback_cb(f.producer, record, callback, on_send, &result, &err);
+    kafka_producer_Callback_destroy(callback);
+    kafka_producer_ProducerRecord_destroy(record);
+
+    /* Taken at once (the mock never waits), but auto_complete=0: nothing has
+     * completed yet. */
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(future);
+    TEST_ASSERT_FALSE(kafka_common_KafkaFuture_is_done(future));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&delivery.fired));
+    TEST_ASSERT_EQUAL_INT32(0, callback_pump_execute(&f.pump));
+
+    TEST_ASSERT_TRUE(kafka_producer_MockProducer_complete_next(f.mock));
+    /* The delivery callback is queued, not fired inline; the pump runs it. */
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&delivery.fired));
+    TEST_ASSERT_EQUAL_INT32(1, callback_pump_execute(&f.pump));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&delivery.fired));
+    TEST_ASSERT_TRUE(delivery.had_metadata);
+    TEST_ASSERT_FALSE(delivery.had_error);
+    TEST_ASSERT_EQUAL_INT32(4, delivery.partition);
+    TEST_ASSERT_EQUAL_STRING("cb-topic", delivery.topic);
+
+    /* The future reports the same outcome, and `cb` never fired: the record
+     * was taken at once. */
+    TEST_ASSERT_TRUE(kafka_common_KafkaFuture_is_done(future));
+    const kafka_producer_RecordMetadata_t *metadata = get_metadata(future);
+    TEST_ASSERT_EQUAL_INT32(4, kafka_producer_RecordMetadata_partition(metadata));
+    TEST_ASSERT_EQUAL_INT64(0, kafka_producer_RecordMetadata_offset(metadata));
+    kafka_common_KafkaFuture_destroy(future);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&result.fired));
+
+    fixture_destroy(&f);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&result.fired));
+}
+
 int main(void) {
     UNITY_BEGIN();
 
@@ -2521,6 +2640,11 @@ int main(void) {
     RUN_TEST(test_flush_returns_only_after_the_callbacks_reported);
     RUN_TEST(test_destroy_completes_a_future_whose_callback_never_reported);
     RUN_TEST(test_send_with_callback_validation_error_no_callback);
+
+    /* Non-blocking send (`try_send_cb`) */
+    RUN_TEST(test_try_send_cb_returns_the_future_of_a_record_taken_at_once);
+    RUN_TEST(test_try_send_cb_on_closed_producer_refuses_synchronously);
+    RUN_TEST(test_try_send_with_callback_cb_future_completes_after_the_callback_reported);
 
     return UNITY_END();
 }

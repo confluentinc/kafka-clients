@@ -554,8 +554,11 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_destroy(self_: *mut kafka_
 #[cfg(test)]
 mod tests {
     use std::ffi::CString;
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
 
     use super::*;
+    use crate::ffi::common::fail_point;
     use crate::ffi::common::{kafka_common_Error_destroy, kafka_common_Error_message};
     use crate::ffi::kafka_future::kafka_common_KafkaFuture_destroy;
     use crate::ffi::producer::producer_config::{
@@ -565,9 +568,10 @@ mod tests {
         kafka_producer_ProducerRecord_destroy, kafka_producer_ProducerRecord_new,
     };
     use crate::ffi::producer::{
-        kafka_producer_Producer__execute_callbacks, kafka_producer_Producer_close_cb,
-        kafka_producer_Producer_close_with_timeout, kafka_producer_Producer_close_with_timeout_cb,
-        kafka_producer_Producer_send_cb,
+        client_ref, kafka_producer_Producer__execute_callbacks, kafka_producer_Producer_close,
+        kafka_producer_Producer_close_cb, kafka_producer_Producer_close_with_timeout,
+        kafka_producer_Producer_close_with_timeout_cb, kafka_producer_Producer_flush, kafka_producer_Producer_send_cb,
+        kafka_producer_Producer_try_send_cb,
     };
     use crate::ffi::util::{box_string_map, c_str_to_string, kafka_Map_destroy};
 
@@ -597,9 +601,9 @@ mod tests {
     }
 
     /// A `KafkaProducer` that can never fetch metadata, so a send waits out
-    /// `max.block.ms` (60 s) for it.
-    fn unreachable_producer() -> *mut kafka_producer_KafkaProducer_t {
-        let props = box_string_map([("bootstrap.servers", "127.0.0.1:1"), ("max.block.ms", "60000")]);
+    /// `max.block.ms` (`max_block_ms`, in milliseconds) for it.
+    fn unreachable_producer(max_block_ms: &str) -> *mut kafka_producer_KafkaProducer_t {
+        let props = box_string_map([("bootstrap.servers", "127.0.0.1:1"), ("max.block.ms", max_block_ms)]);
         // SAFETY: Test code: `err` is a valid slot pointing at null for each call (no call fails),
         // `props` and `config` are live from their constructor to their single destroy below; the
         // producer is handed to the caller, who destroys it.
@@ -675,7 +679,7 @@ mod tests {
             // single destroy below, `view` is used only before the producer is destroyed, and
             // `sends` and `closed` outlive the callback runs that write them.
             unsafe {
-                let producer = unreachable_producer();
+                let producer = unreachable_producer("60000");
                 let view = kafka_producer_KafkaProducer__as_Producer(producer);
                 let record =
                     kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
@@ -738,7 +742,7 @@ mod tests {
         // single destroy below, `view` is used only before the producer is destroyed, and `sends`
         // and `closes` outlive the destroy that runs their callbacks.
         unsafe {
-            let producer = unreachable_producer();
+            let producer = unreachable_producer("60000");
             let view = kafka_producer_KafkaProducer__as_Producer(producer);
             let record =
                 kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
@@ -955,6 +959,113 @@ mod tests {
             assert_eq!(kafka_producer_Producer__execute_callbacks(view), 0);
             kafka_producer_KafkaProducer_destroy(producer);
             kafka_producer_KafkaProducer_destroy(std::ptr::null_mut());
+        }
+    }
+
+    /// `try_send_cb` on a producer that would have to wait — here on metadata
+    /// it can never fetch — returns at once with `NULL` and no error: the
+    /// record was queued, and `cb` fires later with the future `send` would
+    /// have returned (failed on the metadata timeout, as `send_cb`'s is).
+    #[test]
+    fn try_send_cb_queues_a_record_the_producer_cannot_take_at_once() {
+        let topic = CString::new("topic").unwrap();
+        let bytes = kafka_Bytes_t::from_slice(b"v");
+        let seen = std::sync::Mutex::new(Vec::new());
+        // SAFETY: Test code: `err` is a valid slot pointing at null before each call, `record` and
+        // the producer are live from their constructor to their single destroy below, `view` is
+        // used only before the producer is destroyed, `bytes` outlives the callback that reads the
+        // record, and `seen` outlives the callback run that writes it.
+        unsafe {
+            let producer = unreachable_producer("1000");
+            let view = kafka_producer_KafkaProducer__as_Producer(producer);
+            let client = client_ref(view);
+            let record =
+                kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
+            let mut err = std::ptr::null_mut();
+            let started = Instant::now();
+            let future = kafka_producer_Producer_try_send_cb(
+                view,
+                record,
+                record_send,
+                &seen as *const std::sync::Mutex<Vec<Option<String>>> as *mut c_void,
+                &raw mut err,
+            );
+            let elapsed = started.elapsed();
+            assert!(future.is_null(), "queued: no future comes back");
+            assert!(err.is_null(), "queued: no error either");
+            assert!(elapsed < Duration::from_millis(500), "did not wait on metadata: {elapsed:?}");
+            assert_eq!(client.queued_sends.load(Ordering::Acquire), 1);
+
+            // The submission task's `send` waits out `max.block.ms`, then
+            // delivers `cb` a future failed on the metadata timeout.
+            while seen.lock().unwrap().is_empty() {
+                kafka_producer_Producer__execute_callbacks(view);
+                std::thread::yield_now();
+            }
+            assert_eq!(*seen.lock().unwrap(), [None]);
+            assert_eq!(client.queued_sends.load(Ordering::Acquire), 0);
+            kafka_producer_ProducerRecord_destroy(record);
+
+            kafka_producer_Producer_close(view, &raw mut err);
+            assert!(err.is_null());
+            kafka_producer_KafkaProducer_destroy(producer);
+            assert_eq!(seen.lock().unwrap().len(), 1, "`cb` fired once");
+        }
+    }
+
+    /// A panic in a `try_send_cb` body before the hand-off is reported through
+    /// `*out_err`, as from any fallible function, and never through `cb`: the
+    /// completion has not been handed over, so there is nothing to fire later,
+    /// and the queue accounting is untouched, so a `flush` does not wait for it.
+    #[test]
+    fn a_panicking_try_send_cb_body_reports_through_out_err_not_the_completion() {
+        let topic = CString::new("topic").unwrap();
+        let bytes = kafka_Bytes_t::from_slice(b"v");
+        let seen = std::sync::Mutex::new(Vec::new());
+        // SAFETY: Test code: `err` is a valid slot pointing at null before each call (reset after
+        // the error is destroyed), `record` and the producer are live from their constructor to
+        // their single destroy below, `view` is used only before the producer is destroyed, and
+        // `seen` outlives every callback run.
+        unsafe {
+            let producer = unreachable_producer("1000");
+            let view = kafka_producer_KafkaProducer__as_Producer(producer);
+            let client = client_ref(view);
+            let record =
+                kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
+            let mut err = std::ptr::null_mut();
+            fail_point::arm();
+            let future = kafka_producer_Producer_try_send_cb(
+                view,
+                record,
+                record_send,
+                &seen as *const std::sync::Mutex<Vec<Option<String>>> as *mut c_void,
+                &raw mut err,
+            );
+            assert!(future.is_null());
+            assert!(!err.is_null(), "the panic is in `*out_err`");
+            assert_eq!(
+                c_str_to_string(kafka_common_Error_message(err)),
+                format!(
+                    "Rust panic caught at the FFI boundary in kafka_producer_Producer_try_send_with_callback_cb: {}",
+                    fail_point::MESSAGE
+                )
+            );
+            kafka_common_Error_destroy(err);
+            err = std::ptr::null_mut();
+
+            // Never counted, so a flush does not wait for it, and nothing
+            // fires: not now, not on destroy.
+            assert_eq!(client.queued_sends.load(Ordering::Acquire), 0);
+            kafka_producer_Producer_flush(view, &raw mut err);
+            assert!(err.is_null());
+            assert_eq!(kafka_producer_Producer__execute_callbacks(view), 0, "`cb` never fires");
+            assert!(seen.lock().unwrap().is_empty());
+            kafka_producer_ProducerRecord_destroy(record);
+
+            kafka_producer_Producer_close(view, &raw mut err);
+            assert!(err.is_null());
+            kafka_producer_KafkaProducer_destroy(producer);
+            assert!(seen.lock().unwrap().is_empty(), "not even on destroy");
         }
     }
 }
