@@ -374,9 +374,13 @@ impl KafkaAdminClient {
     /// # Errors
     ///
     /// Returns a Kafka error, `Failed to create new KafkaAdminClient`, whose
-    /// source is the failure: the bootstrap addresses cannot be resolved, the
-    /// channel builder cannot be created, or `default.api.timeout.ms` is set
-    /// explicitly below `request.timeout.ms`
+    /// source is the failure: neither or both of `bootstrap.servers` and
+    /// `bootstrap.controllers` are set
+    /// ([`determine_bootstrap_type`](Self::determine_bootstrap_type)), only
+    /// `bootstrap.controllers` is set (an `UNSUPPORTED_VERSION` error: this
+    /// client does not bootstrap through controllers), the bootstrap addresses
+    /// cannot be resolved, the channel builder cannot be created, or
+    /// `default.api.timeout.ms` is set explicitly below `request.timeout.ms`
     /// ([`configure_default_api_timeout_ms`](Self::configure_default_api_timeout_ms)).
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#KafkaAdminClient")]
     pub(crate) fn new(config: AdminClientConfig) -> Result<Self, Error> {
@@ -418,9 +422,21 @@ impl KafkaAdminClient {
         let client_id = Self::generate_client_id(&config);
         let log_context = LogContext::new(format!("[AdminClient clientId={client_id}] "));
 
-        // Java's `bootstrapAddressesToUse`: `bootstrap.controllers` would be
-        // used when `determineBootstrapType` says so, but `AdminClientConfig::new`
-        // already rejected it, so it is always `bootstrap.servers`.
+        // `boolean usingBootstrapControllers = determineBootstrapType(config)`
+        // (`KafkaAdminClient.java:582`), the first step inside `createInternal`'s
+        // `try`, so its `ConfigException` reaches the caller wrapped by `new`.
+        if Self::determine_bootstrap_type(&config)? {
+            // Java bootstraps through the controllers here (KIP-919). That path
+            // is not implemented, so fail explicitly rather than ignore the key,
+            // which would leave the client with no bootstrap address at all.
+            return Err(Error::unsupported_version(format!(
+                "{} is not supported by this client; set {} instead",
+                AdminClientConfig::BOOTSTRAP_CONTROLLERS_CONFIG,
+                AdminClientConfig::BOOTSTRAP_SERVERS_CONFIG
+            )));
+        }
+        // Java's `bootstrapAddressesToUse`, which is `bootstrap.servers` when
+        // `determineBootstrapType` returned `false`.
         let bootstrap: Vec<String> = config.bootstrap_servers().to_vec();
 
         // Java's `Time.SYSTEM`.
@@ -429,7 +445,7 @@ impl KafkaAdminClient {
         let metadata_manager = AdminMetadataManager::new(
             config.retry_backoff_ms(),
             config.metadata_max_age_ms(),
-            false, // `determineBootstrapType`: bootstrap.controllers is rejected by the config
+            false, // `determineBootstrapType`: a controllers-only config is rejected above
             log_context.clone(),
         );
         // bootstrap.resolve.timeout.ms=0 resolves DNS synchronously here and primes the
@@ -554,25 +570,23 @@ impl KafkaAdminClient {
     }
 
     /// Determines which bootstrap configuration to use based on the provided
-    /// lists. Validates that exactly one of `bootstrap.servers` or
+    /// config. Validates that exactly one of `bootstrap.servers` or
     /// `bootstrap.controllers` is configured.
     ///
     /// Returns `true` if using `bootstrap.controllers`, `false` if using
     /// `bootstrap.servers`.
     ///
-    /// Java takes the `AdminClientConfig` and reads both lists from it; the
-    /// Rust config does not keep `bootstrap.controllers` (no client can use
-    /// it), so [`AdminClientConfig::new`] calls this with both lists while it
-    /// parses them.
+    /// Translated from `KafkaAdminClient.determineBootstrapType`
+    /// (`KafkaAdminClient.java:533-560`). An unset list reads as empty, as
+    /// Java's `null` does.
     ///
     /// # Errors
     ///
     /// [`Error::Config`] if both or neither bootstrap configurations are set.
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#determineBootstrapType")]
-    pub(crate) fn determine_bootstrap_type(
-        bootstrap_servers: &[String],
-        controller_servers: &[String],
-    ) -> Result<bool, Error> {
+    fn determine_bootstrap_type(config: &AdminClientConfig) -> Result<bool, Error> {
+        let bootstrap_servers = config.bootstrap_servers();
+        let controller_servers = config.bootstrap_controllers();
         if bootstrap_servers.is_empty() {
             if controller_servers.is_empty() {
                 Err(Error::config_message(format!(
@@ -8020,23 +8034,92 @@ mod tests {
         );
     }
 
+    /// An admin config with `bootstrap.servers` and `bootstrap.controllers` set
+    /// to the given values (`None` leaves a key unset).
+    fn bootstrap_config(servers: Option<&str>, controllers: Option<&str>) -> AdminClientConfig {
+        let mut props = HashMap::new();
+        if let Some(servers) = servers {
+            props.insert(AdminClientConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(), servers.to_string());
+        }
+        if let Some(controllers) = controllers {
+            props.insert(
+                AdminClientConfig::BOOTSTRAP_CONTROLLERS_CONFIG.to_string(),
+                controllers.to_string(),
+            );
+        }
+        AdminClientConfig::new(&props).expect("the config accepts any bootstrap combination")
+    }
+
     /// `KafkaAdminClient.determineBootstrapType`'s three outcomes, with Java's
     /// messages (KIP-909 moved the check here from `AdminBootstrapAddresses`).
+    /// An empty list counts as unset.
     #[test]
     fn test_determine_bootstrap_type() {
-        let servers = vec!["localhost:9092".to_string()];
-        let none: Vec<String> = Vec::new();
-        assert!(!KafkaAdminClient::determine_bootstrap_type(&servers, &none).unwrap());
-        assert!(KafkaAdminClient::determine_bootstrap_type(&none, &servers).unwrap());
+        let determine =
+            |servers, controllers| KafkaAdminClient::determine_bootstrap_type(&bootstrap_config(servers, controllers));
+        assert!(!determine(Some("localhost:9092"), None).unwrap());
+        assert!(!determine(Some("localhost:9092"), Some("")).unwrap());
+        assert!(determine(None, Some("localhost:9093")).unwrap());
+        assert!(determine(Some(" "), Some("localhost:9093")).unwrap());
+        for (servers, controllers) in [(None, None), (Some(""), Some(" "))] {
+            let error = determine(servers, controllers).unwrap_err();
+            assert!(matches!(error, Error::Config(_)), "got {error:?}");
+            assert_eq!(
+                error.message(),
+                "You must set either bootstrap.servers or bootstrap.controllers"
+            );
+        }
+        let error = determine(Some("localhost:9092"), Some("localhost:9093")).unwrap_err();
+        assert!(matches!(error, Error::Config(_)), "got {error:?}");
         assert_eq!(
-            KafkaAdminClient::determine_bootstrap_type(&none, &none).unwrap_err().message(),
-            "You must set either bootstrap.servers or bootstrap.controllers"
-        );
-        assert_eq!(
-            KafkaAdminClient::determine_bootstrap_type(&servers, &servers)
-                .unwrap_err()
-                .message(),
+            error.message(),
             "You cannot set both bootstrap.servers and bootstrap.controllers"
+        );
+    }
+
+    /// Java runs `determineBootstrapType` inside `createInternal`'s `try`
+    /// (`KafkaAdminClient.java:582`), so a config with neither or both bootstrap
+    /// lists fails client creation with `KafkaException("Failed to create new
+    /// KafkaAdminClient", e)` whose cause is the `ConfigException`; the config
+    /// itself is accepted.
+    #[test]
+    fn construction_wraps_the_bootstrap_checks() {
+        let cases = [
+            (None, None, "You must set either bootstrap.servers or bootstrap.controllers"),
+            (
+                Some("localhost:9092"),
+                Some("localhost:9093"),
+                "You cannot set both bootstrap.servers and bootstrap.controllers",
+            ),
+        ];
+        for (servers, controllers, message) in cases {
+            let error = KafkaAdminClient::new(bootstrap_config(servers, controllers))
+                .err()
+                .expect("the bootstrap check must fail construction");
+            assert_eq!(error.message(), "Failed to create new KafkaAdminClient");
+            assert!(error.is_kafka_error(), "got {error:?}");
+            assert!(!error.is_api_error(), "got {error:?}");
+            let cause: &Error = std::error::Error::source(&error)
+                .and_then(|e| e.downcast_ref::<Error>())
+                .expect("the cause is a crate Error");
+            assert!(matches!(cause, Error::Config(_)), "got {cause:?}");
+            assert_eq!(cause.message(), message);
+        }
+
+        // Only `bootstrap.controllers`: bootstrapping through the controllers is
+        // not implemented, so creation fails explicitly instead of ignoring the
+        // key.
+        let error = KafkaAdminClient::new(bootstrap_config(None, Some("localhost:9093")))
+            .err()
+            .expect("a controllers-only config must fail construction");
+        assert_eq!(error.message(), "Failed to create new KafkaAdminClient");
+        let cause: &Error = std::error::Error::source(&error)
+            .and_then(|e| e.downcast_ref::<Error>())
+            .expect("the cause is a crate Error");
+        assert_eq!(cause.error(), Errors::UnsupportedVersion, "got {cause:?}");
+        assert_eq!(
+            cause.message(),
+            "bootstrap.controllers is not supported by this client; set bootstrap.servers instead"
         );
     }
 

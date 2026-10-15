@@ -36,7 +36,8 @@ use crate::integration_tests::common::test_context::TestContext;
 ///
 /// The second half of the Java test builds a `bootstrap.controllers` admin and
 /// expects only CONTROLLER-listener APIs; it is not translated, because this
-/// client still rejects `bootstrap.controllers` in `AdminClientConfig`.
+/// client still fails to create a `bootstrap.controllers` admin
+/// (`KafkaAdminClient::new`).
 #[tokio::test]
 async fn test_api_versions() {
     let ctx = TestContext::new(ClusterConfig::default()).await;
