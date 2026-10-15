@@ -1284,10 +1284,15 @@ def test_many_senders_with_completions_out_of_order_leave_nothing_tracked(
         for t in threads:
             t.join(30)
         p.flush()
-        # flush() waited for every record sent before it: all completed, and
-        # each future left the tracked set as its completion completed it.
+        # flush() waited for every record sent before it to complete.
         assert all(f.done() for f in futures) and len(futures) == 1000
-        assert len(callbacks) == 1000 and len(done_callbacks) == 1000
+        assert len(callbacks) == 1000
+        # A future's done callbacks, and its completion's untracking, run on
+        # the completing thread just after concurrent.futures wakes flush()'s
+        # wait: join those threads, then nothing is left tracked.
+        for t in list(completers):
+            t.join(5)
+        assert len(done_callbacks) == 1000
         assert not p._futures  # noqa: SLF001
     finally:
         for t in list(completers):
