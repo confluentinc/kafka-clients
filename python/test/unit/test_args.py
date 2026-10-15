@@ -232,6 +232,56 @@ def test_a_deprecated_overload_warns_when_called() -> None:
         Records(records={}, next_offsets={})
 
 
+def test_a_deprecated_overload_warns_at_the_callers_line() -> None:
+    # The wrapper java_forms writes for the method warns from its own frame, so
+    # the warning names the caller's line, as the generic wrapper's does.
+    class Records:
+        @java_forms(Form("records", deprecated="Since 4.0. Use (records, next_offsets)."),
+                    Form("records", "next_offsets"))
+        def __init__(self, *, records: object,
+                     next_offsets: object | None = None) -> None:
+            pass
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        frame = inspect.currentframe()
+        assert frame is not None
+        Records(records={}); line = frame.f_lineno  # noqa: E702 (one line: the call's)
+    assert [(w.filename, w.lineno) for w in caught] == [(__file__, line)]
+
+
+def test_pythons_own_type_errors_are_word_for_word() -> None:
+    # A call the generated wrapper does not match (an extra positional
+    # argument, an unknown or a missing keyword) goes to the generic wrapper,
+    # which leaves it to the method, so Python raises its own TypeError.
+    with pytest.raises(TypeError) as extra:
+        _Close().close(1.0)  # type: ignore[call-arg]
+    assert str(extra.value) == "_Close.close() takes 1 positional argument but 2 were given"
+    with pytest.raises(TypeError) as unknown:
+        _Close().close(nope=1)  # type: ignore[call-arg]
+    assert str(unknown.value) == "_Close.close() got an unexpected keyword argument 'nope'"
+    with pytest.raises(TypeError) as missing:
+        _OffsetAndMetadata()  # type: ignore[call-arg]
+    assert str(missing.value) == (
+        "_OffsetAndMetadata.__init__() missing 1 required keyword-only argument: 'offset'")
+    # The receiver by keyword is the method's own business, as before.
+    assert _Close.close(self=_Close()) == (None, None)  # type: ignore[call-arg]
+
+
+def test_a_rejected_call_shows_the_generated_line_in_its_traceback() -> None:
+    # The generated wrapper's source is registered with linecache, so a
+    # traceback through it shows the line that raised.
+    import traceback
+
+    with pytest.raises(IllegalArgumentError) as err:
+        _Close().close(timeout=1.0, option=object())
+    frames = [f for f in traceback.extract_tb(err.value.__traceback__)
+              if f.filename.startswith("<java_forms ")]
+    assert [(f.filename, f.name) for f in frames] == [
+        (f"<java_forms {_Close.close.__module__}._Close.close>", "close")]
+    assert frames[0].line == "raise _jf_illegal(_jf_g)"
+
+
 def test_a_coroutine_function_stays_a_coroutine_function() -> None:
     class Async:
         @java_forms(Form(), Form("timeout"), Form("option"))
