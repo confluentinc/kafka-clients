@@ -52,6 +52,7 @@ pub struct AdminClientConfig {
     connections_max_idle_ms: i64,
     metadata_max_age_ms: i64,
     socket_connection_setup_timeout_ms: i64,
+    socket_connection_setup_timeout_max_ms: i64,
     send_buffer_bytes: i32,
     receive_buffer_bytes: i32,
     metadata_cluster_check_enable: bool,
@@ -105,7 +106,13 @@ impl AdminClientConfig {
     /// `metadata.max.age.ms`
     pub const METADATA_MAX_AGE_MS_CONFIG: &'static str = "metadata.max.age.ms";
     /// `socket.connection.setup.timeout.ms`
-    pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG: &'static str = "socket.connection.setup.timeout.ms";
+    pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG: &'static str =
+        CommonClientConfigs::SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG;
+    /// `socket.connection.setup.timeout.max.ms`. Java's `AdminClientConfig.java`
+    /// declares it as its own public alias of
+    /// `CommonClientConfigs.SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG`.
+    pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG: &'static str =
+        CommonClientConfigs::SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG;
     /// `send.buffer.bytes`. Java's `AdminClientConfig.java` declares it as its own
     /// public alias of `CommonClientConfigs.SEND_BUFFER_CONFIG`.
     pub const SEND_BUFFER_CONFIG: &'static str = CommonClientConfigs::SEND_BUFFER_CONFIG;
@@ -235,6 +242,10 @@ impl AdminClientConfig {
                 Self::SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG => {
                     // `Type.LONG`, no validator (`AdminClientConfig.java:224-228`).
                     config.socket_connection_setup_timeout_ms = ConfigDef::parse_long(key, value)?;
+                },
+                Self::SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG => {
+                    // `Type.LONG`, no validator (`AdminClientConfig.java:229-233`).
+                    config.socket_connection_setup_timeout_max_ms = ConfigDef::parse_long(key, value)?;
                 },
                 Self::SEND_BUFFER_CONFIG => {
                     // `Type.INT`, `atLeast(CommonClientConfigs.SEND_BUFFER_LOWER_BOUND)`
@@ -397,9 +408,17 @@ impl AdminClientConfig {
         self.metadata_max_age_ms
     }
 
-    /// `socket.connection.setup.timeout.ms`.
+    /// `socket.connection.setup.timeout.ms`: the initial connection setup
+    /// timeout, which grows exponentially for each consecutive failure up to
+    /// [`Self::socket_connection_setup_timeout_max_ms`].
     pub fn socket_connection_setup_timeout_ms(&self) -> i64 {
         self.socket_connection_setup_timeout_ms
+    }
+
+    /// `socket.connection.setup.timeout.max.ms`: the most the connection setup
+    /// timeout grows to. Default: 30 seconds.
+    pub fn socket_connection_setup_timeout_max_ms(&self) -> i64 {
+        self.socket_connection_setup_timeout_max_ms
     }
 
     /// `send.buffer.bytes`: the TCP send buffer (SO_SNDBUF) size, `-1` for the
@@ -471,7 +490,8 @@ impl Default for AdminClientConfig {
             reconnect_backoff_max_ms: 1_000,
             connections_max_idle_ms: 300_000,
             metadata_max_age_ms: 300_000,
-            socket_connection_setup_timeout_ms: 10_000,
+            socket_connection_setup_timeout_ms: CommonClientConfigs::DEFAULT_SOCKET_CONNECTION_SETUP_TIMEOUT_MS,
+            socket_connection_setup_timeout_max_ms: CommonClientConfigs::DEFAULT_SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS,
             // `128 * 1024` and `64 * 1024` (`AdminClientConfig.java:181-182`).
             send_buffer_bytes: 128 * 1024,
             receive_buffer_bytes: 64 * 1024,
@@ -789,6 +809,28 @@ mod tests {
                 format!("Invalid value 64k for configuration {key}: Not a number of type INT")
             );
         }
+    }
+
+    /// `socket.connection.setup.timeout.max.ms` is a `Type.LONG` without a
+    /// validator, defaulting to 30 seconds (`AdminClientConfig.java:229-233`).
+    #[test]
+    fn test_socket_connection_setup_timeout_max_ms() {
+        let key = "socket.connection.setup.timeout.max.ms";
+        assert_eq!(AdminClientConfig::SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG, key);
+        let config = AdminClientConfig::new(&with_bootstrap(&[])).unwrap();
+        assert_eq!(config.socket_connection_setup_timeout_ms(), 10_000);
+        assert_eq!(config.socket_connection_setup_timeout_max_ms(), 30_000);
+
+        let config = AdminClientConfig::new(&with_bootstrap(&[(key, "45000")])).unwrap();
+        assert_eq!(config.socket_connection_setup_timeout_max_ms(), 45_000);
+        assert_eq!(config.socket_connection_setup_timeout_ms(), 10_000);
+
+        let err = AdminClientConfig::new(&with_bootstrap(&[(key, "abc")])).unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "got {err:?}");
+        assert_eq!(
+            err.message(),
+            "Invalid value abc for configuration socket.connection.setup.timeout.max.ms: Not a number of type LONG"
+        );
     }
 
     /// Translated from `ProducerConfigTest.testInvalidSecurityProtocol`, adapted

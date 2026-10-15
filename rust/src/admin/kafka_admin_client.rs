@@ -535,12 +535,12 @@ impl KafkaAdminClient {
             1, // maxInFlightRequestsPerConnection (`KafkaAdminClient.java:625`)
             config.reconnect_backoff_ms(),
             config.reconnect_backoff_max_ms(),
-            config.send_buffer_bytes(),    // `ClientUtils.java:294`
-            config.receive_buffer_bytes(), // `ClientUtils.java:295`
-            3_600_000,                     // defaultRequestTimeoutMs: `(int) TimeUnit.HOURS.toMillis(1)` (`:626`)
-            config.socket_connection_setup_timeout_ms(),
-            config.socket_connection_setup_timeout_ms(),
-            true, // discover_broker_versions
+            config.send_buffer_bytes(),                      // `ClientUtils.java:294`
+            config.receive_buffer_bytes(),                   // `ClientUtils.java:295`
+            3_600_000, // defaultRequestTimeoutMs: `(int) TimeUnit.HOURS.toMillis(1)` (`:626`)
+            config.socket_connection_setup_timeout_ms(), // `ClientUtils.java:297`
+            config.socket_connection_setup_timeout_max_ms(), // `ClientUtils.java:298`
+            true,      // discover_broker_versions
             api_versions,
             host_resolver,
             config.metadata_recovery_strategy(),
@@ -15864,6 +15864,70 @@ mod tests {
             );
             assert_eq!(client.socket_buffer_sizes(), expected, "{extra:?}");
         }
+    }
+
+    /// `socket.connection.setup.timeout.max.ms` is the `NetworkClient`'s maximum
+    /// connection setup timeout (`ClientUtils.java:297-298`), so the timeout
+    /// grows from `socket.connection.setup.timeout.ms` with each consecutive
+    /// failed attempt, with 20% jitter (`ClusterConnectionStates.java`). Against
+    /// a listener that accepts the TCP connection and never answers SASL, with a
+    /// 1 s initial timeout, the first attempt is cut after 0.8-1.2 s and the
+    /// second after 1.6-2.4 s. The admin client used to pass the initial value
+    /// as the max too, which kept every attempt at 0.8-1.2 s.
+    #[tokio::test]
+    async fn the_connection_setup_timeout_grows_between_attempts() {
+        use std::time::{Duration, Instant};
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (attempt_tx, mut attempt_rx) = mpsc::unbounded_channel();
+        let acceptor = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let accepted = Instant::now();
+                let attempt_tx = attempt_tx.clone();
+                tokio::spawn(async move {
+                    // Reads whatever the client sends and never answers, until
+                    // the client gives up and closes the connection.
+                    let mut buf = [0u8; 512];
+                    while matches!(socket.read(&mut buf).await, Ok(n) if n > 0) {}
+                    let _ = attempt_tx.send(accepted.elapsed());
+                });
+            }
+        });
+
+        let props: HashMap<String, String> = [
+            ("bootstrap.servers", format!("127.0.0.1:{port}")),
+            ("security.protocol", "SASL_PLAINTEXT".to_string()),
+            ("sasl.mechanism", "PLAIN".to_string()),
+            (
+                "sasl.jaas.config",
+                "org.apache.kafka.common.security.plain.PlainLoginModule required \
+                 username=\"user\" password=\"secret\";"
+                    .to_string(),
+            ),
+            ("socket.connection.setup.timeout.ms", "1000".to_string()),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        let admin = KafkaAdminClient::new(AdminClientConfig::new(&props).unwrap()).unwrap();
+        // A call keeps the client trying to connect.
+        let _result = admin.list_topics();
+
+        let mut attempts = Vec::new();
+        while attempts.len() < 2 {
+            let attempt = tokio::time::timeout(Duration::from_secs(10), attempt_rx.recv())
+                .await
+                .unwrap_or_else(|_| panic!("no connection attempt ended within 10 s; so far {attempts:?}"))
+                .expect("the acceptor is running");
+            attempts.push(attempt);
+        }
+        admin.close_with_timeout(Duration::ZERO).await;
+        acceptor.abort();
+
+        assert!(attempts[0] < Duration::from_millis(1400), "first attempt: {attempts:?}");
+        assert!(attempts[1] > Duration::from_millis(1400), "second attempt: {attempts:?}");
     }
 
     /// `ClientUtils.createNetworkClient` passes `metadata.recovery.strategy` and

@@ -130,6 +130,37 @@ impl CommonClientConfigs {
     /// The lowest valid `receive.buffer.bytes`: `-1`, the OS default.
     pub const RECEIVE_BUFFER_LOWER_BOUND: i32 = -1;
 
+    /// Config key: `socket.connection.setup.timeout.ms`
+    ///
+    /// The amount of time the client will wait for the socket connection to be
+    /// established. If the connection is not built before the timeout elapses,
+    /// clients will close the socket channel. This value is the initial backoff
+    /// value and will increase exponentially for each consecutive connection
+    /// failure, up to the `socket.connection.setup.timeout.max.ms` value.
+    ///
+    /// (Text of Java's `CommonClientConfigs.SOCKET_CONNECTION_SETUP_TIMEOUT_MS_DOC`,
+    /// carried as rustdoc for the reason given on [`Self::CLIENT_DNS_LOOKUP_CONFIG`].)
+    pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG: &str = "socket.connection.setup.timeout.ms";
+
+    /// The default `socket.connection.setup.timeout.ms`: 10 seconds.
+    pub const DEFAULT_SOCKET_CONNECTION_SETUP_TIMEOUT_MS: i64 = 10 * 1000;
+
+    /// Config key: `socket.connection.setup.timeout.max.ms`
+    ///
+    /// The maximum amount of time the client will wait for the socket
+    /// connection to be established. The connection setup timeout will increase
+    /// exponentially for each consecutive connection failure up to this
+    /// maximum. To avoid connection storms, a randomization factor of 0.2 will
+    /// be applied to the timeout resulting in a random range between 20% below
+    /// and 20% above the computed value.
+    ///
+    /// (Text of Java's `CommonClientConfigs.SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_DOC`,
+    /// carried as rustdoc for the reason given on [`Self::CLIENT_DNS_LOOKUP_CONFIG`].)
+    pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG: &str = "socket.connection.setup.timeout.max.ms";
+
+    /// The default `socket.connection.setup.timeout.max.ms`: 30 seconds.
+    pub const DEFAULT_SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS: i64 = 30 * 1000;
+
     /// Config key: `metadata.recovery.strategy`
     ///
     /// Controls how the client recovers when none of the brokers known to it is
