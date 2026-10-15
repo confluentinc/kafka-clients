@@ -340,6 +340,14 @@ class AsyncProducer(Generic[K, V], _ProducerState):
             self._undelivered.free_closed()
             self._drop_stranded()
 
+    def _destroy(self) -> None:
+        """Free the native producer (see :meth:`_ProducerState._destroy`), then
+        the results left for an event loop that has closed: a result the pump
+        handed to the loop before it closed waits here, not in the C API, and
+        no later operation frees it once the producer is gone."""
+        super()._destroy()
+        self._undelivered.free_closed()
+
     def _enter(self) -> asyncio.AbstractEventLoop:
         """The start of each async method: check the running loop is the
         producer's (binding it on the first call; another raises

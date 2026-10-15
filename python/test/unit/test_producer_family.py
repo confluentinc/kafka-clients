@@ -3147,6 +3147,29 @@ def test_an_operation_result_left_for_a_closed_loop_is_freed_when_the_producer_i
     assert len(freed_errors) == 1
 
 
+@pytest.mark.parametrize("call", ["flush", "close"])
+def test_an_operation_result_handed_to_a_loop_that_closed_is_freed_when_the_producer_is_destroyed(
+        call: str, freed_errors: list[int], stopped_loop: Any) -> None:
+    # As above, but the pump ran before the loop closed, as it does when the
+    # result arrives during the loop's last iteration: the result was handed
+    # to the stopped loop, whose close discards its delivery, so it waits in
+    # the producer, not in the C API, and the destroy frees it there.
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    scheduled = _record_pump_schedules(p)
+    stopped_loop.start(p.begin_transaction())
+    assert scheduled.wait(30)
+    p._pump()  # noqa: SLF001
+    stopped_loop.loop.close()
+    assert freed_errors == []
+
+    with pytest.raises(RuntimeError) as err:
+        asyncio.run(getattr(p, call)())
+    assert str(err.value) == BOUND_ELSEWHERE.format(cls="AsyncKafkaProducer")
+    assert freed_errors == []
+    p._destroy()  # noqa: SLF001
+    assert len(freed_errors) == 1
+
+
 async def test_async_begin_transaction_is_a_coroutine_and_does_not_block_the_loop() -> None:
     # begin_transaction() is a coroutine (Class family).
     # Updated for the branch C API (was: a record still waiting for its
