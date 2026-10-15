@@ -93,8 +93,14 @@ pub(crate) enum HandleResult {
 /// Corresponds to the `NodeProvider` implementations in `KafkaAdminClient`.
 pub(crate) enum NodeProvider {
     /// Targets the cluster controller (createTopics / deleteTopics /
-    /// createPartitions).
-    Controller,
+    /// createPartitions). Mirrors `ControllerNodeProvider`.
+    Controller {
+        /// Java's `ControllerNodeProvider(boolean supportsUseControllers)`
+        /// argument: whether a `bootstrap.controllers` client may send the call
+        /// (to the active controller). Java's no-argument constructor sets it to
+        /// `false`.
+        supports_use_controllers: bool,
+    },
     /// Targets the least-loaded broker (listTopics / describeTopics, driver
     /// lookup requests).
     LeastLoaded,
@@ -108,22 +114,32 @@ pub(crate) enum NodeProvider {
     LeastLoadedBrokerOrActiveKController,
     /// Targets the least-loaded node for the internal metadata refresh call.
     MetadataUpdate,
-    /// Targets a specific broker id (driver fulfillment requests).
+    /// Targets a specific node id (driver fulfillment requests).
     ///
     /// Mirrors `ConstantNodeIdProvider`.
-    ConstantNodeId(i32),
+    ConstantNodeId {
+        /// The id of the node to send the call to.
+        node_id: i32,
+        /// Java's `ConstantNodeIdProvider(int nodeId, boolean
+        /// supportsUseControllers)` argument: whether a `bootstrap.controllers`
+        /// client may send the call (to the controller with that id). Java's
+        /// one-argument constructor sets it to `false`.
+        supports_use_controllers: bool,
+    },
 }
 
 impl NodeProvider {
     /// Whether the provider may run when the client uses `bootstrap.controllers`
-    /// (KIP-919). Mirrors `NodeProvider.supportsUseControllers`.
+    /// (KIP-919). Mirrors `NodeProvider.supportsUseControllers`: fixed for
+    /// three providers, and the constructor argument of
+    /// `ControllerNodeProvider` and `ConstantNodeIdProvider`.
     pub(crate) fn supports_use_controllers(&self) -> bool {
         match self {
-            NodeProvider::Controller => false,
+            NodeProvider::Controller { supports_use_controllers } => *supports_use_controllers,
             NodeProvider::LeastLoaded => false,
             NodeProvider::LeastLoadedBrokerOrActiveKController => true,
             NodeProvider::MetadataUpdate => true,
-            NodeProvider::ConstantNodeId(_) => false,
+            NodeProvider::ConstantNodeId { supports_use_controllers, .. } => *supports_use_controllers,
         }
     }
 
@@ -158,7 +174,7 @@ impl NodeProvider {
                 }
                 Ok(least_loaded_node.node().cloned())
             },
-            NodeProvider::Controller => {
+            NodeProvider::Controller { .. } => {
                 if metadata_manager.is_ready()? {
                     match metadata_manager.controller() {
                         Some(node) => Ok(Some(node)),
@@ -198,7 +214,7 @@ impl NodeProvider {
                     Ok(None)
                 }
             },
-            NodeProvider::ConstantNodeId(node_id) => {
+            NodeProvider::ConstantNodeId { node_id, .. } => {
                 // Mirrors ConstantNodeIdProvider: if we can't find the node with
                 // the given id, schedule a metadata update and hope it appears.
                 if metadata_manager.is_ready()?
@@ -394,5 +410,32 @@ impl Call {
     /// retried after a protocol downgrade.
     pub(crate) fn handle_unsupported_version(&mut self) -> bool {
         (self.handle_unsupported_version_fn)()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `supportsUseControllers()` of each Java `NodeProvider`
+    /// (`KafkaAdminClient.java:788-917`): `MetadataUpdateNodeIdProvider` and
+    /// `LeastLoadedBrokerOrActiveKController` answer `true`,
+    /// `LeastLoadedNodeProvider` `false`, and `ControllerNodeProvider` /
+    /// `ConstantNodeIdProvider` answer what their constructor was given.
+    #[test]
+    fn supports_use_controllers_follows_the_java_providers() {
+        assert!(NodeProvider::MetadataUpdate.supports_use_controllers());
+        assert!(NodeProvider::LeastLoadedBrokerOrActiveKController.supports_use_controllers());
+        assert!(!NodeProvider::LeastLoaded.supports_use_controllers());
+        for flag in [false, true] {
+            assert_eq!(
+                NodeProvider::Controller { supports_use_controllers: flag }.supports_use_controllers(),
+                flag
+            );
+            assert_eq!(
+                NodeProvider::ConstantNodeId { node_id: 3, supports_use_controllers: flag }.supports_use_controllers(),
+                flag
+            );
+        }
     }
 }
