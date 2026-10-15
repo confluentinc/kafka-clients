@@ -42,7 +42,7 @@ class UnknownProducerIdError(OutOfOrderSequenceError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 59  # kafka_common_ErrorCode_UNKNOWN_PRODUCER_ID
+    _ffi_id: ClassVar[int] = 59  # kafka_common_Error_UNKNOWN_PRODUCER_ID
 
     def __init__(
         self,

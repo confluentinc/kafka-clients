@@ -33,8 +33,8 @@ use super::{ScramCredentialInfo, ScramMechanism, UserScramCredentialsDescription
 ///
 /// Holds a single future over the raw response data; `all()`, `users()` and
 /// `description()` are per-view refinements (Java uses `whenComplete` on the
-/// data future to complete new `KafkaFutureImpl`s — here `then_apply` /
-/// `then_apply_try` express the same transform-on-completion).
+/// data future to complete new `KafkaFutureImpl`s — here `then_apply`
+/// expresses the same transform-on-completion).
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult")]
 pub struct DescribeUserScramCredentialsResult {
@@ -61,7 +61,7 @@ impl DescribeUserScramCredentialsResult {
     /// future.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult#all")]
     pub fn all(&self) -> KafkaFuture<HashMap<String, UserScramCredentialsDescription>> {
-        self.data_future.then_apply_try(|data| {
+        self.data_future.then_apply(|data| {
             if let Some(first_failed) = data.results.iter().find(|result| {
                 result.error_code != Errors::None.code() && result.error_code != Errors::ResourceNotFound.code()
             }) {
@@ -90,11 +90,12 @@ impl DescribeUserScramCredentialsResult {
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult#users")]
     pub fn users(&self) -> KafkaFuture<Vec<String>> {
         self.data_future.then_apply(|data| {
-            data.results
+            Ok(data
+                .results
                 .iter()
                 .filter(|result| result.error_code != Errors::ResourceNotFound.code())
                 .map(|result| result.user.clone())
-                .collect()
+                .collect())
         })
     }
 
@@ -106,7 +107,7 @@ impl DescribeUserScramCredentialsResult {
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult#description")]
     pub fn description(&self, user_name: &str) -> KafkaFuture<UserScramCredentialsDescription> {
         let user_name = user_name.to_string();
-        self.data_future.then_apply_try(move |data| {
+        self.data_future.then_apply(move |data| {
             match data.results.iter().find(|result| result.user == user_name) {
                 None => Err(Error::with_message(
                     Errors::ResourceNotFound,
@@ -176,7 +177,7 @@ mod tests {
     fn data_future_completed(results: Vec<WireUserResult>) -> KafkaFuture<DescribeUserScramCredentialsResponseData> {
         let mut data = DescribeUserScramCredentialsResponseData::new();
         data.set_error_code(Errors::None.code()).set_results(results);
-        KafkaFuture::completed(Ok(data))
+        KafkaFuture::completed_future(Ok(data))
     }
 
     // Mirrors `DescribeUserScramCredentialsResultTest.testTopLevelError`.
@@ -184,7 +185,7 @@ mod tests {
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeUserScramCredentialsResultTest#testTopLevelError")]
     async fn test_top_level_error() {
         let data_future: KafkaFuture<DescribeUserScramCredentialsResponseData> =
-            KafkaFuture::completed(Err(Error::new(Errors::UnknownServerError)));
+            KafkaFuture::completed_future(Err(Error::new(Errors::UnknownServerError)));
         let results = DescribeUserScramCredentialsResult::new(data_future);
         assert!(results.all().get().await.is_err());
         assert!(results.users().get().await.is_err());

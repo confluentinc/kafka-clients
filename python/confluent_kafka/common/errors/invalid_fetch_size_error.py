@@ -34,7 +34,7 @@ class InvalidFetchSizeError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 4  # kafka_common_ErrorCode_INVALID_FETCH_SIZE
+    _ffi_id: ClassVar[int] = 4  # kafka_common_Error_INVALID_FETCH_SIZE
 
     def __init__(
         self,

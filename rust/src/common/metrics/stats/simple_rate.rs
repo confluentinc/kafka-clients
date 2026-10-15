@@ -37,6 +37,7 @@ pub struct SimpleRate {
 
 impl SimpleRate {
     /// Create a `SimpleRate` over seconds backed by a `WindowedSum`.
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.SimpleRate#SimpleRate")]
     pub fn new() -> Self {
         Self { rate: Rate::new() }
     }

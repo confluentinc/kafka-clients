@@ -39,7 +39,7 @@ class GroupDeletionFailedError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 134  # kafka_common_ErrorCode_GROUP_DELETION_FAILED
+    _ffi_id: ClassVar[int] = 134  # kafka_common_Error_GROUP_DELETION_FAILED
 
     def __init__(
         self,

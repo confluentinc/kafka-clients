@@ -49,7 +49,6 @@ Dropped: ``enforceRebalance()`` / ``enforceRebalance(String)``, whose
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, overload
 
@@ -82,8 +81,6 @@ __all__ = ["Consumer"]
 
 K = TypeVar("K")
 V = TypeVar("V")
-
-_LOG = logging.getLogger("confluent_kafka.consumer")
 
 SUBSCRIBE_FORMS = (Form("topics"), Form("topics", "callback"),
                    Form("pattern", "callback"), Form("pattern"))
@@ -242,6 +239,25 @@ class Consumer(Generic[K, V], _ConsumerState):
         ``ConsumerRebalanceListener`` callback, on this thread, while it waits
         for the offsets to commit (``consumer-threading.md`` §31); a listener
         error it raised is then raised here.
+
+        Called from inside a callback this consumer delivers (a listener method
+        or another commit's ``callback``), it first runs the commit callbacks
+        queued behind the running one, inside this call, as Java's
+        ``commitAsync`` does; its own ``callback`` runs inside a later call.
+
+        An exception the ``callback`` raises propagates out of the call that
+        delivers it, as Java's ``onComplete`` is called without a ``try``:
+        ``poll()`` raises it wrapped in a ``KafkaError`` (unless it is one, as
+        Java's ``maybeWrapAsKafkaException``), ``close()`` wrapped in the
+        ``KafkaError`` "Failed to close kafka consumer" (unless it is a
+        ``KeyboardInterrupt``, as Java's ``close`` wraps every exception but an
+        ``InterruptException``), ``commit()`` and ``commit_nowait()`` raise the
+        very exception; the callbacks queued behind it run inside a later call.
+
+        The ``callback`` is a plain function here: an ``async def`` one is
+        rejected when it is delivered, its coroutine closed, not awaited, and
+        the delivering call raises ``TypeError`` (``MockConsumer`` raises it
+        from this call). Only ``AsyncConsumer`` awaits one.
         """
         self._c_commit_nowait(offsets, callback)
 
@@ -419,7 +435,7 @@ class Consumer(Generic[K, V], _ConsumerState):
         topic_list = blank_null_topics(topics)
         previous, self._listener = self._listener, callback
         try:
-            self._run_sync(*self._subscribe_topics_spec(topic_list, callback is not None))
+            self._run_sync(*self._subscribe_topics_spec(topic_list, callback))
         except BaseException:
             self._listener = previous
             raise
@@ -429,7 +445,7 @@ class Consumer(Generic[K, V], _ConsumerState):
         assert pattern is not None
         previous, self._listener = self._listener, callback
         try:
-            self._run_sync(*self._subscribe_pattern_spec(pattern.pattern(), callback is not None))
+            self._run_sync(*self._subscribe_pattern_spec(pattern.pattern(), callback))
         except BaseException:
             self._listener = previous
             raise
@@ -443,22 +459,23 @@ class Consumer(Generic[K, V], _ConsumerState):
         self._run_sync(*self._void_spec(fn, tp_to_spec(partition_list)))
 
     def _c_assign(self, partitions: Iterable[TopicPartition]) -> None:
-        self._tp_op("assign", _lib.Consumer_assign_async,
+        self._tp_op("assign", _lib.Consumer_assign_cb,
                     self._assign_partitions(partitions))
 
     def _c_unsubscribe(self) -> None:
-        self._run_sync(*self._void_spec(_lib.Consumer_unsubscribe_async))
+        self._run_sync(*self._void_spec(_lib.Consumer_unsubscribe_cb))
 
     def _c_poll(self, timeout: Duration) -> ConsumerRecords[K, V]:
         # The closed check first, then Java's Timer check (Order).
         self._check_open()
         timeout_ms = poll_timeout_ms(timeout)
-        result: Deserialized = self._run_sync(*self._poll_spec(timeout_ms))
-        for partition, offset in result.rewind:
-            try:
-                self._run_sync(*self._seek_spec(partition, offset, None))
-            except Exception:  # noqa: BLE001 - the deserialization error matters
-                _LOG.exception("Could not seek %s back to offset %d", partition, offset)
+        result: Deserialized = self._run_sync(*self._poll_spec(timeout_ms),
+                                              abandoned=self._fetched_positions)
+        interrupted = self._rewind_sync(result.rewind)
+        if interrupted is not None:
+            # Ctrl+C during the seeks back: the records are not returned either.
+            self._rewind_sync(result.unreturned())
+            raise interrupted
         if result.error is not None and result.records.is_empty():
             raise result.error
         return result.records
@@ -477,10 +494,10 @@ class Consumer(Generic[K, V], _ConsumerState):
         self._run_sync(*self._seek_spec(partition, offset, offset_and_metadata))
 
     def _c_seek_to_beginning(self, partitions: Iterable[TopicPartition]) -> None:
-        self._tp_op("seek_to_beginning", _lib.Consumer_seek_to_beginning_async, partitions)
+        self._tp_op("seek_to_beginning", _lib.Consumer_seek_to_beginning_cb, partitions)
 
     def _c_seek_to_end(self, partitions: Iterable[TopicPartition]) -> None:
-        self._tp_op("seek_to_end", _lib.Consumer_seek_to_end_async, partitions)
+        self._tp_op("seek_to_end", _lib.Consumer_seek_to_end_cb, partitions)
 
     def _c_position(self, partition: TopicPartition) -> int:
         if self._in_callback():
@@ -505,10 +522,10 @@ class Consumer(Generic[K, V], _ConsumerState):
         return self._run_sync(*self._list_topics_spec())
 
     def _c_pause(self, partitions: Iterable[TopicPartition]) -> None:
-        self._tp_op("pause", _lib.Consumer_pause_async, partitions)
+        self._tp_op("pause", _lib.Consumer_pause_cb, partitions)
 
     def _c_resume(self, partitions: Iterable[TopicPartition]) -> None:
-        self._tp_op("resume", _lib.Consumer_resume_async, partitions)
+        self._tp_op("resume", _lib.Consumer_resume_cb, partitions)
 
     def _c_offsets_for_times(self, timestamps_to_search: Mapping[TopicPartition, int]
                              ) -> dict[TopicPartition, OffsetAndTimestamp | None]:
@@ -531,11 +548,11 @@ class Consumer(Generic[K, V], _ConsumerState):
 
     def _c_beginning_offsets(self, partitions: Iterable[TopicPartition]
                              ) -> dict[TopicPartition, int]:
-        return self._long_offsets("beginning_offsets", _lib.Consumer_beginning_offsets_async,
+        return self._long_offsets("beginning_offsets", _lib.Consumer_beginning_offsets_cb,
                                   partitions)
 
     def _c_end_offsets(self, partitions: Iterable[TopicPartition]) -> dict[TopicPartition, int]:
-        return self._long_offsets("end_offsets", _lib.Consumer_end_offsets_async, partitions)
+        return self._long_offsets("end_offsets", _lib.Consumer_end_offsets_cb, partitions)
 
     def _c_close(self, option: CloseOptions | None) -> None:
         if self._is_closed():

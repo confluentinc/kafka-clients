@@ -51,6 +51,7 @@ impl ResourcePatternFilter {
     }
 
     /// A filter which matches any resource pattern.
+    #[doc(alias = "org.apache.kafka.common.resource.ResourcePatternFilter#ANY")]
     pub fn any() -> ResourcePatternFilter {
         ResourcePatternFilter::new(ResourceType::Any, None, PatternType::Any)
     }

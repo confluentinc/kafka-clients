@@ -37,7 +37,7 @@ class RecordBatchTooLargeError(InvalidConfigurationError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 18  # kafka_common_ErrorCode_RECORD_LIST_TOO_LARGE
+    _ffi_id: ClassVar[int] = 18  # kafka_common_Error_RECORD_LIST_TOO_LARGE
 
     def __init__(
         self,

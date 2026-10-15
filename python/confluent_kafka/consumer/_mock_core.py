@@ -15,14 +15,15 @@
 """The body of ``MockConsumer`` and ``AsyncMockConsumer`` (private): a direct
 Python translation of Java's ``org.apache.kafka.clients.consumer.MockConsumer``.
 
-*(deviation, logged for the post-phase review)* The mock is not FFI-backed,
-although the Implementation-over-the-FFI rule lists ``MockConsumer`` with the
-clients: the FFI's ``kafka_consumer_MockConsumer_add_record`` carries only a
-topic, partition, offset and serialized key/value, while Java's mock buffers
-the very ``ConsumerRecord`` objects it is given and returns them from
-``poll()`` undeserialized, with their timestamps, headers and leader epochs
-(which it also records in the positions ``commit()`` commits); the core's
-``ConsumerHandle`` rejects the blocking calls a listener makes on a mock; and
+The mock is not FFI-backed, as CLAUDE.md's Implementation-over-the-FFI rule
+requires of every ``Mock*`` (the FFI's ``kafka_consumer_MockConsumer_*`` entry
+points serve the C binding). It could not be anyway: the FFI's
+``kafka_consumer_MockConsumer_add_record`` carries only a topic, partition,
+offset and serialized key/value, while Java's mock buffers the very
+``ConsumerRecord`` objects it is given and returns them from ``poll()``
+undeserialized, with their timestamps, headers and leader epochs (which it also
+records in the positions ``commit()`` commits); the core's ``ConsumerHandle``
+rejects the blocking calls a listener makes on a mock; and
 ``schedulePollTask(Runnable)`` has no entry point. Translated from Java, the
 mock keeps all of that, as ``MockProducer`` does.
 
@@ -31,10 +32,12 @@ task may call back into the mock from the thread holding it, and another thread
 waits instead of failing (Java's mock is not thread-safe but serializes).
 ``wakeup()`` only sets its flag, as Java's ``AtomicBoolean``.
 
-``AsyncMockConsumer`` awaits the same body; ``rebalance`` and
-``lose_partitions`` await a coroutine listener method there, and hold the
-mock's monitor for their task until they return, as Java's ``synchronized``
-``rebalance`` and ``losePartitions`` run the listener inside it
+``AsyncMockConsumer`` awaits the same body. ``commit_nowait()`` awaits an
+``async def`` commit callback inside the call, as Java's mock runs the callback
+inside ``commitAsync``, and the exception it raises propagates out of it, as
+Java's would; ``rebalance`` and ``lose_partitions`` await a coroutine listener
+method. Each holds the mock's monitor for its task until the awaited callback
+returns, as Java's ``synchronized`` method runs the callback inside it
 (``_Monitor``). Meanwhile a method that enters Java's monitor, called from
 another task or another thread, raises ``ConcurrentModificationError`` with
 ``KafkaConsumer``'s message *(deviation: Java's caller waits, which a task on
@@ -86,7 +89,6 @@ if TYPE_CHECKING:
     from .consumer_rebalance_listener import ConsumerRebalanceListener
     from .consumer_record import ConsumerRecord
     from .offset_and_timestamp import OffsetAndTimestamp
-    from .offset_commit_callback import OffsetCommitCallback
     from .subscription_pattern import SubscriptionPattern
 
 __all__ = ["MockConsumerCore"]
@@ -103,13 +105,13 @@ def _seconds(timeout: Duration) -> float:
     return timeout.total_seconds() if isinstance(timeout, timedelta) else float(timeout)
 
 
-def _no_coroutine(result: object, what: str) -> None:
+def _no_coroutine(result: object, what: str, requires: str = "an AsyncMockConsumer") -> None:
     """A synchronous mock cannot await a coroutine a callback returned."""
     if inspect.isawaitable(result):
         close = getattr(result, "close", None)
         if callable(close):
             close()
-        raise TypeError(f"a coroutine {what} requires an AsyncMockConsumer")
+        raise TypeError(f"a coroutine {what} requires {requires}")
 
 
 def _current_task() -> asyncio.Task[Any] | None:
@@ -368,15 +370,23 @@ class MockConsumerCore(Generic[K, V]):
         assert position is not None  # a valid position after _update_fetch_position
         return position
 
+    def _commit_async_body(self, offsets: Mapping[TopicPartition, OffsetAndMetadata],
+                           callback: Callable[..., object] | None) -> object:
+        """Java's ``commitAsync(Map, OffsetCommitCallback)``, under the mock's
+        lock: the callback runs inline, on this thread, and an exception it
+        raises propagates; what it returned (``None`` without a callback)."""
+        self._ensure_not_closed()
+        self._committed_offsets.update(offsets)
+        if callback is None:
+            return None
+        return callback(dict(offsets), None)
+
     def _c_commit_async(self, offsets: Mapping[TopicPartition, OffsetAndMetadata],
-                      callback: OffsetCommitCallback | None) -> None:
-        """Java's ``commitAsync(Map, OffsetCommitCallback)``: the callback runs
-        inline, on this thread; an exception it raises propagates."""
+                      callback: Callable[..., object] | None) -> None:
+        """Java's ``commitAsync(Map, OffsetCommitCallback)`` (see
+        ``_commit_async_body``); a coroutine callback is rejected."""
         with self._lock:
-            self._ensure_not_closed()
-            self._committed_offsets.update(offsets)
-            if callback is not None:
-                _no_coroutine(callback(dict(offsets), None), "OffsetCommitCallback")
+            _no_coroutine(self._commit_async_body(offsets, callback), "OffsetCommitCallback")
 
     def _c_commit(self, offsets: Mapping[TopicPartition, OffsetAndMetadata] | None) -> None:
         """Java's ``commitSync()`` / ``commitSync(Map)``."""
@@ -385,7 +395,7 @@ class MockConsumerCore(Generic[K, V]):
                                None)
 
     def _c_commit_nowait(self, offsets: Mapping[TopicPartition, OffsetAndMetadata] | None,
-                       callback: OffsetCommitCallback | None) -> None:
+                       callback: Callable[..., object] | None) -> None:
         """Java's ``commitAsync()`` / ``commitAsync(callback)`` /
         ``commitAsync(offsets, callback)``."""
         with self._lock:
@@ -582,6 +592,27 @@ class MockConsumerCore(Generic[K, V]):
     async def _a_end_offsets(self, partitions: Iterable[TopicPartition]
                              ) -> dict[TopicPartition, int]:
         return self._c_end_offsets(partitions)
+
+    async def _a_commit_nowait(self, offsets: Mapping[TopicPartition, OffsetAndMetadata] | None,
+                               callback: Callable[..., object] | None) -> None:
+        """Async ``commitAsync()`` / ``commitAsync(callback)`` /
+        ``commitAsync(offsets, callback)``: Java's body, an ``async def``
+        callback awaited inside this call, as Java's mock runs the callback
+        inside ``commitAsync``, and the monitor held for this task until it
+        returns (``_Monitor``); an exception it raises, ``CancelledError``
+        included, propagates."""
+        with self._lock:
+            if offsets is None:
+                self._ensure_not_closed()
+                offsets = self._subscriptions.all_consumed()
+            result = self._commit_async_body(offsets, callback)
+            if not inspect.isawaitable(result):
+                return
+            previous, self._lock.owner = self._lock.owner, _current_task()
+        try:
+            await result
+        finally:
+            self._lock.owner = previous
 
     async def _a_close(self, option: CloseOptions | None) -> None:
         self._c_close(option)

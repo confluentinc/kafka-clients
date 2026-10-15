@@ -24,8 +24,9 @@ Python client. It exercises the async API through the full integration matrix
 against a real broker (the sync server covers the sync client).
 
 Uses grpc.aio (asyncio server) rather than a thread pool: the async client's
-completions already marshal onto the event loop (loop.call_soon_threadsafe from
-the C dispatcher thread), so awaiting the coroutines is the natural fit. All RPC
+completions already run on the event loop (the C API's notify hook schedules,
+through loop.call_soon_threadsafe, a drain of the queued callbacks there), so
+awaiting the coroutines is the natural fit. All RPC
 handlers run as tasks on a single event loop, so the producer/consumer id maps
 need no lock — id allocation and dict pops happen without an intervening await.
 
@@ -230,8 +231,8 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
             LOG.exception("send raised")
             return pb.SendResponse(error=_kafka_error_to_proto(e))
 
-        # Await the record future on the event loop; completions hop onto the
-        # loop from the C dispatcher thread. Bounded like the sync server's 120s.
+        # Await the record future on the event loop, where the producer drains
+        # its queued completions. Bounded like the sync server's 120s.
         try:
             metadata = await asyncio.wait_for(future, timeout=120)
         except KafkaError as e:
@@ -392,9 +393,10 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
     """Async twin of grpc_server.ConsumerService, driving AsyncKafkaConsumer.
 
     Methods Java waits in are coroutines and are awaited (seek included: it
-    waits on the background thread, which may run a rebalance listener); the
-    others (assignment/subscription/paused/commit_nowait/wakeup) are plain
-    methods, called directly."""
+    waits on the background thread, which may run a rebalance listener;
+    commit_nowait included: Java's commitAsync waits for the offsets to commit);
+    the others (assignment/subscription/paused/wakeup) are plain methods,
+    called directly."""
 
     def __init__(self, group_metadata):
         self._consumers = {}
@@ -490,11 +492,10 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         return await self._run_status(request.consumer_id, do)
 
     async def CommitAsync(self, request, context):
-        # commit_nowait (Java's commitAsync) does not wait, so it is a plain def,
-        # called directly. The callback runs inside a later poll/commit/close; a
+        # commit_nowait (Java's commitAsync) waits until the commit is sent, not
+        # for its result: the callback runs inside a later poll/commit/close; a
         # listener callback the core delivers while the commit waits for its
-        # offsets runs on this loop (an async def one in a task the next awaited
-        # call waits for).
+        # offsets runs on this loop, inside the call.
         consumer = self._get(request.consumer_id)
         if consumer is None:
             return pb.StatusResponse(error=self._unknown_consumer(request.consumer_id))
@@ -504,10 +505,10 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         try:
             offsets = _proto_offsets_to_dict(request.offsets)
             if offsets:
-                consumer.commit_nowait(offsets=offsets,
-                                       callback=callback or ignore_commit_completion)
+                await consumer.commit_nowait(offsets=offsets,
+                                             callback=callback or ignore_commit_completion)
             else:
-                consumer.commit_nowait(callback=callback)
+                await consumer.commit_nowait(callback=callback)
             return pb.StatusResponse()
         except KafkaError as e:
             return self._status_err(e)

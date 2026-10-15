@@ -36,7 +36,7 @@ class StreamsInvalidTopologyEpochError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 131  # kafka_common_ErrorCode_STREAMS_INVALID_TOPOLOGY_EPOCH
+    _ffi_id: ClassVar[int] = 131  # kafka_common_Error_STREAMS_INVALID_TOPOLOGY_EPOCH
 
     def __init__(
         self,

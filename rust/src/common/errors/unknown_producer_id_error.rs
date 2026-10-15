@@ -37,5 +37,6 @@ kafka_error_type! {
         is_kafka_error,
         is_api_error,
         is_out_of_order_sequence_error,
+        is_unknown_producer_id_error,
     ],
 }

@@ -37,7 +37,7 @@ class ShareSessionNotFoundError(RetriableError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 122  # kafka_common_ErrorCode_SHARE_SESSION_NOT_FOUND
+    _ffi_id: ClassVar[int] = 122  # kafka_common_Error_SHARE_SESSION_NOT_FOUND
 
     def __init__(
         self,

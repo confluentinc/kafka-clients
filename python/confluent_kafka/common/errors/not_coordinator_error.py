@@ -43,7 +43,7 @@ class NotCoordinatorError(RefreshRetriableError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 16  # kafka_common_ErrorCode_NOT_COORDINATOR
+    _ffi_id: ClassVar[int] = 16  # kafka_common_Error_NOT_COORDINATOR
 
     def __init__(
         self,

@@ -51,7 +51,7 @@ impl AlterConsumerGroupOffsetsResult {
     pub fn partition_result(&self, partition: &TopicPartition) -> KafkaFuture<()> {
         let partition = partition.clone();
         self.future
-            .then_apply_try(move |topic_partitions| match topic_partitions.get(&partition) {
+            .then_apply(move |topic_partitions| match topic_partitions.get(&partition) {
                 None => Err(Error::local_illegal_argument(format!(
                     "Alter offset for partition \"{partition}\" was not attempted"
                 ))),
@@ -65,7 +65,7 @@ impl AlterConsumerGroupOffsetsResult {
     /// Mirrors `all()`.
     #[doc(alias = "org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
-        self.future.then_apply_try(|topic_partition_errors| {
+        self.future.then_apply(|topic_partition_errors| {
             let mut partitions_failed: Vec<&TopicPartition> = topic_partition_errors
                 .iter()
                 .filter(|(_, error)| **error != Errors::None)

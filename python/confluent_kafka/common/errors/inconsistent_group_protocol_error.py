@@ -36,7 +36,7 @@ class InconsistentGroupProtocolError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 23  # kafka_common_ErrorCode_INCONSISTENT_GROUP_PROTOCOL
+    _ffi_id: ClassVar[int] = 23  # kafka_common_Error_INCONSISTENT_GROUP_PROTOCOL
 
     def __init__(
         self,

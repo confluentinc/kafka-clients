@@ -113,6 +113,7 @@ use super::NetworkClientDelegate;
 use super::RequestManager;
 use super::RequestManagers;
 use super::WakeupTrigger;
+use super::consumer_interceptors::panic_payload_message;
 use super::events::ApplicationEventEnvelope;
 use super::events::ApplicationEventProcessor;
 use super::events::CompletableEventReaper;
@@ -801,73 +802,26 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             if let Some(metrics) = &metrics {
                 metrics.record_application_event_queue_time(self.time.milliseconds() - env.enqueued_ms);
             }
-            // 1. Register with the reaper if completable. The Java
-            // `CompletableEvent` interface check is replaced by the
-            // `erased_handle()` accessor on [`ApplicationEvent`].
+            // Java CNT:257-274 wraps each event in `try { ... } catch
+            // (Throwable t)`, so one failing event neither skips the rest of the
+            // batch nor stops the network thread. Rust's processor is
+            // infallible by signature (`fn process(&mut self, event)`): it
+            // completes each event's handle itself, so what Java's catch-all
+            // guards against, a throw out of the body, is a panic here.
+            // KAFKA-18812: log it at ERROR and complete the event's future with
+            // the failure, rather than leaving the caller to time out on the
+            // reaper. The handle is taken before the boundary because the body
+            // consumes the event.
+            //
+            // `AssertUnwindSafe` because `&mut self` is not `UnwindSafe`. What a
+            // caught unwind leaves behind is what Java's thread holds after its
+            // own catch (the `Sender` and `NetworkClient::complete_responses`
+            // use the same idiom).
             let completable = env.event.erased_handle();
-            if let Some(erased) = &completable {
-                let mut reaper = match self.application_event_reaper.lock() {
-                    Ok(g) => g,
-                    Err(p) => p.into_inner(),
-                };
-                reaper.add(Arc::clone(erased));
-            }
-
-            // 1b. Track notifiable+completable events in the parallel
-            // list so the post-poll `maybeFailOnMetadataError` arm can
-            // observe them. Java derives this list from
-            // `applicationEventReaper.uncompletedEvents()` filtered for
-            // `MetadataErrorNotifiableEvent`; in Rust the reaper holds
-            // erased handles only so we keep a side list. See module
-            // docstring for the rationale.
-            if let Some(notifiable) = env.event.metadata_error_notifiable_handle() {
-                self.notifiable_handles.push(notifiable);
-            }
-
-            // 2. Metadata-error short-circuit. Java's
-            // `maybeFailOnMetadataError` queries the delegate's
-            // `getAndClearMetadataError()`; we mirror that here so the
-            // error is consumed regardless of whether THIS event was
-            // notifiable. Java keeps the same "don't get-and-clear if
-            // no notifiable events" optimisation.
-            //
-            // We hold the delegate guard briefly with `try_lock` because
-            // the bg task is the sole holder. No `.await` while held.
-            let event_was_notified = if env.event.is_metadata_error_notifiable() {
-                let mut delegate_guard = self
-                    .network_client_delegate
-                    .try_lock()
-                    .expect("delegate not contended on bg task");
-                if let Some(err) = delegate_guard.get_and_clear_metadata_error() {
-                    env.event.on_metadata_error(err)
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-            if event_was_notified {
-                continue;
-            }
-
-            // 3. Normal dispatch, under Java's `try { ... } catch (Throwable
-            // t)`. Rust's processor is infallible by signature (`fn
-            // process(&mut self, event)`): it completes each event's handle
-            // itself, so what Java's catch-all guards against, a throw out of
-            // `process`, is a panic here. KAFKA-18812: log it at ERROR and
-            // complete the event's future with the failure, rather than
-            // leaving the caller to time out on the reaper.
-            //
-            // `AssertUnwindSafe` because `&mut self.application_event_processor`
-            // is not `UnwindSafe`. What a caught unwind leaves behind is what
-            // Java's thread holds after its own catch (the `Sender` and
-            // `NetworkClient::complete_responses` use the same idiom).
-            let event = env.event;
-            let processor = &mut self.application_event_processor;
-            if let Err(payload) =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || processor.process(event)))
-            {
-                let message = Self::panic_message(payload.as_ref());
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.process_application_event(env, completable.clone())
+            })) {
+                let message = panic_payload_message(&*payload);
                 log::error!("Error processing event {message}");
                 if let Some(erased) = completable {
                     erased.complete_with_error(crate::common::Error::kafka_message(message));
@@ -882,15 +836,67 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         self.app_event_drain_scratch = envelopes;
     }
 
-    /// The text of a caught panic, standing in for Java's `t.getMessage()`.
-    fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
-        if let Some(message) = payload.downcast_ref::<String>() {
-            message.clone()
-        } else if let Some(message) = payload.downcast_ref::<&'static str>() {
-            (*message).to_string()
-        } else {
-            "unknown panic".to_string()
+    /// The body of Java's per-event `try` block in `processApplicationEvents`:
+    /// register with the reaper, short-circuit on a pending metadata error,
+    /// then dispatch. [`Self::process_application_events`] runs it under the
+    /// per-event panic boundary, which takes `completable` (the event's
+    /// [`ApplicationEvent::erased_handle`]) before the call so it can still
+    /// complete the event after a panic.
+    fn process_application_event(
+        &mut self,
+        env: ApplicationEventEnvelope,
+        completable: Option<Arc<dyn super::events::CompletableEventErasedHandle>>,
+    ) {
+        // 1. Register with the reaper if completable. The Java
+        // `CompletableEvent` interface check is replaced by the
+        // `erased_handle()` accessor on [`ApplicationEvent`].
+        if let Some(erased) = completable {
+            let mut reaper = match self.application_event_reaper.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            reaper.add(erased);
         }
+
+        // 1b. Track notifiable+completable events in the parallel
+        // list so the post-poll `maybeFailOnMetadataError` arm can
+        // observe them. Java derives this list from
+        // `applicationEventReaper.uncompletedEvents()` filtered for
+        // `MetadataErrorNotifiableEvent`; in Rust the reaper holds
+        // erased handles only so we keep a side list. See module
+        // docstring for the rationale.
+        if let Some(notifiable) = env.event.metadata_error_notifiable_handle() {
+            self.notifiable_handles.push(notifiable);
+        }
+
+        // 2. Metadata-error short-circuit. Java's
+        // `maybeFailOnMetadataError` queries the delegate's
+        // `getAndClearMetadataError()`; we mirror that here so the
+        // error is consumed regardless of whether THIS event was
+        // notifiable. Java keeps the same "don't get-and-clear if
+        // no notifiable events" optimisation.
+        //
+        // We hold the delegate guard briefly with `try_lock` because
+        // the bg task is the sole holder. No `.await` while held.
+        let event_was_notified = if env.event.is_metadata_error_notifiable() {
+            let mut delegate_guard = self
+                .network_client_delegate
+                .try_lock()
+                .expect("delegate not contended on bg task");
+            if let Some(err) = delegate_guard.get_and_clear_metadata_error() {
+                env.event.on_metadata_error(err)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if event_was_notified {
+            return;
+        }
+
+        // 3. Normal dispatch.
+        self.application_event_processor.process(env.event);
     }
 
     /// Test-only helper that pushes an erased handle directly onto
@@ -1056,11 +1062,31 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
     /// 11 consumer constructor.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#run")]
     pub(crate) async fn run(mut self) {
+        use futures_util::FutureExt;
+
         log::debug!("Consumer network thread started");
         while self.is_running() {
             // Re-check the shutdown signal first so `signal_close()`
             // followed by `wakeup.wakeup()` exits immediately.
-            self.run_once().await;
+            //
+            // Java CNT:161-166: `try { runOnce(); } catch (final Throwable e)
+            // { log.error(...) }` — swallow and continue, so a failing
+            // iteration neither ends the task nor skips `cleanup()`. Without
+            // this boundary a panic would unwind out of the spawned task, which
+            // Tokio turns into task termination, not Java's swallow-and-continue.
+            if let Err(payload) = std::panic::AssertUnwindSafe(self.run_once()).catch_unwind().await {
+                log::error!(
+                    "Unexpected error caught in consumer network task: {}",
+                    panic_payload_message(&*payload)
+                );
+                // A Java thread that keeps failing spins on its own thread. A
+                // Tokio task that panics before its first real `.await` never
+                // returns control to the scheduler, which would starve the
+                // worker (and hang a current-thread runtime, including the
+                // `close()` waiting on this task). Yield so a repeated failure
+                // stays cooperative.
+                tokio::task::yield_now().await;
+            }
         }
         self.cleanup().await;
     }
@@ -2068,6 +2094,118 @@ mod tests {
         assert_eq!(reaper.lock().unwrap().size(), 0, "non-completable events must not be tracked");
     }
 
+    /// Java's `processApplicationEvents` catches `Throwable` per event
+    /// (CNT:257-274), so one failing event does not skip the rest of the
+    /// batch, and completes the failing event with the failure (KAFKA-18812).
+    /// The failure is induced through the production path: with the delegate
+    /// lock held elsewhere, the metadata-error arm's `try_lock().expect(..)`
+    /// panics on the notifiable event, after the event was registered with
+    /// the reaper.
+    #[tokio::test]
+    async fn process_events_continues_after_an_event_panics() {
+        let (fixture, _, _, _) = make_thread_with_dyn_managers(Vec::new());
+        let CountingFixture { mut thread, delegate, reaper, tx, .. } = fixture;
+
+        let (failing, mut failing_rx, failing_erased) = CompletableEvent::make_completable_event::<
+            std::collections::HashMap<String, Vec<crate::common::PartitionInfo>>,
+        >(60_000);
+        tx.send(ApplicationEventEnvelope {
+            event: ApplicationEvent::AllTopicsMetadata { handle: failing },
+            enqueued_ms: 1_000,
+        })
+        .expect("send ok");
+        let (next, mut next_rx, _) = CompletableEvent::make_completable_event::<()>(60_000);
+        let event =
+            ApplicationEvent::AssignmentChange { handle: next, current_time_ms: 1_000, partitions: HashSet::new() };
+        tx.send(ApplicationEventEnvelope { event, enqueued_ms: 1_000 })
+            .expect("send ok");
+
+        {
+            let _held = delegate.lock().await;
+            thread.process_application_events();
+        }
+
+        assert!(
+            matches!(next_rx.try_recv(), Ok(Ok(()))),
+            "the event after the failing one must still be dispatched"
+        );
+        // Like Java's catch, the boundary completes the failing event with the
+        // failure (a bare Kafka error carrying the panic message) instead of
+        // leaving it for the reaper's deadline.
+        let err = failing_rx
+            .try_recv()
+            .expect("the boundary must complete the failing event")
+            .expect_err("completed with the failure");
+        assert!(matches!(err, Error::KafkaError(_)), "a bare KafkaException: {err:?}");
+        assert!(
+            err.message().starts_with("delegate not contended on bg task"),
+            "carries the panic message: {err:?}"
+        );
+        // Registration came before the panic, as `applicationEventReaper.add`
+        // precedes the failure in Java's `try`; the reaper drops completed
+        // events on its next pass.
+        assert!(
+            reaper.lock().unwrap().contains(&failing_erased),
+            "the failing event was registered with the reaper before it failed"
+        );
+    }
+
+    /// Request manager whose first `poll` panics; the second clears the
+    /// thread's running flag so `run` leaves its loop.
+    struct PanickingRequestManager {
+        poll_calls: Arc<AtomicUsize>,
+        poll_on_close_calls: Arc<AtomicUsize>,
+        running: Arc<std::sync::OnceLock<Arc<AtomicBool>>>,
+    }
+
+    impl RequestManager for PanickingRequestManager {
+        fn poll(&mut self, _current_time_ms: i64) -> PollResult {
+            if self.poll_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                panic!("request manager failure");
+            }
+            self.running
+                .get()
+                .expect("running flag installed")
+                .store(false, Ordering::Release);
+            PollResult::empty()
+        }
+
+        fn poll_on_close(&mut self, _current_time_ms: i64) -> PollResult {
+            self.poll_on_close_calls.fetch_add(1, Ordering::SeqCst);
+            PollResult::empty()
+        }
+    }
+
+    /// Java's `run()` wraps each `runOnce()` in `catch (final Throwable e)`
+    /// and keeps looping (CNT:161-166), and `cleanup()` still runs in its
+    /// `finally`. A panicking iteration must therefore neither end the task
+    /// nor skip `cleanup()`.
+    #[tokio::test]
+    async fn run_continues_after_run_once_panics_and_still_cleans_up() {
+        let poll_calls = Arc::new(AtomicUsize::new(0));
+        let poll_on_close_calls = Arc::new(AtomicUsize::new(0));
+        let running = Arc::new(std::sync::OnceLock::new());
+        let manager = PanickingRequestManager {
+            poll_calls: poll_calls.clone(),
+            poll_on_close_calls: poll_on_close_calls.clone(),
+            running: running.clone(),
+        };
+        let (fixture, _, _, _) = make_thread_with_dyn_managers(vec![Box::new(manager)]);
+        let thread = fixture.thread;
+        running.set(thread.running_handle()).expect("set once");
+
+        tokio::time::timeout(Duration::from_secs(10), thread.run())
+            .await
+            .expect("run must return once the running flag is cleared");
+
+        assert_eq!(
+            poll_calls.load(Ordering::SeqCst),
+            2,
+            "the loop must run again after the panicking iteration"
+        );
+        assert_eq!(poll_on_close_calls.load(Ordering::SeqCst), 1, "cleanup must still run");
+    }
+
     /// `wakeup` mid-poll: the bg-task `run_once` should not hang when
     /// the wakeup token is cancelled before/during the network poll.
     /// We assert `run_once` returns within a tight window even though
@@ -2649,7 +2787,7 @@ mod tests {
                 IsolationLevel::ReadUncommitted,
             ),
             Arc::new(crate::consumer::internals::FetchBuffer::new()),
-            Arc::new(crate::common::memory::BufferSupplier::create()),
+            Arc::new(crate::common::utils::internals::BufferSupplier::create()),
             crate::consumer::internals::FetchRequestManager::always_available(),
             crate::consumer::internals::FetchRequestManager::no_auth_failure(),
             Arc::new(ApiVersions::new()),

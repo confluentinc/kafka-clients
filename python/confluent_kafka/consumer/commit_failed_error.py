@@ -42,7 +42,7 @@ class CommitFailedError(KafkaError):
 
     __module__ = "confluent_kafka.consumer"
 
-    _ffi_id: ClassVar[int] = -19  # kafka_common_ErrorCode_CONSUMER_COMMIT_FAILED
+    _ffi_id: ClassVar[int] = -19  # kafka_common_Error_CONSUMER_COMMIT_FAILED
 
     def __init__(
         self,

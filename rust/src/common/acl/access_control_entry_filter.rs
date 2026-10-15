@@ -56,6 +56,7 @@ impl AccessControlEntryFilter {
     }
 
     /// A filter which matches any access control entry.
+    #[doc(alias = "org.apache.kafka.common.acl.AccessControlEntryFilter#ANY")]
     pub fn any() -> AccessControlEntryFilter {
         AccessControlEntryFilter::new(None, None, AclOperation::Any, AclPermissionType::Any)
     }

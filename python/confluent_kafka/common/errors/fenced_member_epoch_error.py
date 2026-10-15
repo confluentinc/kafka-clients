@@ -34,7 +34,7 @@ class FencedMemberEpochError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 110  # kafka_common_ErrorCode_FENCED_MEMBER_EPOCH
+    _ffi_id: ClassVar[int] = 110  # kafka_common_Error_FENCED_MEMBER_EPOCH
 
     def __init__(
         self,
