@@ -400,10 +400,6 @@ class _ProducerState:
         if self._closed:
             raise IllegalStateError(message=CLOSED_MESSAGE)
 
-    def _native_record(self, record: ProducerRecord[Any, Any]) -> Any:
-        """The native record of ``record`` (see ``_native_parts``)."""
-        return self._native_parts(record)[0]
-
     def _native_parts(self, record: ProducerRecord[Any, Any]) -> tuple[Any, str, int | None]:
         """Serialize the record on the caller's thread and build the native
         ``_confluentkafka.ProducerRecord`` the send path reads: it holds the
