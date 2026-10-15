@@ -1,0 +1,48 @@
+# Preset performance tests run by `cargo xtask perf-cloud` against a remote
+# cluster (`--tests ID,ID`). A one-off test can instead be given by its
+# settings (`--scenario "KEY=VALUE ..."`), which names it after them.
+#
+# One test per line: <id> <groups> KEY=VALUE ...
+#
+#   id      lowercase letters, digits and `-`, at most 60 characters
+#   groups  the client groups it applies to: rust, python, or rust,python
+#   KEY     WORKLOAD (producer, the default, transactional or consumer) picks
+#           the harnesses; the rest are harness settings, in their units:
+#             PARTITIONS VALUE_SIZE LIMIT_RPS   required; LIMIT_RPS=0 is unbounded
+#             COMPRESSION_TYPE (none|gzip|snappy|lz4|zstd)
+#           producer and transactional:
+#             KEY_SIZE (B)  BATCH_SIZE (KiB)  LINGER_MS  MAX_IN_FLIGHT
+#             BUFFER_MEMORY (MiB)  MAX_REQUEST_SIZE (KiB)
+#           producer only (transactional tests always use idempotence and acks=all):
+#             ACKS (all|-1|1|0)  ENABLE_IDEMPOTENCE (true|false)
+#           transactional only:
+#             RECORDS_PER_TRANSACTION  ABORT_RATE (0 to 1, e.g. 0.5)
+#             NUM_TRANSACTIONAL_PRODUCERS  TXN_MODE (produce|eos; eos needs LIMIT_RPS > 0)
+#           consumer only (LIMIT_RPS > 0: the clients read a load Kafka's
+#           kafka-producer-perf-test.sh produces at that rate, with VALUE_SIZE
+#           and COMPRESSION_TYPE; unset settings keep the client defaults):
+#             FETCH_MIN_BYTES (B)  FETCH_MAX_WAIT_MS  MAX_PARTITION_FETCH_BYTES (B)
+#             MAX_POLL_RECORDS
+#           Unset settings take each harness's own default (these differ, e.g.
+#           MAX_IN_FLIGHT); set them to pin them. With the librdkafka (C)
+#           client, BATCH_SIZE must be at least 1024: below it the C harnesses
+#           use 1 MiB batches.
+#
+# `cargo xtask perf-cloud check --group G --tests ID,ID` validates a list and
+# prints its time estimate.
+
+# 10k msg/s of 1 KiB values (~10 MB/s): latency at a fixed, comfortable load.
+producer-fixed-10k-1kb-200p  rust,python  PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=10000 BATCH_SIZE=1024
+
+# Unbounded 1 KiB values: peak throughput. Rust-group clients can approach the
+# cluster's ingress limit; when PERF_CLUSTER_INGRESS_MB_S is set the report
+# flags results within 15% of it.
+producer-max-1kb-200p        rust,python  PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=0 BATCH_SIZE=1024
+
+# Transactions of 100 records at 10k msg/s of 1 KiB values: commit latency and
+# transactions/s at a fixed load.
+txn-fixed-10k-1kb-200p       rust,python  WORKLOAD=transactional PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=10000 BATCH_SIZE=1024 RECORDS_PER_TRANSACTION=100
+
+# 10k msg/s of 1 KiB values read as they are produced: end-to-end latency, CPU
+# and memory of the consumers at a fixed load, with the client defaults.
+consumer-fixed-10k-1kb-200p  rust,python  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=10000

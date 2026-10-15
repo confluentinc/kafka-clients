@@ -73,37 +73,78 @@ fn now_millis() -> i64 {
 /// Fixed-memory histogram for streaming percentile estimation. 1 ms buckets
 /// from 0 to `MAX_LATENCY_MS`; anything larger lands in the last bucket. Mirrors
 /// the Java `E2ELatencyBenchmark.LatencyHistogram`.
+///
+/// The buckets are allocated once, zeroed, so only the pages of the buckets
+/// actually written become resident: the reported RSS is the client's, not
+/// this 4.8 MB array's. `reset()` clears in place and only the bucket range
+/// written since the last reset, so it neither reallocates nor touches the
+/// rest of the array.
 struct LatencyHistogram {
     buckets: Vec<u64>,
     count: u64,
     sum: u128,
     min: i64,
     max: i64,
+    /// Lowest and highest bucket written since `new()` / `reset()`; every
+    /// non-zero bucket lies in `lo..=hi`. Meaningless while `count == 0`.
+    lo: usize,
+    hi: usize,
 }
 
 impl LatencyHistogram {
     // 10 minutes: under --peak saturation, e2e latency is backlog age and can far
     // exceed 60s; a 10-min ceiling avoids clamping the tail within a 10-min run.
-    // 600k * 8 bytes ≈ 4.8 MB per histogram — negligible.
+    // 600k * 8 bytes ≈ 4.8 MB per histogram, of which only the written range
+    // is ever resident (see the type's doc).
     const MAX_LATENCY_MS: usize = 600_000;
 
     fn new() -> Self {
         Self {
+            // `vec![0; n]` is a zeroed allocation (calloc): untouched pages stay
+            // non-resident.
             buckets: vec![0; Self::MAX_LATENCY_MS + 1],
             count: 0,
             sum: 0,
             min: i64::MAX,
             max: i64::MIN,
+            lo: Self::MAX_LATENCY_MS,
+            hi: 0,
         }
+    }
+
+    /// Empties the histogram in place for the next interval, zeroing only the
+    /// buckets written since the last reset.
+    fn reset(&mut self) {
+        if self.count > 0 {
+            self.buckets[self.lo..=self.hi].fill(0);
+        }
+        self.count = 0;
+        self.sum = 0;
+        self.min = i64::MAX;
+        self.max = i64::MIN;
+        self.lo = Self::MAX_LATENCY_MS;
+        self.hi = 0;
     }
 
     fn record(&mut self, latency_ms: i64) {
         let idx = latency_ms.clamp(0, Self::MAX_LATENCY_MS as i64) as usize;
         self.buckets[idx] += 1;
+        self.lo = self.lo.min(idx);
+        self.hi = self.hi.max(idx);
         self.count += 1;
         self.sum += latency_ms.max(0) as u128;
         self.min = self.min.min(latency_ms);
         self.max = self.max.max(latency_ms);
+    }
+
+    /// The written bucket range: the index of its first bucket, and the
+    /// buckets. Every bucket outside it is zero.
+    fn written(&self) -> (usize, &[u64]) {
+        if self.count == 0 {
+            (0, &[])
+        } else {
+            (self.lo, &self.buckets[self.lo..=self.hi])
+        }
     }
 
     fn min(&self) -> i64 {
@@ -127,9 +168,10 @@ impl LatencyHistogram {
         }
         let mean = self.sum as f64 / self.count as f64;
         let mut var = 0.0;
-        for (i, &c) in self.buckets.iter().enumerate() {
+        let (first, buckets) = self.written();
+        for (i, &c) in buckets.iter().enumerate() {
             if c > 0 {
-                let d = i as f64 - mean;
+                let d = (first + i) as f64 - mean;
                 var += c as f64 * d * d;
             }
         }
@@ -142,13 +184,14 @@ impl LatencyHistogram {
         }
         let target = (pct / 100.0 * self.count as f64).ceil() as u64;
         let mut cumulative = 0u64;
-        for (i, &c) in self.buckets.iter().enumerate() {
+        let (first, buckets) = self.written();
+        for (i, &c) in buckets.iter().enumerate() {
             cumulative += c;
             if cumulative >= target {
-                return i as i64;
+                return (first + i) as i64;
             }
         }
-        Self::MAX_LATENCY_MS as i64
+        self.hi as i64
     }
 }
 
@@ -387,6 +430,9 @@ struct Args {
     /// Kafka client properties file (e.g. SASL_SSL creds for Confluent Cloud).
     /// Merged into the consumer props AND passed to the producer via `--producer.config`.
     client_config: Option<String>,
+    /// Where to also write the run's summary in the shape the producer
+    /// harnesses' `results.json` has (read by `cargo xtask perf-cloud`).
+    results_file: Option<String>,
 }
 
 impl Args {
@@ -420,6 +466,7 @@ impl Args {
             fetch_max_bytes: None,
             max_poll_records: None,
             client_config: None,
+            results_file: None,
         };
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
@@ -453,6 +500,7 @@ impl Args {
                 "--fetch-max-bytes" => a.fetch_max_bytes = Some(next()?.parse().map_err(|e| format!("{e}"))?),
                 "--max-poll-records" => a.max_poll_records = Some(next()?.parse().map_err(|e| format!("{e}"))?),
                 "--client-config" => a.client_config = Some(next()?),
+                "--results-file" => a.results_file = Some(next()?),
                 "--help" | "-h" => return Err("help".to_string()),
                 other => return Err(format!("unknown argument: {other}")),
             }
@@ -473,7 +521,7 @@ fn print_usage() {
            -d, --duration <SECONDS>      Measurement window after warmup (default: 60)\n  \
                --message-size <BYTES>    Record size for the producer (default: 1024)\n  \
                --partitions <N>          Partitions when creating the topic (default: 8)\n  \
-           -w, --warmup-messages <N>     Records to skip before measuring (default: 5000)\n  \
+           -w, --warmup-messages <N>     Records to skip before measuring, 0 for none (default: 5000)\n  \
                --interval <SECONDS>      Metric reporting interval (default: 5)\n  \
                --poll-timeout-ms <MS>    poll() timeout (default: 500)\n  \
                --join-timeout <SECONDS>  Max wait for partition assignment (default: 120)\n  \
@@ -490,6 +538,8 @@ fn print_usage() {
                --max-partition-fetch-bytes <N>  max.partition.fetch.bytes (client default 1MB)\n  \
                --fetch-max-bytes <N>     fetch.max.bytes (client default 50MB)\n  \
                --max-poll-records <N>    max.poll.records (client default 500)\n  \
+               --client-config <FILE>    Client properties file (e.g. SASL), also given to the producer\n  \
+               --results-file <FILE>     Also write the summary as results.json (perf-cloud's shape)\n  \
            -v, --verbose                 Log every poll (record counts / heartbeats)\n"
     );
 }
@@ -699,6 +749,19 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         .set_auto_offset_reset(args.offset_reset.clone())
         .set_enable_auto_commit(true);
 
+    // The histograms are allocated once, here, before the client has allocated
+    // and freed anything large: glibc raises its mmap threshold when a large
+    // mmap'd block is freed, after which a large calloc may be carved from a
+    // freed heap region and memset, making the whole array resident. Allocated
+    // now they are fresh zero pages, resident only where written.
+    let mut overall = LatencyHistogram::new();
+    let mut interval_hist = LatencyHistogram::new();
+    // Records-per-poll distribution over NON-EMPTY polls during the measurement
+    // window only (mirrors the C harness's batch_calls/batch_records, which count
+    // only batches that returned records, post-warmup). Each entry is the record
+    // count of one poll() that returned >=1 record.
+    let mut rpp = RecordsPerPoll::new();
+
     let mut consumer =
         KafkaConsumer::<usize, usize>::new(config, Box::new(LenDeserializer), Box::new(LenDeserializer))?;
 
@@ -779,8 +842,6 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    let mut overall = LatencyHistogram::new();
-    let mut interval_hist = LatencyHistogram::new();
     let mut sampler = ResourceSampler::new();
     // Run-level current-RSS aggregation (avg/min/max over interval samples).
     let mut rss_sum = 0.0f64;
@@ -792,7 +853,8 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut cpu_max = 0.0f64;
 
     let mut messages_consumed: u64 = 0;
-    let mut warmup_complete = false;
+    // With no warmup the measurement starts with the first poll.
+    let mut warmup_complete = args.warmup_messages == 0;
     let mut measure_start = Instant::now();
     let mut interval_start = Instant::now();
     let mut interval_count: u64 = 0;
@@ -818,11 +880,6 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     // in the client, not this loop.
     let mut poll_nanos: u128 = 0;
     let mut proc_nanos: u128 = 0;
-    // Records-per-poll distribution over NON-EMPTY polls during the measurement
-    // window only (mirrors the C harness's batch_calls/batch_records, which count
-    // only batches that returned records, post-warmup). Each entry is the record
-    // count of one poll() that returned >=1 record.
-    let mut rpp = RecordsPerPoll::new();
 
     'outer: loop {
         let p0 = Instant::now();
@@ -831,7 +888,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         polls += 1;
 
         if records.is_empty() {
-            if !warmup_complete && Instant::now() >= no_data_deadline && messages_consumed == 0 {
+            if Instant::now() >= no_data_deadline && messages_consumed == 0 {
                 return Err("no records received within 120s (producer not running?)".into());
             }
             if warmup_complete && measure_start.elapsed() >= Duration::from_secs(args.duration_s) {
@@ -915,7 +972,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 cpu,
                 rss_mb,
             )?;
-            interval_hist = LatencyHistogram::new();
+            interval_hist.reset();
             interval_start = Instant::now();
             interval_count += 1;
         }
@@ -932,8 +989,6 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         let _ = child.kill();
         let _ = child.wait();
     }
-
-    consumer.close().await?;
 
     // Bytes derived from the fixed producer record size (kafka-producer-perf-test
     // emits exactly --record-size payloads), so the per-record loop never reads
@@ -975,6 +1030,8 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     write_summary(
         &mut jsonl,
         &run_dir,
+        &args.topic,
+        args.results_file.as_deref().map(Path::new),
         &overall,
         total_bytes,
         measured_duration_s,
@@ -989,6 +1046,16 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     println!("\nResults written to: {}", run_dir.display());
+
+    // Closed only once the results are on disk: a close error (e.g. a KIP-848
+    // leave-group timeout) says nothing about the measurement, so it is a
+    // warning and neither discards the results nor changes the exit status.
+    if let Err(e) = consumer.close().await {
+        eprintln!("warning: closing the consumer failed: {e}");
+    }
+    if overall.count == 0 {
+        return Err("no records measured".into());
+    }
     Ok(())
 }
 
@@ -1027,6 +1094,8 @@ fn emit_interval(
 fn write_summary(
     jsonl: &mut File,
     run_dir: &Path,
+    topic: &str,
+    results_file: Option<&Path>,
     hist: &LatencyHistogram,
     total_bytes: u128,
     duration_s: f64,
@@ -1089,6 +1158,49 @@ fn write_summary(
          \"rpp_p99\":{rpp_p99},\"rpp_max\":{rpp_max}}}"
     )?;
     jsonl.flush()?;
+
+    // The same summary in the shape (keys, units, `latency_ms`) of the
+    // producer harnesses' results.json, which `cargo xtask perf-cloud` reads.
+    // Not written when nothing was measured: zeros would read as a result.
+    if let Some(path) = results_file.filter(|_| measured > 0) {
+        let rss_avg_kib = rss_avg * 1024.0;
+        fs::write(
+            path,
+            format!(
+                concat!(
+                    "{{\n",
+                    "  \"test\": \"consumer\",\n",
+                    "  \"client\": \"rust-consumer\",\n",
+                    "  \"topic\": \"{topic}\",\n",
+                    "  \"messages_measured\": {measured},\n",
+                    "  \"duration_s\": {duration_s:.2},\n",
+                    "  \"throughput_msg_s\": {throughput_msg_s:.2},\n",
+                    "  \"throughput_mib_s\": {throughput_mb_s:.2},\n",
+                    "  \"latency_ms\": {{\"min\": {min}, \"avg\": {avg:.2}, \"p50\": {p50}, ",
+                    "\"p90\": {p90}, \"p95\": {p95}, \"p99\": {p99}, \"p999\": {p999}, ",
+                    "\"max\": {max}}},\n",
+                    "  \"cpu_avg_pct\": {cpu_avg:.2},\n",
+                    "  \"rss_avg_kib\": {rss_avg_kib:.2}\n",
+                    "}}\n"
+                ),
+                topic = topic,
+                measured = measured,
+                duration_s = duration_s,
+                throughput_msg_s = throughput_msg_s,
+                throughput_mb_s = throughput_mb_s,
+                min = min,
+                avg = avg,
+                p50 = p50,
+                p90 = p90,
+                p95 = p95,
+                p99 = p99,
+                p999 = p999,
+                max = max,
+                cpu_avg = cpu_avg,
+                rss_avg_kib = rss_avg_kib,
+            ),
+        )?;
+    }
 
     // Human-readable summary alongside the JSONL.
     let mut md = File::create(run_dir.join("summary.md"))?;

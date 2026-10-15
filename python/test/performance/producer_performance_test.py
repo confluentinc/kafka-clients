@@ -18,7 +18,8 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 import librdkafka_helpers  # noqa: E402
-from performance_common import Metrics, MAX_LATENCY_MS, percentile_from_hist, recreate_topic
+from performance_common import (Metrics, MAX_LATENCY_MS, latency_bucket,
+                                percentile_from_hist, recreate_topic)
 from concurrent.futures import CancelledError, Future
 
 
@@ -113,9 +114,18 @@ results_file = os.getenv("RESULTS_FILE", "results.json")
 # cooldown is captured in metrics.jsonl (but excluded from the averages).
 POST_TEST_AWAIT_SECONDS = 10
 
+# A counted run (a message target) also stops once its measured time reaches
+# TEST_DURATION_SECONDS + this many seconds, checked on every send; it then
+# prints a `capped:` line and does not fail for the shortfall (the driver's
+# report flags a client that held less than 95% of the target rate).
+COUNTED_RUN_CAP_SLACK_S = 10
+
 # Cumulative latency histogram over the measured interval (1 ms buckets, plus
 # one overflow bucket), used for the final p50/p90/p99/p999 summary. Warmup
 # sends are awaited inline and never reach the recorder, so they are excluded.
+# Latencies are stamped with time.perf_counter_ns() (monotonic, sub-µs) at the
+# send and at the delivery callback; the summary's min/avg/max come from their
+# exact ns values, the percentiles from these floor-ms buckets.
 latency_hist = [0] * (MAX_LATENCY_MS + 2)
 # Set True when P99_LIMIT_MS > 0 and the measured p99 exceeds it.
 latency_budget_exceeded = False
@@ -143,9 +153,8 @@ def _is_queue_full(exc):
     return "queue_full" in s or "queue full" in s
 
 
-def record_latency(latency_ms):
-    idx = min(max(int(latency_ms), 0), MAX_LATENCY_MS + 1)
-    latency_hist[idx] += 1
+def record_latency(latency_ns):
+    latency_hist[latency_bucket(latency_ns)] += 1
 
 num_messages = 0
 if 'NUM_MESSAGES' in os.environ:
@@ -375,9 +384,8 @@ def configuration_from_env(common_default_configuration, v2=False):
         conf['bootstrap.servers'] = os.environ['BOOTSTRAP_SERVERS']
 
     if not use_defaults:
-        # acks=all, hardcoded like the C and Java perf tests (the Rust test relies
-        # on the same client default).
-        conf['acks'] = 'all'
+        # ACKS: all (default, like the C, Java and Rust perf tests), -1, 1 or 0.
+        conf['acks'] = os.getenv('ACKS', 'all')
 
         if 'BATCH_SIZE' in os.environ:
             batch_size = int(os.environ['BATCH_SIZE']) * 1024  # Convert KB to bytes
@@ -479,15 +487,25 @@ def v2_async_producer(common_default_configuration):
     return AsyncCompatibleProducer(conf)
 
 
-def print_measurement_summary(completed_messages, total_latency_ms,
-                              max_latency_ms, before_ms, after_ms, after_ns,
-                              first_message_time):
+def print_measurement_summary(completed_messages, total_latency_ns,
+                              min_latency_ns, max_latency_ns, before_ms,
+                              after_ms, after_ns, first_message_time):
     """Print the throughput / latency / CPU / RSS report.
 
     Shared by the sync ``main()`` and the async ``async_main()`` so the two
-    paths emit an identical summary.
+    paths emit an identical summary. The latency min/avg/max are exact (ms,
+    from the ns sum / min / max of the recorded latencies); the percentiles
+    come from the floor-ms histogram.
     """
     metrics.measurement_end_ms = after_ms
+    # Every recorded latency is in exactly one bucket (the overflow bucket
+    # included), so this is the exact sample count. Failed deliveries count as
+    # completed but carry no latency.
+    latency_count = sum(latency_hist)
+    avg_latency_ms = total_latency_ns / latency_count / 1_000_000 \
+        if latency_count > 0 else 0.0
+    min_latency_ms = min_latency_ns / 1_000_000 if min_latency_ns is not None else 0.0
+    max_latency_ms = max_latency_ns / 1_000_000 if latency_count > 0 else 0.0
     total_time_ns = after_ns - first_message_time
     total_time_ms = total_time_ns / 1_000_000
     total_time_s = total_time_ms / 1_000
@@ -523,7 +541,7 @@ def print_measurement_summary(completed_messages, total_latency_ms,
         f"{mib_rate:.2f} MiB/s")
     print(
         "Average latency: "
-        f"{total_latency_ms / completed_messages if completed_messages > 0 else 0.0:.2f} ms")
+        f"{avg_latency_ms:.2f} ms")
     print("Max latency: "
           f"{max_latency_ms:.2f} ms")
     # Percentiles from the cumulative measured-interval histogram, matching the
@@ -541,7 +559,6 @@ def print_measurement_summary(completed_messages, total_latency_ms,
     # Machine-readable summary, kept in sync with the other producer perf
     # tests (same file name, keys and latency_ms shape as the consumer perf
     # test's results.json; `client` identifies which implementation wrote it).
-    min_latency_ms = next((ms for ms, c in enumerate(latency_hist) if c), 0)
     client = ("python-librdkafka" if v2 else "python-rust") + \
         ("-async" if run_async else "")
     results = {
@@ -551,9 +568,8 @@ def print_measurement_summary(completed_messages, total_latency_ms,
         "throughput_msg_s": round(message_rate, 2),
         "throughput_mib_s": round(mib_rate, 2),
         "latency_ms": {
-            "min": min_latency_ms,
-            "avg": round(total_latency_ms / completed_messages, 2)
-            if completed_messages > 0 else 0.0,
+            "min": round(min_latency_ms, 2),
+            "avg": round(avg_latency_ms, 2),
             "p50": p50, "p90": p90, "p95": p95, "p99": p99, "p999": p999,
             "max": round(max_latency_ms, 2),
         },
@@ -578,18 +594,20 @@ def print_measurement_summary(completed_messages, total_latency_ms,
         latency_budget_exceeded = True
         print(f"p99 latency {p99} ms exceeds budget {p99_limit_ms} ms")
 
-def pacing_wait_s(messages_sent, first_message_time):
+def pacing_wait_s(messages_sent, first_message_time, final=False):
     """Seconds to sleep after ``messages_sent`` measured messages (<= 0 = none).
 
     Every ``max(floor(limit_rps / 10), 1)`` messages (~100 ms of traffic) the
     sender sleeps until ``first_message_time + messages_sent / limit_rps``. The
     deadline is derived from the cumulative count rather than stepped by a fixed
     100 ms per checkpoint, so rates that are not a multiple of 10 are honoured
-    exactly. Unlimited (``limit_rps`` unset) never waits."""
+    exactly. ``final`` (after the last send) waits off the checkpoint too, as
+    the C harness does: without it a fast client ends a counted run early and
+    overstates throughput. Unlimited (``limit_rps`` unset) never waits."""
     if not limit_rps:
         return 0.0
     checkpoint = max(limit_rps // 10, 1)
-    if messages_sent % checkpoint != 0:
+    if not final and messages_sent % checkpoint != 0:
         return 0.0
     deadline_ns = first_message_time + messages_sent * 1e9 / limit_rps
     return (deadline_ns - time.time_ns()) / 1e9
@@ -601,10 +619,28 @@ def fail_run():
     run_failed = True
 
 
-def check_completion(completed_messages):
+def counted_run_capped(first_message_time):
+    """True once a counted run's measured time reaches TEST_DURATION_SECONDS +
+    COUNTED_RUN_CAP_SLACK_S (on the measured interval's clock, see main)."""
+    return time.time_ns() - first_message_time >= \
+        (test_duration_s + COUNTED_RUN_CAP_SLACK_S) * 1_000_000_000
+
+
+def report_capped(messages_sent, first_message_time):
+    """Print the one stdout line of a counted run stopped by the time cap."""
+    elapsed_s = (time.time_ns() - first_message_time) / 1e9
+    print(f"capped: sent {messages_sent} of {num_messages} records in "
+          f"{elapsed_s:.2f} s (TEST_DURATION_SECONDS + {COUNTED_RUN_CAP_SLACK_S} s)")
+
+
+def check_completion(completed_messages, messages_sent, capped):
     """Fail the run, unless it was terminated by a signal, when not every
-    completed record verified or (with a message target) not every requested
-    record completed. The summary and results.json are written regardless."""
+    completed record verified or (with a message target) not every sent record
+    completed, or none did. ``messages_sent`` leaves out the async path's
+    QUEUE_FULL rejections (the sync path retries them), so those reduce the
+    throughput rather than fail the run. A counted run stopped by the time cap
+    (``capped``) sent fewer records than its target and is not failed for that.
+    The summary and results.json are written regardless."""
     if terminating:
         return
     if verified != completed_messages:
@@ -612,16 +648,23 @@ def check_completion(completed_messages):
               "does not match completed messages "
               f"{completed_messages}")
         fail_run()
-    if num_messages > 0 and completed_messages != num_messages:
-        print(f"Completed messages {completed_messages} "
-              f"does not match produced messages {num_messages}")
-        fail_run()
+    if num_messages > 0:
+        if completed_messages != messages_sent:
+            print(f"Completed messages {completed_messages} "
+                  f"does not match produced messages {messages_sent}")
+            fail_run()
+        if completed_messages == 0:
+            print("No messages completed before the time cap" if capped
+                  else "No messages completed")
+            fail_run()
 
 
 def main(v2=False):
     global producer, verified, warmup_sent, measured_sent, baseline_end_offsets
-    total_latency_ms = 0
-    max_latency_ms = 0
+    # Exact latency sum / min / max in ns (from time.perf_counter_ns() stamps).
+    total_latency_ns = 0
+    min_latency_ns = None
+    max_latency_ns = 0
     completed_messages = 0
     before_ms = None
     first_message_time = None
@@ -657,13 +700,13 @@ def main(v2=False):
     else:
         producer = v2_producer(common_default_configuration)
 
-    def record_delivery(metadata, exception, start_time):
+    def record_delivery(metadata, exception, start_ns):
         # Both backends record here, in their native delivery callback (v3
         # callback / v2 delivery_report). It runs on the producer's single
         # completion/poll thread — the single writer of the latency state — and
         # stamps the latency at the broker ack, so a slow reader can never
         # inflate it (matches the native rust/C perf apps).
-        nonlocal max_latency_ms, total_latency_ms, completed_messages
+        nonlocal total_latency_ns, min_latency_ns, max_latency_ns, completed_messages
         # completed_messages is bumped in `finally` so every delivery counts
         # exactly once even if the accounting below raises: an exception
         # escaping this callback would otherwise kill the v2 poll thread (or be
@@ -680,13 +723,15 @@ def main(v2=False):
                     verification_function(metadata)
                 except Exception as e:
                     print(f"Produce call resulted in exception: {e}")
-            current_latency = int(time.time() * 1000) - start_time
-            metrics.latency.add_measurement(current_latency)
-            record_latency(current_latency)
+            latency_ns = time.perf_counter_ns() - start_ns
+            metrics.latency.add_measurement(latency_ns / 1_000_000)
+            record_latency(latency_ns)
             metrics.messages.add_measurement(1)
             metrics.bytes.add_measurement(message_size)
-            max_latency_ms = max(max_latency_ms, current_latency)
-            total_latency_ms += current_latency
+            max_latency_ns = max(max_latency_ns, latency_ns)
+            if min_latency_ns is None or latency_ns < min_latency_ns:
+                min_latency_ns = latency_ns
+            total_latency_ns += latency_ns
         except Exception as e:  # noqa: BLE001
             print(f"Delivery accounting failed: {e!r}")
         finally:
@@ -733,33 +778,39 @@ def main(v2=False):
             metrics.measurement_start_ms = before_ms
             print(f"Starting measured interval at {before_ms} ms: {datetime.datetime.now(tz=datetime.timezone.utc)}")  # noqa: E501
             messages_sent = 0
+            # Set when a counted run stops at the time cap (see
+            # COUNTED_RUN_CAP_SLACK_S), checked before every send.
+            capped = False
             if num_messages > 0:
                 continue_sending = messages_sent < num_messages
             else:
                 continue_sending = not terminating
 
             while continue_sending:
+                if num_messages > 0 and counted_run_capped(first_message_time):
+                    capped = True
+                    report_capped(messages_sent, first_message_time)
+                    break
                 try:
                     key, value = generated_messages[messages_sent % generated_messages_len]
                     next_message = ProducerRecord(
                         topic=topic_name,
                         key=key,
                         value=value)
-                    start_time = int(time.time() * 1000)
+                    start_ns = time.perf_counter_ns()
                     # Both backends record latency in their native delivery
                     # callback (stamped at the broker ack), not in a recorder.
                     producer.send(
                         record=next_message,
-                        callback=(lambda md, exc, st=start_time:
+                        callback=(lambda md, exc, st=start_ns:
                                   record_delivery(md, exc, st)))
                     messages_sent += 1
                     time_to_wait_s = pacing_wait_s(messages_sent, first_message_time)
                     if time_to_wait_s > 0:
                         time.sleep(time_to_wait_s)
-                    if messages_sent % 10000 == 0:
+                    if num_messages == 0 and messages_sent % 10000 == 0:
                         duration = time.time_ns() - first_message_time
-                        exceeded_seconds = num_messages > 0 and 10 or 1
-                        if duration > (test_duration_s + exceeded_seconds) * 1e9:
+                        if duration > (test_duration_s + 1) * 1e9:
                             print(f"Test duration reached, {duration / 1e9:.2f} seconds. Interrupting...\n")  # noqa: E501
                             break
                 except RuntimeError:
@@ -770,6 +821,9 @@ def main(v2=False):
                     continue_sending = continue_sending and messages_sent < num_messages
 
             if not terminating:
+                time_to_wait_s = pacing_wait_s(messages_sent, first_message_time, final=True)
+                if time_to_wait_s > 0:
+                    time.sleep(time_to_wait_s)
                 # Flush so the producer drives every pending delivery to
                 # completion, then wait for the delivery callbacks (which record
                 # latency/metrics) to drain. Same barrier for both backends.
@@ -781,10 +835,10 @@ def main(v2=False):
             after_ms = int(time.time() * 1000)
             after_ns = time.time_ns()
 
-            check_completion(completed_messages)
+            check_completion(completed_messages, messages_sent, capped)
             print_measurement_summary(
-                completed_messages, total_latency_ms, max_latency_ms,
-                before_ms, after_ms, after_ns, first_message_time)
+                completed_messages, total_latency_ns, min_latency_ns,
+                max_latency_ns, before_ms, after_ms, after_ns, first_message_time)
     except CancelledError:
         print("Main cancelled")
 
@@ -802,8 +856,10 @@ async def async_main():
     future (``produce_call = await producer.send(record=record)``).
     """
     global producer, verified, warmup_sent, measured_sent, baseline_end_offsets
-    total_latency_ms = 0
-    max_latency_ms = 0
+    # Exact latency sum / min / max in ns (from time.perf_counter_ns() stamps).
+    total_latency_ns = 0
+    min_latency_ns = None
+    max_latency_ns = 0
     completed_messages = 0
     # Messages whose delivery failed with QUEUE_FULL (local queue overflow):
     # they were never actually sent, so they are subtracted from measured_sent.
@@ -840,22 +896,23 @@ async def async_main():
     producer = v2_async_producer(common_default_configuration) if v2 \
         else v3_async_producer(common_default_configuration)
 
-    def record_delivery_async(fut, start_time):
+    def record_delivery_async(fut, start_ns):
         # v2: runs on the event loop when the delivery future resolves
         # (add_done_callback -> call_soon). A cancelled future carries no
         # result/exception (calling .exception() on it would raise), so treat
         # it like any other completion.
         exc = None if fut.cancelled() else fut.exception()
         record_completion_async(None if exc is not None or fut.cancelled() else fut.result(),
-                                exc, start_time)
+                                exc, start_ns)
 
-    def record_completion_async(result, exc, start_time):
+    def record_completion_async(result, exc, start_ns):
         # Runs on the event loop when the delivery completes (v3: the send()
         # callback, which runs on the loop before the record's future
         # completes), stamping latency at completion so a backed-up reader can't
         # inflate it. Single-threaded (the loop), so no lock is needed. Matches
         # the sync path and the native rust/C apps.
-        nonlocal max_latency_ms, total_latency_ms, completed_messages, queue_full
+        nonlocal total_latency_ns, min_latency_ns, max_latency_ns, completed_messages
+        nonlocal queue_full
         # QUEUE_FULL is the one outcome kept OUT of the throughput count: those
         # records were never sent, so they are subtracted from measured_sent
         # instead. Don't log it — it can occur tens of thousands of times.
@@ -879,13 +936,15 @@ async def async_main():
                     verification_function(result)
                 except Exception as e:
                     print(f"Produce call resulted in exception: {e}")
-            current_latency = int(time.time() * 1000) - start_time
-            metrics.latency.add_measurement(current_latency)
-            record_latency(current_latency)
+            latency_ns = time.perf_counter_ns() - start_ns
+            metrics.latency.add_measurement(latency_ns / 1_000_000)
+            record_latency(latency_ns)
             metrics.messages.add_measurement(1)
             metrics.bytes.add_measurement(message_size)
-            max_latency_ms = max(max_latency_ms, current_latency)
-            total_latency_ms += current_latency
+            max_latency_ns = max(max_latency_ns, latency_ns)
+            if min_latency_ns is None or latency_ns < min_latency_ns:
+                min_latency_ns = latency_ns
+            total_latency_ns += latency_ns
         except Exception as e:  # noqa: BLE001
             print(f"Delivery accounting failed: {e!r}")
         finally:
@@ -931,32 +990,39 @@ async def async_main():
             metrics.measurement_start_ms = before_ms
             print(f"Starting measured interval at {before_ms} ms: {datetime.datetime.now(tz=datetime.timezone.utc)}")  # noqa: E501
             messages_sent = 0
+            # Set when a counted run stops at the time cap (see
+            # COUNTED_RUN_CAP_SLACK_S), checked before every send.
+            capped = False
             if num_messages > 0:
                 continue_sending = messages_sent < num_messages
             else:
                 continue_sending = not terminating
 
             while continue_sending:
+                if num_messages > 0 and counted_run_capped(first_message_time):
+                    capped = True
+                    report_capped(messages_sent, first_message_time)
+                    break
                 try:
                     key, value = generated_messages[messages_sent % generated_messages_len]
                     next_message = ProducerRecord(
                         topic=topic_name,
                         key=key,
                         value=value)
-                    start_time = int(time.time() * 1000)
+                    start_ns = time.perf_counter_ns()
                     # Record latency in the delivery callback (stamped at the
                     # ack on the event loop), not in a recorder task.
                     if v2:
                         fut = await producer.send(record=next_message)
                         fut.add_done_callback(
-                            lambda f, st=start_time: record_delivery_async(f, st))
+                            lambda f, st=start_ns: record_delivery_async(f, st))
                     else:
                         # The send() callback (Java's Callback), as the sync cell
                         # passes it: it runs on the event loop before the record's
                         # future completes, and the future itself is not kept.
                         await producer.send(
                             record=next_message,
-                            callback=lambda md, exc, st=start_time: record_completion_async(
+                            callback=lambda md, exc, st=start_ns: record_completion_async(
                                 md, exc, st))
                     messages_sent += 1
                     time_to_wait_s = pacing_wait_s(messages_sent, first_message_time)
@@ -967,8 +1033,7 @@ async def async_main():
                         # done-callbacks (which record latency/metrics).
                         await asyncio.sleep(0)
                         duration = time.time_ns() - first_message_time
-                        exceeded_seconds = num_messages > 0 and 10 or 1
-                        if duration > (test_duration_s + exceeded_seconds) * 1e9:
+                        if num_messages == 0 and duration > (test_duration_s + 1) * 1e9:
                             print(f"Test duration reached, {duration / 1e9:.2f} seconds. Interrupting...\n")  # noqa: E501
                             break
                 except RuntimeError:
@@ -978,6 +1043,10 @@ async def async_main():
                 if num_messages > 0:
                     continue_sending = continue_sending and messages_sent < num_messages
 
+            if not terminating:
+                time_to_wait_s = pacing_wait_s(messages_sent, first_message_time, final=True)
+                if time_to_wait_s > 0:
+                    await asyncio.sleep(time_to_wait_s)
             # Flush so the producer drives every pending delivery to completion,
             # then yield until the delivery callbacks (which record
             # latency/metrics) have all fired.
@@ -995,10 +1064,12 @@ async def async_main():
             after_ms = int(time.time() * 1000)
             after_ns = time.time_ns()
 
-            check_completion(completed_messages)
+            # measured_sent, not messages_sent: a QUEUE_FULL record never
+            # completes (see check_completion).
+            check_completion(completed_messages, measured_sent, capped)
             print_measurement_summary(
-                completed_messages, total_latency_ms, max_latency_ms,
-                before_ms, after_ms, after_ns, first_message_time)
+                completed_messages, total_latency_ns, min_latency_ns,
+                max_latency_ns, before_ms, after_ms, after_ns, first_message_time)
     except CancelledError:
         print("Main cancelled")
 
