@@ -716,6 +716,15 @@ impl AdminClientConfig {
         self.default_api_timeout_ms
     }
 
+    /// Whether the user set `key` explicitly.
+    ///
+    /// Java's `config.originals().containsKey(key)`: a key is "user
+    /// configured" iff it appears in the properties the configuration was
+    /// built from, not merely because it has a (possibly derived) value.
+    pub(crate) fn user_configured(&self, key: &str) -> bool {
+        self.config.originals_map().contains_key(key)
+    }
+
     /// `retries`.
     pub(crate) fn retries(&self) -> i32 {
         self.retries
