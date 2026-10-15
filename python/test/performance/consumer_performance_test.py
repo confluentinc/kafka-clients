@@ -33,7 +33,11 @@ Methodology (matches the C benchmark):
     producer perf test and the Rust harness).
   * Summary: min/avg + p50/p90/p95/p99/p999, throughput msg/s and MiB/s, in
     ``RESULTS_FILE`` (default ``results.json``) with the keys of the producer
-    harnesses' results.json, which ``cargo xtask perf-cloud`` reads.
+    harnesses' results.json, which ``cargo xtask perf-cloud`` reads. The
+    percentiles come from 1 ms buckets up to 600 000 ms (a longer latency in the
+    top bucket), min/avg/max from the exact values, as in the other consumer
+    harnesses. The results are written before the consumer is closed; a close
+    error is only logged as a warning.
 
 Backends (``CLIENT_VERSION``): ``3`` = the Rust binding
 (``confluent_kafka.consumer.KafkaConsumer`` of this repo's package), ``2`` =
@@ -74,7 +78,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 # name in the CLIENT_VERSION=2 baseline venv.
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
-from performance_common import Metrics, MAX_LATENCY_MS, percentile_from_hist, recreate_topic  # noqa: E402
+from performance_common import (CONSUMER_MAX_LATENCY_MS, Metrics,  # noqa: E402
+                                percentile_from_hist, recreate_topic)
 
 
 def _now_ms():
@@ -545,9 +550,15 @@ class _Measurement:
     def __init__(self, cfg, metrics):
         self.cfg = cfg
         self.metrics = metrics
-        # Overall latency histogram for the final summary (1 ms buckets +
-        # overflow), same approach as producer_performance_test.py.
-        self.latency_hist = [0] * (MAX_LATENCY_MS + 2)
+        # Overall latency histogram for the final summary's percentiles:
+        # sparse {1 ms bucket: count}, a latency above CONSUMER_MAX_LATENCY_MS
+        # counted in the top bucket (as rust/consumer-perf, librdkafka_e2e.c
+        # and JavaE2E.java). The exact sum / min / max are kept beside it for
+        # the summary's avg / min / max; measured_messages is the sample count.
+        self.latency_hist = {}
+        self.latency_sum_ms = 0
+        self.latency_min_ms = None
+        self.latency_max_ms = 0
         self.measured_messages = 0
         self.consume_start = None
         self.warmup_complete = (cfg.warmup_seconds <= 0)
@@ -593,7 +604,13 @@ class _Measurement:
         if ts_ms and ts_ms > 0:
             latency = _now_ms() - ts_ms
             if latency >= 0:
-                self.latency_hist[min(max(int(latency), 0), MAX_LATENCY_MS + 1)] += 1
+                idx = min(int(latency), CONSUMER_MAX_LATENCY_MS)
+                self.latency_hist[idx] = self.latency_hist.get(idx, 0) + 1
+                self.latency_sum_ms += latency
+                if self.latency_min_ms is None or latency < self.latency_min_ms:
+                    self.latency_min_ms = latency
+                if latency > self.latency_max_ms:
+                    self.latency_max_ms = latency
                 self.metrics.latency.add_measurement(latency)
                 self.metrics.bytes.add_measurement(nbytes)
                 self.metrics.messages.add_measurement(1)
@@ -644,6 +661,24 @@ def _readiness_ok(measurable, received, cfg):
     return False
 
 
+def _close_consumer(consumer):
+    """Close the consumer. A close error is logged to stderr as a warning: it
+    neither discards the results (written before the close) nor changes the
+    exit status."""
+    try:
+        consumer.close()
+    except Exception as e:  # noqa: BLE001
+        print(f"WARNING: closing the consumer failed: {e!r}", file=sys.stderr, flush=True)
+
+
+async def _close_consumer_async(consumer):
+    """``_close_consumer`` for the async backends."""
+    try:
+        await consumer.close()
+    except Exception as e:  # noqa: BLE001
+        print(f"WARNING: closing the consumer failed: {e!r}", file=sys.stderr, flush=True)
+
+
 def run(cfg, metrics=None):
     """Run the benchmark; return a stats dict. If `metrics` is None a fresh
     performance_common.Metrics (writing metrics.jsonl) is created."""
@@ -651,7 +686,7 @@ def run(cfg, metrics=None):
 
     own_metrics = metrics is None
     if own_metrics:
-        metrics = Metrics()
+        metrics = Metrics(latency_top_bucket=CONSUMER_MAX_LATENCY_MS)
 
     # Optionally start from a clean topic before consuming (admin uses the
     # librdkafka v2-form SASL config regardless of CLIENT_VERSION).
@@ -670,7 +705,7 @@ def run(cfg, metrics=None):
         list(poll())
         if time.monotonic() - join_start >= cfg.join_timeout_s:
             print("ERROR: timed out waiting for assignment", file=sys.stderr)
-            consumer.close()
+            _close_consumer(consumer)
             return None
     print(f">>> assigned after {time.monotonic() - join_start:.1f}s", flush=True)
 
@@ -699,40 +734,43 @@ def run(cfg, metrics=None):
             if _measurable_latency_ms(ts_ms) is not None:
                 ready_measurable += 1
     if not _readiness_ok(ready_measurable, ready_received, cfg):
-        consumer.close()
+        _close_consumer(consumer)
         return SETUP_NOT_READY
 
     meas = _Measurement(cfg, metrics)
     meas.begin()
     try:
-        while not _terminating:
-            for ts_ms, nbytes in poll():
-                meas.process_record(ts_ms, nbytes)
-            if meas.time_limit_reached():
-                break
-            if meas.no_data_timeout():
-                break
-    except _Done:
-        pass
+        try:
+            while not _terminating:
+                for ts_ms, nbytes in poll():
+                    meas.process_record(ts_ms, nbytes)
+                if meas.time_limit_reached():
+                    break
+                if meas.no_data_timeout():
+                    break
+        except _Done:
+            pass
+        finally:
+            measured_duration = meas.measured_duration()
+            metrics.measurement_end_ms = _now_ms()
+            if producer is not None:
+                try:
+                    producer.kill()
+                    producer.wait(timeout=5)
+                except Exception:
+                    pass
+                try:
+                    os.unlink(producer.props_path)
+                except OSError:
+                    pass
+            if own_metrics:
+                metrics.stop_collecting()
+        # Summary and results.json before the close, so a failing close
+        # cannot discard them.
+        stats = _summarize(cfg, meas, measured_duration, metrics)
     finally:
-        measured_duration = meas.measured_duration()
-        metrics.measurement_end_ms = _now_ms()
-        if producer is not None:
-            try:
-                producer.kill()
-                producer.wait(timeout=5)
-            except Exception:
-                pass
-            try:
-                os.unlink(producer.props_path)
-            except OSError:
-                pass
-        consumer.close()
-        if own_metrics:
-            metrics.stop_collecting()
-
-    return _summarize(cfg, meas.latency_hist, meas.measured_messages, measured_duration,
-                      metrics)
+        _close_consumer(consumer)
+    return stats
 
 
 async def run_async(cfg, metrics=None):
@@ -744,7 +782,7 @@ async def run_async(cfg, metrics=None):
 
     own_metrics = metrics is None
     if own_metrics:
-        metrics = Metrics()
+        metrics = Metrics(latency_top_bucket=CONSUMER_MAX_LATENCY_MS)
 
     # Clean topic before consuming. recreate_topic is synchronous (admin +
     # sleeps); it runs once at setup before the consumer touches the loop.
@@ -764,7 +802,7 @@ async def run_async(cfg, metrics=None):
             pass
         if time.monotonic() - join_start >= cfg.join_timeout_s:
             print("ERROR: timed out waiting for assignment", file=sys.stderr)
-            await consumer.close()
+            await _close_consumer_async(consumer)
             return None
     print(f">>> assigned after {time.monotonic() - join_start:.1f}s", flush=True)
 
@@ -794,53 +832,59 @@ async def run_async(cfg, metrics=None):
             if _measurable_latency_ms(ts_ms) is not None:
                 ready_measurable += 1
     if not _readiness_ok(ready_measurable, ready_received, cfg):
-        await consumer.close()
+        await _close_consumer_async(consumer)
         return SETUP_NOT_READY
 
     meas = _Measurement(cfg, metrics)
     meas.begin()
     try:
-        while not _terminating:
-            async for ts_ms, nbytes in poll():
-                meas.process_record(ts_ms, nbytes)
-            if meas.time_limit_reached():
-                break
-            if meas.no_data_timeout():
-                break
-    except _Done:
-        pass
+        try:
+            while not _terminating:
+                async for ts_ms, nbytes in poll():
+                    meas.process_record(ts_ms, nbytes)
+                if meas.time_limit_reached():
+                    break
+                if meas.no_data_timeout():
+                    break
+        except _Done:
+            pass
+        finally:
+            measured_duration = meas.measured_duration()
+            metrics.measurement_end_ms = _now_ms()
+            if producer is not None:
+                try:
+                    producer.kill()
+                    producer.wait(timeout=5)
+                except Exception:
+                    pass
+                try:
+                    os.unlink(producer.props_path)
+                except OSError:
+                    pass
+            if own_metrics:
+                metrics.stop_collecting()
+        # Summary and results.json before the close, so a failing close
+        # cannot discard them.
+        stats = _summarize(cfg, meas, measured_duration, metrics)
     finally:
-        measured_duration = meas.measured_duration()
-        metrics.measurement_end_ms = _now_ms()
-        if producer is not None:
-            try:
-                producer.kill()
-                producer.wait(timeout=5)
-            except Exception:
-                pass
-            try:
-                os.unlink(producer.props_path)
-            except OSError:
-                pass
-        await consumer.close()
-        if own_metrics:
-            metrics.stop_collecting()
-
-    return _summarize(cfg, meas.latency_hist, meas.measured_messages, measured_duration,
-                      metrics)
+        await _close_consumer_async(consumer)
+    return stats
 
 
-def _summarize(cfg, latency_hist, measured_messages, measured_duration,
-               metrics=None):
+def _summarize(cfg, meas, measured_duration, metrics=None):
+    """Print the summary and write results.json from a finished
+    ``_Measurement``: percentiles from its 1 ms histogram, min/avg/max from the
+    exact values (never from the clamped buckets)."""
+    latency_hist = meas.latency_hist
+    measured_messages = meas.measured_messages
     p50 = percentile_from_hist(latency_hist, 0.50)
     p90 = percentile_from_hist(latency_hist, 0.90)
     p95 = percentile_from_hist(latency_hist, 0.95)
     p99 = percentile_from_hist(latency_hist, 0.99)
     p999 = percentile_from_hist(latency_hist, 0.999)
-    total = sum(latency_hist)
-    avg = (sum(ms * c for ms, c in enumerate(latency_hist)) / total) if total else 0.0
-    mn = next((ms for ms, c in enumerate(latency_hist) if c), 0)
-    mx = next((ms for ms in range(len(latency_hist) - 1, -1, -1) if latency_hist[ms]), 0)
+    avg = meas.latency_sum_ms / measured_messages if measured_messages else 0.0
+    mn = meas.latency_min_ms if meas.latency_min_ms is not None else 0
+    mx = meas.latency_max_ms
     thr_msg = (measured_messages / measured_duration) if measured_duration > 0 else 0.0
     thr_mib = ((measured_messages * cfg.message_size) / (1024 * 1024) / measured_duration
                if measured_duration > 0 else 0.0)

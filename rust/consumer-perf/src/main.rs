@@ -73,37 +73,78 @@ fn now_millis() -> i64 {
 /// Fixed-memory histogram for streaming percentile estimation. 1 ms buckets
 /// from 0 to `MAX_LATENCY_MS`; anything larger lands in the last bucket. Mirrors
 /// the Java `E2ELatencyBenchmark.LatencyHistogram`.
+///
+/// The buckets are allocated once, zeroed, so only the pages of the buckets
+/// actually written become resident: the reported RSS is the client's, not
+/// this 4.8 MB array's. `reset()` clears in place and only the bucket range
+/// written since the last reset, so it neither reallocates nor touches the
+/// rest of the array.
 struct LatencyHistogram {
     buckets: Vec<u64>,
     count: u64,
     sum: u128,
     min: i64,
     max: i64,
+    /// Lowest and highest bucket written since `new()` / `reset()`; every
+    /// non-zero bucket lies in `lo..=hi`. Meaningless while `count == 0`.
+    lo: usize,
+    hi: usize,
 }
 
 impl LatencyHistogram {
     // 10 minutes: under --peak saturation, e2e latency is backlog age and can far
     // exceed 60s; a 10-min ceiling avoids clamping the tail within a 10-min run.
-    // 600k * 8 bytes ≈ 4.8 MB per histogram — negligible.
+    // 600k * 8 bytes ≈ 4.8 MB per histogram, of which only the written range
+    // is ever resident (see the type's doc).
     const MAX_LATENCY_MS: usize = 600_000;
 
     fn new() -> Self {
         Self {
+            // `vec![0; n]` is a zeroed allocation (calloc): untouched pages stay
+            // non-resident.
             buckets: vec![0; Self::MAX_LATENCY_MS + 1],
             count: 0,
             sum: 0,
             min: i64::MAX,
             max: i64::MIN,
+            lo: Self::MAX_LATENCY_MS,
+            hi: 0,
         }
+    }
+
+    /// Empties the histogram in place for the next interval, zeroing only the
+    /// buckets written since the last reset.
+    fn reset(&mut self) {
+        if self.count > 0 {
+            self.buckets[self.lo..=self.hi].fill(0);
+        }
+        self.count = 0;
+        self.sum = 0;
+        self.min = i64::MAX;
+        self.max = i64::MIN;
+        self.lo = Self::MAX_LATENCY_MS;
+        self.hi = 0;
     }
 
     fn record(&mut self, latency_ms: i64) {
         let idx = latency_ms.clamp(0, Self::MAX_LATENCY_MS as i64) as usize;
         self.buckets[idx] += 1;
+        self.lo = self.lo.min(idx);
+        self.hi = self.hi.max(idx);
         self.count += 1;
         self.sum += latency_ms.max(0) as u128;
         self.min = self.min.min(latency_ms);
         self.max = self.max.max(latency_ms);
+    }
+
+    /// The written bucket range: the index of its first bucket, and the
+    /// buckets. Every bucket outside it is zero.
+    fn written(&self) -> (usize, &[u64]) {
+        if self.count == 0 {
+            (0, &[])
+        } else {
+            (self.lo, &self.buckets[self.lo..=self.hi])
+        }
     }
 
     fn min(&self) -> i64 {
@@ -127,9 +168,10 @@ impl LatencyHistogram {
         }
         let mean = self.sum as f64 / self.count as f64;
         let mut var = 0.0;
-        for (i, &c) in self.buckets.iter().enumerate() {
+        let (first, buckets) = self.written();
+        for (i, &c) in buckets.iter().enumerate() {
             if c > 0 {
-                let d = i as f64 - mean;
+                let d = (first + i) as f64 - mean;
                 var += c as f64 * d * d;
             }
         }
@@ -142,13 +184,14 @@ impl LatencyHistogram {
         }
         let target = (pct / 100.0 * self.count as f64).ceil() as u64;
         let mut cumulative = 0u64;
-        for (i, &c) in self.buckets.iter().enumerate() {
+        let (first, buckets) = self.written();
+        for (i, &c) in buckets.iter().enumerate() {
             cumulative += c;
             if cumulative >= target {
-                return i as i64;
+                return (first + i) as i64;
             }
         }
-        Self::MAX_LATENCY_MS as i64
+        self.hi as i64
     }
 }
 
@@ -727,6 +770,19 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     props.insert("enable.auto.commit".to_string(), "true".to_string());
     let config = ConsumerConfig::new(&props)?;
 
+    // The histograms are allocated once, here, before the client has allocated
+    // and freed anything large: glibc raises its mmap threshold when a large
+    // mmap'd block is freed, after which a large calloc may be carved from a
+    // freed heap region and memset, making the whole array resident. Allocated
+    // now they are fresh zero pages, resident only where written.
+    let mut overall = LatencyHistogram::new();
+    let mut interval_hist = LatencyHistogram::new();
+    // Records-per-poll distribution over NON-EMPTY polls during the measurement
+    // window only (mirrors the C harness's batch_calls/batch_records, which count
+    // only batches that returned records, post-warmup). Each entry is the record
+    // count of one poll() that returned >=1 record.
+    let mut rpp = RecordsPerPoll::new();
+
     let mut consumer =
         KafkaConsumer::<usize, usize>::new(config, Box::new(LenDeserializer), Box::new(LenDeserializer))?;
 
@@ -807,8 +863,6 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    let mut overall = LatencyHistogram::new();
-    let mut interval_hist = LatencyHistogram::new();
     let mut sampler = ResourceSampler::new();
     // Run-level current-RSS aggregation (avg/min/max over interval samples).
     let mut rss_sum = 0.0f64;
@@ -847,11 +901,6 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     // in the client, not this loop.
     let mut poll_nanos: u128 = 0;
     let mut proc_nanos: u128 = 0;
-    // Records-per-poll distribution over NON-EMPTY polls during the measurement
-    // window only (mirrors the C harness's batch_calls/batch_records, which count
-    // only batches that returned records, post-warmup). Each entry is the record
-    // count of one poll() that returned >=1 record.
-    let mut rpp = RecordsPerPoll::new();
 
     'outer: loop {
         let p0 = Instant::now();
@@ -944,7 +993,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 cpu,
                 rss_mb,
             )?;
-            interval_hist = LatencyHistogram::new();
+            interval_hist.reset();
             interval_start = Instant::now();
             interval_count += 1;
         }
@@ -961,8 +1010,6 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         let _ = child.kill();
         let _ = child.wait();
     }
-
-    consumer.close().await?;
 
     // Bytes derived from the fixed producer record size (kafka-producer-perf-test
     // emits exactly --record-size payloads), so the per-record loop never reads
@@ -1020,6 +1067,13 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     println!("\nResults written to: {}", run_dir.display());
+
+    // Closed only once the results are on disk: a close error (e.g. a KIP-848
+    // leave-group timeout) says nothing about the measurement, so it is a
+    // warning and neither discards the results nor changes the exit status.
+    if let Err(e) = consumer.close().await {
+        eprintln!("warning: closing the consumer failed: {e}");
+    }
     if overall.count == 0 {
         return Err("no records measured".into());
     }
