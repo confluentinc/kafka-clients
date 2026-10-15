@@ -16,7 +16,8 @@
 //!
 //! Corresponds to `org.apache.kafka.clients.admin.AdminClientConfig`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::fmt;
 
 use crate::common::Error;
 use crate::common::config::config_def::{ConfigDef, Range, ValidList};
@@ -29,13 +30,10 @@ use crate::{ClientDnsLookup, CommonClientConfigs, MetadataRecoveryStrategy};
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.AdminClientConfig`. Unknown
 /// keys are accepted silently, matching Java's `AbstractConfig` behavior.
-// `Debug` is derived: every secret this struct holds is a `Password` inside
-// `sasl_config` / `ssl_config`, which renders as `[hidden]`. If this struct
-// ever gains a map of the raw user properties (Java's `originals()`), replace
-// the derive with a hand-written `Debug` that renders that map as its key set
-// only, as `ProducerConfig`'s `Debug` does: the map also holds keys this client
-// does not parse, and Java never prints a raw `originals` value.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Equality compares the parsed values and the user's map, as Java's
+/// `AbstractConfig.equals` compares `originals`.
+#[derive(Clone, PartialEq, Eq)]
 #[doc(alias = "org.apache.kafka.clients.admin.AdminClientConfig")]
 pub struct AdminClientConfig {
     bootstrap_servers: Vec<String>,
@@ -69,6 +67,93 @@ pub struct AdminClientConfig {
 
     /// SSL/TLS configuration.
     ssl_config: SslConfigs,
+
+    /// The user-supplied configuration map, verbatim: Java's
+    /// `AbstractConfig.originals()`, with no defaults mixed in. Read through
+    /// [`Self::user_configured`] where Java asks
+    /// `originals().containsKey(..)`: by
+    /// `CommonClientConfigs.postProcessReconnectBackoffConfigs` and by
+    /// `KafkaAdminClient.configureDefaultApiTimeoutMs`.
+    originals: HashMap<String, String>,
+}
+
+/// Renders every field in declaration order, as the derive it replaces did,
+/// but never a secret.
+///
+/// The typed secrets are `Password`s inside `sasl_config` / `ssl_config` and
+/// render as `Password::HIDDEN` on their own. `originals`, the raw user map,
+/// renders as its sorted key set, with no values at all, because Java never
+/// prints a raw `originals` value: `AbstractConfig.logAll()` prints only the
+/// values parsed for the keys the `ConfigDef` defines, with each
+/// `Type.PASSWORD` value rendered as `[hidden]`, and `logUnused()` prints key
+/// names only. The map also holds keys this client does not parse, such as
+/// Java's OAuth `Type.PASSWORD` keys, so hiding values by key could not match
+/// Java. This is the same rendering as `ProducerConfig`'s.
+impl fmt::Debug for AdminClientConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Destructured exhaustively: a field added to the struct fails to
+        // compile until it is bound here, and a bound but unrendered field is
+        // an unused variable, which the lint rejects.
+        let Self {
+            bootstrap_servers,
+            client_dns_lookup,
+            client_id,
+            request_timeout_ms,
+            default_api_timeout_ms,
+            retries,
+            retry_backoff_ms,
+            retry_backoff_max_ms,
+            bootstrap_resolve_timeout_ms,
+            reconnect_backoff_ms,
+            reconnect_backoff_max_ms,
+            connections_max_idle_ms,
+            metadata_max_age_ms,
+            socket_connection_setup_timeout_ms,
+            socket_connection_setup_timeout_max_ms,
+            send_buffer_bytes,
+            receive_buffer_bytes,
+            metadata_cluster_check_enable,
+            metadata_recovery_strategy,
+            metadata_recovery_rebootstrap_trigger_ms,
+            security_protocol,
+            sasl_config,
+            ssl_config,
+            originals,
+        } = self;
+        // The keys only, never a value (see above). Sorted so the rendering is
+        // deterministic, as Java's `logAll()` sorts; borrowed, so no key is
+        // copied.
+        let originals: BTreeSet<&str> = originals.keys().map(String::as_str).collect();
+        f.debug_struct("AdminClientConfig")
+            .field("bootstrap_servers", bootstrap_servers)
+            .field("client_dns_lookup", client_dns_lookup)
+            .field("client_id", client_id)
+            .field("request_timeout_ms", request_timeout_ms)
+            .field("default_api_timeout_ms", default_api_timeout_ms)
+            .field("retries", retries)
+            .field("retry_backoff_ms", retry_backoff_ms)
+            .field("retry_backoff_max_ms", retry_backoff_max_ms)
+            .field("bootstrap_resolve_timeout_ms", bootstrap_resolve_timeout_ms)
+            .field("reconnect_backoff_ms", reconnect_backoff_ms)
+            .field("reconnect_backoff_max_ms", reconnect_backoff_max_ms)
+            .field("connections_max_idle_ms", connections_max_idle_ms)
+            .field("metadata_max_age_ms", metadata_max_age_ms)
+            .field("socket_connection_setup_timeout_ms", socket_connection_setup_timeout_ms)
+            .field("socket_connection_setup_timeout_max_ms", socket_connection_setup_timeout_max_ms)
+            .field("send_buffer_bytes", send_buffer_bytes)
+            .field("receive_buffer_bytes", receive_buffer_bytes)
+            .field("metadata_cluster_check_enable", metadata_cluster_check_enable)
+            .field("metadata_recovery_strategy", metadata_recovery_strategy)
+            .field(
+                "metadata_recovery_rebootstrap_trigger_ms",
+                metadata_recovery_rebootstrap_trigger_ms,
+            )
+            .field("security_protocol", security_protocol)
+            .field("sasl_config", sasl_config)
+            .field("ssl_config", ssl_config)
+            .field("originals", &originals)
+            .finish()
+    }
 }
 
 impl AdminClientConfig {
@@ -170,7 +255,8 @@ impl AdminClientConfig {
     /// client with no bootstrap address at all.
     #[doc(alias = "org.apache.kafka.clients.admin.AdminClientConfig#AdminClientConfig(Map)")]
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
-        let mut config = Self::default();
+        // Java's `AbstractConfig` keeps the user's map as `originals()`.
+        let mut config = Self { originals: props.clone(), ..Self::default() };
         let mut bootstrap_controllers: Vec<String> = Vec::new();
 
         for (key, value) in props {
@@ -314,7 +400,7 @@ impl AdminClientConfig {
             }
         }
 
-        config.post_process_parsed_config(props)?;
+        config.post_process_parsed_config()?;
 
         // `KafkaAdminClient.determineBootstrapType` (KIP-909 moved it there from
         // the deleted `AdminBootstrapAddresses.fromConfig`). Java runs it in
@@ -345,14 +431,12 @@ impl AdminClientConfig {
     /// then `postProcessReconnectBackoffConfigs`, whose override replaces the
     /// parsed `reconnect.backoff.max.ms`.
     ///
-    /// `originals` is the user's map, Java's `originals()`.
-    ///
     /// # Errors
     ///
     /// [`Error::Config`] when a SASL `security.protocol` has an empty
     /// `sasl.mechanism`.
     #[doc(alias = "org.apache.kafka.clients.admin.AdminClientConfig#postProcessParsedConfig")]
-    fn post_process_parsed_config(&mut self, originals: &HashMap<String, String>) -> Result<(), Error> {
+    fn post_process_parsed_config(&mut self) -> Result<(), Error> {
         CommonClientConfigs::post_validate_sasl_mechanism_config(self.security_protocol, &self.sasl_config.mechanism)?;
         CommonClientConfigs::warn_disabling_exponential_backoff(
             self.retry_backoff_ms,
@@ -361,11 +445,19 @@ impl AdminClientConfig {
             self.socket_connection_setup_timeout_max_ms,
         );
         if let Some(reconnect_backoff_max_ms) =
-            CommonClientConfigs::post_process_reconnect_backoff_configs(originals, self.reconnect_backoff_ms)
+            CommonClientConfigs::post_process_reconnect_backoff_configs(&self.originals, self.reconnect_backoff_ms)
         {
             self.reconnect_backoff_max_ms = reconnect_backoff_max_ms;
         }
         Ok(())
+    }
+
+    /// Whether the user set `key` explicitly.
+    ///
+    /// Java's `originals().containsKey(key)`: a key is user configured iff it
+    /// is in the user's map, not merely because it has a value here.
+    pub(crate) fn user_configured(&self, key: &str) -> bool {
+        self.originals.contains_key(key)
     }
 
     /// The `bootstrap.servers` list.
@@ -388,7 +480,11 @@ impl AdminClientConfig {
         self.request_timeout_ms
     }
 
-    /// `default.api.timeout.ms`.
+    /// `default.api.timeout.ms`, as configured. The client checks it against
+    /// `request.timeout.ms` when it is created, as Java's
+    /// `KafkaAdminClient.configureDefaultApiTimeoutMs` does: an explicit value
+    /// below the request timeout fails creation, and an unset one below it is
+    /// raised to the request timeout.
     pub fn default_api_timeout_ms(&self) -> i32 {
         self.default_api_timeout_ms
     }
@@ -537,6 +633,7 @@ impl Default for AdminClientConfig {
             security_protocol: SecurityProtocol::Plaintext,
             sasl_config: SaslConfigs::default(),
             ssl_config: SslConfigs::default(),
+            originals: HashMap::new(),
         }
     }
 }
@@ -1038,8 +1135,9 @@ mod tests {
 
     /// `{:?}` of a config built from every `Type.PASSWORD` key the client
     /// parses (`sasl.jaas.config` and the six SSL keys) renders none of their
-    /// values. The derived `Debug` is safe because the embedded `SaslConfigs`
-    /// and `SslConfigs` hold those values as `Password`s.
+    /// values: the hand-written `Debug` renders `originals` as its keys only,
+    /// and the embedded `SaslConfigs` and `SslConfigs` hold the values as
+    /// `Password`s.
     #[test]
     fn test_debug_redacts_password_configs() {
         let secrets = [
@@ -1089,6 +1187,43 @@ mod tests {
                 assert!(rendered.contains(visible), "{visible} missing: {rendered}");
             }
         }
+    }
+
+    /// `originals` is the user's map verbatim (Java's `originals()`), which
+    /// `user_configured` reads; `Debug` renders it as its sorted key set and
+    /// never a value, including the value of a key this client does not parse.
+    /// Equality compares it, as Java's `AbstractConfig.equals` compares
+    /// `originals`.
+    #[test]
+    fn test_originals() {
+        let props = with_bootstrap(&[
+            ("request.timeout.ms", "5000"),
+            ("sasl.oauthbearer.client.credentials.client.secret", "oauth-S3cr3t"),
+            ("some.unknown.key", "unknown-value"),
+        ]);
+        let config = AdminClientConfig::new(&props).unwrap();
+        assert_eq!(config.originals, props);
+        assert!(config.user_configured("request.timeout.ms"));
+        assert!(config.user_configured("some.unknown.key"));
+        assert!(!config.user_configured("default.api.timeout.ms"));
+
+        for rendered in [format!("{config:?}"), format!("{config:#?}")] {
+            assert!(!rendered.contains("oauth-S3cr3t"), "{rendered}");
+            assert!(!rendered.contains("unknown-value"), "{rendered}");
+        }
+        assert!(
+            format!("{config:?}").ends_with(
+                "originals: {\"bootstrap.servers\", \"request.timeout.ms\", \
+                 \"sasl.oauthbearer.client.credentials.client.secret\", \"some.unknown.key\"} }"
+            ),
+            "{config:?}"
+        );
+        assert!(format!("{:?}", AdminClientConfig::default()).ends_with("originals: {} }"));
+
+        let same_values = AdminClientConfig::new(&with_bootstrap(&[("request.timeout.ms", "5000")])).unwrap();
+        assert_eq!(same_values.request_timeout_ms(), config.request_timeout_ms());
+        assert_ne!(same_values, config);
+        assert_eq!(AdminClientConfig::new(&props).unwrap(), config);
     }
 
     fn with_bootstrap(extra: &[(&str, &str)]) -> HashMap<String, String> {
