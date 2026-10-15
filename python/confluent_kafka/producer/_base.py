@@ -27,7 +27,6 @@ Implementation over the FFI).
 from __future__ import annotations
 
 import threading
-import weakref
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, cast
 
@@ -354,25 +353,11 @@ class _ProducerState:
             return True
 
     def _wait_for_uses(self) -> None:
-        """Wait until no counted call into the native producer is in flight
-        (none can start: ``_closed`` is set). ``send()`` is not counted (see
-        ``_release_handle``)."""
+        """Wait until no call into the native producer is in flight (none can
+        start: ``_closed`` is set)."""
         with self._lifecycle:
             while self._uses:
                 self._lifecycle.wait()
-
-    def _release_handle(self, c_producer: int) -> None:
-        """The end of a close. The send and poll tasks are joined first, so
-        every delivery callback has run when close() returns, as in Java. The
-        handle then stays valid until this producer is collected, when a
-        finalizer frees it: a ``send()`` that passed the closed check just
-        before the close began still reaches a live handle, which refuses its
-        record ("Producer closed while send in progress"), so ``send()`` need
-        not count itself as a use. The C struct's reference to this producer is
-        dropped here, or it would never be collected."""
-        _lib.Producer_join(c_producer)
-        _lib.Producer_release_owner(c_producer)
-        weakref.finalize(self, _lib.Producer_destroy, c_producer)
 
     def _start(self, configs: dict[str, Any], key_serializer: Serializer[Any] | None,
                value_serializer: Serializer[Any] | None) -> None:

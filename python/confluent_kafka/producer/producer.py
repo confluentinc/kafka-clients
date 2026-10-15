@@ -319,22 +319,23 @@ class Producer(Generic[K, V], _ProducerState):
 
         # Not waited for: no transactional.id, or inside a started transaction.
         cb = _Completion(self, callback, future, topic, partition, self._discard_future)
+        space: Future[None] | None = None
         # A close() that began since the check above (the serializers ran in
         # between) refuses the record as Java's RecordAccumulator.append does.
-        # The handle outlives close() (see _release_handle), so the call is not
-        # counted as a use.
-        c_producer = self._c_producer
-        full = _lib.Producer_send(c_producer, native, cb)
-        if full is None:
-            raise closed_while_sending()
-        self._track(future)
-        if full:
-            # The buffer is full: wait until the send task frees capacity, as
-            # Java's send() blocks on buffer.memory.
-            waiter: Future[None] = Future()
-            if not _lib.Producer_on_space_available(
-                    c_producer, lambda: waiter.set_result(None)):
-                waiter.result()
+        with self._send_use as c_producer:
+            full = _lib.Producer_send(c_producer, native, cb)
+            if full is None:
+                raise closed_while_sending()
+            self._track(future)
+            if full:
+                # The buffer is full: wait (below, not as a use) until the send
+                # task frees capacity, as Java's send() blocks on buffer.memory.
+                waiter: Future[None] = Future()
+                if not _lib.Producer_on_space_available(
+                        c_producer, lambda: waiter.set_result(None)):
+                    space = waiter
+        if space is not None:
+            space.result()
         return future
 
     def _send_waiting(self, native: object, topic: str, partition: int | None,
@@ -510,10 +511,10 @@ class Producer(Generic[K, V], _ProducerState):
         finally:
             if not closed:
                 force_close(c_producer)
-            # No counted call is in flight once this returns; the handle is
-            # then freed when this producer is collected.
+            # No call that could still touch the handle is in flight once this
+            # returns; then it is freed.
             self._wait_for_uses()
-            self._release_handle(c_producer)
+            _lib.Producer_destroy(c_producer)
             self._close_serializers()
 
     def __enter__(self) -> Producer[K, V]:

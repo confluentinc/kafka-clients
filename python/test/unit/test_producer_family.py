@@ -1002,25 +1002,14 @@ async def test_an_async_call_that_passed_its_closed_check_before_close_never_tou
 
 
 def _count_teardowns(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[int]]:
-    """Count Producer_shutdown / Producer_join / Producer_release_owner /
-    Producer_destroy per handle. close() runs the first three; the finalizer
-    runs destroy once the producer is collected. A second destroy of one
-    handle is counted, not run (it would free the struct twice)."""
-    calls: dict[str, list[int]] = {"shutdown": [], "join": [], "release": [], "destroy": []}
-    real_shutdown, real_join = _lib.Producer_shutdown, _lib.Producer_join
-    real_release, real_destroy = _lib.Producer_release_owner, _lib.Producer_destroy
+    """Count Producer_shutdown / Producer_destroy per handle; a second destroy
+    of one handle is counted, not run (it would free the struct twice)."""
+    calls: dict[str, list[int]] = {"shutdown": [], "destroy": []}
+    real_shutdown, real_destroy = _lib.Producer_shutdown, _lib.Producer_destroy
 
     def shutdown(c_producer: int) -> None:
         calls["shutdown"].append(c_producer)
         real_shutdown(c_producer)
-
-    def join(c_producer: int) -> None:
-        calls["join"].append(c_producer)
-        real_join(c_producer)
-
-    def release(c_producer: int) -> None:
-        calls["release"].append(c_producer)
-        real_release(c_producer)
 
     def destroy(c_producer: int) -> None:
         calls["destroy"].append(c_producer)
@@ -1028,18 +1017,8 @@ def _count_teardowns(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[int]]:
             real_destroy(c_producer)
 
     monkeypatch.setattr(_lib, "Producer_shutdown", shutdown)
-    monkeypatch.setattr(_lib, "Producer_join", join)
-    monkeypatch.setattr(_lib, "Producer_release_owner", release)
     monkeypatch.setattr(_lib, "Producer_destroy", destroy)
     return calls
-
-
-def _collect() -> None:
-    """A producer is in a reference cycle (its guards point back at it), so the
-    cycle collector is what runs its finalizer."""
-    import gc
-
-    gc.collect()
 
 
 def _close_from_two_threads(p: KafkaProducer[Any, Any]) -> None:
@@ -1072,12 +1051,7 @@ def test_concurrent_closes_tear_down_once(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(module, "in_callback", slow_in_callback)
     p = KafkaProducer(configs=UNREACHABLE)
     _close_from_two_threads(p)
-    c_producer = p._c_producer  # noqa: SLF001
-    assert calls == {"shutdown": [c_producer], "join": [c_producer],
-                     "release": [c_producer], "destroy": []}
-    del p
-    _collect()
-    assert calls["destroy"] == [c_producer]
+    assert calls == {"shutdown": [p._c_producer], "destroy": [p._c_producer]}  # noqa: SLF001
 
 
 def test_concurrent_closes_tear_down_once_at_a_short_switch_interval(
@@ -1089,14 +1063,11 @@ def test_concurrent_closes_tear_down_once_at_a_short_switch_interval(
     sys.setswitchinterval(1e-6)
     try:
         for _ in range(30):
-            for made in calls.values():
-                made.clear()
+            calls["shutdown"].clear()
+            calls["destroy"].clear()
             p = KafkaProducer(configs=UNREACHABLE)
             _close_from_two_threads(p)
-            assert len(calls["shutdown"]) == 1 and len(calls["join"]) == 1
-            del p
-            _collect()
-            assert len(calls["destroy"]) == 1
+            assert len(calls["shutdown"]) == 1 and len(calls["destroy"]) == 1
     finally:
         sys.setswitchinterval(previous)
 
@@ -1111,36 +1082,13 @@ def test_concurrent_async_closes_tear_down_once(monkeypatch: pytest.MonkeyPatch)
         return c_producer
 
     c_producer = asyncio.run(main())
-    _collect()
-    assert calls == {"shutdown": [c_producer], "join": [c_producer],
-                     "release": [c_producer], "destroy": [c_producer]}
-
-
-def test_close_leaves_the_handle_valid_until_the_producer_is_collected(
-        monkeypatch: pytest.MonkeyPatch) -> None:
-    # close() joins the C threads and lets go of the producer, but leaves the
-    # handle valid: a send that passed the closed check just before the close
-    # began still reaches it. The finalizer frees it once the producer is
-    # collected, and only then.
-    calls = _count_teardowns(monkeypatch)
-    p = KafkaProducer(configs=UNREACHABLE)
-    c_producer = p._c_producer  # noqa: SLF001
-    p.close()
-    assert calls == {"shutdown": [c_producer], "join": [c_producer],
-                     "release": [c_producer], "destroy": []}
-    with pytest.raises(IllegalStateError) as err:
-        p.send(record=RECORD)
-    assert str(err.value) == CLOSED
-    p.close()
-    assert calls["destroy"] == []
-    del p, err  # the error's traceback holds send()'s frame, and so the producer
-    _collect()
-    assert calls["destroy"] == [c_producer]
+    assert calls == {"shutdown": [c_producer], "destroy": [c_producer]}
 
 
 def test_close_returns_after_every_delivery_callback_has_run() -> None:
-    # The C poll thread runs the delivery callbacks; close() joins it, as
-    # Java's close() joins its I/O thread, so none runs after close() returns.
+    # The C poll thread runs the delivery callbacks; close() joins it (in
+    # Producer_destroy), as Java's close() joins its I/O thread, so none runs
+    # after close() returns.
     ran: list[Exception | None] = []
 
     def callback(md: RecordMetadata, e: Exception | None) -> None:
