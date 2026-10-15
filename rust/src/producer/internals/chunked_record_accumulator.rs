@@ -1565,24 +1565,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            // The cluster has one partition, so the built-in partitioner can only choose
-            // `PARTITION1`.
-            let failure = accum
-                .append(
-                    TOPIC,
-                    RecordMetadata::UNKNOWN_PARTITION,
-                    0,
-                    Some(KEY),
-                    Some(&[0u8; 150]),
-                    &[],
-                    None,
-                    max_time_to_block,
-                    fx.time.milliseconds(),
-                    &fx.cluster,
-                )
-                .await
-                .err()
-                .unwrap();
+            let failure = append_unknown_partition_failure(&fx, &accum, &[0u8; 150], max_time_to_block).await;
             assert!(
                 matches!(failure.error, Error::ProducerBufferExhausted(_)),
                 "{failure_point}: {:?}",
@@ -1591,6 +1574,101 @@ mod tests {
             assert_eq!(PARTITION1, failure.partition, "a failure at {failure_point}");
             accum.base().close();
         }
+    }
+
+    /// Appends a record to the built-in partitioner's choice and returns the failure. The
+    /// cluster has one partition, so the partitioner can only choose `PARTITION1`.
+    async fn append_unknown_partition_failure(
+        fx: &Fixture,
+        accum: &ChunkedRecordAccumulator,
+        value: &[u8],
+        max_time_to_block: i64,
+    ) -> Box<AppendFailure> {
+        accum
+            .append(
+                TOPIC,
+                RecordMetadata::UNKNOWN_PARTITION,
+                0,
+                Some(KEY),
+                Some(value),
+                &[],
+                None,
+                max_time_to_block,
+                fx.time.milliseconds(),
+                &fx.cluster,
+            )
+            .await
+            .err()
+            .unwrap()
+    }
+
+    /// An extension that fails for a reason other than exhausted memory reports the partition
+    /// `append` chose. Here the pool is closed after the batch opens, so the extension's
+    /// acquire fails with the pool's own error. Not a translation of a Java test.
+    #[tokio::test]
+    async fn test_failed_extension_reports_the_partition_chosen_by_the_partitioner() {
+        let fx = fixture();
+        let chunk_size = 256;
+        let pool = fx.pool(64 * chunk_size as i64, chunk_size);
+        let accum = fx
+            .accumulator_with_pool(8192, Compression::none().build(), Arc::clone(&pool))
+            .unwrap();
+        // The first record opens a batch with one chunk.
+        fx.append_to(&accum, RecordMetadata::UNKNOWN_PARTITION, &[0u8; 150], 0)
+            .await
+            .unwrap();
+        pool.close();
+
+        // The second record overflows that chunk, so the batch needs an extension.
+        let failure = append_unknown_partition_failure(&fx, &accum, &[0u8; 150], MAX_BLOCK_TIME_MS).await;
+        assert_eq!("Producer closed while allocating memory", failure.error.message());
+        assert_eq!(PARTITION1, failure.partition);
+        accum.base().close();
+    }
+
+    /// Closes the accumulator once its armed allocation succeeds, as `close` would from
+    /// another task while an append holds no lock.
+    struct CloseAccumulatorAfterAllocation {
+        close_once: AtomicBool,
+    }
+
+    impl ChunkedAccumulatorTestHooks for CloseAccumulatorAfterAllocation {
+        fn allocate_chunks<'a>(
+            &'a self,
+            accum: &'a ChunkedRecordAccumulator,
+            total_size: i32,
+            max_time_to_block_ms: i64,
+        ) -> HookFuture<'a> {
+            Box::pin(async move {
+                let chunks = accum.real_allocate_chunks(total_size, max_time_to_block_ms).await?;
+                if self.close_once.swap(false, Ordering::SeqCst) {
+                    accum.base().close();
+                }
+                Ok(chunks)
+            })
+        }
+    }
+
+    /// An accumulator closed while an append is in progress fails it with "Producer closed
+    /// while send in progress", reporting the partition `append` chose. Not a translation of a
+    /// Java test.
+    #[tokio::test]
+    async fn test_close_during_append_reports_the_partition_chosen_by_the_partitioner() {
+        let fx = fixture();
+        let chunk_size = 256;
+        let hooks = Arc::new(CloseAccumulatorAfterAllocation { close_once: AtomicBool::new(false) });
+        let accum = fx.hooked(8192, fx.pool(64 * chunk_size as i64, chunk_size), hooks.clone());
+        // The first record opens a batch with one chunk.
+        fx.append_to(&accum, RecordMetadata::UNKNOWN_PARTITION, &[0u8; 150], 0)
+            .await
+            .unwrap();
+        hooks.close_once.store(true, Ordering::SeqCst);
+
+        // The second record overflows that chunk. The accumulator closes once the extension's
+        // chunks are acquired, so the append fails when it next tries to append.
+        let failure = append_unknown_partition_failure(&fx, &accum, &[0u8; 150], MAX_BLOCK_TIME_MS).await;
+        assert_eq!("Producer closed while send in progress", failure.error.message());
+        assert_eq!(PARTITION1, failure.partition);
     }
 
     /// Test that chunks are returned to the pool only at batch completion (deallocate), never at
