@@ -1,0 +1,27 @@
+# Producer performance tests run by `cargo xtask perf-cloud` against a remote
+# cluster.
+#
+# One test per line: <id> <groups> KEY=VALUE ...
+#
+#   id      lowercase letters, digits and `-`; named in the PERF_TESTS parameter
+#   groups  the client groups it applies to: rust, python, or rust,python
+#   KEY     a producer harness setting, in the harnesses' units:
+#             PARTITIONS VALUE_SIZE LIMIT_RPS   required; LIMIT_RPS=0 is unbounded
+#             KEY_SIZE (B)  BATCH_SIZE (KiB)  LINGER_MS  MAX_IN_FLIGHT
+#             BUFFER_MEMORY (MiB)  MAX_REQUEST_SIZE (KiB)
+#             COMPRESSION_TYPE (none|gzip|snappy|lz4|zstd)  ENABLE_IDEMPOTENCE (true|false)
+#           Unset settings take each harness's own default (these differ, e.g.
+#           MAX_IN_FLIGHT); set them to pin them. A test for the rust group
+#           needs BATCH_SIZE >= 1024: below it the C harness's librdkafka arm
+#           uses 1 MiB batches.
+#
+# `cargo xtask perf-cloud check --group G --tests ID,ID` validates a list and
+# prints its time estimate.
+
+# 10k msg/s of 1 KiB values (~10 MB/s): latency at a fixed, comfortable load.
+producer-fixed-10k-1kb-200p  rust,python  PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=10000 BATCH_SIZE=1024
+
+# Unbounded 1 KiB values: peak throughput. Rust-group clients can approach the
+# cluster's ingress limit; when PERF_CLUSTER_INGRESS_MB_S is set the report
+# flags results within 15% of it.
+producer-max-1kb-200p        rust,python  PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=0 BATCH_SIZE=1024
