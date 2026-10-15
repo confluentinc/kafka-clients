@@ -12,22 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! String-value parsing from `org.apache.kafka.common.config.ConfigDef`.
+//! String-value parsing and shared validators from `org.apache.kafka.common.config.ConfigDef`.
 //!
 //! The client configs in this crate are plain structs with named fields, not
 //! a `ConfigDef` (see the module docs of `ProducerConfig` / `ConsumerConfig`),
-//! so only the part of `ConfigDef.parseType` that every config shares is
-//! translated here: how a `String` value is trimmed and, for a `LIST`, split.
-//! Keeping it in one place is what makes `bootstrap.servers` (and every other
-//! list-typed key) parse identically in the producer, consumer, admin client
-//! and SSL configs, as it does in Java where all of them go through
-//! `ConfigDef.parseType`.
+//! so only the parts of `ConfigDef.parseType` the configs share are
+//! translated here: how a `String` value is trimmed and, for a `LIST`, split,
+//! and how a number is parsed, with Java's error messages. Keeping them in one
+//! place is what makes `bootstrap.servers` (and every other list-typed key)
+//! parse identically in the producer, consumer, admin client and SSL configs,
+//! as it does in Java where all of them go through `ConfigDef.parseType`.
 //!
-//! Of `ConfigDef`'s validators, only [`ValidList`]'s `anyNonDuplicateValues`
-//! form is translated here, because every list-typed client key uses it and a
-//! shared translation keeps its messages identical across the configs. The
-//! scalar validators (`Range`, `ValidString`, ...) are inlined at the configs'
-//! own keys.
+//! Of `ConfigDef`'s validators, [`ValidList`]'s `anyNonDuplicateValues` form
+//! and [`Range`] are translated here, so their messages are identical across
+//! the configs that use them. The other validators (`ValidString`, ...) are
+//! inlined at the configs' own keys.
 
 use std::collections::HashSet;
 
@@ -39,7 +38,7 @@ use crate::common::Error;
 /// (CLAUDE.md §2: static functions are exported through the struct defining
 /// them). The rest of `ConfigDef` (`define`, most validators, documentation)
 /// has no counterpart: the configs validate in their own constructors, using
-/// the nested [`ValidList`] for their list-typed keys.
+/// the nested [`ValidList`] and [`Range`] where Java's definitions do.
 #[doc(alias = "org.apache.kafka.common.config.ConfigDef")]
 pub(crate) struct ConfigDef;
 
@@ -88,6 +87,134 @@ impl ConfigDef {
     /// Java regex `\s`: `[ \t\n\x0B\f\r]`.
     fn is_regex_whitespace(c: char) -> bool {
         matches!(c, ' ' | '\t' | '\n' | '\u{0B}' | '\u{0C}' | '\r')
+    }
+
+    /// The `Type.INT` arm of Java's `ConfigDef.parseType` for a `String`
+    /// value: `Integer.parseInt(trimmed)` (`ConfigDef.java:736-742`).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Config`] when the trimmed value is not an `int`, with
+    /// `parseType`'s `NumberFormatException` message (`ConfigDef.java:788-789`):
+    /// `Invalid value <value> for configuration <name>: Not a number of type
+    /// INT`, where `<value>` is the original, untrimmed string. Java's
+    /// `parseInt` also accepts non-ASCII Unicode digits; this accepts ASCII
+    /// digits only.
+    pub(crate) fn parse_int(name: &str, value: &str) -> Result<i32, Error> {
+        Self::trim(value)
+            .parse::<i32>()
+            .map_err(|_| Self::not_a_number(name, value, "INT"))
+    }
+
+    /// The `Type.LONG` arm of Java's `ConfigDef.parseType` for a `String`
+    /// value: `Long.parseLong(trimmed)` (`ConfigDef.java:752-760`).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::parse_int`], with `Not a number of type LONG`.
+    pub(crate) fn parse_long(name: &str, value: &str) -> Result<i64, Error> {
+        Self::trim(value)
+            .parse::<i64>()
+            .map_err(|_| Self::not_a_number(name, value, "LONG"))
+    }
+
+    /// `parseType`'s `catch (NumberFormatException e)`: `new
+    /// ConfigException(name, value, "Not a number of type " + type)`, with the
+    /// original value (`ConfigDef.java:788-789`).
+    fn not_a_number(name: &str, value: &str, type_name: &str) -> Error {
+        Error::config_name_value_message(name, value, format!("Not a number of type {type_name}"))
+    }
+}
+
+/// What Java's `ConfigDef.Range` uses of the `java.lang.Number` its bounds
+/// and values are: `doubleValue()` for the comparison and `toString()` for
+/// the error message.
+///
+/// A crate-private trait rather than a type from Java: the Java parameters are
+/// `Number`, which Rust has no counterpart for, and the trait lets one
+/// [`Range`] serve each numeric config type.
+pub(crate) trait Number: Copy {
+    /// Java's `Number.doubleValue()`.
+    fn double_value(self) -> f64;
+
+    /// Java's `toString()` of the boxed value.
+    fn java_to_string(self) -> String;
+}
+
+impl Number for i32 {
+    fn double_value(self) -> f64 {
+        f64::from(self)
+    }
+
+    fn java_to_string(self) -> String {
+        self.to_string()
+    }
+}
+
+impl Number for i64 {
+    fn double_value(self) -> f64 {
+        // Java's `Long.doubleValue()` is the same rounding conversion.
+        self as f64
+    }
+
+    fn java_to_string(self) -> String {
+        self.to_string()
+    }
+}
+
+/// Java's `ConfigDef.Range`: a numeric range with an inclusive lower bound
+/// and an optional inclusive upper bound.
+///
+/// Java's `ensureValid` takes an `Object` and rejects `null` with `Value must
+/// be non-null`; a value parsed from a `String` property is never null, so
+/// [`Self::ensure_valid`] takes the number itself.
+#[doc(alias = "org.apache.kafka.common.config.ConfigDef$Range")]
+pub(crate) struct Range<T> {
+    min: T,
+    max: Option<T>,
+}
+
+impl<T: Number> Range<T> {
+    /// A numeric range that checks only the lower bound.
+    #[doc(alias = "org.apache.kafka.common.config.ConfigDef$Range#atLeast")]
+    pub(crate) fn at_least(min: T) -> Self {
+        Self { min, max: None }
+    }
+
+    /// A numeric range that checks both the upper (inclusive) and lower bound.
+    #[doc(alias = "org.apache.kafka.common.config.ConfigDef$Range#between")]
+    pub(crate) fn between(min: T, max: T) -> Self {
+        Self { min, max: Some(max) }
+    }
+
+    /// Java's `Range.ensureValid(name, o)` (`ConfigDef.java:1008-1016`): both
+    /// bounds compared as `doubleValue()`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Config`] with Java's message: `Invalid value <value> for
+    /// configuration <name>: Value must be at least <min>`, or `... Value must
+    /// be no more than <max>`.
+    #[doc(alias = "org.apache.kafka.common.config.ConfigDef$Range#ensureValid")]
+    pub(crate) fn ensure_valid(&self, name: &str, value: T) -> Result<(), Error> {
+        let n = value.double_value();
+        if n < self.min.double_value() {
+            return Err(Error::config_name_value_message(
+                name,
+                value.java_to_string(),
+                format!("Value must be at least {}", self.min.java_to_string()),
+            ));
+        }
+        if let Some(max) = self.max
+            && n > max.double_value()
+        {
+            return Err(Error::config_name_value_message(
+                name,
+                value.java_to_string(),
+                format!("Value must be no more than {}", max.java_to_string()),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -320,6 +447,86 @@ mod tests {
             other => panic!("expected a ConfigError, got {other:?}"),
         }
         assert!(ValidList::any_non_duplicate_values(true, true).ensure_valid("k", None).is_ok());
+    }
+
+    fn config_error(result: Result<impl std::fmt::Debug, Error>) -> String {
+        match result {
+            Err(Error::Config(e)) => e.message().to_string(),
+            other => panic!("expected a ConfigError, got {other:?}"),
+        }
+    }
+
+    /// The `Type.INT` case of `ConfigDefTest.testBasicTypes`: `"1   "` parses
+    /// to `1` and passes its `Range.between(0, 14)`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.common.config.ConfigDefTest#testBasicTypes")]
+    fn test_basic_types() {
+        let value = ConfigDef::parse_int("a", "1   ").unwrap();
+        assert_eq!(value, 1);
+        Range::between(0, 14).ensure_valid("a", value).unwrap();
+        assert_eq!(ConfigDef::parse_long("b", " -2 ").unwrap(), -2);
+    }
+
+    /// The `String` inputs of `ConfigDefTest.testBadInputs` for `Type.INT`
+    /// and `Type.LONG`, with the message `parseType` gives them: the original
+    /// value, untrimmed. Its non-`String` inputs (`42.5`, `new Object()`) have
+    /// no counterpart, since a property value here is always a string.
+    #[test]
+    #[doc(alias = "org.apache.kafka.common.config.ConfigDefTest#testBadInputs")]
+    fn test_bad_inputs() {
+        for value in ["hello", "42.5", &i64::MAX.to_string(), " x ", ""] {
+            assert_eq!(
+                config_error(ConfigDef::parse_int("name", value)),
+                format!("Invalid value {value} for configuration name: Not a number of type INT")
+            );
+        }
+        for value in ["hello", "42.5", &format!("{}00", i64::MAX)] {
+            assert_eq!(
+                config_error(ConfigDef::parse_long("name", value)),
+                format!("Invalid value {value} for configuration name: Not a number of type LONG")
+            );
+        }
+        assert_eq!(ConfigDef::parse_int("name", "+2147483647").unwrap(), i32::MAX);
+        assert_eq!(ConfigDef::parse_long("name", &i64::MIN.to_string()).unwrap(), i64::MIN);
+    }
+
+    /// The `Range.between(0, 10)` case of `ConfigDefTest.testValidators`:
+    /// `1`, `5` and `9` pass, `-1` and `11` fail. Its `null` input has no
+    /// counterpart: a value parsed from a property is never null. Both bounds
+    /// are inclusive.
+    #[test]
+    #[doc(alias = "org.apache.kafka.common.config.ConfigDefTest#testValidators")]
+    fn test_validators() {
+        let range = Range::between(0, 10);
+        for ok in [0, 1, 5, 9, 10] {
+            range.ensure_valid("name", ok).unwrap();
+        }
+        assert_eq!(
+            config_error(range.ensure_valid("name", -1)),
+            "Invalid value -1 for configuration name: Value must be at least 0"
+        );
+        assert_eq!(
+            config_error(range.ensure_valid("name", 11)),
+            "Invalid value 11 for configuration name: Value must be no more than 10"
+        );
+    }
+
+    /// `Range.atLeast` checks the lower bound only, inclusively, for `int`
+    /// and `long` values alike.
+    #[test]
+    fn test_range_at_least() {
+        Range::at_least(0).ensure_valid("name", 0).unwrap();
+        Range::at_least(0).ensure_valid("name", i32::MAX).unwrap();
+        Range::at_least(-1_i64).ensure_valid("name", -1).unwrap();
+        Range::at_least(0_i64).ensure_valid("name", i64::MAX).unwrap();
+        assert_eq!(
+            config_error(Range::at_least(0).ensure_valid("name", i32::MIN)),
+            "Invalid value -2147483648 for configuration name: Value must be at least 0"
+        );
+        assert_eq!(
+            config_error(Range::at_least(-1_i64).ensure_valid("name", -2)),
+            "Invalid value -2 for configuration name: Value must be at least -1"
+        );
     }
 
     /// A list of distinct non-empty elements passes and is returned parsed.

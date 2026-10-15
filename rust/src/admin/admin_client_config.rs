@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 
 use crate::common::Error;
-use crate::common::config::config_def::{ConfigDef, ValidList};
+use crate::common::config::config_def::{ConfigDef, Range, ValidList};
 use crate::common::config::types::Password;
 use crate::common::config::{SaslConfigs, SslConfigs};
 use crate::common::security::auth::SecurityProtocol;
@@ -172,25 +172,61 @@ impl AdminClientConfig {
                 // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:707-709`,
                 // `:731-733`), with Java's `String.trim`.
                 Self::CLIENT_ID_CONFIG => config.client_id = ConfigDef::trim(value).to_string(),
-                Self::REQUEST_TIMEOUT_MS_CONFIG => config.request_timeout_ms = parse_i32(key, value)?,
-                Self::DEFAULT_API_TIMEOUT_MS_CONFIG => config.default_api_timeout_ms = parse_i32(key, value)?,
-                Self::RETRIES_CONFIG => config.retries = parse_i32(key, value)?,
-                Self::RETRY_BACKOFF_MS_CONFIG => config.retry_backoff_ms = parse_i64(key, value)?,
-                Self::RETRY_BACKOFF_MAX_MS_CONFIG => config.retry_backoff_max_ms = parse_i64(key, value)?,
+                // Each numeric key is parsed by `ConfigDef.parseType`, then checked by
+                // the validator its `define(..)` gives (`AdminClientConfig.java:167-315`),
+                // if any.
+                Self::REQUEST_TIMEOUT_MS_CONFIG => {
+                    // `Type.INT`, `atLeast(0)` (`AdminClientConfig.java:218-223`).
+                    config.request_timeout_ms = ConfigDef::parse_int(key, value)?;
+                    Range::at_least(0).ensure_valid(key, config.request_timeout_ms)?;
+                },
+                Self::DEFAULT_API_TIMEOUT_MS_CONFIG => {
+                    // `Type.INT`, `atLeast(0)` (`AdminClientConfig.java:245-250`).
+                    config.default_api_timeout_ms = ConfigDef::parse_int(key, value)?;
+                    Range::at_least(0).ensure_valid(key, config.default_api_timeout_ms)?;
+                },
+                Self::RETRIES_CONFIG => {
+                    // `Type.INT`, `between(0, Integer.MAX_VALUE)` (`AdminClientConfig.java:239-244`).
+                    config.retries = ConfigDef::parse_int(key, value)?;
+                    Range::between(0, i32::MAX).ensure_valid(key, config.retries)?;
+                },
+                Self::RETRY_BACKOFF_MS_CONFIG => {
+                    // `Type.LONG`, `atLeast(0L)` (`AdminClientConfig.java:195-200`).
+                    config.retry_backoff_ms = ConfigDef::parse_long(key, value)?;
+                    Range::at_least(0).ensure_valid(key, config.retry_backoff_ms)?;
+                },
+                Self::RETRY_BACKOFF_MAX_MS_CONFIG => {
+                    // `Type.LONG`, `atLeast(0L)` (`AdminClientConfig.java:201-206`).
+                    config.retry_backoff_max_ms = ConfigDef::parse_long(key, value)?;
+                    Range::at_least(0).ensure_valid(key, config.retry_backoff_max_ms)?;
+                },
                 Self::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG => {
                     // `Type.LONG`, `atLeast(0L)` (`AdminClientConfig.java:207-212`, KAFKA-20939).
-                    let v = parse_i64(key, value)?;
-                    if v < 0 {
-                        return Err(Error::config_name_value_message(key, v, "Value must be at least 0"));
-                    }
-                    config.bootstrap_resolve_timeout_ms = v;
+                    config.bootstrap_resolve_timeout_ms = ConfigDef::parse_long(key, value)?;
+                    Range::at_least(0).ensure_valid(key, config.bootstrap_resolve_timeout_ms)?;
                 },
-                Self::RECONNECT_BACKOFF_MS_CONFIG => config.reconnect_backoff_ms = parse_i64(key, value)?,
-                Self::RECONNECT_BACKOFF_MAX_MS_CONFIG => config.reconnect_backoff_max_ms = parse_i64(key, value)?,
-                Self::CONNECTIONS_MAX_IDLE_MS_CONFIG => config.connections_max_idle_ms = parse_i64(key, value)?,
-                Self::METADATA_MAX_AGE_MS_CONFIG => config.metadata_max_age_ms = parse_i64(key, value)?,
+                Self::RECONNECT_BACKOFF_MS_CONFIG => {
+                    // `Type.LONG`, `atLeast(0L)` (`AdminClientConfig.java:183-188`).
+                    config.reconnect_backoff_ms = ConfigDef::parse_long(key, value)?;
+                    Range::at_least(0).ensure_valid(key, config.reconnect_backoff_ms)?;
+                },
+                Self::RECONNECT_BACKOFF_MAX_MS_CONFIG => {
+                    // `Type.LONG`, `atLeast(0L)` (`AdminClientConfig.java:189-194`).
+                    config.reconnect_backoff_max_ms = ConfigDef::parse_long(key, value)?;
+                    Range::at_least(0).ensure_valid(key, config.reconnect_backoff_max_ms)?;
+                },
+                // `Type.LONG`, no validator (`AdminClientConfig.java:234-238`).
+                Self::CONNECTIONS_MAX_IDLE_MS_CONFIG => {
+                    config.connections_max_idle_ms = ConfigDef::parse_long(key, value)?
+                },
+                Self::METADATA_MAX_AGE_MS_CONFIG => {
+                    // `Type.LONG`, `atLeast(0)` (`AdminClientConfig.java:180`).
+                    config.metadata_max_age_ms = ConfigDef::parse_long(key, value)?;
+                    Range::at_least(0).ensure_valid(key, config.metadata_max_age_ms)?;
+                },
                 Self::SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG => {
-                    config.socket_connection_setup_timeout_ms = parse_i64(key, value)?;
+                    // `Type.LONG`, no validator (`AdminClientConfig.java:224-228`).
+                    config.socket_connection_setup_timeout_ms = ConfigDef::parse_long(key, value)?;
                 },
                 Self::METADATA_CLUSTER_CHECK_ENABLE_CONFIG => {
                     // `Type.BOOLEAN`, default `true` (`AdminClientConfig.java:305-309`).
@@ -213,7 +249,9 @@ impl AdminClientConfig {
                     config.metadata_recovery_strategy = parse_metadata_recovery_strategy(key, value)?;
                 },
                 Self::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG => {
-                    config.metadata_recovery_rebootstrap_trigger_ms = parse_rebootstrap_trigger_ms(key, value)?;
+                    // `Type.LONG`, `atLeast(0)` (`AdminClientConfig.java:299-304`).
+                    config.metadata_recovery_rebootstrap_trigger_ms = ConfigDef::parse_long(key, value)?;
+                    Range::at_least(0).ensure_valid(key, config.metadata_recovery_rebootstrap_trigger_ms)?;
                 },
                 Self::SASL_MECHANISM_CONFIG => {
                     // A trimmed `Type.STRING` (`ConfigDef.java:731-733`).
@@ -409,14 +447,6 @@ impl Default for AdminClientConfig {
     }
 }
 
-fn parse_i32(key: &str, value: &str) -> Result<i32, Error> {
-    value.trim().parse::<i32>().map_err(|_| Error::config_name_value(key, value))
-}
-
-fn parse_i64(key: &str, value: &str) -> Result<i64, Error> {
-    value.trim().parse::<i64>().map_err(|_| Error::config_name_value(key, value))
-}
-
 /// Parses a string value as `bool`.
 ///
 /// Java's `ConfigDef.parseType(BOOLEAN)` (`ConfigDef.java:703-737`) trims the
@@ -454,21 +484,6 @@ fn parse_metadata_recovery_strategy(key: &str, value: &str) -> Result<MetadataRe
     MetadataRecoveryStrategy::for_name(trimmed).map_err(|_| {
         Error::config_name_value_message(key, trimmed, "String must be one of (case insensitive): REBOOTSTRAP, NONE")
     })
-}
-
-/// `metadata.recovery.rebootstrap.trigger.ms`: a `Type.LONG` with `atLeast(0)`
-/// (`AdminClientConfig.java:298-303`). `ConfigDef.parseType` reports an
-/// unparsable value with "Not a number of type LONG", and `Range.atLeast` a
-/// negative one with "Value must be at least 0".
-fn parse_rebootstrap_trigger_ms(key: &str, value: &str) -> Result<i64, Error> {
-    let parsed = value
-        .trim()
-        .parse::<i64>()
-        .map_err(|_| Error::config_name_value_message(key, value, "Not a number of type LONG"))?;
-    if parsed < 0 {
-        return Err(Error::config_name_value_message(key, parsed, "Value must be at least 0"));
-    }
-    Ok(parsed)
 }
 
 #[cfg(test)]
@@ -623,12 +638,82 @@ mod tests {
         );
     }
 
+    /// A value `ConfigDef.parseType` cannot parse is reported with its
+    /// `NumberFormatException` message, naming the key's type and printing
+    /// the original, untrimmed value (`ConfigDef.java:788-789`). An `int` key
+    /// rejects a value beyond `Integer.MAX_VALUE` the same way.
     #[test]
     fn invalid_numeric_value_is_error() {
-        let mut props = HashMap::new();
-        props.insert("bootstrap.servers".to_string(), "a:9092".to_string());
-        props.insert("request.timeout.ms".to_string(), "not-a-number".to_string());
-        assert!(AdminClientConfig::new(&props).is_err());
+        for (key, type_name) in [
+            ("request.timeout.ms", "INT"),
+            ("default.api.timeout.ms", "INT"),
+            ("retries", "INT"),
+            ("retry.backoff.ms", "LONG"),
+            ("retry.backoff.max.ms", "LONG"),
+            ("bootstrap.resolve.timeout.ms", "LONG"),
+            ("reconnect.backoff.ms", "LONG"),
+            ("reconnect.backoff.max.ms", "LONG"),
+            ("connections.max.idle.ms", "LONG"),
+            ("metadata.max.age.ms", "LONG"),
+            ("socket.connection.setup.timeout.ms", "LONG"),
+            ("metadata.recovery.rebootstrap.trigger.ms", "LONG"),
+        ] {
+            let err = AdminClientConfig::new(&with_bootstrap(&[(key, " not-a-number ")])).unwrap_err();
+            assert!(matches!(err, Error::Config(_)), "{key}: got {err:?}");
+            assert_eq!(
+                err.message(),
+                format!("Invalid value  not-a-number  for configuration {key}: Not a number of type {type_name}"),
+            );
+        }
+        let err = AdminClientConfig::new(&with_bootstrap(&[("retries", "2147483648")])).unwrap_err();
+        assert_eq!(
+            err.message(),
+            "Invalid value 2147483648 for configuration retries: Not a number of type INT"
+        );
+    }
+
+    /// The `atLeast(0)` / `between(0, Integer.MAX_VALUE)` validators of
+    /// `AdminClientConfig`'s numeric keys (`AdminClientConfig.java:180-250`)
+    /// reject a negative value with `Range.ensureValid`'s message, and accept
+    /// the bounds themselves. `socket.connection.setup.timeout.ms` and
+    /// `connections.max.idle.ms` have no validator in Java, so `-1` stays
+    /// accepted for them.
+    #[test]
+    fn test_negative_values_are_rejected() {
+        for key in [
+            "retries",
+            "request.timeout.ms",
+            "default.api.timeout.ms",
+            "metadata.max.age.ms",
+            "retry.backoff.ms",
+            "retry.backoff.max.ms",
+            "reconnect.backoff.ms",
+            "reconnect.backoff.max.ms",
+        ] {
+            let err = AdminClientConfig::new(&with_bootstrap(&[(key, "-1")])).unwrap_err();
+            assert!(matches!(err, Error::Config(_)), "{key}: got {err:?}");
+            assert_eq!(
+                err.message(),
+                format!("Invalid value -1 for configuration {key}: Value must be at least 0")
+            );
+            AdminClientConfig::new(&with_bootstrap(&[(key, "0")])).unwrap_or_else(|e| panic!("{key}=0: {e:?}"));
+        }
+        let config = AdminClientConfig::new(&with_bootstrap(&[("retries", "2147483647")])).unwrap();
+        assert_eq!(config.retries(), i32::MAX);
+        // The value in the message is the parsed number, not the raw string.
+        let err = AdminClientConfig::new(&with_bootstrap(&[("retry.backoff.ms", " -07 ")])).unwrap_err();
+        assert_eq!(
+            err.message(),
+            "Invalid value -7 for configuration retry.backoff.ms: Value must be at least 0"
+        );
+
+        let config = AdminClientConfig::new(&with_bootstrap(&[
+            ("socket.connection.setup.timeout.ms", "-1"),
+            ("connections.max.idle.ms", "-1"),
+        ]))
+        .unwrap();
+        assert_eq!(config.socket_connection_setup_timeout_ms(), -1);
+        assert_eq!(config.connections_max_idle_ms(), -1);
     }
 
     /// Translated from `ProducerConfigTest.testInvalidSecurityProtocol`, adapted
