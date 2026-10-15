@@ -65,16 +65,18 @@
 //! prints or writes (harness output included), because the results directory
 //! is meant to be published (e.g. as CI artifacts).
 //!
-//! Optional run metadata, recorded in the report when set: `AGENT_REGION`,
-//! `AGENT_AZ_ID`, `PERF_CLUSTER_ID`, `PERF_CLUSTER_SIZE` (free text, e.g.
-//! `10 CKU`), `PERF_CLUSTER_INGRESS_MB_S` (also enables the "near the
-//! ingress limit" notes), and on Semaphore `SEMAPHORE_AGENT_MACHINE_TYPE` and
-//! `SEMAPHORE_WORKFLOW_ID`. The commit is this repository's `HEAD`.
+//! Optional run metadata, recorded in the report when set: `AGENT_AZ_ID`,
+//! `PERF_CLUSTER_SIZE` (free text, e.g. `10 CKU`) and
+//! `PERF_CLUSTER_INGRESS_MB_S` (also enables the "near the ingress limit"
+//! notes). `AGENT_REGION`, `PERF_CLUSTER_ID`, and on Semaphore
+//! `SEMAPHORE_AGENT_MACHINE_TYPE` and `SEMAPHORE_WORKFLOW_ID`, go to the log
+//! only, with this repository's `HEAD` commit and the kernel.
 
 mod json;
 mod report;
 
 use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead as _, BufReader, Read, Write as _};
@@ -240,6 +242,8 @@ const HELP: &str = "cargo xtask perf-cloud <subcommand>
          --bootstrap HOST:PORT --kafka-bin DIR --results-dir DIR
          [--topic-prefix P] [--push-artifacts]
                            Run the tests (credentials from PERF_API_KEY / PERF_API_SECRET);
+                           --topic-prefix defaults to perf-local-<Unix time>, new for each
+                           run, and its topics must not exist yet;
                            --push-artifacts pushes each finished test's results with
                            Semaphore's `artifact` CLI, report.md also as the workflow report
 
@@ -377,16 +381,17 @@ impl Arm {
         }
     }
 
-    /// The row name in the report.
+    /// Its name in the report and the logs. Never `(C)` or `(R)`, which
+    /// Confluence and Semaphore render as © and ®.
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Arm::Rust => "Rust (native)",
-            Arm::Librdkafka => "librdkafka (C)",
+            Arm::Rust => "Rust",
+            Arm::Librdkafka => "librdkafka",
             Arm::Java => "Java",
-            Arm::PythonSyncRust => "python-sync (Rust)",
-            Arm::PythonSyncLibrdkafka => "python-sync (librdkafka)",
-            Arm::PythonAsyncRust => "python-async (Rust)",
-            Arm::PythonAsyncLibrdkafka => "python-async (librdkafka)",
+            Arm::PythonSyncRust => "Python sync (Rust)",
+            Arm::PythonSyncLibrdkafka => "Python sync (librdkafka)",
+            Arm::PythonAsyncRust => "Python async (Rust)",
+            Arm::PythonAsyncLibrdkafka => "Python async (librdkafka)",
         }
     }
 
@@ -600,12 +605,18 @@ enum Kind {
 struct Setting {
     key: &'static str,
     kind: Kind,
+    /// The largest value of a [`Kind::Count`] or [`Kind::Positive`] setting.
+    max: u64,
     /// The workloads whose harnesses read it; empty for all of them.
     only: &'static [Workload],
 }
 
 const fn setting(key: &'static str, kind: Kind, only: &'static [Workload]) -> Setting {
-    Setting { key, kind, only }
+    Setting { key, kind, max: 0, only }
+}
+
+const fn number_setting(key: &'static str, kind: Kind, max: u64, only: &'static [Workload]) -> Setting {
+    Setting { key, kind, max, only }
 }
 
 /// The settings of every workload.
@@ -625,6 +636,13 @@ const PRODUCING: &[Workload] = &[Workload::Producer, Workload::Transactional];
 /// `MAX_REQUEST_SIZE` in KiB, `BUFFER_MEMORY` in MiB. The transactional
 /// harnesses always use idempotence and `acks=all`.
 ///
+/// Each number has a maximum: the harnesses read most of them as 32-bit
+/// integers (the C harnesses with `atoi`, Java with `Integer.parseInt`, which
+/// falls back to its default on a value it cannot read), and a client's own
+/// limit is lower for some (librdkafka's `linger.ms`, `fetch.min.bytes`,
+/// `fetch.wait.max.ms`). A larger value would fail, or run differently in
+/// each harness, only after the cluster is paid for.
+///
 /// In a consumer test `PARTITIONS`, `VALUE_SIZE`, `LIMIT_RPS` and
 /// `COMPRESSION_TYPE` shape the load, and the consumer settings left out keep
 /// each client's default (the harnesses are told to: `USE_DEFAULTS=True`).
@@ -632,30 +650,55 @@ const PRODUCING: &[Workload] = &[Workload::Producer, Workload::Transactional];
 /// partition and 500 records per poll (librdkafka has no `max.poll.records`;
 /// its harnesses consume batches of `MAX_POLL_RECORDS`, 500 by default).
 const SETTINGS: &[Setting] = &[
-    setting("PARTITIONS", Kind::Positive, ALL),
-    setting("VALUE_SIZE", Kind::Positive, ALL),
-    setting("KEY_SIZE", Kind::Count, PRODUCING),
-    setting("LIMIT_RPS", Kind::Count, ALL),
-    setting("BATCH_SIZE", Kind::Positive, PRODUCING),
-    setting("LINGER_MS", Kind::Count, PRODUCING),
-    setting("MAX_IN_FLIGHT", Kind::Positive, PRODUCING),
-    setting("BUFFER_MEMORY", Kind::Positive, PRODUCING),
-    setting("MAX_REQUEST_SIZE", Kind::Positive, PRODUCING),
+    number_setting("PARTITIONS", Kind::Positive, 10_000, ALL),
+    // Bytes; see also MAX_RECORD_BYTES.
+    number_setting("VALUE_SIZE", Kind::Positive, MAX_RECORD_BYTES, ALL),
+    number_setting("KEY_SIZE", Kind::Count, MAX_RECORD_BYTES, PRODUCING),
+    // Records per second: with the longest warmup and measurement, the record
+    // counts derived from it stay 32-bit.
+    number_setting("LIMIT_RPS", Kind::Count, 1_000_000, ALL),
+    // KiB: 64 MiB.
+    number_setting("BATCH_SIZE", Kind::Positive, 65_536, PRODUCING),
+    // librdkafka's maximum.
+    number_setting("LINGER_MS", Kind::Count, 900_000, PRODUCING),
+    number_setting("MAX_IN_FLIGHT", Kind::Positive, 1_000_000, PRODUCING),
+    // MiB: 16 GiB.
+    number_setting("BUFFER_MEMORY", Kind::Positive, 16_384, PRODUCING),
+    // KiB: 100 MiB.
+    number_setting("MAX_REQUEST_SIZE", Kind::Positive, 102_400, PRODUCING),
     setting("COMPRESSION_TYPE", Kind::Compression, ALL),
     setting("ACKS", Kind::Acks, &[Workload::Producer]),
     setting("ENABLE_IDEMPOTENCE", Kind::Bool, &[Workload::Producer]),
-    setting("RECORDS_PER_TRANSACTION", Kind::Positive, &[Workload::Transactional]),
+    number_setting("RECORDS_PER_TRANSACTION", Kind::Positive, 1_000_000, &[Workload::Transactional]),
     setting("ABORT_RATE", Kind::Fraction, &[Workload::Transactional]),
-    setting("NUM_TRANSACTIONAL_PRODUCERS", Kind::Positive, &[Workload::Transactional]),
+    number_setting("NUM_TRANSACTIONAL_PRODUCERS", Kind::Positive, 64, &[Workload::Transactional]),
     setting("TXN_MODE", Kind::TxnMode, &[Workload::Transactional]),
-    // Bytes; librdkafka takes at least 1.
-    setting("FETCH_MIN_BYTES", Kind::Positive, &[Workload::Consumer]),
-    // Milliseconds (librdkafka's `fetch.wait.max.ms`).
-    setting("FETCH_MAX_WAIT_MS", Kind::Count, &[Workload::Consumer]),
-    // Bytes (librdkafka's `fetch.message.max.bytes`).
-    setting("MAX_PARTITION_FETCH_BYTES", Kind::Positive, &[Workload::Consumer]),
-    setting("MAX_POLL_RECORDS", Kind::Positive, &[Workload::Consumer]),
+    // Bytes; librdkafka takes 1 to 100,000,000.
+    number_setting("FETCH_MIN_BYTES", Kind::Positive, 100_000_000, &[Workload::Consumer]),
+    // Milliseconds (librdkafka's `fetch.wait.max.ms`, at most 300,000).
+    number_setting("FETCH_MAX_WAIT_MS", Kind::Count, 300_000, &[Workload::Consumer]),
+    // Bytes (librdkafka's `fetch.message.max.bytes`, at most 1,000,000,000).
+    number_setting(
+        "MAX_PARTITION_FETCH_BYTES",
+        Kind::Positive,
+        1_000_000_000,
+        &[Workload::Consumer],
+    ),
+    // The C consumer harness allocates an array of this many entries.
+    number_setting("MAX_POLL_RECORDS", Kind::Positive, 1_000_000, &[Workload::Consumer]),
 ];
+
+/// The largest record (key plus value, in bytes) a test may produce: under
+/// the clients' default 1 MiB request size (Java's and the Rust client's
+/// `max.request.size`, which `kafka-producer-perf-test.sh` keeps too) with
+/// room for the batch and record headers, and under Confluent Cloud's default
+/// 2 MiB `max.message.bytes`. A larger record is rejected by some clients
+/// only, or by the broker, after the cluster is paid for.
+const MAX_RECORD_BYTES: u64 = 1_000_000;
+
+/// The bytes a request needs on top of its one record (batch and record
+/// headers), when `MAX_REQUEST_SIZE` bounds the record.
+const REQUEST_OVERHEAD_BYTES: u64 = 512;
 
 /// Set by every test, so no arm falls back to a harness default the others
 /// might not share. `LIMIT_RPS=0` is an unbounded test.
@@ -696,7 +739,7 @@ impl PerfTest {
             return None;
         }
         let size = self.number("KEY_SIZE") + self.number("VALUE_SIZE");
-        Some((rps * size) as f64 / 1e6)
+        Some(rps as f64 * size as f64 / 1e6)
     }
 
     /// The minutes an `eos` arm's harness takes to fill its source topic with
@@ -838,7 +881,7 @@ fn parse_settings<'a>(
         if settings.iter().any(|(k, _)| k == key) {
             bail!("{what}: `{key}` is set twice");
         }
-        validate_setting(key, value, def.kind).with_context(|| what.to_string())?;
+        validate_setting(key, value, def.kind, def.max).with_context(|| what.to_string())?;
         settings.push((key.to_string(), value.to_string()));
     }
     let workload = workload.unwrap_or(Workload::Producer);
@@ -869,6 +912,21 @@ fn parse_settings<'a>(
     }
     let get = |key: &str| settings.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
     let number = |key: &str| get(key).and_then(|v| v.parse::<u64>().ok());
+    let record = number("KEY_SIZE").unwrap_or(0) + number("VALUE_SIZE").unwrap_or(0);
+    if record > MAX_RECORD_BYTES {
+        bail!(
+            "{what}: KEY_SIZE + VALUE_SIZE is {record} bytes, above {MAX_RECORD_BYTES}: larger records exceed the \
+             clients' default 1 MiB request size"
+        );
+    }
+    if let Some(kib) = number("MAX_REQUEST_SIZE") {
+        if record + REQUEST_OVERHEAD_BYTES > kib * 1024 {
+            bail!(
+                "{what}: KEY_SIZE + VALUE_SIZE is {record} bytes, which with {REQUEST_OVERHEAD_BYTES} bytes of headers \
+                 does not fit MAX_REQUEST_SIZE={kib} KiB"
+            );
+        }
+    }
     if get("ENABLE_IDEMPOTENCE") == Some("true") {
         if let Some(acks) = get("ACKS").filter(|a| !matches!(*a, "all" | "-1")) {
             bail!("{what}: ACKS={acks} with ENABLE_IDEMPOTENCE=true: an idempotent producer needs ACKS=all");
@@ -1010,13 +1068,15 @@ fn validate_test_id(id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn validate_setting(key: &str, value: &str, kind: Kind) -> anyhow::Result<()> {
+/// Check `value` against `kind`; `max` bounds a [`Kind::Count`] or
+/// [`Kind::Positive`] value.
+fn validate_setting(key: &str, value: &str, kind: Kind, max: u64) -> anyhow::Result<()> {
     // Digits only: `u64::from_str` would also take a leading `+`, which the
     // C harness's `atoi` reads differently from the others.
     let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     let ok = match kind {
-        Kind::Count => digits(value) && value.parse::<u64>().is_ok(),
-        Kind::Positive => digits(value) && value.parse::<u64>().is_ok_and(|n| n > 0),
+        Kind::Count => digits(value) && value.parse::<u64>().is_ok_and(|n| n <= max),
+        Kind::Positive => digits(value) && value.parse::<u64>().is_ok_and(|n| n > 0 && n <= max),
         Kind::Compression => matches!(value, "none" | "gzip" | "snappy" | "lz4" | "zstd"),
         Kind::Bool => matches!(value, "true" | "false"),
         Kind::Acks => matches!(value, "all" | "-1" | "1" | "0"),
@@ -1031,13 +1091,13 @@ fn validate_setting(key: &str, value: &str, kind: Kind) -> anyhow::Result<()> {
     };
     if !ok {
         let expected = match kind {
-            Kind::Count => "a whole number",
-            Kind::Positive => "a whole number above 0",
-            Kind::Compression => "one of none, gzip, snappy, lz4, zstd",
-            Kind::Bool => "`true` or `false`",
-            Kind::Acks => "one of all, -1, 1, 0",
-            Kind::Fraction => "a decimal number from 0 to 1, such as 0.5",
-            Kind::TxnMode => "`produce` or `eos`",
+            Kind::Count => format!("a whole number up to {max}"),
+            Kind::Positive => format!("a whole number from 1 to {max}"),
+            Kind::Compression => "one of none, gzip, snappy, lz4, zstd".to_string(),
+            Kind::Bool => "`true` or `false`".to_string(),
+            Kind::Acks => "one of all, -1, 1, 0".to_string(),
+            Kind::Fraction => "a decimal number from 0 to 1, such as 0.5".to_string(),
+            Kind::TxnMode => "`produce` or `eos`".to_string(),
         };
         bail!("{key}={value}: expected {expected}");
     }
@@ -1157,7 +1217,14 @@ impl RunOptions {
             None => None,
         };
         let (bootstrap, kafka_bin, results_dir, topic_prefix) = if for_run {
-            let topic_prefix = flags.get("--topic-prefix").cloned().unwrap_or_else(|| "perf-local".to_string());
+            // New for each run, so a run never finds the topics, and the
+            // consumer groups named after them, of one before it.
+            let topic_prefix = flags.get("--topic-prefix").cloned().unwrap_or_else(|| {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default();
+                format!("perf-local-{}", now.as_secs())
+            });
             validate_topic_prefix(&topic_prefix)?;
             (
                 required(&flags, "--bootstrap")?.to_string(),
@@ -1284,6 +1351,17 @@ fn check(options: &RunOptions) -> anyhow::Result<()> {
     }
     println!("Tests ({}), in order:", options.tests.len());
     let mut warnings = Vec::new();
+    for t in &options.tests {
+        if let (Some(mb_s), Some(ingress)) = (t.rate_mb_s(), options.ingress_mb_s) {
+            if mb_s > ingress {
+                bail!(
+                    "{}: its fixed rate, {mb_s:.0} MB/s, is above the cluster's ~{ingress:.0} MB/s ingress, so no \
+                     client could hold it; lower LIMIT_RPS, or set LIMIT_RPS=0 for an unbounded producer test",
+                    t.id
+                );
+            }
+        }
+    }
     for (i, t) in options.tests.iter().enumerate() {
         let load = match t.rate_mb_s() {
             Some(mb_s) => {
@@ -1371,8 +1449,11 @@ fn build(group: Group) -> anyhow::Result<()> {
         Group::Rust => {
             // The C harness links the Rust client's C library statically and
             // needs its header, so the FFI build comes first. Only its
-            // librdkafka backend (CLIENT_VERSION=2) runs here, so the Rust code
-            // in it is unused and built without native CPU flags.
+            // librdkafka backend (CLIENT_VERSION=2) runs here, so the library
+            // is built without native CPU flags. It is not wholly unused:
+            // the library bundles its own zstd, whose global `ZSTD_*` symbols
+            // the executable exports, so librdkafka's zstd calls can bind to
+            // that copy instead of the system libzstd.
             step(
                 "Rust client C library (FFI)",
                 Command::new(cargo())
@@ -1672,6 +1753,9 @@ pub(crate) struct ArmResult {
     pub(crate) arm: Arm,
     pub(crate) outcome: Outcome,
     pub(crate) metrics: Option<Metrics>,
+    /// A consumer test's load: the rate `kafka-producer-perf-test.sh`
+    /// reached (msg/s), when its output gave one.
+    pub(crate) load_msg_s: Option<f64>,
     pub(crate) elapsed: Duration,
 }
 
@@ -1685,6 +1769,8 @@ pub(crate) struct RunInfo {
     pub(crate) group: Group,
     /// The arms that ran, in order.
     pub(crate) arms: Vec<Arm>,
+    /// The tests the run runs, in order.
+    pub(crate) tests: Vec<PerfTest>,
     pub(crate) duration_min: u64,
     pub(crate) warmup_min: u64,
     pub(crate) started: String,
@@ -1695,6 +1781,10 @@ pub(crate) struct RunInfo {
 
 fn run_tests(options: &RunOptions) -> anyhow::Result<()> {
     crate::signals::install();
+    // One baseline for the whole run, taken as soon as the handler is in
+    // place: a signal at any later point (during the setup below, a command,
+    // between arms, an artifact push) stops the run.
+    let signals_baseline = crate::signals::count();
     let repo = repo_root();
     let credentials = Credentials::from_env()?;
     let topics_cli = options.kafka_bin.join("kafka-topics.sh");
@@ -1744,9 +1834,6 @@ fn run_tests(options: &RunOptions) -> anyhow::Result<()> {
     let redactions = Arc::new(vec![credentials.secret.clone()]);
 
     let info = run_info(options);
-    // One baseline for the whole run: a signal at any point (during a
-    // command, between arms, during an artifact push) stops the run.
-    let signals_baseline = crate::signals::count();
     let mut results: Vec<TestResult> = Vec::new();
     let mut interrupted = false;
     'tests: for (i, test) in options.tests.iter().enumerate() {
@@ -1839,21 +1926,60 @@ fn run_info(options: &RunOptions) -> RunInfo {
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty());
+    // The baseline clients come from package repositories at their latest
+    // version, so a report records which one it measured.
+    let uses = |arms: &[Arm]| options.arms.iter().any(|a| arms.contains(a));
+    let librdkafka = if uses(&[Arm::Librdkafka]) {
+        Command::new("pkg-config")
+            .args(["--modversion", "rdkafka"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty())
+    } else {
+        None
+    };
+    let python_librdkafka = if uses(&[Arm::PythonSyncLibrdkafka, Arm::PythonAsyncLibrdkafka]) {
+        Command::new(venv_python(repo_root(), "venv-librdkafka"))
+            .args([
+                "-I",
+                "-c",
+                "import confluent_kafka as c; print(f'{c.version()[0]} (librdkafka {c.libversion()[0]})')",
+            ])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty())
+    } else {
+        None
+    };
     // A limit is positive; anything else (e.g. a `0` meaning "not reported")
     // would flag every result as near it.
     let ingress = env("PERF_CLUSTER_INGRESS_MB_S")
         .and_then(|v| v.trim().parse::<f64>().ok())
         .filter(|v| v.is_finite() && *v > 0.0);
+    // The report keeps to what the results depend on; the job's log keeps
+    // where they came from.
     for (label, value) in [
         ("Commit", commit),
         ("Workflow", env("SEMAPHORE_WORKFLOW_ID")),
         ("Agent", env("SEMAPHORE_AGENT_MACHINE_TYPE")),
         ("Agent region", env("AGENT_REGION")),
-        ("Agent AZ ID", env("AGENT_AZ_ID")),
         ("Kernel", kernel),
         ("Cluster", env("PERF_CLUSTER_ID")),
+    ] {
+        if let Some(value) = value {
+            println!("{label}: {value}");
+        }
+    }
+    for (label, value) in [
+        ("Agent AZ ID", env("AGENT_AZ_ID")),
         ("Cluster size", env("PERF_CLUSTER_SIZE")),
         ("Cluster ingress limit", ingress.map(|mb| format!("{mb:.0} MB/s"))),
+        ("librdkafka version", librdkafka),
+        ("confluent-kafka version (PyPI)", python_librdkafka),
     ] {
         if let Some(value) = value {
             facts.push((label.to_string(), value));
@@ -1862,6 +1988,7 @@ fn run_info(options: &RunOptions) -> RunInfo {
     RunInfo {
         group: options.group,
         arms: options.arms.clone(),
+        tests: options.tests.clone(),
         duration_min: options.duration_min,
         warmup_min: options.warmup_min,
         started: now_utc(),
@@ -2012,9 +2139,9 @@ fn run_arm(ctx: &ArmContext<'_>) -> anyhow::Result<ArmResult> {
             },
         }
     }
-    let outcome = match failure {
-        Some(reason) => Outcome::Failed(reason),
-        None => run_harness(ctx, &log).unwrap_or_else(|e| Outcome::Failed(format!("{e:#}"))),
+    let (outcome, load_msg_s) = match failure {
+        Some(reason) => (Outcome::Failed(reason), None),
+        None => run_harness(ctx, &log).unwrap_or_else(|e| (Outcome::Failed(format!("{e:#}")), None)),
     };
     if log.interrupted() {
         // Stopping promptly matters more; the cluster deletion removes the
@@ -2047,10 +2174,12 @@ fn run_arm(ctx: &ArmContext<'_>) -> anyhow::Result<ArmResult> {
         },
         failed => {
             // A harness that failed after writing its summary (e.g. a
-            // verification mismatch) still has numbers worth showing.
+            // verification mismatch) still has numbers worth showing, when
+            // they are the arm's own client's; the report never compares them.
             let metrics = fs::read_to_string(ctx.dir.join("results.json"))
                 .ok()
-                .and_then(|text| Metrics::from_results(&text).ok());
+                .and_then(|text| Metrics::from_results(&text).ok())
+                .filter(|m| m.client == expected);
             (failed, metrics)
         },
     };
@@ -2058,10 +2187,12 @@ fn run_arm(ctx: &ArmContext<'_>) -> anyhow::Result<ArmResult> {
         Outcome::Passed => log.line(&format!("==> {} / {}: passed", ctx.test.id, ctx.arm.label())),
         Outcome::Failed(reason) => log.line(&format!("==> {} / {}: FAILED: {reason}", ctx.test.id, ctx.arm.label())),
     }
-    Ok(ArmResult { arm: ctx.arm, outcome, metrics, elapsed: started.elapsed() })
+    Ok(ArmResult { arm: ctx.arm, outcome, metrics, load_msg_s, elapsed: started.elapsed() })
 }
 
-fn run_harness(ctx: &ArmContext<'_>, log: &ArmLog) -> anyhow::Result<Outcome> {
+/// Run the arm's harness: its outcome, and for a consumer test the rate its
+/// load reached.
+fn run_harness(ctx: &ArmContext<'_>, log: &ArmLog) -> anyhow::Result<(Outcome, Option<f64>)> {
     let options = ctx.options;
     let consumer = ctx.test.workload == Workload::Consumer;
     let mut command = ctx.arm.command(ctx.repo, ctx.test.workload);
@@ -2077,6 +2208,7 @@ fn run_harness(ctx: &ArmContext<'_>, log: &ArmLog) -> anyhow::Result<Outcome> {
     for var in HARNESS_VARS {
         command.env_remove(var);
     }
+    without_cargo_library_paths(&mut command, ctx.repo);
     let mut env: Vec<(String, String)> = vec![
         ("BOOTSTRAP_SERVERS".into(), options.bootstrap.clone()),
         ("TOPIC_NAME".into(), ctx.topic.clone()),
@@ -2121,22 +2253,28 @@ fn run_harness(ctx: &ArmContext<'_>, log: &ArmLog) -> anyhow::Result<Outcome> {
     }
     let minutes = options.warmup_min + options.duration_min + ctx.test.seed_minutes(options.duration_min);
     let timeout = Duration::from_secs(minutes * 60) + ARM_TIMEOUT_SLACK;
-    let load = if consumer {
+    let mut load = if consumer {
         if log.interrupted() {
-            return Ok(Outcome::Failed(INTERRUPTED.to_string()));
+            return Ok((Outcome::Failed(INTERRUPTED.to_string()), None));
         }
-        let load_log = ArmLog::create(&ctx.dir.join("load.log"), Arc::clone(&ctx.redactions), ctx.signals_baseline)?;
+        let load_path = ctx.dir.join("load.log");
+        let load_log = ArmLog::create(&load_path, Arc::clone(&ctx.redactions), ctx.signals_baseline)?;
         log.line("==> load generator started, output in load.log");
-        Some(LoadGenerator::start(ctx, timeout.as_secs(), &load_log)?)
+        Some(LoadGenerator::start(ctx, timeout.as_secs(), &load_log, load_path)?)
     } else {
         None
     };
     log.line(&format!("==> {}", describe(&command)));
+    // A harness whose load has stopped is stopped too: with no records its
+    // count-based warmup would never end, and it would wait out its timeout.
+    let exit = match &mut load {
+        Some(load) => run_watched(&mut command, log, timeout, &mut || load.has_stopped()),
+        None => run_logged(&mut command, log, timeout),
+    };
     // The load is stopped whatever became of the harness.
-    let exit = run_logged(&mut command, log, timeout);
-    let load_stopped = match load {
+    let (load_stopped, load_msg_s) = match load {
         Some(load) => load.stop()?,
-        None => None,
+        None => (None, None),
     };
     let outcome = match exit? {
         Exit::Status(status) if status.success() => Outcome::Passed,
@@ -2145,13 +2283,91 @@ fn run_harness(ctx: &ArmContext<'_>, log: &ArmLog) -> anyhow::Result<Outcome> {
             Outcome::Failed(format!("harness still running after {} min; stopped", timeout.as_secs() / 60))
         },
         Exit::Interrupted => Outcome::Failed(INTERRUPTED.to_string()),
+        Exit::Stopped => Outcome::Failed("stopped because its load stopped".to_string()),
     };
-    Ok(match (outcome, load_stopped) {
+    let outcome = match (outcome, load_stopped) {
         // Part of the run had no load: whatever the harness measured, it is
         // not the test's.
         (_, Some(reason)) if !log.interrupted() => Outcome::Failed(reason),
         (outcome, _) => outcome,
-    })
+    };
+    Ok((outcome, load_msg_s))
+}
+
+/// The dynamic-library search paths `cargo run` (and so `cargo xtask`)
+/// prefixes with its target directories and the toolchain's libraries.
+const LIBRARY_PATH_VARS: &[&str] = &["LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH"];
+
+/// Give `command` the library search paths the driver was started with,
+/// without the entries cargo added. Inherited, they come first and would
+/// load a debug build of the Rust client's library left in
+/// `rust/target/debug` (by any earlier debug build or test of the workspace)
+/// ahead of the release build a harness links: `LD_LIBRARY_PATH` outranks the
+/// RUNPATH the Python extension finds it through.
+fn without_cargo_library_paths(command: &mut Command, repo: &Path) {
+    let rust = repo.join("rust");
+    let mut cargo_dirs = vec![rust.join("target")];
+    if let Some(dir) = std::env::var_os("CARGO_TARGET_DIR") {
+        cargo_dirs.push(rust.join(dir));
+    }
+    if let Some(home) = std::env::var_os("RUSTUP_HOME") {
+        cargo_dirs.push(PathBuf::from(home).join("toolchains"));
+    }
+    for var in LIBRARY_PATH_VARS {
+        if let Some(value) = std::env::var_os(var) {
+            match strip_paths(&value, &cargo_dirs) {
+                Some(kept) => command.env(var, kept),
+                None => command.env_remove(var),
+            };
+        }
+    }
+}
+
+/// `value`, a `:`-separated path list, without empty entries, entries under
+/// one of `dirs` and the toolchain's `lib/rustlib` directories; `None` when
+/// nothing is left.
+fn strip_paths(value: &OsStr, dirs: &[PathBuf]) -> Option<OsString> {
+    let kept: Vec<PathBuf> = std::env::split_paths(value)
+        .filter(|p| {
+            !p.as_os_str().is_empty()
+                && !dirs.iter().any(|d| p.starts_with(d))
+                && !p.to_string_lossy().contains("/lib/rustlib/")
+        })
+        .collect();
+    if kept.is_empty() {
+        return None;
+    }
+    std::env::join_paths(kept).ok()
+}
+
+/// The rate (records/s) in `kafka-producer-perf-test.sh`'s output: its final
+/// summary line when it has one, else the windows it reports every few
+/// seconds (`<n> records sent, <rate> records/sec ...`), weighted by their
+/// records. `None` without either.
+fn load_rate(output: &str) -> Option<f64> {
+    let mut records = 0.0;
+    let mut seconds = 0.0;
+    for line in output.lines() {
+        let Some((count, rest)) = line.trim().split_once(" records sent, ") else {
+            continue;
+        };
+        let (Ok(count), Some(Ok(rate))) = (
+            count.parse::<f64>(),
+            rest.split_once(" records/sec").map(|(r, _)| r.parse::<f64>()),
+        ) else {
+            continue;
+        };
+        if !(count.is_finite() && rate.is_finite() && rate > 0.0) {
+            continue;
+        }
+        // The summary (it also has the percentiles) covers the whole run.
+        if line.contains("50th") {
+            return Some(rate);
+        }
+        records += count;
+        seconds += count / rate;
+    }
+    (seconds > 0.0).then(|| records / seconds)
 }
 
 /// The command-line options of a consumer harness other than Python's (which
@@ -2173,7 +2389,8 @@ fn consumer_args(ctx: &ArmContext<'_>) -> Vec<String> {
         },
     };
     let rate = test.number("LIMIT_RPS");
-    let warmup_records = rate * options.warmup_min * 60;
+    // The settings' maximums keep it far from overflowing.
+    let warmup_records = rate.saturating_mul(options.warmup_min * 60);
     let dir = ctx.dir.display().to_string();
     let mut args: Vec<String> = Vec::new();
     let mut pairs: Vec<(&str, String)> = vec![
@@ -2240,12 +2457,14 @@ struct LoadGenerator {
     child: Child,
     pgid: u32,
     pumps: Vec<JoinHandle<()>>,
+    /// Its `load.log`, read for the rate it reached.
+    log_path: PathBuf,
 }
 
 impl LoadGenerator {
     /// Start it with `seconds` of records: the harness is stopped before it
     /// could read them all, so a generator that ends first has failed.
-    fn start(ctx: &ArmContext<'_>, seconds: u64, log: &ArmLog) -> anyhow::Result<LoadGenerator> {
+    fn start(ctx: &ArmContext<'_>, seconds: u64, log: &ArmLog, log_path: PathBuf) -> anyhow::Result<LoadGenerator> {
         let test = ctx.test;
         let rate = test.number("LIMIT_RPS");
         let mut command = Command::new(ctx.kafka_bin.join("kafka-producer-perf-test.sh"));
@@ -2253,7 +2472,7 @@ impl LoadGenerator {
             .arg("--topic")
             .arg(&ctx.topic)
             .arg("--num-records")
-            .arg((rate * seconds).to_string())
+            .arg(rate.saturating_mul(seconds).to_string())
             .arg("--record-size")
             .arg(test.number("VALUE_SIZE").to_string())
             .arg("--throughput")
@@ -2281,12 +2500,17 @@ impl LoadGenerator {
         .into_iter()
         .flatten()
         .collect();
-        Ok(LoadGenerator { child, pgid, pumps })
+        Ok(LoadGenerator { child, pgid, pumps, log_path })
     }
 
-    /// Stop it. `Some(reason)` when it had already stopped by itself, so part
-    /// of the run had no load.
-    fn stop(mut self) -> anyhow::Result<Option<String>> {
+    /// Whether it has stopped by itself.
+    fn has_stopped(&mut self) -> anyhow::Result<bool> {
+        Ok(self.child.try_wait()?.is_some())
+    }
+
+    /// Stop it. The reason when it had already stopped by itself, so part
+    /// of the run had no load, and the rate it reached ([`load_rate`]).
+    fn stop(mut self) -> anyhow::Result<(Option<String>, Option<f64>)> {
         let stopped = self.child.try_wait()?;
         if stopped.is_none() {
             stop_group(&mut self.child, self.pgid, STOP_GRACE)?;
@@ -2295,9 +2519,11 @@ impl LoadGenerator {
         for p in self.pumps {
             let _ = p.join();
         }
-        Ok(stopped.map(|status| {
+        let rate = fs::read_to_string(&self.log_path).ok().as_deref().and_then(load_rate);
+        let reason = stopped.map(|status| {
             format!("the load generator (kafka-producer-perf-test.sh) stopped with {status} before the harness; see load.log")
-        }))
+        });
+        Ok((reason, rate))
     }
 }
 
@@ -2329,12 +2555,12 @@ fn create_topic(ctx: &ArmContext<'_>, topic: &str, log: &ArmLog) -> anyhow::Resu
         ]);
         match run_logged(&mut create, log, TOPIC_COMMAND_TIMEOUT)? {
             Exit::Interrupted => return Ok(Err(INTERRUPTED.to_string())),
-            Exit::Status(s) if s.success() => {
-                if topic_described(ctx, topic, log)? {
-                    return Ok(Ok(()));
-                }
+            Exit::Status(s) if s.success() => match topic_described(ctx, topic, log)? {
+                Ok(true) => return Ok(Ok(())),
+                Ok(false) => {},
+                Err(reason) => return Ok(Err(reason)),
             },
-            Exit::Status(_) | Exit::TimedOut => {},
+            Exit::Status(_) | Exit::TimedOut | Exit::Stopped => {},
         }
         if attempt < TOPIC_CREATE_ATTEMPTS && sleep_unless_signalled(TOPIC_CREATE_RETRY_DELAY, log) {
             return Ok(Err(INTERRUPTED.to_string()));
@@ -2345,8 +2571,10 @@ fn create_topic(ctx: &ArmContext<'_>, topic: &str, log: &ArmLog) -> anyhow::Resu
     )))
 }
 
-/// Whether `--describe` sees the topic with all its partitions.
-fn topic_described(ctx: &ArmContext<'_>, topic: &str, log: &ArmLog) -> anyhow::Result<bool> {
+/// Whether `--describe` sees the topic with all its partitions; an error
+/// (`Err` inside) when it has more than the test's, so it existed before the
+/// run.
+fn topic_described(ctx: &ArmContext<'_>, topic: &str, log: &ArmLog) -> anyhow::Result<Result<bool, String>> {
     let mut describe = topics_command(ctx);
     describe.args(["--describe", "--topic", topic]);
     let partitions = ctx.test.partitions();
@@ -2358,12 +2586,18 @@ fn topic_described(ctx: &ArmContext<'_>, topic: &str, log: &ArmLog) -> anyhow::R
                 .lines()
                 .filter(|l| l.contains("Partition:") && l.contains(&format!("Topic: {topic}\t")))
                 .count() as u64;
+            if seen > partitions {
+                return Ok(Err(format!(
+                    "topic {topic} already exists, with {seen} partitions instead of {partitions}; delete it or use \
+                     another --topic-prefix"
+                )));
+            }
             if seen < partitions {
                 log.line(&format!("==> topic {topic} shows {seen} of {partitions} partitions"));
             }
-            seen >= partitions
+            Ok(seen == partitions)
         },
-        None => false,
+        None => Ok(false),
     })
 }
 
@@ -2438,20 +2672,33 @@ enum Exit {
     Status(ExitStatus),
     TimedOut,
     Interrupted,
+    /// Stopped because the caller's `stop_if` said so.
+    Stopped,
 }
 
 /// Run `command` in its own process group, streaming its output into `log`,
 /// stopping the whole group on timeout or on a signal to the driver; not
 /// started at all once the run is interrupted.
 fn run_logged(command: &mut Command, log: &ArmLog, timeout: Duration) -> anyhow::Result<Exit> {
-    let (exit, _) = run_capturing(command, log, timeout, false)?;
+    run_watched(command, log, timeout, &mut || Ok(false))
+}
+
+/// Like [`run_logged`], also stopping the group, with [`Exit::Stopped`], as
+/// soon as `stop_if` returns `true` (it is asked every half second).
+fn run_watched(
+    command: &mut Command,
+    log: &ArmLog,
+    timeout: Duration,
+    stop_if: &mut dyn FnMut() -> anyhow::Result<bool>,
+) -> anyhow::Result<Exit> {
+    let (exit, _) = run_capturing(command, log, timeout, false, stop_if)?;
     Ok(exit)
 }
 
 /// Like [`run_logged`], returning the (redacted) output when the command
 /// succeeded.
 fn output_logged(command: &mut Command, log: &ArmLog, timeout: Duration) -> anyhow::Result<Option<String>> {
-    Ok(match run_capturing(command, log, timeout, true)? {
+    Ok(match run_capturing(command, log, timeout, true, &mut || Ok(false))? {
         (Exit::Status(s), captured) if s.success() => Some(captured),
         _ => None,
     })
@@ -2462,6 +2709,7 @@ fn run_capturing(
     log: &ArmLog,
     timeout: Duration,
     capture: bool,
+    stop_if: &mut dyn FnMut() -> anyhow::Result<bool>,
 ) -> anyhow::Result<(Exit, String)> {
     command
         .stdin(Stdio::null())
@@ -2490,6 +2738,10 @@ fn run_capturing(
         if Instant::now() >= deadline {
             stop_group(&mut child, pgid, STOP_GRACE)?;
             break Exit::TimedOut;
+        }
+        if stop_if()? {
+            stop_group(&mut child, pgid, STOP_GRACE)?;
+            break Exit::Stopped;
         }
         std::thread::sleep(Duration::from_millis(500));
     };
@@ -2599,12 +2851,40 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
             ),
             (
                 "t rust PARTITIONS=0 VALUE_SIZE=1 LIMIT_RPS=0",
-                "PARTITIONS=0: expected a whole number above 0",
+                "PARTITIONS=0: expected a whole number from 1 to 10000",
+            ),
+            (
+                "t rust PARTITIONS=10001 VALUE_SIZE=1 LIMIT_RPS=0",
+                "PARTITIONS=10001: expected a whole number from 1 to 10000",
+            ),
+            (
+                "t rust PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=10000000000000000",
+                "LIMIT_RPS=10000000000000000: expected a whole number up to 1000000",
+            ),
+            (
+                "t rust PARTITIONS=1 VALUE_SIZE=4294968320 LIMIT_RPS=0",
+                "VALUE_SIZE=4294968320: expected a whole number from 1 to 1000000",
+            ),
+            (
+                "t rust PARTITIONS=1 VALUE_SIZE=999000 KEY_SIZE=1001 LIMIT_RPS=0",
+                "KEY_SIZE + VALUE_SIZE is 1000001 bytes, above 1000000",
+            ),
+            (
+                "t rust PARTITIONS=1 VALUE_SIZE=1024 KEY_SIZE=0 LIMIT_RPS=0 MAX_REQUEST_SIZE=1",
+                "KEY_SIZE + VALUE_SIZE is 1024 bytes, which with 512 bytes of headers does not fit MAX_REQUEST_SIZE=1 KiB",
+            ),
+            (
+                "t rust WORKLOAD=consumer PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=1 FETCH_MIN_BYTES=100000001",
+                "FETCH_MIN_BYTES=100000001: expected a whole number from 1 to 100000000",
+            ),
+            (
+                "t rust WORKLOAD=transactional PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0 NUM_TRANSACTIONAL_PRODUCERS=65",
+                "NUM_TRANSACTIONAL_PRODUCERS=65: expected a whole number from 1 to 64",
             ),
             ("t rust PARTITIONS=+5 VALUE_SIZE=1 LIMIT_RPS=0", "PARTITIONS=+5"),
             (
                 "t rust PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=-1",
-                "LIMIT_RPS=-1: expected a whole number",
+                "LIMIT_RPS=-1: expected a whole number up to 1000000",
             ),
             (
                 "t rust PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0 COMPRESSION_TYPE=brotli",
@@ -2752,6 +3032,27 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
     }
 
     #[test]
+    fn check_rejects_a_fixed_rate_above_ingress() {
+        let with_test = |line: &str, ingress: Option<f64>| RunOptions {
+            tests: vec![parse_tests(line).unwrap().remove(0)],
+            ingress_mb_s: ingress,
+            ..options(Group::Rust, 1, 5)
+        };
+        // 300,000 × 1 KiB ≈ 307 MB/s.
+        let fast = "t rust WORKLOAD=consumer PARTITIONS=1 VALUE_SIZE=1024 LIMIT_RPS=300000";
+        let err = check(&with_test(fast, Some(240.0))).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "t: its fixed rate, 307 MB/s, is above the cluster's ~240 MB/s ingress, so no client could hold it; lower \
+             LIMIT_RPS, or set LIMIT_RPS=0 for an unbounded producer test"
+        );
+        check(&with_test(fast, Some(600.0))).unwrap();
+        // Unknown ingress, or an unbounded test: nothing to compare.
+        check(&with_test(fast, None)).unwrap();
+        check(&with_test("t rust PARTITIONS=1 VALUE_SIZE=1024 LIMIT_RPS=0", Some(1.0))).unwrap();
+    }
+
+    #[test]
     fn selects_clients() {
         let ids = |group: Group, list: &str| -> anyhow::Result<Vec<&'static str>> {
             Ok(group.select_arms(list)?.into_iter().map(Arm::id).collect())
@@ -2825,15 +3126,19 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
         );
         // Too long: cut, with a hash of the whole name.
         let long = id(
-            "PARTITIONS=200 VALUE_SIZE=1048576 LIMIT_RPS=0 KEY_SIZE=1024 ACKS=1 COMPRESSION_TYPE=zstd \
+            "PARTITIONS=200 VALUE_SIZE=524288 LIMIT_RPS=0 KEY_SIZE=1024 ACKS=1 COMPRESSION_TYPE=zstd \
                        BATCH_SIZE=2048 LINGER_MS=100 MAX_IN_FLIGHT=5 BUFFER_MEMORY=64 MAX_REQUEST_SIZE=2048",
         );
-        assert_eq!(long.len(), MAX_TEST_ID_LEN, "{long}");
-        assert!(long.starts_with("producer-max-1mb-200p-key1kb-acks1-zstd-batch2mb-"), "{long}");
+        // At most the limit: the cut name loses a trailing `-`.
+        assert!(long.len() <= MAX_TEST_ID_LEN && long.len() >= MAX_TEST_ID_LEN - 1, "{long}");
+        assert!(
+            long.starts_with("producer-max-512kb-200p-key1kb-acks1-zstd-batch2mb-"),
+            "{long}"
+        );
         validate_test_id(&long).unwrap();
         // Two scenarios with the same start differ by their hash.
         let other = id(
-            "PARTITIONS=200 VALUE_SIZE=1048576 LIMIT_RPS=0 KEY_SIZE=1024 ACKS=1 COMPRESSION_TYPE=zstd \
+            "PARTITIONS=200 VALUE_SIZE=524288 LIMIT_RPS=0 KEY_SIZE=1024 ACKS=1 COMPRESSION_TYPE=zstd \
                         BATCH_SIZE=2048 LINGER_MS=100 MAX_IN_FLIGHT=5 BUFFER_MEMORY=64 MAX_REQUEST_SIZE=4096",
         );
         assert_ne!(long, other);
@@ -3267,7 +3572,7 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
             let log_path = dir.join("load.log");
             let _ = fs::remove_file(&log_path);
             let log = ArmLog::create(&log_path, Arc::clone(&ctx.redactions), ctx.signals_baseline).unwrap();
-            let mut load = LoadGenerator::start(&ctx, 90, &log).unwrap();
+            let mut load = LoadGenerator::start(&ctx, 90, &log, log_path.clone()).unwrap();
             // A new script can take a while to start (macOS checks it first).
             let deadline = Instant::now() + Duration::from_secs(20);
             while !ready(&mut load, &fs::read_to_string(&log_path).unwrap()) {
@@ -3279,13 +3584,18 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
             (stopped, fs::read_to_string(&log_path).unwrap())
         };
 
-        // Still running at the end: stopped, and not a failure.
-        let (stopped, logged) = run(
+        // Still running at the end: stopped, and not a failure; its rate is
+        // read from the windows it printed.
+        let ((stopped, rate), logged) = run(
             "WORKLOAD=consumer PARTITIONS=1 VALUE_SIZE=1024 LIMIT_RPS=10000 COMPRESSION_TYPE=lz4",
-            "echo \"args: $*\"; echo hunter2; echo started; exec sleep 60",
+            "echo \"args: $*\"; echo hunter2; \
+             echo '50000 records sent, 10000.0 records/sec (9.77 MB/sec), 3.2 ms avg latency, 192.0 ms max latency.'; \
+             echo '40000 records sent, 8000.0 records/sec (7.81 MB/sec), 3.0 ms avg latency, 90.0 ms max latency.'; \
+             echo started; exec sleep 60",
             &|_, logged| logged.contains("started"),
         );
         assert_eq!(stopped, None);
+        assert_eq!(rate, Some(9000.0));
         assert!(
             logged.contains(
                 "args: --topic perf-t --num-records 900000 --record-size 1024 --throughput 10000 \
@@ -3296,11 +3606,12 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
         assert!(!logged.contains("hunter2"), "{logged}");
 
         // Ended before the harness: part of the run had no load.
-        let (stopped, _) = run(
+        let ((stopped, rate), _) = run(
             "WORKLOAD=consumer PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=1",
             "exit 3",
-            &|load, _| load.child.try_wait().unwrap().is_some(),
+            &|load, _| load.has_stopped().unwrap(),
         );
+        assert_eq!(rate, None);
         let reason = stopped.unwrap();
         assert!(
             reason.starts_with("the load generator (kafka-producer-perf-test.sh) stopped with ")
@@ -3309,6 +3620,69 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
             "{reason}"
         );
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reads_the_rate_of_the_load() {
+        let window = |n: u64, rate: f64| {
+            format!(
+                "{n} records sent, {rate:.1} records/sec (9.77 MB/sec), 3.2 ms avg latency, 192.0 ms max latency.\n"
+            )
+        };
+        // Windows, weighted by their records: 150,000 records in 25 s.
+        let text = format!(
+            "==> started\n{}WARN something\n{}",
+            window(50_000, 10_000.0),
+            window(100_000, 5_000.0)
+        );
+        assert_eq!(load_rate(&text), Some(6_000.0));
+        // The final summary, when there is one, covers the whole run.
+        let summary = "300000 records sent, 9876.5 records/sec (9.65 MB/sec), 3.10 ms avg latency, 200.00 ms max \
+                       latency, 3 ms 50th, 5 ms 95th, 9 ms 99th, 40 ms 99.9th.";
+        assert_eq!(load_rate(&format!("{}{summary}\n", window(50_000, 10_000.0))), Some(9876.5));
+        // Nothing to read.
+        assert_eq!(load_rate("==> started\nError: no such topic\n"), None);
+        assert_eq!(load_rate("0 records sent, 0.0 records/sec (0.00 MB/sec)\n"), None);
+    }
+
+    #[test]
+    fn a_watched_command_stops_when_asked() {
+        let _signals = crate::signals::test_lock();
+        let dir = std::env::temp_dir().join(format!("perf-cloud-watch-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let log = ArmLog::create(&dir.join("run.log"), Arc::new(Vec::new()), crate::signals::count()).unwrap();
+        let started = Instant::now();
+        let mut asked = 0;
+        let exit = run_watched(Command::new("sleep").arg("60"), &log, Duration::from_secs(120), &mut || {
+            asked += 1;
+            Ok(asked >= 3)
+        })
+        .unwrap();
+        assert!(matches!(exit, Exit::Stopped));
+        assert!(started.elapsed() < Duration::from_secs(30), "{:?}", started.elapsed());
+        // Never asked to stop: it runs to its end.
+        let exit = run_watched(&mut Command::new("true"), &log, Duration::from_secs(60), &mut || Ok(false)).unwrap();
+        assert!(matches!(exit, Exit::Status(s) if s.success()));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn strips_the_library_paths_cargo_adds() {
+        let dirs = [
+            PathBuf::from("/w/rust/target"),
+            PathBuf::from("/home/u/.rustup/toolchains"),
+        ];
+        let stripped = |value: &str| strip_paths(OsStr::new(value), &dirs).map(|v| v.to_string_lossy().into_owned());
+        assert_eq!(
+            stripped(
+                "/w/rust/target/debug/deps:/w/rust/target/debug:/home/u/.rustup/toolchains/1.95-x86_64/lib:\
+                 /usr/lib/rustlib/x86_64-unknown-linux-gnu/lib/rustlib/x86_64/lib:/opt/lib::/usr/local/lib"
+            ),
+            Some("/opt/lib:/usr/local/lib".to_string())
+        );
+        // A sibling directory with the same prefix is kept.
+        assert_eq!(stripped("/w/rust/target2/lib"), Some("/w/rust/target2/lib".to_string()));
+        assert_eq!(stripped("/w/rust/target/release"), None);
     }
 
     #[test]

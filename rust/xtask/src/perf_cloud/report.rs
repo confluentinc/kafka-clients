@@ -14,16 +14,24 @@
 
 //! `report.md` and `junit.xml` of a `perf-cloud run`.
 //!
-//! The markdown has one table per test: a row per metric, a column per client
-//! that ran, and after each baseline a Δ column giving the change of the
-//! Rust-based client against it, banded:
+//! The markdown opens with a table of the run's parameters. A run of one test
+//! (as CI runs) lists the test's settings there too; a run of several lists
+//! each test's settings under its heading. Each test then has a table with a
+//! row per metric, a column per client that ran and, after the clients, a Δ
+//! column per comparison giving the change of the Rust-based client against
+//! its baseline, banded:
 //!
 //! - 🟢 better, or at most 10 % worse;
 //! - 🟡 10–20 % worse;
 //! - 🔴 more than 20 % worse.
 //!
 //! "Worse" follows the metric: lower throughput or transactions/s, higher
-//! latency, CPU or RSS. Counts (messages, transactions) get no Δ.
+//! latency, CPU or RSS. Counts (messages, transactions) get no Δ. A Δ is
+//! `n/a` unless both clients passed: a failed arm's numbers (from a partial
+//! run) are shown in its column, with a note, but never compared. A
+//! throughput Δ is `cluster-bound` when either client's ingress came near the
+//! cluster's limit, which then capped it rather than the client. The notes
+//! under a table also name the clients that failed or did not run.
 
 use std::fmt::Write as _;
 
@@ -44,13 +52,27 @@ const MIB: f64 = 1024.0 * 1024.0;
 pub(crate) fn comparisons(group: Group) -> &'static [(Arm, Arm, &'static str)] {
     match group {
         Group::Rust => &[
-            (Arm::Rust, Arm::Librdkafka, "Δ Rust vs librdkafka"),
-            (Arm::Rust, Arm::Java, "Δ Rust vs Java"),
+            (Arm::Rust, Arm::Librdkafka, "Δ vs librdkafka"),
+            (Arm::Rust, Arm::Java, "Δ vs Java"),
         ],
         Group::Python => &[
-            (Arm::PythonSyncRust, Arm::PythonSyncLibrdkafka, "Δ sync: Rust vs librdkafka"),
-            (Arm::PythonAsyncRust, Arm::PythonAsyncLibrdkafka, "Δ async: Rust vs librdkafka"),
+            (Arm::PythonSyncRust, Arm::PythonSyncLibrdkafka, "Δ sync"),
+            (Arm::PythonAsyncRust, Arm::PythonAsyncLibrdkafka, "Δ async"),
         ],
+    }
+}
+
+/// A group's report title, and what its Δ columns compare.
+fn group_text(group: Group) -> (&'static str, &'static str) {
+    match group {
+        Group::Rust => (
+            "Rust client performance results",
+            "the Rust client's difference from the named client",
+        ),
+        Group::Python => (
+            "Python client performance results",
+            "the Rust-based client's difference from the librdkafka-based client in the same mode",
+        ),
     }
 }
 
@@ -70,6 +92,8 @@ struct Row {
     decimals: usize,
     better: Option<Better>,
     transactional: bool,
+    /// A rate the cluster's ingress limit can cap.
+    throughput: bool,
 }
 
 const fn row(
@@ -79,19 +103,29 @@ const fn row(
     better: Option<Better>,
     transactional: bool,
 ) -> Row {
-    Row { label, value, decimals, better, transactional }
+    Row { label, value, decimals, better, transactional, throughput: false }
+}
+
+const fn rate_row(
+    label: &'static str,
+    value: fn(&Metrics) -> Option<f64>,
+    decimals: usize,
+    transactional: bool,
+) -> Row {
+    Row {
+        label,
+        value,
+        decimals,
+        better: Some(Better::Higher),
+        transactional,
+        throughput: true,
+    }
 }
 
 const ROWS: &[Row] = &[
-    row("Throughput (msg/s)", |m| Some(m.msg_s), 0, Some(Better::Higher), false),
-    row("Throughput (MiB/s)", |m| Some(m.mib_s), 2, Some(Better::Higher), false),
-    row(
-        "Transactions/s",
-        |m| m.txn.as_ref().map(|t| t.per_s),
-        2,
-        Some(Better::Higher),
-        true,
-    ),
+    rate_row("Throughput (msg/s)", |m| Some(m.msg_s), 0, false),
+    rate_row("Throughput (MiB/s)", |m| Some(m.mib_s), 2, false),
+    rate_row("Transactions/s", |m| m.txn.as_ref().map(|t| t.per_s), 2, true),
     row("Latency avg (ms)", |m| Some(m.avg), 2, Some(Better::Lower), false),
     row("Latency p50 (ms)", |m| Some(m.p50), 2, Some(Better::Lower), false),
     row("Latency p90 (ms)", |m| Some(m.p90), 2, Some(Better::Lower), false),
@@ -130,20 +164,54 @@ enum Column {
     },
 }
 
-/// The run's clients in order, each baseline followed by its Δ column when
-/// its candidate ran too.
+/// The run's clients in order, then a Δ column per comparison whose clients
+/// both ran.
 fn columns(info: &RunInfo) -> Vec<Column> {
-    let mut columns = Vec::new();
-    for &arm in &info.arms {
-        columns.push(Column::Client(arm));
-        for &(candidate, baseline, header) in comparisons(info.group) {
-            if baseline == arm && info.arms.contains(&candidate) {
-                columns.push(Column::Delta { candidate, baseline, header });
-            }
+    let mut columns: Vec<Column> = info.arms.iter().map(|&arm| Column::Client(arm)).collect();
+    for &(candidate, baseline, header) in comparisons(info.group) {
+        if info.arms.contains(&candidate) && info.arms.contains(&baseline) {
+            columns.push(Column::Delta { candidate, baseline, header });
         }
     }
     columns
 }
+
+/// The optional settings a test may set, after its workload, partitions,
+/// value size and rate: `(key, name in a scenario, name in a parameter
+/// table, unit)`.
+const SETTING_NAMES: &[(&str, &str, &str, &str)] = &[
+    ("KEY_SIZE", "key", "Key size", " B"),
+    ("ACKS", "acks", "acks", ""),
+    ("COMPRESSION_TYPE", "compression", "Compression", ""),
+    ("BATCH_SIZE", "batch", "Batch size", " KiB"),
+    ("LINGER_MS", "linger", "Linger", " ms"),
+    ("ENABLE_IDEMPOTENCE", "idempotence", "Idempotence", ""),
+    ("MAX_IN_FLIGHT", "in-flight", "Max in-flight requests", ""),
+    ("BUFFER_MEMORY", "buffer", "Buffer memory", " MiB"),
+    ("MAX_REQUEST_SIZE", "max request", "Max request size", " KiB"),
+    (
+        "RECORDS_PER_TRANSACTION",
+        "records per transaction",
+        "Records per transaction",
+        "",
+    ),
+    ("ABORT_RATE", "abort rate", "Abort rate", ""),
+    (
+        "NUM_TRANSACTIONAL_PRODUCERS",
+        "transactional producers",
+        "Transactional producers",
+        "",
+    ),
+    ("FETCH_MIN_BYTES", "fetch.min.bytes", "fetch.min.bytes", " B"),
+    ("FETCH_MAX_WAIT_MS", "fetch.max.wait.ms", "fetch.max.wait.ms", " ms"),
+    (
+        "MAX_PARTITION_FETCH_BYTES",
+        "max.partition.fetch.bytes",
+        "max.partition.fetch.bytes",
+        " B",
+    ),
+    ("MAX_POLL_RECORDS", "max.poll.records", "max.poll.records", ""),
+];
 
 /// A one-line description of a test's settings.
 pub(crate) fn scenario(test: &PerfTest) -> String {
@@ -161,30 +229,60 @@ pub(crate) fn scenario(test: &PerfTest) -> String {
         Some("0") | None => parts.push("unbounded rate".to_string()),
         Some(rps) => parts.push(format!("{rps} msg/s")),
     }
-    let units = [
-        ("KEY_SIZE", "key", " B"),
-        ("ACKS", "acks", ""),
-        ("COMPRESSION_TYPE", "compression", ""),
-        ("BATCH_SIZE", "batch", " KiB"),
-        ("LINGER_MS", "linger", " ms"),
-        ("ENABLE_IDEMPOTENCE", "idempotence", ""),
-        ("MAX_IN_FLIGHT", "in-flight", ""),
-        ("BUFFER_MEMORY", "buffer", " MiB"),
-        ("MAX_REQUEST_SIZE", "max request", " KiB"),
-        ("RECORDS_PER_TRANSACTION", "records per transaction", ""),
-        ("ABORT_RATE", "abort rate", ""),
-        ("NUM_TRANSACTIONAL_PRODUCERS", "transactional producers", ""),
-        ("FETCH_MIN_BYTES", "fetch.min.bytes", " B"),
-        ("FETCH_MAX_WAIT_MS", "fetch.max.wait.ms", " ms"),
-        ("MAX_PARTITION_FETCH_BYTES", "max.partition.fetch.bytes", " B"),
-        ("MAX_POLL_RECORDS", "max.poll.records", ""),
-    ];
-    for (key, label, unit) in units {
+    for &(key, label, _, unit) in SETTING_NAMES {
         if let Some(v) = test.setting(key) {
             parts.push(format!("{label} {v}{unit}"));
         }
     }
     parts.join(", ")
+}
+
+/// A test's settings as parameter-table rows.
+fn parameters(test: &PerfTest) -> Vec<(String, String)> {
+    let workload = match test.workload {
+        Workload::Producer => "Producer".to_string(),
+        Workload::Transactional => match test.setting("TXN_MODE").unwrap_or("produce") {
+            "eos" => "Transactional (EOS)".to_string(),
+            mode => format!("Transactional ({mode})"),
+        },
+        Workload::Consumer => "Consumer".to_string(),
+    };
+    let mut rows = vec![("Workload".to_string(), workload)];
+    let mut add = |name: &str, value: Option<String>| {
+        if let Some(value) = value {
+            rows.push((name.to_string(), value));
+        }
+    };
+    add("Partitions", test.setting("PARTITIONS").map(grouped));
+    add("Value size", test.setting("VALUE_SIZE").map(|v| format!("{} B", grouped(v))));
+    add(
+        "Rate",
+        Some(match test.setting("LIMIT_RPS") {
+            Some("0") | None => "Unbounded".to_string(),
+            Some(rps) => format!("{} msg/s", grouped(rps)),
+        }),
+    );
+    for &(key, _, name, unit) in SETTING_NAMES {
+        add(name, test.setting(key).map(|v| format!("{}{unit}", grouped(v))));
+    }
+    rows
+}
+
+/// A whole number with a `,` between thousands; any other value unchanged.
+fn grouped(value: &str) -> String {
+    match value.parse::<u64>() {
+        Ok(n) if value.bytes().all(|b| b.is_ascii_digit()) => number(n as f64, 0),
+        _ => value.to_string(),
+    }
+}
+
+/// `2026-10-15T15:57:31Z` → `2026-10-15 15:57:31 UTC`; anything else
+/// unchanged.
+fn start_time(started: &str) -> String {
+    match started.strip_suffix('Z') {
+        Some(time) => format!("{} UTC", time.replacen('T', " ", 1)),
+        None => started.to_string(),
+    }
 }
 
 /// `90` → `1 h 30 min`, `45` → `45 min`.
@@ -259,47 +357,83 @@ fn metrics_of(arms: &[ArmResult], arm: Arm) -> Option<&Metrics> {
     find(arms, arm).and_then(|a| a.metrics.as_ref())
 }
 
-fn mb_s(m: &Metrics) -> f64 {
-    m.mib_s * MIB / 1e6
+/// The metrics of `arm` when it passed: the only ones a Δ compares.
+fn passed_metrics_of(arms: &[ArmResult], arm: Arm) -> Option<&Metrics> {
+    find(arms, arm)
+        .filter(|a| a.outcome == Outcome::Passed)
+        .and_then(|a| a.metrics.as_ref())
+}
+
+/// The MB/s a client sent to (or, in a consumer test, read from) the
+/// cluster. A transactional test's throughput counts committed records only,
+/// while its aborted records crossed the ingress too.
+fn ingress_mb_s(m: &Metrics, abort_rate: f64) -> f64 {
+    let committed = m.mib_s * MIB / 1e6;
+    if abort_rate > 0.0 && abort_rate < 1.0 {
+        committed / (1.0 - abort_rate)
+    } else {
+        committed
+    }
 }
 
 pub(crate) fn markdown(info: &RunInfo, results: &[TestResult]) -> String {
+    let (title, compared) = group_text(info.group);
     let mut out = String::new();
-    let _ = writeln!(out, "# Performance test results: {} client group\n", info.group.name());
-    let _ = writeln!(out, "- Started: {}", info.started);
-    let labels: Vec<&str> = info.arms.iter().map(|a| a.label()).collect();
-    let _ = writeln!(out, "- Clients: {}", labels.join(", "));
-    let _ = writeln!(
-        out,
-        "- Each client: {} min warmup, then {} min measured",
-        info.warmup_min, info.duration_min
-    );
-    for (label, value) in &info.facts {
-        let _ = writeln!(out, "- {label}: {}", cell(value));
+    let _ = writeln!(out, "# {title}\n");
+    let clients: Vec<&str> = info.arms.iter().map(|a| a.label()).collect();
+    let mut rows = vec![
+        ("Start time".to_string(), start_time(&info.started)),
+        ("Clients".to_string(), clients.join(", ")),
+    ];
+    // A run of one test (as CI runs) lists the test's settings with the
+    // run's; a run of several lists each test's under its heading.
+    let single = match info.tests.as_slice() {
+        [test] => Some(test),
+        _ => None,
+    };
+    if let Some(test) = single {
+        rows.extend(parameters(test));
     }
+    rows.push(("Warmup".to_string(), format!("{} min per client", info.warmup_min)));
+    rows.push(("Measurement".to_string(), format!("{} min per client", info.duration_min)));
+    rows.extend(info.facts.iter().cloned());
+    parameter_table(&mut out, &rows);
+
     let columns = columns(info);
     if columns.iter().any(|c| matches!(c, Column::Delta { .. })) {
         let _ = writeln!(
             out,
-            "\nA Δ column gives the Rust-based client's change against the baseline it names: 🟢 better or at most \
-             10% worse, 🟡 10–20% worse, 🔴 more than 20% worse (lower throughput or transactions/s; higher latency, \
-             CPU or RSS)."
+            "\nΔ columns show {compared}: 🟢 better or up to 10% worse, 🟡 10–20% worse, 🔴 more than 20% worse. \
+             Worse means lower throughput, or higher latency, CPU or memory usage."
         );
     }
     if results.is_empty() {
         let _ = writeln!(out, "\nNo test has finished yet.");
     }
-
     for result in results {
-        test_table(&mut out, info, &columns, result);
+        if single.is_some() {
+            let _ = writeln!(out, "\n## Results\n");
+        } else {
+            let _ = writeln!(out, "\n## {}\n", cell(&result.test.id));
+            parameter_table(&mut out, &parameters(&result.test));
+            out.push('\n');
+        }
+        results_table(&mut out, info, &columns, result);
     }
     out
 }
 
-/// A test's section: its id, settings, table and notes.
-fn test_table(out: &mut String, info: &RunInfo, columns: &[Column], result: &TestResult) {
+/// A two-column table of `(parameter, value)` rows.
+fn parameter_table(out: &mut String, rows: &[(String, String)]) {
+    let _ = writeln!(out, "| Parameter | Value |\n|---|---|");
+    for (name, value) in rows {
+        let _ = writeln!(out, "| {} | {} |", cell(name), cell(value));
+    }
+}
+
+/// A test's results table and the notes on it.
+fn results_table(out: &mut String, info: &RunInfo, columns: &[Column], result: &TestResult) {
     let test = &result.test;
-    let _ = writeln!(out, "\n## {}\n\n{}\n", test.id, cell(&scenario(test)));
     let headers: Vec<&str> = columns
         .iter()
         .map(|c| match c {
@@ -310,22 +444,13 @@ fn test_table(out: &mut String, info: &RunInfo, columns: &[Column], result: &Tes
     let _ = writeln!(out, "| Metric | {} |", headers.join(" | "));
     let _ = writeln!(out, "|---|{}", "---:|".repeat(columns.len()));
 
-    let results: Vec<String> = columns
-        .iter()
-        .map(|c| match c {
-            Column::Client(arm) => match find(&result.arms, *arm) {
-                None => "not run".to_string(),
-                Some(a) => match &a.outcome {
-                    Outcome::Passed => "✅".to_string(),
-                    Outcome::Failed(reason) => format!("❌ {}", cell(reason)),
-                },
-            },
-            Column::Delta { .. } => String::new(),
-        })
-        .collect();
-    let _ = writeln!(out, "| Result | {} |", results.join(" | "));
-
     let transactional = test.workload == Workload::Transactional;
+    let abort_rate: f64 = test.setting("ABORT_RATE").and_then(|v| v.parse().ok()).unwrap_or(0.0);
+    // Whether `arm`'s ingress came near the cluster's limit.
+    let near_ingress = |arm: Arm| match (metrics_of(&result.arms, arm), info.ingress_mb_s) {
+        (Some(m), Some(limit)) => ingress_mb_s(m, abort_rate) >= NEAR_INGRESS_SHARE * limit,
+        _ => false,
+    };
     for row in ROWS.iter().filter(|r| transactional || !r.transactional) {
         let cells: Vec<String> = columns
             .iter()
@@ -339,10 +464,15 @@ fn test_table(out: &mut String, info: &RunInfo, columns: &[Column], result: &Tes
                         return String::new();
                     };
                     let pair = (
-                        metrics_of(&result.arms, *candidate).and_then(row.value),
-                        metrics_of(&result.arms, *baseline).and_then(row.value),
+                        passed_metrics_of(&result.arms, *candidate).and_then(row.value),
+                        passed_metrics_of(&result.arms, *baseline).and_then(row.value),
                     );
                     match pair {
+                        (Some(_), Some(_))
+                            if row.throughput && (near_ingress(*candidate) || near_ingress(*baseline)) =>
+                        {
+                            "cluster-bound".to_string()
+                        },
                         (Some(c), Some(b)) => match delta(c, b, better) {
                             Some((pct, band)) => format!("{band} {pct:+.1}%"),
                             None => "n/a".to_string(),
@@ -356,55 +486,71 @@ fn test_table(out: &mut String, info: &RunInfo, columns: &[Column], result: &Tes
     }
 
     let mut notes = Vec::new();
-    if transactional {
-        notes.push(
-            "Throughput counts committed records; a record's latency runs from its send to its transaction's commit."
-                .to_string(),
-        );
-    }
     let consumer = test.workload == Workload::Consumer;
-    if consumer {
-        notes.push(
-            "Each client read the same load: Kafka's kafka-producer-perf-test.sh at the test's rate, on the same \
-             machine. A record's latency runs from its creation by that producer to the consumer's poll (end to \
-             end); CPU and RSS are the consumer's alone."
-                .to_string(),
-        );
-    }
     // The committed rate a fixed-rate test aims at: its aborted transactions'
     // records are sent but not counted.
-    let abort_rate: f64 = test.setting("ABORT_RATE").and_then(|v| v.parse().ok()).unwrap_or(0.0);
-    let target = test.setting("LIMIT_RPS").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) * (1.0 - abort_rate);
+    let rate: f64 = test.setting("LIMIT_RPS").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+    let target = rate * (1.0 - abort_rate);
     for &arm in &info.arms {
-        let Some(m) = metrics_of(&result.arms, arm) else {
+        let label = arm.label();
+        let Some(a) = find(&result.arms, arm) else {
+            notes.push(format!("{label} did not run."));
+            continue;
+        };
+        if let Outcome::Failed(reason) = &a.outcome {
+            let reason = cell(reason.trim_end_matches('.'));
+            notes.push(match a.metrics {
+                Some(_) => {
+                    format!("{label} failed: {reason}. Its results are from a partial run and are not compared.")
+                },
+                None => format!("{label} failed: {reason}."),
+            });
+            continue;
+        }
+        let Some(m) = &a.metrics else {
             continue;
         };
         if let Some(limit) = info.ingress_mb_s {
-            if mb_s(m) >= NEAR_INGRESS_SHARE * limit {
+            let mb_s = ingress_mb_s(m, abort_rate);
+            if mb_s >= NEAR_INGRESS_SHARE * limit {
+                let aborted = if transactional && abort_rate > 0.0 {
+                    " including aborted records"
+                } else {
+                    ""
+                };
                 notes.push(format!(
-                    "⚠️ {} {} {:.0} MB/s, {:.0}% of the cluster's {limit:.0} MB/s ingress limit: the cluster may \
-                     have capped it.",
-                    arm.label(),
+                    "{label} {} {mb_s:.0} MB/s{aborted}, {:.0}% of the cluster's {limit:.0} MB/s ingress limit. The \
+                     cluster may have limited it, so its throughput is not compared.",
                     if consumer { "consumed" } else { "produced" },
-                    mb_s(m),
-                    100.0 * mb_s(m) / limit
+                    100.0 * mb_s / limit
                 ));
             }
         }
-        if target > 0.0 && m.msg_s < HELD_RATE_SHARE * target {
+        // A consumer reads what its load produced: when the load fell short,
+        // so did the consumer, through no fault of its own.
+        let short_load = a
+            .load_msg_s
+            .filter(|r| consumer && target > 0.0 && *r < HELD_RATE_SHARE * target);
+        if let Some(load) = short_load {
             notes.push(format!(
-                "⚠️ {} reached {} msg/s, below the {} msg/s target (capped): its latency is not comparable with a \
-                 client that held the rate.",
-                arm.label(),
+                "The load producer for {label} reached {} msg/s, below the {} msg/s target. Its throughput and \
+                 latency reflect the load, not the client.",
+                number(load, 0),
+                number(target, 0)
+            ));
+        } else if target > 0.0 && m.msg_s < HELD_RATE_SHARE * target {
+            notes.push(format!(
+                "{label} reached {} msg/s, below the {} msg/s target. Its latency is not comparable with that of \
+                 clients that held the rate.",
                 number(m.msg_s, 0),
                 number(target, 0)
             ));
         }
     }
     if !notes.is_empty() {
-        out.push('\n');
+        let _ = writeln!(out, "\n**Notes**\n");
         for note in notes {
-            let _ = writeln!(out, "{note}\n");
+            let _ = writeln!(out, "- {note}");
         }
     }
 }
@@ -535,19 +681,22 @@ mod tests {
     }
 
     fn arm(arm: Arm, outcome: Outcome, metrics: Option<Metrics>) -> ArmResult {
-        ArmResult { arm, outcome, metrics, elapsed: Duration::from_secs(90) }
+        ArmResult { arm, outcome, metrics, load_msg_s: None, elapsed: Duration::from_secs(90) }
     }
 
-    fn info(group: Group, arms: &[Arm], ingress: Option<f64>) -> RunInfo {
-        RunInfo {
+    /// The report of a run of `results`' tests.
+    fn render(group: Group, arms: &[Arm], ingress: Option<f64>, results: &[TestResult]) -> String {
+        let info = RunInfo {
             group,
             arms: arms.to_vec(),
+            tests: results.iter().map(|r| r.test.clone()).collect(),
             duration_min: 30,
             warmup_min: 5,
             started: "2026-10-14T10:00:00Z".to_string(),
-            facts: vec![("Cluster".to_string(), "lkc-abc".to_string())],
+            facts: vec![("Cluster size".to_string(), "2 CKU".to_string())],
             ingress_mb_s: ingress,
-        }
+        };
+        markdown(&info, results)
     }
 
     fn test(line: &str) -> PerfTest {
@@ -632,6 +781,17 @@ mod tests {
     }
 
     #[test]
+    fn formats_parameters() {
+        assert_eq!(grouped("1024"), "1,024");
+        assert_eq!(grouped("0"), "0");
+        assert_eq!(grouped("0.125"), "0.125");
+        assert_eq!(grouped("+5"), "+5");
+        assert_eq!(grouped("none"), "none");
+        assert_eq!(start_time("2026-10-15T15:57:31Z"), "2026-10-15 15:57:31 UTC");
+        assert_eq!(start_time("1760543851"), "1760543851");
+    }
+
+    #[test]
     fn markdown_has_columns_deltas_and_failures() {
         let results = vec![TestResult {
             test: test("producer-max rust PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=0"),
@@ -642,44 +802,131 @@ mod tests {
             ],
         }];
         let all = [Arm::Rust, Arm::Librdkafka, Arm::Java];
-        let md = markdown(&info(Group::Rust, &all, Some(600.0)), &results);
-        assert!(md.starts_with("# Performance test results: rust client group\n"), "{md}");
-        assert!(md.contains("- Clients: Rust (native), librdkafka (C), Java\n"), "{md}");
-        assert!(md.contains("- Cluster: lkc-abc"), "{md}");
-        assert!(md.contains("A Δ column gives the Rust-based client's change"), "{md}");
+        let md = render(Group::Rust, &all, Some(600.0), &results);
         assert!(
-            md.contains("## producer-max\n\nproducer, 200 partitions, 1024 B values, unbounded rate\n"),
+            md.starts_with("# Rust client performance results\n\n| Parameter | Value |\n|---|---|\n"),
             "{md}"
         );
+        assert!(md.contains("| Clients | Rust, librdkafka, Java |\n"), "{md}");
+        assert!(md.contains("| Cluster size | 2 CKU |\n"), "{md}");
+        assert!(
+            md.contains(
+                "\nΔ columns show the Rust client's difference from the named client: 🟢 better or up to 10% worse, \
+                 🟡 10–20% worse, 🔴 more than 20% worse. Worse means lower throughput, or higher latency, CPU or \
+                 memory usage.\n"
+            ),
+            "{md}"
+        );
+        // The clients come first, then the comparisons.
         assert_eq!(
             line_starting(&md, "| Metric |"),
-            "| Metric | Rust (native) | librdkafka (C) | Δ Rust vs librdkafka | Java | Δ Rust vs Java |"
+            "| Metric | Rust | librdkafka | Java | Δ vs librdkafka | Δ vs Java |"
         );
-        assert_eq!(line_starting(&md, "|---|"), "|---|---:|---:|---:|---:|---:|");
-        assert_eq!(
-            line_starting(&md, "| Result |"),
-            "| Result | ✅ | ✅ |  | ❌ harness exited \\| with 1 |  |"
-        );
+        assert_eq!(line_starting(&md, "|---|---:"), "|---|---:|---:|---:|---:|---:|");
+        // A failure is a note, not a row.
+        assert!(!md.contains("| Result |"), "{md}");
+        // Rust came near the cluster's ingress limit: its throughput may be
+        // the cluster's, so it is not compared.
         assert_eq!(
             line_starting(&md, "| Throughput (msg/s) |"),
-            "| Throughput (msg/s) | 500,000 | 400,000 | 🟢 +25.0% | – | n/a |"
+            "| Throughput (msg/s) | 500,000 | 400,000 | – | cluster-bound | n/a |"
         );
         assert_eq!(
             line_starting(&md, "| Latency p99 (ms) |"),
-            "| Latency p99 (ms) | 9.00 | 10.00 | 🟢 -10.0% | – | n/a |"
+            "| Latency p99 (ms) | 9.00 | 10.00 | – | 🟢 -10.0% | n/a |"
         );
         assert_eq!(
             line_starting(&md, "| Messages measured |"),
-            "| Messages measured | 30,000,000 | 24,000,000 |  | – |  |"
+            "| Messages measured | 30,000,000 | 24,000,000 | – |  |  |"
         );
         // No transaction rows for a producer test.
         assert!(!md.contains("Transactions/s"), "{md}");
         // 500k × 1 KiB/s is 512 MB/s, 85 % of 600.
         assert!(
-            md.contains("⚠️ Rust (native) produced 512 MB/s, 85% of the cluster's 600 MB/s ingress limit"),
+            md.ends_with(
+                "\n**Notes**\n\n\
+                 - Rust produced 512 MB/s, 85% of the cluster's 600 MB/s ingress limit. The cluster may have limited \
+                 it, so its throughput is not compared.\n\
+                 - Java failed: harness exited \\| with 1.\n"
+            ),
             "{md}"
         );
-        assert!(!md.contains("⚠️ librdkafka"), "{md}");
+        assert_rectangular(&md);
+    }
+
+    #[test]
+    fn markdown_lists_a_single_test_with_the_run_parameters() {
+        let results = vec![TestResult {
+            test: test("c rust WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=10000 COMPRESSION_TYPE=none"),
+            arms: vec![arm(
+                Arm::Rust,
+                Outcome::Passed,
+                Some(metrics("rust-consumer", 10_000.0, 12.0)),
+            )],
+        }];
+        let md = render(Group::Rust, &[Arm::Rust], Some(600.0), &results);
+        assert!(
+            md.starts_with(
+                "# Rust client performance results\n\n\
+                 | Parameter | Value |\n|---|---|\n\
+                 | Start time | 2026-10-14 10:00:00 UTC |\n\
+                 | Clients | Rust |\n\
+                 | Workload | Consumer |\n\
+                 | Partitions | 200 |\n\
+                 | Value size | 1,024 B |\n\
+                 | Rate | 10,000 msg/s |\n\
+                 | Compression | none |\n\
+                 | Warmup | 5 min per client |\n\
+                 | Measurement | 30 min per client |\n\
+                 | Cluster size | 2 CKU |\n\
+                 \n## Results\n\n| Metric | Rust |\n"
+            ),
+            "{md}"
+        );
+        // Nothing to note: no methodology, no warning.
+        assert!(!md.contains("Notes"), "{md}");
+        assert_rectangular(&md);
+    }
+
+    #[test]
+    fn markdown_lists_each_tests_parameters_under_its_heading() {
+        let results: Vec<TestResult> = [
+            "a rust PARTITIONS=1 VALUE_SIZE=100 LIMIT_RPS=0",
+            "b rust WORKLOAD=transactional TXN_MODE=eos PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=1000 \
+             RECORDS_PER_TRANSACTION=1000 ABORT_RATE=0.5 NUM_TRANSACTIONAL_PRODUCERS=16",
+        ]
+        .iter()
+        .map(|line| TestResult { test: test(line), arms: vec![] })
+        .collect();
+        let md = render(Group::Rust, &[Arm::Rust], None, &results);
+        let (run, tests) = md.split_once("\n## ").unwrap();
+        assert!(!run.contains("Workload"), "{md}");
+        assert!(
+            tests.starts_with(
+                "a\n\n| Parameter | Value |\n|---|---|\n\
+                 | Workload | Producer |\n\
+                 | Partitions | 1 |\n\
+                 | Value size | 100 B |\n\
+                 | Rate | Unbounded |\n\
+                 \n| Metric | Rust |\n"
+            ),
+            "{md}"
+        );
+        assert!(
+            md.contains(
+                "\n## b\n\n| Parameter | Value |\n|---|---|\n\
+                 | Workload | Transactional (EOS) |\n\
+                 | Partitions | 36 |\n\
+                 | Value size | 1,024 B |\n\
+                 | Rate | 1,000 msg/s |\n\
+                 | Records per transaction | 1,000 |\n\
+                 | Abort rate | 0.5 |\n\
+                 | Transactional producers | 16 |\n\
+                 \n| Metric | Rust |\n"
+            ),
+            "{md}"
+        );
+        assert_eq!(md.matches("- Rust did not run.\n").count(), 2, "{md}");
         assert_rectangular(&md);
     }
 
@@ -692,12 +939,9 @@ mod tests {
                 arm(Arm::Java, Outcome::Passed, Some(metrics("java", 1500.0, 9.0))),
             ],
         }];
-        let md = markdown(&info(Group::Rust, &[Arm::Rust, Arm::Java], None), &results);
-        assert!(md.contains("- Clients: Rust (native), Java\n"), "{md}");
-        assert_eq!(
-            line_starting(&md, "| Metric |"),
-            "| Metric | Rust (native) | Java | Δ Rust vs Java |"
-        );
+        let md = render(Group::Rust, &[Arm::Rust, Arm::Java], None, &results);
+        assert!(md.contains("| Clients | Rust, Java |\n"), "{md}");
+        assert_eq!(line_starting(&md, "| Metric |"), "| Metric | Rust | Java | Δ vs Java |");
         assert_eq!(
             line_starting(&md, "| Throughput (msg/s) |"),
             "| Throughput (msg/s) | 1,000 | 1,500 | 🔴 -33.3% |"
@@ -706,7 +950,7 @@ mod tests {
         assert_rectangular(&md);
 
         // Without a candidate and its baseline there is no Δ, nor its legend.
-        let md = markdown(&info(Group::Rust, &[Arm::Librdkafka, Arm::Java], None), &[]);
+        let md = render(Group::Rust, &[Arm::Librdkafka, Arm::Java], None, &[]);
         assert!(!md.contains("Δ"), "{md}");
     }
 
@@ -721,22 +965,36 @@ mod tests {
             )],
         }];
         let python = Group::Python.arms();
-        let md = markdown(&info(Group::Python, python, None), &results);
-        assert_eq!(
-            line_starting(&md, "| Metric |"),
-            "| Metric | python-sync (Rust) | python-sync (librdkafka) | Δ sync: Rust vs librdkafka | python-async (Rust) \
-             | python-async (librdkafka) | Δ async: Rust vs librdkafka |"
+        let md = render(Group::Python, python, None, &results);
+        assert!(md.starts_with("# Python client performance results\n"), "{md}");
+        assert!(
+            md.contains(
+                "Δ columns show the Rust-based client's difference from the librdkafka-based client in the same \
+                 mode: 🟢"
+            ),
+            "{md}"
         );
         assert_eq!(
-            line_starting(&md, "| Result |"),
-            "| Result | ❌ interrupted | not run |  | not run | not run |  |"
+            line_starting(&md, "| Metric |"),
+            "| Metric | Python sync (Rust) | Python sync (librdkafka) | Python async (Rust) | Python async \
+             (librdkafka) | Δ sync | Δ async |"
         );
         assert_eq!(
             line_starting(&md, "| Throughput (msg/s) |"),
-            "| Throughput (msg/s) | – | – | n/a | – | – | n/a |"
+            "| Throughput (msg/s) | – | – | – | – | n/a | n/a |"
+        );
+        assert!(
+            md.ends_with(
+                "\n**Notes**\n\n\
+                 - Python sync (Rust) failed: interrupted.\n\
+                 - Python sync (librdkafka) did not run.\n\
+                 - Python async (Rust) did not run.\n\
+                 - Python async (librdkafka) did not run.\n"
+            ),
+            "{md}"
         );
         assert_rectangular(&md);
-        assert!(markdown(&info(Group::Python, python, None), &[]).contains("No test has finished yet."));
+        assert!(render(Group::Python, python, None, &[]).contains("No test has finished yet."));
     }
 
     #[test]
@@ -748,12 +1006,15 @@ mod tests {
                 arm(Arm::Librdkafka, Outcome::Passed, Some(metrics("librdkafka", 9_000.0, 10.0))),
             ],
         }];
-        let md = markdown(&info(Group::Rust, &[Arm::Rust, Arm::Librdkafka], None), &results);
+        let md = render(Group::Rust, &[Arm::Rust, Arm::Librdkafka], None, &results);
         assert!(
-            md.contains("⚠️ librdkafka (C) reached 9,000 msg/s, below the 10,000 msg/s target (capped)"),
+            md.contains(
+                "\n- librdkafka reached 9,000 msg/s, below the 10,000 msg/s target. Its latency is not comparable \
+                 with that of clients that held the rate.\n"
+            ),
             "{md}"
         );
-        assert!(!md.contains("⚠️ Rust (native)"), "{md}");
+        assert!(!md.contains("- Rust reached"), "{md}");
     }
 
     #[test]
@@ -769,7 +1030,8 @@ mod tests {
                 ),
             ],
         }];
-        let md = markdown(&info(Group::Rust, &[Arm::Rust, Arm::Librdkafka], None), &results);
+        let md = render(Group::Rust, &[Arm::Rust, Arm::Librdkafka], None, &results);
+        assert!(md.contains("| Workload | Transactional (produce) |\n"), "{md}");
         assert_eq!(
             line_starting(&md, "| Transactions/s |"),
             "| Transactions/s | 50.00 | 40.00 | 🟢 +25.0% |"
@@ -782,15 +1044,119 @@ mod tests {
             line_starting(&md, "| Committed transactions |"),
             "| Committed transactions | 3,000 | 2,400 |  |"
         );
-        assert!(md.contains("Throughput counts committed records"), "{md}");
         // Half the transactions abort, so 5,000 committed msg/s holds the
         // 10,000 msg/s rate.
-        assert!(!md.contains("⚠️ Rust (native)"), "{md}");
+        assert!(!md.contains("- Rust reached"), "{md}");
         assert!(
-            md.contains("⚠️ librdkafka (C) reached 4,000 msg/s, below the 5,000 msg/s target (capped)"),
+            md.contains("\n- librdkafka reached 4,000 msg/s, below the 5,000 msg/s target."),
             "{md}"
         );
         assert_rectangular(&md);
+    }
+
+    #[test]
+    fn markdown_compares_only_clients_that_passed() {
+        let results = vec![TestResult {
+            test: test("t rust PARTITIONS=1 VALUE_SIZE=1024 LIMIT_RPS=0"),
+            arms: vec![
+                arm(Arm::Rust, Outcome::Passed, Some(metrics("rust", 1_000.0, 9.0))),
+                arm(
+                    Arm::Librdkafka,
+                    Outcome::Failed("harness exited with 1.".to_string()),
+                    Some(metrics("librdkafka", 2_000.0, 5.0)),
+                ),
+            ],
+        }];
+        let md = render(Group::Rust, &[Arm::Rust, Arm::Librdkafka], None, &results);
+        // The failed client's numbers are shown, never compared.
+        assert_eq!(
+            line_starting(&md, "| Throughput (msg/s) |"),
+            "| Throughput (msg/s) | 1,000 | 2,000 | n/a |"
+        );
+        assert_eq!(
+            line_starting(&md, "| Latency p99 (ms) |"),
+            "| Latency p99 (ms) | 9.00 | 5.00 | n/a |"
+        );
+        assert!(
+            md.contains(
+                "\n- librdkafka failed: harness exited with 1. Its results are from a partial run and are not \
+                 compared.\n"
+            ),
+            "{md}"
+        );
+        assert_rectangular(&md);
+    }
+
+    #[test]
+    fn markdown_counts_aborted_records_against_the_ingress() {
+        let results = vec![TestResult {
+            test: test("txn rust WORKLOAD=transactional PARTITIONS=1 VALUE_SIZE=1024 LIMIT_RPS=0 ABORT_RATE=0.5"),
+            arms: vec![
+                arm(Arm::Rust, Outcome::Passed, Some(txn_metrics("rust-txn", 5_000.0, 40.0))),
+                arm(
+                    Arm::Librdkafka,
+                    Outcome::Passed,
+                    Some(txn_metrics("librdkafka-txn", 2_000.0, 50.0)),
+                ),
+            ],
+        }];
+        // 5,000 committed records/s of 1 KiB are 5.1 MB/s; with as many
+        // aborted, 10.2 MB/s crossed the 12 MB/s ingress.
+        let md = render(Group::Rust, &[Arm::Rust, Arm::Librdkafka], Some(12.0), &results);
+        assert!(
+            md.contains(
+                "\n- Rust produced 10 MB/s including aborted records, 85% of the cluster's 12 MB/s ingress limit."
+            ),
+            "{md}"
+        );
+        assert!(!md.contains("- librdkafka produced"), "{md}");
+        assert_eq!(
+            line_starting(&md, "| Throughput (msg/s) |"),
+            "| Throughput (msg/s) | 5,000 | 2,000 | cluster-bound |"
+        );
+        assert_eq!(
+            line_starting(&md, "| Transactions/s |"),
+            "| Transactions/s | 50.00 | 20.00 | cluster-bound |"
+        );
+        // Latency is still compared.
+        assert_eq!(
+            line_starting(&md, "| Commit latency p99 (ms) |"),
+            "| Commit latency p99 (ms) | 40.00 | 50.00 | 🟢 -20.0% |"
+        );
+        assert_rectangular(&md);
+    }
+
+    #[test]
+    fn markdown_blames_a_short_load_not_the_consumer() {
+        let consumer = |client: &str, msg_s: f64, load: f64, arm_id: Arm| ArmResult {
+            load_msg_s: Some(load),
+            ..arm(arm_id, Outcome::Passed, Some(metrics(client, msg_s, 9.0)))
+        };
+        let results = vec![TestResult {
+            test: test("c rust WORKLOAD=consumer PARTITIONS=1 VALUE_SIZE=1024 LIMIT_RPS=10000"),
+            arms: vec![
+                consumer("rust-consumer", 9_000.0, 9_000.0, Arm::Rust),
+                consumer("librdkafka-consumer", 9_000.0, 9_990.0, Arm::Librdkafka),
+            ],
+        }];
+        let md = render(Group::Rust, &[Arm::Rust, Arm::Librdkafka], None, &results);
+        // Rust's load fell short: the note names the load.
+        assert!(
+            md.contains(
+                "\n- The load producer for Rust reached 9,000 msg/s, below the 10,000 msg/s target. Its throughput \
+                 and latency reflect the load, not the client.\n"
+            ),
+            "{md}"
+        );
+        assert!(!md.contains("- Rust reached"), "{md}");
+        // librdkafka's load held: the shortfall is the client's.
+        assert!(
+            md.contains("\n- librdkafka reached 9,000 msg/s, below the 10,000 msg/s target."),
+            "{md}"
+        );
+        assert!(!md.contains("The load producer for librdkafka"), "{md}");
+        // How a consumer test measures is the documentation's, not the report's.
+        assert!(!md.contains("kafka-producer-perf-test.sh"), "{md}");
     }
 
     #[test]
@@ -810,7 +1176,7 @@ mod tests {
         );
         assert!(xml.contains("<testsuite name=\"t\" tests=\"3\" failures=\"1\""), "{xml}");
         assert!(
-            xml.contains("<testcase classname=\"t\" name=\"librdkafka (C)\" time=\"90.0\">"),
+            xml.contains("<testcase classname=\"t\" name=\"librdkafka\" time=\"90.0\">"),
             "{xml}"
         );
         assert!(xml.contains("<failure message=\"bad &lt;&quot;&amp;&apos;&gt; end\">"), "{xml}");

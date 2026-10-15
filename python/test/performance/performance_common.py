@@ -5,9 +5,15 @@ import json
 from threading import Thread
 
 
-# Latency histogram resolution, matching the C/Rust/Java perf tests: 1 ms
-# buckets covering 0..MAX_LATENCY_MS, plus one overflow bucket.
+# Latency histogram of the producer and transactional harnesses, matching the
+# C/Rust/Java producer perf tests: 1 ms buckets covering 0..MAX_LATENCY_MS,
+# plus one overflow bucket (MAX_LATENCY_MS + 1, the top bucket).
 MAX_LATENCY_MS = 10000
+# Latency histogram of the consumer harness, matching rust/consumer-perf,
+# librdkafka_e2e.c and JavaE2E.java: 1 ms buckets covering
+# 0..CONSUMER_MAX_LATENCY_MS, a longer latency counted in the top bucket. Under
+# saturation the e2e latency is backlog age and can far exceed 10 s.
+CONSUMER_MAX_LATENCY_MS = 600_000
 
 
 def recreate_topic(bootstrap_servers, topic, sasl_conf=None, partitions=-1):
@@ -26,20 +32,34 @@ def recreate_topic(bootstrap_servers, topic, sasl_conf=None, partitions=-1):
                             topic=topic, sasl_conf=sasl_conf or {}, partitions=partitions)
 
 
+def latency_bucket(latency_ns, top_bucket=MAX_LATENCY_MS + 1):
+    """The 1 ms histogram bucket of a latency in nanoseconds:
+    ``floor(latency_ns / 1_000_000)``, clamped to ``0..top_bucket`` (the rule of
+    the Rust and C perf tests)."""
+    return min(max(latency_ns // 1_000_000, 0), top_bucket)
+
+
 def percentile_from_hist(hist, p):
     """Return the smallest latency-ms bucket whose cumulative count reaches the
     p-th percentile (0 < p <= 1). Mirrors percentileFromHist in the C/Rust/Java
-    perf tests."""
-    total = sum(hist)
+    perf tests. ``hist`` is either a dense list indexed by bucket or a sparse
+    ``{bucket: count}`` dict (same result for the same counts)."""
+    if isinstance(hist, dict):
+        buckets = sorted(hist.items())
+        total = sum(count for _, count in buckets)
+    else:
+        buckets = enumerate(hist)
+        total = sum(hist)
     if total == 0:
         return 0
     target = p * total
     cumulative = 0
-    for ms, count in enumerate(hist):
+    ms = 0
+    for ms, count in buckets:
         cumulative += count
         if cumulative >= target:
             return ms
-    return len(hist) - 1
+    return ms
 
 
 class Bucket:
@@ -83,16 +103,23 @@ class Bucket:
 
 class LatencyBucket(Bucket):
     """Bucket that additionally tracks a 1 ms-resolution histogram so it can
-    report p50/p90/p99/p999 per window, matching the C/Rust/Java perf tests."""
+    report p50/p90/p99/p999 per window, matching the C/Rust/Java perf tests.
 
-    def __init__(self):
+    A measurement is a latency in ms (an int, or a float carrying the exact
+    sub-ms value): average/max come from the exact values (``Bucket``), the
+    percentiles from its ``floor`` bucket, clamped to ``top_bucket``. The
+    histogram is sparse (``{bucket: count}``), so a window costs memory only for
+    the buckets it touched, even with the consumer's 600 000 ms ceiling."""
+
+    def __init__(self, top_bucket=MAX_LATENCY_MS + 1):
         super().__init__()
-        self.hist = [0] * (MAX_LATENCY_MS + 2)
+        self.top_bucket = top_bucket
+        self.hist = {}
 
     def add_measurement(self, measurement):
         super().add_measurement(measurement)
-        idx = min(max(int(measurement), 0), MAX_LATENCY_MS + 1)
-        self.hist[idx] += 1
+        idx = min(max(int(measurement), 0), self.top_bucket)
+        self.hist[idx] = self.hist.get(idx, 0) + 1
 
     def rollover(self):
         ret = super().rollover()
@@ -100,7 +127,7 @@ class LatencyBucket(Bucket):
         ret["p90"] = str(percentile_from_hist(self.hist, 0.90))
         ret["p99"] = str(percentile_from_hist(self.hist, 0.99))
         ret["p999"] = str(percentile_from_hist(self.hist, 0.999))
-        self.hist = [0] * (MAX_LATENCY_MS + 2)
+        self.hist = {}
         return ret
 
 
@@ -137,10 +164,14 @@ class CPUBucket(SingleMeasurementBucket):
 
 
 class Metrics:
-    def __init__(self):
+    def __init__(self, latency_top_bucket=MAX_LATENCY_MS + 1):
+        # Top bucket of the per-window latency histogram: the producer
+        # harnesses' overflow bucket by default, CONSUMER_MAX_LATENCY_MS for
+        # the consumer harness.
+        self._latency_top_bucket = latency_top_bucket
         self.rss = MemoryBucket()
         self.cpu = CPUBucket()
-        self.latency = LatencyBucket()
+        self.latency = LatencyBucket(latency_top_bucket)
         self.bytes = Bucket()
         self.messages = Bucket()
         self.thread = None
@@ -157,7 +188,7 @@ class Metrics:
     def rollover(self):
         window_start_ms, self.window_start_ms = \
             self.window_start_ms, int(time.time() * 1000)
-        latency, self.latency = self.latency, LatencyBucket()
+        latency, self.latency = self.latency, LatencyBucket(self._latency_top_bucket)
         bytes, self.bytes = self.bytes, Bucket()
         messages, self.messages = self.messages, Bucket()
         return {

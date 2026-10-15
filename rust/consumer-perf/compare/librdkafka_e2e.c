@@ -67,13 +67,31 @@
 
 /* ----------------------------- histogram ------------------------------ */
 
+/* The buckets are allocated once, zeroed (calloc), so only the pages of the
+ * buckets actually written become resident: the reported RSS is the client's,
+ * not this 4.8 MB array's. hist_reset() clears in place and only the bucket
+ * range written since the last reset, so it never touches the rest of the
+ * array. */
 typedef struct {
     int64_t *buckets; /* MAX_LATENCY_MS + 1 entries */
     int64_t count;
     int64_t sum;
     int64_t min;
     int64_t max;
+    /* Lowest and highest bucket written since init / reset; every non-zero
+     * bucket lies in [lo, hi]. Meaningless while count == 0. */
+    int64_t lo;
+    int64_t hi;
 } hist_t;
+
+static void hist_clear_stats(hist_t *h) {
+    h->count = 0;
+    h->sum = 0;
+    h->min = (int64_t)1 << 62;
+    h->max = -((int64_t)1 << 62);
+    h->lo = MAX_LATENCY_MS;
+    h->hi = 0;
+}
 
 static void hist_init(hist_t *h) {
     h->buckets = calloc(MAX_LATENCY_MS + 1, sizeof(int64_t));
@@ -81,18 +99,16 @@ static void hist_init(hist_t *h) {
         fprintf(stderr, "out of memory allocating histogram\n");
         exit(1);
     }
-    h->count = 0;
-    h->sum = 0;
-    h->min = (int64_t)1 << 62;
-    h->max = -((int64_t)1 << 62);
+    hist_clear_stats(h);
 }
 
+/* Empties the histogram in place for the next interval, zeroing only the
+ * buckets written since the last reset. */
 static void hist_reset(hist_t *h) {
-    memset(h->buckets, 0, (size_t)(MAX_LATENCY_MS + 1) * sizeof(int64_t));
-    h->count = 0;
-    h->sum = 0;
-    h->min = (int64_t)1 << 62;
-    h->max = -((int64_t)1 << 62);
+    if (h->count > 0)
+        memset(h->buckets + h->lo, 0,
+               (size_t)(h->hi - h->lo + 1) * sizeof(int64_t));
+    hist_clear_stats(h);
 }
 
 static void hist_free(hist_t *h) {
@@ -107,6 +123,10 @@ static void hist_record(hist_t *h, int64_t latency_ms) {
     else if (idx > MAX_LATENCY_MS)
         idx = MAX_LATENCY_MS;
     h->buckets[idx]++;
+    if (idx < h->lo)
+        h->lo = idx;
+    if (idx > h->hi)
+        h->hi = idx;
     h->count++;
     h->sum += latency_ms > 0 ? latency_ms : 0;
     if (latency_ms < h->min)
@@ -126,7 +146,7 @@ static double hist_stddev(const hist_t *h) {
         return 0.0;
     double mean = (double)h->sum / (double)h->count;
     double var = 0.0;
-    for (int64_t i = 0; i <= MAX_LATENCY_MS; i++) {
+    for (int64_t i = h->lo; i <= h->hi; i++) {
         if (h->buckets[i]) {
             double d = (double)i - mean;
             var += (double)h->buckets[i] * d * d;
@@ -141,12 +161,12 @@ static int64_t hist_percentile(const hist_t *h, double pct) {
         return 0;
     int64_t target = (int64_t)ceil(pct / 100.0 * (double)h->count);
     int64_t cumulative = 0;
-    for (int64_t i = 0; i <= MAX_LATENCY_MS; i++) {
+    for (int64_t i = h->lo; i <= h->hi; i++) {
         cumulative += h->buckets[i];
         if (cumulative >= target)
             return i;
     }
-    return MAX_LATENCY_MS;
+    return h->hi;
 }
 
 /* ------------------------------ clocks -------------------------------- */
@@ -610,6 +630,20 @@ int main(int argc, char **argv) {
     printf("rdkafka ver: %s\n", rd_kafka_version_str());
     printf("======================================================================\n");
 
+    /* The histograms are allocated once, here, before the client has
+     * allocated and freed anything large: glibc raises its mmap threshold when
+     * a large mmap'd block is freed, after which a large calloc may be carved
+     * from a freed heap region and memset, making the whole array resident.
+     * Allocated now they are fresh zero pages, resident only where written. */
+    hist_t overall, interval_hist;
+    hist_init(&overall);
+    hist_init(&interval_hist);
+    /* Records-per-batch distribution over NON-EMPTY batches during the
+     * measurement window (post-warmup), mirroring the Rust harness. Reuses the
+     * 1-unit-bucket histogram; batch sizes are bounded by max_poll_records. */
+    hist_t rpp;
+    hist_init(&rpp);
+
     char errstr[512];
     rd_kafka_t *rk = build_consumer(&a, errstr, sizeof(errstr));
     if (!rk) {
@@ -730,14 +764,6 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    hist_t overall, interval_hist;
-    hist_init(&overall);
-    hist_init(&interval_hist);
-    /* Records-per-batch distribution over NON-EMPTY batches during the
-     * measurement window (post-warmup), mirroring the Rust harness. Reuses the
-     * 1-unit-bucket histogram; batch sizes are bounded by max_poll_records. */
-    hist_t rpp;
-    hist_init(&rpp);
     cpu_sampler_t sampler;
     /* Re-initialised when warmup completes, so the CPU average covers only
      * the measurement window. */
@@ -945,7 +971,6 @@ int main(int argc, char **argv) {
         measure_start > 0.0 ? (monotonic_s() - measure_start) : 0.0;
 
     kill_producer();
-    rd_kafka_consumer_close(rk);
 
     /* Summary. */
     int64_t total_bytes = overall.count * a.message_size;
@@ -1070,6 +1095,15 @@ int main(int argc, char **argv) {
     }
 
     printf("\nResults written to: %s\n", run_dir);
+    fflush(stdout);
+
+    /* Closed only once the results are on disk: a close error (e.g. a KIP-848
+     * leave-group timeout) says nothing about the measurement, so it is a
+     * warning and neither discards the results nor changes the exit status. */
+    rd_kafka_resp_err_t cerr = rd_kafka_consumer_close(rk);
+    if (cerr)
+        fprintf(stderr, "warning: closing the consumer failed: %s\n",
+                rd_kafka_err2str(cerr));
 
     free(rkmessages);
     rd_kafka_queue_destroy(rkqu);
