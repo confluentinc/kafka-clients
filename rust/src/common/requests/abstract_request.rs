@@ -48,6 +48,7 @@ use crate::DescribeDelegationTokenRequestData;
 use crate::DescribeGroupsRequestData;
 use crate::DescribeLogDirsRequestData;
 use crate::DescribeProducersRequestData;
+use crate::DescribeTopicPartitionsRequestData;
 use crate::DescribeTransactionsRequestData;
 use crate::DescribeUserScramCredentialsRequestData;
 use crate::ElectLeadersRequestData;
@@ -79,6 +80,7 @@ use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Readable};
 
 use super::AddOffsetsToTxnRequest;
 use super::AddPartitionsToTxnRequest;
+use crate::UnregisterControllerRequestData;
 use crate::UpdateFeaturesRequestData;
 use crate::WriteTxnMarkersRequestData;
 
@@ -106,6 +108,7 @@ use super::DescribeDelegationTokenRequest;
 use super::DescribeGroupsRequest;
 use super::DescribeLogDirsRequest;
 use super::DescribeProducersRequest;
+use super::DescribeTopicPartitionsRequest;
 use super::DescribeTransactionsRequest;
 use super::DescribeUserScramCredentialsRequest;
 use super::ElectLeadersRequest;
@@ -134,6 +137,7 @@ use super::SaslAuthenticateRequest;
 use super::SaslHandshakeRequest;
 use super::SendBuilder;
 use super::TxnOffsetCommitRequest;
+use super::UnregisterControllerRequest;
 use super::UpdateFeaturesRequest;
 use super::WriteTxnMarkersRequest;
 
@@ -242,6 +246,8 @@ pub enum AbstractRequest {
     ListConfigResources(ListConfigResourcesRequest),
     /// A DescribeCluster request.
     DescribeCluster(DescribeClusterRequest),
+    /// A DescribeTopicPartitions request.
+    DescribeTopicPartitions(DescribeTopicPartitionsRequest),
     /// A DescribeLogDirs request.
     DescribeLogDirs(DescribeLogDirsRequest),
     /// An AlterReplicaLogDirs request.
@@ -276,6 +282,8 @@ pub enum AbstractRequest {
     DescribeDelegationToken(DescribeDelegationTokenRequest),
     /// An UpdateFeatures request.
     UpdateFeatures(UpdateFeaturesRequest),
+    /// An UnregisterController request.
+    UnregisterController(UnregisterControllerRequest),
     /// A DescribeProducers request.
     DescribeProducers(DescribeProducersRequest),
     /// A DescribeTransactions request.
@@ -322,6 +330,7 @@ impl AbstractRequest {
             Self::IncrementalAlterConfigs(r) => r.version(),
             Self::ListConfigResources(r) => r.version(),
             Self::DescribeCluster(r) => r.version(),
+            Self::DescribeTopicPartitions(r) => r.version(),
             Self::DescribeLogDirs(r) => r.version(),
             Self::AlterReplicaLogDirs(r) => r.version(),
             Self::ElectLeaders(r) => r.version(),
@@ -339,6 +348,7 @@ impl AbstractRequest {
             Self::ExpireDelegationToken(r) => r.version(),
             Self::DescribeDelegationToken(r) => r.version(),
             Self::UpdateFeatures(r) => r.version(),
+            Self::UnregisterController(r) => r.version(),
             Self::DescribeProducers(r) => r.version(),
             Self::DescribeTransactions(r) => r.version(),
             Self::WriteTxnMarkers(r) => r.version(),
@@ -380,6 +390,7 @@ impl AbstractRequest {
             Self::IncrementalAlterConfigs(r) => r.api_key(),
             Self::ListConfigResources(r) => r.api_key(),
             Self::DescribeCluster(r) => r.api_key(),
+            Self::DescribeTopicPartitions(r) => r.api_key(),
             Self::DescribeLogDirs(r) => r.api_key(),
             Self::AlterReplicaLogDirs(r) => r.api_key(),
             Self::ElectLeaders(r) => r.api_key(),
@@ -397,6 +408,7 @@ impl AbstractRequest {
             Self::ExpireDelegationToken(r) => r.api_key(),
             Self::DescribeDelegationToken(r) => r.api_key(),
             Self::UpdateFeatures(r) => r.api_key(),
+            Self::UnregisterController(r) => r.api_key(),
             Self::DescribeProducers(r) => r.api_key(),
             Self::DescribeTransactions(r) => r.api_key(),
             Self::WriteTxnMarkers(r) => r.api_key(),
@@ -447,6 +459,7 @@ impl AbstractRequest {
             Self::IncrementalAlterConfigs(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::ListConfigResources(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::DescribeCluster(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DescribeTopicPartitions(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::DescribeLogDirs(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::AlterReplicaLogDirs(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::ElectLeaders(r) => SendBuilder::build_request_send(header, r.data_mut()),
@@ -464,6 +477,7 @@ impl AbstractRequest {
             Self::ExpireDelegationToken(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::DescribeDelegationToken(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::UpdateFeatures(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::UnregisterController(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::DescribeProducers(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::DescribeTransactions(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::WriteTxnMarkers(r) => SendBuilder::build_request_send(header, r.data_mut()),
@@ -595,6 +609,9 @@ impl AbstractRequest {
             Self::DescribeCluster(r) => {
                 super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::DescribeTopicPartitions(r) => {
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
             Self::DescribeLogDirs(r) => {
                 super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
@@ -644,6 +661,9 @@ impl AbstractRequest {
                 super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::UpdateFeatures(r) => {
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::UnregisterController(r) => {
                 super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::DescribeProducers(r) => {
@@ -702,6 +722,7 @@ impl AbstractRequest {
             Self::IncrementalAlterConfigs(r) => Self::serialize_body(r.data_mut(), version),
             Self::ListConfigResources(r) => Self::serialize_body(r.data_mut(), version),
             Self::DescribeCluster(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeTopicPartitions(r) => Self::serialize_body(r.data_mut(), version),
             Self::DescribeLogDirs(r) => Self::serialize_body(r.data_mut(), version),
             Self::AlterReplicaLogDirs(r) => Self::serialize_body(r.data_mut(), version),
             Self::ElectLeaders(r) => Self::serialize_body(r.data_mut(), version),
@@ -719,6 +740,7 @@ impl AbstractRequest {
             Self::ExpireDelegationToken(r) => Self::serialize_body(r.data_mut(), version),
             Self::DescribeDelegationToken(r) => Self::serialize_body(r.data_mut(), version),
             Self::UpdateFeatures(r) => Self::serialize_body(r.data_mut(), version),
+            Self::UnregisterController(r) => Self::serialize_body(r.data_mut(), version),
             Self::DescribeProducers(r) => Self::serialize_body(r.data_mut(), version),
             Self::DescribeTransactions(r) => Self::serialize_body(r.data_mut(), version),
             Self::WriteTxnMarkers(r) => Self::serialize_body(r.data_mut(), version),
@@ -778,6 +800,7 @@ impl AbstractRequest {
             Self::IncrementalAlterConfigs(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::ListConfigResources(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::DescribeCluster(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DescribeTopicPartitions(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::DescribeLogDirs(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::AlterReplicaLogDirs(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::ElectLeaders(r) => Some(r.get_error_response(throttle_time_ms, error)),
@@ -795,6 +818,11 @@ impl AbstractRequest {
             Self::ExpireDelegationToken(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::DescribeDelegationToken(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::UpdateFeatures(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            // Java's `getErrorResponse(int, Throwable)` takes the throwable, so the
+            // code becomes the error that `Errors.exception()` builds for it.
+            Self::UnregisterController(r) => {
+                Some(r.get_error_response(throttle_time_ms, &crate::common::Error::new(*error)))
+            },
             Self::DescribeProducers(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::DescribeTransactions(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::WriteTxnMarkers(r) => Some(r.get_error_response(throttle_time_ms, error)),
@@ -935,6 +963,13 @@ impl AbstractRequest {
                 let data = DescribeClusterRequestData::read(readable, api_version)?;
                 Ok(Self::DescribeCluster(DescribeClusterRequest::new(data, api_version)))
             },
+            ApiKeys::DESCRIBE_TOPIC_PARTITIONS => {
+                let data = DescribeTopicPartitionsRequestData::read(readable, api_version)?;
+                Ok(Self::DescribeTopicPartitions(DescribeTopicPartitionsRequest::with_version(
+                    data,
+                    api_version,
+                )))
+            },
             ApiKeys::DESCRIBE_LOG_DIRS => {
                 let data = DescribeLogDirsRequestData::read(readable, api_version)?;
                 Ok(Self::DescribeLogDirs(DescribeLogDirsRequest::new(data, api_version)))
@@ -1024,6 +1059,10 @@ impl AbstractRequest {
                 let data = UpdateFeaturesRequestData::read(readable, api_version)?;
                 Ok(Self::UpdateFeatures(UpdateFeaturesRequest::new(data, api_version)))
             },
+            ApiKeys::UNREGISTER_CONTROLLER => {
+                let data = UnregisterControllerRequestData::read(readable, api_version)?;
+                Ok(Self::UnregisterController(UnregisterControllerRequest::new(data, api_version)))
+            },
             ApiKeys::DESCRIBE_PRODUCERS => {
                 let data = DescribeProducersRequestData::read(readable, api_version)?;
                 Ok(Self::DescribeProducers(DescribeProducersRequest::new(data, api_version)))
@@ -1104,6 +1143,7 @@ impl std::fmt::Display for AbstractRequest {
             Self::IncrementalAlterConfigs(r) => write!(f, "{r}"),
             Self::ListConfigResources(r) => write!(f, "{r}"),
             Self::DescribeCluster(r) => write!(f, "{r}"),
+            Self::DescribeTopicPartitions(r) => write!(f, "{r}"),
             Self::DescribeLogDirs(r) => write!(f, "{r}"),
             Self::AlterReplicaLogDirs(r) => write!(f, "{r}"),
             Self::ElectLeaders(r) => write!(f, "{r}"),
@@ -1121,6 +1161,7 @@ impl std::fmt::Display for AbstractRequest {
             Self::ExpireDelegationToken(r) => write!(f, "{r}"),
             Self::DescribeDelegationToken(r) => write!(f, "{r}"),
             Self::UpdateFeatures(r) => write!(f, "{r}"),
+            Self::UnregisterController(r) => write!(f, "{r}"),
             Self::DescribeProducers(r) => write!(f, "{r}"),
             Self::DescribeTransactions(r) => write!(f, "{r}"),
             Self::WriteTxnMarkers(r) => write!(f, "{r}"),

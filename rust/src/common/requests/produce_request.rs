@@ -21,8 +21,9 @@ use std::io;
 use crate::ProduceRequestData;
 use crate::ProduceResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::common::record::internal::BatchIterator;
+use crate::common::record::internal::ByteBufferLogInputStream;
 use crate::common::record::internal::CompressionType;
+use crate::common::record::internal::DefaultRecordBatchRef;
 use crate::common::record::internal::RecordBatch;
 use crate::produce_response_data::{PartitionProduceResponse, TopicProduceResponse};
 
@@ -189,11 +190,25 @@ impl ProduceRequest {
     /// 3. ZStandard compression is not used before version 7
     /// 4. Exactly one record batch per partition
     ///
-    /// Corresponds to Java's `ProduceRequest.validateRecords`.
+    /// Corresponds to Java's `ProduceRequest.validateRecords`
+    /// (`ProduceRequest.java:211-232`).
+    ///
+    /// Java walks `records.batches().iterator()`, whose `hasNext()` is
+    /// `ByteBufferLogInputStream.nextBatch() != null`: true for any complete
+    /// batch, whatever its magic. `BatchIterator` (in `memory_records.rs`)
+    /// cannot answer that, because it ends at a v0/v1 batch this client has no
+    /// view for, so the two presence checks ask the stream directly and the magic
+    /// is read off the header, where `nextBatch()` itself reads it
+    /// (`ByteBufferLogInputStream.java:48`). None of it copies the batch.
     ///
     /// # Errors
     ///
-    /// Returns an error if validation fails.
+    /// Returns an error if validation fails. A header the stream rejects fails
+    /// with the stream's `CORRUPT_MESSAGE` text, as Java's `hasNext()` throws its
+    /// `CorruptRecordException`; a v2 first batch shorter than its own 61-byte
+    /// header, which Java would pass (it reads only the magic and the attributes),
+    /// fails with the `ensureValid()` size text, because this client has no view
+    /// of such a batch.
     #[doc(alias = "org.apache.kafka.common.requests.ProduceRequest#validateRecords")]
     pub fn validate_records(version: i16, records_bytes: &Option<bytes::Bytes>) -> io::Result<()> {
         let bytes: &[u8] = match records_bytes {
@@ -209,22 +224,19 @@ impl ProduceRequest {
             },
         };
 
-        let mut batches = BatchIterator::new(bytes);
-
-        let first_batch = match batches.next() {
-            Some(batch) => batch,
-            None => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "Produce requests with version {} must have at least one record batch per partition",
-                        version
-                    ),
-                ));
-            },
+        let Some(first_batch_size) = complete_batch_size(bytes)? else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Produce requests with version {} must have at least one record batch per partition",
+                    version
+                ),
+            ));
         };
+        let first_batch = &bytes[..first_batch_size];
 
-        if first_batch.magic() != RecordBatch::MAGIC_VALUE_V2 {
+        // In bounds: a complete batch is at least `LOG_OVERHEAD + 14` bytes.
+        if first_batch[RecordBatch::MAGIC_OFFSET] as i8 != RecordBatch::MAGIC_VALUE_V2 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -234,6 +246,7 @@ impl ProduceRequest {
             ));
         }
 
+        let first_batch = DefaultRecordBatchRef::new(first_batch).map_err(io::Error::from)?;
         if version < 7 && first_batch.compression_type() == CompressionType::Zstd {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -244,7 +257,7 @@ impl ProduceRequest {
             ));
         }
 
-        if batches.next().is_some() {
+        if complete_batch_size(&bytes[first_batch_size..])?.is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -266,6 +279,19 @@ impl ProduceRequest {
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = ProduceRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
+    }
+}
+
+/// Java's `iterator.hasNext()` for a batch iterator positioned at the start of
+/// `bytes`: the size of the complete batch there, if one is.
+///
+/// `ByteBufferLogInputStream.nextBatch() != null` (`ByteBufferLogInputStream.java:41-46`):
+/// the header validates and the whole batch is present. A header that does not
+/// validate is the `CorruptRecordException` Java's `hasNext()` throws.
+fn complete_batch_size(bytes: &[u8]) -> io::Result<Option<usize>> {
+    match ByteBufferLogInputStream::new(bytes, i32::MAX).next_batch_size() {
+        Ok(batch_size) => Ok(batch_size.filter(|&batch_size| batch_size <= bytes.len())),
+        Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e.message().to_string())),
     }
 }
 
@@ -330,6 +356,99 @@ impl RequestBuilder for Builder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::protocol::{ByteBufferAccessor, Message, ObjectSerializationCache};
+    use crate::produce_request_data::TopicProduceData;
+
+    /// Java `RequestContextTest.serialize`: writes `data` into a buffer of exactly
+    /// its serialized size.
+    fn serialize(version: i16, data: &mut ProduceRequestData) -> Vec<u8> {
+        let mut cache = ObjectSerializationCache::new();
+        let size = Message::size(data, &mut cache, version).unwrap();
+        let mut buffer = ByteBufferAccessor::new(Vec::with_capacity(size as usize));
+        Message::write(data, &mut buffer, &cache, version).unwrap();
+        buffer.into_buffer()
+    }
+
+    /// `count` topics named `t0`, `t1`, ... with no partition data.
+    fn produce_data_with_topics(count: usize) -> ProduceRequestData {
+        let mut data = ProduceRequestData::new();
+        data.set_acks(-1).set_timeout_ms(1);
+        for i in 0..count {
+            let mut topic = TopicProduceData::new();
+            topic.set_name(format!("t{i}")).set_partition_data(Vec::new());
+            data.topic_data_mut().push(topic);
+        }
+        data
+    }
+
+    // The three `RequestContextTest` cases below exercise the generated
+    // `ProduceRequestData` reader that Java's `RequestContext.parseRequest` drives.
+    // `RequestContext` is the broker's view of an inbound request and has no client
+    // counterpart, so the tests read the data class directly: where Java asserts on
+    // the `InvalidRequestException`'s cause, they assert on the reader's error, and
+    // where Java asserts only the exception type, they assert the read fails.
+
+    /// Translated from Java
+    /// `RequestContextTest.testInvalidRequestForImplicitHashCollectionWithMaxPreAllocation`.
+    #[test]
+    #[doc(
+        alias = "org.apache.kafka.common.requests.RequestContextTest#testInvalidRequestForImplicitHashCollectionWithMaxPreAllocation"
+    )]
+    fn test_invalid_request_for_implicit_hash_collection_with_max_pre_allocation() {
+        let version: i16 = 7; // non-flexible, name-based and no topicId
+        let actual_topic_count = 1010; // (greater than the 1000 pre-alloc cap)
+        let mut buffer = serialize(version, &mut produce_data_with_topics(actual_topic_count));
+
+        // Inflate the declared topic_data array length.
+        buffer[8..12].copy_from_slice(&5000i32.to_be_bytes());
+
+        let mut accessor = ByteBufferAccessor::new(buffer);
+        assert!(ProduceRequestData::read(&mut accessor, version).is_err());
+    }
+
+    /// Translated from Java `RequestContextTest.testProduceRequestV3WithHugeDeclaredTopicCountIsRejected`.
+    #[test]
+    #[doc(
+        alias = "org.apache.kafka.common.requests.RequestContextTest#testProduceRequestV3WithHugeDeclaredTopicCountIsRejected"
+    )]
+    fn test_produce_request_v3_with_huge_declared_topic_count_is_rejected() {
+        let version: i16 = 3; // ProduceRequestData.LOWEST_SUPPORTED_VERSION
+        let declared_topic_count: i32 = 89_999_978;
+
+        // Real ~90MB buffer, backed by declared_topic_count padding bytes, so the
+        // pre-existing count-vs-remaining-bytes guard alone would let this through and
+        // the new hard cap is what has to catch it.
+        let mut buffer = vec![0u8; 12 + declared_topic_count as usize];
+        buffer[0..2].copy_from_slice(&(-1i16).to_be_bytes()); // null transactionalId
+        buffer[2..4].copy_from_slice(&(-1i16).to_be_bytes()); // acks
+        buffer[4..8].copy_from_slice(&1i32.to_be_bytes()); // timeoutMs
+        buffer[8..12].copy_from_slice(&declared_topic_count.to_be_bytes()); // topic_data declared length
+
+        let mut accessor = ByteBufferAccessor::new(buffer);
+        let e = ProduceRequestData::read(&mut accessor, version).unwrap_err();
+        assert!(
+            e.to_string().contains("exceeds the maximum allowed size"),
+            "Expected a hard-cap rejection, but got: {e}"
+        );
+        assert_eq!(
+            "Tried to read a collection of size 89999978, which exceeds the maximum allowed size of 1000000.",
+            e.to_string()
+        );
+    }
+
+    /// Translated from Java `RequestContextTest.testKeyedCollectionAboveInitialCapacityStillParses`.
+    #[test]
+    #[doc(
+        alias = "org.apache.kafka.common.requests.RequestContextTest#testKeyedCollectionAboveInitialCapacityStillParses"
+    )]
+    fn test_keyed_collection_above_initial_capacity_still_parses() {
+        let version: i16 = 7; // non-flexible, name-based and no topicId
+        let count = 1010;
+        let buffer = serialize(version, &mut produce_data_with_topics(count));
+        let parsed = ProduceRequestData::read(&mut ByteBufferAccessor::new(buffer), version).unwrap();
+
+        assert_eq!(count, parsed.topic_data().len());
+    }
 
     #[test]
     fn test_produce_request_basic() {
@@ -489,5 +608,115 @@ mod tests {
              carry the topic too"
         );
         assert_eq!(first.data().topic_data, second.data().topic_data);
+    }
+
+    // ── `validate_records` (`ProduceRequest.java:211-232`) ─────────────────
+
+    /// One uncompressed v2 batch holding one record at `base_offset`.
+    fn v2_batch(base_offset: i64, compression: crate::common::compress::Compression) -> Vec<u8> {
+        use crate::common::record::TimestampType;
+        use crate::common::record::internal::MemoryRecords;
+
+        let mut builder =
+            MemoryRecords::builder_with_initial_capacity(512, compression, TimestampType::CreateTime, base_offset);
+        builder.append_kv(1_700_000_000_000, Some(b"k"), Some(b"v"));
+        builder.build().buffer().to_vec()
+    }
+
+    fn uncompressed_v2_batch(base_offset: i64) -> Vec<u8> {
+        v2_batch(base_offset, crate::common::compress::Compression::none().build())
+    }
+
+    /// A message format v0 or v1 message set of one record — `offset, size, crc,
+    /// magic, attributes, [timestamp,] key, value` — with a null key and a
+    /// one-byte value. The CRC is left zero: `validate_records` never reads it.
+    fn legacy_message(magic: i8) -> Vec<u8> {
+        let mut body = vec![0u8; 4]; // crc
+        body.push(magic as u8);
+        body.push(0); // attributes
+        if magic == RecordBatch::MAGIC_VALUE_V1 {
+            body.extend_from_slice(&1_700_000_000_000_i64.to_be_bytes());
+        }
+        body.extend_from_slice(&(-1_i32).to_be_bytes()); // null key
+        body.extend_from_slice(&1_i32.to_be_bytes());
+        body.push(b'v');
+        let mut message = 0_i64.to_be_bytes().to_vec();
+        message.extend_from_slice(&(body.len() as i32).to_be_bytes());
+        message.extend_from_slice(&body);
+        message
+    }
+
+    fn validation_error(version: i16, records: Option<Vec<u8>>) -> String {
+        ProduceRequest::validate_records(version, &records.map(bytes::Bytes::from))
+            .expect_err("the records must be rejected")
+            .to_string()
+    }
+
+    #[test]
+    fn test_validate_records_accepts_one_v2_batch() {
+        ProduceRequest::validate_records(3, &Some(bytes::Bytes::from(uncompressed_v2_batch(0))))
+            .expect("one complete v2 batch is valid");
+    }
+
+    /// Java's `testV3AndAboveCannotHaveNoRecordBatches`, plus the incomplete
+    /// batch `hasNext()` also answers `false` for.
+    #[test]
+    fn test_validate_records_requires_a_complete_batch() {
+        let expected = "Produce requests with version 3 must have at least one record batch per partition";
+        assert_eq!(expected, validation_error(3, None));
+        assert_eq!(expected, validation_error(3, Some(Vec::new())));
+        let mut truncated = uncompressed_v2_batch(0);
+        truncated.pop();
+        assert_eq!(expected, validation_error(3, Some(truncated)));
+    }
+
+    /// Java's `testV3AndAboveCannotUseMagicV0` and `testV3AndAboveCannotUseMagicV1`:
+    /// a legacy batch is rejected by its magic, not reported as a missing batch —
+    /// the batch iterator has no view for it, so the magic is read off the header.
+    #[test]
+    fn test_validate_records_rejects_legacy_magic() {
+        for magic in [RecordBatch::MAGIC_VALUE_V0, RecordBatch::MAGIC_VALUE_V1] {
+            assert_eq!(
+                "Produce requests with version 3 are only allowed to contain record batches with magic version 2",
+                validation_error(3, Some(legacy_message(magic))),
+                "magic v{magic}"
+            );
+        }
+    }
+
+    /// Java's `testV3AndAboveShouldContainOnlyOneRecordBatch`. `hasNext()` is true
+    /// for any complete second batch, so a legacy one counts as well.
+    #[test]
+    fn test_validate_records_rejects_a_second_batch() {
+        let expected =
+            "Produce requests with version 3 are only allowed to contain exactly one record batch per partition";
+        for second in [uncompressed_v2_batch(1), legacy_message(RecordBatch::MAGIC_VALUE_V1)] {
+            let mut records = uncompressed_v2_batch(0);
+            records.extend_from_slice(&second);
+            assert_eq!(expected, validation_error(3, Some(records)));
+        }
+    }
+
+    /// Java's `testV6AndBelowCannotUseZStdCompression`.
+    #[test]
+    fn test_validate_records_rejects_zstd_below_version_7() {
+        let zstd = v2_batch(0, crate::common::compress::Compression::zstd().build());
+        assert_eq!(
+            "Produce requests with version 6 are not allowed to use ZStandard compression",
+            validation_error(6, Some(zstd.clone()))
+        );
+        ProduceRequest::validate_records(7, &Some(bytes::Bytes::from(zstd))).expect("zstd is allowed from v7");
+    }
+
+    /// A header the stream rejects is the `CorruptRecordException` Java's
+    /// `hasNext()` throws, not a missing batch.
+    #[test]
+    fn test_validate_records_propagates_a_corrupt_header() {
+        let mut records = uncompressed_v2_batch(0);
+        records[RecordBatch::LENGTH_OFFSET..RecordBatch::LENGTH_OFFSET + 4].copy_from_slice(&(-5_i32).to_be_bytes());
+        assert_eq!(
+            "Record size -5 is less than the minimum record overhead (14)",
+            validation_error(3, Some(records))
+        );
     }
 }

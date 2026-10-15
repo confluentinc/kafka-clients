@@ -20,6 +20,7 @@ use std::collections::HashMap;
 
 use crate::common::Error;
 use crate::common::config::config_def::ValidList;
+use crate::common::config::types::Password;
 use crate::common::config::{SaslConfigs, SslConfigs};
 use crate::common::security::auth::SecurityProtocol;
 use crate::{ClientDnsLookup, CommonClientConfigs};
@@ -28,6 +29,12 @@ use crate::{ClientDnsLookup, CommonClientConfigs};
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.AdminClientConfig`. Unknown
 /// keys are accepted silently, matching Java's `AbstractConfig` behavior.
+// `Debug` is derived: every secret this struct holds is a `Password` inside
+// `sasl_config` / `ssl_config`, which renders as `[hidden]`. If this struct
+// ever gains a map of the raw user properties (Java's `originals()`), replace
+// the derive with a hand-written `Debug` that renders that map as its key set
+// only, as `ProducerConfig`'s `Debug` does: the map also holds keys this client
+// does not parse, and Java never prints a raw `originals` value.
 #[derive(Debug, PartialEq, Eq)]
 #[doc(alias = "org.apache.kafka.clients.admin.AdminClientConfig")]
 pub struct AdminClientConfig {
@@ -39,11 +46,13 @@ pub struct AdminClientConfig {
     retries: i32,
     retry_backoff_ms: i64,
     retry_backoff_max_ms: i64,
+    bootstrap_resolve_timeout_ms: i64,
     reconnect_backoff_ms: i64,
     reconnect_backoff_max_ms: i64,
     connections_max_idle_ms: i64,
     metadata_max_age_ms: i64,
     socket_connection_setup_timeout_ms: i64,
+    metadata_cluster_check_enable: bool,
 
     // --- Security ---
     /// `security.protocol` - Protocol used to communicate with brokers.
@@ -79,6 +88,11 @@ impl AdminClientConfig {
     pub const RETRY_BACKOFF_MS_CONFIG: &'static str = "retry.backoff.ms";
     /// `retry.backoff.max.ms`
     pub const RETRY_BACKOFF_MAX_MS_CONFIG: &'static str = "retry.backoff.max.ms";
+    /// `bootstrap.resolve.timeout.ms` (KIP-909): `0` (the default) resolves
+    /// `bootstrap.servers` synchronously when the client is created; a
+    /// positive value resolves asynchronously, retrying for at most this long.
+    pub const BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG: &'static str =
+        CommonClientConfigs::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG;
     /// `reconnect.backoff.ms`
     pub const RECONNECT_BACKOFF_MS_CONFIG: &'static str = "reconnect.backoff.ms";
     /// `reconnect.backoff.max.ms`
@@ -89,6 +103,20 @@ impl AdminClientConfig {
     pub const METADATA_MAX_AGE_MS_CONFIG: &'static str = "metadata.max.age.ms";
     /// `socket.connection.setup.timeout.ms`
     pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG: &'static str = "socket.connection.setup.timeout.ms";
+    /// `metadata.cluster.check.enable` (KIP-1242).
+    ///
+    /// Whether the client should send cluster and node information when
+    /// connecting to a broker to enable it to check for a misrouted
+    /// connection. This configuration is ignored if rebootstrapping is
+    /// disabled by setting the configuration `metadata.recovery.strategy=none`.
+    /// If the client is connecting to a broker older than Apache Kafka 4.4, no
+    /// checking is performed and this configuration has no effect.
+    ///
+    /// Java's `AdminClientConfig.java:157` declares it as its own public alias
+    /// of `CommonClientConfigs.METADATA_CLUSTER_CHECK_ENABLE_CONFIG`, whose doc
+    /// (`CommonClientConfigs.java:268-271`) is the text above.
+    pub const METADATA_CLUSTER_CHECK_ENABLE_CONFIG: &'static str =
+        CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG;
     /// `security.protocol`
     pub const SECURITY_PROTOCOL_CONFIG: &'static str = CommonClientConfigs::SECURITY_PROTOCOL_CONFIG;
     /// `sasl.mechanism`
@@ -102,7 +130,7 @@ impl AdminClientConfig {
     ///
     /// Returns [`Error::Config`] if `bootstrap.servers` is missing or empty, and
     /// an error if a value fails to parse or validate. Following Java's
-    /// `AdminBootstrapAddresses.fromConfig`, setting both `bootstrap.servers`
+    /// `KafkaAdminClient.determineBootstrapType`, setting both `bootstrap.servers`
     /// and `bootstrap.controllers` is an [`Error::Config`]. Setting only
     /// `bootstrap.controllers` returns an `UNSUPPORTED_VERSION` error
     /// ([`Error::unsupported_version`]): Java
@@ -117,29 +145,41 @@ impl AdminClientConfig {
         for (key, value) in props {
             match key.as_str() {
                 Self::BOOTSTRAP_SERVERS_CONFIG => {
-                    // `ValidList.anyNonDuplicateValues(true, false)` (`AdminClientConfig.java:159`).
+                    // `ValidList.anyNonDuplicateValues(true, false)` (`AdminClientConfig.java:170`).
                     config.bootstrap_servers = ValidList::parse_any_non_duplicate_values(key, value, true)?;
                 },
                 Self::BOOTSTRAP_CONTROLLERS_CONFIG => {
-                    // `ValidList.anyNonDuplicateValues(true, false)` (`AdminClientConfig.java:162-167`).
+                    // `ValidList.anyNonDuplicateValues(true, false)` (`AdminClientConfig.java:173-178`).
                     bootstrap_controllers = ValidList::parse_any_non_duplicate_values(key, value, true)?;
                 },
                 Self::CLIENT_DNS_LOOKUP_CONFIG => {
                     config.client_dns_lookup = ClientDnsLookup::parse_config_value(value)?;
                 },
-                // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:729-731`).
+                // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:731-733`).
                 Self::CLIENT_ID_CONFIG => config.client_id = value.trim().to_string(),
                 Self::REQUEST_TIMEOUT_MS_CONFIG => config.request_timeout_ms = parse_i32(key, value)?,
                 Self::DEFAULT_API_TIMEOUT_MS_CONFIG => config.default_api_timeout_ms = parse_i32(key, value)?,
                 Self::RETRIES_CONFIG => config.retries = parse_i32(key, value)?,
                 Self::RETRY_BACKOFF_MS_CONFIG => config.retry_backoff_ms = parse_i64(key, value)?,
                 Self::RETRY_BACKOFF_MAX_MS_CONFIG => config.retry_backoff_max_ms = parse_i64(key, value)?,
+                Self::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG => {
+                    // `Type.LONG`, `atLeast(0L)` (`AdminClientConfig.java:207-212`, KAFKA-20939).
+                    let v = parse_i64(key, value)?;
+                    if v < 0 {
+                        return Err(Error::config_name_value_message(key, v, "Value must be at least 0"));
+                    }
+                    config.bootstrap_resolve_timeout_ms = v;
+                },
                 Self::RECONNECT_BACKOFF_MS_CONFIG => config.reconnect_backoff_ms = parse_i64(key, value)?,
                 Self::RECONNECT_BACKOFF_MAX_MS_CONFIG => config.reconnect_backoff_max_ms = parse_i64(key, value)?,
                 Self::CONNECTIONS_MAX_IDLE_MS_CONFIG => config.connections_max_idle_ms = parse_i64(key, value)?,
                 Self::METADATA_MAX_AGE_MS_CONFIG => config.metadata_max_age_ms = parse_i64(key, value)?,
                 Self::SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG => {
                     config.socket_connection_setup_timeout_ms = parse_i64(key, value)?;
+                },
+                Self::METADATA_CLUSTER_CHECK_ENABLE_CONFIG => {
+                    // `Type.BOOLEAN`, default `true` (`AdminClientConfig.java:305-309`).
+                    config.metadata_cluster_check_enable = parse_bool(key, value)?;
                 },
                 Self::SECURITY_PROTOCOL_CONFIG => {
                     config.security_protocol = SecurityProtocol::for_name(value).ok_or_else(|| {
@@ -157,7 +197,7 @@ impl AdminClientConfig {
                     config.sasl_config.jaas_config = if value.is_empty() {
                         None
                     } else {
-                        Some(value.to_string())
+                        Some(Password::new(value))
                     };
                 },
                 key if key.starts_with("ssl.") => {
@@ -168,34 +208,21 @@ impl AdminClientConfig {
             }
         }
 
-        // `AdminBootstrapAddresses.fromConfig` (`AdminBootstrapAddresses.java:59-79`),
-        // in Java's branch order.
-        match (config.bootstrap_servers.is_empty(), bootstrap_controllers.is_empty()) {
-            (true, true) => {
-                return Err(Error::config_message(format!(
-                    "You must set either {} or {}",
-                    Self::BOOTSTRAP_SERVERS_CONFIG,
-                    Self::BOOTSTRAP_CONTROLLERS_CONFIG
-                )));
-            },
+        // `KafkaAdminClient.determineBootstrapType` (KIP-909 moved it there from
+        // the deleted `AdminBootstrapAddresses.fromConfig`). Java runs it in
+        // `createInternal`; this crate has always run the check here, when the
+        // config is built, because the config does not keep
+        // `bootstrap.controllers` (no client can use it, see below).
+        if crate::admin::KafkaAdminClient::determine_bootstrap_type(&config.bootstrap_servers, &bootstrap_controllers)?
+        {
             // Java bootstraps through the controllers here
             // (`usingBootstrapControllers = true`); that path is not
             // implemented, so fail explicitly rather than drop the key.
-            (true, false) => {
-                return Err(Error::unsupported_version(format!(
-                    "{} is not supported by this client; set {} instead",
-                    Self::BOOTSTRAP_CONTROLLERS_CONFIG,
-                    Self::BOOTSTRAP_SERVERS_CONFIG
-                )));
-            },
-            (false, false) => {
-                return Err(Error::config_message(format!(
-                    "You cannot set both {} and {}",
-                    Self::BOOTSTRAP_SERVERS_CONFIG,
-                    Self::BOOTSTRAP_CONTROLLERS_CONFIG
-                )));
-            },
-            (false, true) => {},
+            return Err(Error::unsupported_version(format!(
+                "{} is not supported by this client; set {} instead",
+                Self::BOOTSTRAP_CONTROLLERS_CONFIG,
+                Self::BOOTSTRAP_SERVERS_CONFIG
+            )));
         }
         config
             .client_dns_lookup
@@ -243,6 +270,20 @@ impl AdminClientConfig {
         self.retry_backoff_max_ms
     }
 
+    /// `bootstrap.resolve.timeout.ms` (KIP-909): selects the client's bootstrap
+    /// DNS resolution mode. `0` (the default) resolves `bootstrap.servers`
+    /// synchronously when the client is created, and a resolution failure fails
+    /// creation with a config error. A positive value resolves asynchronously,
+    /// retrying for at most this long before every subsequent call fails with an
+    /// unrecoverable
+    /// [`BootstrapResolutionError`](crate::common::errors::BootstrapResolutionError);
+    /// the client must then be closed and re-created. Setting a positive value
+    /// enables an evolving feature whose compatibility may be broken in a minor
+    /// release.
+    pub(crate) fn bootstrap_resolve_timeout_ms(&self) -> i64 {
+        self.bootstrap_resolve_timeout_ms
+    }
+
     /// `reconnect.backoff.ms`.
     pub(crate) fn reconnect_backoff_ms(&self) -> i64 {
         self.reconnect_backoff_ms
@@ -266,6 +307,21 @@ impl AdminClientConfig {
     /// `socket.connection.setup.timeout.ms`.
     pub(crate) fn socket_connection_setup_timeout_ms(&self) -> i64 {
         self.socket_connection_setup_timeout_ms
+    }
+
+    /// `metadata.cluster.check.enable` (KIP-1242): whether the client sends the
+    /// cluster id and node id it expects in ApiVersions so the broker can detect
+    /// a misrouted connection.
+    ///
+    /// It is passed to the `NetworkClient` as in Java
+    /// (`ClientUtils.createNetworkClient`), but, also as in Java, it has no
+    /// effect on the admin client: the admin's metadata updater does not
+    /// override `MetadataUpdater.clusterId()` (`AdminMetadataManager.java`), so
+    /// the expected cluster id is never known. This client additionally runs
+    /// the admin `NetworkClient` with `metadata.recovery.strategy=none`, under
+    /// which the check is skipped.
+    pub(crate) fn metadata_cluster_check_enable(&self) -> bool {
+        self.metadata_cluster_check_enable
     }
 
     /// `security.protocol`.
@@ -296,11 +352,13 @@ impl Default for AdminClientConfig {
             retries: i32::MAX,
             retry_backoff_ms: 100,
             retry_backoff_max_ms: 1_000,
+            bootstrap_resolve_timeout_ms: CommonClientConfigs::DEFAULT_BOOTSTRAP_RESOLVE_TIMEOUT_MS,
             reconnect_backoff_ms: 50,
             reconnect_backoff_max_ms: 1_000,
             connections_max_idle_ms: 300_000,
             metadata_max_age_ms: 300_000,
             socket_connection_setup_timeout_ms: 10_000,
+            metadata_cluster_check_enable: true,
             security_protocol: SecurityProtocol::Plaintext,
             sasl_config: SaslConfigs::default(),
             ssl_config: SslConfigs::default(),
@@ -314,6 +372,28 @@ fn parse_i32(key: &str, value: &str) -> Result<i32, Error> {
 
 fn parse_i64(key: &str, value: &str) -> Result<i64, Error> {
     value.trim().parse::<i64>().map_err(|_| Error::config_name_value(key, value))
+}
+
+/// Parses a string value as `bool`.
+///
+/// Java's `ConfigDef.parseType(BOOLEAN)` (`ConfigDef.java:703-737`) trims the
+/// value, then accepts `equalsIgnoreCase("true")` / `("false")`; anything else
+/// throws `ConfigException(name, value, "Expected value to be either true or
+/// false")`, where `value` is the **original, untrimmed** string. Same rule as
+/// the producer and consumer configs.
+fn parse_bool(key: &str, value: &str) -> Result<bool, Error> {
+    let trimmed = value.trim();
+    if trimmed.eq_ignore_ascii_case("true") {
+        Ok(true)
+    } else if trimmed.eq_ignore_ascii_case("false") {
+        Ok(false)
+    } else {
+        Err(Error::config_name_value_message(
+            key,
+            value,
+            "Expected value to be either true or false",
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -332,6 +412,54 @@ mod tests {
         assert_eq!(config.security_protocol(), SecurityProtocol::Plaintext);
     }
 
+    /// `bootstrap.resolve.timeout.ms` (KIP-909): `Type.LONG`, default `0`
+    /// (synchronous resolution), `atLeast(0L)` since KAFKA-20939.
+    #[test]
+    fn bootstrap_resolve_timeout_ms() {
+        assert_eq!(
+            AdminClientConfig::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG,
+            "bootstrap.resolve.timeout.ms"
+        );
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "a:9092".to_string());
+        assert_eq!(AdminClientConfig::new(&props).unwrap().bootstrap_resolve_timeout_ms(), 0);
+
+        props.insert("bootstrap.resolve.timeout.ms".to_string(), "3000".to_string());
+        assert_eq!(AdminClientConfig::new(&props).unwrap().bootstrap_resolve_timeout_ms(), 3000);
+
+        props.insert("bootstrap.resolve.timeout.ms".to_string(), "-1".to_string());
+        assert_eq!(
+            AdminClientConfig::new(&props).unwrap_err().message(),
+            "Invalid value -1 for configuration bootstrap.resolve.timeout.ms: Value must be at least 0"
+        );
+    }
+
+    /// `metadata.cluster.check.enable` (KIP-1242): `Type.BOOLEAN`, default
+    /// `true` (`AdminClientConfig.java:305-309`).
+    #[test]
+    fn metadata_cluster_check_enable() {
+        assert_eq!(
+            AdminClientConfig::METADATA_CLUSTER_CHECK_ENABLE_CONFIG,
+            "metadata.cluster.check.enable"
+        );
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "a:9092".to_string());
+        assert!(AdminClientConfig::new(&props).unwrap().metadata_cluster_check_enable());
+
+        props.insert("metadata.cluster.check.enable".to_string(), "false".to_string());
+        assert!(!AdminClientConfig::new(&props).unwrap().metadata_cluster_check_enable());
+
+        // `ConfigDef.parseType(BOOLEAN)` is case-insensitive.
+        props.insert("metadata.cluster.check.enable".to_string(), " TRUE ".to_string());
+        assert!(AdminClientConfig::new(&props).unwrap().metadata_cluster_check_enable());
+
+        props.insert("metadata.cluster.check.enable".to_string(), "maybe".to_string());
+        assert_eq!(
+            AdminClientConfig::new(&props).unwrap_err().message(),
+            "Invalid value maybe for configuration metadata.cluster.check.enable: Expected value to be either true or false"
+        );
+    }
+
     #[test]
     fn missing_bootstrap_is_error_with_exact_message() {
         let props = HashMap::new();
@@ -339,7 +467,7 @@ mod tests {
         assert_eq!(err.message(), "You must set either bootstrap.servers or bootstrap.controllers");
     }
 
-    /// `AdminBootstrapAddresses.fromConfig`'s branches for
+    /// `KafkaAdminClient.determineBootstrapType`'s branches for
     /// `bootstrap.controllers`: only controllers is an explicit unsupported
     /// error (never silently dropped), both is Java's `ConfigException`, and
     /// an empty controllers list counts as unset.
@@ -515,7 +643,7 @@ mod tests {
     }
 
     /// `bootstrap.servers` is validated with Java's
-    /// `ValidList.anyNonDuplicateValues(true, false)` (`AdminClientConfig.java:159`): an empty
+    /// `ValidList.anyNonDuplicateValues(true, false)` (`AdminClientConfig.java:170`): an empty
     /// element is rejected with `ConfigDef`'s exact message and duplicates are removed
     /// (single-message `ConfigException`, no `Invalid value` prefix).
     #[test]
@@ -542,7 +670,7 @@ mod tests {
             "Configuration 'bootstrap.servers' values must not be empty."
         );
         // Admin allows an empty list (`isEmptyAllowed = true`), so the
-        // ValidList message never appears; `AdminBootstrapAddresses.fromConfig`'s
+        // ValidList message never appears; `KafkaAdminClient.determineBootstrapType`'s
         // check reports it instead.
         for value in ["", "  "] {
             assert_eq!(
@@ -556,5 +684,60 @@ mod tests {
             AdminClientConfig::new(&props).unwrap().bootstrap_servers(),
             ["a:1".to_string(), "b:1".to_string()]
         );
+    }
+
+    /// `{:?}` of a config built from every `Type.PASSWORD` key the client
+    /// parses (`sasl.jaas.config` and the six SSL keys) renders none of their
+    /// values. The derived `Debug` is safe because the embedded `SaslConfigs`
+    /// and `SslConfigs` hold those values as `Password`s.
+    #[test]
+    fn test_debug_redacts_password_configs() {
+        let secrets = [
+            (
+                "sasl.jaas.config",
+                "org.apache.kafka.common.security.plain.PlainLoginModule required \
+                 username=\"jaas-user\" password=\"jaas-S3cr3t\";",
+            ),
+            ("ssl.truststore.password", "truststore-S3cr3t"),
+            ("ssl.truststore.certificates", "TRUSTSTORE-CERTIFICATES-PEM"),
+            ("ssl.keystore.password", "keystore-S3cr3t"),
+            ("ssl.keystore.key", "KEYSTORE-KEY-PEM"),
+            ("ssl.keystore.certificate.chain", "KEYSTORE-CERTIFICATE-CHAIN-PEM"),
+            ("ssl.key.password", "key-S3cr3t"),
+        ];
+        let mut props: HashMap<String, String> = secrets
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        props.insert("bootstrap.servers".to_string(), "visible-host:9092".to_string());
+        props.insert("client.id".to_string(), "visible-admin".to_string());
+        props.insert("sasl.mechanism".to_string(), "PLAIN".to_string());
+        props.insert("ssl.truststore.location".to_string(), "/visible/truststore.pem".to_string());
+        let config = AdminClientConfig::new(&props).unwrap();
+
+        // The secrets did reach the config; they are only hidden from `Debug`.
+        assert_eq!(config.sasl_config().resolve_password(), Some("jaas-S3cr3t"));
+        assert_eq!(
+            config.ssl_config().key_password.as_ref().map(Password::value),
+            Some("key-S3cr3t")
+        );
+
+        for rendered in [format!("{config:?}"), format!("{config:#?}")] {
+            for (key, value) in secrets {
+                assert!(!rendered.contains(value), "{key} leaked: {rendered}");
+            }
+            for fragment in ["jaas-S3cr3t", "jaas-user", "PlainLoginModule", "S3cr3t", "-PEM"] {
+                assert!(!rendered.contains(fragment), "{fragment:?} leaked: {rendered}");
+            }
+            assert_eq!(rendered.matches(Password::HIDDEN).count(), secrets.len(), "{rendered}");
+            for visible in [
+                "visible-host:9092",
+                "visible-admin",
+                "\"PLAIN\"",
+                "/visible/truststore.pem",
+            ] {
+                assert!(rendered.contains(visible), "{visible} missing: {rendered}");
+            }
+        }
     }
 }

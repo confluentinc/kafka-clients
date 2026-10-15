@@ -37,7 +37,7 @@ use crate::common::requests::ConcreteResponse;
 use crate::common::requests::{RequestBuilder, RequestHeader, RequestHeaderOptionsBuilder, api_versions_request};
 use crate::common::security::auth::SecurityProtocol;
 use crate::common::security::ssl::SslFactory;
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::LogContext;
 
 use crate::integration_tests::common::cluster_config::ClusterConfig;
 use crate::integration_tests::common::kafka_cluster::{SASL_PASSWORD, SASL_USERNAME};

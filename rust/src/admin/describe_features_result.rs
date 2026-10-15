@@ -31,6 +31,10 @@ pub struct DescribeFeaturesResult {
 
 impl DescribeFeaturesResult {
     /// Creates a result wrapping the given future.
+    ///
+    /// This constructor is `protected` in Java only to allow internal
+    /// subclasses (e.g. `InternalDescribeFeaturesResult`) to reuse it. It is not
+    /// part of the public API contract, so it stays crate-private here.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeFeaturesResult#DescribeFeaturesResult")]
     pub(crate) fn new(future: KafkaFuture<FeatureMetadata>) -> Self {
         Self { future }

@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use crate::common::utils::ProducerIdAndEpoch;
+use crate::common::utils::internals::ProducerIdAndEpoch;
 use crate::common::{Error, KafkaFuture};
 
 /// The result of `Admin::fence_producers`.
@@ -47,7 +47,10 @@ impl FenceProducersResult {
     /// Mirrors `FenceProducersResult.fencedProducers`.
     #[doc(alias = "org.apache.kafka.clients.admin.FenceProducersResult#fencedProducers")]
     pub fn fenced_producers(&self) -> HashMap<String, KafkaFuture<()>> {
-        self.futures.iter().map(|(id, f)| (id.clone(), f.then_apply(|_| ()))).collect()
+        self.futures
+            .iter()
+            .map(|(id, f)| (id.clone(), f.then_apply(|_| Ok(()))))
+            .collect()
     }
 
     /// Returns a future that provides the producer id generated while
@@ -95,7 +98,7 @@ impl FenceProducersResult {
     {
         self.futures
             .get(transactional_id)
-            .map(|future| future.then_apply(move |p| followup(&p)))
+            .map(|future| future.then_apply(move |p| Ok(followup(&p))))
             .ok_or_else(|| {
                 Error::local_illegal_argument(format!(
                     "TransactionalId `{transactional_id}` was not included in the request"

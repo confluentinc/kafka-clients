@@ -101,12 +101,14 @@ rust/build.rs           # invokes the generator before compilation; writes the
                         # C header to rust/target/include/confluent_kafka.h
 rust/xtask/             # format, format-check, check-generated,
                         # generate-error-codes, java-deprecated, lint,
-                        # lint-custom, doc-hygiene, lint-fix,
+                        # lint-custom, ffi-baseline, doc-hygiene, lint-fix,
                         # coverage{,-lcov,-all}, test-multilanguage,
-                        # producer-perf-test
+                        # producer-perf-test; ffi-baseline.txt is the
+                        # check-ffi-translation burn-down list
 rust/tests/             # integration + multilanguage tests (see below)
 rust/examples/          # transactional examples (txn_*)
 rust/consumer-perf/     # consumer benchmark harness (workspace member)
+rust/ffi-macros/        # proc-macro crate: #[ffi_guard], the panic guard on every C export
 rust/multilanguage-test-server/  # gRPC protos + server backing the
                                  # multilanguage tests of every language
 rust/tools/verifiable-clients/   # Rust verifiable producer/consumer
@@ -143,15 +145,15 @@ In practice:
   `ApiVersions`, `KafkaClient`, ...) and `CommonClientConfigs` are
   `pub(crate)`.
 - `common::{compress, feature, memory, network, protocol, requests, utils}`,
-  `common::security::{authenticator, ssl}` and the generated wire modules are
-  `pub(crate)`. Tests that need them live inside the crate: the message and
-  protocol tests sit under `rust/src/common/`, and the raw-socket integration
-  suites under `rust/src/integration_tests/`.
+  `common::config::types`, `common::security::{authenticator, ssl}` and the
+  generated wire modules are `pub(crate)`. Tests that need them live inside the
+  crate: the message and protocol tests sit under `rust/src/common/`, and the
+  raw-socket integration suites under `rust/src/integration_tests/`.
 - `consumer::AsyncKafkaConsumer` is `pub(crate)`; `KafkaConsumer::new`
   constructs it and returns it as `Box<dyn Consumer<K, V>>`.
 - `Errors` (the wire enum) is `pub(crate)`, so `Error` has no public
   `error()` / `code()`. Callers classify by variant and `is_*_error()`, and C
-  callers use `kafka_common_ErrorCode_t`.
+  callers use `kafka_common_Error_e`.
 - Exceptions are tagged in the code, each under a `//` comment giving the
   reason: `#[doc(alias = "rust-only")]` for an item translating no Java API
   (Rust-only types, JDK translations such as `TimeUnit`, C helper handles,
@@ -176,7 +178,7 @@ things to read.*
 ```
 rust/src/common/
 ├── protocol/       # Readable, Writable, ByteBufferAccessor, Message,
-│                   # ApiMessage, varint, api_keys.rs, errors.rs (135 codes),
+│                   # ApiMessage, varint, api_keys.rs, errors.rs (138 codes),
 │                   # message_size_accumulator.rs, object_serialization_cache.rs,
 │                   # message_util.rs
 ├── requests/       # 117 files: RequestBuilder trait, AbstractRequest /
@@ -193,7 +195,9 @@ rust/src/common/
 │                   # ssl/ (SslFactory), authenticator/, token/delegation/,
 │                   # scram/
 ├── config/         # ssl_configs, sasl_configs, ssl_client_auth,
-│                   # config_resource, config_error
+│                   # config_resource, config_error, types/password.rs
+│                   # (Password: Type.PASSWORD values, Display/Debug =
+│                   # "[hidden]")
 ├── record/         # timestamp_type.rs + internal/ (record batches,
 │                   # MemoryRecords, compression framing)
 ├── errors/         # 146 files: one payload struct per Java exception
@@ -210,7 +214,7 @@ rust/src/common/
 ├── internals/      # KafkaFutureImpl, Topic, PartitionStates,
 │                   # ClusterResourceListeners
 ├── feature/, header/, memory/, utils/
-├── error.rs        # Error enum (162 variants) + ErrorHierarchy predicates
+├── error.rs        # Error enum (166 variants) + ErrorHierarchy predicates
 ├── kafka_error.rs  # KafkaError struct (Java's KafkaException)
 ├── local_{illegal_argument,illegal_state,concurrent_modification,
 │   timeout}_error.rs, invalid_record_error.rs
@@ -269,7 +273,7 @@ Sender-confined fields live on `sender.rs`, not in the manager.*
 ## consumer/ — org.apache.kafka.clients.consumer
 
 ```
-rust/src/consumer/               # 22 files + 51 internals + 9 events
+rust/src/consumer/               # 22 files + 45 internals + 10 metrics + 9 events (each incl. mod.rs)
 ├── mod.rs                  # Consumer<K, V> trait
 ├── kafka_consumer.rs       # KafkaConsumer::new -> Box<dyn Consumer<K, V>>
 ├── async_kafka_consumer.rs # AsyncKafkaConsumer<K, V> (pub(crate))
@@ -307,12 +311,15 @@ rust/src/consumer/               # 22 files + 51 internals + 9 events
     │                                # bytes for the admin group-describe path
     ├── deserializers.rs, consumer_interceptors.rs, consumer_utils.rs
     ├── wakeup_trigger.rs, request_state.rs, timed_request_state.rs
-    ├── async_consumer_metrics.rs, kafka_consumer_metrics.rs,
-    │   fetch_metrics_manager.rs, fetch_metrics_aggregator.rs,
-    │   fetch_metrics_registry.rs, heartbeat_metrics_manager.rs,
-    │   offset_commit_metrics_manager.rs,
-    │   consumer_rebalance_metrics_manager.rs,
-    │   rebalance_callback_metrics_manager.rs, sensor_builder.rs
+    ├── fetch_metrics_manager.rs, fetch_metrics_aggregator.rs,
+    │   fetch_metrics_registry.rs
+    ├── metrics/                     # consumer.internals.metrics (KAFKA-19542)
+    │   ├── metrics_ledger.rs, abstract_consumer_metrics_manager.rs
+    │   ├── async_consumer_metrics.rs, kafka_consumer_metrics.rs
+    │   ├── heartbeat_metrics_manager.rs, offset_commit_metrics_manager.rs
+    │   ├── consumer_rebalance_metrics_manager.rs,
+    │   │   rebalance_callback_metrics_manager.rs
+    │   └── sensor_builder.rs
     └── events/
         ├── application_event.rs, application_event_handler.rs,
         │   application_event_processor.rs
@@ -345,52 +352,75 @@ pipeline over a single owned buffer — read them in that order.*
 ## ffi/ and bindings
 
 ```
-rust/src/ffi/           # feature-gated: --features ffi
-├── mod.rs
-├── common.rs           # kafka_common_Error_t & co. (57 exported symbols)
-│                       # + the callback dispatcher: CompletionJob,
-│                       # spawn_dispatcher, enqueue_or_run_inline
-├── producer.rs         # 62 exported symbols (12 of them *_async)
-├── consumer.rs         # 156 exported symbols (22 of them *_async)
-├── consumer_handle.rs  # 23 exported symbols (1 of them *_async)
-└── admin.rs            # 490 exported symbols (47 of them *_async)
+rust/src/ffi/           # feature-gated: --features ffi; 269 files, 2353 exported symbols
+├── mod.rs              # module docs: the C conventions as implemented
+├── common.rs           # kafka_common_Error_t, kafka_common_Error_e, init_default_logger
+├── error_predicates.rs # generated: 172 kafka_common_Error_is_*_error predicates
+├── util.rs             # kafka_List_t, kafka_Map_t, kafka_Bytes_t, kafka_string_destroy (14)
+├── kafka_future.rs     # kafka_common_KafkaFuture_t (13)
+├── callback_queue.rs   # CallbackQueue behind <Client>__execute_callbacks / __set_callbacks_notify
+├── common/             # 104 files, 835 symbols: one file per Java class (acl/, config/,
+│                       # security/, serialization/, metrics/, ...)
+├── producer/           # 9 files, 129 symbols: Producer_t, KafkaProducer_t, MockProducer_t,
+│                       # Callback_t, Partitioner_t, ProducerConfig_t, ProducerRecord_t, ...
+├── consumer/           # 16 files, 297 symbols: Consumer_t, MockConsumer_t, ConsumerHandle_t,
+│                       # ConsumerRebalanceListener_t, OffsetCommitCallback_t, ...
+└── admin/              # 130 files, 844 symbols: Admin_t, MockAdminClient_t, rpc.rs (94 RPC
+    ├── options/        #   invokers), one <Rpc>Result_t and one <Rpc>Options_t per Java class
+    └── ...
+
+rust/xtask/ffi-baseline.txt   # burn-down baseline of check-ffi-translation (5 by-design lines)
 
 c/
 ├── CMakeLists.txt, Makefile, Dockerfile.grpc, README.md
 ├── tests/{test_kafka_producer,test_kafka_consumer,test_kafka_admin,
 │          test_mock_producer,test_mock_consumer,test_mock_admin,
-│          test_consumer_callbacks,producer_perf_test}.c + unity/ (submodule)
+│          test_consumer_callbacks,test_kafka_future,test_serialization,
+│          producer_perf_test}.c + unity/ (submodule)
 └── grpc_server/        # C backend for the multilanguage tests
 
 python/
-├── producer.py, consumer.py, admin.py
+├── confluent_kafka/    # the Python client (producer + consumer), generated
+│   │                   # from CLAUDE.md's Python Binding Conventions
+│   ├── producer/, consumer/   # base, Kafka*, Mock*, Async* peers, records
+│   ├── common/                # value types, KafkaError, errors/,
+│   │                          # serialization/, config/, …
+│   └── *_error.py             # Java built-in exceptions at the root
+├── admin.py            # older admin binding, paused (not in the package)
+├── _sync_wait.py       # SyncWaiter: admin.py's sliced wait over _cb calls
 ├── _confluentkafka.c   # hand-written C extension
-├── _error_code.py      # generated from rust/src/ffi/common.rs by
-│                       # tools/generate_error_code.py
-├── grpc_server.py, grpc_server_async.py, grpc_translate.py
-├── Dockerfile.grpc, Dockerfile.grpc.async
-├── test/{unit,static,performance}/, soak/, tools/
+├── tinycthread.{c,h}, c11threads_compat.h   # C11 threads shim (macOS)
+├── grpc_server.py, grpc_server_async.py, grpc_translate.py, grpc_chaos.py
+├── Dockerfile.grpc, Dockerfile.grpc.async, requirements-grpc{,-tools}.txt
+├── examples/
+├── test/{unit,integration,static,performance}/, soak/, tools/
 └── setup.py, pyproject.toml, Makefile, README.md
 ```
 
-Symbol counts are `#[unsafe(no_mangle)]` occurrences per file (2026-09-27).
+Symbol counts are `#[unsafe(no_mangle)]` occurrences per directory (2026-10-08).
 
 Both bindings link the library cargo builds under `rust/target/<profile>/` and
 compile against `rust/target/include/confluent_kafka.h`: `c/CMakeLists.txt`
 defaults `RUST_PROJECT_ROOT` to `../rust`, and `python/setup.py` resolves
 `../rust` (overridable with `CONFLUENT_KAFKA_LIB_DIR`).
 
-The bindings expose each operation twice: a synchronous entry point that
-`block_on`s the async API on the runtime the handle owns, and an `*_async`
-one that takes a `*_callback_t` + `user_data`, spawns the future and delivers
-the result through a dispatcher thread (`spawn_dispatcher` /
-`enqueue_or_run_inline` in `rust/src/ffi/common.rs`). The rest of the exported
-symbols are the sync forms, the accessors and the destructors.
+The C surface mirrors the Rust surface one-to-one (CLAUDE.md §4, enforced by
+`cargo xtask lint-custom check-ffi-translation`): every public Rust method is
+one C function with the Rust name, a fallible one returns
+`kafka_common_Error_t *` and fills a trailing `out_` parameter, and every Rust
+`async fn` additionally has a `_cb` twin whose completion is queued on the
+client's `CallbackQueue` and run by `<Client>__execute_callbacks()` on the
+caller's thread (`<Client>__set_callbacks_notify` only signals). Traits C can
+implement are `<Interface>_new(void *self, fn_t...)` interfaces; Rust classes
+implementing them expose borrowed `<Class>__as_<Interface>()` views. The rest
+of the exported symbols are accessors, enum singletons and destructors.
 
 ![Bindings layering](img/bindings-layering.svg)
 
 *Python and C both reach the Rust API through the same header and the same
-two entry-point shapes; neither binding adds a runtime of its own.*
+blocking / `_cb` entry-point shapes. Neither the C binding nor the Python
+extension adds a thread of its own; the Python producer runs its completions on
+one Python completion thread per producer.*
 
 ## tests/
 
@@ -412,6 +442,8 @@ rust/tests/                  # 59 .rs files across 4 cargo test targets
 │                       # mock_consumer_test.rs, trait_surface_check.rs,
 │                       # consumer_config_test.rs, consumer_record(s)_test.rs,
 │                       # offset_and_metadata_test.rs, close_options_test.rs
+├── chaos/              # target `chaos`: fault-injection harness, run with
+│                       # `cargo xtask chaos` (chaos-fault-injection-harness.md)
 ├── performance/        # target `performance`, `test = false` in Cargo.toml —
 │                       # excluded from plain `cargo test`; run explicitly
 └── integration/        # 27 test files + main.rs, Docker required
@@ -512,13 +544,17 @@ rust/src/admin/
 
 rust/src/common/topic_collection.rs, rust/src/common/topic_partition_info.rs
 rust/src/common/requests/{create_topics,delete_topics,create_partitions,
-                     delete_records}_{request,response}.rs
+                     delete_records,describe_topic_partitions}_{request,response}.rs
 rust/tests/integration/admin_{topics,partitions_records}_test.rs
 ```
 
-`describe_topics` (by name and by id) goes through the Metadata API, mirroring
-Java's `generateDescribeTopicsCallWithMetadataApi` / `handleDescribeTopicsByIds`
-rather than `DescribeTopicPartitions` cursor pagination.
+`describe_topics` by name mirrors Java's
+`handleDescribeTopicsByNamesWithDescribeTopicPartitionsApi`: a `describeCluster`
+call for the node map, then the paginated `DescribeTopicPartitions` call
+(`rust/src/common/requests/describe_topic_partitions_{request,response}.rs`), which
+falls back to the Metadata-API call (`generateDescribeTopicsCallWithMetadataApi`)
+on `UnsupportedVersionException`. By id it uses the Metadata API
+(`handleDescribeTopicsByIds`), as Java does.
 
 ## Cluster, configs, log dirs
 

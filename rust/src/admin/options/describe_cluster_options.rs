@@ -58,7 +58,9 @@ impl DescribeClusterOptions {
         self
     }
 
-    /// Whether to include cluster authorized operations.
+    /// Specify if authorized operations should be included in the response.
+    /// Note that some older brokers cannot supply this information even if it
+    /// is requested.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeClusterOptions#includeAuthorizedOperations")]
     pub fn include_authorized_operations(&self) -> bool {
         self.include_authorized_operations
@@ -73,7 +75,9 @@ impl DescribeClusterOptions {
         self
     }
 
-    /// Whether to include fenced brokers.
+    /// Specify if fenced brokers should be included in the response. Note that
+    /// some older brokers cannot supply this information even if it is
+    /// requested.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeClusterOptions#includeFencedBrokers")]
     pub fn include_fenced_brokers(&self) -> bool {
         self.include_fenced_brokers

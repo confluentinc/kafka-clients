@@ -24,11 +24,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::common::Error;
 use crate::common::compress::Compression;
-use crate::common::protocol::Errors;
 use crate::common::record::TimestampType;
 use crate::common::record::internal::AbstractRecords;
+use crate::common::record::internal::ByteBufferLogInputStream;
 use crate::common::record::internal::DefaultRecord;
 use crate::common::record::internal::DefaultRecordBatch;
+use crate::common::record::internal::EndTransactionMarker;
 use crate::common::record::internal::MemoryRecordsBuilder;
 use crate::common::record::internal::RecordBatch;
 use crate::common::record::internal::SimpleRecord;
@@ -103,9 +104,14 @@ impl MemoryRecords {
     ///
     /// Each batch is a `DefaultRecordBatch` containing the full batch header
     /// and record data.
+    ///
+    /// Corresponds to Java's `batches()` / `batchIterator()`
+    /// (`MemoryRecords.java:110-113`), a `ByteBufferLogInputStream` walk with no
+    /// message size limit. See [`BatchIterator`] for how a header the stream
+    /// rejects ends the iteration.
     #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#batches")]
     pub fn batches(&self) -> BatchIterator<'_> {
-        BatchIterator { data: &self.buffer, pos: 0 }
+        BatchIterator::new(&self.buffer)
     }
 
     /// Returns an iterator over all individual records across all batches.
@@ -140,60 +146,25 @@ impl MemoryRecords {
 
     /// Validates the header of the first batch and returns batch size.
     ///
-    /// Returns `Ok(None)` if the buffer does not contain enough bytes for a
-    /// header. Returns `Err(CorruptMessage)` if the record size is invalid
-    /// (too small, too large, or negative) or if the magic byte is invalid.
+    /// Returns the first batch size including `LOG_OVERHEAD` if the buffer
+    /// contains the header up to the magic byte, `None` otherwise.
     ///
-    /// Corresponds to Java's `MemoryRecords.firstBatchSize()` which delegates
-    /// to `ByteBufferLogInputStream.nextBatchSize()`.
+    /// Corresponds to Java's `MemoryRecords.firstBatchSize()`
+    /// (`MemoryRecords.java:121-125`): `None` below `HEADER_SIZE_UP_TO_MAGIC`
+    /// bytes, else `ByteBufferLogInputStream.nextBatchSize()` with no message size
+    /// limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(CorruptMessage)` if the record size is invalid (too small,
+    /// including negative) or if the magic byte is invalid — see
+    /// [`ByteBufferLogInputStream::next_batch_size`].
     #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#firstBatchSize")]
     pub fn first_batch_size(&self) -> Result<Option<usize>, Error> {
-        // Minimum overhead for LegacyRecord v0:
-        //   CRC(4) + Magic(1) + Attributes(1) + KeySize(4) + ValueSize(4) = 14
-        const LEGACY_RECORD_OVERHEAD_V0: i32 = 14;
-
-        if self.buffer.len() < AbstractRecords::LOG_OVERHEAD {
-            return Ok(None);
-        }
-
-        // Read the record size (length) field
-        let record_size = i32::from_be_bytes(
-            self.buffer[RecordBatch::LENGTH_OFFSET..RecordBatch::LENGTH_OFFSET + 4]
-                .try_into()
-                .map_err(|_| Error::with_message(Errors::CorruptMessage, "Failed to read record size"))?,
-        );
-
-        // Validate minimum record size (V0 has the smallest overhead)
-        if record_size < LEGACY_RECORD_OVERHEAD_V0 {
-            return Err(Error::with_message(
-                Errors::CorruptMessage,
-                format!(
-                    "Record size {} is less than the minimum record overhead ({})",
-                    record_size, LEGACY_RECORD_OVERHEAD_V0
-                ),
-            ));
-        }
-
-        // Validate maximum message size (use i32::MAX like Java's Integer.MAX_VALUE)
-        // Java passes Integer.MAX_VALUE as maxMessageSize from firstBatchSize(),
-        // so this check only catches negative values that wrapped or truly
-        // enormous sizes. Since we already checked >= LEGACY_RECORD_OVERHEAD_V0
-        // and record_size is i32, the max check here matches Java behavior.
-
         if self.buffer.len() < AbstractRecords::HEADER_SIZE_UP_TO_MAGIC {
             return Ok(None);
         }
-
-        // Validate magic byte
-        let magic = self.buffer[RecordBatch::MAGIC_OFFSET] as i8;
-        if !(0..=RecordBatch::CURRENT_MAGIC_VALUE).contains(&magic) {
-            return Err(Error::with_message(
-                Errors::CorruptMessage,
-                format!("Invalid magic found in record: {}", magic),
-            ));
-        }
-
-        Ok(Some(AbstractRecords::LOG_OVERHEAD + record_size as usize))
+        ByteBufferLogInputStream::new(&self.buffer, i32::MAX).next_batch_size()
     }
 
     /// Returns `true` if the buffer holds at least one *complete* record batch.
@@ -210,9 +181,13 @@ impl MemoryRecords {
     ///         return null;
     /// ```
     ///
-    /// So it is [`first_batch_size`](Self::first_batch_size) — Java's
+    /// So it is [`ByteBufferLogInputStream::next_batch_size`] — Java's
     /// `nextBatchSize()`, which only validates the header up to the magic byte —
-    /// **plus** the completeness test `remaining < batchSize`. The distinction
+    /// **plus** the completeness test `remaining < batchSize`. It deliberately
+    /// does not go through [`first_batch_size`](Self::first_batch_size), whose
+    /// `HEADER_SIZE_UP_TO_MAGIC` early return (`MemoryRecords.java:122-123`) is
+    /// not part of `nextBatch()`: 12 to 16 bytes carrying a corrupt size make
+    /// `hasNext()` throw, where `firstBatchSize()` answers `null`. The distinction
     /// matters: a buffer holding an intact header that declares `N` bytes but
     /// carrying fewer than `N` bytes of payload (a broker cutting a fetch
     /// response mid-batch at `max.partition.fetch.bytes`) has a batch *size* but
@@ -220,14 +195,14 @@ impl MemoryRecords {
     ///
     /// # Errors
     ///
-    /// Propagates the [`Errors::CorruptMessage`] error `first_batch_size`
-    /// raises for an invalid record size or magic byte, exactly as Java's
+    /// Propagates the `CorruptMessage` error `next_batch_size` raises for an
+    /// invalid record size or magic byte, exactly as Java's
     /// `hasNext()` propagates `CorruptRecordException` out of `nextBatchSize()`
     /// (`ByteBufferLogInputStream.java:73`, `:76`, `:84`). A corrupt header is
     /// NOT "no batch"; conflating the two loses both the error class and the
     /// message that says what is wrong.
     pub fn has_complete_first_batch(&self) -> Result<bool, Error> {
-        match self.first_batch_size()? {
+        match ByteBufferLogInputStream::new(&self.buffer, i32::MAX).next_batch_size()? {
             // Java: `remaining < batchSize` -> null. `remaining` is the whole
             // buffer here because the check runs at position 0.
             Some(batch_size) => Ok(batch_size <= self.buffer.len()),
@@ -699,6 +674,118 @@ impl MemoryRecords {
         }
 
         builder.build()
+    }
+
+    /// Create a `MemoryRecords` containing a single end transaction marker
+    /// (`COMMIT`/`ABORT`) for the given producer, timestamped now.
+    ///
+    /// Corresponds to Java's
+    /// `MemoryRecords.withEndTransactionMarker(long producerId, short producerEpoch, EndTransactionMarker marker)`.
+    pub fn with_end_transaction_marker_for_producer(
+        producer_id: i64,
+        producer_epoch: i16,
+        marker: &EndTransactionMarker,
+    ) -> MemoryRecords {
+        Self::with_end_transaction_marker(
+            0,
+            current_time_millis(),
+            RecordBatch::NO_PARTITION_LEADER_EPOCH,
+            producer_id,
+            producer_epoch,
+            marker,
+        )
+    }
+
+    /// Create a `MemoryRecords` containing a single end transaction marker
+    /// (`COMMIT`/`ABORT`) for the given producer at the given timestamp.
+    ///
+    /// Corresponds to Java's
+    /// `MemoryRecords.withEndTransactionMarker(long timestamp, long producerId, short producerEpoch, EndTransactionMarker marker)`.
+    pub fn with_end_transaction_marker_with_timestamp(
+        timestamp: i64,
+        producer_id: i64,
+        producer_epoch: i16,
+        marker: &EndTransactionMarker,
+    ) -> MemoryRecords {
+        Self::with_end_transaction_marker(
+            0,
+            timestamp,
+            RecordBatch::NO_PARTITION_LEADER_EPOCH,
+            producer_id,
+            producer_epoch,
+            marker,
+        )
+    }
+
+    /// Create a `MemoryRecords` containing a single end transaction marker
+    /// (`COMMIT`/`ABORT`).
+    ///
+    /// Corresponds to Java's
+    /// `MemoryRecords.withEndTransactionMarker(long initialOffset, long timestamp, int partitionLeaderEpoch, long producerId, short producerEpoch, EndTransactionMarker marker)`.
+    pub fn with_end_transaction_marker(
+        initial_offset: i64,
+        timestamp: i64,
+        partition_leader_epoch: i32,
+        producer_id: i64,
+        producer_epoch: i16,
+        marker: &EndTransactionMarker,
+    ) -> MemoryRecords {
+        // Java: `DefaultRecordBatch.RECORD_BATCH_OVERHEAD` (defined on
+        // `RecordBatch` in Rust) + `marker.endTxnMarkerValueSize()`.
+        let size = RecordBatch::RECORD_BATCH_OVERHEAD + marker.end_txn_marker_value_size() as usize;
+        let buffer = Vec::with_capacity(size);
+        // Infallible here: this builds a transactional control batch with a valid
+        // producer id, so neither `append_end_txn_marker` guard can fire.
+        Self::write_end_transactional_marker(
+            buffer,
+            initial_offset,
+            timestamp,
+            partition_leader_epoch,
+            producer_id,
+            producer_epoch,
+            marker,
+        )
+        .expect("writing an end txn marker into a freshly built transactional control batch is infallible")
+    }
+
+    /// Write a single end transaction marker (`COMMIT`/`ABORT`) into the given
+    /// buffer and return the resulting `MemoryRecords`.
+    ///
+    /// Corresponds to Java's
+    /// `MemoryRecords.writeEndTransactionalMarker(ByteBuffer buffer, ...)`, which
+    /// is `void` and writes into a caller-supplied `ByteBuffer`. Because the Rust
+    /// [`MemoryRecordsBuilder`] owns its buffer, this consumes `buffer` and
+    /// returns the built [`MemoryRecords`] — equivalent to Java's caller doing
+    /// `buffer.flip(); readableRecords(buffer)`.
+    pub fn write_end_transactional_marker(
+        buffer: Vec<u8>,
+        initial_offset: i64,
+        timestamp: i64,
+        partition_leader_epoch: i32,
+        producer_id: i64,
+        producer_epoch: i16,
+        marker: &EndTransactionMarker,
+    ) -> Result<MemoryRecords, Error> {
+        let is_transactional = true;
+        let write_limit = buffer.capacity();
+        let mut builder = MemoryRecordsBuilder::with_default(
+            buffer,
+            0,
+            RecordBatch::CURRENT_MAGIC_VALUE,
+            Compression::none().build(),
+            TimestampType::CreateTime,
+            initial_offset,
+            timestamp,
+            producer_id,
+            producer_epoch,
+            RecordBatch::NO_SEQUENCE,
+            is_transactional,
+            true, // is_control_batch
+            partition_leader_epoch,
+            write_limit,
+        );
+        builder.append_end_txn_marker(timestamp, marker)?;
+        Ok(builder.build())
     }
 }
 
@@ -1196,14 +1283,31 @@ impl std::fmt::Display for MemoryRecords {
 }
 
 /// Iterator over record batches in a `MemoryRecords`.
+///
+/// Corresponds to Java's `RecordBatchIterator` over a `ByteBufferLogInputStream`
+/// (`RecordBatchIterator.java:26-47`, `MemoryRecords.java:110-113`): every header
+/// goes through [`ByteBufferLogInputStream::next_batch`] before its batch is
+/// yielded.
+///
+/// Where Java's iterator throws, this one logs at error level and ends: a
+/// header the stream rejects (a corrupt size or magic, a v0/v1 batch, or a v2
+/// batch shorter than its own header) yields nothing further. The precedent is
+/// [`MemoryRecords::records`], and so is the reason — an `Iterator` cannot
+/// report the error, and a fallible signature would reach every caller for a
+/// case only a corrupt buffer produces. Every buffer iterated this way is one
+/// this client built — the producer's own batches; fetched bytes are walked by
+/// the consumer's `CompletedFetch` cursor, and a produce request is validated by
+/// `ProduceRequest::validate_records`, both of which go through the same stream
+/// and propagate the error.
 pub struct BatchIterator<'a> {
-    data: &'a [u8],
-    pos: usize,
+    /// `None` once iteration has ended.
+    stream: Option<ByteBufferLogInputStream<'a>>,
 }
 
 impl<'a> BatchIterator<'a> {
+    /// Iterates the batches in `data`, with no message size limit.
     pub fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
+        Self { stream: Some(ByteBufferLogInputStream::new(data, i32::MAX)) }
     }
 }
 
@@ -1211,24 +1315,19 @@ impl<'a> Iterator for BatchIterator<'a> {
     type Item = DefaultRecordBatch;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // Need at least LOG_OVERHEAD bytes to read base_offset + length
-        if self.pos + AbstractRecords::LOG_OVERHEAD > self.data.len() {
-            return None;
+        match self.stream.as_mut()?.next_batch() {
+            // The copy is the owned batch this iterator has always yielded.
+            Ok(Some(batch)) => Some(DefaultRecordBatch::with_slice(batch.buffer())),
+            Ok(None) => {
+                self.stream = None;
+                None
+            },
+            Err(e) => {
+                log::error!("Ending record batch iteration at a batch this client cannot read: {e}");
+                self.stream = None;
+                None
+            },
         }
-
-        // Read the batch length from the length field
-        let length_bytes = &self.data[self.pos + RecordBatch::LENGTH_OFFSET..self.pos + RecordBatch::LENGTH_OFFSET + 4];
-        let batch_length = i32::from_be_bytes(length_bytes.try_into().ok()?) as usize;
-        let total_batch_size = AbstractRecords::LOG_OVERHEAD + batch_length;
-
-        if self.pos + total_batch_size > self.data.len() {
-            return None;
-        }
-
-        let batch_data = self.data[self.pos..self.pos + total_batch_size].to_vec();
-        self.pos += total_batch_size;
-
-        Some(DefaultRecordBatch::new(batch_data))
     }
 }
 
@@ -1241,6 +1340,8 @@ fn current_time_millis() -> i64 {
 mod tests {
     use super::*;
     use crate::common::header::RecordHeader as HeaderImpl;
+    use crate::common::protocol::Errors;
+    use crate::common::record::internal::ControlRecordType;
     use crate::common::record::internal::DefaultRecordBatch;
     use crate::common::record::internal::Record;
 
@@ -1454,7 +1555,7 @@ mod tests {
             let short_records = MemoryRecords::new(records.buffer()[..1].to_vec().into());
             assert_eq!(None, short_records.first_batch_size().unwrap());
 
-            // magic not in buffer (only LOG_OVERHEAD bytes = 12)
+            // magic not in buffer (only AbstractRecords::LOG_OVERHEAD bytes = 12)
             let short_records = MemoryRecords::new(records.buffer()[..AbstractRecords::LOG_OVERHEAD].to_vec().into());
             assert_eq!(None, short_records.first_batch_size().unwrap());
 
@@ -1653,9 +1754,61 @@ mod tests {
     // skipped because filterTo is not implemented in the Rust version. The filterTo method is
     // a server-side operation used for log compaction and not needed for the producer path.
 
-    // Note: testBuildEndTxnMarker and testBuildLeaderChangeMessage are skipped because
-    // EndTransactionMarker, ControlRecordType, and LeaderChangeMessage/ControlRecordUtils
-    // are not yet implemented.
+    /// Corresponds to Java's `MemoryRecordsTest.testBuildEndTxnMarker`.
+    ///
+    /// Builds an end-transaction (COMMIT) control batch through the
+    /// `with_end_transaction_marker` factory, verifies the buffer allocation was
+    /// precise, checks the batch metadata (control flag, producer id/epoch, base
+    /// offset, partition leader epoch, validity), then deserializes the single
+    /// record back into a marker carrying the same control type and epoch.
+    #[test]
+    fn test_build_end_txn_marker() {
+        let producer_id = 73_i64;
+        let producer_epoch = 13_i16;
+        let initial_offset = 983_i64;
+        let coordinator_epoch = 347_i32;
+        let partition_leader_epoch = 29_i32;
+
+        let marker = EndTransactionMarker::new(ControlRecordType::Commit, coordinator_epoch)
+            .expect("COMMIT is a valid end transaction marker control type");
+        let records = MemoryRecords::with_end_transaction_marker(
+            initial_offset,
+            1_700_000_000_000_i64,
+            partition_leader_epoch,
+            producer_id,
+            producer_epoch,
+            &marker,
+        );
+        // verify that buffer allocation was precise
+        assert_eq!(
+            records.buffer().len(),
+            RecordBatch::RECORD_BATCH_OVERHEAD + marker.end_txn_marker_value_size() as usize
+        );
+
+        let batches: Vec<DefaultRecordBatch> = records.batches().collect();
+        assert_eq!(1, batches.len());
+
+        let batch = &batches[0];
+        assert!(batch.is_control_batch());
+        assert_eq!(producer_id, batch.producer_id());
+        assert_eq!(producer_epoch, batch.producer_epoch());
+        assert_eq!(initial_offset, batch.base_offset());
+        assert_eq!(partition_leader_epoch, batch.partition_leader_epoch());
+        assert!(batch.is_valid());
+
+        let created_records = batch.iter_records().expect("the control batch's records parse");
+        assert_eq!(1, created_records.len());
+
+        let record = &created_records[0];
+        record.ensure_valid().expect("the control record is valid");
+        let deserialized_marker =
+            EndTransactionMarker::deserialize(record).expect("the control record deserializes into an end txn marker");
+        assert_eq!(ControlRecordType::Commit, deserialized_marker.control_type());
+        assert_eq!(coordinator_epoch, deserialized_marker.coordinator_epoch());
+    }
+
+    // Note: testBuildLeaderChangeMessage is skipped because LeaderChangeMessage and
+    // ControlRecordUtils are not yet translated.
 
     // Note: testUnsupportedCompress is skipped because it tests magic v0/v1 which
     // we do not support in the Rust producer path.
@@ -1746,6 +1899,71 @@ mod tests {
     #[test]
     fn test_has_complete_first_batch_empty() {
         assert!(!MemoryRecords::empty().has_complete_first_batch().unwrap());
+    }
+
+    /// Java's `firstBatchSize()` returns `null` below `HEADER_SIZE_UP_TO_MAGIC`
+    /// bytes before it looks at the size (`MemoryRecords.java:122-123`), while
+    /// `hasNext()` runs `nextBatchSize()` directly, which checks the size from
+    /// `LOG_OVERHEAD` bytes on (`ByteBufferLogInputStream.java:68-77`). So the
+    /// same short buffer with a corrupt size is "no size yet" to one and an error
+    /// to the other, and `has_complete_first_batch` must not be built on
+    /// `first_batch_size`.
+    #[test]
+    fn test_first_batch_size_and_has_complete_first_batch_differ_below_the_magic_byte() {
+        for len in AbstractRecords::LOG_OVERHEAD..AbstractRecords::HEADER_SIZE_UP_TO_MAGIC {
+            let mut buf = vec![0u8; len];
+            buf[RecordBatch::LENGTH_OFFSET..RecordBatch::LENGTH_OFFSET + 4].copy_from_slice(&3i32.to_be_bytes());
+            let records = MemoryRecords::readable_records(&buf);
+            assert_eq!(None, records.first_batch_size().unwrap(), "{len} bytes");
+            let err = records.has_complete_first_batch().unwrap_err();
+            assert_eq!(Errors::CorruptMessage, err.error());
+            assert_eq!("Record size 3 is less than the minimum record overhead (14)", err.message());
+        }
+    }
+
+    /// D6: `batches()` yields the batches before a header the stream rejects and
+    /// then ends, instead of misreading it (a negative length used to wrap to a
+    /// size near `usize::MAX`) or yielding a view shorter than a v2 header.
+    #[test]
+    fn test_batches_ends_at_a_header_the_stream_rejects() {
+        let first = one_record_batch();
+        let good = [SimpleRecord::with_timestamp_key_value(
+            0,
+            Some(b"k2".to_vec()),
+            Some(b"v2".to_vec()),
+        )];
+        let second = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
+            2,
+            10,
+            Compression::none().build(),
+            TimestampType::CreateTime,
+            &good,
+        )
+        .buffer()
+        .to_vec();
+        // Each corrupts the header of the batch that starts at `header`.
+        type Corruption = fn(&mut [u8]);
+        let corruptions: [(&str, Corruption); 4] = [
+            ("negative length", |header| put_length(header, -5)),
+            ("invalid magic", |header| header[RecordBatch::MAGIC_OFFSET] = 37),
+            ("legacy magic", |header| {
+                header[RecordBatch::MAGIC_OFFSET] = RecordBatch::MAGIC_VALUE_V1 as u8
+            }),
+            // 30 + AbstractRecords::LOG_OVERHEAD = 42 bytes: a valid size, below the 61-byte v2 header.
+            ("sub-header size", |header| put_length(header, 30)),
+        ];
+        fn put_length(header: &mut [u8], length: i32) {
+            header[RecordBatch::LENGTH_OFFSET..RecordBatch::LENGTH_OFFSET + 4].copy_from_slice(&length.to_be_bytes());
+        }
+        for (name, corrupt) in corruptions {
+            let mut buf = first.clone();
+            buf.extend_from_slice(&second);
+            corrupt(&mut buf[first.len()..]);
+            let records = MemoryRecords::readable_records(&buf);
+            let base_offsets: Vec<i64> = records.batches().map(|batch| batch.base_offset()).collect();
+            assert_eq!(vec![0], base_offsets, "{name}: only the batch before the rejected header");
+            assert_eq!(first.len(), records.valid_bytes(), "{name}");
+        }
     }
 
     /// A batch whose header parses (so the batch iterator yields it) but whose

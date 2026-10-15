@@ -26,6 +26,7 @@ pub mod admin;
 // `dead_code` allowances.
 #[expect(dead_code)]
 mod api_versions;
+mod bootstrap_configuration;
 mod client_dns_lookup;
 mod client_request;
 mod client_response;
@@ -46,7 +47,6 @@ mod kafka_client;
 mod least_loaded_node;
 #[expect(dead_code)]
 mod metadata;
-#[cfg_attr(not(test), expect(dead_code))]
 mod metadata_recovery_strategy;
 mod metadata_snapshot;
 mod metadata_updater;
@@ -60,6 +60,8 @@ mod preview_warning;
 pub mod producer;
 #[cfg(test)]
 mod test_alloc_tracker;
+#[cfg(test)]
+mod test_fake_broker;
 
 #[cfg(feature = "ffi")]
 pub mod ffi;
@@ -76,6 +78,7 @@ pub mod ffi;
 pub(crate) type RequestCompletionHandler = Box<dyn FnOnce(&mut client_response::ClientResponse) + Send>;
 
 pub(crate) use api_versions::ApiVersions;
+pub(crate) use bootstrap_configuration::BootstrapConfiguration;
 pub(crate) use client_dns_lookup::ClientDnsLookup;
 pub(crate) use client_request::ClientRequest;
 pub(crate) use client_response::ClientResponse;
@@ -128,3 +131,8 @@ pub(crate) mod test_generated {
 // module docs. The public-API suites stay in `tests/integration`.
 #[cfg(all(test, feature = "integration-tests"))]
 mod integration_tests;
+// The shared `tests/common` harness, compiled into `integration_tests` by path,
+// names the crate `confluent_kafka::` as the external `tests/integration` binary
+// does; this alias resolves those paths inside the crate's own test binary.
+#[cfg(all(test, feature = "integration-tests"))]
+extern crate self as confluent_kafka;

@@ -53,7 +53,10 @@ fn base64_encode(data: &[u8]) -> String {
 ///
 /// Corresponds to
 /// `org.apache.kafka.common.security.token.delegation.DelegationToken`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// Both [`fmt::Display`] and [`fmt::Debug`] render Java's `toString()`, which
+/// redacts the HMAC.
+#[derive(Clone, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.common.security.token.delegation.DelegationToken")]
 pub struct DelegationToken {
     token_information: TokenInformation,
@@ -111,6 +114,14 @@ impl fmt::Display for DelegationToken {
     }
 }
 
+impl fmt::Debug for DelegationToken {
+    /// Delegates to [`fmt::Display`]: Java has a single `toString()`, and it
+    /// redacts the HMAC, so the Rust `Debug` must not print it either.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,6 +171,21 @@ mod tests {
         let rendered = token.to_string();
         assert!(rendered.contains("hmac=[*******]"), "{rendered}");
         assert!(!rendered.contains("secret"), "{rendered}");
+    }
+
+    /// Java has a single `toString()`, so `Debug` renders exactly what
+    /// `Display` does and never the HMAC, which a derived `Debug` would print
+    /// as its byte values.
+    #[test]
+    fn debug_redacts_hmac() {
+        let token = DelegationToken::new(token_info(), b"secret".to_vec());
+        for rendered in [format!("{token:?}"), format!("{token:#?}")] {
+            assert_eq!(rendered, token.to_string());
+            assert!(rendered.contains("hmac=[*******]"), "{rendered}");
+            assert!(!rendered.contains("secret"), "{rendered}");
+            assert!(!rendered.contains(&format!("{:?}", token.hmac())), "{rendered}");
+            assert!(!rendered.contains("115, 101, 99"), "{rendered}");
+        }
     }
 
     #[test]

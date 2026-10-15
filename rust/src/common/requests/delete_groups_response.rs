@@ -192,4 +192,107 @@ mod tests {
         assert!(!response.should_client_throttle(0));
         assert!(response.should_client_throttle(1));
     }
+
+    fn result_with_message(group_id: &str, error: Errors, message: Option<&str>) -> DeletableGroupResult {
+        let mut r = result(group_id, error);
+        r.set_error_message(message.map(str::to_string));
+        r
+    }
+
+    fn serialize(data: DeleteGroupsResponseData, version: i16) -> Vec<u8> {
+        let mut concrete = crate::common::requests::ConcreteResponse::DeleteGroups(DeleteGroupsResponse::new(data));
+        concrete.serialize(version).unwrap().into_buffer()
+    }
+
+    /// Byte-level wire-encoding check for the v3 response, which adds the
+    /// per-group nullable `ErrorMessage` (KAFKA-20620). Flexible framing:
+    ///   throttle_time_ms 0 -> 0x00 0x00 0x00 0x00
+    ///   results: compact array len 1 -> 0x02
+    ///     group_id "g": compact string -> 0x02 0x67
+    ///     error_code 134 (GROUP_DELETION_FAILED) -> 0x00 0x86
+    ///     error_message "x": compact nullable string -> 0x02 0x78
+    ///     result tagged fields -> 0x00
+    ///   top-level tagged fields -> 0x00
+    #[test]
+    fn serialize_known_byte_vector_v3_with_error_message() {
+        let mut data = DeleteGroupsResponseData::new();
+        data.set_results(vec![result_with_message("g", Errors::GroupDeletionFailed, Some("x"))]);
+        let expected: &[u8] = &[
+            0x00, 0x00, 0x00, 0x00, // throttle_time_ms 0
+            0x02, // results compact array len 1
+            0x02, 0x67, // group_id "g"
+            0x00, 0x86, // error_code 134
+            0x02, 0x78, // error_message "x"
+            0x00, // result tagged fields
+            0x00, // top-level tagged fields
+        ];
+        assert_eq!(serialize(data, 3).as_slice(), expected);
+    }
+
+    /// A null `ErrorMessage` (the default) encodes as the compact-nullable null
+    /// marker 0x00 at v3.
+    #[test]
+    fn serialize_known_byte_vector_v3_null_error_message() {
+        let mut data = DeleteGroupsResponseData::new();
+        data.set_results(vec![result("g", Errors::None)]);
+        let expected: &[u8] = &[
+            0x00, 0x00, 0x00, 0x00, // throttle_time_ms 0
+            0x02, // results compact array len 1
+            0x02, 0x67, // group_id "g"
+            0x00, 0x00, // error_code 0
+            0x00, // error_message null
+            0x00, // result tagged fields
+            0x00, // top-level tagged fields
+        ];
+        assert_eq!(serialize(data, 3).as_slice(), expected);
+    }
+
+    /// Below v3 `ErrorMessage` is absent from the wire; it is `ignorable`, so a
+    /// non-null value is dropped silently rather than rejected.
+    #[test]
+    fn serialize_known_byte_vector_v2_drops_error_message() {
+        let mut data = DeleteGroupsResponseData::new();
+        data.set_results(vec![result_with_message("g", Errors::GroupDeletionFailed, Some("x"))]);
+        let expected: &[u8] = &[
+            0x00, 0x00, 0x00, 0x00, // throttle_time_ms 0
+            0x02, // results compact array len 1
+            0x02, 0x67, // group_id "g"
+            0x00, 0x86, // error_code 134
+            0x00, // result tagged fields
+            0x00, // top-level tagged fields
+        ];
+        assert_eq!(serialize(data, 2).as_slice(), expected);
+    }
+
+    /// Translated from `RequestResponseTest.testDeleteGroupsResponseV3PreservesErrorMessage`:
+    /// a `GROUP_DELETION_FAILED` result's error message survives a round trip at
+    /// the latest version. The fixture is Java's `createDeleteGroupsResponse`
+    /// (one successful group plus the new failed one).
+    #[test]
+    fn delete_groups_response_v3_preserves_error_message() {
+        let mut data = DeleteGroupsResponseData::new();
+        data.set_results(vec![
+            result("test-group", Errors::None),
+            result_with_message("failed-group", Errors::GroupDeletionFailed, Some("plugin offline")),
+        ]);
+        // `RequestResponseTest.testErrorCountsIncludesNone` still counts one NONE
+        // for this fixture now that it also carries the failed group.
+        let counts = DeleteGroupsResponse::new(data.clone()).error_counts();
+        assert_eq!(counts.get(&Errors::None).copied(), Some(1));
+        assert_eq!(counts.get(&Errors::GroupDeletionFailed).copied(), Some(1));
+        let version = ApiKeys::DELETE_GROUPS.latest_version();
+        assert_eq!(version, 3, "DeleteGroups latest version in Kafka 4.4");
+
+        let bytes = serialize(data, version);
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes);
+        let parsed = DeleteGroupsResponse::parse(&mut readable, version).unwrap();
+        let failed = parsed
+            .data()
+            .results()
+            .iter()
+            .find(|r| r.group_id == "failed-group")
+            .expect("failed-group result");
+        assert_eq!(failed.error_code, Errors::GroupDeletionFailed.code());
+        assert_eq!(failed.error_message.as_deref(), Some("plugin offline"));
+    }
 }

@@ -222,10 +222,11 @@ service AdminService {
   //     by [ResultKey.name]. Its Java result holds one future over the raw
   //     response data and exposes three views (`all()` / `users()` /
   //     `description(user)`); the per-user shape that subsumes all three is what
-  //     the C FFI already composes (`src/ffi/admin.rs`'s
-  //     `submit_describe_user_scram_credentials`, whose doc comment states the
-  //     composition and why nothing Java can reach is lost) and what admin.py
-  //     returns (`{user: UserScramCredentialsDescription | KafkaError}`). It is
+  //     every backend composes the same way: `all()` first, then `users()` +
+  //     `description(user)` when `all()` fails (`rust/tests/common/
+  //     admin_backend.rs`, `c/grpc_server/server.cc`, and the Python
+  //     extension's `assemble_scram` behind admin.py, which returns
+  //     `{user: UserScramCredentialsDescription | KafkaError}`). It is
   //     **not** the `listGroups` `valid()`/`errors()` split: every error here has
   //     a user to hang on, so [Listings] does not apply.
   //
@@ -309,6 +310,17 @@ service AdminService {
   rpc ForceTerminateTransaction(ForceTerminateTransactionRequest) returns (StatusResponse);
   rpc ListTransactions(ListTransactionsRequest) returns (ListTransactionsResponse);
   rpc FenceProducers(FenceProducersRequest) returns (FenceProducersResponse);
+
+  // -------------------------------------------------------------------------
+  // Controller registration (Milestone 17, KAFKA-20395 / Kafka 4.4)
+  //
+  // `unregisterController` is **whole-value degenerated to void**, the shared
+  // [StatusResponse]: `UnregisterControllerResult` exposes only
+  // `all() -> KafkaFuture<()>`, so, as for `abortTransaction`, the C entry
+  // points return no result handle and `admin.py` resolves to `None`.
+  // -------------------------------------------------------------------------
+
+  rpc UnregisterController(UnregisterControllerRequest) returns (StatusResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -2588,7 +2600,7 @@ message TransactionListingList {
   repeated TransactionListing listings = 1;
 }
 
-// Java `org.apache.kafka.common.utils.ProducerIdAndEpoch`, the value of one
+// Java `org.apache.kafka.common.utils.internals.ProducerIdAndEpoch`, the value of one
 // `fenceProducers` row.
 //
 // A record of two scalars, so it is not the collection case at all — both
@@ -2693,6 +2705,16 @@ message AbortTransactionRequest {
 message ForceTerminateTransactionRequest {
   uint64 admin_id = 1;
   string transactional_id = 2;
+  optional int32 timeout_ms = 3;
+}
+
+// ---------------------------------------------------------------------------
+// unregisterController
+// ---------------------------------------------------------------------------
+
+message UnregisterControllerRequest {
+  uint64 admin_id = 1;
+  int32 controller_id = 2;
   optional int32 timeout_ms = 3;
 }
 

@@ -1,6 +1,6 @@
 # RFC: Client APIs
 
-- **Status:** Draft
+- **Status:** Proposed
 - **Audience:** users and contributors of Confluent's Kafka clients
 
 ## Summary
@@ -20,7 +20,7 @@ than holding them all back for a single large proposal.
 
 | Language | RFC | Status |
 | --- | --- | --- |
-| Rust | `rust.md` | Planned |
+| Rust | `rust.md` | Proposed |
 | Python | `python.md` | Planned |
 | .NET | `dotnet.md` | Planned |
 | JavaScript | `javascript.md` | Planned |

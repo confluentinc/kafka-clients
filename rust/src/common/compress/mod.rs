@@ -65,6 +65,12 @@ const XERIAL_HEADER: [u8; 16] = [
 /// Default block size for xerial snappy (matches Java's default of 32KB).
 const XERIAL_BLOCK_SIZE: usize = 32 * 1024;
 
+/// The longest compressed block the reader accepts: snappy-java's
+/// `SnappyInputStream.MAX_CHUNK_SIZE` (512 MiB), which Kafka keeps by building
+/// its `SnappyInputStream` with the default constructor
+/// (`SnappyCompression.wrapForInput`).
+const XERIAL_MAX_CHUNK_SIZE: usize = 512 * 1024 * 1024;
+
 /// A writer that compresses data using the xerial/snappy-java block format.
 ///
 /// Buffers input data and compresses in blocks when the buffer reaches
@@ -164,7 +170,7 @@ impl<R: Read> XerialSnappyReader<R> {
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(false),
             Err(e) => return Err(e),
         }
-        let compressed_len = u32::from_be_bytes(len_buf) as usize;
+        let compressed_len = checked_chunk_size(len_buf)?;
         let mut compressed = vec![0u8; compressed_len];
         self.inner.read_exact(&mut compressed)?;
         let mut decoder = snap::raw::Decoder::new();
@@ -174,6 +180,51 @@ impl<R: Read> XerialSnappyReader<R> {
         self.decompressed = Cursor::new(decompressed);
         Ok(true)
     }
+}
+
+/// A block's length field, checked as snappy-java's
+/// `SnappyInputStream.hasNextChunk` checks it before allocating for the block.
+/// Java reads the field as a signed `int`, so a length of 2 GiB or more is
+/// negative there; a negative length and one above [`XERIAL_MAX_CHUNK_SIZE`]
+/// are refused with snappy-java's messages, which `SnappyError.getMessage()`
+/// prefixes with the error code.
+///
+/// Java first compares the field with `SnappyCodec.MAGIC_HEADER_HEAD`, the
+/// start of a concatenated stream's header. This reader does not read
+/// concatenated streams, so such a header is refused here as a negative length.
+fn checked_chunk_size(len_buf: [u8; 4]) -> io::Result<usize> {
+    let chunk_size = i32::from_be_bytes(len_buf);
+    let Ok(len) = usize::try_from(chunk_size) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("[INVALID_CHUNK_SIZE] chunkSize is too big or negative : {chunk_size}"),
+        ));
+    };
+    if len > XERIAL_MAX_CHUNK_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "[FAILED_TO_UNCOMPRESS] Received chunkSize {} is greater than max configured chunk size {}",
+                group_thousands(len),
+                group_thousands(XERIAL_MAX_CHUNK_SIZE)
+            ),
+        ));
+    }
+    Ok(len)
+}
+
+/// `n` with its digits in groups of three separated by commas, as Java's `%,d`
+/// formats it in an English locale.
+fn group_thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped
 }
 
 impl<R: Read> Read for XerialSnappyReader<R> {
@@ -341,6 +392,74 @@ mod tests {
         let data = b"Hello, Kafka! This is a test of snappy compression.";
         let result = round_trip(&Compression::snappy().build(), data);
         assert_eq!(result, data);
+    }
+
+    /// A xerial stream holding one block whose length field is `chunk_size`,
+    /// followed by `block`.
+    fn xerial_stream(chunk_size: u32, block: &[u8]) -> Vec<u8> {
+        let mut stream = XERIAL_HEADER.to_vec();
+        stream.extend_from_slice(&chunk_size.to_be_bytes());
+        stream.extend_from_slice(block);
+        stream
+    }
+
+    /// Reads `stream` with the snappy reader, and returns the error it fails
+    /// with and the largest allocation made while reading.
+    fn snappy_read_error(stream: &[u8]) -> (io::Error, usize) {
+        let _guard = crate::AllocTrackingGuard::new();
+        let mut reader = Compression::snappy()
+            .build()
+            .wrap_for_input(stream, TEST_MESSAGE_VERSION)
+            .unwrap();
+        let err = reader.read_to_end(&mut Vec::new()).expect_err("the block is refused");
+        (err, crate::AllocTrackingGuard::max_allocation())
+    }
+
+    /// A block longer than snappy-java's `MAX_CHUNK_SIZE` is refused before
+    /// anything is allocated for it (`SnappyInputStream.hasNextChunk`).
+    #[test]
+    fn test_xerial_block_longer_than_max_chunk_size_is_refused() {
+        let (err, max_allocation) = snappy_read_error(&xerial_stream(512 * 1024 * 1024 + 1, b"abc"));
+        assert_eq!(io::ErrorKind::InvalidData, err.kind());
+        assert_eq!(
+            "[FAILED_TO_UNCOMPRESS] Received chunkSize 536,870,913 is greater than max configured chunk size \
+             536,870,912",
+            err.to_string()
+        );
+        assert!(max_allocation < 1024, "allocated {max_allocation} bytes for a refused block");
+    }
+
+    /// A length field with the high bit set, such as the 4 GiB a broker can
+    /// claim, is negative to snappy-java, which reads it as a signed `int`. It
+    /// is refused before anything is allocated for it.
+    #[test]
+    fn test_xerial_block_with_negative_length_is_refused() {
+        let (err, max_allocation) = snappy_read_error(&xerial_stream(0xFFFF_FFFF, b"abc"));
+        assert_eq!(io::ErrorKind::InvalidData, err.kind());
+        assert_eq!("[INVALID_CHUNK_SIZE] chunkSize is too big or negative : -1", err.to_string());
+        assert!(max_allocation < 1024, "allocated {max_allocation} bytes for a refused block");
+    }
+
+    /// The limits sit where snappy-java's do: a length of exactly
+    /// `MAX_CHUNK_SIZE` is accepted, and a longer one is refused up to 2 GiB,
+    /// where lengths turn negative.
+    #[test]
+    fn test_xerial_chunk_size_limits() {
+        let chunk_size = |len: u32| checked_chunk_size(len.to_be_bytes()).map_err(|e| e.to_string());
+        assert_eq!(Ok(0), chunk_size(0));
+        assert_eq!(Ok(XERIAL_MAX_CHUNK_SIZE), chunk_size(512 * 1024 * 1024));
+        assert_eq!(
+            Err(
+                "[FAILED_TO_UNCOMPRESS] Received chunkSize 2,147,483,647 is greater than max configured chunk size \
+                 536,870,912"
+                    .to_owned()
+            ),
+            chunk_size(0x7FFF_FFFF)
+        );
+        assert_eq!(
+            Err("[INVALID_CHUNK_SIZE] chunkSize is too big or negative : -2147483648".to_owned()),
+            chunk_size(0x8000_0000)
+        );
     }
 
     #[test]

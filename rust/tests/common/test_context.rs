@@ -39,6 +39,10 @@ use super::kafka_cluster::{KafkaCluster, SASL_PASSWORD, SASL_USERNAME};
 /// Every broker the harness starts exposes all four listeners simultaneously
 /// (see [`super::kafka_cluster`]), so switching protocol is purely a
 /// client-config choice — no cluster restart.
+///
+/// The broker version is chosen the same way, per process, by
+/// `INTEGRATION_TEST_BROKER_TAG` (the `apache/kafka` image tag; default
+/// `4.2.0`, see `kafka_cluster::KAFKA_TAG`). The two variables combine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TestProtocol {
     /// `security.protocol=PLAINTEXT` — the default; no encryption, no auth.
@@ -104,8 +108,17 @@ impl TestContext {
     /// Create a new context for a test, sharing the given cluster.
     ///
     /// Generates a unique prefix from the current thread name + random suffix.
+    ///
+    /// A [`ClusterConfig::dedicated`] config bypasses the pool: the test gets
+    /// its own cluster (as every Java `@ClusterTest` invocation does), removed
+    /// when this context is dropped.
     pub async fn new(config: ClusterConfig) -> Self {
-        let cluster = cluster_pool::get_or_create(&config).await;
+        init_test_logger();
+        let cluster = if config.dedicated {
+            Arc::new(KafkaCluster::start_with_config(&config).await)
+        } else {
+            cluster_pool::get_or_create(&config).await
+        };
         let thread_name = std::thread::current().name().unwrap_or("test").to_string();
         // Sanitize thread name: Kafka topic names only allow [a-zA-Z0-9._-].
         // Replace invalid characters (e.g. '::' from module paths) with '_'.
@@ -123,6 +136,14 @@ impl TestContext {
         let prefix = format!("{sanitized}_{suffix}");
 
         Self { cluster, prefix, created_topics: Vec::new() }
+    }
+
+    /// The cluster backing this test — the Rust counterpart of the Java
+    /// `ClusterInstance` a `@ClusterTest` method receives. Broker lifecycle
+    /// (`shutdown_broker` / `start_broker` / `wait_for_ready_brokers`) is only
+    /// available on a [`ClusterConfig::dedicated`] [`super::cluster_config::Type::Kraft`] cluster.
+    pub fn cluster(&self) -> &KafkaCluster {
+        &self.cluster
     }
 
     /// Bootstrap servers for the PLAINTEXT listener.
@@ -313,6 +334,22 @@ impl TestContext {
 
 impl Drop for TestContext {
     fn drop(&mut self) {
+        if self.cluster.config().dedicated {
+            // A dedicated cluster belongs to this test alone: remove its
+            // containers and network now, including when the test panicked
+            // (this runs during unwinding).
+            //
+            // `docker rm -f` rather than dropping the `ContainerAsync`s:
+            // their `Drop` needs a Tokio runtime handle
+            // (`testcontainers::core::async_drop`), which is not guaranteed
+            // while unwinding out of `#[tokio::test]`'s `block_on` — a panic
+            // there would abort the whole test binary. Having removed the
+            // containers synchronously, one extra strong reference is leaked
+            // so the `KafkaCluster` (and its `ContainerAsync`s) is never
+            // dropped; that is a few hundred bytes per dedicated test.
+            cluster_pool::teardown(&self.cluster);
+            std::mem::forget(Arc::clone(&self.cluster));
+        }
         if !self.created_topics.is_empty() {
             eprintln!(
                 "WARN: TestContext dropped with {} uncleaned topics (prefix: {})",
@@ -321,6 +358,18 @@ impl Drop for TestContext {
             );
         }
     }
+}
+
+/// Installs a process-wide logger so client logs reach test output. With
+/// `is_test(true)` libtest captures them per test and prints them only for a
+/// failing test, which is the one place a CI flake leaves evidence. `RUST_LOG`
+/// overrides the default filter; `try_init` is a no-op after the first call.
+fn init_test_logger() {
+    let _ = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("warn,confluent_kafka::consumer::internals=info"),
+    )
+    .is_test(true)
+    .try_init();
 }
 
 /// Generates a random hexadecimal suffix of the given length (in bytes,
