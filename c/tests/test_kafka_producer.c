@@ -476,7 +476,7 @@ void test_transaction_control_guard_rejects_concurrent_calls(void) {
     err = NULL;
     kafka_producer_Producer_send_async(producer, "guard-topic", -1, -1, NULL, -1,
                                       value, (int32_t)sizeof(value) - 1, NULL, 0,
-                                      txn_guard_on_record, NULL, &err);
+                                      txn_guard_on_record, NULL, NULL, NULL, NULL, &err, NULL);
     clock_gettime(CLOCK_MONOTONIC, &t1);
     int send_accepted = (err == NULL);
     if (err != NULL) {
