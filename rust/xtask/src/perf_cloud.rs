@@ -12,14 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `cargo xtask perf-cloud`: runs the producer performance harnesses against
-//! a remote SASL_SSL (PLAIN) cluster, such as a Confluent Cloud cluster, and
-//! compares the clients. Whatever provisions the cluster (a CI pipeline, an
-//! operator) calls it with the cluster's bootstrap and credentials.
+//! `cargo xtask perf-cloud`: runs the producer and transactional producer
+//! performance harnesses against a remote SASL_SSL (PLAIN) cluster, such as a
+//! Confluent Cloud cluster, and compares the clients. Whatever provisions the
+//! cluster (a CI pipeline, an operator) calls it with the cluster's bootstrap
+//! and credentials.
 //!
-//! A run compares one **client group** across a list of tests from
-//! [`TESTS_FILE`]. Each test runs every arm of the group, one after another,
-//! against the same cluster:
+//! A run compares the clients of one **client group** (all of them, or the
+//! ones `--clients` selects) on a list of tests: presets from [`TESTS_FILE`]
+//! (`--tests`), or one test given by its settings (`--scenario`) and named
+//! after them. Each test runs every selected client (an **arm**), one after
+//! another, against the same cluster:
 //!
 //! - `rust`: Rust (native), librdkafka (C) and Java. Rust is compared with
 //!   both of the others.
@@ -27,23 +30,32 @@
 //!   and async. Each Rust-backed client is compared with its librdkafka
 //!   equivalent (sync with sync, async with async).
 //!
+//! A test's `WORKLOAD` is `producer` (the producer harnesses, the default) or
+//! `transactional` (the transactional producer harnesses, in `TXN_MODE`
+//! `produce` or `eos`).
+//!
 //! Subcommands:
 //!
 //! - `list` prints the tests file.
-//! - `check` validates a run (group, test list, durations) and prints its
-//!   time estimate, failing above `--budget-min`. It needs no cluster, so a
-//!   caller can run it before provisioning one: a typo or an over-long list
+//! - `check` validates a run (group, clients, tests, durations) and prints
+//!   its time estimate, failing above `--budget-min`. It needs no cluster, so
+//!   a caller can run it before provisioning one: a typo or an over-long list
 //!   then costs seconds, not a provisioning cycle.
 //! - `build` builds the group's harnesses once.
-//! - `run` creates each arm's topic, runs the arm, collects its
-//!   `results.json` and deletes the topic, then writes `report.md` (a table
-//!   per test with the changes against each baseline) and `junit.xml`.
+//! - `run` creates each arm's topics, runs the arm, collects its
+//!   `results.json` and deletes the topics, then writes `report.md` (per
+//!   test, a column per client and a row per metric, with the change of each
+//!   Rust-based client against its baseline) and `junit.xml`. With
+//!   `--push-artifacts` they also go to Semaphore: the job's artifacts, and
+//!   `report.md` as the workflow's report (its Report tab).
 //!
-//! The arms are the existing producer harnesses, driven by the same
-//! environment variables `tools/deploy_and_run_perf/deploy_and_run_perf.py`
+//! The arms are the existing (transactional) producer harnesses, driven by
+//! the same environment variables `tools/deploy_and_run_perf/deploy_and_run_perf.py`
 //! sets on EC2. Topics are created here, never by a harness
-//! (`CREATE_TOPIC=False`): the Rust harness cannot create topics, and one
-//! creation path gives every arm the same topic.
+//! (`CREATE_TOPIC=False`): the Rust harnesses cannot create topics, and one
+//! creation path gives every arm the same topic. An `eos` test also gets a
+//! source topic, which its harness fills with Kafka's
+//! `kafka-producer-perf-test.sh` from `--kafka-bin` before measuring.
 //!
 //! The SASL credentials come from `PERF_API_KEY` / `PERF_API_SECRET`, never
 //! from the command line, and the secret is masked in everything this driver
@@ -106,11 +118,22 @@ const TOPIC_COMMAND_TIMEOUT: Duration = Duration::from_secs(180);
 const TOPIC_CREATE_ATTEMPTS: u32 = 8;
 const TOPIC_CREATE_RETRY_DELAY: Duration = Duration::from_secs(30);
 
-/// Every environment variable a producer harness reads, its A/B debugging
-/// knobs included. Each arm starts from the job's environment with all of
-/// them removed, so a stray value in the job cannot change one arm and not
-/// the others.
+/// The rate at which an `eos` test's harness is assumed to fill its source
+/// topic (Kafka's `kafka-producer-perf-test.sh`, one Java producer), in MB/s:
+/// the time estimate and the arm's timeout allow for it.
+const SEED_MB_S: f64 = 50.0;
+
+/// The most requests in flight an idempotent (or transactional) producer
+/// allows.
+const IDEMPOTENT_MAX_IN_FLIGHT: u64 = 5;
+
+/// Every environment variable a (transactional) producer harness reads, its
+/// A/B debugging knobs included. Each arm starts from the job's environment
+/// with all of them removed, so a stray value in the job cannot change one
+/// arm and not the others.
 const HARNESS_VARS: &[&str] = &[
+    "ABORT_RATE",
+    "ACKS",
     "ASYNC",
     "BATCH_SIZE",
     "BOOTSTRAP_SERVERS",
@@ -120,6 +143,8 @@ const HARNESS_VARS: &[&str] = &[
     "CREATE_TOPIC",
     "DO_VERIFY",
     "ENABLE_IDEMPOTENCE",
+    "GROUP_ID",
+    "KAFKA_BIN",
     "KEY_SIZE",
     "LIBRDKAFKA_PYTHON",
     "LIMIT_RPS",
@@ -129,21 +154,28 @@ const HARNESS_VARS: &[&str] = &[
     "METRICS_FILE",
     "NO_MSG_F_BLOCK",
     "NUM_MESSAGES",
+    "NUM_TRANSACTIONAL_PRODUCERS",
     "P99_LIMIT_MS",
     "PARTITIONER",
     "PARTITIONS",
     "PERF_DEBUG_TIMING",
     "PERF_LRK_STATS",
+    "RECORDS_PER_TRANSACTION",
     "RESULTS_FILE",
     "SASL_MECHANISM",
     "SASL_PASSWORD",
     "SASL_USERNAME",
     "SECURITY_PROTOCOL",
+    "SEED_COUNT",
+    "SEED_THROUGHPUT",
     "SKIP_PARTITIONER_OVERRIDE",
+    "SOURCE_TOPIC",
     "SSL_CA_LOCATION",
     "STICKY_LINGER_MS",
     "TEST_DURATION_SECONDS",
     "TOPIC_NAME",
+    "TRANSACTIONAL_ID",
+    "TXN_MODE",
     "USE_DEFAULTS",
     "VALUE_SIZE",
     "VERIFY_CONSUMED",
@@ -180,22 +212,28 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
 const HELP: &str = "cargo xtask perf-cloud <subcommand>
 
   list                     Print the tests that can be run (tools/perf-cloud/tests.txt)
-  check  --group G --tests ID,ID [--duration-min N] [--warmup-min N]
-         [--budget-min N] [--ingress-mb-s N]
+  check  --group G [--clients C,C] (--tests ID,ID | --scenario S)
+         [--duration-min N] [--warmup-min N] [--budget-min N] [--ingress-mb-s N]
                            Validate a run and print its time estimate; fail when
                            it exceeds --budget-min, warn about fixed-rate tests
                            near the cluster's --ingress-mb-s
   build  --group G         Build the group's harnesses
-  run    --group G --tests ID,ID [--duration-min N] [--warmup-min N]
+  run    --group G [--clients C,C] (--tests ID,ID | --scenario S)
+         [--duration-min N] [--warmup-min N]
          --bootstrap HOST:PORT --kafka-bin DIR --results-dir DIR
          [--topic-prefix P] [--push-artifacts]
-                           (--push-artifacts: push each finished test's results
-                           with Semaphore's `artifact` CLI)
-                           Run the tests (credentials from PERF_API_KEY / PERF_API_SECRET)
+                           Run the tests (credentials from PERF_API_KEY / PERF_API_SECRET);
+                           --push-artifacts pushes each finished test's results with
+                           Semaphore's `artifact` CLI, report.md also as the workflow report
 
   G is `rust` (Rust, librdkafka, Java) or `python` (Rust- and librdkafka-backed
-  Python clients, sync and async). Durations are minutes: --duration-min
-  defaults to 30 (at most 60), --warmup-min to 5 (at most 30).";
+  Python clients, sync and async). C is `all` (the default) or the group's
+  clients to run: rust, librdkafka, java / python-sync-rust,
+  python-sync-librdkafka, python-async-rust, python-async-librdkafka.
+  S is one test given by its settings, as in the tests file, e.g.
+  \"WORKLOAD=producer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=10000 ACKS=all\";
+  it is named after them (producer-fixed-10k-1kb-200p). Durations are minutes:
+  --duration-min defaults to 30 (at most 60), --warmup-min to 5 (at most 30).";
 
 // ---------------------------------------------------------------------------
 // Client groups and arms
@@ -233,6 +271,53 @@ impl Group {
                 Arm::PythonAsyncRust,
                 Arm::PythonAsyncLibrdkafka,
             ],
+        }
+    }
+
+    /// The arms `--clients` names (`all`, or arm ids separated by commas), in
+    /// the group's order.
+    fn select_arms(self, list: &str) -> anyhow::Result<Vec<Arm>> {
+        let ids: Vec<&str> = self.arms().iter().map(|a| a.id()).collect();
+        let list = list.trim();
+        if list == "all" {
+            return Ok(self.arms().to_vec());
+        }
+        let mut named: Vec<Arm> = Vec::new();
+        for name in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            let Some(arm) = self.arms().iter().find(|a| a.id() == name) else {
+                bail!(
+                    "unknown client `{name}` in group `{}` (expected `all` or some of: {})",
+                    self.name(),
+                    ids.join(", ")
+                );
+            };
+            if named.contains(arm) {
+                bail!("client `{name}` is listed twice");
+            }
+            named.push(*arm);
+        }
+        if named.is_empty() {
+            bail!("no clients given (--clients all, or some of: {})", ids.join(", "));
+        }
+        Ok(self.arms().iter().copied().filter(|a| named.contains(a)).collect())
+    }
+}
+
+/// What a test measures. It picks the harnesses each arm runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Workload {
+    /// The producer harnesses.
+    Producer,
+    /// The transactional producer harnesses (`TXN_MODE` `produce` or `eos`).
+    Transactional,
+}
+
+impl Workload {
+    fn parse(value: &str) -> anyhow::Result<Workload> {
+        match value {
+            "producer" => Ok(Workload::Producer),
+            "transactional" => Ok(Workload::Transactional),
+            other => bail!("WORKLOAD={other}: expected `producer` or `transactional`"),
         }
     }
 }
@@ -276,43 +361,63 @@ impl Arm {
     }
 
     /// The `client` its harness writes into `results.json`, checked so a
-    /// wrong `CLIENT_VERSION` / `ASYNC` cannot pass as the arm.
-    fn expected_client(self) -> &'static str {
-        match self {
-            Arm::Rust => "rust",
-            Arm::Librdkafka => "librdkafka",
-            Arm::Java => "java",
-            Arm::PythonSyncRust => "python-rust",
-            Arm::PythonSyncLibrdkafka => "python-librdkafka",
-            Arm::PythonAsyncRust => "python-rust-async",
-            Arm::PythonAsyncLibrdkafka => "python-librdkafka-async",
+    /// wrong `CLIENT_VERSION` / `ASYNC` cannot pass as the arm. The Python
+    /// transactional harness writes the same name for sync and async.
+    fn expected_client(self, workload: Workload) -> &'static str {
+        match (workload, self) {
+            (Workload::Producer, Arm::Rust) => "rust",
+            (Workload::Producer, Arm::Librdkafka) => "librdkafka",
+            (Workload::Producer, Arm::Java) => "java",
+            (Workload::Producer, Arm::PythonSyncRust) => "python-rust",
+            (Workload::Producer, Arm::PythonSyncLibrdkafka) => "python-librdkafka",
+            (Workload::Producer, Arm::PythonAsyncRust) => "python-rust-async",
+            (Workload::Producer, Arm::PythonAsyncLibrdkafka) => "python-librdkafka-async",
+            (Workload::Transactional, Arm::Rust) => "rust-txn",
+            (Workload::Transactional, Arm::Librdkafka) => "librdkafka-txn",
+            (Workload::Transactional, Arm::Java) => "java-txn",
+            (Workload::Transactional, Arm::PythonSyncRust | Arm::PythonAsyncRust) => "python-rust-txn",
+            (Workload::Transactional, Arm::PythonSyncLibrdkafka | Arm::PythonAsyncLibrdkafka) => {
+                "python-librdkafka-txn"
+            },
         }
     }
 
-    /// The command that runs this arm's harness (the `RUN_PERF_SH` recipes
-    /// of `deploy_and_run_perf.py`), to be started in the arm's directory.
-    fn command(self, repo: &Path) -> Command {
+    /// The command that runs this arm's harness for `workload` (the
+    /// `RUN_PERF_SH` recipes of `deploy_and_run_perf.py`), to be started in
+    /// the arm's directory.
+    fn command(self, repo: &Path, workload: Workload) -> Command {
+        let transactional = workload == Workload::Transactional;
         match self {
             Arm::Rust => {
+                let task = if transactional {
+                    "transactional-producer-perf-test"
+                } else {
+                    "producer-perf-test"
+                };
                 let mut c = Command::new(cargo());
-                c.args(["xtask", "producer-perf-test", "--test-threads=1"])
-                    .current_dir(repo.join("rust"));
+                c.args(["xtask", task, "--test-threads=1"]).current_dir(repo.join("rust"));
                 c
             },
-            Arm::Librdkafka => Command::new(c_harness(repo)),
+            Arm::Librdkafka => Command::new(c_harness(repo, workload)),
             Arm::Java => {
                 let mut c = Command::new("java");
-                c.arg("-jar").arg(java_jar(repo));
+                if transactional {
+                    c.arg("-cp")
+                        .arg(java_jar(repo))
+                        .arg("io.confluent.kafka.perftest.TransactionalProducerPerformanceTest");
+                } else {
+                    c.arg("-jar").arg(java_jar(repo));
+                }
                 c
             },
             Arm::PythonSyncRust | Arm::PythonAsyncRust => {
                 let mut c = Command::new(venv_python(repo, "venv"));
-                c.arg(python_harness(repo));
+                c.arg(python_harness(repo, workload));
                 c
             },
             Arm::PythonSyncLibrdkafka | Arm::PythonAsyncLibrdkafka => {
                 let mut c = Command::new(venv_python(repo, "venv-librdkafka"));
-                c.arg(python_harness(repo));
+                c.arg(python_harness(repo, workload));
                 c
             },
         }
@@ -353,12 +458,12 @@ impl Arm {
         }
     }
 
-    /// What must exist before the arm can run, from `build`.
-    fn prerequisites(self, repo: &Path) -> Vec<PathBuf> {
+    /// What must exist before the arm can run `workload`, from `build`.
+    fn prerequisites(self, repo: &Path, workload: Workload) -> Vec<PathBuf> {
         match self {
             // Built by `cargo` on first use; `build` compiles it ahead.
             Arm::Rust => Vec::new(),
-            Arm::Librdkafka => vec![c_harness(repo)],
+            Arm::Librdkafka => vec![c_harness(repo, workload)],
             Arm::Java => vec![java_jar(repo)],
             Arm::PythonSyncRust | Arm::PythonAsyncRust => vec![venv_python(repo, "venv")],
             Arm::PythonSyncLibrdkafka | Arm::PythonAsyncLibrdkafka => vec![venv_python(repo, "venv-librdkafka")],
@@ -370,16 +475,22 @@ fn cargo() -> String {
     std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
 }
 
-fn c_harness(repo: &Path) -> PathBuf {
-    repo.join("c/build/producer_perf_test")
+fn c_harness(repo: &Path, workload: Workload) -> PathBuf {
+    match workload {
+        Workload::Producer => repo.join("c/build/producer_perf_test"),
+        Workload::Transactional => repo.join("c/build/transactional_producer_perf_test"),
+    }
 }
 
 fn java_jar(repo: &Path) -> PathBuf {
     repo.join("tools/java-perf-test/build/libs/java-perf-test-all.jar")
 }
 
-fn python_harness(repo: &Path) -> PathBuf {
-    repo.join("python/test/performance/producer_performance_test.py")
+fn python_harness(repo: &Path, workload: Workload) -> PathBuf {
+    match workload {
+        Workload::Producer => repo.join("python/test/performance/producer_performance_test.py"),
+        Workload::Transactional => repo.join("python/test/performance/transactional_producer_performance_test.py"),
+    }
 }
 
 fn venv_python(repo: &Path, venv: &str) -> PathBuf {
@@ -394,12 +505,13 @@ fn repo_root() -> &'static Path {
 // The tests file
 // ---------------------------------------------------------------------------
 
-/// One line of [`TESTS_FILE`].
+/// A test: a line of [`TESTS_FILE`], or a `--scenario`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PerfTest {
     pub(crate) id: String,
     groups: Vec<Group>,
-    /// Harness settings in file order, values already validated.
+    pub(crate) workload: Workload,
+    /// Harness settings in the given order, values already validated.
     pub(crate) settings: Vec<(String, String)>,
 }
 
@@ -412,27 +524,50 @@ enum Kind {
     Positive,
     Compression,
     Bool,
+    Acks,
+    /// A decimal number from 0 to 1.
+    Fraction,
+    TxnMode,
 }
 
-/// The harness settings a test may set; every producer harness reads all of
-/// them, in the same units, except that the C harness raises a `BATCH_SIZE`
-/// below 1024 KiB to 1 MiB for librdkafka (see [`MIN_RUST_GROUP_BATCH_KIB`]).
-/// A setting a test leaves out takes each harness's own default, and those
-/// differ (`MAX_IN_FLIGHT`: 1000 in the C harness, the client default of 5
-/// in Rust and Java), as in the EC2 runs; set it in the test to pin it.
-/// Units: `BATCH_SIZE` / `MAX_REQUEST_SIZE` in KiB, `BUFFER_MEMORY` in MiB.
-const SETTINGS: &[(&str, Kind)] = &[
-    ("PARTITIONS", Kind::Positive),
-    ("VALUE_SIZE", Kind::Positive),
-    ("KEY_SIZE", Kind::Count),
-    ("LIMIT_RPS", Kind::Count),
-    ("BATCH_SIZE", Kind::Positive),
-    ("LINGER_MS", Kind::Count),
-    ("MAX_IN_FLIGHT", Kind::Positive),
-    ("BUFFER_MEMORY", Kind::Positive),
-    ("MAX_REQUEST_SIZE", Kind::Positive),
-    ("COMPRESSION_TYPE", Kind::Compression),
-    ("ENABLE_IDEMPOTENCE", Kind::Bool),
+/// A harness setting a test may set.
+struct Setting {
+    key: &'static str,
+    kind: Kind,
+    /// The only workload whose harnesses read it; `None` for both.
+    only: Option<Workload>,
+}
+
+const fn setting(key: &'static str, kind: Kind, only: Option<Workload>) -> Setting {
+    Setting { key, kind, only }
+}
+
+/// The harness settings a test may set. Every harness of a workload reads
+/// all of that workload's settings, in the same units, except that the C
+/// harnesses raise a `BATCH_SIZE` below 1024 KiB to 1 MiB for librdkafka (see
+/// [`MIN_LIBRDKAFKA_BATCH_KIB`]). A setting a test leaves out takes each
+/// harness's own default, and those differ (`MAX_IN_FLIGHT`: 1000 in the C
+/// producer harness, the client default of 5 in Rust and Java), as in the EC2
+/// runs; set it in the test to pin it. Units: `BATCH_SIZE` /
+/// `MAX_REQUEST_SIZE` in KiB, `BUFFER_MEMORY` in MiB. The transactional
+/// harnesses always use idempotence and `acks=all`.
+const SETTINGS: &[Setting] = &[
+    setting("PARTITIONS", Kind::Positive, None),
+    setting("VALUE_SIZE", Kind::Positive, None),
+    setting("KEY_SIZE", Kind::Count, None),
+    setting("LIMIT_RPS", Kind::Count, None),
+    setting("BATCH_SIZE", Kind::Positive, None),
+    setting("LINGER_MS", Kind::Count, None),
+    setting("MAX_IN_FLIGHT", Kind::Positive, None),
+    setting("BUFFER_MEMORY", Kind::Positive, None),
+    setting("MAX_REQUEST_SIZE", Kind::Positive, None),
+    setting("COMPRESSION_TYPE", Kind::Compression, None),
+    setting("ACKS", Kind::Acks, Some(Workload::Producer)),
+    setting("ENABLE_IDEMPOTENCE", Kind::Bool, Some(Workload::Producer)),
+    setting("RECORDS_PER_TRANSACTION", Kind::Positive, Some(Workload::Transactional)),
+    setting("ABORT_RATE", Kind::Fraction, Some(Workload::Transactional)),
+    setting("NUM_TRANSACTIONAL_PRODUCERS", Kind::Positive, Some(Workload::Transactional)),
+    setting("TXN_MODE", Kind::TxnMode, Some(Workload::Transactional)),
 ];
 
 /// Set by every test, so no arm falls back to a harness default the others
@@ -441,11 +576,11 @@ const REQUIRED_SETTINGS: &[&str] = &["PARTITIONS", "VALUE_SIZE", "LIMIT_RPS"];
 
 const MAX_TEST_ID_LEN: usize = 60;
 
-/// The smallest `BATCH_SIZE` (KiB) a `rust`-group test may set: below it the
-/// C harness's librdkafka arm runs with 1 MiB batches
-/// (`c/tests/producer_perf_test.c`) while Rust and Java use the value, so
-/// the arms would not be comparable.
-const MIN_RUST_GROUP_BATCH_KIB: u64 = 1024;
+/// The smallest `BATCH_SIZE` (KiB) a test may set when the librdkafka (C)
+/// client runs: below it the C harnesses run librdkafka with 1 MiB batches
+/// (`c/tests/producer_perf_test.c`, `c/tests/transactional_producer_perf_test.c`)
+/// while the other clients use the value, so they would not be comparable.
+const MIN_LIBRDKAFKA_BATCH_KIB: u64 = 1024;
 
 impl PerfTest {
     pub(crate) fn setting(&self, key: &str) -> Option<&str> {
@@ -453,12 +588,18 @@ impl PerfTest {
     }
 
     fn number(&self, key: &str) -> u64 {
-        // Validated when the file was parsed.
+        // Validated when the test was parsed.
         self.setting(key).and_then(|v| v.parse().ok()).unwrap_or(0)
     }
 
     fn partitions(&self) -> u64 {
         self.number("PARTITIONS")
+    }
+
+    /// A transactional test in `TXN_MODE=eos`, which consumes from a source
+    /// topic.
+    pub(crate) fn is_eos(&self) -> bool {
+        self.workload == Workload::Transactional && self.setting("TXN_MODE") == Some("eos")
     }
 
     /// The target ingress in MB/s (payload only), `None` when unbounded.
@@ -471,13 +612,40 @@ impl PerfTest {
         Some((rps * size) as f64 / 1e6)
     }
 
+    /// The minutes an `eos` arm's harness takes to fill its source topic with
+    /// the records it then consumes (`LIMIT_RPS` × the measured seconds), at
+    /// [`SEED_MB_S`]; 0 for other tests.
+    fn seed_minutes(&self, duration_min: u64) -> u64 {
+        if !self.is_eos() {
+            return 0;
+        }
+        let size = self.number("KEY_SIZE") + self.number("VALUE_SIZE");
+        let bytes = self.number("LIMIT_RPS") as f64 * (duration_min * 60) as f64 * size as f64;
+        (bytes / (SEED_MB_S * 1e6) / 60.0).ceil() as u64
+    }
+
     fn applies_to(&self, group: Group) -> bool {
         self.groups.contains(&group)
     }
 
-    /// The test's settings as `arm` reads them (see [`Arm::idempotence_value`]).
+    /// Whether the test can compare `arms`.
+    fn check_arms(&self, arms: &[Arm]) -> anyhow::Result<()> {
+        let batch_kib = self.setting("BATCH_SIZE").and_then(|v| v.parse::<u64>().ok());
+        if arms.contains(&Arm::Librdkafka) && batch_kib.is_some_and(|kib| kib < MIN_LIBRDKAFKA_BATCH_KIB) {
+            bail!(
+                "test `{}`: BATCH_SIZE below {MIN_LIBRDKAFKA_BATCH_KIB} KiB is not comparable with the librdkafka (C) \
+                 client (its harness runs librdkafka with 1 MiB batches below it); leave that client out",
+                self.id
+            );
+        }
+        Ok(())
+    }
+
+    /// The test's settings as `arm` reads them (see [`Arm::idempotence_value`]),
+    /// and what they imply for it.
     fn env_for(&self, arm: Arm) -> Vec<(String, String)> {
-        self.settings
+        let mut env: Vec<(String, String)> = self
+            .settings
             .iter()
             .map(|(k, v)| {
                 let v = if k == "ENABLE_IDEMPOTENCE" {
@@ -487,7 +655,23 @@ impl PerfTest {
                 };
                 (k.clone(), v)
             })
-            .collect()
+            .collect();
+        // With acks=0 the clients report no offsets, which the harnesses'
+        // delivery checks require.
+        if self.setting("ACKS") == Some("0") {
+            env.push(("DO_VERIFY".to_string(), "False".to_string()));
+        }
+        // The C producer harness sets MAX_IN_FLIGHT to 1000 unless told
+        // otherwise, which librdkafka refuses with idempotence; left unset,
+        // librdkafka would use 5 itself.
+        if arm == Arm::Librdkafka
+            && self.workload == Workload::Producer
+            && self.setting("ENABLE_IDEMPOTENCE") == Some("true")
+            && self.setting("MAX_IN_FLIGHT").is_none()
+        {
+            env.push(("MAX_IN_FLIGHT".to_string(), IDEMPOTENT_MAX_IN_FLIGHT.to_string()));
+        }
+        env
     }
 }
 
@@ -528,37 +712,171 @@ fn parse_test_line(line: &str) -> anyhow::Result<PerfTest> {
         }
         groups.push(group);
     }
+    let (workload, settings) = parse_settings(&format!("test `{id}`"), words)?;
+    Ok(PerfTest { id, groups, workload, settings })
+}
+
+/// A `--scenario`: settings as in the tests file, for `group`, named after
+/// them ([`scenario_id`]).
+fn parse_scenario(text: &str, group: Group) -> anyhow::Result<PerfTest> {
+    let (workload, settings) = parse_settings("--scenario", text.split_whitespace())?;
+    let id = scenario_id(workload, &settings);
+    Ok(PerfTest { id, groups: vec![group], workload, settings })
+}
+
+/// Parse `KEY=VALUE` words into a workload and harness settings. `WORKLOAD`
+/// (`producer`, the default, or `transactional`) picks the harnesses and is
+/// not passed to them. `what` names the test in errors.
+fn parse_settings<'a>(
+    what: &str,
+    words: impl Iterator<Item = &'a str>,
+) -> anyhow::Result<(Workload, Vec<(String, String)>)> {
+    let mut workload: Option<Workload> = None;
     let mut settings: Vec<(String, String)> = Vec::new();
     for word in words {
         let (key, value) = word
             .split_once('=')
-            .ok_or_else(|| anyhow::anyhow!("test `{id}`: `{word}` is not KEY=VALUE"))?;
-        let Some(&(_, kind)) = SETTINGS.iter().find(|(k, _)| *k == key) else {
-            let known: Vec<&str> = SETTINGS.iter().map(|(k, _)| *k).collect();
-            bail!("test `{id}`: unknown setting `{key}` (known: {})", known.join(", "));
+            .ok_or_else(|| anyhow::anyhow!("{what}: `{word}` is not KEY=VALUE"))?;
+        if key == "WORKLOAD" {
+            if workload.is_some() {
+                bail!("{what}: `WORKLOAD` is set twice");
+            }
+            workload = Some(Workload::parse(value).with_context(|| what.to_string())?);
+            continue;
+        }
+        let Some(def) = SETTINGS.iter().find(|s| s.key == key) else {
+            let known: Vec<&str> = SETTINGS.iter().map(|s| s.key).collect();
+            bail!("{what}: unknown setting `{key}` (known: WORKLOAD, {})", known.join(", "));
         };
         if settings.iter().any(|(k, _)| k == key) {
-            bail!("test `{id}`: `{key}` is set twice");
+            bail!("{what}: `{key}` is set twice");
         }
-        validate_setting(key, value, kind).with_context(|| format!("test `{id}`"))?;
+        validate_setting(key, value, def.kind).with_context(|| what.to_string())?;
         settings.push((key.to_string(), value.to_string()));
+    }
+    let workload = workload.unwrap_or(Workload::Producer);
+    for (key, _) in &settings {
+        match SETTINGS.iter().find(|s| s.key == key).and_then(|s| s.only) {
+            Some(Workload::Producer) if workload == Workload::Transactional => {
+                bail!("{what}: {key} does not apply to transactional tests (they always use idempotence and acks=all)")
+            },
+            Some(Workload::Transactional) if workload == Workload::Producer => {
+                bail!("{what}: {key} applies to transactional tests only (WORKLOAD=transactional)")
+            },
+            _ => {},
+        }
     }
     for key in REQUIRED_SETTINGS {
         if !settings.iter().any(|(k, _)| k == key) {
-            bail!("test `{id}` must set {key}");
+            bail!("{what} must set {key}");
         }
     }
-    let batch_kib = settings
-        .iter()
-        .find(|(k, _)| k == "BATCH_SIZE")
-        .and_then(|(_, v)| v.parse::<u64>().ok());
-    if groups.contains(&Group::Rust) && batch_kib.is_some_and(|kib| kib < MIN_RUST_GROUP_BATCH_KIB) {
+    let get = |key: &str| settings.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
+    let number = |key: &str| get(key).and_then(|v| v.parse::<u64>().ok());
+    if get("ENABLE_IDEMPOTENCE") == Some("true") {
+        if let Some(acks) = get("ACKS").filter(|a| !matches!(*a, "all" | "-1")) {
+            bail!("{what}: ACKS={acks} with ENABLE_IDEMPOTENCE=true: an idempotent producer needs ACKS=all");
+        }
+    }
+    let idempotent = workload == Workload::Transactional || get("ENABLE_IDEMPOTENCE") == Some("true");
+    if idempotent && number("MAX_IN_FLIGHT").is_some_and(|n| n > IDEMPOTENT_MAX_IN_FLIGHT) {
         bail!(
-            "test `{id}`: BATCH_SIZE below {MIN_RUST_GROUP_BATCH_KIB} KiB is not comparable in the rust group (the C \
-             harness runs librdkafka with 1 MiB batches below it); limit the test to `python`"
+            "{what}: MAX_IN_FLIGHT above {IDEMPOTENT_MAX_IN_FLIGHT}: an idempotent or transactional producer allows \
+             at most {IDEMPOTENT_MAX_IN_FLIGHT}"
         );
     }
-    Ok(PerfTest { id, groups, settings })
+    if get("TXN_MODE") == Some("eos") && number("LIMIT_RPS") == Some(0) {
+        bail!(
+            "{what}: TXN_MODE=eos needs LIMIT_RPS above 0: each client's source topic is first filled with LIMIT_RPS \
+             × the measured seconds records"
+        );
+    }
+    Ok((workload, settings))
+}
+
+/// The name of a `--scenario`: its workload, rate, value size and partitions,
+/// then each other setting that differs from the harnesses' default, in a
+/// fixed order (`producer-fixed-10k-1kb-200p`,
+/// `txn-max-1kb-36p-1000-per-txn-abort50-16-producers`). A name over
+/// [`MAX_TEST_ID_LEN`] is cut short and ends with a hash of the whole name.
+fn scenario_id(workload: Workload, settings: &[(String, String)]) -> String {
+    let get = |key: &str| settings.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
+    let number = |key: &str| get(key).and_then(|v| v.parse::<u64>().ok());
+    let mut parts: Vec<String> = Vec::new();
+    parts.push(
+        match (workload, get("TXN_MODE")) {
+            (Workload::Producer, _) => "producer",
+            (Workload::Transactional, Some("eos")) => "eos",
+            (Workload::Transactional, _) => "txn",
+        }
+        .to_string(),
+    );
+    parts.push(match number("LIMIT_RPS").unwrap_or(0) {
+        0 => "max".to_string(),
+        rps if rps % 1000 == 0 => format!("fixed-{}k", rps / 1000),
+        rps => format!("fixed-{rps}"),
+    });
+    parts.push(size_label(number("VALUE_SIZE").unwrap_or(0)));
+    parts.push(format!("{}p", number("PARTITIONS").unwrap_or(0)));
+    if let Some(n) = number("KEY_SIZE").filter(|n| *n > 0) {
+        parts.push(format!("key{}", size_label(n)));
+    }
+    if let Some(acks) = get("ACKS").filter(|a| !matches!(*a, "all" | "-1")) {
+        parts.push(format!("acks{acks}"));
+    }
+    if let Some(codec) = get("COMPRESSION_TYPE").filter(|c| *c != "none") {
+        parts.push(codec.to_string());
+    }
+    if let Some(kib) = number("BATCH_SIZE").filter(|n| *n != 1024) {
+        parts.push(format!("batch{}", size_label(kib * 1024)));
+    }
+    if let Some(ms) = number("LINGER_MS").filter(|n| *n != 5) {
+        parts.push(format!("linger{ms}ms"));
+    }
+    if get("ENABLE_IDEMPOTENCE") == Some("true") {
+        parts.push("idempotent".to_string());
+    }
+    if let Some(n) = number("MAX_IN_FLIGHT") {
+        parts.push(format!("inflight{n}"));
+    }
+    if let Some(mib) = number("BUFFER_MEMORY") {
+        parts.push(format!("buffer{}", size_label(mib * 1024 * 1024)));
+    }
+    if let Some(kib) = number("MAX_REQUEST_SIZE") {
+        parts.push(format!("maxrequest{}", size_label(kib * 1024)));
+    }
+    if workload == Workload::Transactional {
+        parts.push(format!("{}-per-txn", number("RECORDS_PER_TRANSACTION").unwrap_or(100)));
+        if let Some(rate) = get("ABORT_RATE").and_then(|v| v.parse::<f64>().ok()).filter(|r| *r > 0.0) {
+            // `0.5` -> `50`, `0.125` -> `12p5`: a test id has no `.`.
+            let percent = format!("{:.1}", rate * 100.0);
+            parts.push(format!("abort{}", percent.trim_end_matches(".0").replace('.', "p")));
+        }
+        if let Some(n) = number("NUM_TRANSACTIONAL_PRODUCERS").filter(|n| *n > 1) {
+            parts.push(format!("{n}-producers"));
+        }
+    }
+    let id = parts.join("-");
+    if id.len() <= MAX_TEST_ID_LEN {
+        return id;
+    }
+    // FNV-1a: stable across builds, unlike the standard library's hasher.
+    let hash = id.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    });
+    let keep = MAX_TEST_ID_LEN - 9;
+    format!("{}-{:08x}", id[..keep].trim_end_matches('-'), hash as u32)
+}
+
+/// `1048576` -> `1mb`, `1024` -> `1kb`, `100` -> `100b`.
+fn size_label(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * 1024;
+    match bytes {
+        b if b >= MIB && b % MIB == 0 => format!("{}mb", b / MIB),
+        b if b >= KIB && b % KIB == 0 => format!("{}kb", b / KIB),
+        b => format!("{b}b"),
+    }
 }
 
 fn validate_test_id(id: &str) -> anyhow::Result<()> {
@@ -576,15 +894,23 @@ fn validate_test_id(id: &str) -> anyhow::Result<()> {
 }
 
 fn validate_setting(key: &str, value: &str, kind: Kind) -> anyhow::Result<()> {
+    // Digits only: `u64::from_str` would also take a leading `+`, which the
+    // C harness's `atoi` reads differently from the others.
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     let ok = match kind {
-        // Digits only: `u64::from_str` would also take a leading `+`, which
-        // the C harness's `atoi` reads differently from the others.
-        Kind::Count => !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()) && value.parse::<u64>().is_ok(),
-        Kind::Positive => {
-            !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()) && value.parse::<u64>().is_ok_and(|n| n > 0)
-        },
+        Kind::Count => digits(value) && value.parse::<u64>().is_ok(),
+        Kind::Positive => digits(value) && value.parse::<u64>().is_ok_and(|n| n > 0),
         Kind::Compression => matches!(value, "none" | "gzip" | "snappy" | "lz4" | "zstd"),
         Kind::Bool => matches!(value, "true" | "false"),
+        Kind::Acks => matches!(value, "all" | "-1" | "1" | "0"),
+        Kind::Fraction => {
+            let well_formed = match value.split_once('.') {
+                Some((whole, fraction)) => digits(whole) && digits(fraction),
+                None => digits(value),
+            };
+            well_formed && value.parse::<f64>().is_ok_and(|v| (0.0..=1.0).contains(&v))
+        },
+        Kind::TxnMode => matches!(value, "produce" | "eos"),
     };
     if !ok {
         let expected = match kind {
@@ -592,6 +918,9 @@ fn validate_setting(key: &str, value: &str, kind: Kind) -> anyhow::Result<()> {
             Kind::Positive => "a whole number above 0",
             Kind::Compression => "one of none, gzip, snappy, lz4, zstd",
             Kind::Bool => "`true` or `false`",
+            Kind::Acks => "one of all, -1, 1, 0",
+            Kind::Fraction => "a decimal number from 0 to 1, such as 0.5",
+            Kind::TxnMode => "`produce` or `eos`",
         };
         bail!("{key}={value}: expected {expected}");
     }
@@ -647,6 +976,8 @@ fn list() -> anyhow::Result<()> {
 
 struct RunOptions {
     group: Group,
+    /// The group's arms to run (`--clients`), in the group's order.
+    arms: Vec<Arm>,
     tests: Vec<PerfTest>,
     duration_min: u64,
     warmup_min: u64,
@@ -662,7 +993,14 @@ struct RunOptions {
     push_artifacts: bool,
 }
 
-const SHARED_FLAGS: &[&str] = &["--group", "--tests", "--duration-min", "--warmup-min"];
+const SHARED_FLAGS: &[&str] = &[
+    "--group",
+    "--clients",
+    "--tests",
+    "--scenario",
+    "--duration-min",
+    "--warmup-min",
+];
 const CHECK_FLAGS: &[&str] = &["--budget-min", "--ingress-mb-s"];
 const RUN_FLAGS: &[&str] = &["--bootstrap", "--kafka-bin", "--results-dir", "--topic-prefix"];
 
@@ -678,9 +1016,18 @@ impl RunOptions {
         }
         let flags = parse_flags(raw, &allowed, &switches)?;
         let group = Group::parse(required(&flags, "--group")?)?;
+        let arms = group.select_arms(flags.get("--clients").map_or("all", String::as_str))?;
         let duration_min = minutes(&flags, "--duration-min", 30, 1, MAX_DURATION_MINUTES)?;
         let warmup_min = minutes(&flags, "--warmup-min", 5, 0, MAX_WARMUP_MINUTES)?;
-        let tests = select_tests(&load_tests()?, required(&flags, "--tests")?, group)?;
+        let tests = match (flags.get("--tests"), flags.get("--scenario")) {
+            (Some(list), None) => select_tests(&load_tests()?, list, group)?,
+            (None, Some(scenario)) => vec![parse_scenario(scenario, group)?],
+            (Some(_), Some(_)) => bail!("give either --tests or --scenario, not both"),
+            (None, None) => bail!("--tests or --scenario is required"),
+        };
+        for test in &tests {
+            test.check_arms(&arms)?;
+        }
         let budget_min = match flags.get("--budget-min") {
             Some(_) => Some(minutes(&flags, "--budget-min", 0, 1, u64::from(u32::MAX))?),
             None => None,
@@ -706,6 +1053,7 @@ impl RunOptions {
         };
         Ok(RunOptions {
             group,
+            arms,
             tests,
             duration_min,
             warmup_min,
@@ -719,12 +1067,18 @@ impl RunOptions {
         })
     }
 
-    fn arm_minutes(&self) -> u64 {
-        self.warmup_min + self.duration_min + ARM_SETUP_MINUTES
+    /// The minutes one arm of `test` takes, its source topic's filling
+    /// included.
+    fn arm_minutes(&self, test: &PerfTest) -> u64 {
+        self.warmup_min + self.duration_min + ARM_SETUP_MINUTES + test.seed_minutes(self.duration_min)
+    }
+
+    fn test_minutes(&self, test: &PerfTest) -> u64 {
+        self.arms.len() as u64 * self.arm_minutes(test)
     }
 
     fn estimate_minutes(&self) -> u64 {
-        self.tests.len() as u64 * self.group.arms().len() as u64 * self.arm_minutes()
+        self.tests.iter().map(|t| self.test_minutes(t)).sum()
     }
 }
 
@@ -776,8 +1130,9 @@ fn minutes(flags: &BTreeMap<String, String>, flag: &str, default: u64, min: u64,
     Ok(value)
 }
 
-/// Topic names are `<prefix>-<test>-<arm>`; Kafka allows `[A-Za-z0-9._-]`,
-/// at most 249 characters, and the test id and arm add at most ~85.
+/// Topic names are `<prefix>-<test>-<arm>`, and `<that>-source` for an
+/// `eos` test's source topic; Kafka allows `[A-Za-z0-9._-]`, at most 249
+/// characters, and all but the prefix add at most ~92.
 fn validate_topic_prefix(prefix: &str) -> anyhow::Result<()> {
     let valid = !prefix.is_empty()
         && prefix.len() <= 100
@@ -794,14 +1149,19 @@ fn topic_name(prefix: &str, test: &PerfTest, arm: Arm) -> String {
     format!("{prefix}-{}-{}", test.id, arm.id())
 }
 
+/// The topic an `eos` arm consumes from (see [`topic_name`]).
+fn source_topic_name(topic: &str) -> String {
+    format!("{topic}-source")
+}
+
 // ---------------------------------------------------------------------------
 // check
 // ---------------------------------------------------------------------------
 
 fn check(options: &RunOptions) -> anyhow::Result<()> {
     let group = options.group;
-    let arms: Vec<&str> = group.arms().iter().map(|a| a.label()).collect();
-    println!("Client group: {}; arms in order: {}", group.name(), arms.join(", "));
+    let arms: Vec<&str> = options.arms.iter().map(|a| a.label()).collect();
+    println!("Client group: {}; clients in order: {}", group.name(), arms.join(", "));
     if let Some(ingress) = options.ingress_mb_s {
         println!("Cluster ingress limit: ~{ingress:.0} MB/s");
     }
@@ -822,16 +1182,23 @@ fn check(options: &RunOptions) -> anyhow::Result<()> {
             },
             None => "unbounded (may reach the cluster's ingress limit)".to_string(),
         };
-        println!("  {}. {:<40} {}  [{load}]", i + 1, t.id, report::scenario(t));
+        println!("  {}. {}", i + 1, t.id);
+        println!("     {}  [{load}]", report::scenario(t));
+        let seed = t.seed_minutes(options.duration_min);
+        let seeding = if seed > 0 {
+            format!(" + ~{seed} min filling the source topic")
+        } else {
+            String::new()
+        };
+        println!(
+            "     per client: {} min warmup + {} min measured + ~{ARM_SETUP_MINUTES} min setup{seeding}; \
+             test ~{}",
+            options.warmup_min,
+            options.duration_min,
+            report::hours_minutes(options.test_minutes(t))
+        );
     }
     let estimate = options.estimate_minutes();
-    let per_test = options.arm_minutes() * group.arms().len() as u64;
-    println!(
-        "Per arm: {} min warmup + {} min measured + ~{ARM_SETUP_MINUTES} min setup; per test ~{}",
-        options.warmup_min,
-        options.duration_min,
-        report::hours_minutes(per_test)
-    );
     match options.budget_min {
         Some(budget) => println!(
             "Estimated test time: {} (budget {})",
@@ -844,13 +1211,27 @@ fn check(options: &RunOptions) -> anyhow::Result<()> {
         println!("WARNING: {w}");
     }
     if let Some(budget) = options.budget_min.filter(|b| estimate > *b) {
+        // How many of the tests, in order, fit.
+        let mut total = 0;
+        let fit = options
+            .tests
+            .iter()
+            .take_while(|t| {
+                total += options.test_minutes(t);
+                total <= budget
+            })
+            .count();
+        let n = options.tests.len();
+        let advice = if fit == 0 {
+            "shorten the measurement or run fewer clients".to_string()
+        } else {
+            format!("only the first {fit} fit")
+        };
         bail!(
-            "{} tests take ~{}, more than the budget of {}; at {} min per arm at most {} test(s) fit",
-            options.tests.len(),
+            "{n} {} ~{}, more than the budget of {}; {advice}",
+            if n == 1 { "test takes" } else { "tests take" },
             report::hours_minutes(estimate),
-            report::hours_minutes(budget),
-            options.duration_min,
-            budget / per_test
+            report::hours_minutes(budget)
         );
     }
     println!("OK");
@@ -886,7 +1267,7 @@ fn build(group: Group) -> anyhow::Result<()> {
                 bail!("librdkafka-dev is not installed (pkg-config cannot find rdkafka)");
             }
             step(
-                "C producer harness: configure",
+                "C (transactional) producer harnesses: configure",
                 Command::new("cmake")
                     .arg("-S")
                     .arg(repo.join("c"))
@@ -896,16 +1277,18 @@ fn build(group: Group) -> anyhow::Result<()> {
                     .arg("-DCMAKE_C_FLAGS=-O2 -march=native"),
             )?;
             step(
-                "C producer harness: build",
-                Command::new("cmake")
-                    .arg("--build")
-                    .arg(repo.join("c/build"))
-                    .args(["--target", "producer_perf_test"]),
+                "C (transactional) producer harnesses: build",
+                Command::new("cmake").arg("--build").arg(repo.join("c/build")).args([
+                    "--target",
+                    "producer_perf_test",
+                    "transactional_producer_perf_test",
+                ]),
             )?;
-            // The Rust arm runs `cargo xtask producer-perf-test`; compiling its
-            // test binary now keeps the compile out of the first arm.
+            // The Rust arm runs `cargo xtask producer-perf-test` or
+            // `transactional-producer-perf-test`, both in this test binary;
+            // compiling it now keeps the compile out of the first arm.
             step(
-                "Rust producer harness",
+                "Rust (transactional) producer harnesses",
                 Command::new(cargo())
                     .args([
                         "test",
@@ -920,7 +1303,7 @@ fn build(group: Group) -> anyhow::Result<()> {
             )?;
             let gradle = std::env::var("GRADLE").unwrap_or_else(|_| "gradle".to_string());
             step(
-                "Java producer harness",
+                "Java (transactional) producer harnesses",
                 Command::new(gradle)
                     .args(["shadowJar", "--console=plain"])
                     .current_dir(repo.join("tools/java-perf-test")),
@@ -977,9 +1360,11 @@ fn build(group: Group) -> anyhow::Result<()> {
         },
     }
     for arm in group.arms() {
-        for path in arm.prerequisites(repo) {
-            if !path.exists() {
-                bail!("the build did not produce {} ({})", path.display(), arm.label());
+        for workload in [Workload::Producer, Workload::Transactional] {
+            for path in arm.prerequisites(repo, workload) {
+                if !path.exists() {
+                    bail!("the build did not produce {} ({})", path.display(), arm.label());
+                }
             }
         }
     }
@@ -1051,6 +1436,19 @@ pub(crate) struct Metrics {
     pub(crate) cpu_pct: f64,
     pub(crate) rss_mib: f64,
     pub(crate) messages: f64,
+    /// The transactional harnesses' numbers, `None` for the others.
+    pub(crate) txn: Option<TxnMetrics>,
+}
+
+/// The transaction numbers of a transactional harness's `results.json`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TxnMetrics {
+    pub(crate) per_s: f64,
+    pub(crate) committed: f64,
+    pub(crate) aborted: f64,
+    /// `begin_transaction` to `commit_transaction` completing.
+    pub(crate) commit_p50: f64,
+    pub(crate) commit_p99: f64,
 }
 
 impl Metrics {
@@ -1072,6 +1470,29 @@ impl Metrics {
             .get("client")
             .and_then(json::Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("no `client`"))?;
+        let txn = match v.get("transactions_per_s") {
+            None => None,
+            Some(per_s) => {
+                let commit = v
+                    .get("commit_latency_ms")
+                    .ok_or_else(|| anyhow::anyhow!("no `commit_latency_ms`"))?;
+                let commit_lat = |key: &str| {
+                    commit
+                        .get(key)
+                        .and_then(json::Value::as_f64)
+                        .ok_or_else(|| anyhow::anyhow!("no `commit_latency_ms.{key}`"))
+                };
+                Some(TxnMetrics {
+                    per_s: per_s
+                        .as_f64()
+                        .ok_or_else(|| anyhow::anyhow!("`transactions_per_s` is not a number"))?,
+                    committed: top("committed_transactions")?,
+                    aborted: top("aborted_transactions")?,
+                    commit_p50: commit_lat("p50")?,
+                    commit_p99: commit_lat("p99")?,
+                })
+            },
+        };
         Ok(Metrics {
             client: client.to_string(),
             msg_s: top("throughput_msg_s")?,
@@ -1086,6 +1507,7 @@ impl Metrics {
             cpu_pct: top("cpu_avg_pct")?,
             rss_mib: top("rss_avg_kib")? / 1024.0,
             messages: top("messages_measured")?,
+            txn,
         })
     }
 }
@@ -1105,6 +1527,8 @@ pub(crate) struct TestResult {
 /// Run-wide facts shown at the top of the report.
 pub(crate) struct RunInfo {
     pub(crate) group: Group,
+    /// The arms that ran, in order.
+    pub(crate) arms: Vec<Arm>,
     pub(crate) duration_min: u64,
     pub(crate) warmup_min: u64,
     pub(crate) started: String,
@@ -1121,15 +1545,23 @@ fn run_tests(options: &RunOptions) -> anyhow::Result<()> {
     if !topics_cli.is_file() {
         bail!("{} not found (--kafka-bin)", topics_cli.display());
     }
-    for arm in options.group.arms() {
-        for path in arm.prerequisites(repo) {
-            if !path.exists() {
-                bail!(
-                    "{} is missing ({}); run `cargo xtask perf-cloud build --group {}` first",
-                    path.display(),
-                    arm.label(),
-                    options.group.name()
-                );
+    // The eos harnesses fill their source topic with it.
+    let seeder = options.kafka_bin.join("kafka-producer-perf-test.sh");
+    if options.tests.iter().any(PerfTest::is_eos) && !seeder.is_file() {
+        bail!("{} not found (--kafka-bin; TXN_MODE=eos needs it)", seeder.display());
+    }
+    let kafka_bin = fs::canonicalize(&options.kafka_bin)?;
+    for &arm in &options.arms {
+        for test in &options.tests {
+            for path in arm.prerequisites(repo, test.workload) {
+                if !path.exists() {
+                    bail!(
+                        "{} is missing ({}); run `cargo xtask perf-cloud build --group {}` first",
+                        path.display(),
+                        arm.label(),
+                        options.group.name()
+                    );
+                }
             }
         }
     }
@@ -1165,20 +1597,23 @@ fn run_tests(options: &RunOptions) -> anyhow::Result<()> {
             report::scenario(test)
         );
         let mut arms = Vec::new();
-        for &arm in options.group.arms() {
+        for &arm in &options.arms {
             if crate::signals::count() > signals_baseline {
                 interrupted = true;
                 results.push(TestResult { test: test.clone(), arms });
                 break 'tests;
             }
+            let topic = topic_name(&options.topic_prefix, test, arm);
             let ctx = ArmContext {
                 repo,
                 options,
                 test,
                 arm,
                 dir: results_dir.join(&test.id).join(arm.id()),
-                topic: topic_name(&options.topic_prefix, test, arm),
+                source_topic: test.is_eos().then(|| source_topic_name(&topic)),
+                topic,
                 topics_cli: &topics_cli,
+                kafka_bin: &kafka_bin,
                 client_properties: &client_properties,
                 credentials: &credentials,
                 redactions: Arc::clone(&redactions),
@@ -1196,7 +1631,7 @@ fn run_tests(options: &RunOptions) -> anyhow::Result<()> {
         results.push(TestResult { test: test.clone(), arms });
         write_reports(&results_dir, &info, &results)?;
         if options.push_artifacts {
-            push_artifact(&results_dir.join(&test.id), &format!("perf-results/{}", test.id));
+            push_artifact("job", &results_dir.join(&test.id), &format!("perf-results/{}", test.id));
             push_reports(&results_dir);
         }
     }
@@ -1265,6 +1700,7 @@ fn run_info(options: &RunOptions) -> RunInfo {
     }
     RunInfo {
         group: options.group,
+        arms: options.arms.clone(),
         duration_min: options.duration_min,
         warmup_min: options.warmup_min,
         started: now_utc(),
@@ -1279,23 +1715,29 @@ fn write_reports(results_dir: &Path, info: &RunInfo, results: &[TestResult]) -> 
     Ok(())
 }
 
-/// Push to the Semaphore job's artifacts (`--push-artifacts`) right away, so a
-/// job that later hits its time limit keeps the tests that finished. A failed push is only
-/// logged: the epilogue pushes everything again.
-fn push_artifact(path: &Path, destination: &str) {
+/// Push to Semaphore's artifacts (`--push-artifacts`) right away, so a job
+/// that later hits its time limit keeps the tests that finished. `level` is
+/// `job` or `workflow`. A failed push is only logged: the epilogue pushes
+/// everything again.
+fn push_artifact(level: &str, path: &Path, destination: &str) {
     let status = Command::new("artifact")
-        .args(["push", "job"])
+        .args(["push", level])
         .arg(path)
         .args(["--destination", destination, "--force"])
         .status();
     if !status.is_ok_and(|s| s.success()) {
-        println!("WARNING: could not push {} as a job artifact", path.display());
+        println!("WARNING: could not push {} as a {level} artifact", path.display());
     }
 }
 
+/// The report and the JUnit file as job artifacts, and the report as the
+/// workflow's report too (Semaphore shows `.semaphore/REPORT.md` of the
+/// workflow artifacts in its Report tab).
 fn push_reports(results_dir: &Path) {
-    push_artifact(&results_dir.join("report.md"), "perf-results/report.md");
-    push_artifact(&results_dir.join("junit.xml"), "perf-results/junit.xml");
+    let report = results_dir.join("report.md");
+    push_artifact("job", &report, "perf-results/report.md");
+    push_artifact("job", &results_dir.join("junit.xml"), "perf-results/junit.xml");
+    push_artifact("workflow", &report, ".semaphore/REPORT.md");
 }
 
 /// The Java-form properties `kafka-topics.sh` reads (`--command-config`).
@@ -1358,7 +1800,11 @@ struct ArmContext<'a> {
     arm: Arm,
     dir: PathBuf,
     topic: String,
+    /// The topic an `eos` arm consumes from, which it fills first.
+    source_topic: Option<String>,
     topics_cli: &'a Path,
+    /// `--kafka-bin`, absolute (the harnesses run in other directories).
+    kafka_bin: &'a Path,
     client_properties: &'a Path,
     credentials: &'a Credentials,
     redactions: Arc<Vec<String>>,
@@ -1366,46 +1812,71 @@ struct ArmContext<'a> {
     signals_baseline: u32,
 }
 
-/// Create the arm's topic, run the arm, read its results, delete the topic.
-/// An error is returned only for local I/O failures of the results
+/// Create the arm's topics, run the arm, read its results, delete the
+/// topics. An error is returned only for local I/O failures of the results
 /// directory; everything about the arm itself, a harness that cannot be
 /// started included, ends up in its [`Outcome`], so the run goes on.
 fn run_arm(ctx: &ArmContext<'_>) -> anyhow::Result<ArmResult> {
     let started = Instant::now();
     fs::create_dir_all(&ctx.dir).with_context(|| format!("creating {}", ctx.dir.display()))?;
     let log = ArmLog::create(&ctx.dir.join("run.log"), Arc::clone(&ctx.redactions), ctx.signals_baseline)?;
+    let source = match &ctx.source_topic {
+        Some(source) => format!(", consuming from {source}"),
+        None => String::new(),
+    };
     log.line(&format!(
-        "==> {} / {} on topic {} ({})",
+        "==> {} / {} on topic {}{source} ({})",
         ctx.test.id,
         ctx.arm.label(),
         ctx.topic,
         now_utc()
     ));
 
-    let created = create_topic(ctx, &log).unwrap_or_else(|e| Err(format!("{e:#}")));
-    let outcome = match created {
-        Err(reason) => Outcome::Failed(reason),
-        Ok(()) => {
-            let outcome = run_harness(ctx, &log).unwrap_or_else(|e| Outcome::Failed(format!("{e:#}")));
-            if log.interrupted() {
-                // Stopping promptly matters more; the cluster deletion
-                // removes the topic.
-                log.line(&format!("==> interrupted: leaving topic {} to the cluster deletion", ctx.topic));
-            } else if let Err(e) = delete_topic(ctx, &log) {
-                log.line(&format!("WARNING: could not delete topic {}: {e:#}", ctx.topic));
-            }
-            outcome
-        },
+    // The source topic first: an eos harness fills it, then consumes it into
+    // the topic.
+    let topics: Vec<&str> = ctx
+        .source_topic
+        .iter()
+        .map(String::as_str)
+        .chain([ctx.topic.as_str()])
+        .collect();
+    let mut created: Vec<&str> = Vec::new();
+    let mut failure: Option<String> = None;
+    for &topic in &topics {
+        match create_topic(ctx, topic, &log).unwrap_or_else(|e| Err(format!("{e:#}"))) {
+            Ok(()) => created.push(topic),
+            Err(reason) => {
+                failure = Some(reason);
+                break;
+            },
+        }
+    }
+    let outcome = match failure {
+        Some(reason) => Outcome::Failed(reason),
+        None => run_harness(ctx, &log).unwrap_or_else(|e| Outcome::Failed(format!("{e:#}"))),
     };
+    if log.interrupted() {
+        // Stopping promptly matters more; the cluster deletion removes the
+        // topics.
+        if !created.is_empty() {
+            log.line(&format!(
+                "==> interrupted: leaving {} to the cluster deletion",
+                created.join(", ")
+            ));
+        }
+    } else {
+        for topic in &created {
+            if let Err(e) = delete_topic(ctx, topic, &log) {
+                log.line(&format!("WARNING: could not delete topic {topic}: {e:#}"));
+            }
+        }
+    }
+    let expected = ctx.arm.expected_client(ctx.test.workload);
     let (outcome, metrics) = match outcome {
         Outcome::Passed => match fs::read_to_string(ctx.dir.join("results.json")) {
             Ok(text) => match Metrics::from_results(&text) {
-                Ok(m) if m.client != ctx.arm.expected_client() => (
-                    Outcome::Failed(format!(
-                        "results.json is from client `{}`, expected `{}`",
-                        m.client,
-                        ctx.arm.expected_client()
-                    )),
+                Ok(m) if m.client != expected => (
+                    Outcome::Failed(format!("results.json is from client `{}`, expected `{expected}`", m.client)),
                     None,
                 ),
                 Ok(m) => (Outcome::Passed, Some(m)),
@@ -1431,7 +1902,7 @@ fn run_arm(ctx: &ArmContext<'_>) -> anyhow::Result<ArmResult> {
 
 fn run_harness(ctx: &ArmContext<'_>, log: &ArmLog) -> anyhow::Result<Outcome> {
     let options = ctx.options;
-    let mut command = ctx.arm.command(ctx.repo);
+    let mut command = ctx.arm.command(ctx.repo, ctx.test.workload);
     // The Rust arm runs in the workspace (cargo needs it); every other arm
     // runs in its own directory, since several harnesses write
     // metrics.jsonl to the current directory.
@@ -1459,12 +1930,26 @@ fn run_harness(ctx: &ArmContext<'_>, log: &ArmLog) -> anyhow::Result<Outcome> {
         ("METRICS_FILE".into(), ctx.dir.join("metrics.jsonl").display().to_string()),
     ];
     env.extend(ctx.test.env_for(ctx.arm));
+    if ctx.test.workload == Workload::Transactional {
+        // The arm's own transactional ids (`<id>-<k>` per producer), so no arm
+        // fences or inherits the transactions of another.
+        env.push(("TRANSACTIONAL_ID".into(), ctx.topic.clone()));
+    }
+    if let Some(source) = &ctx.source_topic {
+        env.push(("SOURCE_TOPIC".into(), source.clone()));
+        // Its own consumer group, so it starts from the source's beginning.
+        env.push(("GROUP_ID".into(), format!("{}-eos", ctx.topic)));
+        // The harness fills the source topic with Kafka's
+        // kafka-producer-perf-test.sh from here before it measures.
+        env.push(("KAFKA_BIN".into(), ctx.kafka_bin.display().to_string()));
+    }
     env.extend(ctx.arm.own_env(ctx.repo));
     for (k, v) in &env {
         command.env(k, v);
     }
     log.line(&format!("==> {}", describe(&command)));
-    let timeout = Duration::from_secs((options.warmup_min + options.duration_min) * 60) + ARM_TIMEOUT_SLACK;
+    let minutes = options.warmup_min + options.duration_min + ctx.test.seed_minutes(options.duration_min);
+    let timeout = Duration::from_secs(minutes * 60) + ARM_TIMEOUT_SLACK;
     Ok(match run_logged(&mut command, log, timeout)? {
         Exit::Status(status) if status.success() => Outcome::Passed,
         Exit::Status(status) => Outcome::Failed(format!("harness exited with {status}")),
@@ -1484,12 +1969,11 @@ fn topics_command(ctx: &ArmContext<'_>) -> Command {
 }
 
 /// `Ok(Err(reason))` when the topic could not be created.
-fn create_topic(ctx: &ArmContext<'_>, log: &ArmLog) -> anyhow::Result<Result<(), String>> {
+fn create_topic(ctx: &ArmContext<'_>, topic: &str, log: &ArmLog) -> anyhow::Result<Result<(), String>> {
     let partitions = ctx.test.partitions().to_string();
     for attempt in 1..=TOPIC_CREATE_ATTEMPTS {
         log.line(&format!(
-            "==> creating topic {} with {partitions} partitions (attempt {attempt}/{TOPIC_CREATE_ATTEMPTS})",
-            ctx.topic
+            "==> creating topic {topic} with {partitions} partitions (attempt {attempt}/{TOPIC_CREATE_ATTEMPTS})"
         ));
         // No --replication-factor: the cluster's default (Confluent Cloud
         // rejects anything else).
@@ -1498,14 +1982,14 @@ fn create_topic(ctx: &ArmContext<'_>, log: &ArmLog) -> anyhow::Result<Result<(),
             "--create",
             "--if-not-exists",
             "--topic",
-            &ctx.topic,
+            topic,
             "--partitions",
             &partitions,
         ]);
         match run_logged(&mut create, log, TOPIC_COMMAND_TIMEOUT)? {
             Exit::Interrupted => return Ok(Err(INTERRUPTED.to_string())),
             Exit::Status(s) if s.success() => {
-                if topic_described(ctx, log)? {
+                if topic_described(ctx, topic, log)? {
                     return Ok(Ok(()));
                 }
             },
@@ -1516,24 +2000,25 @@ fn create_topic(ctx: &ArmContext<'_>, log: &ArmLog) -> anyhow::Result<Result<(),
         }
     }
     Ok(Err(format!(
-        "could not create topic {} after {TOPIC_CREATE_ATTEMPTS} attempts",
-        ctx.topic
+        "could not create topic {topic} after {TOPIC_CREATE_ATTEMPTS} attempts"
     )))
 }
 
 /// Whether `--describe` sees the topic with all its partitions.
-fn topic_described(ctx: &ArmContext<'_>, log: &ArmLog) -> anyhow::Result<bool> {
+fn topic_described(ctx: &ArmContext<'_>, topic: &str, log: &ArmLog) -> anyhow::Result<bool> {
     let mut describe = topics_command(ctx);
-    describe.args(["--describe", "--topic", &ctx.topic]);
+    describe.args(["--describe", "--topic", topic]);
     let partitions = ctx.test.partitions();
     Ok(match output_logged(&mut describe, log, TOPIC_COMMAND_TIMEOUT)? {
         Some(text) => {
+            // `Topic: <name>\tPartition: ...`: the name followed by a tab, so
+            // a topic does not count the partitions of `<name>-source`.
             let seen = text
                 .lines()
-                .filter(|l| l.contains("Partition:") && l.contains(&ctx.topic))
+                .filter(|l| l.contains("Partition:") && l.contains(&format!("Topic: {topic}\t")))
                 .count() as u64;
             if seen < partitions {
-                log.line(&format!("==> topic {} shows {seen} of {partitions} partitions", ctx.topic));
+                log.line(&format!("==> topic {topic} shows {seen} of {partitions} partitions"));
             }
             seen >= partitions
         },
@@ -1542,15 +2027,14 @@ fn topic_described(ctx: &ArmContext<'_>, log: &ArmLog) -> anyhow::Result<bool> {
 }
 
 /// Best effort: the cluster is deleted at the end of the run anyway.
-fn delete_topic(ctx: &ArmContext<'_>, log: &ArmLog) -> anyhow::Result<()> {
-    log.line(&format!("==> deleting topic {}", ctx.topic));
+fn delete_topic(ctx: &ArmContext<'_>, topic: &str, log: &ArmLog) -> anyhow::Result<()> {
+    log.line(&format!("==> deleting topic {topic}"));
     let mut delete = topics_command(ctx);
-    delete.args(["--delete", "--if-exists", "--topic", &ctx.topic]);
+    delete.args(["--delete", "--if-exists", "--topic", topic]);
     match run_logged(&mut delete, log, TOPIC_COMMAND_TIMEOUT)? {
         Exit::Status(s) if s.success() => {},
         _ => log.line(&format!(
-            "WARNING: could not delete topic {}; the cluster deletion removes it",
-            ctx.topic
+            "WARNING: could not delete topic {topic}; the cluster deletion removes it"
         )),
     }
     Ok(())
@@ -1764,7 +2248,10 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
             ("t", "names no client group"),
             ("t java PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0", "unknown client group `java`"),
             ("t rust,rust PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0", "names group `rust` twice"),
-            ("t rust PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0 ACKS=1", "unknown setting `ACKS`"),
+            (
+                "t rust PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0 LINGER=5",
+                "unknown setting `LINGER`",
+            ),
             (
                 "t rust PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0 LIMIT_RPS=1",
                 "`LIMIT_RPS` is set twice",
@@ -1787,10 +2274,6 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
                 "ENABLE_IDEMPOTENCE=True",
             ),
             ("t rust PARTITIONS=1 VALUE_SIZE=1", "must set LIMIT_RPS"),
-            (
-                "t rust,python PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0 BATCH_SIZE=16",
-                "BATCH_SIZE below 1024 KiB",
-            ),
             ("t rust PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS", "`LIMIT_RPS` is not KEY=VALUE"),
         ] {
             let err = format!("{:#}", parse_tests(line).unwrap_err());
@@ -1801,8 +2284,6 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
                 .unwrap_err()
                 .to_string();
         assert!(err.contains(":2: test `a` is defined twice"), "{err}");
-        // Small batches are fine where no librdkafka C arm runs.
-        parse_tests("t python PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0 BATCH_SIZE=16").unwrap();
         assert!(parse_tests("# only a comment\n")
             .unwrap_err()
             .to_string()
@@ -1878,6 +2359,7 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
             .remove(0);
         RunOptions {
             group,
+            arms: group.arms().to_vec(),
             tests: vec![test; tests],
             duration_min,
             warmup_min: 5,
@@ -1909,11 +2391,224 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
         let err = check(&with_budget(6, 1340)).unwrap_err().to_string();
         assert_eq!(
             err,
-            "6 tests take ~26 h 48 min, more than the budget of 22 h 20 min; at 60 min per arm at most 5 test(s) fit"
+            "6 tests take ~26 h 48 min, more than the budget of 22 h 20 min; only the first 5 fit"
         );
         check(&with_budget(5, 1340)).unwrap();
+        let err = check(&with_budget(1, 100)).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "1 test takes ~4 h 28 min, more than the budget of 1 h 40 min; shorten the measurement or run fewer clients"
+        );
+        // Fewer clients, less time.
+        let two = RunOptions {
+            arms: vec![Arm::PythonSyncRust, Arm::PythonSyncLibrdkafka],
+            ..with_budget(1, 140)
+        };
+        assert_eq!(two.estimate_minutes(), 134);
+        check(&two).unwrap();
         // Without a budget any length passes.
         check(&options(Group::Python, 6, 60)).unwrap();
+    }
+
+    #[test]
+    fn selects_clients() {
+        let ids = |group: Group, list: &str| -> anyhow::Result<Vec<&'static str>> {
+            Ok(group.select_arms(list)?.into_iter().map(Arm::id).collect())
+        };
+        assert_eq!(ids(Group::Rust, "all").unwrap(), ["rust", "librdkafka", "java"]);
+        // The group's order, whatever the list's.
+        assert_eq!(ids(Group::Rust, " java, rust ").unwrap(), ["rust", "java"]);
+        assert_eq!(
+            ids(Group::Python, "python-async-librdkafka,python-sync-rust").unwrap(),
+            ["python-sync-rust", "python-async-librdkafka"]
+        );
+        assert_eq!(
+            ids(Group::Rust, "rust,python-sync-rust").unwrap_err().to_string(),
+            "unknown client `python-sync-rust` in group `rust` (expected `all` or some of: rust, librdkafka, java)"
+        );
+        assert_eq!(
+            ids(Group::Rust, "rust,rust").unwrap_err().to_string(),
+            "client `rust` is listed twice"
+        );
+        assert_eq!(
+            ids(Group::Rust, " , ").unwrap_err().to_string(),
+            "no clients given (--clients all, or some of: rust, librdkafka, java)"
+        );
+    }
+
+    #[test]
+    fn names_a_scenario_after_its_settings() {
+        let id = |text: &str| parse_scenario(text, Group::Rust).unwrap().id;
+        assert_eq!(
+            id("PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=10000"),
+            "producer-fixed-10k-1kb-200p"
+        );
+        // Settings at the harnesses' defaults add nothing, others are named.
+        assert_eq!(
+            id(
+                "WORKLOAD=producer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=0 ACKS=all COMPRESSION_TYPE=none \
+                BATCH_SIZE=1024 LINGER_MS=5 ENABLE_IDEMPOTENCE=false"
+            ),
+            "producer-max-1kb-200p"
+        );
+        assert_eq!(
+            id("PARTITIONS=36 VALUE_SIZE=100 LIMIT_RPS=1500 ACKS=1 COMPRESSION_TYPE=lz4 BATCH_SIZE=64 LINGER_MS=0"),
+            "producer-fixed-1500-100b-36p-acks1-lz4-batch64kb-linger0ms"
+        );
+        assert_eq!(
+            id("WORKLOAD=transactional PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=10000"),
+            "txn-fixed-10k-1kb-200p-100-per-txn"
+        );
+        assert_eq!(
+            id(
+                "WORKLOAD=transactional TXN_MODE=eos PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=1000 \
+                RECORDS_PER_TRANSACTION=1000 ABORT_RATE=0.125 NUM_TRANSACTIONAL_PRODUCERS=16"
+            ),
+            "eos-fixed-1k-1kb-36p-1000-per-txn-abort12p5-16-producers"
+        );
+        // Too long: cut, with a hash of the whole name.
+        let long = id(
+            "PARTITIONS=200 VALUE_SIZE=1048576 LIMIT_RPS=0 KEY_SIZE=1024 ACKS=1 COMPRESSION_TYPE=zstd \
+                       BATCH_SIZE=2048 LINGER_MS=100 MAX_IN_FLIGHT=5 BUFFER_MEMORY=64 MAX_REQUEST_SIZE=2048",
+        );
+        assert_eq!(long.len(), MAX_TEST_ID_LEN, "{long}");
+        assert!(long.starts_with("producer-max-1mb-200p-key1kb-acks1-zstd-batch2mb-"), "{long}");
+        validate_test_id(&long).unwrap();
+        // Two scenarios with the same start differ by their hash.
+        let other = id(
+            "PARTITIONS=200 VALUE_SIZE=1048576 LIMIT_RPS=0 KEY_SIZE=1024 ACKS=1 COMPRESSION_TYPE=zstd \
+                        BATCH_SIZE=2048 LINGER_MS=100 MAX_IN_FLIGHT=5 BUFFER_MEMORY=64 MAX_REQUEST_SIZE=4096",
+        );
+        assert_ne!(long, other);
+
+        let test = parse_scenario("PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0", Group::Python).unwrap();
+        assert!(test.applies_to(Group::Python) && !test.applies_to(Group::Rust));
+        assert_eq!(test.workload, Workload::Producer);
+    }
+
+    #[test]
+    fn checks_settings_against_the_workload() {
+        let err = |text: &str| format!("{:#}", parse_scenario(text, Group::Rust).unwrap_err());
+        let base = "PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=100";
+        for (extra, message) in [
+            (
+                "WORKLOAD=consumer",
+                "--scenario: WORKLOAD=consumer: expected `producer` or `transactional`",
+            ),
+            ("WORKLOAD=producer WORKLOAD=producer", "--scenario: `WORKLOAD` is set twice"),
+            (
+                "WORKLOAD=transactional ACKS=1",
+                "--scenario: ACKS does not apply to transactional tests (they always use idempotence and acks=all)",
+            ),
+            (
+                "WORKLOAD=transactional ENABLE_IDEMPOTENCE=false",
+                "--scenario: ENABLE_IDEMPOTENCE does not apply to transactional tests",
+            ),
+            (
+                "ABORT_RATE=0.5",
+                "--scenario: ABORT_RATE applies to transactional tests only (WORKLOAD=transactional)",
+            ),
+            (
+                "ENABLE_IDEMPOTENCE=true ACKS=1",
+                "--scenario: ACKS=1 with ENABLE_IDEMPOTENCE=true: an idempotent producer needs ACKS=all",
+            ),
+            (
+                "ENABLE_IDEMPOTENCE=true MAX_IN_FLIGHT=6",
+                "--scenario: MAX_IN_FLIGHT above 5: an idempotent or transactional producer allows at most 5",
+            ),
+            ("WORKLOAD=transactional MAX_IN_FLIGHT=10", "--scenario: MAX_IN_FLIGHT above 5"),
+            ("ACKS=2", "ACKS=2: expected one of all, -1, 1, 0"),
+            (
+                "WORKLOAD=transactional ABORT_RATE=1.5",
+                "ABORT_RATE=1.5: expected a decimal number from 0 to 1, such as 0.5",
+            ),
+            ("WORKLOAD=transactional ABORT_RATE=.5", "ABORT_RATE=.5"),
+            (
+                "WORKLOAD=transactional TXN_MODE=consume",
+                "TXN_MODE=consume: expected `produce` or `eos`",
+            ),
+            ("WORKLOAD=transactional RECORDS_PER_TRANSACTION=0", "RECORDS_PER_TRANSACTION=0"),
+        ] {
+            let e = err(&format!("{base} {extra}"));
+            assert!(e.contains(message), "{extra}: {e}");
+        }
+        let e = err("WORKLOAD=transactional TXN_MODE=eos PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0");
+        assert!(e.contains("TXN_MODE=eos needs LIMIT_RPS above 0"), "{e}");
+        assert_eq!(err("PARTITIONS=1 VALUE_SIZE=1"), "--scenario must set LIMIT_RPS");
+        // Accepted: idempotence with acks=all / -1 and at most 5 in flight,
+        // and the transactional settings.
+        for ok in [
+            "ENABLE_IDEMPOTENCE=true ACKS=-1 MAX_IN_FLIGHT=5",
+            "ENABLE_IDEMPOTENCE=false ACKS=0 MAX_IN_FLIGHT=1000",
+            "WORKLOAD=transactional TXN_MODE=eos ABORT_RATE=0 RECORDS_PER_TRANSACTION=10 NUM_TRANSACTIONAL_PRODUCERS=16",
+            "WORKLOAD=transactional ABORT_RATE=1.0",
+        ] {
+            parse_scenario(&format!("{base} {ok}"), Group::Rust).unwrap();
+        }
+    }
+
+    #[test]
+    fn small_batches_leave_out_the_librdkafka_client() {
+        let test = parse_scenario("PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0 BATCH_SIZE=16", Group::Rust).unwrap();
+        let err = test.check_arms(Group::Rust.arms()).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            format!(
+                "test `{}`: BATCH_SIZE below 1024 KiB is not comparable with the librdkafka (C) client (its harness \
+                 runs librdkafka with 1 MiB batches below it); leave that client out",
+                test.id
+            )
+        );
+        test.check_arms(&[Arm::Rust, Arm::Java]).unwrap();
+        test.check_arms(Group::Python.arms()).unwrap();
+    }
+
+    #[test]
+    fn derives_settings_for_each_client() {
+        let env = |text: &str, arm: Arm| -> BTreeMap<String, String> {
+            parse_scenario(text, Group::Rust).unwrap().env_for(arm).into_iter().collect()
+        };
+        // acks=0: no offsets to verify.
+        let acks0 = env("PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0 ACKS=0", Arm::Java);
+        assert_eq!(acks0.get("DO_VERIFY").map(String::as_str), Some("False"));
+        assert_eq!(acks0.get("ACKS").map(String::as_str), Some("0"));
+        assert!(!env("PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0 ACKS=1", Arm::Java).contains_key("DO_VERIFY"));
+        // An idempotent librdkafka producer gets at most 5 in flight unless
+        // the test sets it.
+        let idempotent = "PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0 ENABLE_IDEMPOTENCE=true";
+        assert_eq!(
+            env(idempotent, Arm::Librdkafka).get("MAX_IN_FLIGHT").map(String::as_str),
+            Some("5")
+        );
+        assert!(!env(idempotent, Arm::Rust).contains_key("MAX_IN_FLIGHT"));
+        assert_eq!(
+            env(&format!("{idempotent} MAX_IN_FLIGHT=2"), Arm::Librdkafka)
+                .get("MAX_IN_FLIGHT")
+                .map(String::as_str),
+            Some("2")
+        );
+        assert!(!env("PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0", Arm::Librdkafka).contains_key("MAX_IN_FLIGHT"));
+        // `WORKLOAD` picks the harness; it is not one of their settings.
+        let txn = env("WORKLOAD=transactional PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0", Arm::Librdkafka);
+        assert!(!txn.contains_key("WORKLOAD") && !txn.contains_key("MAX_IN_FLIGHT"), "{txn:?}");
+    }
+
+    #[test]
+    fn times_the_eos_source_filling() {
+        let test = |text: &str| parse_scenario(text, Group::Rust).unwrap();
+        // 10,000 msg/s × 30 min × 1,024 B is 18.4 GB, ~6.1 min at 50 MB/s.
+        let eos = test("WORKLOAD=transactional TXN_MODE=eos PARTITIONS=1 VALUE_SIZE=1024 LIMIT_RPS=10000");
+        assert!(eos.is_eos());
+        assert_eq!(eos.seed_minutes(30), 7);
+        assert_eq!(
+            test("WORKLOAD=transactional PARTITIONS=1 VALUE_SIZE=1024 LIMIT_RPS=10000").seed_minutes(30),
+            0
+        );
+        assert_eq!(test("PARTITIONS=1 VALUE_SIZE=1024 LIMIT_RPS=10000").seed_minutes(30), 0);
+        // Each arm fills its own source topic.
+        let mut options = options(Group::Rust, 0, 30);
+        options.tests = vec![eos];
+        assert_eq!(options.estimate_minutes(), 3 * (5 + 30 + 2 + 7));
     }
 
     #[test]
@@ -1973,16 +2668,150 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
         assert_eq!(env(Arm::Librdkafka)["CLIENT_VERSION"], "2");
         assert!(env(Arm::Rust).is_empty());
         assert_eq!(
-            Arm::PythonAsyncLibrdkafka.command(repo).get_program(),
+            Arm::PythonAsyncLibrdkafka.command(repo, Workload::Producer).get_program(),
             "/repo/venv-librdkafka/bin/python"
         );
     }
 
     #[test]
+    fn each_workload_runs_its_own_harnesses() {
+        let repo = Path::new("/repo");
+        let args = |arm: Arm, workload: Workload| -> Vec<String> {
+            let command = arm.command(repo, workload);
+            std::iter::once(command.get_program())
+                .chain(command.get_args())
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        assert!(args(Arm::Rust, Workload::Producer).contains(&"producer-perf-test".to_string()));
+        assert!(args(Arm::Rust, Workload::Transactional).contains(&"transactional-producer-perf-test".to_string()));
+        assert_eq!(args(Arm::Librdkafka, Workload::Producer), ["/repo/c/build/producer_perf_test"]);
+        assert_eq!(
+            args(Arm::Librdkafka, Workload::Transactional),
+            ["/repo/c/build/transactional_producer_perf_test"]
+        );
+        let jar = "/repo/tools/java-perf-test/build/libs/java-perf-test-all.jar";
+        assert_eq!(args(Arm::Java, Workload::Producer), ["java", "-jar", jar]);
+        assert_eq!(
+            args(Arm::Java, Workload::Transactional),
+            [
+                "java",
+                "-cp",
+                jar,
+                "io.confluent.kafka.perftest.TransactionalProducerPerformanceTest"
+            ]
+        );
+        assert_eq!(
+            args(Arm::PythonSyncRust, Workload::Transactional),
+            [
+                "/repo/venv/bin/python",
+                "/repo/python/test/performance/transactional_producer_performance_test.py"
+            ]
+        );
+        assert_eq!(
+            Arm::Librdkafka.prerequisites(repo, Workload::Transactional),
+            [PathBuf::from("/repo/c/build/transactional_producer_perf_test")]
+        );
+        assert_eq!(Arm::Java.expected_client(Workload::Producer), "java");
+        assert_eq!(Arm::Java.expected_client(Workload::Transactional), "java-txn");
+        assert_eq!(Arm::PythonAsyncRust.expected_client(Workload::Producer), "python-rust-async");
+        assert_eq!(Arm::PythonAsyncRust.expected_client(Workload::Transactional), "python-rust-txn");
+    }
+
+    #[test]
     fn every_setting_is_cleared_before_an_arm_starts() {
-        for (key, _) in SETTINGS {
-            assert!(HARNESS_VARS.contains(key), "{key} is not in HARNESS_VARS");
+        for setting in SETTINGS {
+            assert!(HARNESS_VARS.contains(&setting.key), "{} is not in HARNESS_VARS", setting.key);
         }
+    }
+
+    /// The names `source` reads from the environment: the string literal
+    /// right after a read (`getenv("X")`, `env_or("X", ..)`, `envInt("X", ..)`,
+    /// `os.environ.get("X")`, `os.environ["X"]`, ...) or right before
+    /// `in os.environ`.
+    fn env_reads(source: &str) -> Vec<String> {
+        const READS: &[&str] = &[
+            "getenv(",
+            "env_or(",
+            "env_opt(",
+            "env_parse(",
+            "env::var(",
+            "envOr(",
+            "envInt(",
+            "envLong(",
+            "envDouble(",
+            "envBool(",
+            "os.environ.get(",
+            "os.environ[",
+        ];
+        let name = |quoted: &str| -> Option<String> {
+            let quote = quoted.chars().next().filter(|c| matches!(c, '"' | '\''))?;
+            let rest = &quoted[1..];
+            let name = &rest[..rest.find(quote)?];
+            let valid =
+                name.len() > 1 && name.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_');
+            valid.then(|| name.to_string())
+        };
+        let mut names = Vec::new();
+        for read in READS {
+            for (i, _) in source.match_indices(read) {
+                names.extend(name(source[i + read.len()..].trim_start()));
+            }
+        }
+        for (i, _) in source.match_indices(" in os.environ") {
+            let before = source[..i].trim_end();
+            if let Some(quote) = before.chars().last().filter(|c| matches!(c, '"' | '\'')) {
+                if let Some(start) = before[..before.len() - 1].rfind(quote) {
+                    names.extend(name(&before[start..]));
+                }
+            }
+        }
+        names
+    }
+
+    /// No variable in the job's environment reaches one arm and not the
+    /// others: whatever a harness reads, the driver clears.
+    #[test]
+    fn harness_vars_cover_what_the_harnesses_read() {
+        assert_eq!(
+            env_reads(
+                "getenv(\"A_B\") env_or(\"SASL_MECHANISM\", \"PLAIN\") os.environ.get(\n \"CC\")\n'DD' in os.environ \
+                 getenv(name) x"
+            ),
+            ["A_B", "SASL_MECHANISM", "CC", "DD"]
+        );
+        let repo = repo_root();
+        let mut sources = vec![
+            "rust/tests/performance/producer_perf_test.rs",
+            "rust/tests/performance/transactional_producer_perf_test.rs",
+            "c/tests/producer_perf_test.c",
+            "c/tests/transactional_producer_perf_test.c",
+            "python/test/performance/producer_performance_test.py",
+            "python/test/performance/transactional_producer_performance_test.py",
+            "python/test/performance/performance_common.py",
+            "python/test/performance/librdkafka_helpers.py",
+        ]
+        .into_iter()
+        .map(|p| repo.join(p))
+        .collect::<Vec<_>>();
+        let java = repo.join("tools/java-perf-test/src/main/java/io/confluent/kafka/perftest");
+        for entry in fs::read_dir(&java).unwrap() {
+            sources.push(entry.unwrap().path());
+        }
+        let mut read = 0;
+        for path in &sources {
+            let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            for name in env_reads(&text) {
+                read += 1;
+                assert!(
+                    HARNESS_VARS.contains(&name.as_str()),
+                    "{} reads {name}, which is not in HARNESS_VARS",
+                    path.display()
+                );
+            }
+        }
+        // The scan found the reads at all.
+        assert!(read > 100, "only {read} reads found");
     }
 
     #[test]
@@ -2004,16 +2833,17 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
             topic_name("perf-abc", &test, Arm::PythonAsyncLibrdkafka),
             "perf-abc-producer-fixed-python-async-librdkafka"
         );
+        assert_eq!(source_topic_name("perf-abc-eos-x-rust"), "perf-abc-eos-x-rust-source");
         validate_topic_prefix("perf-0d0c9b9e-1f7a-4d0b-9c39-ff4b6a0f1d2e").unwrap();
         assert!(validate_topic_prefix("perf/x").is_err());
         assert!(validate_topic_prefix("").is_err());
         // The longest name stays well inside Kafka's 249 characters.
-        let longest = format!(
+        let longest = source_topic_name(&format!(
             "{}-{}-{}",
             "p".repeat(100),
             "t".repeat(MAX_TEST_ID_LEN),
             Arm::PythonAsyncLibrdkafka.id()
-        );
+        ));
         assert!(longest.len() <= 249);
     }
 
@@ -2030,10 +2860,35 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
         assert_eq!(m.msg_s, 10000.0);
         assert_eq!(m.p99, 8.0);
         assert_eq!(m.rss_mib, 50.0);
+        assert_eq!(m.txn, None);
         let err = Metrics::from_results(r#"{"client": "rust", "throughput_msg_s": 1}"#)
             .unwrap_err()
             .to_string();
         assert_eq!(err, "no `latency_ms`");
+
+        let txn = r#"{"test": "producer", "client": "rust-txn", "messages_measured": 600000,
+            "throughput_msg_s": 10000.00, "throughput_mib_s": 9.77,
+            "committed_transactions": 6000, "aborted_transactions": 0, "aborted_records": 0,
+            "transactions_per_s": 100.00,
+            "latency_ms": {"min": 1, "avg": 3.25, "p50": 3, "p90": 4, "p95": 5, "p99": 8, "p999": 12, "max": 40},
+            "commit_latency_ms": {"min": 1, "avg": 12.5, "p50": 11, "p90": 14, "p95": 15, "p99": 21, "p999": 30,
+                                  "max": 40},
+            "cpu_avg_pct": 21.50, "rss_avg_kib": 51200.00}"#;
+        let m = Metrics::from_results(txn).unwrap();
+        assert_eq!(
+            m.txn,
+            Some(TxnMetrics {
+                per_s: 100.0,
+                committed: 6000.0,
+                aborted: 0.0,
+                commit_p50: 11.0,
+                commit_p99: 21.0
+            })
+        );
+        let err = Metrics::from_results(&txn.replace("\"commit_latency_ms\"", "\"x\""))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, "no `commit_latency_ms`");
     }
 
     #[test]

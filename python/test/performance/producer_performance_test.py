@@ -375,9 +375,8 @@ def configuration_from_env(common_default_configuration, v2=False):
         conf['bootstrap.servers'] = os.environ['BOOTSTRAP_SERVERS']
 
     if not use_defaults:
-        # acks=all, hardcoded like the C and Java perf tests (the Rust test relies
-        # on the same client default).
-        conf['acks'] = 'all'
+        # ACKS: all (default, like the C, Java and Rust perf tests), -1, 1 or 0.
+        conf['acks'] = os.getenv('ACKS', 'all')
 
         if 'BATCH_SIZE' in os.environ:
             batch_size = int(os.environ['BATCH_SIZE']) * 1024  # Convert KB to bytes
