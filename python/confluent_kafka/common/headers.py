@@ -52,7 +52,9 @@ def _read_headers(
     Each value is kept as the record's own read-only view of the caller's
     bytes, not a copy (CLAUDE.md §12): the caller releasing its view does not
     release the record's."""
-    if headers is None:
+    # The empty tuple too: it is what a record built without headers is given
+    # (the Java-given default), and it reads as itself.
+    if headers is None or (type(headers) is tuple and not headers):
         return ()
     result: list[tuple[str, memoryview | None]] = []
     for index, item in enumerate(headers):
@@ -82,6 +84,8 @@ def _read_headers(
 def _hand_out(headers: tuple[tuple[str, memoryview | None], ...]) -> Headers:
     """The record's headers for a caller: fresh views of the same bytes, so a
     caller releasing one (``with value:``) leaves the record's intact."""
+    if not headers:
+        return ()
     return tuple((key, None if value is None else value[:]) for key, value in headers)
 
 

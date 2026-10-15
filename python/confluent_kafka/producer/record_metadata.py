@@ -64,13 +64,14 @@ class RecordMetadata:
 
         Built once per completed record, so its own slots are filled directly:
         the same values ``__init__`` sets for ``base_offset=offset,
-        batch_index=0``, without its keyword constructor."""
+        batch_index=0``, without its keyword constructor; the TopicPartition
+        is built by its own ``_of``, for the same reason."""
         self = cls.__new__(cls)
         self._offset = offset
         self._timestamp = timestamp
         self._serialized_key_size = serialized_key_size
         self._serialized_value_size = serialized_value_size
-        self._topic_partition = TopicPartition(topic=topic, partition=partition)
+        self._topic_partition = TopicPartition._of(topic, partition)
         return self
 
     def has_offset(self) -> bool:

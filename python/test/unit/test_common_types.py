@@ -53,7 +53,7 @@ from confluent_kafka.common import (
     TopicPartition,
     Uuid,
 )
-from confluent_kafka.common.headers import _headers_to_string, _read_headers
+from confluent_kafka.common.headers import _hand_out, _headers_to_string, _read_headers
 
 # --------------------------------------------------------------------------- #
 # Uuid: UuidTest
@@ -484,6 +484,24 @@ def test_timestamp_type() -> None:
 # --------------------------------------------------------------------------- #
 # Headers and Java's string conversion
 # --------------------------------------------------------------------------- #
+
+
+def test_no_headers_read_and_hand_out_as_the_empty_tuple() -> None:
+    # A record built without headers is given (); it reads, and hands out, as
+    # the empty tuple at once.
+    assert _read_headers(()) == () and type(_read_headers(())) is tuple
+    assert _read_headers(None) == ()
+    assert _read_headers([]) == ()
+    assert _hand_out(()) == () and type(_hand_out(())) is tuple
+
+
+def test_topic_partition_of_is_what_the_constructor_builds() -> None:
+    built = TopicPartition._of("t", 3)  # noqa: SLF001
+    expected = TopicPartition(topic="t", partition=3)
+    assert type(built) is TopicPartition
+    assert (built.topic(), built.partition()) == ("t", 3)
+    assert built == expected and hash(built) == hash(expected)
+    assert str(built) == str(expected) == "t-3"
 
 
 def test_read_headers_views_the_values_without_copying() -> None:
