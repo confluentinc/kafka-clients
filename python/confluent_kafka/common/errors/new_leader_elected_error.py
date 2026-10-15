@@ -34,7 +34,7 @@ class NewLeaderElectedError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 108  # kafka_common_ErrorCode_NEW_LEADER_ELECTED
+    _ffi_id: ClassVar[int] = 108  # kafka_common_Error_NEW_LEADER_ELECTED
 
     def __init__(
         self,

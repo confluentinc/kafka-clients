@@ -38,7 +38,7 @@ class InterruptError(KafkaError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = -12  # kafka_common_ErrorCode_INTERRUPT
+    _ffi_id: ClassVar[int] = -12  # kafka_common_Error_INTERRUPT
 
     @java_forms(
         Form("cause"),

@@ -37,7 +37,7 @@ class TimeoutError(RetriableError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 7  # kafka_common_ErrorCode_REQUEST_TIMED_OUT
+    _ffi_id: ClassVar[int] = 7  # kafka_common_Error_REQUEST_TIMED_OUT
 
     def __init__(
         self,

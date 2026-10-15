@@ -38,6 +38,9 @@ impl Default for AlterPartitionReassignmentsOptions {
 impl AlterPartitionReassignmentsOptions {
     /// Creates default options (default API timeout, replication-factor change
     /// allowed).
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.AlterPartitionReassignmentsOptions#AlterPartitionReassignmentsOptions"
+    )]
     pub fn new() -> Self {
         Self::default()
     }
@@ -45,6 +48,7 @@ impl AlterPartitionReassignmentsOptions {
     /// Set the timeout in milliseconds for this operation, or `None` to use the
     /// default API timeout for the `AdminClient`.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
@@ -52,6 +56,7 @@ impl AlterPartitionReassignmentsOptions {
 
     /// The timeout in milliseconds for this operation, or `None` if the default
     /// API timeout should be used.
+    #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
@@ -61,6 +66,7 @@ impl AlterPartitionReassignmentsOptions {
     ///
     /// Mirrors `allowReplicationFactorChange(boolean)`.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.AlterPartitionReassignmentsOptions#allowReplicationFactorChange")]
     pub fn set_allow_replication_factor_change(mut self, allow: bool) -> Self {
         self.allow_replication_factor_change = allow;
         self
@@ -70,6 +76,7 @@ impl AlterPartitionReassignmentsOptions {
     /// allowed to alter the replication factor of a partition.
     ///
     /// Mirrors `allowReplicationFactorChange()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.AlterPartitionReassignmentsOptions#allowReplicationFactorChange")]
     pub fn allow_replication_factor_change(&self) -> bool {
         self.allow_replication_factor_change
     }

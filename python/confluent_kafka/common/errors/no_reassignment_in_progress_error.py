@@ -37,7 +37,7 @@ class NoReassignmentInProgressError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 85  # kafka_common_ErrorCode_NO_REASSIGNMENT_IN_PROGRESS
+    _ffi_id: ClassVar[int] = 85  # kafka_common_Error_NO_REASSIGNMENT_IN_PROGRESS
 
     def __init__(
         self,

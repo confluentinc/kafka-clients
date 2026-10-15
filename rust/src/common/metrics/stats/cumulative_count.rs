@@ -34,6 +34,7 @@ pub struct CumulativeCount {
 
 impl CumulativeCount {
     /// Create a `CumulativeCount` initialized to `0`.
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.CumulativeCount#CumulativeCount")]
     pub fn new() -> Self {
         Self { inner: CumulativeSum::new() }
     }

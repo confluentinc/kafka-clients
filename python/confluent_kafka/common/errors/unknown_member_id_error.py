@@ -34,7 +34,7 @@ class UnknownMemberIdError(ApplicationRecoverableError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 25  # kafka_common_ErrorCode_UNKNOWN_MEMBER_ID
+    _ffi_id: ClassVar[int] = 25  # kafka_common_Error_UNKNOWN_MEMBER_ID
 
     def __init__(
         self,

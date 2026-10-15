@@ -33,7 +33,7 @@ class IllegalArgumentError(RuntimeError):
 
     __module__ = "confluent_kafka"
 
-    _ffi_id: ClassVar[int] = -3  # kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT
+    _ffi_id: ClassVar[int] = -3  # kafka_common_Error_LOCAL_ILLEGAL_ARGUMENT
 
     def __init__(
         self,

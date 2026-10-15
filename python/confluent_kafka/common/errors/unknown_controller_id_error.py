@@ -34,7 +34,7 @@ class UnknownControllerIdError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 116  # kafka_common_ErrorCode_UNKNOWN_CONTROLLER_ID
+    _ffi_id: ClassVar[int] = 116  # kafka_common_Error_UNKNOWN_CONTROLLER_ID
 
     def __init__(
         self,

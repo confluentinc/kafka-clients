@@ -32,5 +32,6 @@ kafka_error_type! {
         is_kafka_error,
         is_api_error,
         is_invalid_configuration_error,
+        is_unsupported_for_message_format_error,
     ],
 }

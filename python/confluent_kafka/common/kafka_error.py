@@ -38,7 +38,7 @@ class KafkaError(RuntimeError):
 
     # A bare KafkaException is reported as UNKNOWN_SERVER_ERROR; UnknownServerError
     # owns that id in the id -> class table.
-    _ffi_id: ClassVar[int] = -1  # kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR
+    _ffi_id: ClassVar[int] = -1  # kafka_common_Error_UNKNOWN_SERVER_ERROR
 
     def __init__(
         self,

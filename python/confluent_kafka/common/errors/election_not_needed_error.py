@@ -34,7 +34,7 @@ class ElectionNotNeededError(InvalidMetadataError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 84  # kafka_common_ErrorCode_ELECTION_NOT_NEEDED
+    _ffi_id: ClassVar[int] = 84  # kafka_common_Error_ELECTION_NOT_NEEDED
 
     def __init__(
         self,

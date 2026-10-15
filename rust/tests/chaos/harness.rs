@@ -125,7 +125,7 @@ pub struct ChaosHarness {
     replication: i16,
     /// Per-topic current topic id, for the physical verification key.
     /// Re-resolved after a topic recreate (the id changes). Missing / absent =
-    /// unresolved (treated as `Uuid::zero()`). Shared with every workload (via
+    /// unresolved (treated as `Uuid::ZERO_UUID`). Shared with every workload (via
     /// [`WorkloadContext::topic_ids`]) so they stamp records with the live id.
     topic_ids: TopicIds,
     /// Drain-settle signal: per-topic resume baselines captured at each recreate.
@@ -438,7 +438,7 @@ impl ChaosHarness {
     /// delete of the same name and reported the existing topic).
     async fn cache_created_topic_id(&self, topic: &str, result: &CreateTopicsResult) {
         match result.topic_id(topic).get().await {
-            Ok(id) if id != Uuid::zero() => self.set_topic_id(topic, id).await,
+            Ok(id) if id != Uuid::ZERO_UUID => self.set_topic_id(topic, id).await,
             other => {
                 eprintln!(
                     "chaos: create-topics response carried no usable id for {topic} ({other:?}); \
@@ -466,7 +466,7 @@ impl ChaosHarness {
     /// `describe_topics`, and cache it. **Retries until a non-zero id is
     /// resolved**, bounded by `timeout` — under a concurrent broker roll,
     /// `describe_topics` can transiently return a zero/absent id (metadata
-    /// churn), and keying post-recreate records under `Uuid::zero()` corrupts the
+    /// churn), and keying post-recreate records under `Uuid::ZERO_UUID` corrupts the
     /// physical accounting. Logs loudly if it genuinely cannot resolve within the
     /// bound (leaving the previous cached value untouched). The fallback for a
     /// create-topics response without an id; see [`Self::cache_created_topic_id`].
@@ -499,7 +499,7 @@ impl ChaosHarness {
             .get()
             .await;
         let id = described.ok()?.get(topic)?.topic_id();
-        (id != Uuid::zero()).then_some(id)
+        (id != Uuid::ZERO_UUID).then_some(id)
     }
 
     fn current_topic_id(&self, topic: &str) -> Uuid {
@@ -508,7 +508,7 @@ impl ChaosHarness {
             .expect("topic_ids poisoned")
             .get(topic)
             .copied()
-            .unwrap_or_else(Uuid::zero)
+            .unwrap_or(Uuid::ZERO_UUID)
     }
 
     /// Delete and recreate ONE chaos topic, optionally dwelling `dwell` between
@@ -616,10 +616,10 @@ impl ChaosHarness {
         // always does); a recreate that reused the id or could not resolve it
         // relies on the snapshot and the blackout floor, since old and new
         // records then cannot be told apart by topic_id.
-        if old_id != new_id && old_id != Uuid::zero() {
+        if old_id != new_id && old_id != Uuid::ZERO_UUID {
             self.verifier
                 .note_expected_loss(ExpectedLossHint::DestroyedGeneration { id: old_id, deleted_at: delete_started });
-            if new_id != Uuid::zero() {
+            if new_id != Uuid::ZERO_UUID {
                 self.verifier.note_expected_loss(ExpectedLossHint::NewGeneration(new_id));
             }
         }
@@ -631,7 +631,7 @@ impl ChaosHarness {
         // documents this as a valid mode), especially when the cluster metadata
         // is still churning from a concurrent broker roll, so we do not assert
         // there. Either way the map now holds the create response's id for keying.
-        if !dwell.is_zero() && old_id != Uuid::zero() && new_id != Uuid::zero() {
+        if !dwell.is_zero() && old_id != Uuid::ZERO_UUID && new_id != Uuid::ZERO_UUID {
             assert_ne!(
                 old_id, new_id,
                 "recreate-delayed produced the same topic id for {topic} — the topic was not \
@@ -707,7 +707,7 @@ impl ChaosHarness {
                     return;
                 },
                 Err(Error::TopicExists(_))
-                    if old_id != Uuid::zero()
+                    if old_id != Uuid::ZERO_UUID
                         && let Some(id) = self.describe_topic_id(topic).await
                         && id != old_id =>
                 {

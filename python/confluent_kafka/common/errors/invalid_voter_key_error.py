@@ -34,7 +34,7 @@ class InvalidVoterKeyError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 125  # kafka_common_ErrorCode_INVALID_VOTER_KEY
+    _ffi_id: ClassVar[int] = 125  # kafka_common_Error_INVALID_VOTER_KEY
 
     def __init__(
         self,

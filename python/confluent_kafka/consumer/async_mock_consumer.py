@@ -16,7 +16,9 @@
 same constructor and the same mock methods (CLAUDE.md, Python Binding
 Conventions, Class family). ``rebalance`` and ``lose_partitions`` are
 ``async def``: Java's wait on the listener they run, which may be ``async def``
-here and is awaited."""
+here and is awaited. ``commit_nowait()`` is ``async def`` too, as on
+``AsyncKafkaConsumer``: its callback may be ``async def``, and it is awaited
+inside the call, as Java's mock runs the callback inside ``commitAsync``."""
 
 from __future__ import annotations
 

@@ -950,7 +950,7 @@ async fn close_and_validate(
     const CLOSE_GRACE_TIME_MS: u64 = 2000;
     let start = std::time::Instant::now();
     eprintln!("Closing consumer with timeout {close_timeout_ms} ms.");
-    let close = consumer.close_with_options(CloseOptions::new_timeout(Duration::from_millis(close_timeout_ms)));
+    let close = consumer.close_with_options(CloseOptions::new_with_timeout(Duration::from_millis(close_timeout_ms)));
     let result = match max_close_time_ms {
         Some(ms) => tokio::time::timeout(Duration::from_millis(ms + CLOSE_GRACE_TIME_MS), close)
             .await

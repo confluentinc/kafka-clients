@@ -34,7 +34,7 @@ class InvalidTxnStateError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 48  # kafka_common_ErrorCode_INVALID_TXN_STATE
+    _ffi_id: ClassVar[int] = 48  # kafka_common_Error_INVALID_TXN_STATE
 
     def __init__(
         self,

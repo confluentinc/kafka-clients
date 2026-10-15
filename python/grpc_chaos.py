@@ -789,9 +789,10 @@ async def _run_consumer_async(request, emit, stop):
             if sync_commit:
                 await consumer.commit()
             else:
-                # commit_nowait (Java's commitAsync) is a plain def: it only
-                # initiates the commit.
-                consumer.commit_nowait(callback=on_commit)
+                # commit_nowait (Java's commitAsync) waits until the commit is
+                # sent; its failure arrives through on_commit, on the loop,
+                # inside a later awaited poll / commit / close.
+                await consumer.commit_nowait(callback=on_commit)
         except Exception as e:  # noqa: BLE001
             emit(_consumer_error(chpb.CONSUMER_OP_COMMIT, e))
             continue

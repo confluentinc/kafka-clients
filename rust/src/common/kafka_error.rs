@@ -131,6 +131,8 @@ impl KafkaError {
     }
 
     /// The underlying cause, if any. Mirrors Java's `getCause()`.
+    // Java's Throwable.getCause, a JDK method
+    #[doc(alias = "rust-only")]
     pub fn source(&self) -> Option<&Error> {
         self.source.as_deref()
     }
@@ -143,6 +145,8 @@ impl KafkaError {
 
     /// The error message. Returns the custom message if set, otherwise the
     /// default message from the error code.
+    // Java's Throwable.getMessage, a JDK method
+    #[doc(alias = "rust-only")]
     pub fn message(&self) -> &str {
         match &self.custom_message {
             Some(msg) => msg,

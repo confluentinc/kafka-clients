@@ -34,7 +34,7 @@ class InvalidPidMappingError(ApplicationRecoverableError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 49  # kafka_common_ErrorCode_INVALID_PRODUCER_ID_MAPPING
+    _ffi_id: ClassVar[int] = 49  # kafka_common_Error_INVALID_PRODUCER_ID_MAPPING
 
     def __init__(
         self,

@@ -41,6 +41,7 @@ impl Default for CreateDelegationTokenOptions {
 impl CreateDelegationTokenOptions {
     /// Creates default options (default API timeout, server-default lifetime,
     /// no renewers, owner defaults to the request principal).
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateDelegationTokenOptions#CreateDelegationTokenOptions")]
     pub fn new() -> Self {
         Self::default()
     }
@@ -49,6 +50,7 @@ impl CreateDelegationTokenOptions {
     ///
     /// Mirrors `CreateDelegationTokenOptions.renewers`.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateDelegationTokenOptions#renewers")]
     pub fn set_renewers(mut self, renewers: Vec<KafkaPrincipal>) -> Self {
         self.renewers = renewers;
         self
@@ -57,6 +59,7 @@ impl CreateDelegationTokenOptions {
     /// The principals allowed to renew the token.
     ///
     /// Mirrors `CreateDelegationTokenOptions.renewers`.
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateDelegationTokenOptions#renewers")]
     pub fn renewers(&self) -> &[KafkaPrincipal] {
         &self.renewers
     }
@@ -65,6 +68,7 @@ impl CreateDelegationTokenOptions {
     ///
     /// Mirrors `CreateDelegationTokenOptions.owner`.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateDelegationTokenOptions#owner")]
     pub fn set_owner(mut self, owner: KafkaPrincipal) -> Self {
         self.owner = Some(owner);
         self
@@ -74,6 +78,7 @@ impl CreateDelegationTokenOptions {
     ///
     /// Mirrors `CreateDelegationTokenOptions.owner`, which returns an
     /// `Optional`.
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateDelegationTokenOptions#owner")]
     pub fn owner(&self) -> Option<&KafkaPrincipal> {
         self.owner.as_ref()
     }
@@ -83,6 +88,7 @@ impl CreateDelegationTokenOptions {
     ///
     /// Mirrors `CreateDelegationTokenOptions.maxLifetimeMs`.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateDelegationTokenOptions#maxLifetimeMs")]
     pub fn set_max_lifetime_ms(mut self, max_lifetime_ms: i64) -> Self {
         self.max_lifetime_ms = max_lifetime_ms;
         self
@@ -91,6 +97,7 @@ impl CreateDelegationTokenOptions {
     /// The maximum lifetime of the token in milliseconds.
     ///
     /// Mirrors `CreateDelegationTokenOptions.maxLifetimeMs`.
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateDelegationTokenOptions#maxLifetimeMs")]
     pub fn max_lifetime_ms(&self) -> i64 {
         self.max_lifetime_ms
     }
@@ -98,6 +105,7 @@ impl CreateDelegationTokenOptions {
     /// Set the timeout in milliseconds for this operation, or `None` to use the
     /// default API timeout for the `AdminClient`.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
@@ -105,6 +113,7 @@ impl CreateDelegationTokenOptions {
 
     /// The timeout in milliseconds for this operation, or `None` if the default
     /// API timeout should be used.
+    #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }

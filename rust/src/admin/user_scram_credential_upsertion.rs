@@ -71,6 +71,7 @@ impl UserScramCredentialUpsertion {
     }
 
     /// Returns the always non-null user.
+    #[doc(alias = "org.apache.kafka.clients.admin.UserScramCredentialAlteration#user")]
     pub fn user(&self) -> &str {
         &self.user
     }

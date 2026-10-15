@@ -71,6 +71,7 @@ impl KafkaMetric {
     }
 
     /// Set the metric config.
+    #[doc(alias = "org.apache.kafka.common.metrics.KafkaMetric#config")]
     pub fn set_config(&self, config: Arc<MetricConfig>) {
         *self.config.lock().expect("metric config mutex poisoned") = config;
     }
@@ -385,7 +386,7 @@ mod tests {
         let metrics = crate::common::metrics::Metrics::new();
         let sensor = metrics.sensor("s").unwrap();
         sensor
-            .add_metric_name(metrics.metric_name("m", "g"), Box::new(Avg::new()))
+            .add_with_metric_name(metrics.metric_name("m", "g"), Box::new(Avg::new()))
             .unwrap();
         let metric = metrics.metric(&metrics.metric_name("m", "g")).unwrap();
         let expected_suffix = format!("metricValueProvider={}]", std::any::type_name::<Avg>());
