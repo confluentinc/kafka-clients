@@ -1168,6 +1168,82 @@ async def test_async_close_returns_after_every_delivery_callback_has_run() -> No
     assert len(ran) == 10
 
 
+def test_a_record_that_completes_before_send_tracks_it_is_not_kept(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # The completion untracks a record's future right after completing it. It
+    # can run on the C completion thread before send() tracks the future; then
+    # send() finds the future done and does not keep it, so a later flush()
+    # does not hold it for ever.
+    def complete_at_once(c_producer: int, native: object, cb: Any) -> bool:
+        cb(0, 0, False)
+        return False
+
+    monkeypatch.setattr(_lib, "Producer_send", complete_at_once)
+    p = KafkaProducer(configs=UNREACHABLE)
+    try:
+        future = p.send(record=RECORD)
+        assert future.done()
+        assert not p._futures  # noqa: SLF001
+    finally:
+        monkeypatch.undo()
+        p.close(timeout=0)
+
+
+def test_the_completion_untracks_its_future_without_a_done_callback(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # No done callback of the producer's own is added to a record's future
+    # (asyncio would schedule each one as a loop callback): the completion
+    # removes the future from the tracked set itself.
+    captured: dict[str, Any] = {}
+
+    def hold(c_producer: int, native: object, cb: Any) -> bool:
+        captured["cb"] = cb
+        return False
+
+    monkeypatch.setattr(_lib, "Producer_send", hold)
+    p = KafkaProducer(configs=UNREACHABLE)
+    try:
+        future = p.send(record=RECORD)
+        assert future in p._futures  # noqa: SLF001
+        assert future._done_callbacks == []  # noqa: SLF001 - concurrent.futures' own list
+        captured["cb"](0, 0, False)
+        assert future.done()
+        assert future not in p._futures  # noqa: SLF001
+    finally:
+        monkeypatch.undo()
+        p.close(timeout=0)
+
+
+async def test_an_async_future_its_awaiter_cancelled_is_untracked_by_its_completion(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def hold(c_producer: int, native: object, cb: Any) -> bool:
+        captured["cb"] = cb
+        return False
+
+    monkeypatch.setattr(_lib, "Producer_send", hold)
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    try:
+        future = await p.send(record=RECORD)
+        future.cancel()
+        # Tracked until its completion arrives; a flush() meanwhile sees it as
+        # done and does not wait for it.
+        assert future in p._futures  # noqa: SLF001
+        completer = threading.Thread(target=captured["cb"], args=(0, 0, False))
+        completer.start()
+        completer.join(5)
+        for _ in range(500):
+            if future not in p._futures:  # noqa: SLF001
+                break
+            await asyncio.sleep(0.01)
+        assert future not in p._futures  # noqa: SLF001
+        assert future.cancelled()
+    finally:
+        monkeypatch.undo()
+        await p.close(timeout=0)
+
+
 def test_an_async_send_racing_close_is_refused_after_its_serializer() -> None:
     started = threading.Event()
 

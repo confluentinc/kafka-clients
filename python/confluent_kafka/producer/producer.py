@@ -32,7 +32,7 @@ import concurrent.futures
 import logging
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Generic, TypeVar
 
@@ -83,20 +83,23 @@ class _Completion:
     ``ProducerBatch.completeFutureAndFireCallbacks`` for one record.
 
     Runs on the C completion thread with the GIL held; as in Java, the
-    callback runs before the future completes. It is one object rather than a
-    closure over its five values, so a record in flight keeps fewer objects
-    alive for the garbage collector to scan.
+    callback runs before the future completes. Then the future is untracked
+    (see _ProducerState._track). It is one object rather than a closure over
+    its values, so a record in flight keeps fewer objects alive for the garbage
+    collector to scan.
     """
 
-    __slots__ = ("_producer", "_callback", "_future", "_topic", "_partition")
+    __slots__ = ("_producer", "_callback", "_future", "_topic", "_partition", "_untrack")
 
     def __init__(self, producer: object, callback: Callback | None,
-                 future: Future[RecordMetadata], topic: str, partition: int | None) -> None:
+                 future: Future[RecordMetadata], topic: str, partition: int | None,
+                 untrack: Callable[[Future[RecordMetadata]], None]) -> None:
         self._producer = producer
         self._callback = callback
         self._future = future
         self._topic = topic
         self._partition = partition
+        self._untrack = untrack
 
     def __call__(self, result: int, error: int, immediate: bool) -> None:
         metadata, exception = completion_to_python(result, error, self._topic, self._partition)
@@ -105,6 +108,7 @@ class _Completion:
             self._future.set_exception(exception)
         else:
             self._future.set_result(metadata)
+        self._untrack(self._future)
 
 
 class Producer(Generic[K, V], _ProducerState):
@@ -314,7 +318,7 @@ class Producer(Generic[K, V], _ProducerState):
             return self._send_waiting(native, topic, partition, callback, future)
 
         # Not waited for: no transactional.id, or inside a started transaction.
-        cb = _Completion(self, callback, future, topic, partition)
+        cb = _Completion(self, callback, future, topic, partition, self._discard_future)
         # A close() that began since the check above (the serializers ran in
         # between) refuses the record as Java's RecordAccumulator.append does.
         # The handle outlives close() (see _release_handle), so the call is not
@@ -366,6 +370,7 @@ class Producer(Generic[K, V], _ProducerState):
                 future.set_exception(exception)
             else:
                 future.set_result(metadata)
+            self._discard_future(future)
 
         space: Future[None] | None = None
         handed_over: threading.Event | None = None

@@ -326,18 +326,21 @@ class AsyncProducer(Generic[K, V], _ProducerState):
 
     def _complete_pending(self, loop: asyncio.AbstractEventLoop) -> None:
         """Resolve the completions buffered for ``loop``, on ``loop``, in
-        completion order: the callback runs, then the future completes."""
+        completion order: the callback runs, then the future completes, then it
+        is untracked (see _ProducerState._track), also when its awaiter
+        cancelled it."""
         with self._pending_lock:
             items = self._pending.pop(loop, [])
+        untrack = self._discard_future
         for future, callback, topic, partition, result, error in items:
             metadata, exception = completion_to_python(result, error, topic, partition)
             invoke_callback(self, callback, metadata, exception)
-            if future.done():
-                continue  # cancelled by its awaiter
-            if exception is not None:
-                future.set_exception(exception)
-            else:
-                future.set_result(metadata)
+            if not future.done():  # done: cancelled by its awaiter
+                if exception is not None:
+                    future.set_exception(exception)
+                else:
+                    future.set_result(metadata)
+            untrack(future)
 
     async def flush(self) -> None:
         """See :meth:`Producer.flush`: when it returns, the callbacks of the
