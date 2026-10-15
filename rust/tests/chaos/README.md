@@ -215,9 +215,11 @@ Run via `cargo xtask chaos …`. Defaults mirror `chaos.py` where they overlap.
   (1000 × 1 MiB is about 1 GiB/s); the producer is then paced by backpressure,
   and the achieved rate is printed when it finishes:
   `chaos: producer-… sent N records in Ts (R records/s, M MiB/s, target X records/s)`.
-- `--commit sync|async` (`sync`). A gRPC consumer performs `async` as a
-  synchronous commit on the server side (the offsets are committed, the async
-  timing is not exercised); the run prints a notice when this applies.
+- `--commit sync|async` (`sync`). Every backend performs `async` as a real
+  asynchronous commit (Java's `commitAsync` with a callback): the C and Python
+  gRPC servers report each failed async commit as a commit-error event, and
+  async commits are not retried, so a broker roll can report a few
+  retriable commit failures.
 
 ### Security protocol
 - `--security-protocol plaintext|ssl|sasl_plaintext|sasl_ssl` (`plaintext`) —

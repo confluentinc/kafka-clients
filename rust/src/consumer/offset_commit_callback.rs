@@ -54,10 +54,19 @@ pub trait OffsetCommitCallback: Send + Sync + 'static {
     /// `void onComplete(Map<TopicPartition, OffsetAndMetadata> offsets,
     ///                  Exception exception)`.
     ///
-    /// Returns `()` (not `Result`) because Java's `onComplete` is `void` and
-    /// does not allow the callback to fail the commit — the commit has
-    /// already happened. The `error` parameter is informational and matches
-    /// Java's pattern of "exception == null means success".
+    /// The `error` parameter matches Java's pattern of "exception == null
+    /// means success".
+    ///
+    /// # Errors
+    ///
+    /// Java's `onComplete` is `void` but may throw: an exception it throws
+    /// is not caught (`OffsetCommitCallbackInvoker.executeCallbacks`) and
+    /// propagates out of the call that ran the callback (`poll`,
+    /// `commit_sync`, `commit_async`, `close`; `poll` wraps it as
+    /// `ConsumerUtils.maybeWrapAsKafkaException` does). An `Err` returned
+    /// here is that exception: it propagates the same way, and callbacks
+    /// queued behind this one stay queued for the next call that runs them.
+    /// The commit itself has already completed.
     ///
     /// # Arguments
     ///
@@ -66,5 +75,9 @@ pub trait OffsetCommitCallback: Send + Sync + 'static {
     /// * `error` - `Some(&error)` if the commit failed, `None` if it
     ///   completed successfully
     #[doc(alias = "org.apache.kafka.clients.consumer.OffsetCommitCallback#onComplete")]
-    async fn on_complete(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>);
+    async fn on_complete(
+        &self,
+        offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+        error: Option<&Error>,
+    ) -> Result<(), Error>;
 }

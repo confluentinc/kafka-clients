@@ -39,7 +39,7 @@ class InvalidRequestError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 42  # kafka_common_ErrorCode_INVALID_REQUEST
+    _ffi_id: ClassVar[int] = 42  # kafka_common_Error_INVALID_REQUEST
 
     def __init__(
         self,

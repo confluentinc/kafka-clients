@@ -46,7 +46,7 @@ class RecordDeserializationError(SerializationError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = -27  # kafka_common_ErrorCode_RECORD_DESERIALIZATION
+    _ffi_id: ClassVar[int] = -27  # kafka_common_Error_RECORD_DESERIALIZATION
 
     class DeserializationExceptionOrigin(enum.Enum):
         """Java's nested enum ``RecordDeserializationException.DeserializationExceptionOrigin``."""

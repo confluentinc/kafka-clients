@@ -34,7 +34,7 @@ class DelegationTokenNotFoundError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 62  # kafka_common_ErrorCode_DELEGATION_TOKEN_NOT_FOUND
+    _ffi_id: ClassVar[int] = 62  # kafka_common_Error_DELEGATION_TOKEN_NOT_FOUND
 
     def __init__(
         self,

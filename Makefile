@@ -97,8 +97,9 @@ devel-build-python: init-venv devel-build-rust
 # Build the per-language gRPC server Docker images used by the
 # multilanguage integration test harness. See
 # design/history/MILESTONE-6/DESIGN-multilanguage-tests.md.
-# Depends on `build` so libconfluent_kafka.{a,so} and confluent_kafka.h are
-# present under rust/target/release/.
+# Depends on `build` so libconfluent_kafka.{a,so} are present under
+# rust/target/release/, and confluent_kafka.h (the C image) and
+# confluent_kafka_bindings.h (the Python images) under rust/target/include/.
 build-grpc-images: build
 	@($(VENV) && $(MAKE) -C python $(ROOTS) grpc-image grpc-image-async)
 	$(MAKE) -C c $(ROOTS) grpc-image

@@ -25,5 +25,7 @@ message_only_error! {
     /// Corresponds to Java's `java.lang.IllegalStateException`; like
     /// [`LocalIllegalArgumentError`](crate::common::LocalIllegalArgumentError),
     /// outside the `KafkaException` hierarchy.
+    // translates java.lang.IllegalStateException, a JDK runtime exception (CLAUDE.md §2)
+    #[doc(alias = "rust-only")]
     LocalIllegalStateError
 }

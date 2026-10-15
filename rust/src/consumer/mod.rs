@@ -17,7 +17,6 @@
 //! Translated from `org.apache.kafka.clients.consumer`. The `clients` Java
 //! package segment is intentionally dropped per CLAUDE.md §2.
 
-mod async_kafka_consumer;
 pub mod close_options;
 mod consumer_commit_failed_error;
 mod consumer_config;
@@ -41,8 +40,6 @@ mod subscription_pattern;
 
 pub(crate) mod internals;
 
-pub(crate) use async_kafka_consumer::AsyncKafkaConsumer;
-pub use async_kafka_consumer::ConsumerHandle;
 pub use close_options::{CloseOptions, GroupMembershipOperation};
 pub use consumer_config::ConsumerConfig;
 pub use consumer_group_metadata::ConsumerGroupMetadata;
@@ -52,6 +49,7 @@ pub use consumer_record::{ConsumerRecord, ConsumerRecordOptions, ConsumerRecordO
 pub use consumer_records::ConsumerRecords;
 pub use group_protocol::GroupProtocol;
 pub use interceptor::ConsumerInterceptor;
+pub use internals::ConsumerHandle;
 pub use kafka_consumer::KafkaConsumer;
 pub use mock_consumer::MockConsumer;
 pub use offset_and_metadata::OffsetAndMetadata;
@@ -180,6 +178,8 @@ where
     fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata>;
 
     /// Returns the consumer's `client.id`. Borrowed per CLAUDE.md §14.
+    // Java's KafkaConsumer.clientId() is package-private; consumer-threading.md §1 lists it
+    #[doc(alias = "rust-only")]
     fn client_id(&self) -> &str;
 
     /// Translates Java's `OptionalLong currentLag(TopicPartition)`.
@@ -602,7 +602,7 @@ where
     /// Translates Java's `void close(CloseOptions option)`.
     ///
     /// Java's `@Deprecated void close(Duration timeout)` is not translated
-    /// (CLAUDE.md §3); pass `CloseOptions::new_timeout(timeout)` here instead,
+    /// (CLAUDE.md §3); pass `CloseOptions::new_with_timeout(timeout)` here instead,
     /// which is what the Java overload's body does.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#close(CloseOptions)")]
     async fn close_with_options(&mut self, options: CloseOptions) -> Result<(), Error>;
@@ -628,6 +628,8 @@ where
     /// `Box<dyn Consumer>` is not `Clone`, so neither is expressible with a
     /// bare reference; capture a [`ConsumerHandle`] instead. See
     /// [`ConsumerHandle`].
+    // listener reentrancy handle (consumer-threading.md §31, §41)
+    #[doc(alias = "rust-only")]
     fn handle(&self) -> ConsumerHandle;
 }
 

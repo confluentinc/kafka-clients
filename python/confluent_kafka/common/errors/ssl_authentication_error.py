@@ -44,7 +44,7 @@ class SslAuthenticationError(AuthenticationError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = -16  # kafka_common_ErrorCode_SSL_AUTHENTICATION
+    _ffi_id: ClassVar[int] = -16  # kafka_common_Error_SSL_AUTHENTICATION
 
     def __init__(
         self,

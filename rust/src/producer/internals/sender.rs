@@ -187,26 +187,27 @@ impl SenderMetrics {
         log_context: LogContext,
     ) -> Result<Self, Error> {
         let batch_size_sensor = metrics.sensor("batch-size")?;
-        batch_size_sensor.add_metric_name(metrics.batch_size_avg.clone(), Box::new(Avg::new()))?;
-        batch_size_sensor.add_metric_name(metrics.batch_size_max.clone(), Box::new(Max::new()))?;
+        batch_size_sensor.add_with_metric_name(metrics.batch_size_avg.clone(), Box::new(Avg::new()))?;
+        batch_size_sensor.add_with_metric_name(metrics.batch_size_max.clone(), Box::new(Max::new()))?;
 
         let compression_rate_sensor = metrics.sensor("compression-rate")?;
-        compression_rate_sensor.add_metric_name(metrics.compression_rate_avg.clone(), Box::new(Avg::new()))?;
+        compression_rate_sensor.add_with_metric_name(metrics.compression_rate_avg.clone(), Box::new(Avg::new()))?;
 
         let queue_time_sensor = metrics.sensor("queue-time")?;
-        queue_time_sensor.add_metric_name(metrics.record_queue_time_avg.clone(), Box::new(Avg::new()))?;
-        queue_time_sensor.add_metric_name(metrics.record_queue_time_max.clone(), Box::new(Max::new()))?;
+        queue_time_sensor.add_with_metric_name(metrics.record_queue_time_avg.clone(), Box::new(Avg::new()))?;
+        queue_time_sensor.add_with_metric_name(metrics.record_queue_time_max.clone(), Box::new(Max::new()))?;
 
         let request_time_sensor = metrics.sensor("request-time")?;
-        request_time_sensor.add_metric_name(metrics.request_latency_avg.clone(), Box::new(Avg::new()))?;
-        request_time_sensor.add_metric_name(metrics.request_latency_max.clone(), Box::new(Max::new()))?;
+        request_time_sensor.add_with_metric_name(metrics.request_latency_avg.clone(), Box::new(Avg::new()))?;
+        request_time_sensor.add_with_metric_name(metrics.request_latency_max.clone(), Box::new(Max::new()))?;
 
         let records_per_request_sensor = metrics.sensor("records-per-request")?;
         records_per_request_sensor.add(Box::new(Meter::new(
             metrics.record_send_rate.clone(),
             metrics.record_send_total.clone(),
         )))?;
-        records_per_request_sensor.add_metric_name(metrics.records_per_request_avg.clone(), Box::new(Avg::new()))?;
+        records_per_request_sensor
+            .add_with_metric_name(metrics.records_per_request_avg.clone(), Box::new(Avg::new()))?;
 
         let retry_sensor = metrics.sensor("record-retries")?;
         retry_sensor.add(Box::new(Meter::new(
@@ -221,8 +222,8 @@ impl SenderMetrics {
         )))?;
 
         let max_record_size_sensor = metrics.sensor("record-size")?;
-        max_record_size_sensor.add_metric_name(metrics.record_size_max.clone(), Box::new(Max::new()))?;
-        max_record_size_sensor.add_metric_name(metrics.record_size_avg.clone(), Box::new(Avg::new()))?;
+        max_record_size_sensor.add_with_metric_name(metrics.record_size_max.clone(), Box::new(Max::new()))?;
+        max_record_size_sensor.add_with_metric_name(metrics.record_size_avg.clone(), Box::new(Avg::new()))?;
 
         // `requests-in-flight` gauge: Java `(config, now) -> client.inFlightRequestCount()`.
         let in_flight_for_gauge = Arc::clone(&in_flight_count);
@@ -292,7 +293,7 @@ impl SenderMetrics {
         let topic_compression_rate_name = format!("topic.{topic}.compression-rate");
         let topic_compression_rate = self.metrics.sensor(&topic_compression_rate_name)?;
         let m = self.metrics.topic_compression_rate(metric_tags.clone())?;
-        topic_compression_rate.add_metric_name(m, Box::new(Avg::new()))?;
+        topic_compression_rate.add_with_metric_name(m, Box::new(Avg::new()))?;
 
         let topic_retry_name = format!("topic.{topic}.record-retries");
         let topic_retry_sensor = self.metrics.sensor(&topic_retry_name)?;
@@ -330,32 +331,33 @@ impl SenderMetrics {
                 // Per-topic record send rate.
                 let topic_records_count_name = format!("topic.{topic}.records-per-batch");
                 if let Some(s) = self.metrics.get_sensor(&topic_records_count_name) {
-                    s.record_value_time_ms(batch.record_count as f64, now);
+                    s.record_with_value_time_ms(batch.record_count as f64, now);
                 }
 
                 // Per-topic bytes send rate.
                 let topic_byte_rate_name = format!("topic.{topic}.bytes");
                 if let Some(s) = self.metrics.get_sensor(&topic_byte_rate_name) {
-                    s.record_value_time_ms(batch.estimated_size_in_bytes() as f64, now);
+                    s.record_with_value_time_ms(batch.estimated_size_in_bytes() as f64, now);
                 }
 
                 // Per-topic compression rate.
                 let topic_compression_rate_name = format!("topic.{topic}.compression-rate");
                 if let Some(s) = self.metrics.get_sensor(&topic_compression_rate_name) {
-                    s.record_value_time_ms(batch.compression_ratio(), now);
+                    s.record_with_value_time_ms(batch.compression_ratio(), now);
                 }
 
                 // Global metrics.
                 self.batch_size_sensor
-                    .record_value_time_ms(batch.estimated_size_in_bytes() as f64, now);
-                self.queue_time_sensor.record_value_time_ms(batch.queue_time_ms() as f64, now);
+                    .record_with_value_time_ms(batch.estimated_size_in_bytes() as f64, now);
+                self.queue_time_sensor
+                    .record_with_value_time_ms(batch.queue_time_ms() as f64, now);
                 self.compression_rate_sensor
-                    .record_value_time_ms(batch.compression_ratio(), now);
+                    .record_with_value_time_ms(batch.compression_ratio(), now);
                 self.max_record_size_sensor
-                    .record_value_time_ms(batch.max_record_size as f64, now);
+                    .record_with_value_time_ms(batch.max_record_size as f64, now);
                 records += batch.record_count;
             }
-            self.records_per_request_sensor.record_value_time_ms(records as f64, now);
+            self.records_per_request_sensor.record_with_value_time_ms(records as f64, now);
         }
     }
 
@@ -364,10 +366,10 @@ impl SenderMetrics {
     #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender$SenderMetrics#recordRetries")]
     fn record_retries(&self, topic: &str, count: i32) {
         let now = self.time.milliseconds();
-        self.retry_sensor.record_value_time_ms(count as f64, now);
+        self.retry_sensor.record_with_value_time_ms(count as f64, now);
         let topic_retry_name = format!("topic.{topic}.record-retries");
         if let Some(topic_retry_sensor) = self.metrics.get_sensor(&topic_retry_name) {
-            topic_retry_sensor.record_value_time_ms(count as f64, now);
+            topic_retry_sensor.record_with_value_time_ms(count as f64, now);
         }
     }
 
@@ -376,10 +378,10 @@ impl SenderMetrics {
     #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender$SenderMetrics#recordErrors")]
     fn record_errors(&self, topic: &str, count: i32) {
         let now = self.time.milliseconds();
-        self.error_sensor.record_value_time_ms(count as f64, now);
+        self.error_sensor.record_with_value_time_ms(count as f64, now);
         let topic_error_name = format!("topic.{topic}.record-errors");
         if let Some(topic_error_sensor) = self.metrics.get_sensor(&topic_error_name) {
-            topic_error_sensor.record_value_time_ms(count as f64, now);
+            topic_error_sensor.record_with_value_time_ms(count as f64, now);
         }
     }
 
@@ -389,11 +391,11 @@ impl SenderMetrics {
     #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender$SenderMetrics#recordLatency")]
     fn record_latency(&self, node: &str, latency: i64) {
         let now = self.time.milliseconds();
-        self.request_time_sensor.record_value_time_ms(latency as f64, now);
+        self.request_time_sensor.record_with_value_time_ms(latency as f64, now);
         if !node.is_empty() {
             let node_time_name = format!("node-{node}.latency");
             if let Some(node_request_time) = self.metrics.get_sensor(&node_time_name) {
-                node_request_time.record_value_time_ms(latency as f64, now);
+                node_request_time.record_with_value_time_ms(latency as f64, now);
             }
         }
     }
@@ -402,7 +404,7 @@ impl SenderMetrics {
     /// (Java's no-arg `Sensor.record()` records the value `1.0`).
     #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender$SenderMetrics#recordBatchSplit")]
     fn record_batch_split(&self) {
-        self.batch_split_sensor.record_value(1.0);
+        self.batch_split_sensor.record_with_value(1.0);
     }
 }
 
@@ -678,9 +680,9 @@ impl<C: KafkaClient> Sender<C> {
     pub(crate) fn throttle_time_sensor(metrics: &SenderMetricsRegistry) -> Result<Arc<Sensor>, Error> {
         let produce_throttle_time_sensor = metrics.sensor("produce-throttle-time")?;
         produce_throttle_time_sensor
-            .add_metric_name(metrics.produce_throttle_time_avg.clone(), Box::new(Avg::new()))?;
+            .add_with_metric_name(metrics.produce_throttle_time_avg.clone(), Box::new(Avg::new()))?;
         produce_throttle_time_sensor
-            .add_metric_name(metrics.produce_throttle_time_max.clone(), Box::new(Max::new()))?;
+            .add_with_metric_name(metrics.produce_throttle_time_max.clone(), Box::new(Max::new()))?;
         Ok(produce_throttle_time_sensor)
     }
 

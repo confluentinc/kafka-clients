@@ -28,6 +28,7 @@ pub struct ListTopicsOptions {
 
 impl ListTopicsOptions {
     /// Creates default options (`list_internal=false`, default API timeout).
+    #[doc(alias = "org.apache.kafka.clients.admin.ListTopicsOptions#ListTopicsOptions")]
     pub fn new() -> Self {
         Self::default()
     }
@@ -35,6 +36,7 @@ impl ListTopicsOptions {
     /// Set the timeout in milliseconds for this operation, or `None` to use the
     /// default API timeout for the `AdminClient`.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.ListTopicsOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
@@ -42,18 +44,21 @@ impl ListTopicsOptions {
 
     /// The timeout in milliseconds for this operation, or `None` if the default
     /// API timeout should be used.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListTopicsOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
 
     /// Set whether we should list internal topics.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.ListTopicsOptions#listInternal")]
     pub fn set_list_internal(mut self, list_internal: bool) -> Self {
         self.list_internal = list_internal;
         self
     }
 
     /// Return true if we should list internal topics.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListTopicsOptions#shouldListInternal")]
     pub fn should_list_internal(&self) -> bool {
         self.list_internal
     }

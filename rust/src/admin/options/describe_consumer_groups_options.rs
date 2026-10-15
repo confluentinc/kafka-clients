@@ -28,6 +28,7 @@ pub struct DescribeConsumerGroupsOptions {
 
 impl DescribeConsumerGroupsOptions {
     /// Creates default options.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeConsumerGroupsOptions#DescribeConsumerGroupsOptions")]
     pub fn new() -> Self {
         Self::default()
     }
@@ -35,6 +36,7 @@ impl DescribeConsumerGroupsOptions {
     /// Whether to include authorized operations in the description. Mirrors
     /// `includeAuthorizedOperations`.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeConsumerGroupsOptions#includeAuthorizedOperations")]
     pub fn set_include_authorized_operations(mut self, include_authorized_operations: bool) -> Self {
         self.include_authorized_operations = include_authorized_operations;
         self
@@ -42,6 +44,7 @@ impl DescribeConsumerGroupsOptions {
 
     /// Set the operation timeout in milliseconds (or `None` for the default).
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
@@ -49,11 +52,13 @@ impl DescribeConsumerGroupsOptions {
 
     /// Whether authorized operations are requested. Mirrors
     /// `includeAuthorizedOperations()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeConsumerGroupsOptions#includeAuthorizedOperations")]
     pub fn include_authorized_operations(&self) -> bool {
         self.include_authorized_operations
     }
 
     /// The operation timeout in milliseconds, or `None` for the default.
+    #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }

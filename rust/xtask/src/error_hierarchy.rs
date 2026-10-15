@@ -16,7 +16,7 @@
 //!
 //! Reads the Java exception sources (Apache Kafka 4.4.0, under `kafka/`) and
 //! emits one Python class per Java exception class the FFI enum
-//! `kafka_common_ErrorCode_t` names, plus Java's abstract bases, the base
+//! `kafka_common_Error_e` names, plus Java's abstract bases, the base
 //! `KafkaException` and the Java built-in exceptions of the Types table, each as
 //! a `.py` plus `.pyi` file in the module of its Java package (CLAUDE.md, Python
 //! Binding Conventions, Modules and Errors). Every class keeps Java's `extends`
@@ -99,6 +99,17 @@ const EXCLUSIONS: &[&str] = &[
     "org.apache.kafka.common.security.oauthbearer.internals.unsecured.OAuthBearerConfigException",
     "org.apache.kafka.common.security.oauthbearer.internals.unsecured.OAuthBearerIllegalTokenException",
 ];
+
+/// FFI ids with no Java class, so no generated Python class: each is a Rust-only
+/// `Error` variant with no Java `extends` chain to translate.
+///
+/// - `LOCAL_CALLBACK` is `LocalCallbackError`, the error a binding reports when
+///   its own callback raised one of its language's errors
+///   (`kafka_common_Error_local_callback`). The client wraps it as Java wraps a
+///   listener's foreign `Throwable`, and the binding swaps its original
+///   exception back in from the error's `opaque`, so the user never sees a
+///   class for it.
+const RUST_ONLY_IDS: &[&str] = &["LOCAL_CALLBACK"];
 
 /// `(ffi_id_constant, java_class_fqn)` — one row per concrete (non-abstract) Java
 /// exception class, i.e. one row per FFI id (all 166 enum ids except `NONE`, which
@@ -827,15 +838,15 @@ fn build_graph(repo_root: &Path) -> anyhow::Result<BTreeMap<String, ClassInfo>> 
         if !enum_id_values.contains_key(*id) {
             anyhow::bail!(
                 "error hierarchy: BRIDGE names FFI id `{id}` (for `{fqn}`) that is not in \
-                 kafka_common_ErrorCode_t ({FFI_ENUM_SOURCE})"
+                 kafka_common_Error_e ({FFI_ENUM_SOURCE})"
             );
         }
     }
     for id in enum_id_values.keys() {
-        if id != "NONE" && !bridge_ids.contains(id.as_str()) {
+        if id != "NONE" && !RUST_ONLY_IDS.contains(&id.as_str()) && !bridge_ids.contains(id.as_str()) {
             anyhow::bail!(
                 "error hierarchy: FFI id `{id}` has no class in the BRIDGE table — every \
-                 kafka_common_ErrorCode_t id except NONE must map to one Java class"
+                 kafka_common_Error_e id except NONE must map to one Java class"
             );
         }
     }
@@ -2277,7 +2288,7 @@ fn render_class(g: &Graph, info: &ClassInfo) -> anyhow::Result<Rendered> {
             body.push("    # A bare KafkaException is reported as UNKNOWN_SERVER_ERROR; UnknownServerError".into());
             body.push("    # owns that id in the id -> class table.".into());
         }
-        body.push(format!("    _ffi_id: ClassVar[int] = {value}  # kafka_common_ErrorCode_{id}"));
+        body.push(format!("    _ffi_id: ClassVar[int] = {value}  # kafka_common_Error_{id}"));
     }
     for e in &info.java.enums {
         body.push(String::new());
@@ -3161,19 +3172,19 @@ fn validate_exception_scan(repo_root: &Path, classes: &BTreeMap<String, ClassInf
     Ok(())
 }
 
-/// Extract the enumerator `(name, value)` pairs of `kafka_common_ErrorCode_t`
-/// (names without the `kafka_common_ErrorCode_` prefix) from the FFI source.
+/// Extract the enumerator `(name, value)` pairs of `kafka_common_Error_e`
+/// (names without the `kafka_common_Error_` prefix) from the FFI source.
 fn parse_ffi_enum_ids(repo_root: &Path) -> anyhow::Result<BTreeMap<String, i32>> {
     let src = fs::read_to_string(repo_root.join(FFI_ENUM_SOURCE))?;
     let body = src
-        .split_once("pub enum kafka_common_ErrorCode_t {")
+        .split_once("pub enum kafka_common_Error_e {")
         .map(|(_, rest)| rest)
-        .ok_or_else(|| anyhow::anyhow!("{FFI_ENUM_SOURCE}: kafka_common_ErrorCode_t not found"))?;
+        .ok_or_else(|| anyhow::anyhow!("{FFI_ENUM_SOURCE}: kafka_common_Error_e not found"))?;
     let body = body.split_once("\n}").map(|(b, _)| b).unwrap_or(body);
     let mut ids = BTreeMap::new();
     for line in body.lines() {
         let line = line.trim();
-        if let Some(rest) = line.strip_prefix("kafka_common_ErrorCode_") {
+        if let Some(rest) = line.strip_prefix("kafka_common_Error_") {
             if let Some((name, value)) = rest.split_once(" = ") {
                 let value: i32 = value.trim_end_matches(',').trim().parse()?;
                 ids.insert(name.to_string(), value);
@@ -3181,7 +3192,7 @@ fn parse_ffi_enum_ids(repo_root: &Path) -> anyhow::Result<BTreeMap<String, i32>>
         }
     }
     if ids.is_empty() {
-        anyhow::bail!("{FFI_ENUM_SOURCE}: kafka_common_ErrorCode_t has no enumerators");
+        anyhow::bail!("{FFI_ENUM_SOURCE}: kafka_common_Error_e has no enumerators");
     }
     Ok(ids)
 }

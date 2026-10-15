@@ -37,8 +37,8 @@ use crate::common::TopicPartition;
 /// the Java class that *declares* it, `AbstractStickyAssignor`, is a
 /// client-side assignor and is out of scope per `consumer-threading.md` §20,
 /// so there is no translated type to host it on. It is referenced only within
-/// this file.
-pub const DEFAULT_GENERATION: i32 = -1;
+/// this file, and is not public: its Java home is in `consumer.internals`.
+pub(crate) const DEFAULT_GENERATION: i32 = -1;
 
 /// The parameters of Java's widest `Subscription` constructor
 /// (`Subscription(List, ByteBuffer, List, int, Optional<String>)`,
@@ -57,6 +57,8 @@ pub const DEFAULT_GENERATION: i32 = -1;
 /// [`SubscriptionOptionsBuilder::new`] and set it: [`SubscriptionOptionsBuilder::build`] returns an error if `topics` was not set.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
+// the options of Subscription's constructor overloads (CLAUDE.md §2)
+#[doc(alias = "rust-only")]
 pub struct SubscriptionOptions {
     /// Java's `topics`.
     pub(crate) topics: Vec<String>,
@@ -77,6 +79,8 @@ pub struct SubscriptionOptions {
 /// fluent setter, and [`Self::build`] validates the mandatory ones — returning
 /// [`Error::LocalIllegalArgument`] if they were not set. Like [`SubscriptionOptions`] it has no Java counterpart and
 /// exists solely to satisfy that naming rule (DoD #7).
+// builds SubscriptionOptions (CLAUDE.md §2)
+#[doc(alias = "rust-only")]
 pub struct SubscriptionOptionsBuilder {
     topics: Option<Vec<String>>,
     user_data: Option<Vec<u8>>,

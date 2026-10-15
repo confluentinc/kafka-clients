@@ -34,7 +34,7 @@ class ClusterAuthorizationError(AuthorizationError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 31  # kafka_common_ErrorCode_CLUSTER_AUTHORIZATION_FAILED
+    _ffi_id: ClassVar[int] = 31  # kafka_common_Error_CLUSTER_AUTHORIZATION_FAILED
 
     def __init__(
         self,

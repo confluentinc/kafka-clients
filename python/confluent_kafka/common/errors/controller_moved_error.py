@@ -34,7 +34,7 @@ class ControllerMovedError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 11  # kafka_common_ErrorCode_STALE_CONTROLLER_EPOCH
+    _ffi_id: ClassVar[int] = 11  # kafka_common_Error_STALE_CONTROLLER_EPOCH
 
     def __init__(
         self,

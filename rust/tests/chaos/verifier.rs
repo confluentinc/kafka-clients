@@ -102,7 +102,7 @@ pub enum WorkloadEvent {
     /// events are not in real-time order with each other.
     ConsumerStarted { consumer: String, in_process: bool },
     /// Consumer `consumer` received `index` at this physical address.
-    /// `topic_id` is best-effort: `Uuid::zero()` when the consumer could not
+    /// `topic_id` is best-effort: `Uuid::ZERO_UUID` when the consumer could not
     /// resolve it (single-topic non-recreate runs do not need it).
     Consumed {
         consumer: String,
@@ -1146,7 +1146,7 @@ impl ConservationState {
     /// destroyed), so its records are judged by id rather than by the
     /// point-in-time snapshots and the index floor.
     fn is_identified_generation(&self, topic_id: Uuid) -> bool {
-        topic_id != Uuid::zero()
+        topic_id != Uuid::ZERO_UUID
             && (self.new_generations.contains(&topic_id) || self.destroyed_generations.contains_key(&topic_id))
     }
 
@@ -1270,7 +1270,7 @@ impl Verifier for ConservationVerifier {
                 let now = Instant::now();
                 s.delivered_at.insert(key.clone(), now);
                 s.partition_first_acked_at.entry((topic.clone(), partition)).or_insert(now);
-                if topic_id != Uuid::zero() {
+                if topic_id != Uuid::ZERO_UUID {
                     s.topic_ids_seen.entry(topic.clone()).or_default().insert(topic_id);
                 }
                 if let Some(producer) = producer {
@@ -1364,7 +1364,7 @@ impl Verifier for ConservationVerifier {
                 // Per-incarnation reading progress (every generation, old ones
                 // included: a destroyed generation's excusal needs how far the
                 // consumer got in it).
-                if topic_id != Uuid::zero() {
+                if topic_id != Uuid::ZERO_UUID {
                     s.topic_ids_seen.entry(topic.clone()).or_default().insert(topic_id);
                     let max = s.max_consumed.entry((topic_id, partition)).or_insert(offset);
                     *max = (*max).max(offset);
@@ -2097,7 +2097,7 @@ impl std::fmt::Display for ChaosVerdict {
                     Some(o) => o.to_string(),
                     None => "none".to_string(),
                 };
-                let incarnation = if p.topic_id == Uuid::zero() {
+                let incarnation = if p.topic_id == Uuid::ZERO_UUID {
                     String::new()
                 } else {
                     format!(" [{}]", p.topic_id)
@@ -2190,14 +2190,14 @@ mod tests {
     use super::*;
 
     fn zero() -> Uuid {
-        Uuid::zero()
+        Uuid::ZERO_UUID
     }
 
     /// The id of the recreated topic's new generation in the label tests.
-    const NEW_GEN: [u8; 16] = [8u8; 16];
+    const NEW_GEN: Uuid = Uuid::new(u64::from_be_bytes([8u8; 8]), u64::from_be_bytes([8u8; 8]));
 
     fn lost_at(topic: &str, partition: i32, lost: (i64, i64), consumed: Option<i64>) -> LostPartition {
-        lost_in(Uuid::with_bytes(NEW_GEN), topic, partition, lost, consumed)
+        lost_in(NEW_GEN, topic, partition, lost, consumed)
     }
 
     fn lost_in(topic_id: Uuid, topic: &str, partition: i32, lost: (i64, i64), consumed: Option<i64>) -> LostPartition {
@@ -2219,7 +2219,7 @@ mod tests {
     /// committed-offset knock-on on the other topic.
     #[test]
     fn the_known_recreate_defect_is_labelled_only_on_its_exact_signature() {
-        let recreated: BTreeSet<Uuid> = [Uuid::with_bytes(NEW_GEN)].into_iter().collect();
+        let recreated: BTreeSet<Uuid> = [NEW_GEN].into_iter().collect();
         let repro = vec![
             lost_at("chaos-run_0", 1, (0, 154), Some(1737)),
             lost_at("chaos-run_0", 2, (0, 147), Some(1749)),
@@ -2260,14 +2260,20 @@ mod tests {
         // incarnation (a gap), or any additional kind of failure.
         assert_eq!(known_recreate_defect(1, &recreated, &repro, &reasons), None);
         let other_topic = vec![lost_in(
-            Uuid::with_bytes([9u8; 16]),
+            Uuid::new(u64::from_be_bytes([9u8; 8]), u64::from_be_bytes([9u8; 8])),
             "chaos-run_1",
             0,
             (0, 9),
             Some(100),
         )];
         assert_eq!(known_recreate_defect(2, &recreated, &other_topic, &reasons), None);
-        let old_generation = vec![lost_in(Uuid::with_bytes([7u8; 16]), "chaos-run_0", 4, (0, 60), None)];
+        let old_generation = vec![lost_in(
+            Uuid::new(u64::from_be_bytes([7u8; 8]), u64::from_be_bytes([7u8; 8])),
+            "chaos-run_0",
+            4,
+            (0, 60),
+            None,
+        )];
         assert_eq!(known_recreate_defect(2, &recreated, &old_generation, &reasons), None);
         let unidentified = vec![lost_in(zero(), "chaos-run_0", 4, (0, 60), None)];
         assert_eq!(known_recreate_defect(2, &recreated, &unidentified, &reasons), None);
@@ -2639,8 +2645,8 @@ mod tests {
     /// generation is then a cross-generation repeat, not a double write.
     #[test]
     fn consumed_topic_id_is_corrected_from_the_ack_at_the_same_address() {
-        let old = Uuid::with_bytes([1u8; 16]);
-        let new = Uuid::with_bytes([2u8; 16]);
+        let old = Uuid::new(u64::from_be_bytes([1u8; 8]), u64::from_be_bytes([1u8; 8]));
+        let new = Uuid::new(u64::from_be_bytes([2u8; 8]), u64::from_be_bytes([2u8; 8]));
         let v = ConservationVerifier::new();
         v.record(WorkloadEvent::Delivered { index: 7, topic: "t".into(), topic_id: old, partition: 0, offset: 100 });
         // Old-generation copy, polled after the id map switched to `new`.
@@ -2674,8 +2680,8 @@ mod tests {
     /// cross-generation repeat, not a double write.
     #[test]
     fn a_retry_acked_in_the_new_generation_is_not_a_double_write() {
-        let old = Uuid::with_bytes([1u8; 16]);
-        let new = Uuid::with_bytes([2u8; 16]);
+        let old = Uuid::new(u64::from_be_bytes([1u8; 8]), u64::from_be_bytes([1u8; 8]));
+        let new = Uuid::new(u64::from_be_bytes([2u8; 8]), u64::from_be_bytes([2u8; 8]));
         let v = ConservationVerifier::new();
         recreate(&v, "t", old, new);
         v.record(WorkloadEvent::Delivered { index: 7, topic: "t".into(), topic_id: new, partition: 0, offset: 3 });
@@ -2744,8 +2750,8 @@ mod tests {
         let v = ConservationVerifier::new();
         // Both topics deliver index 5 at the same physical partition/offset but
         // under distinct topic ids (post-create ids differ).
-        let id0 = Uuid::with_bytes([1u8; 16]);
-        let id1 = Uuid::with_bytes([2u8; 16]);
+        let id0 = Uuid::new(u64::from_be_bytes([1u8; 8]), u64::from_be_bytes([1u8; 8]));
+        let id1 = Uuid::new(u64::from_be_bytes([2u8; 8]), u64::from_be_bytes([2u8; 8]));
         v.record(WorkloadEvent::Delivered { index: 5, topic: "t0".into(), topic_id: id0, partition: 0, offset: 5 });
         v.record(WorkloadEvent::Delivered { index: 5, topic: "t1".into(), topic_id: id1, partition: 0, offset: 5 });
         // Consume each once.
@@ -3535,7 +3541,7 @@ mod tests {
     #[test]
     fn double_write_within_a_generation_fails() {
         let v = ConservationVerifier::new();
-        let id = Uuid::with_bytes([1u8; 16]);
+        let id = Uuid::new(u64::from_be_bytes([1u8; 8]), u64::from_be_bytes([1u8; 8]));
         v.record(WorkloadEvent::Delivered { index: 5, topic: "t".into(), topic_id: id, partition: 0, offset: 5 });
         v.record(WorkloadEvent::Consumed {
             consumer: "c".into(),
@@ -3573,7 +3579,7 @@ mod tests {
     #[test]
     fn double_write_across_partitions_of_one_generation_fails() {
         let v = ConservationVerifier::new();
-        let id = Uuid::with_bytes([1u8; 16]);
+        let id = Uuid::new(u64::from_be_bytes([1u8; 8]), u64::from_be_bytes([1u8; 8]));
         v.record(WorkloadEvent::Consumed {
             consumer: "c".into(),
             index: 5,
@@ -3602,7 +3608,7 @@ mod tests {
     #[test]
     fn re_read_at_the_same_offset_is_not_a_double_write() {
         let v = ConservationVerifier::new();
-        let id = Uuid::with_bytes([1u8; 16]);
+        let id = Uuid::new(u64::from_be_bytes([1u8; 8]), u64::from_be_bytes([1u8; 8]));
         v.record(WorkloadEvent::Delivered { index: 5, topic: "t".into(), topic_id: id, partition: 0, offset: 5 });
         v.record(WorkloadEvent::Consumed {
             consumer: "c".into(),
@@ -3635,8 +3641,8 @@ mod tests {
     #[test]
     fn duplicate_across_generations_is_excused() {
         let v = ConservationVerifier::new();
-        let old_id = Uuid::with_bytes([7u8; 16]);
-        let new_id = Uuid::with_bytes([8u8; 16]);
+        let old_id = Uuid::new(u64::from_be_bytes([7u8; 8]), u64::from_be_bytes([7u8; 8]));
+        let new_id = Uuid::new(u64::from_be_bytes([8u8; 8]), u64::from_be_bytes([8u8; 8]));
         v.note_expected_loss(ExpectedLossHint::DestroyedGeneration { id: old_id, deleted_at: Instant::now() });
         v.record(WorkloadEvent::Delivered { index: 5, topic: "t".into(), topic_id: old_id, partition: 0, offset: 5 });
         v.record(WorkloadEvent::Consumed {
@@ -3684,8 +3690,8 @@ mod tests {
     #[test]
     fn destroyed_generation_old_id_records_are_not_loss() {
         let v = ConservationVerifier::new();
-        let old_id = Uuid::with_bytes([7u8; 16]);
-        let new_id = Uuid::with_bytes([8u8; 16]);
+        let old_id = Uuid::new(u64::from_be_bytes([7u8; 8]), u64::from_be_bytes([7u8; 8]));
+        let new_id = Uuid::new(u64::from_be_bytes([8u8; 8]), u64::from_be_bytes([8u8; 8]));
         // Recreate happened: harness marks the old generation destroyed.
         v.note_expected_loss(ExpectedLossHint::DestroyedGeneration { id: old_id, deleted_at: Instant::now() });
         // A late ack to the OLD generation lands only now (after the recreate),
@@ -3723,7 +3729,7 @@ mod tests {
     /// generation hid exactly those stuck partitions (F9).
     #[test]
     fn destroyed_generation_excuses_only_the_unread_recent_tail() {
-        let old_id = Uuid::with_bytes([7u8; 16]);
+        let old_id = Uuid::new(u64::from_be_bytes([7u8; 8]), u64::from_be_bytes([7u8; 8]));
         let feed = |v: &ConservationVerifier| {
             // p0: offsets 0..=9 acked, the consumer read 0..=5 except 3 (a gap).
             for offset in 0..=9 {
@@ -3779,8 +3785,8 @@ mod tests {
     /// generation the consumer never read.
     #[test]
     fn new_generation_skipped_head_is_loss_even_below_the_floor() {
-        let old_id = Uuid::with_bytes([7u8; 16]);
-        let new_id = Uuid::with_bytes([8u8; 16]);
+        let old_id = Uuid::new(u64::from_be_bytes([7u8; 8]), u64::from_be_bytes([7u8; 8]));
+        let new_id = Uuid::new(u64::from_be_bytes([8u8; 8]), u64::from_be_bytes([8u8; 8]));
         let v = ConservationVerifier::new();
         for i in 0..5u64 {
             v.record(delivered_in("t", old_id, i, 0, i as i64));
@@ -3822,9 +3828,9 @@ mod tests {
     /// and not the defect at all, since 17 < 21 (F9).
     #[test]
     fn consumed_offsets_are_per_incarnation_in_the_loss_report_and_the_label() {
-        let old_id = Uuid::with_bytes([7u8; 16]);
-        let new_id = Uuid::with_bytes([8u8; 16]);
-        let other_id = Uuid::with_bytes([9u8; 16]);
+        let old_id = Uuid::new(u64::from_be_bytes([7u8; 8]), u64::from_be_bytes([7u8; 8]));
+        let new_id = Uuid::new(u64::from_be_bytes([8u8; 8]), u64::from_be_bytes([8u8; 8]));
+        let other_id = Uuid::new(u64::from_be_bytes([9u8; 8]), u64::from_be_bytes([9u8; 8]));
         let v = ConservationVerifier::new();
         v.record(delivered_in("t1", other_id, 0, 0, 0));
         v.record(consumed_in("t1", other_id, 0, 0, 0));
@@ -3939,9 +3945,9 @@ mod tests {
     /// labelled as the known defect, never excused as a blackout skip.
     #[test]
     fn a_skipped_new_generation_head_fails_with_the_known_defect_label() {
-        let old_id = Uuid::with_bytes([7u8; 16]);
-        let new_id = Uuid::with_bytes([8u8; 16]);
-        let other_id = Uuid::with_bytes([9u8; 16]);
+        let old_id = Uuid::new(u64::from_be_bytes([7u8; 8]), u64::from_be_bytes([7u8; 8]));
+        let new_id = Uuid::new(u64::from_be_bytes([8u8; 8]), u64::from_be_bytes([8u8; 8]));
+        let other_id = Uuid::new(u64::from_be_bytes([9u8; 8]), u64::from_be_bytes([9u8; 8]));
         let v = ConservationVerifier::new();
         v.record(delivered_in("chaos-run_1", other_id, 0, 0, 0));
         v.record(consumed_in("chaos-run_1", other_id, 0, 0, 0));
@@ -3992,9 +3998,9 @@ mod tests {
     /// created.
     #[test]
     fn a_stuck_old_generation_is_loss_without_the_known_defect_label() {
-        let old_id = Uuid::with_bytes([7u8; 16]);
-        let new_id = Uuid::with_bytes([8u8; 16]);
-        let other_id = Uuid::with_bytes([9u8; 16]);
+        let old_id = Uuid::new(u64::from_be_bytes([7u8; 8]), u64::from_be_bytes([7u8; 8]));
+        let new_id = Uuid::new(u64::from_be_bytes([8u8; 8]), u64::from_be_bytes([8u8; 8]));
+        let other_id = Uuid::new(u64::from_be_bytes([9u8; 8]), u64::from_be_bytes([9u8; 8]));
         let v = ConservationVerifier::with_destroyed_tail_window(Duration::ZERO);
         v.record(delivered_in("chaos-run_1", other_id, 0, 0, 0));
         v.record(consumed_in("chaos-run_1", other_id, 0, 0, 0));
@@ -4041,9 +4047,9 @@ mod tests {
     #[test]
     fn a_partition_unread_for_longer_than_the_window_across_generations_is_loss() {
         let window = Duration::from_millis(1200);
-        let gen_a = Uuid::with_bytes([7u8; 16]);
-        let gen_b = Uuid::with_bytes([8u8; 16]);
-        let gen_c = Uuid::with_bytes([6u8; 16]);
+        let gen_a = Uuid::new(u64::from_be_bytes([7u8; 8]), u64::from_be_bytes([7u8; 8]));
+        let gen_b = Uuid::new(u64::from_be_bytes([8u8; 8]), u64::from_be_bytes([8u8; 8]));
+        let gen_c = Uuid::new(u64::from_be_bytes([6u8; 8]), u64::from_be_bytes([6u8; 8]));
         let v = ConservationVerifier::with_destroyed_tail_window(window);
         let mut index = 0u64;
         let live = |v: &ConservationVerifier, id: Uuid, lifetime: Duration, index: &mut u64| {
@@ -4083,8 +4089,8 @@ mod tests {
     #[test]
     fn a_global_consumption_stall_does_not_make_a_partition_stuck() {
         let window = Duration::from_millis(600);
-        let gen_a = Uuid::with_bytes([7u8; 16]);
-        let gen_b = Uuid::with_bytes([8u8; 16]);
+        let gen_a = Uuid::new(u64::from_be_bytes([7u8; 8]), u64::from_be_bytes([7u8; 8]));
+        let gen_b = Uuid::new(u64::from_be_bytes([8u8; 8]), u64::from_be_bytes([8u8; 8]));
         let v = ConservationVerifier::with_destroyed_tail_window(window);
         for partition in [0, 1] {
             v.record(delivered_in("t", gen_a, partition as u64, partition, 0));
@@ -4420,8 +4426,8 @@ mod tests {
     /// counted, not scored, and the records are still conserved.
     #[test]
     fn a_late_old_generation_ack_on_a_recreated_topic_is_not_scored() {
-        let old_id = Uuid::with_bytes([7u8; 16]);
-        let new_id = Uuid::with_bytes([8u8; 16]);
+        let old_id = Uuid::new(u64::from_be_bytes([7u8; 8]), u64::from_be_bytes([7u8; 8]));
+        let new_id = Uuid::new(u64::from_be_bytes([8u8; 8]), u64::from_be_bytes([8u8; 8]));
         let v = ConservationVerifier::new();
         v.record(rebalance("c1", RebalanceCallback::Assigned, &[0]));
         v.record(sent(1, "p1"));

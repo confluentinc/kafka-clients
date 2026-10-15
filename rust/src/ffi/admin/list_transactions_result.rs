@@ -1,0 +1,220 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! `kafka_admin_ListTransactionsResult_t`:
+//! `org.apache.kafka.clients.admin.ListTransactionsResult` (CLAUDE.md §4).
+//! Broker ids cross as boxed `int32_t *` map keys, compared by value.
+
+use std::collections::{BTreeMap, HashMap};
+use std::ffi::c_void;
+
+use crate::admin::{ListTransactionsResult, TransactionListing};
+use crate::common::KafkaFuture;
+use crate::ffi::admin::transaction_listing::{box_transaction_listing, destroy_transaction_listing_element};
+use crate::ffi::admin::{
+    FutureCtx, ResultHandle, box_result, destroy_list_element, destroy_map_element, destroy_result, result_ref,
+};
+use crate::ffi::ffi_guard;
+use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
+use crate::ffi::util::{box_list, box_map, destroy_boxed};
+
+/// Opaque handle to a [`ListTransactionsResult`], owned and freed with
+/// [`kafka_admin_ListTransactionsResult_destroy`].
+#[repr(C)]
+pub struct kafka_admin_ListTransactionsResult_t {
+    _private: [u8; 0],
+}
+
+/// Boxes a broker id as an owned `int32_t *` map key.
+fn box_i32(broker_id: &i32) -> *mut c_void {
+    Box::into_raw(Box::new(*broker_id)) as *mut c_void
+}
+
+/// Compares two `int32_t *` keys by value, for `kafka_Map_get`.
+///
+/// # Safety
+///
+/// `a` and `b` must each be null or point at a readable, aligned
+/// `int32_t`.
+unsafe fn i32_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
+    if a.is_null() || b.is_null() {
+        return a == b;
+    }
+    // SAFETY: `a` and `b` are non-null (checked above) and, per this function's `# Safety`, each
+    // points at a readable, aligned `int32_t`; the reads copy the two values.
+    unsafe { *(a as *const i32) == *(b as *const i32) }
+}
+
+/// Java's `Collection<TransactionListing>` as an owned list of owned
+/// `kafka_admin_TransactionListing_t *`, in the order given.
+fn listings_list(listings: Vec<TransactionListing>) -> *mut c_void {
+    let elements = listings
+        .into_iter()
+        .map(|l| box_transaction_listing(l) as *mut c_void)
+        .collect();
+    box_list(elements, Some(destroy_transaction_listing_element)) as *mut c_void
+}
+
+/// [`listings_list`] for the listings of every broker flattened out of an
+/// unordered map: sorted by transactional id so the order a C caller sees is
+/// deterministic.
+fn sorted_listings_list(mut listings: Vec<TransactionListing>) -> *mut c_void {
+    listings.sort_by(|a, b| a.transactional_id().cmp(b.transactional_id()));
+    listings_list(listings)
+}
+
+/// Java's `Map<Integer, Collection<TransactionListing>>` as an owned map of
+/// owned `int32_t *` broker ids, sorted and compared by value, to the owned
+/// `kafka_List_t *` built by [`listings_list`].
+fn all_by_broker_id_map(map: HashMap<i32, Vec<TransactionListing>>) -> *mut c_void {
+    let sorted: BTreeMap<i32, Vec<TransactionListing>> = map.into_iter().collect();
+    let entries = sorted
+        .into_iter()
+        .map(|(broker_id, l)| (box_i32(&broker_id), listings_list(l)))
+        .collect();
+    box_map(
+        entries,
+        Some(destroy_boxed::<i32>),
+        Some(destroy_list_element),
+        Some(i32_key_eq),
+    ) as *mut c_void
+}
+
+/// Hands `result` to C (used by the RPC functions in `rpc.rs`).
+pub(crate) fn box_list_transactions_result(
+    result: ListTransactionsResult,
+    ctx: &FutureCtx,
+) -> *mut kafka_admin_ListTransactionsResult_t {
+    box_result(result, ctx)
+}
+
+/// The handle `self_` points at.
+///
+/// # Safety
+///
+/// `self_` must be a live result handle, kept alive for `'a`.
+unsafe fn handle<'a>(self_: *const kafka_admin_ListTransactionsResult_t) -> &'a ResultHandle<ListTransactionsResult> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
+    // and every `kafka_admin_ListTransactionsResult_t` is built by
+    // `box_result::<ListTransactionsResult, _>` (in `box_list_transactions_result`), as
+    // `result_ref` requires.
+    unsafe { result_ref(self_) }
+}
+
+/// `all()`: an owned future freed with `kafka_common_KafkaFuture_destroy`;
+/// its `get` delivers a `kafka_List_t *` (owned by the future) of
+/// `kafka_admin_TransactionListing_t *` from every broker, sorted by
+/// transactional id.
+///
+/// # Safety
+///
+/// `self_` must be a live result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_all(
+    self_: *const kafka_admin_ListTransactionsResult_t,
+) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
+    let h = unsafe { handle(self_) };
+    // SAFETY: `destroy_list_element` frees exactly the list `sorted_listings_list` makes through
+    // `box_list`, and the handle holds only owned data and no thread-bound state, so it may be
+    // freed from any thread and read from several at once, as `handle_future` requires.
+    unsafe { h.ctx.handle_future(&h.result.all(), sorted_listings_list, destroy_list_element) }
+}
+
+/// `byBrokerId()`: an owned future freed with `kafka_common_KafkaFuture_destroy`;
+/// its `get` delivers a `kafka_Map_t *` (owned by the future) of `int32_t *`
+/// broker ids, sorted and compared by value in `kafka_Map_get`, to
+/// `kafka_common_KafkaFuture_t *` (owned by the map) whose own `get`
+/// delivers that broker's `kafka_List_t *` of
+/// `kafka_admin_TransactionListing_t *`, in the order the broker returned
+/// them. The outer future completes once the brokers are known, the inner
+/// ones once each broker has answered.
+///
+/// # Safety
+///
+/// `self_` must be a live result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_by_broker_id(
+    self_: *const kafka_admin_ListTransactionsResult_t,
+) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
+    let h = unsafe { handle(self_) };
+    let ctx = h.ctx.clone();
+    // SAFETY: `destroy_map_element` frees exactly the map the closure makes through
+    // `keyed_future_map` (a `box_map` of owned future handles), and the map and its futures hold no
+    // thread-bound state, so they may be freed from any thread and read from several at once, as
+    // `handle_future` requires. The same holds for the inner futures: `destroy_list_element` frees
+    // exactly the list `listings_list` makes through `box_list`, which holds only owned data and no
+    // thread-bound state.
+    unsafe {
+        h.ctx.handle_future(
+            &h.result.by_broker_id(),
+            move |map: HashMap<i32, KafkaFuture<Vec<TransactionListing>>>| {
+                let sorted: BTreeMap<i32, KafkaFuture<Vec<TransactionListing>>> = map.into_iter().collect();
+                ctx.keyed_future_map(sorted.iter(), box_i32, destroy_boxed::<i32>, i32_key_eq, |ctx, f| {
+                    ctx.handle_future(f, listings_list, destroy_list_element)
+                }) as *mut c_void
+            },
+            destroy_map_element,
+        )
+    }
+}
+
+/// `allByBrokerId()`: an owned future freed with
+/// `kafka_common_KafkaFuture_destroy`; its `get` delivers a `kafka_Map_t *`
+/// (owned by the future) of `int32_t *` broker ids, sorted and compared by
+/// value in `kafka_Map_get`, to that broker's `kafka_List_t *` of
+/// `kafka_admin_TransactionListing_t *`, in the order the broker returned
+/// them; it completes once every broker has answered.
+///
+/// # Safety
+///
+/// `self_` must be a live result handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_all_by_broker_id(
+    self_: *const kafka_admin_ListTransactionsResult_t,
+) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
+    let h = unsafe { handle(self_) };
+    // SAFETY: `destroy_map_element` frees exactly the map `all_by_broker_id_map` makes through
+    // `box_map`, and the handle holds only owned data and no thread-bound state, so it may be freed
+    // from any thread and read from several at once, as `handle_future` requires.
+    unsafe {
+        h.ctx
+            .handle_future(&h.result.all_by_broker_id(), all_by_broker_id_map, destroy_map_element)
+    }
+}
+
+/// Frees a result handle; null is a no-op. Futures already taken from it
+/// stay valid.
+///
+/// # Safety
+///
+/// `self_` must be null or an owned result handle not yet destroyed, that
+/// no other call uses at the same time; it is not used afterwards.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_destroy(self_: *mut kafka_admin_ListTransactionsResult_t) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned result handle not yet
+    // destroyed, that no other call uses at the same time and that is not used afterwards; every
+    // `kafka_admin_ListTransactionsResult_t` is built by `box_result::<ListTransactionsResult, _>`,
+    // as `destroy_result` requires.
+    unsafe { destroy_result::<ListTransactionsResult, _>(self_) }
+}

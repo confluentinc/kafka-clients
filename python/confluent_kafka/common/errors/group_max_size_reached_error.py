@@ -38,7 +38,7 @@ class GroupMaxSizeReachedError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 81  # kafka_common_ErrorCode_GROUP_MAX_SIZE_REACHED
+    _ffi_id: ClassVar[int] = 81  # kafka_common_Error_GROUP_MAX_SIZE_REACHED
 
     def __init__(
         self,

@@ -42,7 +42,7 @@ class ProducerFencedError(ApplicationRecoverableError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 90  # kafka_common_ErrorCode_PRODUCER_FENCED
+    _ffi_id: ClassVar[int] = 90  # kafka_common_Error_PRODUCER_FENCED
 
     def __init__(
         self,

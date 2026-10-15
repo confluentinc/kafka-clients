@@ -34,7 +34,7 @@ class BrokerIdNotRegisteredError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 102  # kafka_common_ErrorCode_BROKER_ID_NOT_REGISTERED
+    _ffi_id: ClassVar[int] = 102  # kafka_common_Error_BROKER_ID_NOT_REGISTERED
 
     def __init__(
         self,
