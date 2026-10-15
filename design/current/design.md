@@ -1261,11 +1261,14 @@ schedules; it never runs a callback.
 - **Async families.** The notify hook schedules a drain on the event loop
   with `loop.call_soon_threadsafe`, so every completion and every queued
   interface call runs on the loop thread.
-  - The producer pumps on the running loops it was used from, and once on
-    entry to each async method. When none of those loops is running, the pump
-    runs on a short-lived helper thread instead, so a completion whose loop
-    has closed is dropped promptly, reported at once. A `send()` callback runs
-    on the record's own loop and reports through the extension's
+  - The producer and the admin client are bound to one event loop: the one
+    running when they are constructed, or else the loop of their first async
+    call. A call from another loop raises `RuntimeError` (`"<Class> is bound to
+    a different event loop"`), as asyncio's own primitives do.
+  - The producer pumps on its loop, and once on entry to each async method.
+    Once that loop has closed, the pump runs on one helper thread instead
+    (one at a time), so a completion left for it is dropped promptly, reported
+    at once. A `send()` callback runs on the producer's loop and reports through the extension's
     `Producer__set_callback_result(h, callback_id, error)` after it returned;
     an `async def` callback is awaited there first, and later completions for
     that loop wait behind it, so callbacks stay one at a time in completion
@@ -1277,11 +1280,25 @@ schedules; it never runs a callback.
     `Consumer__set_callback_result(h, callback_id, error)`, which passes a
     `NULL` result to the C function, the listener methods being void.
 - **Admin.** The sync `admin.py` clients wait through `SyncWaiter`
-  (`_sync_wait.py`) on `Admin_resolve_cb`.
+  (`_sync_wait.py`) on `Admin_resolve_cb`: one pump thread per client drains
+  `Admin__execute_callbacks`, and each caller waits for its own completion in
+  100 ms slices.
+- **One drainer per client.** `<Client>__execute_callbacks` keeps the GIL from
+  the first callback of a drain to the last, rather than releasing it after
+  each callback and taking it again for the next. A second thread entering
+  the drain would then block inside the native call holding the GIL while the
+  first waits for the GIL, so each client has exactly one drainer: the sync
+  producer's completion thread, the sync admin client's pump thread, the
+  consumer's calling thread (a consumer refuses a concurrent call), or the
+  async client's loop. A hop onto the loop from a callback already running on
+  it uses `loop.call_soon`, since `call_soon_threadsafe`'s self-pipe write
+  would release the GIL mid-drain.
 
 The extension starts no thread. The Python-side threads are:
 - the sync producer's completion thread;
-- the async producer's fallback pump.
+- the sync admin client's pump thread;
+- the async producer's and async admin client's helper pump, once their loop
+  has closed.
 
 Blocking C entry points are used only where the call cannot park: the
 re-entrant `ConsumerHandle` inside a listener.

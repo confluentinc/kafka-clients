@@ -387,7 +387,7 @@ python/
 │   │                          # serialization/, config/, …
 │   └── *_error.py             # Java built-in exceptions at the root
 ├── admin.py            # older admin binding, paused (not in the package)
-├── _sync_wait.py       # SyncWaiter: admin.py's sliced wait over _cb calls
+├── _sync_wait.py       # SyncWaiter: admin.py's pump thread + sliced wait over _cb calls
 ├── _confluentkafka.c   # hand-written C extension
 ├── tinycthread.{c,h}, c11threads_compat.h   # C11 threads shim (macOS)
 ├── grpc_server.py, grpc_server_async.py, grpc_translate.py, grpc_chaos.py

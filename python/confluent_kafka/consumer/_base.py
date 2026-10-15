@@ -68,7 +68,7 @@ from typing import TYPE_CHECKING, Any, NoReturn, TypeVar, cast
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
-from confluent_kafka._async import Undelivered
+from confluent_kafka._async import Undelivered, call_soon_on
 from confluent_kafka._config import duration_to_ms, prepare
 from confluent_kafka._errors import from_ffi_error
 from confluent_kafka.common.errors.invalid_group_id_error import InvalidGroupIdError
@@ -600,7 +600,7 @@ class _ConsumerState:
         self._pending_event.set()
         for loop, event in list(self._async_waiters):
             try:
-                loop.call_soon_threadsafe(event.set)
+                call_soon_on(loop, event.set)
             except RuntimeError:  # its loop is closed
                 pass
 

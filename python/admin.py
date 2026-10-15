@@ -17,18 +17,22 @@ Design notes
   Both clients resolve with ``kafka_common_KafkaFuture_get_cb`` (the
   ``Admin_resolve_cb`` twin): the completion callbacks queue up on the client
   and the ``set_callbacks_notify`` hook -- which only *signals* -- tells the
-  waiting side to drain them with ``execute_callbacks`` on its own thread. No
-  extra thread exists.
+  client's single drainer to run them with ``execute_callbacks``. The drain
+  keeps the GIL from the first callback to the last, so a client has exactly
+  one thread draining it:
 
   - the synchronous client (:class:`AdminClient`, :class:`MockAdminClient`)
-    waits in Python through :class:`_sync_wait.SyncWaiter`: the hook sets a
-    ``threading.Event`` and the calling thread sleeps on it in 100 ms slices,
-    draining the queue each time it is set. The interpreter stays reachable
-    between slices, so ``Ctrl-C`` is honoured promptly rather than once a
-    native block returned;
+    drains on its own pump thread (:class:`_sync_wait.SyncWaiter`), which the
+    hook wakes through a ``threading.Event``; the calling thread waits for its
+    completion in 100 ms slices. The interpreter stays reachable between
+    slices, so ``Ctrl-C`` is honoured promptly rather than once a native block
+    returned. ``close`` stops the pump thread before it frees the client;
   - the asyncio client (:class:`AsyncAdminClient`, :class:`AsyncMockAdminClient`)
-    has the hook schedule the drain on the event loop with
-    ``loop.call_soon_threadsafe``.
+    is bound to one event loop -- the one running when it is constructed, or
+    else the loop of its first call; a call from another loop raises
+    ``RuntimeError`` -- and the hook schedules the drain on that loop with
+    ``loop.call_soon_threadsafe``. Once that loop has closed, one helper
+    thread drains instead.
 
   ``close`` goes the same way, through ``Admin_close_cb``. The blocking entry
   points (``Admin_resolve``, ``Admin_close``) remain in the extension for
@@ -105,10 +109,10 @@ A per-key failure therefore does **not** raise; iterate the dict and check for
 
 import asyncio
 import datetime as _dt
-import threading
 
 import _confluentkafka as _lib
 from _sync_wait import SyncWaiter
+from confluent_kafka._async import LoopBinding, OffLoopPump, call_soon_on
 # The admin binding is PAUSED (its public surface, including the flat
 # ``KafkaError`` values it returns per-key and its positional ``Node`` /
 # ``OffsetAndMetadata`` value types, must not change until it is ported to the
@@ -2996,25 +3000,27 @@ class Admin(_AdminBase):
     """A synchronous Kafka admin client. Every RPC issues the C call and then
     resolves its ``KafkaFuture`` handles through the queued ``_cb`` twin
     (``Admin_resolve_cb``), waiting on the calling thread in short slices
-    (:class:`_sync_wait.SyncWaiter`) and draining the completion with
-    ``Admin__execute_callbacks`` -- the result is delivered on the caller's
-    thread, as for a Java caller blocking in ``KafkaFuture.get()``, while
-    ``Ctrl-C`` is honoured between slices. The request itself cannot be
+    (:class:`_sync_wait.SyncWaiter`) while the client's one pump thread runs
+    the completions with ``Admin__execute_callbacks`` -- the result is returned
+    on the caller's thread, as for a Java caller blocking in
+    ``KafkaFuture.get()``, while ``Ctrl-C`` is honoured between slices. The request itself cannot be
     interrupted (there is no admin ``wakeup()``): on ``KeyboardInterrupt`` the
     waiter lets the RPC finish, frees its result, then re-raises (see the
     module docstring)."""
 
     def __init__(self):
         super().__init__()
-        self._waiter = SyncWaiter(self._execute_callbacks)
+        self._waiter = SyncWaiter(self._execute_callbacks, "confluent-kafka-admin-pump")
 
     def _init_mock(self, num_brokers=1):
         super()._init_mock(num_brokers)
         _lib.Admin__set_callbacks_notify(self._h, self._waiter.notify)
+        self._waiter.start()
 
     def _init_kafka(self, config):
         super()._init_kafka(config)
         _lib.Admin__set_callbacks_notify(self._h, self._waiter.notify)
+        self._waiter.start()
 
     def __enter__(self):
         return self
@@ -3023,9 +3029,9 @@ class Admin(_AdminBase):
         self.close()
 
     def _execute_callbacks(self):
-        """One drain pass for the waiter: runs the queued completions on this
-        thread and returns how many ran (``0`` once the client is destroyed:
-        ``Admin_destroy`` already ran what was pending)."""
+        """One drain pass for the waiter's pump thread: runs the queued
+        completions there and returns how many ran (``0`` once the client is
+        destroyed: ``Admin_destroy`` already ran what was pending)."""
         h = self._h
         if h is None:
             return 0
@@ -3035,9 +3041,9 @@ class Admin(_AdminBase):
         job = self._submit(submit())
         # `Admin_resolve_cb` registers `get_cb` on every future of the job; the
         # completion -- cb(payload, None) / cb(None, exc) -- is queued on the
-        # client and drained here, on the calling thread, by the waiter. There
-        # is no admin wakeup(), so an interrupt lets the RPC finish
-        # (`on_interrupt=None`), frees the payload, then re-raises.
+        # client and run by the waiter's pump thread, which hands the payload
+        # to this thread. There is no admin wakeup(), so an interrupt lets the
+        # RPC finish (`on_interrupt=None`), frees the payload, then re-raises.
         payload, exc = self._waiter.run(lambda cb: _lib.Admin_resolve_cb(job, cb))
         if exc is not None:
             raise exc
@@ -3565,6 +3571,9 @@ class Admin(_AdminBase):
             ms = _close_ms(timeout)
             self._waiter.run(lambda cb: _lib.Admin_close_cb(self._h, ms, cb))
         finally:
+            # The pump thread ends before the handle is freed, so no drain
+            # can reach a destroyed client; `Admin_destroy` runs what is left.
+            self._waiter.stop()
             self._destroy()
 
 
@@ -3580,7 +3589,11 @@ class AsyncAdmin(_AdminBase):
 
     def __init__(self):
         super().__init__()
-        self._loop = None
+        # The one event loop this client runs on (see the module docstring),
+        # and the helper thread that drains once that loop has closed.
+        self._binding = LoopBinding(type(self).__name__)
+        self._off_loop_pump = OffLoopPump(self._execute_callbacks,
+                                          "confluent-kafka-admin-pump")
 
     def _init_mock(self, num_brokers=1):
         super()._init_mock(num_brokers)
@@ -3599,17 +3612,20 @@ class AsyncAdmin(_AdminBase):
     def _on_callbacks_notify(self):
         """The ``set_callbacks_notify`` hook: fired from a Rust task each time
         the client's callback queue goes from empty to non-empty. It only
-        schedules the drain -- it never runs callbacks itself."""
-        loop = self._loop
-        if loop is not None and not loop.is_closed():
+        schedules the drain -- it never runs callbacks itself. Before the first
+        call there is no loop yet, and nothing is queued."""
+        loop = self._binding.loop
+        if loop is None:
+            return
+        if not loop.is_closed():
             try:
-                loop.call_soon_threadsafe(self._execute_callbacks)
+                call_soon_on(loop, self._execute_callbacks)
                 return
             except RuntimeError:
                 pass  # the loop closed between the check and the call
-        # No loop to hand the drain to (a callback completing after the loop
-        # closed): drain on a helper thread so every callback still fires once.
-        threading.Thread(target=self._execute_callbacks, daemon=True).start()
+        # The loop has closed (a callback completing after it): drain on the
+        # helper thread, one at a time, so every callback still fires once.
+        self._off_loop_pump.start()
 
     def _execute_callbacks(self):
         h = self._h
@@ -3629,8 +3645,7 @@ class AsyncAdmin(_AdminBase):
             fut.set_result(payload)
 
     async def _run_async(self, submit, convert):
-        loop = asyncio.get_running_loop()
-        self._loop = loop
+        loop = self._binding.bind()
         job = self._submit(submit())
         fut = loop.create_future()
 
@@ -3640,7 +3655,7 @@ class AsyncAdmin(_AdminBase):
             # asyncio futures are touched only through the loop either way.
             if loop.is_closed():
                 return
-            loop.call_soon_threadsafe(self._deliver, fut, payload, exc)
+            call_soon_on(loop, self._deliver, fut, payload, exc)
 
         _lib.Admin_resolve_cb(job, cb)
         # On cancellation the late callback finds the future done and is
@@ -3906,10 +3921,10 @@ class AsyncAdmin(_AdminBase):
         the client."""
         if self.closed:
             return
+        # Another loop's close() raises before it marks the client closed.
+        loop = self._binding.bind()
         self.closed = True
         try:
-            loop = asyncio.get_running_loop()
-            self._loop = loop
             fut = loop.create_future()
 
             def cb():
@@ -3918,7 +3933,7 @@ class AsyncAdmin(_AdminBase):
                 # cancellation; the future is touched only through the loop.
                 if loop.is_closed():
                     return
-                loop.call_soon_threadsafe(self._deliver, fut, None, None)
+                call_soon_on(loop, self._deliver, fut, None, None)
 
             _lib.Admin_close_cb(self._h, _close_ms(timeout), cb)
             await fut

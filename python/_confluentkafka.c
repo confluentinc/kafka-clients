@@ -697,12 +697,16 @@ static PyTypeObject ConsumerGroupMetadataType = {
 //
 //   * `KafkaProducer` runs them on its own Python completion thread, a loop of
 //     `Producer_poll(handle, 100)` slices (drain, wait on the condvar below
-//     with the GIL released, drain again). Its waiting calls (flush, the
-//     transaction-control ops, close) wait on a Python event their completion
-//     sets, in 100 ms slices, so Ctrl-C is honoured between two slices.
+//     with the GIL released, drain again; each drain keeps the GIL). Its
+//     waiting calls (flush, the transaction-control ops, close) wait on a
+//     Python event their completion sets, in 100 ms slices, so Ctrl-C is
+//     honoured between two slices.
 //   * `AsyncKafkaProducer` registers a Python notify callable that does
-//     nothing but `loop.call_soon_threadsafe(pump)`; the pump calls
-//     `Producer__execute_callbacks` on the event loop.
+//     nothing but `loop.call_soon_threadsafe(pump)` on the one loop the
+//     producer is bound to; the pump calls `Producer__execute_callbacks` there.
+//   * Either way each producer has one drainer, which a drain that keeps the
+//     GIL needs: a second thread entering it would block inside the native
+//     call holding the GIL while the first waits for the GIL.
 //
 // The hook installed with `kafka_producer_Producer__set_callbacks_notify_err` fires
 // from a Rust task once per empty->non-empty transition of that vector. It
@@ -925,9 +929,10 @@ static kafka_common_Error_t* callback_error_from_py(PyObject* exc);
 static kafka_common_Error_t* callback_error_from_py_exception(void);
 
 // Runs inside kafka_producer_Producer__execute_callbacks_err, i.e. on the thread
-// that called Producer_poll / Producer__execute_callbacks / Producer_destroy
-// or a blocking flush / close / commit / abort / future get running the queue
-// while it waits, with the GIL released by that wrapper. Both arguments are
+// that called Producer_poll / Producer__execute_callbacks (GIL held across the
+// drain) or Producer_destroy, or a blocking flush / close / commit / abort /
+// future get running the queue while it waits (GIL released by that wrapper,
+// so this re-acquires it). Both arguments are
 // BORROWED; exactly one is non-NULL except for a pre-accumulator rejection,
 // which delivers the placeholder metadata (offset/partition -1) beside the
 // error, as Java's `callback.onCompletion(nullMetadata, e)`. The Python
@@ -998,8 +1003,10 @@ static void producer_callbacks_notify(void* opaque) {
     mtx_unlock(&p->mtx);
     if (p->notify_cb != NULL) {
         // asyncio: schedule the pump on the loop. PyGILState_Ensure is a no-op
-        // when this thread already holds the GIL and re-acquires it when it is
-        // the calling thread inside Py_BEGIN_ALLOW_THREADS.
+        // when this thread already holds the GIL (a callback of a drain that
+        // queued another) and takes it on a Rust task or inside a wrapper's
+        // Py_BEGIN_ALLOW_THREADS. `mtx` is not held here, so a drainer that
+        // holds the GIL and takes `mtx` cannot deadlock against this.
         PyGILState_STATE g;
         if (!gil_ensure_unless_finalizing(&g)) return;
         PyObject* r = PyObject_CallNoArgs(p->notify_cb);
@@ -1156,18 +1163,21 @@ static PyObject* py_Producer_destroy(PyObject* self, PyObject* args) {
 // ---- callback pump ---------------------------------------------------------
 
 // Producer__execute_callbacks(handle) -> int: runs the queued callbacks on this
-// thread (with the GIL released around the drain; each callback re-acquires
-// it) and returns how many ran.
+// thread and returns how many ran. The GIL stays held for the whole drain, so
+// the callbacks run back to back without handing the GIL to another thread
+// between two of them; each callback's own PyGILState_Ensure is then a no-op.
+// The Rust half of a queued job (boxing, firing the C callback, destroying it)
+// never blocks, so holding the GIL across it stalls nothing. The Python
+// clients call this from a single thread per client (see the pump notes
+// above), so no second drainer can wait inside Rust for this one while
+// holding the GIL itself.
 static PyObject* py_Producer__execute_callbacks(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
     unsigned long long ptr;
     if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
     Producer* p = producer_from_handle(ptr);
-    int32_t n = 0;
-    kafka_common_Error_t* err;
-    Py_BEGIN_ALLOW_THREADS
-    err = (n = kafka_producer_Producer__execute_callbacks_err(p->producer, &ffi_err), ffi_take(&ffi_err));
-    Py_END_ALLOW_THREADS
+    int32_t n = kafka_producer_Producer__execute_callbacks_err(p->producer, &ffi_err);
+    kafka_common_Error_t* err = ffi_take(&ffi_err);
     if (ffi_raise(err)) return NULL;
     return PyLong_FromLong((long)n);
 }
@@ -1208,14 +1218,17 @@ static PyObject* py_Producer_poll(PyObject* self, PyObject* args) {
     long long timeout_ms;
     if (!PyArg_ParseTuple(args, "KL", &ptr, &timeout_ms)) return NULL;
     Producer* p = producer_from_handle(ptr);
-    int32_t n = 0;
-    kafka_common_Error_t* err;
-    Py_BEGIN_ALLOW_THREADS
+    // `mtx` is taken with the GIL held: the notify hook never holds `mtx`
+    // while it takes the GIL, so this order cannot deadlock against it.
     mtx_lock(&p->mtx);
     p->notified = 0;
     mtx_unlock(&p->mtx);
-    err = (n = kafka_producer_Producer__execute_callbacks_err(p->producer, &ffi_err), ffi_take(&ffi_err));
+    // Both drains keep the GIL (see Producer__execute_callbacks); it is
+    // released only around the wait for the notify hook.
+    int32_t n = kafka_producer_Producer__execute_callbacks_err(p->producer, &ffi_err);
+    kafka_common_Error_t* err = ffi_take(&ffi_err);
     if (err == NULL && n == 0 && timeout_ms != 0) {
+        Py_BEGIN_ALLOW_THREADS
         mtx_lock(&p->mtx);
         if (timeout_ms < 0) {
             while (!p->notified) cnd_wait(&p->cnd, &p->mtx);
@@ -1231,9 +1244,10 @@ static PyObject* py_Producer_poll(PyObject* self, PyObject* args) {
         }
         p->notified = 0;
         mtx_unlock(&p->mtx);
-        err = (n = kafka_producer_Producer__execute_callbacks_err(p->producer, &ffi_err), ffi_take(&ffi_err));
+        Py_END_ALLOW_THREADS
+        n = kafka_producer_Producer__execute_callbacks_err(p->producer, &ffi_err);
+        err = ffi_take(&ffi_err);
     }
-    Py_END_ALLOW_THREADS
     if (ffi_raise(err)) return NULL;
     return PyLong_FromLong((long)n);
 }
@@ -2488,7 +2502,8 @@ static PyObject* py_KafkaError_destroy(PyObject* self, PyObject* args) {
 //   * `_cb` twins (`kafka_consumer_Consumer_<op>_cb`) return at once; the
 //     operation runs on the consumer's runtime and both the interface methods
 //     it triggers and the completion `cb` are queued on the consumer's callbacks
-//     vector, run only by `Consumer__execute_callbacks` (the asyncio pump).
+//     vector, run only by `Consumer__execute_callbacks`, which keeps the GIL
+//     for the whole drain (the asyncio pump, or a sync call waiting).
 //     `Consumer__set_callbacks_notify` registers the Python callable the Rust
 //     notify hook fires once each time the vector goes from empty to non-empty
 //     (it may only schedule the pump, never run callbacks).
@@ -3790,9 +3805,9 @@ static void consumer_orphan_commit(Consumer* c, CommitCbCtx* ctx) {
 
 // ---- rebalance-listener trampolines ----------------------------------------
 //
-// Invoked by Rust on the calling thread (blocking entry point) or from
-// Consumer__execute_callbacks (`_cb` entry point), both with the GIL released by
-// the wrapper. The adapter method receives the partitions as
+// Invoked by Rust on the calling thread (blocking entry point, GIL released by
+// the wrapper) or from Consumer__execute_callbacks (`_cb` entry point, GIL
+// held across the drain). The adapter method receives the partitions as
 // list[(topic, partition)] plus the callback id and returns:
 //   * None  -> the listener returned: report success now;
 //   * True  -> the adapter deferred (coroutine scheduled on the loop) and will
@@ -3952,17 +3967,15 @@ static PyObject* py_Consumer__set_callbacks_notify(PyObject* self, PyObject* arg
 }
 
 // Consumer__execute_callbacks(handle) -> int: runs the queued callbacks on this
-// thread (GIL released around the drain; each callback re-acquires it).
+// thread with the GIL held for the whole drain, as Producer__execute_callbacks
+// does, and returns how many ran.
 static PyObject* py_Consumer__execute_callbacks(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
     unsigned long long h;
     if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
     kafka_consumer_Consumer_t* s = consumer_self(h);
-    int32_t n = 0;
-    kafka_common_Error_t* err;
-    Py_BEGIN_ALLOW_THREADS
-    err = (n = kafka_consumer_Consumer__execute_callbacks_err(s, &ffi_err), ffi_take(&ffi_err));
-    Py_END_ALLOW_THREADS
+    int32_t n = kafka_consumer_Consumer__execute_callbacks_err(s, &ffi_err);
+    kafka_common_Error_t* err = ffi_take(&ffi_err);
     if (ffi_raise(err)) return NULL;
     return PyLong_FromLong((long)n);
 }
@@ -4248,7 +4261,7 @@ static PyObject* py_Consumer_current_lag(PyObject* self, PyObject* args) {
 
 // ---- `_cb` completion trampolines ------------------------------------------
 //
-// Each runs from Consumer__execute_callbacks (GIL released by that wrapper), or
+// Each runs from Consumer__execute_callbacks (GIL held by that wrapper), or
 // inline from a ConsumerHandle `_cb` whose consumer is already destroyed, and
 // hands copied Python values to the registered callable. The void shape reuses
 // the producer's VoidCbCtx / producer_void_cb.
@@ -5655,13 +5668,14 @@ static PyObject* py_MockConsumer_last_poll_timeout(PyObject* self, PyObject* arg
 //
 //   * `Admin_resolve_cb(job, cb)` is what BOTH Python clients use:
 //     `kafka_common_KafkaFuture_get_cb_err` on every future; the callbacks arrive
-//     through `Admin__execute_callbacks`, which the Python side runs on the
-//     thread that waits for them. The asyncio client drains on the event-loop
-//     thread when the `Admin__set_callbacks_notify` hook fires
-//     (`loop.call_soon_threadsafe`); the sync client's hook only sets a
-//     `threading.Event` that the calling thread waits on in 100 ms slices
-//     (`_sync_wait.SyncWaiter`), so a pending `KeyboardInterrupt` is raised
-//     promptly instead of once a native block returned. A future that belongs
+//     through `Admin__execute_callbacks`, which keeps the GIL for the whole
+//     drain and so has one drainer per client. The asyncio client drains on
+//     the event loop it is bound to when the `Admin__set_callbacks_notify` hook
+//     fires (`loop.call_soon_threadsafe`); the sync client's hook only sets a
+//     `threading.Event` that the client's one pump thread waits on
+//     (`_sync_wait.SyncWaiter`), and each caller waits for its own completion
+//     in 100 ms slices, so a pending `KeyboardInterrupt` is raised promptly
+//     instead of once a native block returned. A future that belongs
 //     to no client (refinements, `all_of`) fires inline, which the same code
 //     handles. `Admin_close_cb` queues `cb()` on the same vector so `close`
 //     waits the same way.
@@ -5930,17 +5944,15 @@ static PyObject* py_Admin__set_callbacks_notify(PyObject* self, PyObject* args) 
 }
 
 // Admin__execute_callbacks(handle) -> int: runs the queued callbacks on this
-// thread (GIL released around the drain; each callback re-acquires it).
+// thread with the GIL held for the whole drain, as Producer__execute_callbacks
+// does, and returns how many ran.
 static PyObject* py_Admin__execute_callbacks(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
     unsigned long long h;
     if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
     AdminHandle* a = admin_from_handle(h);
-    int32_t n = 0;
-    kafka_common_Error_t* err;
-    Py_BEGIN_ALLOW_THREADS
-    err = (n = kafka_admin_Admin__execute_callbacks_err(a->admin, &ffi_err), ffi_take(&ffi_err));
-    Py_END_ALLOW_THREADS
+    int32_t n = kafka_admin_Admin__execute_callbacks_err(a->admin, &ffi_err);
+    kafka_common_Error_t* err = ffi_take(&ffi_err);
     if (ffi_raise(err)) return NULL;
     return PyLong_FromLong((long)n);
 }
@@ -6223,9 +6235,9 @@ static void job_finish_async(AdminJob* job) {
 // here are not used: the error is released and the slot re-reads the (now
 // completed) future with `get`, whose value stays valid until the future is
 // destroyed -- the same lifetime rule the sync path relies on. Runs on the
-// thread draining `Admin__execute_callbacks` (GIL released there), or inline
-// inside `get_cb` for a client-less future (GIL held); PyGILState_Ensure
-// covers both.
+// thread draining `Admin__execute_callbacks`, or inline inside `get_cb` for a
+// client-less future, the GIL held either way; PyGILState_Ensure is then a
+// no-op, and also covers a destroy draining what is left.
 static void admin_slot_cb(void* value, kafka_common_Error_t* error, void* opaque) {
     kafka_common_Error_t *ffi_err = NULL;
     (void)value;

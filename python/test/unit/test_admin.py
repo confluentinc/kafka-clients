@@ -591,6 +591,21 @@ async def test_async_list_topics_call_failure_raises():
         assert str(excinfo.value) == "The mock timed out the request."
 
 
+async def test_async_client_is_bound_to_one_event_loop():
+    """The callbacks run on the client's event loop, their single drainer, so
+    the client is bound to the loop of its first call: a call from another
+    loop raises ``RuntimeError``, as asyncio's own primitives do, and the
+    client stays usable on its own loop."""
+    async with AsyncMockAdminClient(1) as admin:
+        await admin.create_topics([NewTopic("bound", 1, 1)])
+        loop = asyncio.get_running_loop()
+        with pytest.raises(RuntimeError) as excinfo:
+            await loop.run_in_executor(
+                None, lambda: asyncio.run(admin.list_topics(list_internal=True)))
+        assert str(excinfo.value) == "AsyncMockAdminClient is bound to a different event loop"
+        assert set(await admin.list_topics(list_internal=True)) == {"bound"}
+
+
 async def test_async_concurrent_calls():
     """The admin client is thread-safe and has no single-owner guard, so
     concurrent RPCs are allowed (unlike the consumer)."""
@@ -1115,7 +1130,7 @@ def test_sync_client_uses_the_cb_twins_not_the_blocking_entry_points(monkeypatch
     """The sync client must never park the thread inside a native block
     (``Admin_resolve`` / ``Admin_close``): every RPC is resolved through
     ``Admin_resolve_cb`` and ``close`` through ``Admin_close_cb``, with the
-    completion drained by the waiter on the calling thread. Making the blocking
+    completion drained by the client's pump thread. Making the blocking
     entry points fail proves no sync path reaches them."""
     def forbidden(*args):
         raise AssertionError("the sync client must not call a blocking entry point")
@@ -1136,7 +1151,8 @@ def test_sync_client_uses_the_cb_twins_not_the_blocking_entry_points(monkeypatch
     _created(admin, "cb-twin")
     listings = admin.list_topics(list_internal=True)
     assert "cb-twin" in listings
-    # The completions were delivered through the waiter's drain, on this thread.
+    # The completions were delivered through the waiter's drain, on its pump
+    # thread.
     assert sum(drained) >= 2
     # A whole-call failure still raises from the `_cb` payload's `exc` slot.
     with pytest.raises(KafkaError) as exc:
@@ -1145,6 +1161,42 @@ def test_sync_client_uses_the_cb_twins_not_the_blocking_entry_points(monkeypatch
     admin.close(timeout=_dt.timedelta(seconds=5))
     assert admin.closed
     assert admin._h is None
+
+
+def test_sync_callers_on_many_threads_share_the_one_pump_thread():
+    """The client's queued callbacks run with the GIL held from the first to
+    the last, so they have one drainer: the client's pump thread, however many
+    threads wait on the client at once. ``close`` stops that thread."""
+    admin = MockAdminClient(1)
+    drained_on = set()
+    real_drain = admin._waiter._execute_callbacks
+
+    def recording_drain():
+        drained_on.add(threading.current_thread().name)
+        return real_drain()
+
+    admin._waiter._execute_callbacks = recording_drain
+    _created(admin, "shared")
+    failures = []
+
+    def caller():
+        try:
+            for _ in range(20):
+                assert "shared" in admin.list_topics(list_internal=True)
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            failures.append(exc)
+
+    callers = [threading.Thread(target=caller) for _ in range(8)]
+    for thread in callers:
+        thread.start()
+    for thread in callers:
+        thread.join()
+    assert failures == []
+    pump = admin._waiter._thread
+    assert pump.is_alive()
+    admin.close(timeout=_dt.timedelta(seconds=5))
+    assert drained_on == {"confluent-kafka-admin-pump"}
+    assert not pump.is_alive()
 
 
 def test_sigint_while_waiting_drains_callback_then_reraises():
