@@ -48,6 +48,7 @@
 //! | `MAX_IN_FLIGHT`        | (client default)   | `max.in.flight.requests.per.connection`    |
 //! | `COMPRESSION_TYPE`     | `none`             | Compression: none/gzip/snappy/lz4/zstd     |
 //! | `ENABLE_IDEMPOTENCE`   | `false`            | `enable.idempotence`                       |
+//! | `ACKS`                 | (client default)   | `acks`: `all`/`-1`/`1`/`0` (default all)   |
 //! | `USE_DEFAULTS`         | `False`            | Omit all tuning knobs; use client defaults |
 //! | `WARMUP_SECONDS`       | `120` *            | Warmup duration                            |
 //! | `TEST_DURATION_SECONDS`| `600` *            | Measured interval duration                 |
@@ -126,6 +127,7 @@ struct PerfTestConfig {
     max_in_flight: Option<String>,
     compression_type: String,
     enable_idempotence: String,
+    acks: Option<String>,
     use_defaults: bool,
     warmup_seconds: u64,
     test_duration_seconds: u64,
@@ -186,6 +188,7 @@ impl PerfTestConfig {
             max_in_flight: env_opt("MAX_IN_FLIGHT"),
             compression_type: env_or("COMPRESSION_TYPE", "none"),
             enable_idempotence: env_or("ENABLE_IDEMPOTENCE", "false"),
+            acks: env_opt("ACKS"),
             use_defaults: env_or("USE_DEFAULTS", "False") == "True",
             warmup_seconds: env_parse("WARMUP_SECONDS", 120),
             test_duration_seconds,
@@ -221,8 +224,11 @@ impl PerfTestConfig {
             props.insert("max.request.size".to_string(), self.max_request_size.to_string());
             props.insert("compression.type".to_string(), self.compression_type.clone());
             props.insert("enable.idempotence".to_string(), self.enable_idempotence.clone());
-            // `acks` is intentionally not set, so it relies on the client default
-            // (acks = all / -1), consistent with the other performance tests.
+            // Unset, `acks` is the client default (all / -1), which the other
+            // performance tests set explicitly.
+            if let Some(v) = &self.acks {
+                props.insert("acks".to_string(), v.clone());
+            }
             if let Some(v) = &self.buffer_memory {
                 props.insert("buffer.memory".to_string(), v.to_string());
             }
