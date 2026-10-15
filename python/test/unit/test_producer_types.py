@@ -237,3 +237,23 @@ def test_send_path_record_from_a_released_caller_view() -> None:
     native = lib.ProducerRecord("t", b"v", None, -1, -1, tuple(record.headers()))
     assert native.headers == [("h", b"A" * 4096)]
     del junk
+
+
+def test_record_metadata_from_ffi_is_what_the_constructor_builds() -> None:
+    # The core reports the combined offset (baseOffset + batchIndex); _from_ffi
+    # fills the slots directly, with what the constructor builds for that
+    # offset as base_offset and batch_index 0.
+    for topic, partition, offset, timestamp, key_size, value_size in (
+            ("t", 0, 5, 123, -1, 100), ("orders", 7, -1, -1, 3, 0), ("a", 2147483647, 0, 0, 0, 0)):
+        made = RecordMetadata._from_ffi(  # noqa: SLF001
+            topic=topic, partition=partition, offset=offset, timestamp=timestamp,
+            serialized_key_size=key_size, serialized_value_size=value_size)
+        built = RecordMetadata(
+            topic_partition=TopicPartition(topic=topic, partition=partition), base_offset=offset,
+            batch_index=0, timestamp=timestamp, serialized_key_size=key_size,
+            serialized_value_size=value_size)
+        assert type(made) is RecordMetadata
+        for getter in ("topic", "partition", "offset", "has_offset", "timestamp",
+                       "has_timestamp", "serialized_key_size", "serialized_value_size"):
+            assert getattr(made, getter)() == getattr(built, getter)(), getter
+        assert str(made) == str(built)
