@@ -953,7 +953,6 @@ mod tests {
     };
     use crate::ffi::kafka_future::{
         kafka_common_KafkaFuture_destroy, kafka_common_KafkaFuture_get, kafka_common_KafkaFuture_get_cb,
-        kafka_common_KafkaFuture_get_with_timeout,
     };
     use crate::ffi::util::{kafka_Map_destroy, kafka_Map_new, kafka_Map_put};
     use std::sync::Mutex;
@@ -1182,6 +1181,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn destroy_releases_a_blocking_get_whose_call_is_stuck_in_the_connect() {
+        // Imported here: this Linux-only test is its only user.
+        use crate::ffi::kafka_future::kafka_common_KafkaFuture_get_with_timeout;
         // A listener whose accept queue is full: Linux drops the SYNs it gets
         // next, so a connect to it waits out the SYN retries, about two minutes.
         let listener_runtime = tokio::runtime::Builder::new_current_thread().enable_io().build().unwrap();

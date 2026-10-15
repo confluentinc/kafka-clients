@@ -2938,17 +2938,20 @@ def _dropped(caplog: pytest.LogCaptureFixture) -> list[str]:
             if r.name == "confluent_kafka.producer" and r.getMessage().startswith("The completion")]
 
 
-def _record_pump_schedules(p: Any) -> threading.Event:
-    """Set once the notify hook has scheduled the producer's callback pump."""
+def _hold_pump_schedules(p: Any) -> tuple[threading.Event, Callable[[], None]]:
+    """Hold the producer's pump schedules: the event is set once the notify
+    hook asks for one, and calling the function schedules that one as the hook
+    would have. Holding it keeps the pump off the loop while the loop still
+    runs, which on a fast machine would otherwise run the pump, and then the
+    delivery, before the loop stops."""
     scheduled = threading.Event()
     real = p._schedule_pump  # noqa: SLF001
 
     def schedule() -> None:
-        real()
         scheduled.set()
 
     p._schedule_pump = schedule  # noqa: SLF001
-    return scheduled
+    return scheduled, real
 
 
 def test_a_call_from_another_loop_is_refused_while_a_closed_loops_completion_is_in_flight(
@@ -3133,9 +3136,10 @@ def test_an_operation_result_left_for_a_closed_loop_is_freed_when_the_producer_i
     # operation, from another loop, is refused, and freeing the producer runs
     # the queued completion, which frees the result.
     p = AsyncKafkaProducer(configs=UNREACHABLE)
-    scheduled = _record_pump_schedules(p)
+    scheduled, schedule = _hold_pump_schedules(p)
     stopped_loop.start(p.begin_transaction())
     assert scheduled.wait(30)
+    schedule()  # on the stopped loop, whose close discards it
     stopped_loop.loop.close()
     assert freed_errors == []
 
@@ -3155,7 +3159,7 @@ def test_an_operation_result_handed_to_a_loop_that_closed_is_freed_when_the_prod
     # to the stopped loop, whose close discards its delivery, so it waits in
     # the producer, not in the C API, and the destroy frees it there.
     p = AsyncKafkaProducer(configs=UNREACHABLE)
-    scheduled = _record_pump_schedules(p)
+    scheduled, _schedule = _hold_pump_schedules(p)
     stopped_loop.start(p.begin_transaction())
     assert scheduled.wait(30)
     p._pump()  # noqa: SLF001
@@ -3167,6 +3171,35 @@ def test_an_operation_result_handed_to_a_loop_that_closed_is_freed_when_the_prod
     assert str(err.value) == BOUND_ELSEWHERE.format(cls="AsyncKafkaProducer")
     assert freed_errors == []
     p._destroy()  # noqa: SLF001
+    assert len(freed_errors) == 1
+
+
+@pytest.mark.parametrize("call", ["flush", "close"])
+def test_an_operation_result_delivered_to_a_task_left_on_a_closed_loop_is_freed_with_the_task(
+        call: str, freed_errors: list[int], stopped_loop: Any) -> None:
+    # As above, but the loop also ran the delivery before it closed, as it
+    # does when the result arrives early in the loop's last iterations: the
+    # result is in the awaiting task's future, and the task never resumes to
+    # take it. The producer cannot reach it; the task frees it when it goes
+    # away, which closes its coroutine.
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    scheduled, _schedule = _hold_pump_schedules(p)
+    stopped_loop.start(p.begin_transaction())
+    assert scheduled.wait(30)
+    p._pump()  # noqa: SLF001
+    # One iteration: the delivery runs, the task's wake-up it schedules does not.
+    stopped_loop.loop.stop()
+    stopped_loop.loop.run_forever()
+    assert not stopped_loop._task.done()  # noqa: SLF001
+    stopped_loop.loop.close()
+    assert freed_errors == []
+
+    with pytest.raises(RuntimeError) as err:
+        asyncio.run(getattr(p, call)())
+    assert str(err.value) == BOUND_ELSEWHERE.format(cls="AsyncKafkaProducer")
+    p._destroy()  # noqa: SLF001
+    assert freed_errors == []
+    stopped_loop.abandon()
     assert len(freed_errors) == 1
 
 

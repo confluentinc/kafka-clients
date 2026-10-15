@@ -792,23 +792,32 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         else:
             with self._use() as c_producer:
                 entry(c_producer, *args, cb)
-        if reports is None:
-            return await fut
-        if self._in_own_callback():
-            try:
-                return await asyncio.wait_for(fut, self._max_block_ms / 1000.0)
-            except asyncio.TimeoutError:
-                raise KafkaTimeoutError(message=_ASYNC_CALLBACK_WAIT_TIMEOUT_MESSAGE.format(
-                    ms=self._max_block_ms, operation=reports)) from None
         try:
+            if reports is None:
+                return await fut
+            if self._in_own_callback():
+                try:
+                    return await asyncio.wait_for(fut, self._max_block_ms / 1000.0)
+                except asyncio.TimeoutError:
+                    raise KafkaTimeoutError(message=_ASYNC_CALLBACK_WAIT_TIMEOUT_MESSAGE.format(
+                        ms=self._max_block_ms, operation=reports)) from None
             while not fut.done():
                 await asyncio.wait((fut,), timeout=_STRANDED_POLL_S)
                 self._drop_stranded()
+            return fut.result()
         except BaseException:
-            # A cancelled wait: the payload, when it arrives, is freed.
-            fut.cancel()
+            # A wait that ends without taking the payload: a cancelled task, or
+            # one left on a closed loop, whose coroutine is closed when the task
+            # goes away. A payload delivered already is freed now; one still
+            # on its way is freed when it arrives: by deliver, or, the loop
+            # closed, by its hand-over, so the future of a closed loop, whose
+            # cancel would schedule on that loop, is left alone.
+            if fut.done():
+                if not fut.cancelled():
+                    free(fut.result())
+            elif not loop.is_closed():
+                fut.cancel()
             raise
-        return fut.result()
 
     async def _run_async(self, entry: Callable[..., None], *args: Any,
                          reports: str | None = None) -> None:
