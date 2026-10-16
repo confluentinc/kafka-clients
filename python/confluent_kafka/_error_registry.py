@@ -190,6 +190,7 @@ ERRORS: tuple[tuple[str, str, str], ...] = (
     ("confluent_kafka.consumer.no_offset_for_partition_error", "NoOffsetForPartitionError", "org.apache.kafka.clients.consumer.NoOffsetForPartitionException"),
     ("confluent_kafka.consumer.offset_out_of_range_error", "OffsetOutOfRangeError", "org.apache.kafka.clients.consumer.OffsetOutOfRangeException"),
     ("confluent_kafka.consumer.retriable_commit_failed_error", "RetriableCommitFailedError", "org.apache.kafka.clients.consumer.RetriableCommitFailedException"),
+    ("confluent_kafka.execution_error", "ExecutionError", "java.util.concurrent.ExecutionException"),
     ("confluent_kafka.illegal_argument_error", "IllegalArgumentError", "java.lang.IllegalArgumentException"),
     ("confluent_kafka.illegal_state_error", "IllegalStateError", "java.lang.IllegalStateException"),
     ("confluent_kafka.no_such_element_error", "NoSuchElementError", "java.util.NoSuchElementException"),

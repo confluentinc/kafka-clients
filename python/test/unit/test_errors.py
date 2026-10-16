@@ -37,6 +37,7 @@ import pytest
 import confluent_kafka
 from confluent_kafka import (
     ConcurrentModificationError,
+    ExecutionError,
     IllegalArgumentError,
     IllegalStateError,
     NoSuchElementError,
@@ -140,6 +141,7 @@ _JDK: dict[str, type[BaseException]] = {
     "java.lang.IllegalArgumentException": RuntimeError,
     "java.util.ConcurrentModificationException": RuntimeError,
     "java.util.concurrent.TimeoutException": builtins.TimeoutError,
+    "java.util.concurrent.ExecutionException": Exception,
     "java.util.NoSuchElementException": RuntimeError,
     "java.lang.NullPointerException": RuntimeError,
 }
@@ -204,13 +206,14 @@ def test_every_python_error_class_is_a_java_class() -> None:
 
     defined = walk(KafkaError)
     for root in (IllegalStateError, IllegalArgumentError, ConcurrentModificationError,
-                 RootTimeoutError, NoSuchElementError, NullPointerError):
+                 RootTimeoutError, NoSuchElementError, NullPointerError, ExecutionError):
         defined |= walk(root)
     assert defined == set(error_classes())
     expected = set(_bridge().values()) | {
         "org.apache.kafka.common.KafkaException",
         "java.util.NoSuchElementException",
         "java.lang.NullPointerException",
+        "java.util.concurrent.ExecutionException",
         "org.apache.kafka.common.errors.RetriableException",
         "org.apache.kafka.common.errors.RefreshRetriableException",
         "org.apache.kafka.common.errors.InvalidMetadataException",
@@ -218,7 +221,7 @@ def test_every_python_error_class_is_a_java_class() -> None:
         "org.apache.kafka.clients.consumer.InvalidOffsetException",
     }
     assert set(_BY_JAVA) == expected
-    assert len(_BY_JAVA) == 173
+    assert len(_BY_JAVA) == 174
 
 
 def test_only_an_exception_suffix_becomes_error() -> None:
@@ -254,13 +257,15 @@ def test_each_error_lives_in_the_module_of_its_java_package() -> None:
 
 def test_the_root_exports_duration_and_the_java_built_ins_only() -> None:
     assert sorted(confluent_kafka.__all__) == sorted([
-        "Duration", "ConcurrentModificationError", "IllegalArgumentError",
+        "Duration", "ConcurrentModificationError", "ExecutionError", "IllegalArgumentError",
         "IllegalStateError", "NoSuchElementError", "NullPointerError", "TimeoutError"])
     assert issubclass(RootTimeoutError, builtins.TimeoutError)
     for cls in (IllegalStateError, IllegalArgumentError, ConcurrentModificationError,
                 NoSuchElementError, NullPointerError):
         assert issubclass(cls, RuntimeError)
         assert not issubclass(cls, KafkaError)
+    # ExecutionException is checked: an Exception, not a RuntimeError.
+    assert ExecutionError.__bases__ == (Exception,)
 
 
 def test_kafka_error_subclasses_runtime_error() -> None:
@@ -318,6 +323,8 @@ def test_built_ins_the_core_does_not_model_have_no_id() -> None:
     for cls in (NoSuchElementError, NullPointerError):
         assert not hasattr(cls, "_ffi_id")
         assert to_ffi_id(cls(message="x")) == -1
+    assert not hasattr(ExecutionError, "_ffi_id")
+    assert to_ffi_id(ExecutionError(cause=ValueError("x"))) == -1
     assert to_ffi_id(ValueError("not ours")) == -1
 
 

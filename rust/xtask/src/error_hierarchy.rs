@@ -662,6 +662,18 @@ const JDK_BUILTINS: &[(&str, &str, &str, &[JdkCtor])] = &[
         "LOCAL_TIMEOUT",
         &[&[], &[("String", "message")]],
     ),
+    // Java's `ExecutionException` is the checked exception `KafkaFuture.get()` throws;
+    // only its two public constructors (its no-argument and `(String)` ones are
+    // protected). The core models no id for it.
+    (
+        "java.util.concurrent.ExecutionException",
+        "java.lang.Exception",
+        "",
+        &[
+            &[("String", "message"), ("Throwable", "cause")],
+            &[("Throwable", "cause")],
+        ],
+    ),
     (
         "java.util.NoSuchElementException",
         "java.lang.RuntimeException",
@@ -2046,8 +2058,12 @@ Errors) and validated for staleness by ``cargo xtask check-generated``.";
 /// The Python base expression of a class.
 fn py_base(g: &Graph, info: &ClassInfo) -> String {
     if TERMINAL_BASES.contains(&info.parent_fqn.as_str()) {
+        // A Java unchecked exception subclasses `RuntimeError`, a checked one `Exception`;
+        // `TimeoutException` subclasses `builtins.TimeoutError` (CLAUDE.md, Types).
         if info.java_fqn == "java.util.concurrent.TimeoutException" {
             "builtins.TimeoutError".into()
+        } else if info.parent_fqn == "java.lang.Exception" {
+            "Exception".into()
         } else {
             "RuntimeError".into()
         }
@@ -3415,8 +3431,8 @@ mod tests {
     #[test]
     fn graph_builds_and_cross_checks() {
         let classes = build_graph(&repo_root()).expect("graph must build and cross-check");
-        // 165 FFI ids (one class each) + 5 abstract + KafkaException + 2 id-less built-ins.
-        assert_eq!(classes.len(), 173);
+        // 165 FFI ids (one class each) + 5 abstract + KafkaException + 3 id-less built-ins.
+        assert_eq!(classes.len(), 174);
         assert_eq!(classes.values().filter(|c| c.is_abstract).count(), 5);
         let with_id = classes.values().filter(|c| c.ffi_id.is_some()).count();
         assert_eq!(with_id, 166, "165 bridge classes plus the base's UNKNOWN_SERVER_ERROR");
@@ -3437,6 +3453,8 @@ mod tests {
         assert_eq!(base("org.apache.kafka.clients.consumer.CommitFailedException"), "KafkaError");
         assert_eq!(base("org.apache.kafka.common.KafkaException"), "RuntimeError");
         assert_eq!(base("java.util.concurrent.TimeoutException"), "builtins.TimeoutError");
+        assert_eq!(base("java.util.concurrent.ExecutionException"), "Exception");
+        assert_eq!(base("java.util.NoSuchElementException"), "RuntimeError");
         assert_eq!(
             base("org.apache.kafka.common.requests.CorrelationIdMismatchException"),
             "IllegalStateError"

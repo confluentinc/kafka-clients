@@ -52,14 +52,16 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable, Mapping
-from concurrent.futures import Future
-from concurrent.futures import TimeoutError as FutureTimeoutError
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
 from confluent_kafka._config import duration_to_ms, prepare
 from confluent_kafka._errors import from_ffi_error
+# The slice waits live in the shared ``_wait`` module; re-exported for the producers.
+from confluent_kafka._wait import WAIT_SLICE_S as WAIT_SLICE_S
+from confluent_kafka._wait import result_sliced as result_sliced
+from confluent_kafka._wait import wait_sliced as wait_sliced
 from confluent_kafka.common.errors.timeout_error import TimeoutError as KafkaTimeoutError
 from confluent_kafka.common.errors.unsupported_version_error import UnsupportedVersionError
 from confluent_kafka.common.kafka_error import KafkaError
@@ -117,10 +119,6 @@ def closed_while_sending() -> KafkaError:
 # ProducerConfig.MAX_BLOCK_MS_CONFIG and its default (60 s).
 _MAX_BLOCK_MS = "max.block.ms"
 _DEFAULT_MAX_BLOCK_MS = 60000
-
-# The slice a sync wait sleeps in, so Ctrl+C is seen promptly (CLAUDE.md,
-# Python Binding Conventions, Threads and callbacks).
-WAIT_SLICE_S = 0.1
 
 # The message of a wait from a delivery callback that ran out of max.block.ms:
 # the completion it waits for can only run on the thread the callback blocks.
@@ -228,55 +226,6 @@ def free_error(error: int) -> None:
     """Free an OWNED FFI error handle nobody raises (0 is none)."""
     if error:
         _lib.KafkaError_destroy(error)
-
-
-def wait_sliced(event: threading.Event, deadline: float | None = None,
-                on_interrupt: Callable[[], None] | None = None) -> bool:
-    """Wait for ``event`` in :data:`WAIT_SLICE_S` slices, up to ``deadline``
-    (``time.monotonic()``) when given; whether it was set.
-
-    A Ctrl+C (``KeyboardInterrupt``) does not end the wait: the operation goes
-    on, as the producer lets an operation finish, and the first interrupt is
-    raised once the wait is over (a second one meanwhile is dropped, as Java
-    keeps only the first interrupt). ``on_interrupt`` runs at the first one."""
-    interrupted: KeyboardInterrupt | None = None
-    try:
-        while True:
-            try:
-                while not event.wait(WAIT_SLICE_S):
-                    if deadline is not None and time.monotonic() >= deadline:
-                        return False
-                return True
-            except KeyboardInterrupt as exc:
-                if interrupted is None:
-                    interrupted = exc
-                    if on_interrupt is not None:
-                        on_interrupt()
-    finally:
-        if interrupted is not None:
-            raise interrupted
-
-
-_T = TypeVar("_T")
-
-
-def result_sliced(future: Future[_T]) -> _T:
-    """``future.result()``, waited for as :func:`wait_sliced` waits: in
-    :data:`WAIT_SLICE_S` slices, a Ctrl+C letting the wait end and then raised
-    instead of the result."""
-    interrupted: KeyboardInterrupt | None = None
-    try:
-        while True:
-            try:
-                return future.result(WAIT_SLICE_S)
-            except FutureTimeoutError:
-                continue
-            except KeyboardInterrupt as exc:
-                if interrupted is None:
-                    interrupted = exc
-    finally:
-        if interrupted is not None:
-            raise interrupted
 
 
 def wait_futures(futures: list[Any]) -> None:
