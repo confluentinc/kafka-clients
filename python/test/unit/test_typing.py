@@ -475,13 +475,11 @@ def _admin_reference_set_types(c: object = None) -> None:
     executed at runtime."""
     if c is None:
         return
-    import asyncio
-    import concurrent.futures
-
     from confluent_kafka.admin.create_topics_options import CreateTopicsOptions
     from confluent_kafka.admin.delete_records_options import DeleteRecordsOptions
     from confluent_kafka.admin.describe_features_options import DescribeFeaturesOptions
     from confluent_kafka.admin.list_offsets_result import ListOffsetsResult
+    from confluent_kafka.common import AsyncKafkaFuture, KafkaFuture
 
     # AbstractOptions.timeout_ms returns Self; a re-declaration its own class.
     assert_type(DeleteRecordsOptions().timeout_ms(timeout_ms=1), DeleteRecordsOptions)
@@ -494,21 +492,21 @@ def _admin_reference_set_types(c: object = None) -> None:
 
     Info = ListOffsetsResult.ListOffsetsResultInfo
     tp = TopicPartition(topic="t", partition=0)
-    sync_future: concurrent.futures.Future[ListOffsetsResult.ListOffsetsResultInfo] = (
-        concurrent.futures.Future())
+    sync_future = KafkaFuture.completed_future(
+        value=Info(offset=1, timestamp=2, leader_epoch=None))
     sync_result = ListOffsetsResult(futures={tp: sync_future})
     assert_type(sync_result.partition_result(partition=tp),
-                "concurrent.futures.Future[ListOffsetsResult.ListOffsetsResultInfo]")
+                "KafkaFuture[ListOffsetsResult.ListOffsetsResultInfo]")
     assert_type(sync_result.all(),
-                "concurrent.futures.Future[dict[TopicPartition, ListOffsetsResult.ListOffsetsResultInfo]]")
+                "KafkaFuture[dict[TopicPartition, ListOffsetsResult.ListOffsetsResultInfo]]")
 
     async def _async() -> None:
-        async_future: asyncio.Future[ListOffsetsResult.ListOffsetsResultInfo] = (
-            asyncio.get_running_loop().create_future())
+        async_future = AsyncKafkaFuture.completed_future(
+            value=Info(offset=1, timestamp=2, leader_epoch=None))
         async_result = ListOffsetsResult(futures={tp: async_future})
         assert_type(async_result.all(),
-                    "asyncio.Future[dict[TopicPartition, ListOffsetsResult.ListOffsetsResultInfo]]")
-        assert_type((await async_result.partition_result(partition=tp)).offset(), int)
+                    "AsyncKafkaFuture[dict[TopicPartition, ListOffsetsResult.ListOffsetsResultInfo]]")
+        assert_type((await async_result.partition_result(partition=tp).get()).offset(), int)
 
     del _async, Info
 
@@ -527,32 +525,30 @@ def _admin_client_types(c: object = None) -> None:
     executed at runtime."""
     if c is None:
         return
-    import asyncio
-    import concurrent.futures
-
     from confluent_kafka.admin import Admin, AsyncAdmin, NewTopic, TopicListing
+    from confluent_kafka.common import AsyncKafkaFuture, KafkaFuture
 
     admin = Admin.create(configs={"bootstrap.servers": "b:9092"})
     assert_type(admin, Admin)
     created = admin.create_topics(new_topics=[NewTopic(name="t", num_partitions=1,
                                                        replication_factor=1)])
-    assert_type(created.all(), "concurrent.futures.Future[None]")
-    assert_type(created.values(), "dict[str, concurrent.futures.Future[None]]")
-    assert_type(admin.list_topics().names(), "concurrent.futures.Future[set[str]]")
+    assert_type(created.all(), KafkaFuture[None])
+    assert_type(created.values(), dict[str, KafkaFuture[None]])
+    assert_type(admin.list_topics().names(), KafkaFuture[set[str]])
     with admin as same:
         assert_type(same, Admin)
 
     async def _async() -> None:
         async_admin = AsyncAdmin.create(configs={"bootstrap.servers": "b:9092"})
         assert_type(async_admin, AsyncAdmin)
-        async_created = await async_admin.create_topics(new_topics=[])
-        assert_type(async_created.all(), "asyncio.Future[None]")
-        listings = await (await async_admin.list_topics()).listings()
+        async_created = async_admin.create_topics(new_topics=[])
+        assert_type(async_created.all(), AsyncKafkaFuture[None])
+        listings = await async_admin.list_topics().listings().get()
         assert_type(listings, list[TopicListing])
         async with async_admin as same_async:
             assert_type(same_async, AsyncAdmin)
 
-    del _async, asyncio, concurrent
+    del _async
 
 
 def test_admin_client_typing_imports() -> None:
@@ -571,9 +567,6 @@ def _admin_topic_rpc_types(c: object = None) -> None:
     executed at runtime."""
     if c is None:
         return
-    import asyncio
-    import concurrent.futures
-
     from confluent_kafka.admin import (
         Admin,
         AlterConfigOp,
@@ -594,7 +587,9 @@ def _admin_topic_rpc_types(c: object = None) -> None:
     )
     from confluent_kafka.common import (
         AclOperation,
+        AsyncKafkaFuture,
         ElectionType,
+        KafkaFuture,
         Node,
         TopicCollection,
         TopicPartition,
@@ -611,93 +606,96 @@ def _admin_topic_rpc_types(c: object = None) -> None:
                        operation_type=AlterConfigOp.OpType.SET)
 
     deleted = admin.delete_topics(topics=["t"])
-    assert_type(deleted.all(), "concurrent.futures.Future[None]")
+    assert_type(deleted.all(), "KafkaFuture[None]")
     by_ids = admin.delete_topics(topics=TopicCollection.of_topic_ids(topics=[]))
-    assert_type(by_ids.topic_id_values(), "dict[Uuid, concurrent.futures.Future[None]] | None")
+    assert_type(by_ids.topic_id_values(), "dict[Uuid, KafkaFuture[None]] | None")
     assert_type(admin.describe_topics(topic_names=["t"]).topic_name_values(),
-                "dict[str, concurrent.futures.Future[TopicDescription]] | None")
+                "dict[str, KafkaFuture[TopicDescription]] | None")
     assert_type(admin.describe_topics(
         topics=TopicCollection.of_topic_names(topics=[])).all_topic_names(),
-        "concurrent.futures.Future[dict[str, TopicDescription]] | None")
+        "KafkaFuture[dict[str, TopicDescription]] | None")
     cluster = admin.describe_cluster()
-    assert_type(cluster.nodes(), "concurrent.futures.Future[list[Node]]")
+    assert_type(cluster.nodes(), "KafkaFuture[list[Node]]")
     assert_type(cluster.authorized_operations(),
-                "concurrent.futures.Future[set[AclOperation] | None]")
+                "KafkaFuture[set[AclOperation] | None]")
     assert_type(admin.describe_configs(resources=[resource]).all(),
-                "concurrent.futures.Future[dict[ConfigResource, Config]]")
+                "KafkaFuture[dict[ConfigResource, Config]]")
     assert_type(admin.incremental_alter_configs(configs={resource: [op]}).values(),
-                "dict[ConfigResource, concurrent.futures.Future[None]]")
+                "dict[ConfigResource, KafkaFuture[None]]")
     assert_type(admin.alter_replica_log_dirs(replica_assignment={replica: "/d"}).all(),
-                "concurrent.futures.Future[None]")
+                "KafkaFuture[None]")
     assert_type(admin.describe_log_dirs(brokers=[1]).all_descriptions(),
-                "concurrent.futures.Future[dict[int, dict[str, LogDirDescription]]]")
+                "KafkaFuture[dict[int, dict[str, LogDirDescription]]]")
     assert_type(admin.describe_replica_log_dirs(replicas=[replica]).values(),
                 "dict[TopicPartitionReplica, "
-                "concurrent.futures.Future[DescribeReplicaLogDirsResult.ReplicaLogDirInfo]]")
+                "KafkaFuture[DescribeReplicaLogDirsResult.ReplicaLogDirInfo]]")
     assert_type(admin.create_partitions(
         new_partitions={"t": NewPartitions.increase_to(total_count=2)}).values(),
-        "dict[str, concurrent.futures.Future[None]]")
+        "dict[str, KafkaFuture[None]]")
     assert_type(admin.delete_records(
         records_to_delete={tp: RecordsToDelete.before_offset(offset=1)}).low_watermarks(),
-        "dict[TopicPartition, concurrent.futures.Future[DeletedRecords]]")
+        "dict[TopicPartition, KafkaFuture[DeletedRecords]]")
     assert_type(admin.elect_leaders(election_type=ElectionType.PREFERRED,
                                     partitions=None).partitions(),
-                "concurrent.futures.Future[dict[TopicPartition, BaseException | None]]")
+                "KafkaFuture[dict[TopicPartition, BaseException | None]]")
     assert_type(admin.alter_partition_reassignments(
         reassignments={tp: NewPartitionReassignment(target_replicas=[1]), tp: None}).all(),
-        "concurrent.futures.Future[None]")
+        "KafkaFuture[None]")
     assert_type(admin.list_partition_reassignments().reassignments(),
-                "concurrent.futures.Future[dict[TopicPartition, PartitionReassignment]]")
+                "KafkaFuture[dict[TopicPartition, PartitionReassignment]]")
     assert_type(admin.list_offsets(topic_partition_offsets={tp: OffsetSpec.latest()}).all(),
-                "concurrent.futures.Future[dict[TopicPartition, "
+                "KafkaFuture[dict[TopicPartition, "
                 "ListOffsetsResult.ListOffsetsResultInfo]]")
     assert_type(admin.list_config_resources().all(),
-                "concurrent.futures.Future[list[ConfigResource]]")
+                "KafkaFuture[list[ConfigResource]]")
     assert_type(admin.list_config_resources(
         config_resource_types=[ConfigResource.Type.TOPIC],
         options=ListConfigResourcesOptions()).all(),
-        "concurrent.futures.Future[list[ConfigResource]]")
+        "KafkaFuture[list[ConfigResource]]")
+    assert_type(admin.unregister_controller(controller_id=1).all(), KafkaFuture[None])
 
     async def _async() -> None:
         async_admin = AsyncAdmin.create(configs={"bootstrap.servers": "b:9092"})
-        async_deleted = await async_admin.delete_topics(topics=["t"])
-        assert_type(async_deleted.all(), "asyncio.Future[None]")
-        async_described = await async_admin.describe_topics(
+        async_deleted = async_admin.delete_topics(topics=["t"])
+        assert_type(async_deleted.all(), AsyncKafkaFuture[None])
+        async_described = async_admin.describe_topics(
             topics=TopicCollection.of_topic_ids(topics=[Uuid.random_uuid()]))
         assert_type(async_described.all_topic_ids(),
-                    "asyncio.Future[dict[Uuid, TopicDescription]] | None")
-        nodes = await (await async_admin.describe_cluster()).nodes()
+                    "AsyncKafkaFuture[dict[Uuid, TopicDescription]] | None")
+        nodes = await async_admin.describe_cluster().nodes().get()
         assert_type(nodes, list[Node])
-        assert_type((await async_admin.describe_configs(resources=[])).all(),
-                    "asyncio.Future[dict[ConfigResource, Config]]")
-        assert_type((await async_admin.incremental_alter_configs(configs={})).all(),
-                    "asyncio.Future[None]")
-        assert_type((await async_admin.alter_replica_log_dirs(replica_assignment={})).all(),
-                    "asyncio.Future[None]")
-        assert_type((await async_admin.describe_log_dirs(brokers=[])).all_descriptions(),
-                    "asyncio.Future[dict[int, dict[str, LogDirDescription]]]")
-        assert_type((await async_admin.describe_replica_log_dirs(replicas=[])).all(),
-                    "asyncio.Future[dict[TopicPartitionReplica, "
-                    "DescribeReplicaLogDirsResult.ReplicaLogDirInfo]]")
-        assert_type((await async_admin.create_partitions(new_partitions={})).all(),
-                    "asyncio.Future[None]")
-        assert_type((await async_admin.delete_records(records_to_delete={})).all(),
-                    "asyncio.Future[None]")
-        assert_type((await async_admin.elect_leaders(election_type=ElectionType.UNCLEAN,
-                                                     partitions=[tp])).all(),
-                    "asyncio.Future[None]")
-        assert_type((await async_admin.alter_partition_reassignments(reassignments={})).all(),
-                    "asyncio.Future[None]")
-        listed = await (await async_admin.list_partition_reassignments(
-            partitions=[tp])).reassignments()
+        assert_type(async_admin.describe_configs(resources=[]).all(),
+                    AsyncKafkaFuture[dict[ConfigResource, Config]])
+        assert_type(async_admin.incremental_alter_configs(configs={}).all(),
+                    AsyncKafkaFuture[None])
+        assert_type(async_admin.alter_replica_log_dirs(replica_assignment={}).all(),
+                    AsyncKafkaFuture[None])
+        assert_type(async_admin.describe_log_dirs(brokers=[]).all_descriptions(),
+                    AsyncKafkaFuture[dict[int, dict[str, LogDirDescription]]])
+        assert_type(async_admin.describe_replica_log_dirs(replicas=[]).all(),
+                    AsyncKafkaFuture[dict[TopicPartitionReplica,
+                                          DescribeReplicaLogDirsResult.ReplicaLogDirInfo]])
+        assert_type(async_admin.create_partitions(new_partitions={}).all(),
+                    AsyncKafkaFuture[None])
+        assert_type(async_admin.delete_records(records_to_delete={}).all(),
+                    AsyncKafkaFuture[None])
+        assert_type(async_admin.elect_leaders(election_type=ElectionType.UNCLEAN,
+                                              partitions=[tp]).all(),
+                    AsyncKafkaFuture[None])
+        assert_type(async_admin.alter_partition_reassignments(reassignments={}).all(),
+                    AsyncKafkaFuture[None])
+        listed = await async_admin.list_partition_reassignments(
+            partitions=[tp]).reassignments().get()
         assert_type(listed, dict[TopicPartition, PartitionReassignment])
-        assert_type((await async_admin.list_offsets(topic_partition_offsets={})).all(),
-                    "asyncio.Future[dict[TopicPartition, "
-                    "ListOffsetsResult.ListOffsetsResultInfo]]")
-        resources = await (await async_admin.list_config_resources()).all()
+        assert_type(async_admin.list_offsets(topic_partition_offsets={}).all(),
+                    AsyncKafkaFuture[dict[TopicPartition,
+                                          ListOffsetsResult.ListOffsetsResultInfo]])
+        resources = await async_admin.list_config_resources().all().get()
         assert_type(resources, list[ConfigResource])
+        assert_type(async_admin.unregister_controller(controller_id=1).all(),
+                    AsyncKafkaFuture[None])
 
-    del _async, asyncio, concurrent
+    del _async
 
 
 def test_admin_topic_rpc_typing_imports() -> None:
