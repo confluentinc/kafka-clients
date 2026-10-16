@@ -1212,7 +1212,21 @@ pub trait Admin: Send + Sync {
     /// The bound is a guarantee, not a hint: this returns once `timeout` has
     /// elapsed whatever the background task is doing, mirroring the timed
     /// `thread.join(waitTimeMs)` that ends Java's `close`. A task that has not
-    /// finished by then is left running.
+    /// finished by then is left running; a later `close` joins it.
+    ///
+    /// # A zero timeout
+    ///
+    /// `close_with_timeout(Duration::ZERO)` returns at once. It sets the
+    /// shutdown deadline and wakes the background task, but does not wait for
+    /// the task to exit, so a call still pending may be unresolved when this
+    /// returns: the task fails it with a timeout error ("The AdminClient thread
+    /// has exited.") once it runs again.
+    ///
+    /// This deliberately differs from Java, whose `close(Duration.ZERO)` ends
+    /// in `thread.join(0)`, which waits for the I/O thread to exit. The
+    /// background task here can be blocked in a TCP connect that no shutdown
+    /// deadline interrupts, so waiting for it would make `close(0)` wait as
+    /// long as the operating system takes to abandon that connect.
     ///
     /// Corresponds to `Admin.close(Duration)`; blocking in Java, so `async` in
     /// Rust (CLAUDE.md §11.4).

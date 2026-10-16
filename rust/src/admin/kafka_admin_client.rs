@@ -5449,10 +5449,10 @@ impl Admin for KafkaAdminClient {
         //
         // Deliberate divergence: Java's `Thread.join(0)` means "wait forever", so
         // `close(Duration::ZERO)` there is unbounded. We treat 0 as 0, because
-        // both `Admin::close`'s rustdoc and the exported C header promise a
-        // return within `timeout`, and because of the uninterruptible connect
-        // await above the Java behavior would be a genuine hang rather than the
-        // near-immediate return it is in Java.
+        // both `Admin::close_with_timeout`'s rustdoc ("A zero timeout") and the
+        // exported C header promise a return within `timeout`, and because of
+        // the uninterruptible connect await above the Java behavior would be a
+        // genuine hang rather than the near-immediate return it is in Java.
         let mut handle = self.shared.bg_handle.lock().unwrap().take();
         if let Some(join_handle) = handle.as_mut() {
             let joined = tokio::time::timeout(Duration::from_millis(wait_time_ms as u64), join_handle).await;
@@ -17629,6 +17629,7 @@ mod tests {
         poll_timeouts: Arc<Mutex<Vec<i64>>>,
         advance_clock: Arc<std::sync::atomic::AtomicBool>,
         stuck: Arc<std::sync::atomic::AtomicBool>,
+        release: Arc<Notify>,
         park_once: Arc<std::sync::atomic::AtomicBool>,
         parked: Arc<Notify>,
     }
@@ -17641,6 +17642,7 @@ mod tests {
                 poll_timeouts: Arc::new(Mutex::new(Vec::new())),
                 advance_clock: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 stuck: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                release: Arc::new(Notify::new()),
                 park_once: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 parked: Arc::new(Notify::new()),
             }
@@ -17658,7 +17660,8 @@ mod tests {
         }
 
         /// Signalled (with a stored permit) when `poll` has entered the park
-        /// armed by [`park_once`](Self::park_once).
+        /// armed by [`park_once`](Self::park_once), or the wait armed by
+        /// [`stuck`](Self::stuck).
         fn parked(&self) -> Arc<Notify> {
             Arc::clone(&self.parked)
         }
@@ -17671,13 +17674,22 @@ mod tests {
             Arc::clone(&self.advance_clock)
         }
 
-        /// Once armed, `poll` never returns, so the I/O loop can never reach
-        /// `should_exit` again. It stands in for any `await` inside a
-        /// `process_pending_calls` phase that no shutdown deadline can interrupt — in
-        /// production the unbounded `socket.connect(...).await` that
-        /// `send_eligible_calls` reaches through `client.ready(...)`.
+        /// Once armed, `poll` does not return until [`release`](Self::release)
+        /// is notified, so until then the I/O loop cannot reach `should_exit`
+        /// again. It stands in for any `await` inside a `process_pending_calls`
+        /// phase that no shutdown deadline can interrupt — in production the
+        /// unbounded `socket.connect(...).await` that `send_eligible_calls`
+        /// reaches through `client.ready(...)`. A wakeup does not end it, as it
+        /// does not end that connect.
         fn stuck(&self) -> Arc<std::sync::atomic::AtomicBool> {
             Arc::clone(&self.stuck)
+        }
+
+        /// Ends the wait armed by [`stuck`](Self::stuck), standing in for the
+        /// connect that finally returns. Clear `stuck` first, then
+        /// `notify_one`, so the next poll does not wait again.
+        fn release(&self) -> Arc<Notify> {
+            Arc::clone(&self.release)
         }
     }
 
@@ -17706,7 +17718,11 @@ mod tests {
         async fn poll(&mut self, timeout: i64, now: i64) -> Vec<crate::ClientResponse> {
             self.poll_timeouts.lock().unwrap().push(timeout);
             if self.stuck.load(Ordering::Acquire) {
-                std::future::pending::<()>().await;
+                // Created before `parked` is signalled, so a release issued the
+                // moment the test resumes is not lost.
+                let released = self.release.notified();
+                self.parked.notify_one();
+                released.await;
             }
             if self.park_once.swap(false, Ordering::AcqRel) {
                 let wakeup = self.inner.wakeup_notify();
@@ -17936,6 +17952,80 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(1),
             "close(50ms) must be bounded by its timeout, but it returned only after {elapsed:?}"
+        );
+    }
+
+    /// The documented contract of `close_with_timeout(Duration::ZERO)`, which
+    /// deliberately differs from Java's `close(Duration.ZERO)`: Java's
+    /// `thread.join(0)` waits for the I/O thread to exit
+    /// (`KafkaAdminClient.java:765-771`), whereas Rust returns at once and leaves
+    /// the call to fail on the I/O task once that task can run again.
+    ///
+    /// The task is blocked in an await no deadline interrupts, standing in for
+    /// the TCP connect `Selector::connect` awaits. `close(0)` must return while
+    /// it is blocked, with the call unresolved and the task still running; once
+    /// the task is released it exits and fails the call with Java's
+    /// "thread has exited" error, and a second `close()` joins it.
+    #[tokio::test]
+    async fn close_zero_returns_at_once_and_leaves_pending_calls_to_fail_on_the_task() {
+        let time = mock_time(1000);
+        let (cluster, nodes) = mock_cluster(3, 0);
+        let client = WaitingClient::new(
+            MockClient::with_static_nodes(nodes.clone(), Arc::clone(&time) as Arc<dyn Time>),
+            Arc::clone(&time),
+        );
+        let stuck = client.stuck();
+        let release = client.release();
+        let parked = client.parked();
+        let config = test_config();
+        let (admin, runnable) =
+            KafkaAdminClient::create_for_test(client, cluster, &config, Arc::clone(&time) as Arc<dyn Time>);
+
+        // The call is queued before the task starts, so the task's first pass
+        // picks it up; that pass's network poll then blocks.
+        let names = admin.list_topics_with_options(ListTopicsOptions::new()).names();
+        stuck.store(true, Ordering::Release);
+        admin.spawn(runnable);
+        tokio::time::timeout(Duration::from_secs(5), parked.notified())
+            .await
+            .expect("the I/O task should block in its network poll");
+
+        let started = std::time::Instant::now();
+        tokio::time::timeout(Duration::from_secs(5), admin.close_with_timeout(Duration::ZERO))
+            .await
+            .expect("close(0) must not wait for the I/O task to exit");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "close(0) must return at once, but it returned only after {:?}",
+            started.elapsed()
+        );
+        assert!(!names.is_done(), "close(0) returns before the I/O task fails the pending call");
+        assert!(
+            admin
+                .shared
+                .bg_handle
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|task| !task.is_finished()),
+            "close(0) leaves the blocked I/O task running"
+        );
+
+        stuck.store(false, Ordering::Release);
+        release.notify_one();
+        let error = tokio::time::timeout(Duration::from_secs(10), names.get())
+            .await
+            .expect("the released I/O task must fail the pending call")
+            .expect_err("a call still pending when the I/O task exits must fail");
+        assert!(matches!(error, Error::Timeout(_)), "got {error:?}");
+        assert_eq!(error.message(), "The AdminClient thread has exited. Call: listTopics");
+
+        tokio::time::timeout(Duration::from_secs(10), admin.close())
+            .await
+            .expect("a second close() joins the I/O task once it has exited");
+        assert!(
+            admin.shared.bg_handle.lock().unwrap().is_none(),
+            "the second close() joined the I/O task"
         );
     }
 

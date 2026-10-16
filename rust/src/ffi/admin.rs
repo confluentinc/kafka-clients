@@ -808,6 +808,13 @@ fn close_with_timeout(timeout_ms: i64) -> Duration {
 /// a negative `timeout_ms` for Java's no-argument `close()` semantics — wait
 /// indefinitely, which like Java means "capped at a year".
 ///
+/// A `timeout_ms` of 0 returns at once, without waiting for the background task
+/// to exit: a call still pending may be unresolved when this returns, and the
+/// task fails it with a timeout error once it runs again. Java's
+/// `close(Duration.ZERO)` instead waits for its I/O thread to exit; this client
+/// does not, because the task can be blocked in a TCP connect that no shutdown
+/// deadline interrupts.
+///
 /// Returns nothing: Java's `Admin.close(Duration)` is `void`, and the Rust
 /// `Admin::close` likewise returns `()`.
 ///
