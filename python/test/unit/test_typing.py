@@ -703,6 +703,45 @@ def test_admin_topic_rpc_typing_imports() -> None:
     _admin_topic_rpc_types()
 
 
+def _admin_mock_types(c: object = None) -> None:
+    """The mock admin clients: ``MockAdminClient`` hands out ``KafkaFuture`` and
+    ``AsyncMockAdminClient`` ``AsyncKafkaFuture``, the kind bound without any
+    written type argument, and ``get()`` takes a ``Duration``.
+
+    Type-check-only: the body is statically analysed by mypy --strict but never
+    executed at runtime."""
+    if c is None:
+        return
+    from confluent_kafka.admin import AsyncMockAdminClient, MockAdminClient, NewTopic
+    from confluent_kafka.common import AsyncKafkaFuture, KafkaFuture, Node
+
+    node = Node(id=0, host="h", port=1)
+    mock = MockAdminClient(brokers=[node], controller=node)
+    assert_type(mock, MockAdminClient)
+    created = mock.create_topics(new_topics=[NewTopic(name="t", num_partitions=1,
+                                                      replication_factor=1)])
+    assert_type(created.all(), KafkaFuture[None])
+    assert_type(created.all().get(timeout=1.0), None)
+    assert_type(mock.list_topics().names(), KafkaFuture[set[str]])
+    assert_type(mock.unregister_controller(controller_id=0).all(), KafkaFuture[None])
+
+    async def _async() -> None:
+        async_mock = AsyncMockAdminClient(brokers=[node], controller=node)
+        assert_type(async_mock, AsyncMockAdminClient)
+        assert_type(async_mock.create_topics(new_topics=[]).all(), AsyncKafkaFuture[None])
+        names = await async_mock.list_topics().names().get(timeout=1.0)
+        assert_type(names, set[str])
+        assert_type(async_mock.unregister_controller(controller_id=0).all(),
+                    AsyncKafkaFuture[None])
+
+    del _async
+
+
+def test_admin_mock_typing_imports() -> None:
+    """Runtime smoke check of the mock admin clients' typing function."""
+    _admin_mock_types()
+
+
 def _admin_group_rpc_types(c: object = None) -> None:
     """The consumer-group RPCs: each result's futures follow the client that
     returned it (``KafkaFuture`` from ``Admin``, ``AsyncKafkaFuture`` from
