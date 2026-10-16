@@ -1183,6 +1183,25 @@ fn assert_producer_fenced(error: &Error) {
     assert_eq!(error.message(), PRODUCER_FENCED_MESSAGE);
 }
 
+/// The message of the error a fenced producer's `send` fails with in
+/// `testFencingOnSend`, which has two sources. When the broker rejects the record,
+/// it is the error code's default text (`default_message`), since the broker sends
+/// no custom one. When an earlier record of the transaction already failed, `send`
+/// refuses the new one with `maybeFailWithError`'s text
+/// (`TransactionManager.java:1184-1192`): "Producer with transactionalId '<id>' and
+/// <producerIdAndEpoch> " followed by `rethrown_suffix`. Which one happens is a race:
+/// producer1's first two records are sent without waiting, so they may still be
+/// retrying (e.g. on `CONCURRENT_TRANSACTIONS`) when producer2's `initTransactions`
+/// bumps the epoch, and then fail. Java asserts only the class.
+fn assert_fenced_send_message(error: &Error, default_message: &str, rethrown_suffix: &str) {
+    let message = error.message();
+    assert!(
+        message == default_message
+            || (message.starts_with("Producer with transactionalId '") && message.ends_with(rethrown_suffix)),
+        "expected {default_message:?} or \"Producer with transactionalId '..' and .. {rethrown_suffix}\", got {message:?}"
+    );
+}
+
 /// The fencing prologue shared by `testFencingOnCommit` / `testFencingOnSendOffsets`
 /// (`TransactionsTest.scala:385-404` / `417-436`): p1 opens a transaction and
 /// flushes two records that must end up aborted, then p2 (same
@@ -1383,7 +1402,11 @@ async fn test_fencing_on_send() {
     )
     .await
     {
-        Err(error @ Error::ProducerFenced(_)) => assert_producer_fenced(&error),
+        Err(error @ Error::ProducerFenced(_)) => assert_fenced_send_message(
+            &error,
+            PRODUCER_FENCED_MESSAGE,
+            "has been fenced by another producer with the same transactionalId",
+        ),
         Err(other) => panic!("Got an unexpected error from a fenced producer: {other:?}"),
         Ok(future) => match future.get().await {
             Ok(metadata) => panic!(
@@ -1397,7 +1420,11 @@ async fn test_fencing_on_send() {
                     matches!(error, Error::InvalidProducerEpoch(_)),
                     "expected the send future to fail with InvalidProducerEpoch, got {error:?}"
                 );
-                assert_eq!(error.message(), INVALID_PRODUCER_EPOCH_MESSAGE);
+                assert_fenced_send_message(
+                    &error,
+                    INVALID_PRODUCER_EPOCH_MESSAGE,
+                    "attempted to produce with an old epoch",
+                );
             },
         },
     }
