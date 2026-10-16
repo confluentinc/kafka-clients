@@ -710,6 +710,10 @@ static PyTypeObject ConsumerGroupMetadataType = {
 //   * `AsyncKafkaProducer` registers a Python notify callable that does
 //     nothing but `loop.call_soon_threadsafe(pump)` on the one loop the
 //     producer is bound to; the pump calls `Producer__execute_callbacks` there.
+//     Once the loop is bound it also hands over the write end of a socket pair
+//     whose read end the loop watches (`Producer__set_wake_fd`): the hook then
+//     writes one byte there instead of taking the GIL for the callable, and
+//     the loop's reader callback runs the pump.
 //   * Either way each producer has one drainer, which a drain that keeps the
 //     GIL needs: a second thread entering it would block inside the native
 //     call holding the GIL while the first waits for the GIL.
@@ -717,8 +721,9 @@ static PyTypeObject ConsumerGroupMetadataType = {
 // The hook installed with `kafka_producer_Producer__set_callbacks_notify_err` fires
 // from a Rust task once per empty->non-empty transition of that vector. It
 // only signals: it sets `notified` under `mtx` and broadcasts `cnd` (what the
-// `Producer_poll` slices wait on) and, when one is set, invokes the Python
-// notify callable. It never calls back into the C API.
+// `Producer_poll` slices wait on) and then either writes a byte to the wake
+// fd, when one is set, or invokes the Python notify callable, when one is set.
+// It never calls back into the C API.
 //
 // Ownership conventions (CLAUDE.md §4): errors cross into Python as the
 // address of the `kafka_common_Error_t` (an int, 0 = success). An error a
@@ -768,6 +773,7 @@ typedef struct {
     cnd_t cnd;
     int notified;              // set by the notify hook, consumed by Producer_poll
     PyObject* notify_cb;       // asyncio: scheduler callable; NULL for the sync producer
+    int wake_fd;               // asyncio: write end of the socket pair the loop watches, -1 for none (mtx-guarded)
     DeliveryCtx* orphans;      // delivery contexts whose send failed (GIL-guarded)
 } Producer;
 
@@ -954,11 +960,25 @@ static void producer_on_completion(void* self_,
 // that point), so the pointer is stable here.
 static void producer_callbacks_notify(void* opaque) {
     Producer* p = (Producer*)opaque;
+    int woke = 0;
     mtx_lock(&p->mtx);
     p->notified = 1;
     cnd_broadcast(&p->cnd);
+#ifndef _WIN32
+    if (p->wake_fd >= 0) {
+        // asyncio, the socket-pair wake (see Producer__set_wake_fd): one byte
+        // to the write end, which the loop's selector sees; no GIL is taken on
+        // this thread. The end is non-blocking: EAGAIN means a byte is already
+        // pending there, which wakes the loop just the same. Written under
+        // `mtx`, so once Producer__set_wake_fd(-1) returns no write to the old
+        // end is in progress and the ends can be closed.
+        ssize_t written = write(p->wake_fd, "", 1);
+        (void)written;
+        woke = 1;
+    }
+#endif
     mtx_unlock(&p->mtx);
-    if (p->notify_cb != NULL) {
+    if (!woke && p->notify_cb != NULL) {
         // asyncio: schedule the pump on the loop. PyGILState_Ensure is a no-op
         // when this thread already holds the GIL (a callback of a drain that
         // queued another) and takes it on a Rust task or inside a wrapper's
@@ -972,12 +992,36 @@ static void producer_callbacks_notify(void* opaque) {
     }
 }
 
+// Producer__set_wake_fd(handle, fd: int) -> None: the write end of the socket
+// pair the asyncio loop watches, or -1 to fall back to the notify callable.
+// While set, the notify hook writes one byte there instead of taking the GIL
+// to call the callable. The caller keeps the fd open until it has cleared it
+// here: the hook reads and writes it under `mtx`, which this takes too.
+static PyObject* py_Producer__set_wake_fd(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    int fd;
+    if (!PyArg_ParseTuple(args, "Ki", &ptr, &fd)) return NULL;
+#ifdef _WIN32
+    // No socket wake on Windows (a socket is not an fd there): the hook keeps
+    // calling the notify callable, and the loop's reader never fires.
+    (void)ptr;
+    (void)fd;
+#else
+    Producer* p = producer_from_handle(ptr);
+    mtx_lock(&p->mtx);
+    p->wake_fd = fd;
+    mtx_unlock(&p->mtx);
+#endif
+    Py_RETURN_NONE;
+}
+
 // ---- construction / destruction --------------------------------------------
 
 static Producer* producer_alloc(PyObject* notify_cb) {
     Producer* p = (Producer*)PyMem_Malloc(sizeof(Producer));
     if (p == NULL) { PyErr_NoMemory(); return NULL; }
     memset(p, 0, sizeof(*p));
+    p->wake_fd = -1;
     mtx_init(&p->mtx, mtx_plain);
     cnd_init(&p->cnd);
     if (notify_cb != NULL && notify_cb != Py_None) {
@@ -10742,6 +10786,8 @@ static PyMethodDef ProducerNativeMethods[] = {
      "poll(timeout_ms): run queued callbacks on this thread, waiting up to timeout_ms; returns count"},
     {"Producer__set_callback_result", py_Producer__set_callback_result, METH_VARARGS,
      "Report a deferred delivery-callback result: (h, callback_id, exception | None)"},
+    {"Producer__set_wake_fd", py_Producer__set_wake_fd, METH_VARARGS,
+     "Set the write end of the socket pair the asyncio loop watches (-1: none)"},
     {"Producer__execute_callbacks", py_Producer__execute_callbacks, METH_VARARGS,
      "Run the queued callbacks on this thread; returns count"},
     {"Producer_flush", py_Producer_flush, METH_VARARGS, "Blocking flush -> owned_error_int"},

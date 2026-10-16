@@ -3314,8 +3314,12 @@ def _hold_pump_schedules(p: Any) -> tuple[threading.Event, Callable[[], None]]:
     hook asks for one, and calling the function schedules that one as the hook
     would have. Holding it keeps the pump off the loop while the loop still
     runs, which on a fast machine would otherwise run the pump, and then the
-    delivery, before the loop stops."""
+    delivery, before the loop stops. The hook goes through the callable this
+    replaces: the socket-pair wake it takes otherwise (``_install_wake``) has
+    nothing to hold, so it is off for this producer (its loop is not bound
+    yet)."""
     scheduled = threading.Event()
+    p._WAKE_BY_FD = False  # noqa: SLF001
     real = p._schedule_pump  # noqa: SLF001
 
     def schedule() -> None:
@@ -3477,7 +3481,11 @@ def test_an_operation_result_its_closing_loop_refuses_is_freed(
     # one-loop binding: submitted once the loop has closed, so the notify hook
     # that finds it open hands the pump to the helper thread when
     # call_soon_threadsafe refuses it; the producer is then freed.
+    # The notify callable is the hook of a loop that cannot watch a socket;
+    # the socket-pair wake (AsyncProducer._install_wake) cannot see a closed
+    # loop: see test_a_completion_for_a_closed_loop_waits_for_the_producers_destruction.
     p = AsyncKafkaProducer(configs=UNREACHABLE)
+    p._WAKE_BY_FD = False  # noqa: SLF001
     held = hold_completion("Producer_begin_transaction_cb", submit_later=True)
     stopped_loop.start(p.begin_transaction())
     loop = stopped_loop.loop
@@ -3961,3 +3969,229 @@ async def test_a_payload_delivered_just_before_a_cancellation_is_freed(
     finally:
         monkeypatch.undo()
         await p.close(timeout=0)
+
+
+# ---------------------------------------------------------------------------
+# The fast path yields to the loop: after 1000 sends in a row that the producer
+# took at once, the next send() gives the loop one iteration before touching
+# its record (rule 3, asyncio's cooperative scheduling:
+# AsyncProducer._FAST_PATH_YIELD_EVERY). A queued send suspends on its own and
+# restarts the count; a task cancelled at the yield has sent nothing.
+# ---------------------------------------------------------------------------
+
+def _taking_at_once(order: list[str]) -> Callable[..., int]:
+    """Fake the C send: every record is taken, and completes, at once, so
+    send() never suspends on its own (the fast path). Each call appends
+    "send" to ``order``."""
+
+    def producer_send_cb(c_producer: int, native: object, cb: Any, resolve: Any) -> int:
+        order.append("send")
+        cb(_METADATA, 0, 0)
+        resolve(0)
+        return 0
+
+    return producer_send_cb
+
+
+async def test_the_async_send_yields_to_the_loop_after_1000_sends_taken_at_once(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    order: list[str] = []
+    monkeypatch.setattr(_lib, "Producer_send_cb", _taking_at_once(order))
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    try:
+        every = AsyncKafkaProducer._FAST_PATH_YIELD_EVERY  # noqa: SLF001
+        assert every == 1000
+        asyncio.get_running_loop().call_soon(order.append, "loop")
+        for _ in range(every):
+            await p.send(record=RECORD)
+        # No send suspended: what was scheduled on the loop before has not run.
+        assert order == ["send"] * every
+        assert p._fast_path_sends == every  # noqa: SLF001
+        await p.send(record=RECORD)
+        # The 1001st gave the loop one iteration before touching its record.
+        assert order == ["send"] * every + ["loop", "send"]
+        assert p._fast_path_sends == 1  # noqa: SLF001
+    finally:
+        monkeypatch.undo()
+        await p.close(timeout=0)
+
+
+async def test_a_queued_async_send_restarts_the_count_of_sends_taken_at_once(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    order: list[str] = []
+    taken = _taking_at_once(order)
+    loop = asyncio.get_running_loop()
+
+    def queued(c_producer: int, native: object, cb: Any, resolve: Any) -> int:
+        # The record waits for the submission task: its handover, then its
+        # completion, come from the pump later, and send() suspends meanwhile.
+        order.append("queued")
+        loop.call_soon(resolve, 0)
+        loop.call_soon(cb, _METADATA, 0, 0)
+        return 0
+
+    monkeypatch.setattr(_lib, "Producer_send_cb", taken)
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    try:
+        every = AsyncKafkaProducer._FAST_PATH_YIELD_EVERY  # noqa: SLF001
+        for _ in range(every - 1):
+            await p.send(record=RECORD)
+        assert p._fast_path_sends == every - 1  # noqa: SLF001
+        monkeypatch.setattr(_lib, "Producer_send_cb", queued)
+        await p.send(record=RECORD)
+        assert order[-1] == "queued"
+        assert p._fast_path_sends == 0  # noqa: SLF001
+        monkeypatch.setattr(_lib, "Producer_send_cb", taken)
+        loop.call_soon(order.append, "loop")
+        for _ in range(every):
+            await p.send(record=RECORD)
+        # The count restarted at the queued send: these 1000 did not yield.
+        assert "loop" not in order
+        assert p._fast_path_sends == every  # noqa: SLF001
+    finally:
+        monkeypatch.undo()
+        await p.close(timeout=0)
+
+
+async def test_a_task_cancelled_at_the_fast_path_yield_has_sent_nothing(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    order: list[str] = []
+    monkeypatch.setattr(_lib, "Producer_send_cb", _taking_at_once(order))
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    try:
+        every = AsyncKafkaProducer._FAST_PATH_YIELD_EVERY  # noqa: SLF001
+        for _ in range(every):
+            await p.send(record=RECORD)
+        task = asyncio.ensure_future(p.send(record=RECORD))
+        await asyncio.sleep(0)  # the task is suspended at the yield, before its record
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert order == ["send"] * every  # the 1001st record was never sent
+        assert p._fast_path_sends == 0  # noqa: SLF001
+        await p.send(record=RECORD)  # and the next send works
+        assert order == ["send"] * (every + 1)
+    finally:
+        monkeypatch.undo()
+        await p.close(timeout=0)
+
+
+async def test_a_completion_wakes_the_loop_through_the_socket_pair_not_the_notify_callable(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # The native producer's notify hook, fired on the Rust task's thread when
+    # its callback queue turns non-empty, writes one byte to the socket pair
+    # the loop watches (AsyncProducer._install_wake) instead of taking the GIL
+    # to call the notify callable: a completion that arrives while the loop
+    # waits reaches its callback with the callable never called. close()
+    # releases the pair: the loop stops watching it and both ends are closed.
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    scheduled: list[int] = []
+    monkeypatch.setattr(p, "_schedule_pump", lambda: scheduled.append(1))
+    with pytest.raises(IllegalStateError) as err:
+        await p.begin_transaction()  # its queued completion is the error
+    assert str(err.value) == NOT_TRANSACTIONAL
+    reader, writer = p._wake_r, p._wake_w  # noqa: SLF001
+    assert reader is not None and writer is not None
+    assert scheduled == []
+    await p.close()
+    await asyncio.sleep(0)  # the loop stops watching the read end on its next iteration
+    assert p._wake_r is None and p._wake_w is None  # noqa: SLF001
+    assert reader.fileno() == -1 and writer.fileno() == -1
+
+
+def test_a_completion_for_a_closed_loop_waits_for_the_producers_destruction(
+        hold_completion: Any, freed_errors: list[int], stopped_loop: Any,
+        capfd: pytest.CaptureFixture[str]) -> None:
+    # The socket-pair wake cannot see that the loop has closed: a byte written
+    # to a pair nobody reads wakes nothing, so a completion that arrives for a
+    # closed loop stays queued in the C API until the producer is destroyed,
+    # which runs the still pending callbacks (CLAUDE.md §4); the result is
+    # freed then, on the destroying thread, with no error printed. (With the
+    # notify callable the helper thread would have run it at once: see
+    # test_an_operation_result_its_closing_loop_refuses_is_freed.)
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    held = hold_completion("Producer_begin_transaction_cb", submit_later=True)
+    stopped_loop.start(p.begin_transaction())
+    assert p._wake_r is not None  # noqa: SLF001 - the loop watches the pair
+    stopped_loop.loop.close()
+    capfd.readouterr()
+    held.submit()
+    assert held.submitted.is_set()
+    held.release.set()
+    assert not held.delivered.wait(0.5)
+    assert freed_errors == []
+    p._destroy()  # noqa: SLF001
+    assert held.delivered.wait(30)
+    ((error,),) = held.payloads
+    assert error
+    assert held.raised == []
+    assert capfd.readouterr().err == ""
+    assert freed_errors == [error]
+    assert p._wake_r is None and p._wake_w is None  # noqa: SLF001
+
+
+def _counting_schedule_pump(p: Any) -> list[int]:
+    """Count the calls of the producer's notify callable, which keeps working."""
+    calls: list[int] = []
+    real = p._schedule_pump  # noqa: SLF001
+
+    def schedule() -> None:
+        calls.append(1)
+        real()
+
+    p._schedule_pump = schedule  # noqa: SLF001
+    return calls
+
+
+async def test_a_loop_that_cannot_watch_a_socket_keeps_the_notify_callable(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # A loop without add_reader (Windows' Proactor raises NotImplementedError):
+    # no socket pair is installed, and the hook keeps calling the notify
+    # callable, which schedules the pump on the loop.
+    loop = asyncio.get_running_loop()
+
+    def no_reader(*args: Any) -> None:
+        raise NotImplementedError
+
+    monkeypatch.setattr(type(loop), "add_reader", no_reader)
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    calls = _counting_schedule_pump(p)
+    with pytest.raises(IllegalStateError) as err:
+        await p.begin_transaction()
+    assert str(err.value) == NOT_TRANSACTIONAL
+    assert p._wake_r is None and p._wake_w is None  # noqa: SLF001
+    assert calls
+    await p.close()
+
+
+async def test_the_wake_switch_off_keeps_the_notify_callable() -> None:
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    p._WAKE_BY_FD = False  # noqa: SLF001
+    calls = _counting_schedule_pump(p)
+    with pytest.raises(IllegalStateError) as err:
+        await p.begin_transaction()
+    assert str(err.value) == NOT_TRANSACTIONAL
+    assert p._wake_r is None and p._wake_w is None  # noqa: SLF001
+    assert calls
+    await p.close()
+
+
+def test_the_sync_producer_sets_no_wake_fd(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The socket pair is the asyncio producer's: the sync producer's completion
+    # thread waits on the condition the hook broadcasts, so it never hands the
+    # native producer a wake fd.
+    set_calls: list[tuple[Any, ...]] = []
+    real = _lib.Producer__set_wake_fd
+
+    def set_wake_fd(*args: Any) -> Any:
+        set_calls.append(args)
+        return real(*args)
+
+    monkeypatch.setattr(_lib, "Producer__set_wake_fd", set_wake_fd)
+    p = KafkaProducer(configs=UNREACHABLE)
+    with pytest.raises(IllegalStateError) as err:
+        p.begin_transaction()  # its completion reaches the completion thread
+    assert str(err.value) == NOT_TRANSACTIONAL
+    p.close()
+    assert set_calls == []
+
