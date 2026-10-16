@@ -836,6 +836,10 @@ async fn receive_exact_records(poller: &ConsumerAssignmentPoller, num_records: u
 /// :262): subscribe to a topic that does not exist yet, create it 2 s later,
 /// consume 1000 records; then stop every broker, restart them all, and consume
 /// 1000 more on the same consumer.
+///
+/// Deviation: `max.poll.interval.ms` is 60000 instead of Java's 6000 (see the
+/// comment at the config). Everything else, including `metadata.max.age.ms=100`
+/// and the exact-count assertion on the second poller, is Java's.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_subscribe_when_topic_unavailable() {
     let mut ctx = TestContext::new(bounce_cluster_config()).await;
@@ -847,7 +851,17 @@ async fn test_async_subscribe_when_topic_unavailable() {
     let mut consumer = create_consumer(
         &ctx,
         &HashMap::from([
-            ("max.poll.interval.ms".to_string(), "6000".to_string()),
+            // Deviation: Java sets 6000, which assumes its in-process KRaft
+            // cluster restarts within 6 s. Bouncing every broker of the Docker
+            // harness takes about 8-13 s, during which nothing calls `poll()`.
+            // Letting the poll timer expire would make the member go stale and
+            // drop its assignment and positions without a commit (Java's
+            // `AbstractMembershipManager.transitionToStale`; this client
+            // auto-commits only from the application's `poll()`/`assign()`, as
+            // Java does), so the second poller would re-read all 2000 records
+            // from `earliest`. That is not what this test is about, so allow a
+            // poll gap with clear headroom over the bounce.
+            ("max.poll.interval.ms".to_string(), "60000".to_string()),
             ("metadata.max.age.ms".to_string(), "100".to_string()),
         ]),
     );

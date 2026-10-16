@@ -153,7 +153,12 @@ impl AutoCommitState {
     }
 
     /// Java: `resetTimer(long retryBackoffMs)`. Reset to a caller-supplied
-    /// backoff from `now_ms` (used when a retriable auto-commit failed).
+    /// backoff from `now_ms`. Java reaches it only through
+    /// `maybeResetTimerWithBackoff`'s `RetriableCommitFailedException` branch,
+    /// which the auto-commit future never takes (see
+    /// `CommitRequestManager::maybe_auto_commit_async`), so it has no
+    /// production caller here; it is kept as the translation of the Java
+    /// method.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager$AutoCommitState#resetTimer")]
     fn reset_timer_with_backoff(&mut self, now_ms: i64, retry_backoff_ms: i64) {
         self.expiration_ms = now_ms.saturating_add(retry_backoff_ms);
@@ -292,11 +297,6 @@ struct OffsetCommitRequestState {
     offsets: HashMap<TopicPartition, OffsetAndMetadata>,
     member_info: MemberInfo,
     state: TimedRequestState,
-    /// Tracks whether `on_send_attempt` has been called at least once.
-    /// `RequestState::num_attempts` is private; we track separately so
-    /// we can reproduce Java's `maybeExpire` invariant (only expire after
-    /// at least one send attempt).
-    has_attempted_send: bool,
     /// Number of prior retriable failures for this `commit_sync` flow.
     /// Java tracks this via the inherited `RequestState.numAttempts` field,
     /// which carries across `resetFuture()` calls because Java keeps the
@@ -338,7 +338,6 @@ impl OffsetCommitRequestState {
                 offsets,
                 member_info,
                 state,
-                has_attempted_send: false,
                 commit_sync_attempts: 0,
                 future_tx: Arc::new(Mutex::new(Some(tx))),
             },
@@ -356,6 +355,41 @@ impl OffsetCommitRequestState {
             self.state.on_failed_attempt(now_ms);
         }
         self.commit_sync_attempts = n;
+    }
+
+    /// Mirrors Java's `OffsetCommitRequestState.requestDescription()`:
+    /// `"OffsetCommit request for offsets " + offsets`, with the map in
+    /// Java's `Map.toString()` shape (`{topic-0=OffsetAndMetadata{...}}`).
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager$OffsetCommitRequestState#requestDescription"
+    )]
+    fn request_description(&self) -> String {
+        let entries: Vec<String> = self.offsets.iter().map(|(tp, oam)| format!("{tp}={oam}")).collect();
+        format!("OffsetCommit request for offsets {{{}}}", entries.join(", "))
+    }
+
+    /// Mirrors Java's `RetriableRequestState.maybeExpire()`: if the request
+    /// already failed at least once (`numAttempts > 0`) and its deadline has
+    /// passed, complete its future with a timeout error
+    /// (`"<requestDescription> could not complete before timeout expired."`)
+    /// and return `true` so the caller drops it from the unsent queue (Java's
+    /// `removeRequest()`).
+    ///
+    /// A request that has never failed (the first attempt of a commit, even
+    /// one whose deadline passed while the coordinator was unknown) is not
+    /// expired. A retry is, because the retry driver seeds its failed
+    /// attempts via [`Self::seed_failed_attempts`] (Java reuses the same
+    /// state, so its `numAttempts` carries over the same way).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager$RetriableRequestState#maybeExpire")]
+    fn maybe_expire(&self, current_time_ms: i64) -> bool {
+        if self.state.num_attempts() > 0 && self.state.is_expired(current_time_ms) {
+            self.complete_err(Error::timeout(format!(
+                "{} could not complete before timeout expired.",
+                self.request_description()
+            )));
+            return true;
+        }
+        false
     }
 
     fn complete_ok(&self, value: HashMap<TopicPartition, OffsetAndMetadata>) {
@@ -577,7 +611,9 @@ struct CommitRequestManagerInner {
     /// poked whenever a spawned retry driver ([`fetch_offsets_with_retries`],
     /// [`commit_sync_with_retries`],
     /// [`auto_commit_sync_before_rebalance_with_retries`]) re-enqueues an
-    /// `OffsetFetch` / `OffsetCommit` retry.
+    /// `OffsetFetch` / `OffsetCommit` retry, and whenever
+    /// `maybe_auto_commit_async` enqueues an interval auto-commit (it may run
+    /// on the spawned `AsyncPoll` task, after the bg loop polled this manager).
     ///
     /// Java retries inside the `whenComplete` continuation, which runs on the
     /// network thread itself, so the retry is visible to the very next
@@ -782,7 +818,9 @@ impl CommitRequestManager {
     }
 
     /// Reset the auto-commit timer to a caller-supplied backoff. Mirrors
-    /// Java's overloaded `resetAutoCommitTimer(long retryBackoffMs)`.
+    /// Java's overloaded `resetAutoCommitTimer(long retryBackoffMs)`, whose
+    /// only Java caller (`maybeResetTimerWithBackoff`) is unreachable for the
+    /// auto-commit future (see `maybe_auto_commit_async`).
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager#resetAutoCommitTimer")]
     pub(crate) fn reset_auto_commit_timer_with_backoff(&self, now_ms: i64, retry_backoff_ms: i64) {
         let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
@@ -805,8 +843,11 @@ impl CommitRequestManager {
     /// pass-through to the existing `maybe_auto_commit_async` driver.
     ///
     /// Used by `ApplicationEventProcessor` for `AsyncPoll` and
-    /// `AssignmentChange` events so the auto-commit interval is honoured at
-    /// event-dispatch time rather than only inside the bg-task `poll`.
+    /// `AssignmentChange` events. As in Java, this is the ONLY place the
+    /// interval auto-commit is started: the bg-task `poll_with_coordinator`
+    /// only drains requests already queued, so offsets are auto-committed
+    /// only when the application calls `poll()` / `assign()`, never while it
+    /// is still processing the records the previous `poll()` returned.
     /// Takes `&self` (not `&mut self`) because all mutation flows through
     /// the interior `Arc<CommitRequestManagerInner>` `Mutex` slots. The
     /// shape change is required for Phase-12 production wire-up where the
@@ -1485,8 +1526,18 @@ impl CommitRequestManager {
             return self.drain_pending_offset_commit_requests();
         }
 
-        // Auto-commit firing — drain timer.
-        self.maybe_auto_commit_async(current_time_ms);
+        // No auto-commit is started here. Java's `poll` only drains requests
+        // that are already queued; the interval auto-commit is started solely
+        // by `updateTimerAndMaybeCommit` (`Self::update_timer_and_maybe_commit`),
+        // which runs when the application calls `poll()` (`AsyncPollEvent`)
+        // or `assign()` (`AssignmentChangeEvent`). Starting it from this
+        // background-loop poll would commit the positions of records the
+        // application has been handed by `poll()` but may still be
+        // processing, turning auto-commit into at-most-once delivery. A long
+        // `poll()` with no new records still auto-commits on the interval:
+        // `maximum_time_to_wait` bounds the application task's wait by the
+        // auto-commit timer, so its poll loop submits a fresh
+        // `AsyncPollEvent` when the timer expires.
 
         let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
         if !guard.pending.has_unsent_requests() {
@@ -1499,17 +1550,19 @@ impl CommitRequestManager {
         let mut commits = std::mem::take(&mut guard.pending.unsent_offset_commits);
         let mut requeue_commits: VecDeque<OffsetCommitRequestState> = VecDeque::new();
         while let Some(mut commit) = commits.pop_front() {
-            // Expire any commits whose deadline has passed and at least
-            // one send attempt has been made (Java: maybeExpire).
-            if commit.has_attempted_send && commit.state.is_expired(current_time_ms) {
-                let desc = format!("OffsetCommit request for offsets {:?}", commit.offsets);
-                let err = Error::timeout(format!("{desc} could not complete before timeout expired."));
-                commit.complete_err(err);
+            // Java `PendingRequests.drain` → `failAndRemoveExpiredCommitRequests`
+            // → `maybeExpire`: a request that already failed at least once
+            // (`numAttempts > 0`) and whose deadline passed is removed and
+            // failed with a TimeoutException instead of being sent. This is
+            // what stops a `commit_sync` retry that waited out its deadline in
+            // backoff from reaching the broker after the caller was told the
+            // commit timed out (it could otherwise land after a newer commit
+            // and move the committed offset backwards).
+            if commit.maybe_expire(current_time_ms) {
                 continue;
             }
             if commit.state.can_send_request(current_time_ms) {
                 commit.state.on_send_attempt(current_time_ms);
-                commit.has_attempted_send = true;
                 // Refresh the request's member id/epoch from the manager's
                 // CURRENT member info at SEND time. In Java the request holds a
                 // reference to the manager's mutable `MemberInfo`
@@ -1570,9 +1623,21 @@ impl CommitRequestManager {
         // Java: `maybeAutoCommitAsync()` — only fires when autoCommit enabled
         // AND timer expired AND no in-flight commit. Then snapshots
         // `subscriptions.allConsumed()`, enqueues an `OffsetCommitRequestState`
-        // (deadline = `Long.MAX_VALUE`), resets the interval timer, and on
-        // a retriable failure resets the timer with `retry_backoff_ms`
-        // (Java's `maybeResetTimerWithBackoff`).
+        // (deadline = `Long.MAX_VALUE`) and resets the interval timer.
+        //
+        // Java then calls `maybeResetTimerWithBackoff(result)`, which would
+        // shorten the timer to `retryBackoffMs` only if the auto-commit future
+        // failed with a `RetriableCommitFailedException`. That never happens:
+        // the auto-commit future is the request's own future, completed with
+        // the raw error (`error.exception()` in
+        // `OffsetCommitRequestState.onResponse`, the transport error in
+        // `handleClientResponse`, the coordinator fatal error, ...); only the
+        // user-facing `commitAsync` wraps errors in
+        // `RetriableCommitFailedException` (`commitAsyncExceptionForError`).
+        // So after any failure, retriable or not, Java waits the full
+        // interval before the next auto-commit
+        // (`CommitRequestManagerTest.testAsyncAutocommitNotRetriedAfterException`),
+        // and so does this translation: there is no backoff reset.
         let should_fire = {
             let guard = self.inner.state.lock().expect("commit manager state poisoned");
             match guard.auto_commit.as_ref() {
@@ -1631,27 +1696,30 @@ impl CommitRequestManager {
             let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
             guard.pending.unsent_offset_commits.push_back(request);
         }
-        // Java: `maybeResetTimerWithBackoff` — on a retriable failure
-        // reset the auto-commit timer with `retry_backoff_ms`. Also
-        // clears the `inflightCommitStatus` flag regardless of outcome
-        // (Java's `autoCommitCallback` BiConsumer in `requestAutoCommit`).
+        // Wake the bg loop so its next iteration sends the commit. Java's
+        // network thread processes the `AsyncPollEvent` and then polls the
+        // request managers in the same `runOnce`, so the OffsetCommit goes out
+        // at once. In Rust the `AsyncPoll` work runs on a spawned task and can
+        // enqueue this request after the bg loop already polled the commit
+        // manager for this iteration; without the wake it would wait until
+        // something else ended the network poll (up to its ~5 s timeout).
+        // Called on the bg task itself (`AssignmentChange`), the stored
+        // `Notify` permit costs one extra loop iteration. Only a non-empty
+        // auto-commit reaches here, so it is at most one wake per interval.
+        wake_background_task(&self.inner);
+        // Java's `autoCommitCallback` BiConsumer in `requestAutoCommit`:
+        // clear the `inflightCommitStatus` flag regardless of outcome and log
+        // the result. The timer keeps the interval set above (see the comment
+        // at the top of this method on `maybeResetTimerWithBackoff`).
         let inner = Arc::clone(&self.inner);
         tokio::spawn(async move {
             let outcome = request_rx.await;
-            // Clear the inflight flag and (on a retriable failure) reset the
-            // auto-commit timer with backoff under a single critical section,
-            // then drop the guard before firing the interceptor hook (which
-            // takes its own lock inside the invoker).
+            // Clear the inflight flag, then drop the guard before firing the
+            // interceptor hook (which takes its own lock inside the invoker).
             {
                 let mut guard = inner.state.lock().expect("commit manager state poisoned");
                 if let Some(ac) = guard.auto_commit.as_mut() {
                     ac.set_inflight_commit_status(false);
-                }
-                // Java's `maybeResetTimerWithBackoff`: on a retriable failure
-                // reset the auto-commit timer with `retry_backoff_ms`.
-                let is_retriable_failure = matches!(&outcome, Ok(Err(err)) if err.is_retriable_error());
-                if let (true, Some(ac)) = (is_retriable_failure, guard.auto_commit.as_mut()) {
-                    ac.reset_timer_with_backoff(current_time_ms, inner.retry_backoff_ms);
                 }
             }
             match outcome {
@@ -1664,14 +1732,14 @@ impl CommitRequestManager {
                     if let Some(offsets) = offsets_for_interceptor {
                         inner.enqueue_interceptor_invocation(&offsets);
                     }
-                    log::debug!("Completed asynchronous auto-commit of offsets");
+                    log::debug!("Completed auto-commit of offsets");
                 },
                 Ok(Err(err)) => {
-                    if err.is_retriable_error() {
-                        log::debug!("Asynchronous auto-commit of offsets failed due to retriable error: {err}");
-                    } else {
-                        log::debug!("Asynchronous auto-commit of offsets failed: {err}");
-                    }
+                    // Java's `autoCommitCallback` logs every auto-commit
+                    // failure at WARN: its debug branch is reserved for a
+                    // `RetriableCommitFailedException`, which the auto-commit
+                    // future never carries (see above).
+                    log::warn!("Auto-commit of offsets failed: {err}");
                 },
                 Err(_) => {
                     log::debug!("Asynchronous auto-commit channel closed without a result");
@@ -2384,10 +2452,7 @@ async fn commit_sync_with_retries(
                 commit_sync_attempts += 1;
                 if current_time_ms >= deadline_ms {
                     log::info!("OffsetCommit timeout expired so it won't be retried anymore");
-                    break Err(Error::timeout(format!(
-                        "Failed to commit offsets within the deadline: {}",
-                        err.error().message()
-                    )));
+                    break Err(maybe_wrap_as_timeout_error(err));
                 }
                 // Re-enqueue a fresh request with continuity in the
                 // backoff counter.
@@ -2413,6 +2478,23 @@ async fn commit_sync_with_retries(
     let mut guard = result_tx.lock().expect("commit_sync tx poisoned");
     if let Some(tx) = guard.take() {
         let _ = tx.send(outcome);
+    }
+}
+
+/// Java `CommitRequestManager.maybeWrapAsTimeoutException`: a timeout error
+/// is surfaced as-is (e.g. the one [`OffsetCommitRequestState::maybe_expire`]
+/// produces when an expired retry is dropped at drain, so the caller sees
+/// "<description> could not complete before timeout expired."); any other
+/// retriable error is wrapped in a timeout error.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager#maybeWrapAsTimeoutException")]
+fn maybe_wrap_as_timeout_error(err: Error) -> Error {
+    if matches!(err, Error::Timeout(_)) {
+        err
+    } else {
+        Error::timeout(format!(
+            "Failed to commit offsets within the deadline: {}",
+            err.error().message()
+        ))
     }
 }
 
@@ -2508,10 +2590,7 @@ async fn auto_commit_sync_before_rebalance_with_retries(
                 attempts += 1;
                 if current_time_ms >= deadline_ms {
                     log::debug!("Auto-commit sync before rebalance timed out and won't be retried anymore");
-                    break Err(Error::timeout(format!(
-                        "Failed to commit offsets within the deadline: {}",
-                        err.error().message()
-                    )));
+                    break Err(maybe_wrap_as_timeout_error(err));
                 }
                 // Java treats UNKNOWN_TOPIC_OR_PARTITION as fatal here
                 // (`CommitRequestManager.java:366-368`) even though it's
@@ -2576,7 +2655,8 @@ async fn auto_commit_sync_before_rebalance_with_retries(
 /// Wakes the bg task's network poll after a spawned retry driver
 /// ([`fetch_offsets_with_retries`], [`commit_sync_with_retries`],
 /// [`auto_commit_sync_before_rebalance_with_retries`]) re-enqueues a retry, so the next `poll` sees the retry and
-/// sleeps only for its backoff. See
+/// sleeps only for its backoff, and after `maybe_auto_commit_async` enqueues
+/// an interval auto-commit (possibly from the spawned `AsyncPoll` task). See
 /// `CommitRequestManagerInner::completion_notify` for why Java needs no
 /// equivalent (its retry is enqueued on the network thread itself). The guard
 /// on `inner.state` MUST already be dropped (the poke is lock-free anyway).
@@ -3622,6 +3702,119 @@ mod tests {
         assert_eq!(manager.maximum_time_to_wait(5_000), i64::MAX);
     }
 
+    /// Audit finding C4-01 follow-up: the interval auto-commit is started only
+    /// by `update_timer_and_maybe_commit`, which for `AsyncPoll` runs on a
+    /// spawned task — possibly after the bg loop already polled this manager
+    /// in the current iteration. Java's network thread processes the
+    /// `AsyncPollEvent` and then polls the request managers in the same
+    /// `runOnce`, so the OffsetCommit goes out at once; to match that, the
+    /// Rust manager must wake the bg loop exactly when it enqueues an
+    /// auto-commit — and not otherwise, or the loop would spin.
+    ///
+    /// The `Notify` is installed through `set_completion_notify`, the same
+    /// path the production constructor uses for the consumer's selector
+    /// wakeup handle.
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_commit_wakes_background_task_only_when_it_enqueues_a_commit() {
+        use futures_util::FutureExt;
+        let (manager, subs) = make_manager_with_subs(0, true); // interval 1000
+        manager.set_coordinator(Arc::new(coordinator_with_node()));
+        let notify = Arc::new(tokio::sync::Notify::new());
+        manager.set_completion_notify(Arc::clone(&notify));
+        // `notify_one` with nobody parked stores one permit, which a fresh
+        // `notified()` consumes immediately; no permit means it stays pending.
+        let woken = || notify.notified().now_or_never().is_some();
+
+        // Interval expired, but nothing consumed: the timer is reset and no
+        // request is enqueued, so there is nothing to wake the loop for.
+        manager.update_timer_and_maybe_commit(2_000);
+        assert_eq!(0, manager.unsent_offset_commits_len_for_test());
+        assert!(!woken(), "no auto-commit was enqueued, so the bg loop must not be woken");
+
+        let tp = topic_partition("t", 0);
+        {
+            let mut s = subs.lock().unwrap();
+            s.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+            s.seek(&tp, 10).expect("seek");
+        }
+        // Offsets consumed, but the interval (reset at 2000) has not expired.
+        manager.update_timer_and_maybe_commit(2_500);
+        assert_eq!(0, manager.unsent_offset_commits_len_for_test());
+        assert!(!woken(), "the interval has not expired, so the bg loop must not be woken");
+
+        // Interval expired with consumed offsets: one auto-commit is enqueued
+        // and the bg loop is woken (one permit) so it sends it right away.
+        manager.update_timer_and_maybe_commit(3_000);
+        assert_eq!(
+            1,
+            manager.unsent_offset_commits_len_for_test(),
+            "the expired interval must enqueue exactly one auto-commit"
+        );
+        assert!(
+            woken(),
+            "enqueueing the auto-commit must wake the bg loop so it is sent promptly"
+        );
+        assert!(!woken(), "a single auto-commit must wake the bg loop exactly once");
+
+        // Interval expired again, but the previous auto-commit is still in
+        // flight: Java's `maybeAutoCommitAsync` skips it, so nothing is
+        // enqueued and nothing is woken.
+        manager.update_timer_and_maybe_commit(4_000);
+        assert_eq!(1, manager.unsent_offset_commits_len_for_test());
+        assert!(!woken(), "no new auto-commit was enqueued, so the bg loop must not be woken");
+    }
+
+    /// Audit finding C4-01: `CommitRequestManager.poll()`
+    /// (`CommitRequestManager.java:181-209`) only drains requests that are
+    /// already queued and never starts an auto-commit; only
+    /// `updateTimerAndMaybeCommit` (driven by the application's `poll()` /
+    /// `assign()` events) does. A background-loop poll after the interval
+    /// expired must therefore send nothing — otherwise it would commit the
+    /// positions of records the application is still processing. The next
+    /// application poll event then sends exactly one auto-commit.
+    #[tokio::test(flavor = "current_thread")]
+    async fn background_poll_does_not_auto_commit() {
+        let (manager, subs) = make_manager_with_subs(0, true); // interval 1000
+        let coordinator = coordinator_with_node();
+        manager.set_coordinator(Arc::new(coordinator_with_node()));
+        let tp = topic_partition("t", 0);
+        {
+            let mut s = subs.lock().unwrap();
+            s.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+            s.seek(&tp, 10).expect("seek");
+        }
+        // The interval has expired, but the application has not called
+        // poll() again: only the background loop runs.
+        let sent = manager.poll_with_coordinator(&coordinator, 2_000).unsent_requests.len();
+        assert_eq!(
+            sent, 0,
+            "Java: CommitRequestManager.poll() never fires an auto-commit; only \
+             updateTimerAndMaybeCommit (application poll()/assign()) does"
+        );
+        // The timer is still expired, so the application task is told not to
+        // wait: its poll loop submits the event that starts the auto-commit.
+        assert_eq!(
+            0,
+            manager.maximum_time_to_wait(2_000),
+            "the expired auto-commit timer bounds the app's wait"
+        );
+
+        // The application's poll event starts exactly one auto-commit, which
+        // the next background poll sends.
+        manager.update_timer_and_maybe_commit(2_000);
+        let unsent = manager.poll_with_coordinator(&coordinator, 2_000).unsent_requests;
+        assert_eq!(1, unsent.len(), "the application poll event must start exactly one auto-commit");
+        assert_eq!(
+            &ApiKeys::OFFSET_COMMIT,
+            unsent[0].request_builder().expect("builder present").api_key()
+        );
+        assert_eq!(
+            0,
+            manager.poll_with_coordinator(&coordinator, 2_000).unsent_requests.len(),
+            "a further background poll must not start a second auto-commit"
+        );
+    }
+
     /// Phase 10 wire-prereq #8:
     /// [`PendingRequests::inflight_offset_fetches`] must drain when an
     /// offset-fetch response (success or failure) is delivered. Phase 9
@@ -4376,57 +4569,237 @@ mod tests {
         }
     }
 
+    /// Java's caller-visible message for a commit whose retry was dropped at
+    /// drain by `RetriableRequestState.maybeExpire`:
+    /// `requestDescription() + " could not complete before timeout expired."`
+    /// (`commitSyncWithRetries` passes the TimeoutException through
+    /// `maybeWrapAsTimeoutException` unchanged).
+    fn expired_commit_message(tp: &TopicPartition, offset: i64) -> String {
+        format!(
+            "OffsetCommit request for offsets {{{tp}=OffsetAndMetadata{{offset={offset}, leaderEpoch=null, metadata=''}}}} \
+             could not complete before timeout expired."
+        )
+    }
+
+    /// Yield until the spawned retry driver has re-queued the retry (the
+    /// Rust analog of Java's synchronous `whenComplete` → `resetFuture()` +
+    /// `addOffsetCommitRequest`).
+    async fn await_retry_queued(manager: &CommitRequestManager) {
+        for _ in 0..64 {
+            if manager.unsent_offset_commits_len_for_test() == 1 {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("retry was not re-queued");
+    }
+
     /// `testOffsetCommitSyncFailedWithRetriableThrowsTimeoutWhenRetryTimeExpires`
-    /// (×13): a retriable error, once the deadline expires, surfaces a
-    /// TimeoutException; a non-retriable error surfaces its specific class.
+    /// (×13, `offsetCommitExceptionSupplier`): a sync commit that fails with a
+    /// retriable error is retried while there is time; when the deadline
+    /// passes while the retry waits, the next poll sends NOTHING (Java
+    /// `maybeExpire` drops it at drain) and the commit fails with a
+    /// TimeoutException. A non-retriable error fails the commit with its
+    /// specific class straight away (and nothing is sent on the later poll
+    /// either).
     #[tokio::test(flavor = "current_thread")]
     async fn offset_commit_sync_failed_with_retriable_throws_timeout_when_retry_time_expires() {
         for (error, expected) in offset_commit_error_supplier() {
             let (manager, mock_time) = make_manager_with_mock_time(0, false);
             let coordinator = coordinator_with_node();
             let tp = topic_partition("topic", 1);
-            // The driver checks expiry against the real clock (the injected
-            // MockTime) at response-handling time. Advancing the mock clock
-            // past the deadline (Java's `MockTime.sleep`) makes a retriable
-            // failure surface a Timeout; a non-retriable error surfaces its
-            // specific class regardless of the deadline.
-            let retry_backoff_ms = manager.inner.retry_backoff_ms;
-            let deadline_ms = retry_backoff_ms.saturating_mul(2) + 1;
-            let mut public_rx = manager.commit_sync(singleton_offset(tp.clone(), 0), deadline_ms, 0);
-            mock_time.sleep(deadline_ms);
 
+            // Java: `deadlineMs = time.milliseconds() + retryBackoffMs * 2`.
+            let deadline_ms = manager.inner.retry_backoff_ms * 2;
+            let mut public_rx = manager.commit_sync(singleton_offset(tp.clone(), 0), deadline_ms, 0);
+            // Java: `completeOffsetCommitRequestWithError` (asserts 1 request).
+            let unsent = poll_one_unsent(&manager, &coordinator, 0);
+            unsent.handler().on_complete(offset_commit_response_single(&tp, error));
             let retriable = error.error().is_some_and(|x| x.is_retriable_error());
-            // Drive send/fail cycles to either expire (retriable) or surface
-            // the specific error (non-retriable). The poll time advances each
-            // iteration past the re-queued request's seeded backoff so each
-            // retry is shipped; the mock clock is already past the deadline so
-            // the first retriable failure surfaces a Timeout.
-            let poll_step = manager.inner.retry_backoff_max_ms.saturating_mul(2).max(retry_backoff_ms * 4);
-            let mut poll_time = 0;
-            let mut iters = 0;
-            let err = loop {
-                iters += 1;
-                if let Some(unsent) = manager
-                    .poll_with_coordinator(&coordinator, poll_time)
-                    .unsent_requests
-                    .into_iter()
-                    .next()
-                {
-                    unsent.handler().on_complete(offset_commit_response_single(&tp, error));
-                }
-                if let Some(result) = recv_commit_result_nonblocking(&mut public_rx) {
-                    break result.expect_err("commit must fail");
-                }
-                tokio::task::yield_now().await;
-                poll_time = poll_time.saturating_add(poll_step);
-                assert!(iters < 200, "commit {error:?} did not resolve within 200 iterations");
-            };
             if retriable {
-                assert!(matches!(err, Error::Timeout(_)), "retriable {error:?} → Timeout, got {err:?}");
-            } else {
-                assert_error_class(&err, expected);
+                await_retry_queued(&manager).await;
+            }
+
+            // Java: `time.sleep(deadlineMs)`, then poll → 0 unsent requests.
+            mock_time.sleep(deadline_ms);
+            let res = manager.poll_with_coordinator(&coordinator, mock_time.milliseconds());
+            assert_eq!(
+                res.unsent_requests.len(),
+                0,
+                "{error:?}: Java sends no request once the retry deadline has expired (maybeExpire)"
+            );
+
+            let err = recv_commit_result(&mut public_rx).await.expect_err("commit must fail");
+            assert_error_class(&err, expected);
+            if retriable {
+                assert_eq!(err.message(), expired_commit_message(&tp, 0), "{error:?}");
             }
         }
+    }
+
+    /// `testOffsetCommitSyncTimeoutNotReturnedOnPollAndFails`: two retriable
+    /// failures within the deadline keep the commit pending; once the deadline
+    /// expires the next poll returns no request and the commit fails.
+    #[tokio::test(flavor = "current_thread")]
+    async fn offset_commit_sync_timeout_not_returned_on_poll_and_fails() {
+        let (manager, mock_time) = make_manager_with_mock_time(0, false);
+        let coordinator = coordinator_with_node();
+        let tp = topic_partition("topic", 1);
+        let retry_backoff_ms = manager.inner.retry_backoff_ms;
+
+        // Send sync offset commit request that fails with retriable error.
+        let deadline_ms = retry_backoff_ms * 2;
+        let mut public_rx = manager.commit_sync(singleton_offset(tp.clone(), 0), deadline_ms, 0);
+        let unsent = poll_one_unsent(&manager, &coordinator, 0);
+        unsent
+            .handler()
+            .on_complete(offset_commit_response_single(&tp, Errors::RequestTimedOut));
+        await_retry_queued(&manager).await;
+
+        // Request retried after backoff, and fails with retriable again. Should
+        // not complete yet given that the request timeout hasn't expired.
+        // Java builds its manager with jitter 0 (`OptionalDouble.of(0)`) and
+        // sleeps exactly `retryBackoffMs`; the Rust manager always uses the
+        // default ±20% jitter, so sleep to the top of the jitter band
+        // (`retryBackoffMs * 1.2`), still inside the `2 * retryBackoffMs`
+        // deadline.
+        mock_time.sleep(retry_backoff_ms * 6 / 5);
+        let unsent = poll_one_unsent(&manager, &coordinator, mock_time.milliseconds());
+        unsent
+            .handler()
+            .on_complete(offset_commit_response_single(&tp, Errors::RequestTimedOut));
+        await_retry_queued(&manager).await;
+        assert!(
+            recv_commit_result_nonblocking(&mut public_rx).is_none(),
+            "Java: assertFalse(commitResult.isDone()) after a retriable failure within the deadline"
+        );
+
+        // Sleep to expire the request timeout (Java lands exactly on the
+        // deadline). Request should fail on the next poll.
+        mock_time.sleep(deadline_ms - mock_time.milliseconds());
+        let res = manager.poll_with_coordinator(&coordinator, mock_time.milliseconds());
+        assert_eq!(res.unsent_requests.len(), 0, "Java: the expired retry is not returned on poll");
+        let err = recv_commit_result(&mut public_rx)
+            .await
+            .expect_err("Java: commitResult.isCompletedExceptionally()");
+        assert!(matches!(err, Error::Timeout(_)), "expected a timeout error, got {err:?}");
+        assert_eq!(err.message(), expired_commit_message(&tp, 0));
+    }
+
+    /// A `commit_sync` retry whose backoff elapses BEFORE the deadline is
+    /// still sent: the drain-time expiry only drops retries that are past
+    /// their deadline (Java `maybeExpire` requires `isExpired()`).
+    #[tokio::test(flavor = "current_thread")]
+    async fn commit_sync_retry_within_deadline_is_still_sent() {
+        let (manager, mock_time) = make_manager_with_mock_time(0, false);
+        let coordinator = coordinator_with_node();
+        let tp = topic_partition("topic", 1);
+        let retry_backoff_max_ms = manager.inner.retry_backoff_max_ms;
+
+        let deadline_ms = retry_backoff_max_ms * 4;
+        let mut public_rx = manager.commit_sync(singleton_offset(tp.clone(), 0), deadline_ms, 0);
+        let unsent = poll_one_unsent(&manager, &coordinator, 0);
+        unsent
+            .handler()
+            .on_complete(offset_commit_response_single(&tp, Errors::CoordinatorLoadInProgress));
+        await_retry_queued(&manager).await;
+
+        // Past any backoff, still well within the deadline.
+        mock_time.sleep(retry_backoff_max_ms + 1);
+        let unsent = poll_one_unsent(&manager, &coordinator, mock_time.milliseconds());
+        unsent.handler().on_complete(offset_commit_response_single(&tp, Errors::None));
+        let committed = recv_commit_result(&mut public_rx)
+            .await
+            .expect("retry within the deadline commits");
+        assert_eq!(committed, singleton_offset(tp, 0));
+    }
+
+    /// The FIRST attempt of a `commit_sync` is never expired at drain, even
+    /// if its deadline passed while the coordinator was unknown: Java's
+    /// `maybeExpire` requires `numAttempts > 0`, and `numAttempts` is only
+    /// incremented by a failed attempt. Once the coordinator is found the
+    /// request is sent and its response decides the result.
+    #[tokio::test(flavor = "current_thread")]
+    async fn commit_sync_first_attempt_sent_after_deadline_when_coordinator_found_late() {
+        let (manager, mock_time) = make_manager_with_mock_time(0, false);
+        let tp = topic_partition("topic", 1);
+        let deadline_ms = manager.inner.retry_backoff_ms * 2;
+        let mut public_rx = manager.commit_sync(singleton_offset(tp.clone(), 0), deadline_ms, 0);
+
+        // Coordinator unknown: nothing is sent (Java `poll` returns EMPTY).
+        let unknown = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
+        assert!(manager.poll_with_coordinator(&unknown, 0).unsent_requests.is_empty());
+
+        // The deadline passes before the coordinator is discovered.
+        mock_time.sleep(deadline_ms + 1);
+        let coordinator = coordinator_with_node();
+        let unsent = poll_one_unsent(&manager, &coordinator, mock_time.milliseconds());
+        assert!(
+            recv_commit_result_nonblocking(&mut public_rx).is_none(),
+            "Java: a never-failed request (numAttempts == 0) is not expired at drain"
+        );
+        unsent.handler().on_complete(offset_commit_response_single(&tp, Errors::None));
+        let committed = recv_commit_result(&mut public_rx).await.expect("first attempt commits");
+        assert_eq!(committed, singleton_offset(tp, 0));
+    }
+
+    /// Same drain-time expiry on the rebalance auto-commit-sync retry
+    /// (`autoCommitSyncBeforeRebalanceWithRetries` reuses the request state,
+    /// so `maybeExpire` applies to its retries too): a retry whose deadline
+    /// passed while it waited in backoff is not sent, and the flush fails with
+    /// the `maybeExpire` TimeoutException.
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_commit_sync_before_rebalance_retry_not_sent_after_deadline() {
+        let mock_time = Arc::new(
+            crate::common::utils::MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 0, 0),
+        );
+        let (manager, subs, _) = make_manager_with_subs_and_time(0, true, Arc::clone(&mock_time) as Arc<dyn Time>);
+        let coordinator = coordinator_with_node();
+        let tp = topic_partition("topic", 1);
+        {
+            let mut s = subs.lock().unwrap();
+            s.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+            s.seek(&tp, 100).expect("seek");
+        }
+
+        let deadline_ms = manager.inner.retry_backoff_ms * 2;
+        let mut flush_rx = manager.maybe_auto_commit_sync_before_rebalance(deadline_ms, 0);
+        let unsent = poll_one_unsent(&manager, &coordinator, 0);
+        unsent
+            .handler()
+            .on_complete(offset_commit_response_single(&tp, Errors::CoordinatorLoadInProgress));
+        await_retry_queued(&manager).await;
+
+        // The deadline passes while the retry waits in backoff.
+        mock_time.sleep(deadline_ms + manager.inner.retry_backoff_max_ms + 1);
+        let res = manager.poll_with_coordinator(&coordinator, mock_time.milliseconds());
+        assert_eq!(
+            res.unsent_requests.len(),
+            0,
+            "Java: the expired rebalance auto-commit retry is dropped at drain (maybeExpire)"
+        );
+        let mut outcome = None;
+        for _ in 0..64 {
+            if let Ok(result) = flush_rx.try_recv() {
+                outcome = Some(result);
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let err = outcome
+            .expect("rebalance flush resolves")
+            .expect_err("rebalance flush fails with a timeout");
+        assert!(matches!(err, Error::Timeout(_)), "expected a timeout error, got {err:?}");
+        assert_eq!(err.message(), expired_commit_message(&tp, 100));
+        let inflight = manager
+            .inner
+            .state
+            .lock()
+            .unwrap()
+            .auto_commit
+            .as_ref()
+            .is_some_and(|ac| ac.has_inflight_commit);
+        assert!(!inflight, "the auto-commit in-flight flag is cleared when the flush fails");
     }
 
     /// `testOffsetCommitAsyncFailedWithRetriableThrowsRetriableCommitException`:
@@ -4714,11 +5087,11 @@ mod tests {
     /// STALE_MEMBER_EPOCH and increasing epochs.
     #[tokio::test(flavor = "current_thread")]
     async fn last_epoch_sent_on_commit() {
-        // Auto-commit enabled, very long interval (avoid interval auto-commits).
-        let manager = make_manager(0, true);
+        // Auto-commit enabled, very long interval (avoid interval auto-commits):
+        // Java's `create(true, Integer.MAX_VALUE)`.
+        let (manager, subs) = make_manager_with_subs_interval(0, true, i64::from(i32::MAX));
         let coordinator = Arc::new(coordinator_with_node());
         manager.set_coordinator(Arc::clone(&coordinator));
-        let subs = manager_subscriptions(&manager);
         let tp = topic_partition("topic", 1);
         {
             let mut s = subs.lock().unwrap();
@@ -4754,6 +5127,22 @@ mod tests {
             .handler()
             .on_complete(offset_commit_response_single(&tp, Errors::StaleMemberEpoch));
         assert_eq!(manager.last_epoch_sent_on_commit(), Some(initial_epoch + 1));
+        // Java completes the response future synchronously, so the retry is
+        // re-enqueued (its stale-epoch gate seeing the still-valid epoch 2)
+        // before `onMemberEpochUpdated(Optional.empty())` runs. The Rust
+        // retry driver is a spawned task: let it re-enqueue first, as Java's
+        // ordering does.
+        for _ in 0..64 {
+            if manager.unsent_offset_commits_len_for_test() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            1,
+            manager.unsent_offset_commits_len_for_test(),
+            "the stale-epoch retry must be re-enqueued"
+        );
 
         // Receive empty epoch. Next sent request carries no epoch.
         manager.on_member_epoch_updated(None, member_id);
@@ -6243,54 +6632,143 @@ mod tests {
         assert_eq!(poll_result.unsent_requests.len(), 1, "commit sent once coordinator discovered");
     }
 
-    /// `testAsyncAutocommitNotRetriedAfterException`: an auto-commit on the
-    /// interval that fails is NOT retried until the next interval expires.
-    #[tokio::test(flavor = "current_thread")]
-    async fn async_autocommit_not_retried_after_error() {
-        let commit_interval = 200; // retryBackoffMs * 2 in Java.
+    /// Fire an interval auto-commit at `now_ms` through the application-poll
+    /// path (`update_timer_and_maybe_commit`, as Java's tests do), ship it,
+    /// fail it with `error`, and let the spawned completion task run.
+    async fn fire_and_fail_auto_commit(
+        manager: &CommitRequestManager,
+        coordinator: &CoordinatorRequestManager,
+        tp: &TopicPartition,
+        now_ms: i64,
+        error: Errors,
+    ) {
+        manager.update_timer_and_maybe_commit(now_ms);
+        let unsent = poll_one_unsent(manager, coordinator, now_ms);
+        unsent.handler().on_complete(offset_commit_response_single(tp, error));
+        // Let the auto-commit completion task run (clears the in-flight flag).
+        let in_flight = || {
+            let guard = manager.inner.state.lock().unwrap();
+            guard.auto_commit.as_ref().is_some_and(|ac| ac.has_inflight_commit)
+        };
+        for _ in 0..64 {
+            if !in_flight() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(!in_flight(), "the auto-commit completion task clears the in-flight flag");
+    }
+
+    /// Auto-commit manager with `interval = retry.backoff.ms * 2` (Java's
+    /// `commitInterval = retryBackoffMs * 2`) and `tp` assigned at offset 100.
+    fn auto_commit_manager_for_failure_tests(
+        tp: &TopicPartition,
+    ) -> (CommitRequestManager, CoordinatorRequestManager, i64, i64) {
+        let retry_backoff_ms = make_manager(0, true).inner.retry_backoff_ms;
+        let commit_interval = retry_backoff_ms * 2;
         let (manager, subs) = make_manager_with_subs_interval(0, true, commit_interval);
-        let coordinator = coordinator_with_node();
-        let tp = topic_partition("topic", 1);
         {
             let mut s = subs.lock().unwrap();
             s.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
-            s.seek(&tp, 100).expect("seek");
+            s.seek(tp, 100).expect("seek");
         }
-        // Fire auto-commit after the interval.
-        manager.update_timer_and_maybe_commit(commit_interval);
-        let unsent = poll_one_unsent(&manager, &coordinator, commit_interval);
-        // Fail it with a retriable error. The auto-commit completion task
-        // resets the timer with retry backoff (Java: maybeResetTimerWithBackoff),
-        // so the failed request itself is NOT re-queued — only the timer is
-        // reset for the next interval-based attempt.
-        unsent
-            .handler()
-            .on_complete(offset_commit_response_single(&tp, Errors::CoordinatorLoadInProgress));
-        // Let the auto-commit completion task run (resets the timer).
-        for _ in 0..16 {
-            tokio::task::yield_now().await;
-        }
+        (manager, coordinator_with_node(), retry_backoff_ms, commit_interval)
+    }
 
-        // The failed request was not re-queued for immediate retry: nothing is
-        // pending right after the failure.
-        assert!(
-            manager
-                .poll_with_coordinator(&coordinator, commit_interval)
-                .unsent_requests
-                .is_empty(),
-            "failed auto-commit must not be re-queued for immediate retry"
-        );
+    /// `testAsyncAutocommitNotRetriedAfterException`: an interval auto-commit
+    /// that fails with a retriable error is NOT retried after
+    /// `retry.backoff.ms`; the next auto-commit waits the full interval. In
+    /// Java the auto-commit future fails with the raw broker error, never a
+    /// `RetriableCommitFailedException`, so `maybeResetTimerWithBackoff`
+    /// never shortens the timer.
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_autocommit_not_retried_after_error() {
+        let tp = topic_partition("topic", 1);
+        let (manager, coordinator, retry_backoff_ms, commit_interval) = auto_commit_manager_for_failure_tests(&tp);
+        // time.sleep(commitInterval); updateTimerAndMaybeCommit; assertPoll(1);
+        // complete the auto-commit with COORDINATOR_LOAD_IN_PROGRESS.
+        let mut now = commit_interval;
+        fire_and_fail_auto_commit(&manager, &coordinator, &tp, now, Errors::CoordinatorLoadInProgress).await;
 
-        // After the next interval expires → a new auto-commit is generated
-        // (this is a fresh interval auto-commit, not a retry of the failed one).
-        let next = commit_interval * 4;
-        manager.update_timer_and_maybe_commit(next);
-        let poll_result = manager.poll_with_coordinator(&coordinator, next);
+        // When polling again before the auto-commit interval no request should
+        // be generated (sleep the backoff, to check that the failed request is
+        // not being retried).
+        now += retry_backoff_ms;
+        manager.update_timer_and_maybe_commit(now);
         assert_eq!(
-            poll_result.unsent_requests.len(),
-            1,
-            "new auto-commit generated after the interval"
+            manager.poll_with_coordinator(&coordinator, now).unsent_requests.len(),
+            0,
+            "Java: no auto-commit retry.backoff.ms after a retriable failure; the auto-commit future \
+             fails with the raw error (never RetriableCommitFailedException), so \
+             maybeResetTimerWithBackoff never shortens the timer and it keeps the full interval"
         );
+        manager.update_timer_and_maybe_commit(now);
+
+        // Only when polling after the auto-commit interval, a new auto-commit
+        // request should be generated.
+        now += commit_interval;
+        manager.update_timer_and_maybe_commit(now);
+        let unsent = poll_one_unsent(&manager, &coordinator, now);
+        assert_eq!(
+            0,
+            manager.unsent_offset_commits_len_for_test(),
+            "no pending commit after the poll"
+        );
+        unsent.handler().on_complete(offset_commit_response_single(&tp, Errors::None));
+    }
+
+    /// Rust-specific companion of `async_autocommit_not_retried_after_error`:
+    /// waiting the full interval does not stop auto-commits after a retriable
+    /// failure. The next auto-commit fires exactly when the interval (reset
+    /// when the failed one was started) elapses, not before.
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_commit_sent_again_after_full_interval_following_retriable_error() {
+        let tp = topic_partition("topic", 1);
+        let (manager, coordinator, _retry_backoff_ms, commit_interval) = auto_commit_manager_for_failure_tests(&tp);
+        let fired_at = commit_interval;
+        fire_and_fail_auto_commit(&manager, &coordinator, &tp, fired_at, Errors::CoordinatorLoadInProgress).await;
+
+        // One millisecond before the interval elapses: nothing.
+        let before = fired_at + commit_interval - 1;
+        manager.update_timer_and_maybe_commit(before);
+        assert_eq!(
+            manager.poll_with_coordinator(&coordinator, before).unsent_requests.len(),
+            0,
+            "Java: the next auto-commit waits the full interval after a retriable failure"
+        );
+
+        // The interval has elapsed: the next auto-commit is sent.
+        let due = fired_at + commit_interval;
+        manager.update_timer_and_maybe_commit(due);
+        let unsent = poll_one_unsent(&manager, &coordinator, due);
+        unsent.handler().on_complete(offset_commit_response_single(&tp, Errors::None));
+    }
+
+    /// Rust-specific companion of `async_autocommit_not_retried_after_error`:
+    /// a non-retriable auto-commit failure behaves the same as a retriable
+    /// one — no retry after `retry.backoff.ms`, next auto-commit after the
+    /// full interval (Java `maybeAutoCommitAsync`: "If it fails with a
+    /// non-retriable error, no action is taken, so the next commit will be
+    /// generated when the interval expires").
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_commit_non_retriable_error_waits_full_interval() {
+        let tp = topic_partition("topic", 1);
+        let (manager, coordinator, retry_backoff_ms, commit_interval) = auto_commit_manager_for_failure_tests(&tp);
+        let fired_at = commit_interval;
+        fire_and_fail_auto_commit(&manager, &coordinator, &tp, fired_at, Errors::OffsetMetadataTooLarge).await;
+
+        let after_backoff = fired_at + retry_backoff_ms;
+        manager.update_timer_and_maybe_commit(after_backoff);
+        assert_eq!(
+            manager.poll_with_coordinator(&coordinator, after_backoff).unsent_requests.len(),
+            0,
+            "Java: no auto-commit retry.backoff.ms after a non-retriable failure"
+        );
+
+        let due = fired_at + commit_interval;
+        manager.update_timer_and_maybe_commit(due);
+        let unsent = poll_one_unsent(&manager, &coordinator, due);
+        unsent.handler().on_complete(offset_commit_response_single(&tp, Errors::None));
     }
 
     /// `testAutoCommitAsyncFailsWithStaleMemberEpochContinuesToCommitOnTheInterval`:

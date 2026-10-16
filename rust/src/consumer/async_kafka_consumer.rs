@@ -2346,18 +2346,28 @@ where
 
         // OffsetsRequestManager — always built (Java's
         // `RequestManagers.supplier` builds this unconditionally).
-        let offsets = Some(OffsetsRequestManager::new(
-            Arc::clone(&subscriptions),
-            Arc::clone(&metadata),
-            fetch_config.isolation_level,
-            Arc::clone(&time),
-            config.retry_backoff_ms(),
-            config.request_timeout_ms() as i64,
-            config.default_api_timeout_ms as i64,
-            Arc::clone(&api_versions),
-            commit.as_ref().map(Arc::clone),
-            Arc::clone(&positions_validator),
-        ));
+        let offsets = {
+            let orm = OffsetsRequestManager::new(
+                Arc::clone(&subscriptions),
+                Arc::clone(&metadata),
+                fetch_config.isolation_level,
+                Arc::clone(&time),
+                config.retry_backoff_ms(),
+                config.request_timeout_ms() as i64,
+                config.default_api_timeout_ms as i64,
+                Arc::clone(&api_versions),
+                commit.as_ref().map(Arc::clone),
+                Arc::clone(&positions_validator),
+            );
+            // Wake the bg task when a ListOffsets / OffsetsForLeaderEpoch
+            // response (or other work queued off the bg loop) is ready, so
+            // `end_offsets` / `offsets_for_times` / position resets complete
+            // on the response instead of after the network poll's timeout.
+            // Reuses the same `event_notify` the application-event enqueue
+            // path pokes.
+            orm.set_completion_notify(Arc::clone(&event_notify));
+            Some(orm)
+        };
 
         // TopicMetadataRequestManager — always built.
         let topic_metadata = Some(TopicMetadataRequestManager::new(&config));
