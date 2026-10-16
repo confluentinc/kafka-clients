@@ -2655,18 +2655,24 @@ def test_ctrl_c_wakes_only_a_call_java_can_wake(
 
 class _NativeRecord:
     """A record of the native batch ``Consumer_poll_cb`` hands over; its value
-    is ``b"<partition>:<offset>"``."""
+    is ``b"<partition>:<offset>"`` unless given, ``None`` bytes for a null key
+    or value."""
 
-    def __init__(self, tp: TopicPartition, offset: int) -> None:
+    def __init__(self, tp: TopicPartition, offset: int, *, key: bytes | None = None,
+                 value: bytes | None | str = "") -> None:
+        if value == "":
+            value = f"{tp.partition()}:{offset}".encode()
+        assert not isinstance(value, str)
         self.topic = tp.topic()
         self.partition = tp.partition()
         self.offset = offset
         self.timestamp = 0
         self.timestamp_type = 0
-        self.serialized_key_size = -1
-        self.serialized_value_size = 3
-        self.key = None
-        self.value = memoryview(f"{tp.partition()}:{offset}".encode())
+        # A null key or value: no bytes, Java's ConsumerRecord.NULL_SIZE.
+        self.serialized_key_size = -1 if key is None else len(key)
+        self.serialized_value_size = -1 if value is None else len(value)
+        self.key = None if key is None else memoryview(key)
+        self.value = None if value is None else memoryview(value)
         self.headers = ()
         self.leader_epoch = None
 
@@ -2685,6 +2691,62 @@ class _NativeBatch:
 
     def next_offsets(self) -> dict[tuple[str, int], tuple[int, str, int | None]]:
         return {(r.topic, r.partition): (r.offset + 1, "", None) for r in self._records}
+
+
+# A null key or value is not deserialized (Serialization; Java's
+# CompletedFetch.parseRecord: `keyBytes == null ? null : deserialize(...)`).
+def _refuses_null(topic: str, data: memoryview | None, headers: Any = None) -> str:
+    """A deserializer that fails on Java's null, as one assuming non-null
+    bytes would."""
+    if data is None:
+        raise AssertionError("the deserializer was called with a null")
+    return bytes(data).decode()
+
+
+def test_a_null_key_is_not_deserialized() -> None:
+    from confluent_kafka.consumer._poll import deserialize_batch
+    result = deserialize_batch(_NativeBatch([_NativeRecord(TP0, 0, key=None, value=b"v")]),
+                               key_deserializer=_refuses_null,
+                               value_deserializer=_refuses_null)
+    assert result.error is None and result.rewind == []
+    (record,) = list(result.records)
+    assert record.key() is None
+    assert record.value() == "v"
+    assert record.serialized_key_size() == -1
+
+
+def test_a_tombstone_is_delivered_with_a_null_value() -> None:
+    from confluent_kafka.consumer._poll import deserialize_batch
+    result = deserialize_batch(
+        _NativeBatch([_NativeRecord(TP0, 0, key=b"k", value=None),
+                      _NativeRecord(TP0, 1, key=None, value=None)]),
+        key_deserializer=_refuses_null, value_deserializer=_refuses_null)
+    assert result.error is None
+    tombstone, empty = list(result.records)
+    assert (tombstone.key(), tombstone.value()) == ("k", None)
+    assert tombstone.serialized_value_size() == -1
+    assert (empty.key(), empty.value()) == (None, None)
+    assert result.records.next_offsets() == {TP0: OffsetAndMetadata(offset=2)}
+
+
+def test_a_failing_deserializer_still_fails_on_non_null_bytes() -> None:
+    from confluent_kafka.common.errors import RecordDeserializationError
+    from confluent_kafka.consumer._poll import deserialize_batch
+
+    def failing(topic: str, data: memoryview | None, headers: Any = None) -> str:
+        assert data is not None
+        raise ValueError("bad value")
+
+    result = deserialize_batch(
+        _NativeBatch([_NativeRecord(TP0, 0, key=None, value=None),
+                      _NativeRecord(TP0, 1, key=None, value=b"x")]),
+        key_deserializer=_refuses_null, value_deserializer=failing)
+    (record,) = list(result.records)
+    assert record.offset() == 0 and record.value() is None
+    assert isinstance(result.error, RecordDeserializationError)
+    assert result.error.offset() == 1
+    assert result.error.key_buffer() is None
+    assert result.rewind == [(TP0, 1)]
 
 
 TP1 = TopicPartition(topic=TOPIC, partition=1)
