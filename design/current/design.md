@@ -1278,10 +1278,18 @@ schedules; it never runs a callback.
     method is awaited there and reports through the extension's
     `Consumer__set_callback_result(h, callback_id, error)`, which passes a
     `NULL` result to the C function, the listener methods being void.
-- **Admin.** The sync `admin.py` clients wait through `SyncWaiter`
-  (`_sync_wait.py`) on `Admin_resolve_cb`: one pump thread per client drains
-  `Admin__execute_callbacks`, and each caller waits for its own completion in
-  100 ms slices.
+- **Futures and the admin client.** Every future the package hands out is a
+  `KafkaFuture` (sync clients) or `AsyncKafkaFuture` (async clients) in
+  `confluent_kafka.common`: over a core `kafka_common_KafkaFuture_t` through
+  the extension's future object (`is_done`, `get_cb`), or over Python state
+  for the mocks and the dependants (`then_apply`, `when_complete`, `all_of`).
+  `get()` only waits, in short slices, and raises `ExecutionError` with the
+  failure as its `__cause__`. An admin RPC returns its `*Result` at once, as
+  Java's; the Result's per-key futures are the core's, completed through
+  `get_cb` when the response arrives. The sync `KafkaAdminClient` has one
+  daemon pump thread that drains `Admin__execute_callbacks` when the client's
+  notify hook fires, so `then_apply` functions and `when_complete` actions run
+  there; `AsyncKafkaAdminClient` drains on its event loop.
 - **One drainer per client.** `<Client>__execute_callbacks` keeps the GIL from
   the first callback of a drain to the last, rather than releasing it after
   each callback and taking it again for the next. A second thread entering
@@ -1353,8 +1361,7 @@ Deviations recorded in the package's module docstrings:
   accessor for them (CLAUDE.md §4).
 
 The admin binding is `confluent_kafka.admin`, generated from the same
-conventions; the older `admin.py` and its shim `confluent_kafka/_legacy_compat.py`
-are removed. `grpc_server.py`,
+conventions over the same FFI. `grpc_server.py`,
 `grpc_server_async.py` and `grpc_translate.py` back the Python arm of the
 multilanguage tests, and `soak/` holds the long-running soak client.
 

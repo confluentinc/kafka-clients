@@ -23,6 +23,7 @@
 
 import sys
 
+from confluent_kafka import ExecutionError
 from confluent_kafka.admin import Admin, NewTopic
 from confluent_kafka.common.errors import TopicExistsError
 
@@ -39,18 +40,21 @@ if __name__ == '__main__':
     conf = {'bootstrap.servers': broker}
 
     with Admin.create(configs=conf) as admin:
-        # create_topics() returns once the core has answered every topic, so
-        # each future in the result is already complete.
+        # create_topics() returns its result at once; the result holds one
+        # KafkaFuture per topic.
         result = admin.create_topics(
             new_topics=[NewTopic(name=topic, num_partitions=3, replication_factor=1)])
 
-        # One future per topic; result() raises the topic's error, as a class.
+        # get() waits for a topic and raises ExecutionError for a failed one,
+        # the error being its __cause__.
         for name, future in result.values().items():
             try:
-                future.result()
+                future.get()
                 print('Topic %s created' % name)
-            except TopicExistsError:
+            except ExecutionError as e:
+                if not isinstance(e.__cause__, TopicExistsError):
+                    raise
                 print('Topic %s already exists' % name)
 
         # list_topics() returns one future with every topic's name.
-        print('Topics: %s' % sorted(admin.list_topics().names().result()))
+        print('Topics: %s' % sorted(admin.list_topics().names().get()))

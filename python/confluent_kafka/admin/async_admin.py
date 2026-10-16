@@ -654,8 +654,8 @@ class AsyncAdmin(_AdminState):
         self, *, group_id: str, partitions: Iterable[TopicPartition],
         options: DeleteConsumerGroupOffsetsOptions | None = None
     ) -> DeleteConsumerGroupOffsetsResult[Async]:
-        """See :meth:`Admin.delete_consumer_group_offsets`; the result's future is an
-        ``asyncio.Future``."""
+        """See :meth:`Admin.delete_consumer_group_offsets`; the result's futures are
+        ``AsyncKafkaFuture``\ s."""
         self._check_not_closed()
         if options is None:
             options = DeleteConsumerGroupOffsetsOptions()
@@ -734,8 +734,8 @@ class AsyncAdmin(_AdminState):
         self, *, group_id: str, offsets: Mapping[TopicPartition, OffsetAndMetadata],
         options: AlterConsumerGroupOffsetsOptions | None = None
     ) -> AlterConsumerGroupOffsetsResult[Async]:
-        """See :meth:`Admin.alter_consumer_group_offsets`; the result's future is an
-        ``asyncio.Future``."""
+        """See :meth:`Admin.alter_consumer_group_offsets`; the result's futures are
+        ``AsyncKafkaFuture``\ s."""
         self._check_not_closed()
         if options is None:
             options = AlterConsumerGroupOffsetsOptions()

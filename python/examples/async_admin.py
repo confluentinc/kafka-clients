@@ -24,6 +24,7 @@
 import asyncio
 import sys
 
+from confluent_kafka import ExecutionError
 from confluent_kafka.admin import AsyncAdmin, NewTopic
 from confluent_kafka.common.errors import TopicExistsError
 
@@ -34,21 +35,24 @@ async def main(broker, topic):
     conf = {'bootstrap.servers': broker}
 
     async with AsyncAdmin.create(configs=conf) as admin:
-        # Admin calls are coroutines: awaiting one returns once the core has
-        # answered every topic, so each future in the result is already complete.
-        result = await admin.create_topics(
+        # Admin calls return their result at once; its AsyncKafkaFutures are
+        # awaited through get().
+        result = admin.create_topics(
             new_topics=[NewTopic(name=topic, num_partitions=3, replication_factor=1)])
 
-        # One asyncio.Future per topic; awaiting it raises the topic's error.
+        # One AsyncKafkaFuture per topic; get() raises ExecutionError for a
+        # failed one, the error being its __cause__.
         for name, future in result.values().items():
             try:
-                await future
+                await future.get()
                 print('Topic %s created' % name)
-            except TopicExistsError:
+            except ExecutionError as e:
+                if not isinstance(e.__cause__, TopicExistsError):
+                    raise
                 print('Topic %s already exists' % name)
 
-        listing = await admin.list_topics()
-        print('Topics: %s' % sorted(await listing.names()))
+        listing = admin.list_topics()
+        print('Topics: %s' % sorted(await listing.names().get()))
 
 
 if __name__ == '__main__':

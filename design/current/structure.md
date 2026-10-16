@@ -385,9 +385,9 @@ python/
 │   ├── producer/, consumer/   # base, Kafka*, Mock*, Async* peers, records
 │   ├── admin/                 # Admin, KafkaAdminClient, MockAdminClient, Async*
 │   │                          # peers, Options, Results, value classes
-│   ├── common/                # value types, KafkaError, errors/,
+│   ├── common/                # value types, KafkaError, KafkaFuture, errors/,
 │   │                          # serialization/, config/, …
-│   └── *_error.py             # Java built-in exceptions at the root
+│   └── *_error.py             # Java built-in exceptions (ExecutionError…) at the root
 ├── _confluentkafka.c   # hand-written C extension
 ├── tinycthread.{c,h}, c11threads_compat.h   # C11 threads shim (macOS)
 ├── grpc_server.py, grpc_server_async.py, grpc_translate.py, grpc_chaos.py
@@ -418,9 +418,12 @@ of the exported symbols are accessors, enum singletons and destructors.
 ![Bindings layering](img/bindings-layering.svg)
 
 *Python and C both reach the Rust API through the same header and the same
-blocking / `_cb` entry-point shapes. Neither the C binding nor the Python
-extension adds a thread of its own; the Python producer runs its completions on
-one Python completion thread per producer.*
+blocking / `_cb` entry-point shapes. The Python clients submit the `_cb` twins
+only and drain each client's callback queue in Python: a waiting consumer call
+on its own thread, the sync producer on one completion thread, the sync admin
+client on one pump thread, the async clients on their event loop. The
+extension adds no thread of its own, and one future object wraps each core
+`kafka_common_KafkaFuture_t` (the clients' `KafkaFuture` / `AsyncKafkaFuture`).*
 
 ## tests/
 
