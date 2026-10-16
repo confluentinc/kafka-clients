@@ -16,10 +16,11 @@
 //!
 //! Corresponds to the `*Options` classes in `org.apache.kafka.clients.admin`.
 //! Each extends the Java `AbstractOptions` base (a `timeout_ms` field); in Rust
-//! each options struct simply carries its own optional timeout plus operation
-//! specific fields.
+//! each options struct carries its own optional timeout plus operation specific
+//! fields, and implements the [`AbstractOptions`] trait.
 
 mod abort_transaction_options;
+mod abstract_options;
 mod alter_client_quotas_options;
 mod alter_configs_options;
 mod alter_consumer_group_offsets_options;
@@ -66,6 +67,7 @@ mod unregister_controller_options;
 mod update_features_options;
 
 pub use abort_transaction_options::AbortTransactionOptions;
+pub use abstract_options::AbstractOptions;
 pub use alter_client_quotas_options::AlterClientQuotasOptions;
 pub use alter_configs_options::AlterConfigsOptions;
 pub use alter_consumer_group_offsets_options::AlterConsumerGroupOffsetsOptions;

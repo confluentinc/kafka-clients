@@ -80,6 +80,21 @@ impl ResourcePatternFilter {
     }
 
     /// Return `true` if this filter matches the given pattern.
+    ///
+    /// # Panics
+    ///
+    /// Panics with `Unsupported PatternType: <type>` if this filter's pattern
+    /// type is [`PatternType::Match`], it has a name, and `pattern`'s pattern
+    /// type is [`PatternType::Unknown`] or [`PatternType::Any`], neither of
+    /// which a concrete pattern has. Java throws `IllegalArgumentException`
+    /// there (`ResourcePatternFilter.java:116-117`). A pattern this client
+    /// cannot parse, such as one with a pattern type a newer broker added,
+    /// reports `Unknown`, so check [`ResourcePattern::pattern_type`] before
+    /// matching it against a `Match` filter.
+    ///
+    /// The panic is a deliberate deviation from Java's catchable exception:
+    /// this predicate's signature stays a plain `bool` rather than becoming a
+    /// `Result`.
     #[doc(alias = "org.apache.kafka.common.resource.ResourcePatternFilter#matches")]
     pub fn matches(&self, pattern: &ResourcePattern) -> bool {
         if self.resource_type != ResourceType::Any && self.resource_type != pattern.resource_type() {
@@ -163,6 +178,19 @@ mod tests {
 
     fn filter(rt: ResourceType, name: Option<&str>, pt: PatternType) -> ResourcePatternFilter {
         ResourcePatternFilter::new(rt, name.map(str::to_string), pt)
+    }
+
+    /// New test, no Java original: the documented panic (`# Panics` on
+    /// `matches`), where Java throws `IllegalArgumentException("Unsupported
+    /// PatternType: UNKNOWN")` (`ResourcePatternFilter.java:116-117`).
+    #[test]
+    #[should_panic(expected = "Unsupported PatternType: UNKNOWN")]
+    fn match_filter_with_a_name_panics_on_an_unknown_pattern_type() {
+        filter(ResourceType::Topic, Some("Name"), PatternType::Match).matches(&pattern(
+            ResourceType::Topic,
+            "Name",
+            PatternType::Unknown,
+        ));
     }
 
     #[test]

@@ -61,12 +61,15 @@ impl CreateDelegationTokenOptions {
         &self.renewers
     }
 
-    /// Sets the owner of the token.
+    /// Sets the owner of the token, or `None` for none, in which case the
+    /// broker makes the request principal the owner.
     ///
-    /// Mirrors `CreateDelegationTokenOptions.owner`.
+    /// Mirrors `CreateDelegationTokenOptions.owner(KafkaPrincipal)`, which
+    /// stores the value as given, so `owner(null)` clears an owner set earlier
+    /// (`CreateDelegationTokenOptions.java:45-48`).
     #[must_use]
-    pub fn set_owner(mut self, owner: KafkaPrincipal) -> Self {
-        self.owner = Some(owner);
+    pub fn set_owner(mut self, owner: Option<KafkaPrincipal>) -> Self {
+        self.owner = owner;
         self
     }
 
@@ -128,7 +131,7 @@ mod tests {
         let owner = KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "alice");
         let renewer = KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "bob");
         let options = CreateDelegationTokenOptions::new()
-            .set_owner(owner.clone())
+            .set_owner(Some(owner.clone()))
             .set_renewers(vec![renewer.clone()])
             .set_max_lifetime_ms(1000)
             .set_timeout_ms(Some(5000));
@@ -136,5 +139,15 @@ mod tests {
         assert_eq!(options.renewers(), &[renewer]);
         assert_eq!(options.max_lifetime_ms(), 1000);
         assert_eq!(options.timeout_ms(), Some(5000));
+    }
+
+    /// New test, no Java original: Java's `owner(null)` stores `null`, so it
+    /// clears an owner set earlier and `owner()` is `Optional.empty()` again
+    /// (`CreateDelegationTokenOptions.java:45-52`).
+    #[test]
+    fn set_owner_none_clears_the_owner() {
+        let owner = KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "alice");
+        let options = CreateDelegationTokenOptions::new().set_owner(Some(owner)).set_owner(None);
+        assert!(options.owner().is_none());
     }
 }

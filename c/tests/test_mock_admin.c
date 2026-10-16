@@ -402,6 +402,32 @@ static void test_mock_admin_create_topics_replicas_assignment(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
+/* A NULL config value is Java's null config value: the topic is created and
+ * the config comes back with a NULL value, not dropped and not "". */
+static void test_mock_admin_create_topics_null_config_value(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+
+    kafka_admin_NewTopic_t *t = kafka_admin_NewTopic_new("null-config", 1, 1);
+    kafka_admin_NewTopic_put_config(t, "cleanup.policy", NULL);
+    const kafka_admin_NewTopic_t *topics[1] = {t};
+
+    kafka_admin_CreateTopicsResult_t *result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_create_topics(admin, topics, 1, 5000, false,
+                                                           false, &result));
+    TEST_ASSERT_NULL(kafka_admin_CreateTopicsResult_get_error(result, 0));
+    const kafka_admin_TopicMetadataAndConfig_t *mc =
+        kafka_admin_CreateTopicsResult_get_value(result, 0);
+    TEST_ASSERT_NOT_NULL(mc);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_TopicMetadataAndConfig_config_count(mc));
+    TEST_ASSERT_EQUAL_STRING("cleanup.policy",
+                             kafka_admin_TopicMetadataAndConfig_config_name(mc, 0));
+    TEST_ASSERT_NULL(kafka_admin_TopicMetadataAndConfig_config_value(mc, 0));
+
+    kafka_admin_CreateTopicsResult_destroy(result);
+    kafka_admin_NewTopic_destroy(t);
+    kafka_admin_AdminClient_destroy(admin);
+}
+
 /* NewTopic_new(NULL, ..) returns NULL; NULL entries in the topics array are
  * skipped rather than dereferenced. */
 static void test_mock_admin_new_topic_null_handling(void) {
@@ -6179,6 +6205,7 @@ int main(void) {
     RUN_TEST(test_admin_client_new_rejects_empty_bootstrap);
     RUN_TEST(test_admin_client_new_null_props);
     RUN_TEST(test_mock_admin_create_topics_sync);
+    RUN_TEST(test_mock_admin_create_topics_null_config_value);
     RUN_TEST(test_mock_admin_create_topics_partial_failure);
     RUN_TEST(test_mock_admin_create_topics_broker_defaults);
     RUN_TEST(test_mock_admin_create_topics_replicas_assignment);

@@ -3980,7 +3980,8 @@ static void free_new_topics(kafka_admin_NewTopic_t** topics, Py_ssize_t count) {
     PyMem_Free(topics);
 }
 
-// Applies `configs` (a sequence of (name, value) pairs) to a NewTopic handle.
+// Applies `configs` (a sequence of (name, value) pairs, a None value being
+// Java's null config value) to a NewTopic handle.
 // Returns 0 on success, -1 with a Python exception set on failure.
 static int apply_new_topic_configs(kafka_admin_NewTopic_t* topic, PyObject* configs) {
     if (configs == Py_None) return 0;
@@ -3989,7 +3990,7 @@ static int apply_new_topic_configs(kafka_admin_NewTopic_t* topic, PyObject* conf
     for (Py_ssize_t i = 0; i < n; i++) {
         PyObject* item = PySequence_GetItem(configs, i);  // new ref
         const char* k = NULL; const char* v = NULL;
-        int ok = item && PyArg_ParseTuple(item, "ss", &k, &v);
+        int ok = item && PyArg_ParseTuple(item, "sz", &k, &v);
         if (ok) kafka_admin_NewTopic_put_config(topic, k, v);
         Py_XDECREF(item);
         if (!ok) return -1;
@@ -4877,8 +4878,8 @@ static PyObject* config_entry_to_py(const kafka_admin_ConfigEntry_t* entry) {
         if (s == NULL) { Py_DECREF(synonyms); return NULL; }
         PyList_SET_ITEM(synonyms, i, s);
     }
-    // "z" yields None for a NULL value / documentation.
-    return Py_BuildValue("(sziiisszN)",
+    // "z" yields None for a NULL value / type / documentation.
+    return Py_BuildValue("(sziiiszzN)",
                          kafka_admin_ConfigEntry_name(entry),
                          kafka_admin_ConfigEntry_value(entry),
                          kafka_admin_ConfigEntry_is_default(entry) ? 1 : 0,

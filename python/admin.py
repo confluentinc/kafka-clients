@@ -131,7 +131,8 @@ class NewTopic:
             self.name,
             -1 if self.num_partitions is None else int(self.num_partitions),
             -1 if self.replication_factor is None else int(self.replication_factor),
-            [(str(k), str(v)) for k, v in self.configs.items()],
+            # A None value is Java's null config value (C passes it as NULL).
+            [(str(k), None if v is None else str(v)) for k, v in self.configs.items()],
             [(int(p), [int(b) for b in brokers])
              for p, brokers in self.replicas_assignments.items()],
         )
@@ -233,8 +234,9 @@ class ConfigEntry:
     """A configuration entry (Java ``ConfigEntry``).
 
     ``source`` and ``config_type`` are Java's ``ConfigSource`` / ``ConfigType``
-    enum constant names (neither enum has a numeric id in Java). Synonyms keep
-    Java's precedence order.
+    enum constant names (neither enum has a numeric id in Java). ``config_type``
+    is ``None`` for an entry without a type, as Java's nullable ``type()`` is.
+    Synonyms keep Java's precedence order.
 
     ``create_topics`` populates only the first five fields — the broker's
     ``CreateTopicsResponse`` carries no source, type, documentation or synonyms —

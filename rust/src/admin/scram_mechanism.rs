@@ -98,9 +98,39 @@ impl ScramMechanism {
     }
 }
 
+/// Renders the Java constant name (`SCRAM_SHA_256`, `UNKNOWN`, ...): Java's
+/// `ScramMechanism` does not override `toString()`, so `Enum.toString()`
+/// returns that name, which [`mechanism_name`](ScramMechanism::mechanism_name)
+/// derives from with `_` replaced by `-`.
+impl std::fmt::Display for ScramMechanism {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ScramMechanism::Unknown => "UNKNOWN",
+            ScramMechanism::ScramSha256 => "SCRAM_SHA_256",
+            ScramMechanism::ScramSha512 => "SCRAM_SHA_512",
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// New test, no Java original: every `ScramMechanism` renders its Java
+    /// constant name, as Java's `Enum.toString()` does
+    /// (`ScramMechanism.java:35-38`), and `mechanism_name` is that name with
+    /// `_` replaced by `-`, as Java derives it (`ScramMechanism.java:93`).
+    #[test]
+    fn display_matches_java_constant_names() {
+        for (mechanism, java) in [
+            (ScramMechanism::Unknown, "UNKNOWN"),
+            (ScramMechanism::ScramSha256, "SCRAM_SHA_256"),
+            (ScramMechanism::ScramSha512, "SCRAM_SHA_512"),
+        ] {
+            assert_eq!(mechanism.to_string(), java);
+            assert_eq!(mechanism.mechanism_name(), java.replace('_', "-"));
+        }
+    }
 
     // Mirrors `ScramMechanismTest.testFromMechanismName`.
     #[test]

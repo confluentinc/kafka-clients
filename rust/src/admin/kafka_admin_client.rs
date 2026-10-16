@@ -2839,7 +2839,7 @@ fn describe_config_result(result: &crate::describe_configs_response_data::Descri
                 .set_is_sensitive(config.is_sensitive)
                 .set_is_read_only(config.read_only)
                 .set_synonyms(synonyms)
-                .set_config_type(ConfigType::for_id(config.config_type))
+                .set_config_type(Some(ConfigType::for_id(config.config_type)))
                 .set_documentation(config.documentation.clone())
                 .build()
                 .expect("ConfigEntryOptionsBuilder::build: every mandatory parameter is set above"),
@@ -3326,6 +3326,9 @@ fn get_create_topics_call(
                                     .set_source(ConfigSource::for_id(c.config_source))
                                     .set_is_sensitive(c.is_sensitive)
                                     .set_is_read_only(c.read_only)
+                                    // Java passes `null` for the type and the
+                                    // documentation (`KafkaAdminClient.java:1992-2002`).
+                                    .set_config_type(None)
                                     .build()
                                     .expect("ConfigEntryOptionsBuilder::build: every mandatory parameter is set above"),
                             )
@@ -3795,7 +3798,11 @@ impl Admin for KafkaAdminClient {
         CreateTopicsResult::new(public)
     }
 
-    fn delete_topics_with_options(&self, topics: TopicCollection, options: DeleteTopicsOptions) -> DeleteTopicsResult {
+    fn delete_topics_with_topic_collection_options(
+        &self,
+        topics: TopicCollection,
+        options: DeleteTopicsOptions,
+    ) -> DeleteTopicsResult {
         let now = self.now();
         let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         match topics {
@@ -5446,10 +5453,10 @@ impl Admin for KafkaAdminClient {
         //
         // Deliberate divergence: Java's `Thread.join(0)` means "wait forever", so
         // `close(Duration::ZERO)` there is unbounded. We treat 0 as 0, because
-        // both `Admin::close`'s rustdoc and the exported C header promise a
-        // return within `timeout`, and because of the uninterruptible connect
-        // await above the Java behavior would be a genuine hang rather than the
-        // near-immediate return it is in Java.
+        // both `Admin::close_with_timeout`'s rustdoc ("A zero timeout") and the
+        // exported C header promise a return within `timeout`, and because of
+        // the uninterruptible connect await above the Java behavior would be a
+        // genuine hang rather than the near-immediate return it is in Java.
         let mut handle = self.shared.bg_handle.lock().unwrap().take();
         if let Some(join_handle) = handle.as_mut() {
             let joined = tokio::time::timeout(Duration::from_millis(wait_time_ms as u64), join_handle).await;
@@ -7299,7 +7306,7 @@ mod tests {
     #[tokio::test]
     async fn test_delete_topics_by_name_success() {
         let (admin, mut runnable, _time, _nodes) = env();
-        let result = admin.delete_topics_with_options(
+        let result = admin.delete_topics_with_topic_collection_options(
             TopicCollection::of_topic_names(vec!["myTopic".to_string()]),
             DeleteTopicsOptions::new(),
         );
@@ -7313,7 +7320,7 @@ mod tests {
     #[tokio::test]
     async fn test_delete_topics_by_name_error() {
         let (admin, mut runnable, _time, _nodes) = env();
-        let result = admin.delete_topics_with_options(
+        let result = admin.delete_topics_with_topic_collection_options(
             TopicCollection::of_topic_names(vec!["ghost".to_string()]),
             DeleteTopicsOptions::new(),
         );
@@ -7330,8 +7337,10 @@ mod tests {
     async fn test_delete_topics_by_id_success() {
         let (admin, mut runnable, _time, _nodes) = env();
         let id = Uuid::new(1, 2);
-        let result =
-            admin.delete_topics_with_options(TopicCollection::of_topic_ids(vec![id]), DeleteTopicsOptions::new());
+        let result = admin.delete_topics_with_topic_collection_options(
+            TopicCollection::of_topic_ids(vec![id]),
+            DeleteTopicsOptions::new(),
+        );
         let mut r = DeletableTopicResult::new();
         r.set_topic_id(id);
         r.set_error_code(Errors::None.code());
@@ -7346,7 +7355,7 @@ mod tests {
         // By name: the response omits "myOtherTopic", so its future is
         // completed by the unrealized-futures sanity check.
         let (admin, mut runnable, _time, _nodes) = env();
-        let result = admin.delete_topics_with_options(
+        let result = admin.delete_topics_with_topic_collection_options(
             TopicCollection::of_topic_names(vec!["myTopic".to_string(), "myOtherTopic".to_string()]),
             DeleteTopicsOptions::new(),
         );
@@ -7366,8 +7375,10 @@ mod tests {
         let (admin, mut runnable, _time, _nodes) = env();
         let id1 = Uuid::new(1, 1);
         let id2 = Uuid::new(2, 2);
-        let result =
-            admin.delete_topics_with_options(TopicCollection::of_topic_ids(vec![id1, id2]), DeleteTopicsOptions::new());
+        let result = admin.delete_topics_with_topic_collection_options(
+            TopicCollection::of_topic_ids(vec![id1, id2]),
+            DeleteTopicsOptions::new(),
+        );
         runnable
             .client_mut()
             .prepare_response(delete_response_throttled(1000, vec![delete_result_with_id(id1, Errors::None)]));
@@ -7402,7 +7413,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(delete_response_throttled(0, vec![delete_result_named("topic2", Errors::None)]));
-        let result = admin.delete_topics_with_options(
+        let result = admin.delete_topics_with_topic_collection_options(
             TopicCollection::of_topic_names(vec!["topic1".to_string(), "topic2".to_string(), "topic3".to_string()]),
             DeleteTopicsOptions::new().set_retry_on_quota_violation(true),
         );
@@ -7432,7 +7443,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(delete_response_throttled(0, vec![delete_result_with_id(id2, Errors::None)]));
-        let result = admin.delete_topics_with_options(
+        let result = admin.delete_topics_with_topic_collection_options(
             TopicCollection::of_topic_ids(vec![id1, id2, id3]),
             DeleteTopicsOptions::new().set_retry_on_quota_violation(true),
         );
@@ -7458,7 +7469,7 @@ mod tests {
                 delete_result_named("topic3", Errors::TopicAlreadyExists),
             ],
         ));
-        let result = admin.delete_topics_with_options(
+        let result = admin.delete_topics_with_topic_collection_options(
             TopicCollection::of_topic_names(vec!["topic1".to_string(), "topic2".to_string(), "topic3".to_string()]),
             DeleteTopicsOptions::new().set_retry_on_quota_violation(false),
         );
@@ -7483,7 +7494,7 @@ mod tests {
                 delete_result_with_id(id3, Errors::UnknownTopicId),
             ],
         ));
-        let result = admin.delete_topics_with_options(
+        let result = admin.delete_topics_with_topic_collection_options(
             TopicCollection::of_topic_ids(vec![id1, id2, id3]),
             DeleteTopicsOptions::new().set_retry_on_quota_violation(false),
         );
@@ -7514,7 +7525,7 @@ mod tests {
             1000,
             vec![delete_result_named("topic2", Errors::ThrottlingQuotaExceeded)],
         ));
-        let result = admin.delete_topics_with_options(
+        let result = admin.delete_topics_with_topic_collection_options(
             TopicCollection::of_topic_names(vec!["topic1".to_string(), "topic2".to_string(), "topic3".to_string()]),
             DeleteTopicsOptions::new().set_retry_on_quota_violation(true),
         );
@@ -7549,7 +7560,7 @@ mod tests {
             1000,
             vec![delete_result_with_id(id2, Errors::ThrottlingQuotaExceeded)],
         ));
-        let result = admin.delete_topics_with_options(
+        let result = admin.delete_topics_with_topic_collection_options(
             TopicCollection::of_topic_ids(vec![id1, id2, id3]),
             DeleteTopicsOptions::new().set_retry_on_quota_violation(true),
         );
@@ -9207,6 +9218,16 @@ mod tests {
         assert!(entry.is_read_only());
         assert!(!entry.is_sensitive());
         assert_eq!(entry.source(), ConfigSource::DynamicTopicConfig);
+        // Java builds the entry with a `null` type and documentation
+        // (`KafkaAdminClient.java:1992-2002`), and prints them as `null`.
+        assert_eq!(entry.config_type(), None);
+        assert_eq!(entry.documentation(), None);
+        assert!(entry.synonyms().is_empty());
+        assert_eq!(
+            entry.to_string(),
+            "ConfigEntry(name=cleanup.policy, value=compact, source=DYNAMIC_TOPIC_CONFIG, \
+             isSensitive=false, isReadOnly=true, synonyms=[], type=null, documentation=null)"
+        );
     }
 
     #[tokio::test]
@@ -9224,7 +9245,7 @@ mod tests {
     #[tokio::test]
     async fn test_delete_topics_invalid_name_unrepresentable() {
         let (admin, _runnable, _time, _nodes) = env();
-        let result = admin.delete_topics_with_options(
+        let result = admin.delete_topics_with_topic_collection_options(
             TopicCollection::of_topic_names(vec![String::new()]),
             DeleteTopicsOptions::new(),
         );
@@ -10419,6 +10440,27 @@ mod tests {
         let mut data = DescribeConfigsResponseData::new();
         data.set_results(results);
         ConcreteResponse::DescribeConfigs(DescribeConfigsResponse::new(data))
+    }
+
+    /// New test, no Java original: unlike a `createTopics` entry, every entry
+    /// `describeConfigs` builds has a type. Java's `describeConfigResult`
+    /// passes `ConfigType.forId(id).type()`, which is `UNKNOWN` for an id it
+    /// does not know, never `null`.
+    #[test]
+    fn describe_config_result_gives_every_entry_a_type() {
+        use crate::describe_configs_response_data::DescribeConfigsResourceResult;
+        let mut result = describe_configs_result("t", config_resource::Type::Topic.id(), Errors::None);
+        let mut long = DescribeConfigsResourceResult::new();
+        long.set_name("retention.ms".to_string());
+        long.set_config_type(5);
+        let mut unknown = DescribeConfigsResourceResult::new();
+        unknown.set_name("future.config".to_string());
+        unknown.set_config_type(42);
+        result.set_configs(vec![long, unknown]);
+
+        let config = describe_config_result(&result);
+        assert_eq!(config.get("retention.ms").unwrap().config_type(), Some(ConfigType::Long));
+        assert_eq!(config.get("future.config").unwrap().config_type(), Some(ConfigType::Unknown));
     }
 
     #[tokio::test]
@@ -15290,9 +15332,7 @@ mod tests {
             .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
 
         let mut options = members_to_remove(&["instance-1", "instance-2"]);
-        if let Some(reason) = reason {
-            options.set_reason(reason);
-        }
+        options.set_reason(reason.map(str::to_string));
         let _result = admin.remove_members_from_consumer_group_with_options(GROUP_ID, options);
 
         pump_until(&mut runnable, 40, |r| {
@@ -17595,6 +17635,7 @@ mod tests {
         poll_timeouts: Arc<Mutex<Vec<i64>>>,
         advance_clock: Arc<std::sync::atomic::AtomicBool>,
         stuck: Arc<std::sync::atomic::AtomicBool>,
+        release: Arc<Notify>,
         park_once: Arc<std::sync::atomic::AtomicBool>,
         parked: Arc<Notify>,
     }
@@ -17607,6 +17648,7 @@ mod tests {
                 poll_timeouts: Arc::new(Mutex::new(Vec::new())),
                 advance_clock: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 stuck: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                release: Arc::new(Notify::new()),
                 park_once: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 parked: Arc::new(Notify::new()),
             }
@@ -17624,7 +17666,8 @@ mod tests {
         }
 
         /// Signalled (with a stored permit) when `poll` has entered the park
-        /// armed by [`park_once`](Self::park_once).
+        /// armed by [`park_once`](Self::park_once), or the wait armed by
+        /// [`stuck`](Self::stuck).
         fn parked(&self) -> Arc<Notify> {
             Arc::clone(&self.parked)
         }
@@ -17637,13 +17680,22 @@ mod tests {
             Arc::clone(&self.advance_clock)
         }
 
-        /// Once armed, `poll` never returns, so the I/O loop can never reach
-        /// `should_exit` again. It stands in for any `await` inside a
-        /// `process_pending_calls` phase that no shutdown deadline can interrupt — in
-        /// production the unbounded `socket.connect(...).await` that
-        /// `send_eligible_calls` reaches through `client.ready(...)`.
+        /// Once armed, `poll` does not return until [`release`](Self::release)
+        /// is notified, so until then the I/O loop cannot reach `should_exit`
+        /// again. It stands in for any `await` inside a `process_pending_calls`
+        /// phase that no shutdown deadline can interrupt — in production the
+        /// unbounded `socket.connect(...).await` that `send_eligible_calls`
+        /// reaches through `client.ready(...)`. A wakeup does not end it, as it
+        /// does not end that connect.
         fn stuck(&self) -> Arc<std::sync::atomic::AtomicBool> {
             Arc::clone(&self.stuck)
+        }
+
+        /// Ends the wait armed by [`stuck`](Self::stuck), standing in for the
+        /// connect that finally returns. Clear `stuck` first, then
+        /// `notify_one`, so the next poll does not wait again.
+        fn release(&self) -> Arc<Notify> {
+            Arc::clone(&self.release)
         }
     }
 
@@ -17672,7 +17724,11 @@ mod tests {
         async fn poll(&mut self, timeout: i64, now: i64) -> Vec<crate::ClientResponse> {
             self.poll_timeouts.lock().unwrap().push(timeout);
             if self.stuck.load(Ordering::Acquire) {
-                std::future::pending::<()>().await;
+                // Created before `parked` is signalled, so a release issued the
+                // moment the test resumes is not lost.
+                let released = self.release.notified();
+                self.parked.notify_one();
+                released.await;
             }
             if self.park_once.swap(false, Ordering::AcqRel) {
                 let wakeup = self.inner.wakeup_notify();
@@ -17902,6 +17958,80 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(1),
             "close(50ms) must be bounded by its timeout, but it returned only after {elapsed:?}"
+        );
+    }
+
+    /// The documented contract of `close_with_timeout(Duration::ZERO)`, which
+    /// deliberately differs from Java's `close(Duration.ZERO)`: Java's
+    /// `thread.join(0)` waits for the I/O thread to exit
+    /// (`KafkaAdminClient.java:765-771`), whereas Rust returns at once and leaves
+    /// the call to fail on the I/O task once that task can run again.
+    ///
+    /// The task is blocked in an await no deadline interrupts, standing in for
+    /// the TCP connect `Selector::connect` awaits. `close(0)` must return while
+    /// it is blocked, with the call unresolved and the task still running; once
+    /// the task is released it exits and fails the call with Java's
+    /// "thread has exited" error, and a second `close()` joins it.
+    #[tokio::test]
+    async fn close_zero_returns_at_once_and_leaves_pending_calls_to_fail_on_the_task() {
+        let time = mock_time(1000);
+        let (cluster, nodes) = mock_cluster(3, 0);
+        let client = WaitingClient::new(
+            MockClient::with_static_nodes(nodes.clone(), Arc::clone(&time) as Arc<dyn Time>),
+            Arc::clone(&time),
+        );
+        let stuck = client.stuck();
+        let release = client.release();
+        let parked = client.parked();
+        let config = test_config();
+        let (admin, runnable) =
+            KafkaAdminClient::create_for_test(client, cluster, &config, Arc::clone(&time) as Arc<dyn Time>);
+
+        // The call is queued before the task starts, so the task's first pass
+        // picks it up; that pass's network poll then blocks.
+        let names = admin.list_topics_with_options(ListTopicsOptions::new()).names();
+        stuck.store(true, Ordering::Release);
+        admin.spawn(runnable);
+        tokio::time::timeout(Duration::from_secs(5), parked.notified())
+            .await
+            .expect("the I/O task should block in its network poll");
+
+        let started = std::time::Instant::now();
+        tokio::time::timeout(Duration::from_secs(5), admin.close_with_timeout(Duration::ZERO))
+            .await
+            .expect("close(0) must not wait for the I/O task to exit");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "close(0) must return at once, but it returned only after {:?}",
+            started.elapsed()
+        );
+        assert!(!names.is_done(), "close(0) returns before the I/O task fails the pending call");
+        assert!(
+            admin
+                .shared
+                .bg_handle
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|task| !task.is_finished()),
+            "close(0) leaves the blocked I/O task running"
+        );
+
+        stuck.store(false, Ordering::Release);
+        release.notify_one();
+        let error = tokio::time::timeout(Duration::from_secs(10), names.get())
+            .await
+            .expect("the released I/O task must fail the pending call")
+            .expect_err("a call still pending when the I/O task exits must fail");
+        assert!(matches!(error, Error::Timeout(_)), "got {error:?}");
+        assert_eq!(error.message(), "The AdminClient thread has exited. Call: listTopics");
+
+        tokio::time::timeout(Duration::from_secs(10), admin.close())
+            .await
+            .expect("a second close() joins the I/O task once it has exited");
+        assert!(
+            admin.shared.bg_handle.lock().unwrap().is_none(),
+            "the second close() joined the I/O task"
         );
     }
 

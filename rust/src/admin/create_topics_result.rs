@@ -134,7 +134,13 @@ impl CreateTopicsResult {
     ///
     /// # Panics
     ///
-    /// Panics if `topic` was not part of the original request.
+    /// Panics with `Topic <topic> was not part of the createTopics request` if
+    /// `topic` was not part of the original request, where Java's
+    /// `futures.get(topic)` is `null` and the call throws
+    /// `NullPointerException` (`CreateTopicsResult.java:67-108`). This is a
+    /// deliberate deviation from Java's catchable exception: the accessor's
+    /// signature stays a plain `KafkaFuture` rather than becoming a `Result`.
+    /// Read the requested topics from [`values`](Self::values) to avoid it.
     #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult#config")]
     pub fn config(&self, topic: &str) -> KafkaFuture<Config> {
         self.future_for(topic).then_apply_try(|tmac| tmac.config())
@@ -144,7 +150,13 @@ impl CreateTopicsResult {
     ///
     /// # Panics
     ///
-    /// Panics if `topic` was not part of the original request.
+    /// Panics with `Topic <topic> was not part of the createTopics request` if
+    /// `topic` was not part of the original request, where Java's
+    /// `futures.get(topic)` is `null` and the call throws
+    /// `NullPointerException` (`CreateTopicsResult.java:67-108`). This is a
+    /// deliberate deviation from Java's catchable exception: the accessor's
+    /// signature stays a plain `KafkaFuture` rather than becoming a `Result`.
+    /// Read the requested topics from [`values`](Self::values) to avoid it.
     #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult#topicId")]
     pub fn topic_id(&self, topic: &str) -> KafkaFuture<Uuid> {
         self.future_for(topic).then_apply_try(|tmac| tmac.topic_id())
@@ -154,7 +166,13 @@ impl CreateTopicsResult {
     ///
     /// # Panics
     ///
-    /// Panics if `topic` was not part of the original request.
+    /// Panics with `Topic <topic> was not part of the createTopics request` if
+    /// `topic` was not part of the original request, where Java's
+    /// `futures.get(topic)` is `null` and the call throws
+    /// `NullPointerException` (`CreateTopicsResult.java:67-108`). This is a
+    /// deliberate deviation from Java's catchable exception: the accessor's
+    /// signature stays a plain `KafkaFuture` rather than becoming a `Result`.
+    /// Read the requested topics from [`values`](Self::values) to avoid it.
     #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult#numPartitions")]
     pub fn num_partitions(&self, topic: &str) -> KafkaFuture<i32> {
         self.future_for(topic).then_apply_try(|tmac| tmac.num_partitions())
@@ -164,7 +182,13 @@ impl CreateTopicsResult {
     ///
     /// # Panics
     ///
-    /// Panics if `topic` was not part of the original request.
+    /// Panics with `Topic <topic> was not part of the createTopics request` if
+    /// `topic` was not part of the original request, where Java's
+    /// `futures.get(topic)` is `null` and the call throws
+    /// `NullPointerException` (`CreateTopicsResult.java:67-108`). This is a
+    /// deliberate deviation from Java's catchable exception: the accessor's
+    /// signature stays a plain `KafkaFuture` rather than becoming a `Result`.
+    /// Read the requested topics from [`values`](Self::values) to avoid it.
     #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult#replicationFactor")]
     pub fn replication_factor(&self, topic: &str) -> KafkaFuture<i32> {
         self.future_for(topic).then_apply_try(|tmac| tmac.replication_factor())
@@ -202,6 +226,26 @@ mod tests {
 
     fn config() -> Config {
         Config::new([ConfigEntry::new("k".to_string(), Some("v".to_string()))])
+    }
+
+    /// New test, no Java original: each per-topic accessor panics, as its
+    /// `# Panics` section documents, for a topic the request did not name,
+    /// where Java's `futures.get(topic)` is `null` and the call throws
+    /// `NullPointerException` (`CreateTopicsResult.java:67-108`).
+    #[test]
+    fn accessors_panic_for_a_topic_not_in_the_request() {
+        let handle: KafkaFutureImpl<TopicMetadataAndConfig> = KafkaFutureImpl::new();
+        let result = CreateTopicsResult::new(HashMap::from([("t".to_string(), handle.future())]));
+        let message = |accessor: &dyn Fn(&CreateTopicsResult)| {
+            let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| accessor(&result)))
+                .expect_err("an accessor for an unrequested topic must panic");
+            payload.downcast_ref::<String>().cloned().expect("a formatted panic message")
+        };
+        let expected = "Topic nope was not part of the createTopics request";
+        assert_eq!(message(&|r| drop(r.config("nope"))), expected);
+        assert_eq!(message(&|r| drop(r.topic_id("nope"))), expected);
+        assert_eq!(message(&|r| drop(r.num_partitions("nope"))), expected);
+        assert_eq!(message(&|r| drop(r.replication_factor("nope"))), expected);
     }
 
     #[tokio::test]

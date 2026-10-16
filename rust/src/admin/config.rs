@@ -108,7 +108,7 @@ mod tests {
                     .set_name("ssl.truststore.password".to_string())
                     .set_value(Some(SECRET.to_string()))
                     .set_is_sensitive(true)
-                    .set_config_type(ConfigType::Password)
+                    .set_config_type(Some(ConfigType::Password))
                     .build()
                     .unwrap(),
             ),

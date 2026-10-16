@@ -23,7 +23,10 @@ use crate::admin::TransactionState;
 /// Options for `Admin::list_transactions`.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.ListTransactionsOptions`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Equality is Java's `equals`, which compares the four filters only: two
+/// options differing only in their timeout are equal.
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsOptions")]
 pub struct ListTransactionsOptions {
     timeout_ms: Option<i32>,
@@ -32,6 +35,29 @@ pub struct ListTransactionsOptions {
     filtered_duration_ms: i64,
     filtered_transactional_id_pattern: Option<String>,
 }
+
+/// Java's `equals` (`ListTransactionsOptions.java:140-149`) compares the four
+/// filters only; the timeout inherited from `AbstractOptions` takes no part,
+/// in `hashCode` (`:151-154`) either.
+impl PartialEq for ListTransactionsOptions {
+    fn eq(&self, other: &Self) -> bool {
+        // Destructured, so a field added to the struct must be placed on one
+        // side of Java's comparison or the other.
+        let Self {
+            timeout_ms: _,
+            filtered_states,
+            filtered_producer_ids,
+            filtered_duration_ms,
+            filtered_transactional_id_pattern,
+        } = self;
+        *filtered_states == other.filtered_states
+            && *filtered_producer_ids == other.filtered_producer_ids
+            && *filtered_duration_ms == other.filtered_duration_ms
+            && *filtered_transactional_id_pattern == other.filtered_transactional_id_pattern
+    }
+}
+
+impl Eq for ListTransactionsOptions {}
 
 /// Java's `new ListTransactionsOptions()`; a derived `Default` would set
 /// `filtered_duration_ms` to `0` instead of Java's `-1L`
@@ -155,6 +181,29 @@ mod tests {
     fn default_is_new() {
         assert_eq!(ListTransactionsOptions::default(), ListTransactionsOptions::new());
         assert_eq!(ListTransactionsOptions::default().filtered_duration(), -1);
+    }
+
+    /// New test, no Java original: as in Java, the timeout takes no part in
+    /// equality, while each of the four filters does.
+    #[test]
+    fn equality_ignores_the_timeout() {
+        assert_eq!(
+            ListTransactionsOptions::new().set_timeout_ms(Some(1)),
+            ListTransactionsOptions::new().set_timeout_ms(Some(2))
+        );
+        assert_eq!(
+            ListTransactionsOptions::new().set_timeout_ms(Some(1)),
+            ListTransactionsOptions::new()
+        );
+        let base = || ListTransactionsOptions::new().set_timeout_ms(Some(1));
+        for different in [
+            base().filter_states([TransactionState::Ongoing]),
+            base().filter_producer_ids([23423]),
+            base().filter_on_duration(10),
+            base().filter_on_transactional_id_pattern(Some("^special-.*".to_string())),
+        ] {
+            assert_ne!(different, base());
+        }
     }
 
     #[test]

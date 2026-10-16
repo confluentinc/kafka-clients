@@ -67,6 +67,26 @@ impl DescribeProducersOptions {
 mod tests {
     use super::*;
 
+    /// New test, no Java original: unlike `ListTopicsOptions` and
+    /// `ListTransactionsOptions`, Java's `equals` here compares the timeout as
+    /// well as the broker id (`DescribeProducersOptions.java:42-49`), and the
+    /// derived `PartialEq` does the same.
+    #[test]
+    fn equality_compares_the_broker_id_and_the_timeout() {
+        assert_eq!(
+            DescribeProducersOptions::new().set_broker_id(1).set_timeout_ms(Some(1)),
+            DescribeProducersOptions::new().set_broker_id(1).set_timeout_ms(Some(1))
+        );
+        assert_ne!(
+            DescribeProducersOptions::new().set_timeout_ms(Some(1)),
+            DescribeProducersOptions::new().set_timeout_ms(Some(2))
+        );
+        assert_ne!(
+            DescribeProducersOptions::new().set_broker_id(1),
+            DescribeProducersOptions::new()
+        );
+    }
+
     #[test]
     fn defaults_match_java() {
         let options = DescribeProducersOptions::new();

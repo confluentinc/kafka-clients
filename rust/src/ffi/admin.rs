@@ -808,6 +808,13 @@ fn close_with_timeout(timeout_ms: i64) -> Duration {
 /// a negative `timeout_ms` for Java's no-argument `close()` semantics — wait
 /// indefinitely, which like Java means "capped at a year".
 ///
+/// A `timeout_ms` of 0 returns at once, without waiting for the background task
+/// to exit: a call still pending may be unresolved when this returns, and the
+/// task fails it with a timeout error once it runs again. Java's
+/// `close(Duration.ZERO)` instead waits for its I/O thread to exit; this client
+/// does not, because the task can be blocked in a TCP connect that no shutdown
+/// deadline interrupts.
+///
 /// Returns nothing: Java's `Admin.close(Duration)` is `void`, and the Rust
 /// `Admin::close` likewise returns `()`.
 ///
@@ -1353,7 +1360,8 @@ struct NewTopicBuilder {
     num_partitions: Option<i32>,
     replication_factor: Option<i16>,
     replicas_assignments: BTreeMap<i32, Vec<i32>>,
-    configs: BTreeMap<String, String>,
+    /// A `None` value is Java's `null` config value.
+    configs: BTreeMap<String, Option<String>>,
 }
 
 impl NewTopicBuilder {
@@ -1373,7 +1381,7 @@ impl NewTopicBuilder {
         if self.configs.is_empty() {
             topic
         } else {
-            topic.set_configs(self.configs.clone())
+            topic.set_configs(Some(self.configs.clone()))
         }
     }
 }
@@ -1449,11 +1457,14 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_new(
 }
 
 /// Sets a topic-level configuration entry (Java's `NewTopic.configs(Map)`,
-/// applied one key at a time). No-op if any parameter is null.
+/// applied one key at a time). A null `value` sets the config to null, which
+/// Java's map allows and the request carries as a null value. No-op if `topic`
+/// or `key` is null.
 ///
 /// # Safety
 ///
-/// `topic` must be a valid handle; `key` and `value` valid C strings.
+/// `topic` must be a valid handle; `key` a valid C string; `value` null or a
+/// valid C string.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_put_config(
@@ -1461,23 +1472,27 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_put_config(
     key: *const c_char,
     value: *const c_char,
 ) {
-    if topic.is_null() || key.is_null() || value.is_null() {
+    if topic.is_null() || key.is_null() {
         return;
     }
-    // SAFETY: `key` is non-null (checked above together with `topic` and `value`) and, per
-    // this function's `# Safety`, a valid C string; it is borrowed only for the
-    // `to_string_lossy` copy made in this call.
-    let builder = unsafe { new_topic_mut(topic) };
-    // SAFETY: `value` is non-null (checked above together with `topic` and `key`) and, per
-    // this function's `# Safety`, a valid C string; it is borrowed only for the
-    // `to_string_lossy` copy made in this call.
-    let k = unsafe { CStr::from_ptr(key) }.to_string_lossy().to_string();
     // SAFETY: `new_topic_mut` requires a valid handle from `kafka_admin_NewTopic_new`;
     // `topic` is non-null (checked above) and, per this function's `# Safety`, a valid
     // handle. The `&mut NewTopicBuilder` is used only for this one config insertion within
     // the call; its exclusivity rests on the C caller not using the same builder from
     // another thread meanwhile (builder handles carry no thread-safety claim).
-    let v = unsafe { CStr::from_ptr(value) }.to_string_lossy().to_string();
+    let builder = unsafe { new_topic_mut(topic) };
+    // SAFETY: `key` is non-null (checked above together with `topic`) and, per this
+    // function's `# Safety`, a valid C string; it is borrowed only for the
+    // `to_string_lossy` copy made in this call.
+    let k = unsafe { CStr::from_ptr(key) }.to_string_lossy().to_string();
+    let v = if value.is_null() {
+        None
+    } else {
+        // SAFETY: `value` is non-null (checked just above) and, per this function's
+        // `# Safety`, a valid C string; it is borrowed only for the `to_string_lossy` copy
+        // made in this call.
+        Some(unsafe { CStr::from_ptr(value) }.to_string_lossy().to_string())
+    };
     builder.configs.insert(k, v);
 }
 
@@ -1922,7 +1937,8 @@ struct ConfigEntryC {
     is_sensitive: bool,
     is_read_only: bool,
     source_c: CString,
-    config_type_c: CString,
+    /// `None` for a null type (Java's `ConfigEntry.type()` is nullable).
+    config_type_c: Option<CString>,
     /// `None` for null documentation (Java's `ConfigEntry.documentation()`).
     documentation_c: Option<CString>,
     synonyms: Vec<ConfigSynonymC>,
@@ -1939,7 +1955,7 @@ impl ConfigEntryC {
             is_sensitive: entry.is_sensitive(),
             is_read_only: entry.is_read_only(),
             source_c: to_cstring(config_source_name(entry.source())),
-            config_type_c: to_cstring(config_type_name(entry.config_type())),
+            config_type_c: entry.config_type().map(|config_type| to_cstring(config_type_name(config_type))),
             documentation_c: entry.documentation().map(to_cstring),
             synonyms: entry
                 .synonyms()
@@ -2195,7 +2211,9 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_read_only(entry: *const kafk
 }
 
 /// Returns the config type as Java's enum constant name (borrowed), e.g.
-/// `"STRING"` or `"UNKNOWN"`.
+/// `"STRING"` or `"UNKNOWN"`, or null when the entry has no type (Java's
+/// `ConfigEntry.type()` is nullable: the entries of a `createTopics` result
+/// carry none).
 ///
 /// `ConfigEntry.ConfigType` has no numeric id in Java, so the name is the
 /// contract.
@@ -2209,9 +2227,12 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_type(entry: *const kafka_admin_
     // SAFETY: `config_entry_ref` requires a non-null borrowed pointer from a
     // `kafka_admin_Config_t` getter, which this function's `# Safety` requires of `entry`
     // (no in-body null check, so the C caller's contract is the sole source); the reference
-    // is used only for the duration of this call, during which the owning result handle is
-    // alive.
-    unsafe { config_entry_ref(entry) }.config_type_c.as_ptr()
+    // is used only for the duration of this call, and the returned string pointer borrows a
+    // `CString` owned by the result handle, valid until that handle is destroyed.
+    match &unsafe { config_entry_ref(entry) }.config_type_c {
+        Some(config_type) => config_type.as_ptr(),
+        None => std::ptr::null(),
+    }
 }
 
 /// Returns the entry documentation (borrowed), or null when the broker did not
@@ -4175,7 +4196,7 @@ fn submit_delete_topics_by_names(
     names: Vec<String>,
     options: DeleteTopicsOptions,
 ) -> Result<KafkaFuture<DeleteTopicsOutcomes<String>>, Error> {
-    let result = admin.delete_topics_with_options(TopicCollection::of_topic_names(names), options);
+    let result = admin.delete_topics_with_topic_collection_options(TopicCollection::of_topic_names(names), options);
     let values = result
         .topic_name_values()
         .ok_or_else(|| Error::local_illegal_state("deleteTopics(ofTopicNames) did not return name-keyed futures"))?;
@@ -4189,7 +4210,7 @@ fn submit_delete_topics_by_ids(
     ids: Vec<Uuid>,
     options: DeleteTopicsOptions,
 ) -> Result<KafkaFuture<DeleteTopicsOutcomes<Uuid>>, Error> {
-    let result = admin.delete_topics_with_options(TopicCollection::of_topic_ids(ids), options);
+    let result = admin.delete_topics_with_topic_collection_options(TopicCollection::of_topic_ids(ids), options);
     let values = result
         .topic_id_values()
         .ok_or_else(|| Error::local_illegal_state("deleteTopics(ofTopicIds) did not return id-keyed futures"))?;
@@ -11067,9 +11088,9 @@ impl GroupListingInner {
     fn new(listing: &GroupListing) -> Self {
         Self {
             group_id_c: to_cstring(listing.group_id()),
-            group_type_c: listing.group_type().map(|t| to_cstring(t.name())),
+            group_type_c: listing.group_type().map(|t| to_cstring(&t.to_string())),
             protocol_c: to_cstring(listing.protocol()),
-            group_state_c: listing.group_state().map(|s| to_cstring(s.name())),
+            group_state_c: listing.group_state().map(|s| to_cstring(&s.to_string())),
             is_simple_consumer_group: listing.is_simple_consumer_group(),
         }
     }
@@ -11667,8 +11688,8 @@ impl ConsumerGroupDescriptionInner {
             is_simple_consumer_group: description.is_simple_consumer_group(),
             members: description.members().iter().map(MemberDescriptionInner::new).collect(),
             partition_assignor_c: to_cstring(description.partition_assignor()),
-            group_type_c: to_cstring(description.group_type().name()),
-            group_state_c: to_cstring(description.group_state().name()),
+            group_type_c: to_cstring(&description.group_type().to_string()),
+            group_state_c: to_cstring(&description.group_state().to_string()),
             coordinator: description.coordinator().cloned(),
             authorized_operations: description
                 .authorized_operations()
@@ -12037,7 +12058,7 @@ impl ClassicGroupDescriptionInner {
             protocol_data_c: to_cstring(description.protocol_data()),
             is_simple_consumer_group: description.is_simple_consumer_group(),
             members: description.members().iter().map(MemberDescriptionInner::new).collect(),
-            state_c: to_cstring(description.state().name()),
+            state_c: to_cstring(&description.state().to_string()),
             coordinator: description.coordinator().cloned(),
             authorized_operations: description
                 .authorized_operations()
@@ -12878,13 +12899,17 @@ unsafe fn remove_members_options(
             .map(MemberToRemove::new);
         RemoveMembersFromConsumerGroupOptions::new(members)?
     };
-    if !reason.is_null() {
+    // A null `reason` is Java's `reason(null)`: no reason.
+    let reason = if reason.is_null() {
+        None
+    } else {
         // SAFETY: `reason` is non-null (checked above) and, per this helper's `# Safety`,
         // null or a valid C string the C caller keeps alive for the call, so
         // `CStr::from_ptr` reads a NUL-terminated string; it is copied immediately via
         // `to_string_lossy().to_string()` into the owned options value.
-        options.set_reason(unsafe { CStr::from_ptr(reason) }.to_string_lossy().to_string());
-    }
+        Some(unsafe { CStr::from_ptr(reason) }.to_string_lossy().to_string())
+    };
+    options.set_reason(reason);
     Ok(options.set_timeout_ms(option_timeout(timeout_ms)))
 }
 
@@ -21183,14 +21208,11 @@ fn create_delegation_token_options(
     max_lifetime_ms: i64,
     timeout_ms: i32,
 ) -> CreateDelegationTokenOptions {
-    let options = CreateDelegationTokenOptions::new()
+    CreateDelegationTokenOptions::new()
         .set_renewers(renewers)
+        .set_owner(owner)
         .set_max_lifetime_ms(max_lifetime_ms)
-        .set_timeout_ms(option_timeout(timeout_ms));
-    match owner {
-        Some(owner) => options.set_owner(owner),
-        None => options,
-    }
+        .set_timeout_ms(option_timeout(timeout_ms))
 }
 
 /// Reads the optional owner pair: both non-NULL yields a principal, either NULL
@@ -26433,6 +26455,34 @@ mod tests {
 
     // -- NewPartitions (input handle) ---------------------------------------
 
+    /// A NULL value passed to `kafka_admin_NewTopic_put_config` is Java's `null`
+    /// config value, which the built `NewTopic` keeps as `None`.
+    #[test]
+    fn new_topic_put_config_keeps_a_null_value_as_java_null() {
+        let name = CString::new("t").unwrap();
+        let key = CString::new("cleanup.policy").unwrap();
+        let other = CString::new("retention.ms").unwrap();
+        let value = CString::new("1000").unwrap();
+        // SAFETY: Test code: `name`, `key`, `other` and `value` are live `CString`s that
+        // outlive every call; `topic` is created here by `kafka_admin_NewTopic_new` and
+        // destroyed once at the end, after its builder has been read; the NULL value is
+        // passed deliberately to exercise Java's null config value.
+        unsafe {
+            let topic = kafka_admin_NewTopic_new(name.as_ptr(), 1, 1);
+            kafka_admin_NewTopic_put_config(topic, key.as_ptr(), std::ptr::null());
+            kafka_admin_NewTopic_put_config(topic, other.as_ptr(), value.as_ptr());
+            let built = new_topic_ref(topic).build();
+            assert_eq!(
+                built.configs(),
+                Some(&BTreeMap::from([
+                    ("cleanup.policy".to_string(), None),
+                    ("retention.ms".to_string(), Some("1000".to_string())),
+                ]))
+            );
+            kafka_admin_NewTopic_destroy(topic);
+        }
+    }
+
     /// Java's `NewPartitions.increaseTo(int)` leaves `newAssignments` **null**
     /// while `increaseTo(int, List<List<Integer>>)` sets it to whatever list is
     /// passed, empty included (`NewPartitions.java:43-71`). The two are different
@@ -26659,7 +26709,7 @@ mod tests {
                     ),
                     ConfigSynonym::new("log.retention.ms".to_string(), None, ConfigSource::StaticBrokerConfig),
                 ])
-                .set_config_type(ConfigType::Long)
+                .set_config_type(Some(ConfigType::Long))
                 .set_documentation(Some("The retention window.".to_string()))
                 .build()
                 .unwrap(),
@@ -26674,7 +26724,7 @@ mod tests {
         assert!(flat.is_sensitive);
         assert!(!flat.is_read_only);
         assert_eq!(text(&flat.source_c), "DYNAMIC_TOPIC_CONFIG");
-        assert_eq!(text(&flat.config_type_c), "LONG");
+        assert_eq!(opt_text(&flat.config_type_c), Some("LONG"));
         assert_eq!(opt_text(&flat.documentation_c), Some("The retention window."));
 
         assert_eq!(flat.synonyms.len(), 2);
@@ -26695,7 +26745,32 @@ mod tests {
         assert_eq!(opt_text(&flat.documentation_c), None);
         assert!(flat.synonyms.is_empty());
         assert_eq!(text(&flat.source_c), "UNKNOWN");
-        assert_eq!(text(&flat.config_type_c), "UNKNOWN");
+        assert_eq!(opt_text(&flat.config_type_c), Some("UNKNOWN"));
+    }
+
+    /// Java's `ConfigEntry.type()` is nullable (a `createTopics` entry has no
+    /// type), so C must see a null type, not `"UNKNOWN"`; an entry built with
+    /// `ConfigType::Unknown` still reports `"UNKNOWN"`.
+    #[test]
+    fn config_entry_type_is_null_for_an_entry_without_type() {
+        let without_type = ConfigEntryC::new(&ConfigEntry::with_options(
+            ConfigEntryOptionsBuilder::new()
+                .set_name("cleanup.policy".to_string())
+                .set_value(Some("compact".to_string()))
+                .set_config_type(None)
+                .build()
+                .unwrap(),
+        ));
+        assert_eq!(opt_text(&without_type.config_type_c), None);
+        let with_unknown = ConfigEntryC::new(&ConfigEntry::new("cleanup.policy".to_string(), None));
+
+        let as_handle = |flat: &ConfigEntryC| flat as *const ConfigEntryC as *const kafka_admin_ConfigEntry_t;
+        // SAFETY: each pointer is a live `ConfigEntryC`, the type a
+        // `kafka_admin_ConfigEntry_t` handle points to, borrowed for the call.
+        assert!(unsafe { kafka_admin_ConfigEntry_type(as_handle(&without_type)) }.is_null());
+        // SAFETY: as above; the returned string borrows `with_unknown`, alive here.
+        let unknown = unsafe { CStr::from_ptr(kafka_admin_ConfigEntry_type(as_handle(&with_unknown))) };
+        assert_eq!(unknown.to_str().unwrap(), "UNKNOWN");
     }
 
     #[test]
@@ -26706,7 +26781,7 @@ mod tests {
                 .set_value(Some("v".to_string()))
                 .set_source(ConfigSource::DefaultConfig)
                 .set_is_read_only(true)
-                .set_config_type(ConfigType::String)
+                .set_config_type(Some(ConfigType::String))
                 .build()
                 .unwrap(),
         ));
@@ -27879,7 +27954,7 @@ mod tests {
 
     #[test]
     fn describe_classic_groups_result_carries_protocol_and_protocol_data() {
-        let description = ClassicGroupDescription::new(
+        let description = ClassicGroupDescription::with_authorized_operations(
             "cg",
             "consumer",
             "range",
@@ -27954,7 +28029,7 @@ mod tests {
             None,
             None,
         );
-        let classic = ClassicGroupDescription::new(
+        let classic = ClassicGroupDescription::with_authorized_operations(
             "cg",
             "consumer",
             "range",
@@ -28031,7 +28106,7 @@ mod tests {
             ))
         };
         let classic = |ops: Option<BTreeSet<AclOperation>>| {
-            ClassicGroupDescriptionInner::new(&ClassicGroupDescription::new(
+            ClassicGroupDescriptionInner::new(&ClassicGroupDescription::with_authorized_operations(
                 "cg",
                 "consumer",
                 "range",
@@ -28182,6 +28257,48 @@ mod tests {
             assert!(kafka_common_TopicPartitionInfo_has_elr(p(&reported)));
             assert!(kafka_common_TopicPartitionInfo_has_last_known_elr(p(&reported)));
         }
+    }
+
+    /// The group type and state cross to C as Java's `toString()` text
+    /// (`PreparingRebalance`, `Consumer`), which the C header documents, not as
+    /// the constant names `GroupState::name()` and friends return
+    /// (`PREPARING_REBALANCE`). A two-word state tells the two apart.
+    #[test]
+    fn group_type_and_state_cross_as_java_to_string_text() {
+        let listing = GroupListingInner::new(&GroupListing::new(
+            "g",
+            Some(GroupType::Consumer),
+            "consumer",
+            Some(GroupState::PreparingRebalance),
+        ));
+        assert_eq!(opt_text(&listing.group_type_c), Some("Consumer"));
+        assert_eq!(opt_text(&listing.group_state_c), Some("PreparingRebalance"));
+
+        let consumer = ConsumerGroupDescriptionInner::new(&ConsumerGroupDescription::new(
+            "g",
+            false,
+            vec![],
+            "range",
+            GroupType::Classic,
+            GroupState::CompletingRebalance,
+            None,
+            None,
+            None,
+            None,
+        ));
+        assert_eq!(text(&consumer.group_type_c), "Classic");
+        assert_eq!(text(&consumer.group_state_c), "CompletingRebalance");
+
+        let classic = ClassicGroupDescriptionInner::new(&ClassicGroupDescription::with_authorized_operations(
+            "cg",
+            "consumer",
+            "range",
+            vec![],
+            ClassicGroupState::PreparingRebalance,
+            None,
+            None,
+        ));
+        assert_eq!(text(&classic.state_c), "PreparingRebalance");
     }
 
     #[test]

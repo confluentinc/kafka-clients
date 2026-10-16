@@ -66,6 +66,20 @@ impl UpgradeType {
     }
 }
 
+/// Renders the Java constant name (`SAFE_DOWNGRADE`, `UNKNOWN`, ...): Java's
+/// `UpgradeType` does not override `toString()`, so `Enum.toString()` returns
+/// that name.
+impl std::fmt::Display for UpgradeType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            UpgradeType::Unknown => "UNKNOWN",
+            UpgradeType::Upgrade => "UPGRADE",
+            UpgradeType::SafeDowngrade => "SAFE_DOWNGRADE",
+            UpgradeType::UnsafeDowngrade => "UNSAFE_DOWNGRADE",
+        })
+    }
+}
+
 /// Encapsulates details about an update to a finalized feature.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.FeatureUpdate`.
@@ -143,6 +157,21 @@ mod tests {
         assert_eq!(UpgradeType::from_code(3), UpgradeType::UnsafeDowngrade);
         // Unrecognized codes fall back to Unknown.
         assert_eq!(UpgradeType::from_code(42), UpgradeType::Unknown);
+    }
+
+    /// New test, no Java original: every `UpgradeType` renders its Java
+    /// constant name, as Java's `Enum.toString()` does
+    /// (`FeatureUpdate.java:32-36`).
+    #[test]
+    fn upgrade_type_display_matches_java_constant_names() {
+        for (upgrade_type, java) in [
+            (UpgradeType::Unknown, "UNKNOWN"),
+            (UpgradeType::Upgrade, "UPGRADE"),
+            (UpgradeType::SafeDowngrade, "SAFE_DOWNGRADE"),
+            (UpgradeType::UnsafeDowngrade, "UNSAFE_DOWNGRADE"),
+        ] {
+            assert_eq!(upgrade_type.to_string(), java);
+        }
     }
 
     #[test]

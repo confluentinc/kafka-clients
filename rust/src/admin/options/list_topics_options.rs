@@ -19,7 +19,10 @@
 /// Options for `Admin::list_topics`.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.ListTopicsOptions`.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+///
+/// Equality is Java's `equals`, which compares `listInternal` only: two
+/// options differing only in their timeout are equal.
+#[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.ListTopicsOptions")]
 pub struct ListTopicsOptions {
     timeout_ms: Option<i32>,
@@ -59,6 +62,20 @@ impl ListTopicsOptions {
     }
 }
 
+/// Java's `equals` (`ListTopicsOptions.java:69-75`) compares `listInternal`
+/// only; the timeout inherited from `AbstractOptions` takes no part, in
+/// `hashCode` (`:77-80`) either.
+impl PartialEq for ListTopicsOptions {
+    fn eq(&self, other: &Self) -> bool {
+        // Destructured, so a field added to the struct must be placed on one
+        // side of Java's comparison or the other.
+        let Self { timeout_ms: _, list_internal } = self;
+        *list_internal == other.list_internal
+    }
+}
+
+impl Eq for ListTopicsOptions {}
+
 impl std::fmt::Display for ListTopicsOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "ListTopicsOptions(listInternal={})", self.list_internal)
@@ -74,6 +91,22 @@ mod tests {
         let options = ListTopicsOptions::new();
         assert_eq!(options.timeout_ms(), None);
         assert!(!options.should_list_internal());
+    }
+
+    /// New test, no Java original: as in Java, the timeout takes no part in
+    /// equality, so `new ListTopicsOptions().timeoutMs(1)` equals
+    /// `new ListTopicsOptions().timeoutMs(2)`; `listInternal` does.
+    #[test]
+    fn equality_ignores_the_timeout() {
+        assert_eq!(
+            ListTopicsOptions::new().set_timeout_ms(Some(1)),
+            ListTopicsOptions::new().set_timeout_ms(Some(2))
+        );
+        assert_eq!(ListTopicsOptions::new().set_timeout_ms(Some(1)), ListTopicsOptions::new());
+        assert_ne!(
+            ListTopicsOptions::new().set_timeout_ms(Some(1)).set_list_internal(true),
+            ListTopicsOptions::new().set_timeout_ms(Some(1))
+        );
     }
 
     #[test]
