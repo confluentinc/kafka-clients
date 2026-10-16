@@ -233,8 +233,9 @@ class ConfigEntry:
     """A configuration entry (Java ``ConfigEntry``).
 
     ``source`` and ``config_type`` are Java's ``ConfigSource`` / ``ConfigType``
-    enum constant names (neither enum has a numeric id in Java). Synonyms keep
-    Java's precedence order.
+    enum constant names (neither enum has a numeric id in Java). ``config_type``
+    is ``None`` for an entry without a type, as Java's nullable ``type()`` is.
+    Synonyms keep Java's precedence order.
 
     ``create_topics`` populates only the first five fields — the broker's
     ``CreateTopicsResponse`` carries no source, type, documentation or synonyms —

@@ -4877,8 +4877,8 @@ static PyObject* config_entry_to_py(const kafka_admin_ConfigEntry_t* entry) {
         if (s == NULL) { Py_DECREF(synonyms); return NULL; }
         PyList_SET_ITEM(synonyms, i, s);
     }
-    // "z" yields None for a NULL value / documentation.
-    return Py_BuildValue("(sziiisszN)",
+    // "z" yields None for a NULL value / type / documentation.
+    return Py_BuildValue("(sziiiszzN)",
                          kafka_admin_ConfigEntry_name(entry),
                          kafka_admin_ConfigEntry_value(entry),
                          kafka_admin_ConfigEntry_is_default(entry) ? 1 : 0,

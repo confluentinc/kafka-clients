@@ -1922,7 +1922,8 @@ struct ConfigEntryC {
     is_sensitive: bool,
     is_read_only: bool,
     source_c: CString,
-    config_type_c: CString,
+    /// `None` for a null type (Java's `ConfigEntry.type()` is nullable).
+    config_type_c: Option<CString>,
     /// `None` for null documentation (Java's `ConfigEntry.documentation()`).
     documentation_c: Option<CString>,
     synonyms: Vec<ConfigSynonymC>,
@@ -1939,7 +1940,7 @@ impl ConfigEntryC {
             is_sensitive: entry.is_sensitive(),
             is_read_only: entry.is_read_only(),
             source_c: to_cstring(config_source_name(entry.source())),
-            config_type_c: to_cstring(config_type_name(entry.config_type())),
+            config_type_c: entry.config_type().map(|config_type| to_cstring(config_type_name(config_type))),
             documentation_c: entry.documentation().map(to_cstring),
             synonyms: entry
                 .synonyms()
@@ -2195,7 +2196,9 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_read_only(entry: *const kafk
 }
 
 /// Returns the config type as Java's enum constant name (borrowed), e.g.
-/// `"STRING"` or `"UNKNOWN"`.
+/// `"STRING"` or `"UNKNOWN"`, or null when the entry has no type (Java's
+/// `ConfigEntry.type()` is nullable: the entries of a `createTopics` result
+/// carry none).
 ///
 /// `ConfigEntry.ConfigType` has no numeric id in Java, so the name is the
 /// contract.
@@ -2209,9 +2212,12 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_type(entry: *const kafka_admin_
     // SAFETY: `config_entry_ref` requires a non-null borrowed pointer from a
     // `kafka_admin_Config_t` getter, which this function's `# Safety` requires of `entry`
     // (no in-body null check, so the C caller's contract is the sole source); the reference
-    // is used only for the duration of this call, during which the owning result handle is
-    // alive.
-    unsafe { config_entry_ref(entry) }.config_type_c.as_ptr()
+    // is used only for the duration of this call, and the returned string pointer borrows a
+    // `CString` owned by the result handle, valid until that handle is destroyed.
+    match &unsafe { config_entry_ref(entry) }.config_type_c {
+        Some(config_type) => config_type.as_ptr(),
+        None => std::ptr::null(),
+    }
 }
 
 /// Returns the entry documentation (borrowed), or null when the broker did not
@@ -26659,7 +26665,7 @@ mod tests {
                     ),
                     ConfigSynonym::new("log.retention.ms".to_string(), None, ConfigSource::StaticBrokerConfig),
                 ])
-                .set_config_type(ConfigType::Long)
+                .set_config_type(Some(ConfigType::Long))
                 .set_documentation(Some("The retention window.".to_string()))
                 .build()
                 .unwrap(),
@@ -26674,7 +26680,7 @@ mod tests {
         assert!(flat.is_sensitive);
         assert!(!flat.is_read_only);
         assert_eq!(text(&flat.source_c), "DYNAMIC_TOPIC_CONFIG");
-        assert_eq!(text(&flat.config_type_c), "LONG");
+        assert_eq!(opt_text(&flat.config_type_c), Some("LONG"));
         assert_eq!(opt_text(&flat.documentation_c), Some("The retention window."));
 
         assert_eq!(flat.synonyms.len(), 2);
@@ -26695,7 +26701,32 @@ mod tests {
         assert_eq!(opt_text(&flat.documentation_c), None);
         assert!(flat.synonyms.is_empty());
         assert_eq!(text(&flat.source_c), "UNKNOWN");
-        assert_eq!(text(&flat.config_type_c), "UNKNOWN");
+        assert_eq!(opt_text(&flat.config_type_c), Some("UNKNOWN"));
+    }
+
+    /// Java's `ConfigEntry.type()` is nullable (a `createTopics` entry has no
+    /// type), so C must see a null type, not `"UNKNOWN"`; an entry built with
+    /// `ConfigType::Unknown` still reports `"UNKNOWN"`.
+    #[test]
+    fn config_entry_type_is_null_for_an_entry_without_type() {
+        let without_type = ConfigEntryC::new(&ConfigEntry::with_options(
+            ConfigEntryOptionsBuilder::new()
+                .set_name("cleanup.policy".to_string())
+                .set_value(Some("compact".to_string()))
+                .set_config_type(None)
+                .build()
+                .unwrap(),
+        ));
+        assert_eq!(opt_text(&without_type.config_type_c), None);
+        let with_unknown = ConfigEntryC::new(&ConfigEntry::new("cleanup.policy".to_string(), None));
+
+        let as_handle = |flat: &ConfigEntryC| flat as *const ConfigEntryC as *const kafka_admin_ConfigEntry_t;
+        // SAFETY: each pointer is a live `ConfigEntryC`, the type a
+        // `kafka_admin_ConfigEntry_t` handle points to, borrowed for the call.
+        assert!(unsafe { kafka_admin_ConfigEntry_type(as_handle(&without_type)) }.is_null());
+        // SAFETY: as above; the returned string borrows `with_unknown`, alive here.
+        let unknown = unsafe { CStr::from_ptr(kafka_admin_ConfigEntry_type(as_handle(&with_unknown))) };
+        assert_eq!(unknown.to_str().unwrap(), "UNKNOWN");
     }
 
     #[test]
@@ -26706,7 +26737,7 @@ mod tests {
                 .set_value(Some("v".to_string()))
                 .set_source(ConfigSource::DefaultConfig)
                 .set_is_read_only(true)
-                .set_config_type(ConfigType::String)
+                .set_config_type(Some(ConfigType::String))
                 .build()
                 .unwrap(),
         ));
