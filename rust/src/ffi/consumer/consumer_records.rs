@@ -21,8 +21,9 @@
 //! until the records handle is destroyed; those lists own nothing and a
 //! borrowed record is never passed to `kafka_consumer_ConsumerRecord_destroy`.
 //! With a `NULL` deserializer the records own the `kafka_Bytes_t`s behind
-//! their keys and values, which point into the fetch buffer the records
-//! keep alive: destroying the records handle releases the buffer.
+//! their keys and values, which point into the buffers the records keep
+//! alive, the fetch buffer or, for a compressed batch, each record's own:
+//! destroying the records handle releases them.
 
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void};

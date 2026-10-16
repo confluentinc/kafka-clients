@@ -24,7 +24,8 @@
 //! `Deserializer<T>` allocations for the key and value `T`, plus the
 //! `RecordHeaders` clone (which §27 explicitly allows in Milestone-8), plus,
 //! for a compressed batch, the buffer each record is decompressed into, the
-//! one Java allocates per record ([`RecordStream`]).
+//! one Java allocates per record, which §27 does not allow ([`RecordStream`]
+//! says why it is taken).
 //! Specifically preserved here:
 //!
 //! - `partition_data.records: Option<Vec<u8>>` arrives owning the fetch
@@ -380,11 +381,13 @@ enum PendingRecordSource {
 /// its declared size up front only up to [`MAX_RECORD_PREALLOCATION`]; a
 /// bigger one grows as its bytes arrive ([`Self::read_record`]).
 ///
-/// This costs one allocation per record beyond the deserializer's output,
-/// which is all `consumer-threading.md` §27 budgets for the receive path. It
-/// is the cost Java pays, taken so that a record pins only its own bytes:
-/// records read into a chunk shared with the records around them kept the
-/// whole chunk alive for as long as any one of them was held.
+/// This costs one allocation per record beyond the deserializer's output, and
+/// so deviates from `consumer-threading.md` §27, which budgets none for a
+/// record's bytes and has a compressed batch decompressed into one buffer.
+/// That one buffer is what the paragraph above rules out, and records read
+/// into a buffer shared with the records around them would keep all of it
+/// alive for as long as any one of them is held. A buffer per record avoids
+/// both, at the cost Java pays.
 struct RecordStream {
     /// The decompression stream over the batch's records section, read
     /// through a buffer of the codec's size taken from the fetch's pool, which
@@ -4917,7 +4920,7 @@ mod tests {
     /// batch is read uncompressed first, and the compressed read may allocate
     /// one more per record plus a fixed number for the stream, so a second
     /// allocation per record (2000) cannot hide in the budget: it measured
-    /// 2006 to 2019 allocations under the four codecs for 2000 records, against
+    /// 2006 to 2020 allocations under the four codecs for 2000 records, against
     /// 3 for the batch uncompressed.
     #[test]
     fn test_compressed_per_record_allocation_budget() {

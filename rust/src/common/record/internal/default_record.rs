@@ -546,8 +546,9 @@ impl DefaultRecord {
 /// copying its key, value, or header bytes.
 ///
 /// Corresponds to the per-record data of Java's `DefaultRecord`, but the
-/// key/value/header bytes remain borrowed from the underlying fetch buffer
-/// (see `consumer-threading.md` §27). The header bytes are kept as the raw
+/// key/value/header bytes remain borrowed from the buffer it was parsed from,
+/// the fetch buffer or a compressed record's own (see
+/// `consumer-threading.md` §27). The header bytes are kept as the raw
 /// (unparsed) slice and decoded on demand by [`DefaultRecordRef::headers`] so
 /// that records whose headers are never read incur no header-parsing cost.
 #[derive(Clone, Debug)]
