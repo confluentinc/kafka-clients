@@ -925,7 +925,7 @@ def _drain_committed(producer, delivered, n):
 
 def _verify_committed(results, r):
     """Return True if record ``r`` in ``results`` verified. ``results`` is a list
-    of concurrent.futures.Future (v3) or (err, msg) tuples (v2)."""
+    of KafkaFuture (v3) or (err, msg) tuples (v2)."""
     try:
         if v2:
             if r >= len(results):
@@ -935,7 +935,7 @@ def _verify_committed(results, r):
                 print(f"Delivery failed: {err}")
                 return False
             return verify_v2(msg)
-        return verify_v3(results[r].result())
+        return verify_v3(results[r].get())
     except Exception as e:  # noqa: BLE001
         print(f"Produce call resulted in exception: {e}")
         return False
@@ -1024,7 +1024,7 @@ def run_warmup(bootstrap_servers):
                 fut = producer.send(record=ProducerRecord(topic=topic_name, key=key, value=value))
                 producer.commit_transaction()
                 try:
-                    fut.result()
+                    fut.get()
                 except Exception as e:  # noqa: BLE001
                     print(f"Warmup failed due to message verification error: {e}")
                     return
@@ -1227,12 +1227,19 @@ def create_async_producer(bootstrap_servers, txn_id):
 
 
 async def _async_send(producer, key, value):
-    """Async produce; returns an awaitable delivery future (v2 AIOProducer.produce
-    / v3 AsyncKafkaProducer.send)."""
+    """Async produce; returns the delivery future (v2 AIOProducer.produce's
+    awaitable / v3 AsyncKafkaProducer.send's AsyncKafkaFuture, read with
+    :func:`_delivery`)."""
     if v2:
         return await producer.produce(topic=topic_name, key=key, value=value)
     from confluent_kafka.producer import ProducerRecord
     return await producer.send(record=ProducerRecord(topic=topic_name, key=key, value=value))
+
+
+def _delivery(future):
+    """The awaitable of a delivery future from :func:`_async_send`: v3's
+    ``AsyncKafkaFuture`` is read through its ``get()``."""
+    return future if v2 else future.get()
 
 
 async def _send_offsets_async(producer, consumer, offsets):
@@ -1338,7 +1345,8 @@ async def run_producer_async(index, bootstrap_servers, measured_start_ns,
                 else:
                     commit_ms = now_ms()
                     record_commit(commit_ms - begin_ms)
-                    results = await asyncio.gather(*futures, return_exceptions=True)
+                    results = await asyncio.gather(*map(_delivery, futures),
+                                                   return_exceptions=True)
                     for r in range(n):
                         ok = _verify_async_result(results[r]) if r < len(results) else False
                         record_committed_record(commit_ms - produce_ms[r], ok)
@@ -1444,7 +1452,8 @@ async def run_eos_producer_async(index, bootstrap_servers, measured_start_ns,
                     else:
                         commit_ms = now_ms()
                         record_commit(commit_ms - begin_ms)
-                        results = await asyncio.gather(*futures, return_exceptions=True)
+                        results = await asyncio.gather(*map(_delivery, futures),
+                                                       return_exceptions=True)
                         for r in range(batch_records):
                             ok = _verify_async_result(results[r]) if r < len(results) else False
                             record_committed_record(commit_ms - produce_ms[r], ok)

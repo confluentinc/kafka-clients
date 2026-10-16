@@ -25,9 +25,11 @@ the result of each operation -- are queued in the client's callback vector and
 run by whoever calls ``kafka_producer_Producer__execute_callbacks``: the sync
 producer's completion thread, or the event loop of the async producer, which
 the ``__set_callbacks_notify`` hook wakes (the hook only schedules, never runs
-a callback). Both families reuse the same entry points and differ only in the
-future type a completion resolves and where the user's callback runs (CLAUDE.md,
-Python Binding Conventions, Implementation over the FFI and Threads and
+a callback). Both families reuse the same entry points: a record's completion
+completes the same Python state (a ``_KafkaFutureImpl``), and they differ only
+in the future ``send()`` hands out over it (``KafkaFuture`` /
+``AsyncKafkaFuture``) and where the user's callback runs (CLAUDE.md, Python
+Binding Conventions, Futures, Implementation over the FFI and Threads and
 callbacks).
 
 Backpressure is Java's: ``send()`` returns only once its record is with the
@@ -76,6 +78,7 @@ from confluent_kafka.illegal_state_error import IllegalStateError
 if TYPE_CHECKING:
     from confluent_kafka import Duration
     from confluent_kafka.common import TopicPartition
+    from confluent_kafka.common.kafka_future import _KafkaFutureImpl
     from confluent_kafka.common.metric import Metric
     from confluent_kafka.common.serialization import Serializer
     from confluent_kafka.consumer import ConsumerGroupMetadata, OffsetAndMetadata
@@ -228,15 +231,18 @@ def free_error(error: int) -> None:
         _lib.KafkaError_destroy(error)
 
 
-def wait_futures(futures: list[Any]) -> None:
-    """Wait (as :func:`wait_sliced`) until every future of ``futures`` is done."""
+def wait_futures(futures: list[_KafkaFutureImpl[Any]]) -> None:
+    """Wait (as :func:`wait_sliced`) until every record future of ``futures``
+    (the Python state under each ``KafkaFuture`` a ``send()`` returned) is
+    done: the internal wait of ``flush()`` and ``commit_transaction()``, never
+    a public ``get()``."""
     if not futures:
         return
     all_done = threading.Event()
     lock = threading.Lock()
     remaining = len(futures)
 
-    def one_done(_future: Any) -> None:
+    def one_done(_future: _KafkaFutureImpl[Any]) -> None:
         nonlocal remaining
         with lock:
             remaining -= 1
@@ -245,7 +251,7 @@ def wait_futures(futures: list[Any]) -> None:
             all_done.set()
 
     for future in futures:
-        future.add_done_callback(one_done)
+        future._add_listener(one_done)
     wait_sliced(all_done)
 
 
@@ -358,7 +364,7 @@ class _ProducerState:
         self._uses = 0
         # Futures of the records sent and not yet completed: flush() waits for
         # the ones sent before it (their callbacks have run by then, as in Java).
-        self._futures: set[Any] = set()
+        self._futures: set[_KafkaFutureImpl[Any]] = set()
         # Bound once: every completion untracks its record's future with it.
         self._discard_future = self._futures.discard
         self._key_serializer: Serializer[Any] = bytes_serializer()
@@ -513,7 +519,7 @@ class _ProducerState:
                                      headers)
         return native, topic, partition
 
-    def _track(self, future: Any) -> None:
+    def _track(self, future: _KafkaFutureImpl[Any]) -> None:
         """Track a sent record's future until its completion untracks it, right
         after completing it (``_discard_future``), so a flush() or
         commit_transaction() waits for the records sent before it. Untracking
@@ -521,10 +527,9 @@ class _ProducerState:
         loop a scheduled callback per record. A record can complete before
         ``send()`` gets here (on the sync producer's completion thread): its
         future is then already done, and untracked at once. The sync ``send()``
-        fast path does not call this: it checks its completion's own flag, as
-        ``concurrent.futures.Future.done()`` takes the future's lock."""
+        does not call this: it checks its completion's own flag."""
         self._futures.add(future)
-        if future.done():
+        if future.is_done():
             self._futures.discard(future)
 
     def _close_serializers(self) -> None:

@@ -702,10 +702,14 @@ def _settle_sync(inner: concurrent.futures.Future[Any], impl: _KafkaFutureImpl[A
         concurrent.futures.Future.set_result(inner, impl._outcome)
     elif state == _ERROR:
         concurrent.futures.Future.set_exception(inner, impl._outcome)
-    else:
-        inner.cancel()
+    elif inner.cancel():
         # Wakes the waiters of concurrent.futures.wait as well.
         inner.set_running_or_notify_cancel()
+    else:
+        # An inner future that refuses cancellation still releases its
+        # waiters: the outcome (a CancelledError) is delivered as its failure,
+        # and the future answers from its own state.
+        concurrent.futures.Future.set_exception(inner, impl._outcome)
 
 
 class AsyncKafkaFuture(_KafkaFutureBase[T]):
@@ -886,4 +890,8 @@ def _settle_async(inner: asyncio.Future[Any], impl: _KafkaFutureImpl[Any]) -> No
         inner.exception()
     else:
         message = _throwable.java_message(impl._outcome)
-        inner.cancel(message)
+        if not inner.cancel(message):
+            # An inner future that refuses cancellation still releases its
+            # waiters, as _settle_sync does.
+            asyncio.Future.set_exception(inner, impl._outcome)
+            inner.exception()

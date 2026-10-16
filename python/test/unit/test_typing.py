@@ -343,17 +343,17 @@ def _consumer_family_types(c: object = None) -> None:
 
 
 def _producer_family_types(p: object = None) -> None:
-    """The producer clients' constructor binding stubs, ``send`` and the async
+    """The producer clients' constructor binding stubs, ``send`` (a
+    ``KafkaFuture`` / ``AsyncKafkaFuture`` of the metadata) and the async
     double await.
 
     Type-check-only (guarded early return; never runs the FFI)."""
     if p is None:
         return
-    import asyncio
-    from concurrent.futures import Future
+    import concurrent.futures
     from typing import Any
 
-    from confluent_kafka.common import MetricName, PartitionInfo
+    from confluent_kafka.common import AsyncKafkaFuture, KafkaFuture, MetricName, PartitionInfo
     from confluent_kafka.common.metric import Metric
     from confluent_kafka.producer import (
         AsyncKafkaProducer, AsyncMockProducer, Callback, KafkaProducer, MockProducer,
@@ -404,23 +404,33 @@ def _producer_family_types(p: object = None) -> None:
                        value_serializer=string_serializer())
     callback: Callback = lambda metadata, exception: None  # noqa: E731
     # A record's omitted key binds Never, which fits any producer (covariance).
-    assert_type(kp.send(record=ProducerRecord(topic="t", value="v"), callback=callback),
-                "Future[RecordMetadata]")
+    sent = kp.send(record=ProducerRecord(topic="t", value="v"), callback=callback)
+    assert_type(sent, KafkaFuture[RecordMetadata])
+    assert_type(sent.get(), RecordMetadata)
+    assert_type(sent.get(timeout=1.0), RecordMetadata)
+    assert_type(sent.cancel(may_interrupt_if_running=True), bool)
+    assert_type(sent.then_apply(function=lambda md: md.offset()), KafkaFuture[int])
+    assert_type(sent.when_complete(action=lambda md, e: None), KafkaFuture[RecordMetadata])
+    assert_type(sent.to_completion_stage(), concurrent.futures.Future[RecordMetadata])
     assert_type(kp.partitions_for(topic="t"), "list[PartitionInfo]")
     assert_type(kp.metrics(), "dict[MetricName, Metric]")
     base: Producer[str, str] = kp
     assert_type(base.send(record=ProducerRecord(topic="t", key="k", value="v")),
-                "Future[RecordMetadata]")
+                KafkaFuture[RecordMetadata])
     mp = MockProducer(auto_complete=True, partitioner=None, key_serializer=string_serializer(),
                       value_serializer=string_serializer())
     assert_type(mp.history(), "list[ProducerRecord[str, str]]")
+    assert_type(mp.send(record=ProducerRecord(topic="t", value="v")),
+                KafkaFuture[RecordMetadata])
 
     async def _async() -> None:
         ap = AsyncKafkaProducer(configs=configs, value_serializer=string_serializer())
         future = await ap.send(record=ProducerRecord(topic="t", value="v"))
-        assert_type(future, "asyncio.Future[RecordMetadata]")
-        assert_type(await future, RecordMetadata)
-        assert_type(await (await ap.send(record=ProducerRecord(topic="t", value="v"))),
+        assert_type(future, AsyncKafkaFuture[RecordMetadata])
+        assert_type(await future.get(), RecordMetadata)
+        assert_type(await future.get(timeout=1.0), RecordMetadata)
+        assert_type(future.then_apply(function=lambda md: md.partition()), AsyncKafkaFuture[int])
+        assert_type(await (await ap.send(record=ProducerRecord(topic="t", value="v"))).get(),
                     RecordMetadata)
 
         async def async_callback(metadata: RecordMetadata,
@@ -430,14 +440,15 @@ def _producer_family_types(p: object = None) -> None:
         # sync producers take the plain Callback alias.
         assert_type(await ap.send(record=ProducerRecord(topic="t", value="v"),
                                   callback=async_callback),
-                    "asyncio.Future[RecordMetadata]")
+                    AsyncKafkaFuture[RecordMetadata])
         await ap.send(record=ProducerRecord(topic="t", value="v"), callback=callback)
         amp = AsyncMockProducer(auto_complete=True, partitioner=None)
-        await amp.send(record=ProducerRecord(topic="t", value=b"v"), callback=async_callback)
+        assert_type(await amp.send(record=ProducerRecord(topic="t", value=b"v"),
+                                   callback=async_callback), AsyncKafkaFuture[RecordMetadata])
         kp.send(record=ProducerRecord(topic="t", value="v"),
                 callback=async_callback)  # type: ignore[arg-type]
 
-    del _async, Future, asyncio
+    del _async
 
 
 def test_typing_module_imports() -> None:
