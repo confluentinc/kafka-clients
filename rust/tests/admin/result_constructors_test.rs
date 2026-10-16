@@ -65,8 +65,15 @@ async fn describe_consumer_groups_result_is_constructible_outside_the_crate() {
 
 #[tokio::test]
 async fn describe_classic_groups_result_is_constructible_outside_the_crate() {
-    let description =
-        ClassicGroupDescription::new("g", "consumer", "range", Vec::new(), ClassicGroupState::Stable, None, None);
+    let description = ClassicGroupDescription::with_authorized_operations(
+        "g",
+        "consumer",
+        "range",
+        Vec::new(),
+        ClassicGroupState::Stable,
+        None,
+        None,
+    );
     let result =
         DescribeClassicGroupsResult::new(HashMap::from([("g".to_string(), KafkaFuture::completed(Ok(description)))]));
     let described = result.described_groups()["g"].get().await.expect("completed future");

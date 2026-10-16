@@ -52,11 +52,13 @@ impl RemoveMembersFromConsumerGroupOptions {
         Ok(Self { members, reason: None, timeout_ms: None })
     }
 
-    /// Sets an optional reason.
+    /// Sets an optional reason, or `None` for none.
     ///
-    /// Mirrors Java's `reason(String)`.
-    pub fn set_reason(&mut self, reason: impl Into<String>) {
-        self.reason = Some(reason.into());
+    /// Mirrors Java's `reason(String)`, which stores the value as given, so
+    /// `reason(null)` clears a reason set earlier
+    /// (`RemoveMembersFromConsumerGroupOptions.java:52-54`).
+    pub fn set_reason(&mut self, reason: Option<String>) {
+        self.reason = reason;
     }
 
     /// Set the operation timeout in milliseconds (or `None` for the default).
@@ -123,9 +125,19 @@ mod tests {
     #[test]
     fn reason_and_timeout_setters() {
         let mut options = RemoveMembersFromConsumerGroupOptions::new([MemberToRemove::new("i")]).unwrap();
-        options.set_reason("because");
+        options.set_reason(Some("because".to_string()));
         let options = options.set_timeout_ms(Some(50));
         assert_eq!(options.reason(), Some("because"));
         assert_eq!(options.timeout_ms(), Some(50));
+    }
+
+    /// New test, no Java original: Java's `reason(null)` stores `null`, so it
+    /// clears a reason set earlier (`RemoveMembersFromConsumerGroupOptions.java:52-54`).
+    #[test]
+    fn set_reason_none_clears_the_reason() {
+        let mut options = RemoveMembersFromConsumerGroupOptions::default();
+        options.set_reason(Some("because".to_string()));
+        options.set_reason(None);
+        assert_eq!(options.reason(), None);
     }
 }

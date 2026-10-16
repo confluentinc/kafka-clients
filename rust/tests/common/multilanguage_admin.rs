@@ -662,7 +662,7 @@ impl MultilanguageAdmin {
         description: proto::ClassicGroupDescription,
     ) -> Result<ClassicGroupDescription, Error> {
         let state = self.classic_group_state(&description.state, "ClassicGroupDescription.state")?;
-        let rebuilt = ClassicGroupDescription::new(
+        let rebuilt = ClassicGroupDescription::with_authorized_operations(
             description.group_id.clone(),
             description.protocol.clone(),
             description.protocol_data,

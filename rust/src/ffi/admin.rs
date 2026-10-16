@@ -12891,13 +12891,17 @@ unsafe fn remove_members_options(
             .map(MemberToRemove::new);
         RemoveMembersFromConsumerGroupOptions::new(members)?
     };
-    if !reason.is_null() {
+    // A null `reason` is Java's `reason(null)`: no reason.
+    let reason = if reason.is_null() {
+        None
+    } else {
         // SAFETY: `reason` is non-null (checked above) and, per this helper's `# Safety`,
         // null or a valid C string the C caller keeps alive for the call, so
         // `CStr::from_ptr` reads a NUL-terminated string; it is copied immediately via
         // `to_string_lossy().to_string()` into the owned options value.
-        options.set_reason(unsafe { CStr::from_ptr(reason) }.to_string_lossy().to_string());
-    }
+        Some(unsafe { CStr::from_ptr(reason) }.to_string_lossy().to_string())
+    };
+    options.set_reason(reason);
     Ok(options.set_timeout_ms(option_timeout(timeout_ms)))
 }
 
@@ -21196,14 +21200,11 @@ fn create_delegation_token_options(
     max_lifetime_ms: i64,
     timeout_ms: i32,
 ) -> CreateDelegationTokenOptions {
-    let options = CreateDelegationTokenOptions::new()
+    CreateDelegationTokenOptions::new()
         .set_renewers(renewers)
+        .set_owner(owner)
         .set_max_lifetime_ms(max_lifetime_ms)
-        .set_timeout_ms(option_timeout(timeout_ms));
-    match owner {
-        Some(owner) => options.set_owner(owner),
-        None => options,
-    }
+        .set_timeout_ms(option_timeout(timeout_ms))
 }
 
 /// Reads the optional owner pair: both non-NULL yields a principal, either NULL
@@ -27917,7 +27918,7 @@ mod tests {
 
     #[test]
     fn describe_classic_groups_result_carries_protocol_and_protocol_data() {
-        let description = ClassicGroupDescription::new(
+        let description = ClassicGroupDescription::with_authorized_operations(
             "cg",
             "consumer",
             "range",
@@ -27992,7 +27993,7 @@ mod tests {
             None,
             None,
         );
-        let classic = ClassicGroupDescription::new(
+        let classic = ClassicGroupDescription::with_authorized_operations(
             "cg",
             "consumer",
             "range",
@@ -28069,7 +28070,7 @@ mod tests {
             ))
         };
         let classic = |ops: Option<BTreeSet<AclOperation>>| {
-            ClassicGroupDescriptionInner::new(&ClassicGroupDescription::new(
+            ClassicGroupDescriptionInner::new(&ClassicGroupDescription::with_authorized_operations(
                 "cg",
                 "consumer",
                 "range",
@@ -28252,7 +28253,7 @@ mod tests {
         assert_eq!(text(&consumer.group_type_c), "Classic");
         assert_eq!(text(&consumer.group_state_c), "CompletingRebalance");
 
-        let classic = ClassicGroupDescriptionInner::new(&ClassicGroupDescription::new(
+        let classic = ClassicGroupDescriptionInner::new(&ClassicGroupDescription::with_authorized_operations(
             "cg",
             "consumer",
             "range",
