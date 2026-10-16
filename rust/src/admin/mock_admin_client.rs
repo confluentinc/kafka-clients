@@ -95,8 +95,9 @@ struct TopicMetadata {
     partition_log_dirs: Vec<String>,
     // Read by `describe_configs` / `incremental_alter_configs`. Java's
     // `TopicMetadata.configs` is never null (defaults to an empty map); the
-    // Rust `Option` treats `None` as an empty map.
-    configs: Option<BTreeMap<String, String>>,
+    // Rust `Option` treats `None` as an empty map. A `None` value is a config
+    // set to `null`, which Java's `Map<String, String>` holds as given.
+    configs: Option<BTreeMap<String, Option<String>>>,
     marked_for_deletion: bool,
     fetches_remaining_until_visible: i32,
 }
@@ -116,12 +117,14 @@ struct State {
     default_replication_factor: i32,
     timeout_next_requests: i32,
     // Per-broker config maps (index = broker id), mirroring Java's
-    // `brokerConfigs`. Each is seeded with `default.replication.factor`.
-    broker_configs: Vec<BTreeMap<String, String>>,
+    // `brokerConfigs`. Each is seeded with `default.replication.factor`. In
+    // these maps, as in the topic configs, a `None` value is a config set to
+    // `null`, which Java's maps hold as given.
+    broker_configs: Vec<BTreeMap<String, Option<String>>>,
     // Client-metrics subscription configs, keyed by resource name.
-    client_metrics_configs: BTreeMap<String, BTreeMap<String, String>>,
+    client_metrics_configs: BTreeMap<String, BTreeMap<String, Option<String>>>,
     // Group configs, keyed by group id.
-    group_configs: BTreeMap<String, BTreeMap<String, String>>,
+    group_configs: BTreeMap<String, BTreeMap<String, Option<String>>>,
     // Defaults overlaid onto group configs on read (mirrors Java's
     // `defaultGroupConfigs`; set by `Builder::set_default_group_configs`).
     default_group_configs: BTreeMap<String, String>,
@@ -169,7 +172,7 @@ struct State {
 /// `ProducerConfig`'s `Debug` prints no value of its raw `originals` map. The
 /// map is a `BTreeMap`, so the keys are already sorted; they are borrowed, not
 /// copied.
-fn config_keys(configs: &BTreeMap<String, String>) -> BTreeSet<&str> {
+fn config_keys<V>(configs: &BTreeMap<String, V>) -> BTreeSet<&str> {
     configs.keys().map(String::as_str).collect()
 }
 
@@ -703,11 +706,14 @@ impl MockAdminClient {
         check_controller(&brokers, &controller)?;
         // Seed one config map per broker with `default.replication.factor`
         // (mirrors Java's constructor).
-        let broker_configs: Vec<BTreeMap<String, String>> = brokers
+        let broker_configs: Vec<BTreeMap<String, Option<String>>> = brokers
             .iter()
             .map(|_| {
                 let mut config = BTreeMap::new();
-                config.insert("default.replication.factor".to_string(), default_replication_factor.to_string());
+                config.insert(
+                    "default.replication.factor".to_string(),
+                    Some(default_replication_factor.to_string()),
+                );
                 config
             })
             .collect();
@@ -892,7 +898,7 @@ impl MockAdminClient {
                 is_internal: internal,
                 partitions,
                 partition_log_dirs,
-                configs,
+                configs: configs.map(|configs| configs.into_iter().map(|(name, value)| (name, Some(value))).collect()),
                 marked_for_deletion: false,
                 fetches_remaining_until_visible: 0,
             },
@@ -1027,29 +1033,33 @@ fn config_from_new_topic(new_topic: &NewTopic) -> Config {
     Config::new(entries)
 }
 
-/// Builds a [`Config`] from an in-memory config map.
+/// Builds a [`Config`] from an in-memory config map; a config set to `null`
+/// gives an entry with a `None` value, as Java's `new ConfigEntry(key, null)`.
 ///
 /// Corresponds to `MockAdminClient.toConfigObject`.
-fn to_config_object(map: &BTreeMap<String, String>) -> Config {
+fn to_config_object(map: &BTreeMap<String, Option<String>>) -> Config {
     let entries = map
         .iter()
-        .map(|(k, v)| ConfigEntry::new(k.clone(), Some(v.clone())))
+        .map(|(k, v)| ConfigEntry::new(k.clone(), v.clone()))
         .collect::<Vec<_>>();
     Config::new(entries)
 }
 
 /// Applies a sequence of [`AlterConfigOp`]s to an in-memory config map.
 ///
+/// A `Set` stores the entry's value as given, `None` included, as Java's
+/// `newMap.put(name, value)` stores a `null` value (`MockAdminClient.java:937`).
+///
 /// Returns an error for an unsupported op type (mirrors Java's
 /// `InvalidRequestException`). `Append` / `Subtract` are list-type operations
 /// that Java's mock does not implement, matching its `default` branch.
-fn apply_alter_ops(map: &mut BTreeMap<String, String>, ops: &[AlterConfigOp]) -> Result<(), Error> {
+fn apply_alter_ops(map: &mut BTreeMap<String, Option<String>>, ops: &[AlterConfigOp]) -> Result<(), Error> {
     for op in ops {
         match op.op_type() {
             OpType::Set => {
                 map.insert(
                     op.config_entry().name().to_string(),
-                    op.config_entry().value().unwrap_or_default().to_string(),
+                    op.config_entry().value().map(str::to_string),
                 );
             },
             OpType::Delete => {
@@ -1113,9 +1123,13 @@ fn get_resource_description(state: &mut State, resource: &ConfigResource) -> Res
                 return Err(Error::with_message(Errors::InvalidRequest, "Empty resource name"));
             }
             let mut group_config = state.group_configs.get(resource_name).cloned().unwrap_or_default();
-            // Overlay defaults for keys not already present (Java's `putIfAbsent`).
+            // Overlay the defaults with Java's `putIfAbsent`, which also
+            // replaces a key set to `null` (`MockAdminClient.java:883`).
             for (k, v) in &state.default_group_configs {
-                group_config.entry(k.clone()).or_insert_with(|| v.clone());
+                let value = group_config.entry(k.clone()).or_insert(None);
+                if value.is_none() {
+                    *value = Some(v.clone());
+                }
             }
             Ok(to_config_object(&group_config))
         },
@@ -1290,16 +1304,9 @@ impl Admin for MockAdminClient {
                     is_internal: false,
                     partitions,
                     partition_log_dirs,
-                    // Java stores the map as given, `null` values included. This
-                    // mock keeps config values as plain strings and, as
-                    // `apply_alter_ops` already does for a `null` alter value,
-                    // stores a `null` value as the empty string.
-                    configs: new_topic.configs().map(|configs| {
-                        configs
-                            .iter()
-                            .map(|(name, value)| (name.clone(), value.clone().unwrap_or_default()))
-                            .collect()
-                    }),
+                    // Java stores the map as given, `null` values included
+                    // (`MockAdminClient.java:420`).
+                    configs: new_topic.configs().cloned(),
                     marked_for_deletion: false,
                     fetches_remaining_until_visible: 0,
                 },
@@ -2699,7 +2706,7 @@ mod tests {
             state.broker_configs,
             vec![BTreeMap::from([(
                 "default.replication.factor".to_string(),
-                "1".to_string()
+                Some("1".to_string())
             )])]
         );
     }
@@ -2760,7 +2767,7 @@ mod tests {
         assert_eq!(state.broker_log_dirs, vec![default_dirs(); 4]);
         assert_eq!(
             state.broker_configs,
-            vec![BTreeMap::from([("default.replication.factor".to_string(), "4".to_string())]); 4]
+            vec![BTreeMap::from([("default.replication.factor".to_string(), Some("4".to_string()))]); 4]
         );
         assert!(!state.using_raft_controller);
         assert!(state.feature_levels.is_empty());
@@ -2788,7 +2795,7 @@ mod tests {
             state.broker_configs,
             vec![BTreeMap::from([(
                 "default.replication.factor".to_string(),
-                "1".to_string()
+                Some("1".to_string())
             )])]
         );
     }
@@ -2822,7 +2829,7 @@ mod tests {
         {
             let state = mock.state.lock().unwrap();
             assert_eq!(state.default_replication_factor, 32_768);
-            assert_eq!(state.broker_configs[0]["default.replication.factor"], "32768");
+            assert_eq!(state.broker_configs[0]["default.replication.factor"].as_deref(), Some("32768"));
         }
 
         let result = mock.create_topics_with_options(
@@ -3095,7 +3102,7 @@ mod tests {
             state.default_group_configs,
             group_defaults.into_iter().collect::<BTreeMap<_, _>>()
         );
-        assert_eq!(state.broker_configs[0]["default.replication.factor"], "2");
+        assert_eq!(state.broker_configs[0]["default.replication.factor"].as_deref(), Some("2"));
     }
 
     /// `build()` narrows the replication factor with `Integer.shortValue()`,
@@ -3111,7 +3118,7 @@ mod tests {
             assert_eq!(state.default_replication_factor, narrowed, "shortValue() of {factor}");
             assert_eq!(
                 state.broker_configs[0]["default.replication.factor"],
-                narrowed.to_string(),
+                Some(narrowed.to_string()),
                 "String.valueOf of the narrowed value for {factor}"
             );
         }
@@ -3489,6 +3496,107 @@ mod tests {
         // The counter is decremented, so the next call succeeds.
         let recovered = client.describe_cluster_with_options(DescribeClusterOptions::new());
         assert_eq!(recovered.nodes().get().await.unwrap().len(), 3);
+    }
+
+    /// Describes one resource's configs from `client`.
+    async fn described(client: &MockAdminClient, resource: &ConfigResource) -> Config {
+        let result =
+            client.describe_configs_with_options(std::slice::from_ref(resource), DescribeConfigsOptions::new());
+        result.values()[resource].get().await.unwrap()
+    }
+
+    /// New test, no Java original: Java's mock stores a created topic's configs
+    /// as given (`MockAdminClient.java:420`), so a config set to `null` reads
+    /// back from `describeConfigs` as `new ConfigEntry(key, null)`, not as an
+    /// empty value (`MockAdminClient.java:891-897`).
+    #[tokio::test]
+    async fn describe_configs_returns_a_null_value_given_to_create_topics() {
+        let client = admin();
+        let new_topic = NewTopic::with_num_partitions_replication_factor("t", Some(1), Some(1)).set_configs(Some(
+            BTreeMap::from([
+                ("cleanup.policy".to_string(), None),
+                ("retention.ms".to_string(), Some("1000".to_string())),
+            ]),
+        ));
+        client
+            .create_topics_with_options(&[new_topic], CreateTopicsOptions::new())
+            .all()
+            .get()
+            .await
+            .unwrap();
+
+        let config = described(&client, &ConfigResource::new(config_resource::Type::Topic, "t".to_string())).await;
+        assert_eq!(config.get("cleanup.policy").expect("the null config is stored").value(), None);
+        assert_eq!(config.get("retention.ms").unwrap().value(), Some("1000"));
+    }
+
+    /// New test, no Java original: Java's `incrementalAlterConfigs` stores a
+    /// `SET` value as given, `null` included, for every resource type
+    /// (`MockAdminClient.java:937, 960, 988, 1015`), so `describeConfigs` reads
+    /// the config back with a `null` value. For a group, Java then overlays the
+    /// default configs with `putIfAbsent` (`:883`), which also replaces a
+    /// `null` value, so a group config set to `null` that has a default reads
+    /// back as the default.
+    #[tokio::test]
+    async fn describe_configs_returns_a_null_value_set_by_incremental_alter_configs() {
+        let client = Builder::new()
+            .set_default_group_configs(HashMap::from([(
+                "consumer.session.timeout.ms".to_string(),
+                "45000".to_string(),
+            )]))
+            .build()
+            .unwrap();
+        client
+            .create_topics_with_options(
+                &[NewTopic::with_num_partitions_replication_factor("t", Some(1), Some(1))],
+                CreateTopicsOptions::new(),
+            )
+            .all()
+            .get()
+            .await
+            .unwrap();
+        let set_null = |name: &str| AlterConfigOp::new(ConfigEntry::new(name.to_string(), None), OpType::Set);
+        let topic = ConfigResource::new(config_resource::Type::Topic, "t".to_string());
+        let broker = ConfigResource::new(config_resource::Type::Broker, "0".to_string());
+        let metrics = ConfigResource::new(config_resource::Type::ClientMetrics, "metrics".to_string());
+        let group = ConfigResource::new(config_resource::Type::Group, "group".to_string());
+        let configs = HashMap::from([
+            (topic.clone(), vec![set_null("cleanup.policy")]),
+            (broker.clone(), vec![set_null("log.retention.ms")]),
+            (metrics.clone(), vec![set_null("interval.ms")]),
+            (
+                group.clone(),
+                vec![
+                    set_null("consumer.heartbeat.interval.ms"),
+                    set_null("consumer.session.timeout.ms"),
+                ],
+            ),
+        ]);
+        client
+            .incremental_alter_configs_with_options(&configs, AlterConfigsOptions::new())
+            .all()
+            .get()
+            .await
+            .unwrap();
+
+        for (resource, name) in [
+            (&topic, "cleanup.policy"),
+            (&broker, "log.retention.ms"),
+            (&metrics, "interval.ms"),
+            (&group, "consumer.heartbeat.interval.ms"),
+        ] {
+            let config = described(&client, resource).await;
+            assert_eq!(
+                config
+                    .get(name)
+                    .unwrap_or_else(|| panic!("{name} is stored for {resource}"))
+                    .value(),
+                None,
+                "{resource}"
+            );
+        }
+        let group_config = described(&client, &group).await;
+        assert_eq!(group_config.get("consumer.session.timeout.ms").unwrap().value(), Some("45000"));
     }
 
     #[tokio::test]
@@ -3892,13 +4000,16 @@ mod tests {
             state
                 .default_group_configs
                 .insert(DEFAULT_GROUP_KEY.to_string(), DEFAULT_GROUP_SECRET.to_string());
-            assert_eq!(state.broker_configs[0][BROKER_KEY], BROKER_SECRET);
-            assert_eq!(state.all_topics["orders"].configs.as_ref().unwrap()[TOPIC_KEY], TOPIC_SECRET);
+            assert_eq!(state.broker_configs[0][BROKER_KEY].as_deref(), Some(BROKER_SECRET));
             assert_eq!(
-                state.client_metrics_configs["metrics"][CLIENT_METRICS_KEY],
-                CLIENT_METRICS_SECRET
+                state.all_topics["orders"].configs.as_ref().unwrap()[TOPIC_KEY].as_deref(),
+                Some(TOPIC_SECRET)
             );
-            assert_eq!(state.group_configs["group"][GROUP_KEY], GROUP_SECRET);
+            assert_eq!(
+                state.client_metrics_configs["metrics"][CLIENT_METRICS_KEY].as_deref(),
+                Some(CLIENT_METRICS_SECRET)
+            );
+            assert_eq!(state.group_configs["group"][GROUP_KEY].as_deref(), Some(GROUP_SECRET));
         }
 
         let rendered = format!("{client:?}");
