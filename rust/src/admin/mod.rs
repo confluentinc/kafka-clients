@@ -82,7 +82,7 @@ pub mod mock_admin_client;
 mod new_partition_reassignment;
 mod new_partitions;
 mod new_topic;
-mod offset_spec;
+pub mod offset_spec;
 pub mod options;
 mod partition_reassignment;
 mod producer_state;

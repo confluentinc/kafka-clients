@@ -18,10 +18,12 @@
 //! Java's abstract class has two subclasses built by the static factories
 //! `ofTopicIds` / `ofTopicNames`; the Rust enum's two data-carrying variants
 //! follow the enum rule for variants with data (§4, "Enums"): each is built
-//! by its factory and returned owned, and the per-variant constructors
-//! (`_topic_ids`, `_topic_names`) build the same values under the variant
-//! names, beside `kafka_common_TopicCollection_e` and `__enum` for a
-//! `switch`.
+//! by its Java static factory and returned owned, beside
+//! `kafka_common_TopicCollection_e` and `__enum` for a `switch`. There is no
+//! per-variant constructor: a variant wraps its subclass
+//! (`TopicCollection::TopicIds(TopicIdCollection)`), whose constructor is
+//! private as Java's is, so C never holds the subclass handle the constructor
+//! would take.
 
 #![expect(non_camel_case_types)]
 
@@ -67,42 +69,6 @@ pub unsafe extern "C" fn kafka_common_TopicCollection__enum(
         TopicCollection::TopicIds(_) => kafka_common_TopicCollection_e::kafka_common_TopicCollection_TOPIC_IDS,
         TopicCollection::TopicNames(_) => kafka_common_TopicCollection_e::kafka_common_TopicCollection_TOPIC_NAMES,
     }
-}
-
-/// `TopicCollection::TopicIds(value)`: the variant constructor, equal to
-/// [`kafka_common_TopicCollection_of_topic_ids`]. `value` holds
-/// `const kafka_common_Uuid_t *` elements, copied. Owned, freed with
-/// [`kafka_common_TopicCollection_destroy`].
-///
-/// # Safety
-///
-/// `value` must be null or a valid list of uuid handles.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TopicCollection_topic_ids(
-    value: *const kafka_List_t,
-) -> *mut kafka_common_TopicCollection_t {
-    // SAFETY: Per this function's `# Safety`, `value` is null or a valid list of uuid handles, as
-    // `list_uuids` requires; the uuids are copied out, so nothing borrows the list after this call.
-    boxed(TopicCollection::TopicIds(unsafe { list_uuids(value) }))
-}
-
-/// `TopicCollection::TopicNames(value)`: the variant constructor, equal to
-/// [`kafka_common_TopicCollection_of_topic_names`]. `value` holds
-/// `const char *` elements, copied.
-///
-/// # Safety
-///
-/// `value` must be null or a valid list of NUL-terminated strings.
-#[ffi_guard]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TopicCollection_topic_names(
-    value: *const kafka_List_t,
-) -> *mut kafka_common_TopicCollection_t {
-    // SAFETY: Per this function's `# Safety`, `value` is null or a valid list of NUL-terminated
-    // strings, as `list_strings` requires; the strings are copied into owned `String`s, so nothing
-    // borrows the list after this call.
-    boxed(TopicCollection::TopicNames(unsafe { list_strings(value) }))
 }
 
 /// The collection behind a handle.
@@ -195,36 +161,6 @@ mod tests {
             let by_name = kafka_common_TopicCollection_of_topic_names(names);
             kafka_List_destroy(names);
             assert_eq!(
-                *topic_collection_ref(by_name),
-                TopicCollection::of_topic_names(vec!["orders".to_string()])
-            );
-            kafka_common_TopicCollection_destroy(by_name);
-
-            let ids = uuid_list([Uuid::new(1, 2)]);
-            let by_id = kafka_common_TopicCollection_of_topic_ids(ids);
-            kafka_List_destroy(ids);
-            assert_eq!(
-                *topic_collection_ref(by_id),
-                TopicCollection::of_topic_ids(vec![Uuid::new(1, 2)])
-            );
-            kafka_common_TopicCollection_destroy(by_id);
-            kafka_common_TopicCollection_destroy(ptr::null_mut());
-        }
-    }
-
-    #[test]
-    fn variant_constructors_build_the_same_values_and_enum_tells_them_apart() {
-        let name = CString::new("orders").unwrap();
-        // SAFETY: Test code: each list comes from `kafka_List_new`, borrowing `name`, which
-        // outlives it, or from `uuid_list`, and is destroyed once, after the constructor copies it;
-        // each collection comes from a constructor and is destroyed once, after the calls reading
-        // it.
-        unsafe {
-            let names = kafka_List_new();
-            kafka_List_add(names, name.as_ptr() as *mut c_void);
-            let by_name = kafka_common_TopicCollection_topic_names(names);
-            kafka_List_destroy(names);
-            assert_eq!(
                 kafka_common_TopicCollection__enum(by_name),
                 kafka_common_TopicCollection_e::kafka_common_TopicCollection_TOPIC_NAMES
             );
@@ -235,7 +171,7 @@ mod tests {
             kafka_common_TopicCollection_destroy(by_name);
 
             let ids = uuid_list([Uuid::new(1, 2)]);
-            let by_id = kafka_common_TopicCollection_topic_ids(ids);
+            let by_id = kafka_common_TopicCollection_of_topic_ids(ids);
             kafka_List_destroy(ids);
             assert_eq!(
                 kafka_common_TopicCollection__enum(by_id),
@@ -246,6 +182,7 @@ mod tests {
                 TopicCollection::of_topic_ids(vec![Uuid::new(1, 2)])
             );
             kafka_common_TopicCollection_destroy(by_id);
+            kafka_common_TopicCollection_destroy(ptr::null_mut());
         }
     }
 }

@@ -53,7 +53,16 @@
 //!     `TopicCollection`): the opaque handle `<prefix>_t` when some method
 //!     takes `self` or some static returns the type, else no handle (nothing
 //!     constructs a `KafkaConsumer` from C: its constructor returns the
-//!     `Consumer` interface); `<prefix>_destroy` for every handle;
+//!     `Consumer` interface). A struct a public enum's data variant wraps
+//!     (`TopicCollection::TopicIds(TopicIdCollection)`) gets the handle
+//!     only when C can come to hold one — a static of its own builds it or
+//!     a public signature anywhere names it, a type inside a parameter or
+//!     return (`KafkaFuture<T>`) included; otherwise its constructor is
+//!     private as Java's is and C cannot downcast the enum handle, so, as
+//!     for an interface nothing hands out, neither its handle nor its
+//!     getters are expected (`Error`'s payloads are not wrapped in this
+//!     sense: the `kafka_common_Error_<class>` views reach them);
+//!     `<prefix>_destroy` for every handle;
 //!   - every `pub fn` of its inherent impls: `<prefix>_<name>`, `self` first
 //!     as `*const <prefix>_t` for `&self` and `*mut` for `&mut self` or
 //!     `self` (a unit enum is the exception: its instances are borrowed
@@ -78,7 +87,11 @@
 //!     variant and one `<prefix>_<variant>(<fields>..)` returning an owned
 //!     handle per data variant (`MetricValue::Double(f64)`); the Java static
 //!     factory, when there is one (`OffsetSpec::for_timestamp`), is an
-//!     ordinary method beside it. `Error` is the exception: its constructors
+//!     ordinary method beside it. A data variant whose field is a type C
+//!     cannot hold (above: `OffsetSpec::Timestamp(TimestampSpec)`,
+//!     `TopicCollection::TopicIds(TopicIdCollection)`) has no constructor,
+//!     and the Java static factory is its only builder, as §4 says for a
+//!     value carrying data. `Error` is the exception: its constructors
 //!     are the `kafka_common_Error_<class>` factories and C classifies it
 //!     with the predicates, never by variant;
 //!   - a public trait some public method accepts or returns, or a public
@@ -901,10 +914,10 @@ impl RustType {
         match &self.kind {
             Kind::Trait { .. } => true,
             Kind::Enum { unit, .. } if !unit.is_empty() => true,
-            _ => self.methods.iter().any(|m| {
-                m.sig.receiver().is_some()
-                    || matches!(&m.sig.output, syn::ReturnType::Type(_, ty) if mentions(ty, "Self") || mentions(ty, &self.name))
-            }),
+            _ => self
+                .methods
+                .iter()
+                .any(|m| m.sig.receiver().is_some() || returns_type(&m.sig, &self.name)),
         }
     }
 }
@@ -1467,17 +1480,53 @@ impl FfiTranslation {
             }
         }
 
+        // A struct a public enum's data variant wraps
+        // (`TopicCollection::TopicIds(TopicIdCollection)`) has a handle only
+        // when C can come to hold one: a static of its own builds it, or a
+        // public signature anywhere names it — as a parameter, a return, or a
+        // type inside one such as `KafkaFuture<T>`. Otherwise its constructor
+        // is private as Java's is and C cannot downcast the enum handle, so, as
+        // for an interface nothing hands out, neither its handle nor its
+        // getters are expected. `Error`'s payloads are not wrapped in this
+        // sense: C reaches them through the `kafka_common_Error_<class>` views.
+        let wrapped: BTreeSet<String> = surface
+            .types
+            .iter()
+            .filter(|t| error_prefix.as_deref() != Some(t.prefix.as_str()))
+            .filter_map(|t| match &t.kind {
+                Kind::Enum { data, .. } => Some(data),
+                _ => None,
+            })
+            .flat_map(|data| data.iter().flat_map(|v| &v.fields))
+            .filter_map(|(_, fty)| type_ident(fty))
+            .collect();
+        let named: BTreeSet<String> = surface
+            .types
+            .iter()
+            .flat_map(|t| &t.methods)
+            .filter(|m| !mentions_any(&m.sig, NO_C_TYPE))
+            .flat_map(|m| signature_types(&m.sig))
+            .flat_map(|ty| idents(&ty))
+            .collect();
+        let obtainable = |t: &RustType| {
+            !wrapped.contains(&t.name)
+                || named.contains(&t.name)
+                || t.methods
+                    .iter()
+                    .any(|m| receiver(&m.sig) == Receiver::Static && returns_type(&m.sig, &t.name))
+        };
+        let struct_handle = |t: &RustType| (t.needs_handle() && obtainable(t)) || referenced.contains(&t.prefix);
+
         // The traits some public struct with a handle implements: its
         // `__as_<Trait>` view builds an instance.
         let implemented: BTreeSet<&str> = surface
             .impls
             .iter()
             .filter(|(s, _)| {
-                surface.types.iter().any(|t| {
-                    &t.name == s
-                        && !matches!(t.kind, Kind::Trait { .. })
-                        && (t.needs_handle() || referenced.contains(&t.prefix))
-                })
+                surface
+                    .types
+                    .iter()
+                    .any(|t| &t.name == s && !matches!(t.kind, Kind::Trait { .. }) && struct_handle(t))
             })
             .map(|(_, t)| t.as_str())
             .collect();
@@ -1495,7 +1544,7 @@ impl FfiTranslation {
                         || referenced.contains(&t.prefix)
                         || implemented.contains(t.name.as_str())
                 },
-                _ => t.needs_handle() || referenced.contains(&t.prefix),
+                _ => struct_handle(t),
             })
             .map(|t| t.prefix.as_str())
             .collect();
@@ -1584,6 +1633,23 @@ impl FfiTranslation {
                 // an ordinary method beside it.
                 if has_handle && !is_error {
                     for v in data {
+                        // A field of a type C cannot hold (no handle, above:
+                        // `TopicCollection::TopicIds(TopicIdCollection)`,
+                        // `OffsetSpec::Timestamp(TimestampSpec)`) leaves the
+                        // variant without a constructor; the enum's Java
+                        // static factory (`of_topic_ids`, `for_timestamp`) is
+                        // its only builder, as §4 says for a value carrying
+                        // data.
+                        let unholdable = v.fields.iter().any(|(_, fty)| {
+                            type_ident(fty).and_then(|n| by_name.get(&n)).is_some_and(|types| {
+                                types
+                                    .iter()
+                                    .any(|(p, class)| *class != TypeClass::Trait && !handles.contains(p.as_str()))
+                            })
+                        });
+                        if unholdable {
+                            continue;
+                        }
                         let mapper = Mapper {
                             by_name: &by_name,
                             aliases: &surface.aliases,
@@ -1625,8 +1691,14 @@ impl FfiTranslation {
                 if mentions_any(&m.sig, NO_C_TYPE) {
                     continue;
                 }
-                let mapper = mapper_for(&m.sig);
                 let recv = receiver(&m.sig);
+                // No handle, no instance to call a method on: a wrapped
+                // struct's getters (`TopicIdCollection::topic_ids`) stay on
+                // the Rust side; its statics, if any, are still expected.
+                if !has_handle && recv != Receiver::Static {
+                    continue;
+                }
+                let mapper = mapper_for(&m.sig);
                 let self_param = (recv != Receiver::Static).then(|| {
                     Param::new(
                         "self",
@@ -1897,6 +1969,11 @@ fn is_hidden(attrs: &[syn::Attribute]) -> bool {
 
 /// Whether `sig` names any of `names` in a parameter or the return type.
 fn mentions_any(sig: &syn::Signature, names: &[&str]) -> bool {
+    signature_types(sig).any(|t| names.iter().any(|n| mentions(&t, n)))
+}
+
+/// The parameter types and the return type of `sig`, the receiver aside.
+fn signature_types(sig: &syn::Signature) -> impl Iterator<Item = syn::Type> + '_ {
     let types = sig.inputs.iter().filter_map(|a| match a {
         syn::FnArg::Typed(pt) => Some((*pt.ty).clone()),
         syn::FnArg::Receiver(_) => None,
@@ -1905,7 +1982,23 @@ fn mentions_any(sig: &syn::Signature, names: &[&str]) -> bool {
         syn::ReturnType::Type(_, t) => Some((**t).clone()),
         syn::ReturnType::Default => None,
     };
-    types.chain(ret).any(|t| names.iter().any(|n| mentions(&t, n)))
+    types.chain(ret)
+}
+
+/// Every identifier in `ty`'s tokens: what [`mentions`] tests one name against.
+fn idents(ty: &syn::Type) -> Vec<String> {
+    ty.to_token_stream()
+        .to_string()
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|tok| !tok.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether `sig` returns `name` or `Self`, possibly inside another type
+/// (`Result<Self, Error>`).
+fn returns_type(sig: &syn::Signature, name: &str) -> bool {
+    matches!(&sig.output, syn::ReturnType::Type(_, ty) if mentions(ty, "Self") || mentions(ty, name))
 }
 
 /// The `pub fn`s of the inherent impls of `name` among `items`, test and
@@ -2753,6 +2846,10 @@ mod tests {
                 class("clients.consumer", &["KafkaConsumer"]),
                 class("clients.consumer.internals", &["Fetcher"]),
                 class("clients.admin", &["OffsetSpec"]),
+                class("clients.admin", &["OffsetSpec", "TimestampSpec"]),
+                class("common", &["TopicCollection"]),
+                class("common", &["TopicCollection", "TopicIdCollection"]),
+                class("common", &["TopicCollection", "TopicNameCollection"]),
                 class("clients.admin", &["CreateTopicsResult"]),
                 class("clients.admin", &["CreateTopicsResult", "TopicMetadataAndConfig"]),
                 class("common", &["TopicPartition"]),
@@ -3134,6 +3231,135 @@ mod tests {
             detail(&findings, "missing kafka_admin_OffsetSpec__enum"),
             "expected `fn(self: *const kafka_admin_OffsetSpec_t) -> kafka_admin_OffsetSpec_e`"
         );
+    }
+
+    /// Java's `TopicCollection`: an abstract class whose subclasses have private
+    /// constructors, so only the static factories build one. The Rust variants
+    /// wrap the subclasses, and C can hold neither of them: no subclass handle
+    /// or getter and no per-variant constructor, the factories being the only
+    /// builders (§4, "Enums").
+    const TOPIC_COLLECTION_RUST: &str = r#"
+        pub mod common {
+            #[doc(alias = "org.apache.kafka.common.TopicCollection")]
+            pub enum TopicCollection { TopicIds(TopicIdCollection), TopicNames(TopicNameCollection) }
+            impl TopicCollection {
+                pub fn of_topic_ids(topics: Vec<i64>) -> TopicCollection { TopicCollection::TopicIds(TopicIdCollection) }
+                pub fn of_topic_names(topics: Vec<String>) -> TopicCollection { TopicCollection::TopicNames(TopicNameCollection) }
+            }
+            #[doc(alias = "org.apache.kafka.common.TopicCollection$TopicIdCollection")]
+            pub struct TopicIdCollection;
+            impl TopicIdCollection { pub fn topic_ids(&self) -> &[i64] { &[] } }
+            #[doc(alias = "org.apache.kafka.common.TopicCollection$TopicNameCollection")]
+            pub struct TopicNameCollection;
+            impl TopicNameCollection { pub fn topic_names(&self) -> &[String] { &[] } }
+        }
+    "#;
+
+    const TOPIC_COLLECTION_FFI: &str = r#"
+        #[repr(C)] pub struct kafka_common_TopicCollection_t { _p: [u8; 0] }
+        #[repr(C)] pub enum kafka_common_TopicCollection_e { kafka_common_TopicCollection_TOPIC_IDS, kafka_common_TopicCollection_TOPIC_NAMES }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_TopicCollection__enum(this: *const kafka_common_TopicCollection_t) -> kafka_common_TopicCollection_e { kafka_common_TopicCollection_e::kafka_common_TopicCollection_TOPIC_IDS }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_TopicCollection_of_topic_ids(topics: *const kafka_List_t) -> *mut kafka_common_TopicCollection_t { std::ptr::null_mut() }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_TopicCollection_of_topic_names(topics: *const kafka_List_t) -> *mut kafka_common_TopicCollection_t { std::ptr::null_mut() }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_TopicCollection_destroy(this: *mut kafka_common_TopicCollection_t) {}
+    "#;
+
+    #[test]
+    fn test_variant_wrapping_a_struct_c_cannot_hold_has_no_constructor_and_the_struct_no_handle() {
+        let findings = run("unholdable-payload", TOPIC_COLLECTION_RUST, TOPIC_COLLECTION_FFI);
+        assert!(findings.is_empty(), "{findings:?}");
+
+        // The shape the rule rules out: a subclass handle nothing in C can
+        // obtain, its getter, and a variant constructor taking it.
+        let ffi = format!(
+            "{TOPIC_COLLECTION_FFI}
+            #[repr(C)] pub struct kafka_common_TopicCollection_TopicIdCollection_t {{ _p: [u8; 0] }}
+            #[unsafe(no_mangle)] pub unsafe extern \"C\" fn kafka_common_TopicCollection_TopicIdCollection_topic_ids(this: *const kafka_common_TopicCollection_TopicIdCollection_t) -> *mut kafka_List_t {{ std::ptr::null_mut() }}
+            #[unsafe(no_mangle)] pub unsafe extern \"C\" fn kafka_common_TopicCollection_TopicIdCollection_destroy(this: *mut kafka_common_TopicCollection_TopicIdCollection_t) {{}}
+            #[unsafe(no_mangle)] pub unsafe extern \"C\" fn kafka_common_TopicCollection_topic_ids(value: *const kafka_common_TopicCollection_TopicIdCollection_t) -> *mut kafka_common_TopicCollection_t {{ std::ptr::null_mut() }}"
+        );
+        let findings = run("unholdable-payload-dead", TOPIC_COLLECTION_RUST, &ffi);
+        assert_eq!(
+            keys(&findings),
+            [
+                "unexpected kafka_common_TopicCollection_TopicIdCollection_destroy",
+                "unexpected kafka_common_TopicCollection_TopicIdCollection_t",
+                "unexpected kafka_common_TopicCollection_TopicIdCollection_topic_ids",
+                "unexpected kafka_common_TopicCollection_topic_ids",
+            ]
+        );
+    }
+
+    /// The same enum when the subclass has a public constructor
+    /// (`UserScramCredentialAlteration::Upsertion(UserScramCredentialUpsertion)`):
+    /// C can build the subclass, so it has its handle and the variant has its
+    /// constructor taking that handle.
+    #[test]
+    fn test_variant_wrapping_a_struct_c_can_build_keeps_its_constructor() {
+        let rust = TOPIC_COLLECTION_RUST.replace(
+            "impl TopicIdCollection { pub fn topic_ids(&self) -> &[i64] { &[] } }",
+            "impl TopicIdCollection {
+                pub fn new(topic_ids: Vec<i64>) -> Self { TopicIdCollection }
+                pub fn topic_ids(&self) -> &[i64] { &[] }
+            }",
+        );
+        let findings = run("holdable-payload", &rust, TOPIC_COLLECTION_FFI);
+        assert_eq!(
+            keys(&findings),
+            [
+                "missing kafka_common_TopicCollection_TopicIdCollection_destroy",
+                "missing kafka_common_TopicCollection_TopicIdCollection_new",
+                "missing kafka_common_TopicCollection_TopicIdCollection_t",
+                "missing kafka_common_TopicCollection_TopicIdCollection_topic_ids",
+                "missing kafka_common_TopicCollection_topic_ids",
+            ]
+        );
+        assert_eq!(
+            detail(&findings, "missing kafka_common_TopicCollection_topic_ids"),
+            "expected `fn(value: *const kafka_common_TopicCollection_TopicIdCollection_t) -> *mut kafka_common_TopicCollection_t`"
+        );
+    }
+
+    /// Java's `OffsetSpec.TimestampSpec`: a nested subclass whose constructor
+    /// and getter are package-private, so the Rust struct has no public method
+    /// at all. Beside the singletons, `forTimestamp` is the only way to a
+    /// timestamp spec; there is no `_timestamp` constructor taking a handle no
+    /// C code could obtain.
+    #[test]
+    fn test_data_variant_with_a_package_private_payload_is_built_by_its_factory_only() {
+        let rust = ENUM_RUST.replace(
+            "pub enum OffsetSpec { Earliest, Latest, MaxTimestamp }",
+            "pub enum OffsetSpec { Earliest, Latest, MaxTimestamp, Timestamp(TimestampSpec) }
+            impl OffsetSpec {
+                pub fn for_timestamp(timestamp: i64) -> Self { OffsetSpec::Timestamp(TimestampSpec { timestamp }) }
+            }
+            #[doc(alias = \"org.apache.kafka.clients.admin.OffsetSpec$TimestampSpec\")]
+            pub struct TimestampSpec { timestamp: i64 }
+            impl TimestampSpec {
+                pub(crate) fn new(timestamp: i64) -> Self { TimestampSpec { timestamp } }
+                pub(crate) fn timestamp(&self) -> i64 { self.timestamp }
+            }",
+        );
+        let ffi = ENUM_FFI
+            .replace(
+                "kafka_admin_OffsetSpec_MAX_TIMESTAMP }",
+                "kafka_admin_OffsetSpec_MAX_TIMESTAMP, kafka_admin_OffsetSpec_TIMESTAMP }",
+            )
+            .replace(
+                "#[unsafe(no_mangle)] pub unsafe extern \"C\" fn kafka_admin_OffsetSpec_earliest()",
+                "#[unsafe(no_mangle)] pub unsafe extern \"C\" fn kafka_admin_OffsetSpec_for_timestamp(timestamp: i64) -> *mut kafka_admin_OffsetSpec_t { std::ptr::null_mut() }
+                #[unsafe(no_mangle)] pub unsafe extern \"C\" fn kafka_admin_OffsetSpec_destroy(this: *mut kafka_admin_OffsetSpec_t) {}
+                #[unsafe(no_mangle)] pub unsafe extern \"C\" fn kafka_admin_OffsetSpec_earliest()",
+            );
+        let findings = run("factory-only-payload", &rust, &ffi);
+        assert!(findings.is_empty(), "{findings:?}");
+
+        let ffi = format!(
+            "{ffi}
+            #[unsafe(no_mangle)] pub unsafe extern \"C\" fn kafka_admin_OffsetSpec_timestamp(value: i64) -> *mut kafka_admin_OffsetSpec_t {{ std::ptr::null_mut() }}"
+        );
+        let findings = run("factory-only-payload-dead", &rust, &ffi);
+        assert_eq!(keys(&findings), ["unexpected kafka_admin_OffsetSpec_timestamp"]);
     }
 
     #[test]

@@ -8919,7 +8919,7 @@ static PyObject* py_Admin_list_offsets(PyObject* self, PyObject* args) {
         kafka_common_Error_t* spec_err = NULL;
         if (is_timestamp) {
             kafka_admin_OffsetSpec_t* ts = NULL;
-            spec_err = (ts = kafka_admin_OffsetSpec_timestamp_err((int64_t)value, &ffi_err), ffi_take(&ffi_err));
+            spec_err = (ts = kafka_admin_OffsetSpec_for_timestamp_err((int64_t)value, &ffi_err), ffi_take(&ffi_err));
             if (spec_err == NULL && obj_list_add(&owned, ts) < 0) goto fail;
             os = ts;
         } else {

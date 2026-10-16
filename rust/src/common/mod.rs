@@ -61,7 +61,7 @@ pub(crate) mod requests;
 pub mod resource;
 pub mod security;
 pub mod serialization;
-mod topic_collection;
+pub mod topic_collection;
 mod topic_id_partition;
 mod topic_partition;
 mod topic_partition_info;
