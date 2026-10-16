@@ -4199,6 +4199,52 @@ mod tests {
         );
     }
 
+    /// `ready()` on a node whose address silently drops connection attempts returns `false`
+    /// at once (Java: after 6 ms) and the connection setup timeout fails the node while the client
+    /// stays usable. Awaiting the TCP handshake in `ready()` parked the single network task for the
+    /// kernel's connect timeout (75 s on macOS) and the setup timeout never applied to it.
+    #[tokio::test]
+    async fn ready_on_an_unreachable_address_returns_immediately_and_times_out_the_setup() {
+        let node = Node::new(0, "10.255.255.1".to_string(), 9092);
+        let selector = crate::common::network::Selector::with_defaults(
+            crate::common::network::Selector::NO_IDLE_TIMEOUT_MS,
+            Box::new(crate::common::network::PlaintextChannelBuilder::new(None)),
+        );
+        let mut client = NetworkClient::with_metadata_updater(
+            selector,
+            Box::new(TestMetadataUpdater::new(vec![node.clone()])),
+            "r1-01",
+            1,
+            0,
+            0,
+            64 * 1024,
+            64 * 1024,
+            DEFAULT_REQUEST_TIMEOUT_MS,
+            500, // socket.connection.setup.timeout.ms
+            500,
+            false,
+            Arc::new(ApiVersions::new()),
+            crate::DefaultHostResolver::new(),
+            MetadataRecoveryStrategy::None,
+            LogContext::empty(),
+        );
+        let now = || crate::common::utils::SystemTime.milliseconds();
+
+        let started = std::time::Instant::now();
+        let ready = tokio::time::timeout(std::time::Duration::from_secs(3), client.ready(&node, now()))
+            .await
+            .expect("ready() waited for the TCP handshake");
+        assert!(!ready);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "{:?}", started.elapsed());
+
+        // The setup timeout (500 ms) now bounds the connect.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !client.connection_failed(&node) {
+            assert!(std::time::Instant::now() < deadline, "the setup timeout never failed the node");
+            client.poll(50, now()).await;
+        }
+    }
+
     /// Translated from `NetworkClientTest.testInflightRequestsDuringRebootstrap`.
     ///
     /// Tests that in-flight requests are aborted when rebootstrap is triggered.
