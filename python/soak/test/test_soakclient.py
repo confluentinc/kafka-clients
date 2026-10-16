@@ -746,13 +746,20 @@ def test_is_wakeup_recognizes_the_package_wakeup_error():
 # Topic creation through confluent_kafka.admin: per-topic futures raise typed
 # errors, which are classified by FFI id (the wire code).
 # ---------------------------------------------------------------------------
+def _execution_error(cause):
+    """What ``KafkaFuture.get()`` raises for a failed future (Java's
+    ``ExecutionException``)."""
+    from confluent_kafka import ExecutionError
+    return ExecutionError(cause=cause)
+
+
 class _FakeTopicFuture:
     def __init__(self, error=None):
         self._error = error
 
-    def result(self):
+    def get(self):
         if self._error is not None:
-            raise self._error
+            raise _execution_error(self._error)
 
 
 class _FakeCreateResult:
@@ -1214,3 +1221,53 @@ def test_latency_gauges_record_ms_and_export_seconds(tmp_path):
                     "{} p99 collapsed to zero: histogram was fed seconds".format(key)
     finally:
         metrics.close()
+
+
+# ---------------------------------------------------------------------------
+# send() futures: the delivery report is a `when_complete` action, and a failed
+# `get()` is an `ExecutionError` classified through its cause.
+# ---------------------------------------------------------------------------
+def _delivery_client():
+    client = _bare_soak_client()
+    client.outstanding = 1
+    client.dr_cnt = 0
+    client.dr_err_cnt = 0
+    return client
+
+
+def test_delivery_report_of_a_completed_send_future():
+    from confluent_kafka.common import KafkaFuture
+    from confluent_kafka.common.kafka_future import _KafkaFutureImpl
+
+    impl = _KafkaFutureImpl()
+    metadata = SimpleNamespace(partition=lambda: 0, topic=lambda: "t", offset=lambda: 5)
+    client = _delivery_client()
+    KafkaFuture._of_impl(impl).when_complete(
+        action=lambda value, error: client._on_delivery(value, error, time.time()))
+    impl.complete(metadata)
+    assert (client.dr_cnt, client.dr_err_cnt, client.outstanding) == (1, 0, 0)
+    client.incr_counter.assert_any_call("producer.drok", 1)
+
+
+def test_delivery_report_of_a_failed_send_future_counts_the_error_code():
+    from confluent_kafka.common import KafkaFuture
+    from confluent_kafka.common.kafka_future import _KafkaFutureImpl
+
+    errors = _errors()
+    impl = _KafkaFutureImpl()
+    client = _delivery_client()
+    KafkaFuture._of_impl(impl).when_complete(
+        action=lambda value, error: client._on_delivery(value, error, time.time()))
+    impl.complete_with_error(errors.NotCoordinatorError(message="x"))
+    assert (client.dr_cnt, client.dr_err_cnt, client.outstanding) == (0, 1, 0)
+    client.incr_counter.assert_any_call("producer.drerr", 1)
+    client.incr_counter.assert_any_call("producer.delivery.failure", 1, tags={"err": "16"})
+
+
+def test_failure_of_unwraps_an_execution_error_only():
+    from soakclient import failure_of
+
+    errors = _errors()
+    cause = errors.NotCoordinatorError(message="x")
+    assert failure_of(_execution_error(cause)) is cause
+    assert failure_of(cause) is cause

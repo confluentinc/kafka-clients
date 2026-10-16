@@ -335,6 +335,17 @@ def error_message(ex):
     return message if isinstance(message, str) else str(ex)
 
 
+def failure_of(ex):
+    """The error a failed ``get()`` carries: ``get()`` raises ``ExecutionError``
+    (Java's ``ExecutionException``) with the future's failure as ``__cause__``.
+    Any other error is returned as it is. Duck-typed by class name for the same
+    reason as :func:`error_message`."""
+    cause = getattr(ex, "__cause__", None)
+    if type(ex).__name__ == "ExecutionError" and cause is not None:
+        return cause
+    return ex
+
+
 def _is_int_code(code):
     return isinstance(code, int) and not isinstance(code, bool)
 
@@ -1401,9 +1412,9 @@ class SoakClient(object):
 
         # `Errors` wire codes (src/common/protocol/errors.rs). ``create_topics``
         # returns a result whose ``values()`` holds one future per topic: a
-        # per-topic failure is raised by that future's ``result()`` and the
-        # whole call itself raises on a call-level failure. Either way the error
-        # is a typed class, whose wire code is its FFI id (``error_code``).
+        # per-topic failure is raised by that future's ``get()`` (an
+        # ``ExecutionError`` whose cause is the error) and the whole call itself
+        # raises on a call-level failure. Either way the error is a typed class, whose wire code is its FFI id (``error_code``).
         # Authentication / authorization failures will never clear by retrying;
         # everything else here (broker unreachable, metadata timeout) might.
         TOPIC_ALREADY_EXISTS = 36
@@ -1446,9 +1457,9 @@ class SoakClient(object):
             else:
                 for _topic, future in futures.items():
                     try:
-                        future.result()
+                        future.get()
                     except Exception as ex:
-                        _handle_create_error(_topic, ex)
+                        _handle_create_error(_topic, failure_of(ex))
                     else:
                         self.logger.info("Created topic %s (partitions=%d, rf=%d)",
                                          _topic, partitions, replication_factor)
@@ -1484,17 +1495,17 @@ class SoakClient(object):
                 metadata.topic(), metadata.partition(), metadata.offset(),
                 latency_ms)
 
-    def _on_delivery(self, future, sent_at):
-        """Delivery report. Runs on the C extension's poll thread."""
+    def _on_delivery(self, metadata, error, sent_at):
+        """Delivery report: Java's ``whenComplete`` action, ``(metadata, None)``
+        or ``(None, error)``. Runs on the producer's completion task."""
+        with self._lock:
+            self.outstanding -= 1
         try:
-            try:
-                metadata = future.result()
-            finally:
-                with self._lock:
-                    self.outstanding -= 1
+            if error is not None:
+                raise error
             self._record_delivery(metadata, (time.time() - sent_at) * 1000.0)
         except Exception as ex:
-            # A failed send raises its error through the future (the future
+            # A failed send completes its future with the error (the future
             # cannot be cancelled, and close() does not cancel it: it waits for
             # the in-flight sends, as Java's does). The error's code/message are
             # read by duck typing (error_code / error_message) rather than by
@@ -1546,8 +1557,8 @@ class SoakClient(object):
                 self.stop_event.wait(0.1)
                 continue
 
-            future.add_done_callback(
-                lambda f, t=sent_at: self._on_delivery(f, t))
+            future.when_complete(
+                action=lambda metadata, error, t=sent_at: self._on_delivery(metadata, error, t))
             self.incr_counter("producer.send", 1)
             return
 

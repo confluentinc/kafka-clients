@@ -67,7 +67,7 @@ def recreate_topic(config, topic, partitions=-1):
     needed; the Rust admin client parses `sasl.jaas.config` itself.
 
     Each RPC returns a result whose `values()` / `topic_name_values()` hold one
-    future per topic: a per-topic failure is raised by that future's `result()`
+    future per topic: a per-topic failure is raised by that future's `get()`
     (a typed error class, whose FFI id is the wire error code), and the whole
     call raises on a call-level failure.
 
@@ -78,7 +78,7 @@ def recreate_topic(config, topic, partitions=-1):
     # Reuse the startup fatal/transient classification so an ACL / auth failure
     # here surfaces as EXIT_FATAL rather than looping under the supervisor
     # (imported lazily to avoid a soakclient <-> soak_metrics import cycle).
-    from soakclient import (FatalStartupError, TransientStartupError, error_code,
+    from soakclient import (FatalStartupError, TransientStartupError, error_code, failure_of,
                             error_message)
 
     # `Errors` wire codes (src/common/protocol/errors.rs); the typed error of a
@@ -133,9 +133,9 @@ def recreate_topic(config, topic, partitions=-1):
         else:
             for _t, future in del_futures.items():
                 try:
-                    future.result()
+                    future.get()
                 except Exception as e:
-                    _classify("delete", _t, e, UNKNOWN_TOPIC_OR_PARTITION)
+                    _classify("delete", _t, failure_of(e), UNKNOWN_TOPIC_OR_PARTITION)
                 else:
                     print(f">>> deleted '{_t}'", flush=True)
         print(">>> waiting 10s after delete ...", flush=True)
@@ -152,9 +152,9 @@ def recreate_topic(config, topic, partitions=-1):
         else:
             for _t, future in create_futures.items():
                 try:
-                    future.result()
+                    future.get()
                 except Exception as e:
-                    _classify("create", _t, e, TOPIC_ALREADY_EXISTS)
+                    _classify("create", _t, failure_of(e), TOPIC_ALREADY_EXISTS)
                 else:
                     print(f">>> created '{_t}'", flush=True)
         print(">>> waiting 10s after create ...", flush=True)
