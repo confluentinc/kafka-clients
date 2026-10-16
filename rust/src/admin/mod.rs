@@ -183,18 +183,19 @@ pub use new_partitions::NewPartitions;
 pub use new_topic::NewTopic;
 pub use offset_spec::OffsetSpec;
 pub use options::{
-    AbortTransactionOptions, AlterClientQuotasOptions, AlterConfigsOptions, AlterConsumerGroupOffsetsOptions,
-    AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions, AlterUserScramCredentialsOptions,
-    CreateAclsOptions, CreateDelegationTokenOptions, CreatePartitionsOptions, CreateTopicsOptions, DeleteAclsOptions,
-    DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupsOptions, DeleteRecordsOptions, DeleteTopicsOptions,
-    DescribeAclsOptions, DescribeClassicGroupsOptions, DescribeClientQuotasOptions, DescribeClusterOptions,
-    DescribeConfigsOptions, DescribeConsumerGroupsOptions, DescribeDelegationTokenOptions, DescribeFeaturesOptions,
-    DescribeLogDirsOptions, DescribeProducersOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions,
-    DescribeTransactionsOptions, DescribeUserScramCredentialsOptions, ElectLeadersOptions,
-    ExpireDelegationTokenOptions, FenceProducersOptions, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions,
-    ListGroupsOptions, ListOffsetsOptions, ListPartitionReassignmentsOptions, ListTopicsOptions,
-    ListTransactionsOptions, RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions,
-    TerminateTransactionOptions, UnregisterControllerOptions, UpdateFeaturesOptions,
+    AbortTransactionOptions, AbstractOptions, AlterClientQuotasOptions, AlterConfigsOptions,
+    AlterConsumerGroupOffsetsOptions, AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions,
+    AlterUserScramCredentialsOptions, CreateAclsOptions, CreateDelegationTokenOptions, CreatePartitionsOptions,
+    CreateTopicsOptions, DeleteAclsOptions, DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupsOptions,
+    DeleteRecordsOptions, DeleteTopicsOptions, DescribeAclsOptions, DescribeClassicGroupsOptions,
+    DescribeClientQuotasOptions, DescribeClusterOptions, DescribeConfigsOptions, DescribeConsumerGroupsOptions,
+    DescribeDelegationTokenOptions, DescribeFeaturesOptions, DescribeLogDirsOptions, DescribeProducersOptions,
+    DescribeReplicaLogDirsOptions, DescribeTopicsOptions, DescribeTransactionsOptions,
+    DescribeUserScramCredentialsOptions, ElectLeadersOptions, ExpireDelegationTokenOptions, FenceProducersOptions,
+    ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListGroupsOptions, ListOffsetsOptions,
+    ListPartitionReassignmentsOptions, ListTopicsOptions, ListTransactionsOptions,
+    RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions, TerminateTransactionOptions,
+    UnregisterControllerOptions, UpdateFeaturesOptions,
 };
 pub use partition_reassignment::PartitionReassignment;
 pub use producer_state::ProducerState;

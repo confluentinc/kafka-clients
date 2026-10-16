@@ -234,6 +234,17 @@ def test_create_topics_with_configs():
         assert entry.is_read_only is False
 
 
+def test_create_topics_with_a_null_config_value():
+    # Java's NewTopic configs map may hold null; MockAdminClient builds the
+    # result with `new ConfigEntry(key, value)`, so the value stays null.
+    with MockAdminClient(1) as admin:
+        result = admin.create_topics(
+            [NewTopic("null-config", 1, 1, configs={"cleanup.policy": None})])
+        entry = result["null-config"].configs[0]
+        assert entry.name == "cleanup.policy"
+        assert entry.value is None
+
+
 def test_create_topics_broker_defaults():
     # None -> broker defaults; the mock uses 1 partition and min(brokers, 3).
     with MockAdminClient(2) as admin:

@@ -21,7 +21,11 @@ use crate::common::quota::ClientQuotaEntity;
 /// A single quota alteration operation.
 ///
 /// Corresponds to `org.apache.kafka.common.quota.ClientQuotaAlteration.Op`.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// Equality is Java's `equals`, which compares the boxed `Double` values with
+/// `Double.equals`: a NaN value equals a NaN value, and `0.0` differs from
+/// `-0.0`, unlike `f64`'s `==`.
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaAlteration$Op")]
 pub struct Op {
     key: String,
@@ -53,6 +57,29 @@ impl Op {
     #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaAlteration$Op#value")]
     pub fn value(&self) -> Option<f64> {
         self.value
+    }
+}
+
+/// Java's `Op.equals` (`ClientQuotaAlteration.java:60-66`) compares the values
+/// with `Objects.equals`, that is `Double.equals`, which compares
+/// `Double.doubleToLongBits`: every NaN is one value, and the two zeros are
+/// two.
+impl PartialEq for Op {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key && self.value.map(double_to_long_bits) == other.value.map(double_to_long_bits)
+    }
+}
+
+/// Reflexive, since NaN equals NaN under [`PartialEq`] above.
+impl Eq for Op {}
+
+/// Java's `Double.doubleToLongBits`: the IEEE 754 bit pattern of `value`, with
+/// every NaN collapsed to the one canonical NaN (`0x7ff8000000000000`).
+fn double_to_long_bits(value: f64) -> u64 {
+    if value.is_nan() {
+        0x7ff8_0000_0000_0000
+    } else {
+        value.to_bits()
     }
 }
 
@@ -136,6 +163,21 @@ mod tests {
     fn op_equality() {
         assert_eq!(Op::new("k", Some(1.0)), Op::new("k", Some(1.0)));
         assert_ne!(Op::new("k", Some(1.0)), Op::new("k", None));
+    }
+
+    /// New test, no Java original: `Op.equals` follows `Double.equals`
+    /// (`ClientQuotaAlteration.java:60-66`), so a NaN value equals a NaN value,
+    /// whatever its bit pattern, and `0.0` differs from `-0.0`, both unlike
+    /// `f64`'s `==`.
+    #[test]
+    fn op_equality_follows_java_double_equals() {
+        let other_nan = f64::from_bits(f64::NAN.to_bits() | 1);
+        assert!(other_nan.is_nan() && other_nan.to_bits() != f64::NAN.to_bits());
+        assert_eq!(Op::new("k", Some(f64::NAN)), Op::new("k", Some(f64::NAN)));
+        assert_eq!(Op::new("k", Some(f64::NAN)), Op::new("k", Some(other_nan)));
+        assert_ne!(Op::new("k", Some(0.0)), Op::new("k", Some(-0.0)));
+        assert_ne!(Op::new("k", Some(f64::NAN)), Op::new("k", None));
+        assert_ne!(Op::new("k", Some(1.0)), Op::new("other", Some(1.0)));
     }
 
     // New test, no Java original.
