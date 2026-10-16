@@ -457,10 +457,17 @@ impl RecordStream {
         Ok(&self.record)
     }
 
-    /// Drops the record just read, its first `consumed` bytes. Its buffer is
-    /// let go of when the next record is read, or with the stream.
+    /// Drops the record just read, its first `consumed` bytes, and lets go of
+    /// its buffer once all of it is consumed, so the next record is not read
+    /// while it is still held. A record a deserializer sliced keeps the buffer
+    /// alive through its own reference. Java keeps the record in `lastRecord`
+    /// until the next one is read (`CompletedFetch.java:277`); nothing a
+    /// caller sees depends on that.
     fn consume(&mut self, consumed: usize) {
         self.record.advance(consumed.min(self.record.len()));
+        if self.record.is_empty() {
+            self.record = bytes::Bytes::new();
+        }
     }
 
     /// Whether any bytes follow the record last read, consumed or not: Java's
@@ -3506,19 +3513,32 @@ mod tests {
         assert_eq!(vec![0, 1, 4, 5], records.iter().map(ConsumerRecord::offset).collect::<Vec<_>>());
     }
 
+    /// Whether taking a buffer of `size` from `pool` allocates one, that is
+    /// whether the pool holds none of that size. A buffer it holds is taken out
+    /// of it and freed.
+    fn takes_an_allocation(pool: &BufferSupplier, size: usize) -> bool {
+        let _guard = crate::AllocTrackingGuard::new();
+        drop(pool.get(size));
+        crate::AllocTrackingGuard::count() > 0
+    }
+
     /// The cursor lets go of an exhausted batch's record stream before it takes
     /// the next batch, as Java closes a batch's record stream before taking the
     /// next (`maybeCloseRecordStream()`, `CompletedFetch.java:180-185, 190`), so
-    /// a fetch never holds two batches' decompressors and buffers at once. The
-    /// test keeps its own reference to the first batch's last record, whose
-    /// buffer the stream holds until it reads another record or is dropped, and
-    /// makes the second batch fail: once that failure is reported, the test's
-    /// reference must be the only one left. The second batch fails either its
-    /// checksum, before any stream is opened for it, or its first read.
-    /// Releasing the first stream only when the second is installed would fail
-    /// the checksum case, since a batch that fails its checks installs nothing.
+    /// a fetch never holds two batches' decompressors and buffers at once. A
+    /// stream gives its read buffer back to the fetch's pool when it is let go
+    /// of, so the pool shows when that happened. The second batch fails either
+    /// its checksum, before any stream is opened for it, or its first read.
+    /// When that failure is reported, the first batch's buffer must be back in
+    /// the pool in the first case, and in the second case taken from it by the
+    /// second batch's stream, leaving it empty. Letting go of the first stream
+    /// only when the second is installed fails both: a batch that fails its
+    /// checks installs nothing, and a stream opened while the first still holds
+    /// the buffer finds the pool empty and allocates a second one.
     #[test]
     fn test_exhausted_inflated_batch_is_released_before_the_next_is_inflated() {
+        let compression = Compression::gzip().build();
+        let size = compression.decompression_output_size().expect("gzip has a buffer size");
         // (check.crcs, whether the second batch is re-signed after it is garbled,
         // the start of the failure's message).
         let cases = [
@@ -3527,7 +3547,10 @@ mod tests {
             (true, false, "Record is corrupt (stored crc = "),
         ];
         for (check_crcs, resign, failure) in cases {
-            let mut buf = new_multi_batch_records(0, 2, 2, Compression::gzip().build());
+            // A stream is opened for the second batch unless its checksum is
+            // checked and fails.
+            let opens = resign || !check_crcs;
+            let mut buf = new_multi_batch_records(0, 2, 2, compression.clone());
             let length = RecordBatch::LENGTH_OFFSET;
             let second = AbstractRecords::LOG_OVERHEAD
                 + i32::from_be_bytes(buf[length..length + 4].try_into().unwrap()) as usize;
@@ -3535,7 +3558,8 @@ mod tests {
             if resign {
                 recompute_crc(&mut buf[second..]);
             }
-            let mut cf = new_completed_fetch(0, buf);
+            let pool = Arc::new(BufferSupplier::create());
+            let mut cf = new_completed_fetch_with_pool(0, buf, Arc::clone(&pool));
             let config = make_fetch_config(IsolationLevel::ReadUncommitted, check_crcs);
 
             // Exactly the first batch's two records, so the cursor stops at the
@@ -3544,11 +3568,10 @@ mod tests {
                 .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 2)
                 .expect("the first batch's records are returned");
             assert_eq!(vec![0, 1], first.iter().map(ConsumerRecord::offset).collect::<Vec<_>>());
-            let first_batch = cf
-                .current_record_source_bytes()
-                .cloned()
-                .expect("the exhausted first batch is still the cursor's current one");
-            assert!(!first_batch.is_unique(), "the cursor shares the first batch's last record");
+            assert!(
+                takes_an_allocation(&pool, size),
+                "the exhausted first batch's stream, still the cursor's current one, holds the buffer"
+            );
 
             let err = cf
                 .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
@@ -3560,10 +3583,18 @@ mod tests {
                 "{:?}",
                 cause(&err)
             );
-            assert!(
-                first_batch.is_unique(),
-                "the cursor still held the first batch's stream when the second failed (check.crcs={check_crcs})"
-            );
+            if opens {
+                assert!(
+                    takes_an_allocation(&pool, size),
+                    "the second batch's stream was opened while the first still held the buffer \
+                     (check.crcs={check_crcs})"
+                );
+            } else {
+                assert!(
+                    !takes_an_allocation(&pool, size),
+                    "the cursor still held the first batch's stream when the second failed (check.crcs={check_crcs})"
+                );
+            }
         }
     }
 
@@ -4290,6 +4321,35 @@ mod tests {
                     "{compression:?}: largest allocation {largest} bytes, {codec_largest} for 100 bytes ({fault})"
                 );
             }
+        }
+    }
+
+    /// A compressed record's buffer is let go of as soon as the record is
+    /// consumed, under every codec, rather than when the next record is read,
+    /// so two records are not held at once.
+    #[test]
+    fn test_consumed_record_is_let_go_of_before_the_next_is_read() {
+        const VALUE_SIZE: usize = 256 * 1024;
+        let batch = batch_of_values(2, VALUE_SIZE);
+        for compression in codecs() {
+            let records = bytes::Bytes::from(compressed_by_record(&batch, &compression))
+                .slice(RecordBatch::RECORD_BATCH_OVERHEAD..);
+            let mut stream = RecordStream::open(
+                records,
+                compression.compression_type(),
+                RecordBatch::MAGIC_VALUE_V2,
+                no_caching(),
+            )
+            .expect("the stream opens");
+            let size = stream.next_record().expect("the first record is read").len();
+            assert!(size > VALUE_SIZE, "{compression:?}: the record is {size} bytes");
+            let _guard = crate::AllocTrackingGuard::new();
+            stream.consume(size);
+            let freed = -crate::AllocTrackingGuard::net_bytes();
+            assert!(
+                freed >= isize::try_from(size).unwrap(),
+                "{compression:?}: consuming a record of {size} bytes freed {freed}"
+            );
         }
     }
 
