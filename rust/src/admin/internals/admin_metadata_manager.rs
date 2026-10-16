@@ -160,6 +160,11 @@ impl AdminMetadataManager {
 
     /// Returns whether the manager has usable, non-bootstrap metadata.
     ///
+    /// Logs the line Java's `isReady` logs for the outcome
+    /// (`AdminMetadataManager.java:228-245`): DEBUG for a stored fatal error,
+    /// TRACE otherwise. Every pending call's node provider asks on every pass of
+    /// the I/O loop, so the not-ready lines must stay below DEBUG.
+    ///
     /// # Errors
     ///
     /// Returns the stored fatal exception (if any), mirroring Java's `isReady`
@@ -167,18 +172,18 @@ impl AdminMetadataManager {
     #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManager#isReady")]
     pub(crate) fn is_ready(&self) -> Result<bool, Error> {
         let inner = self.inner.lock().unwrap();
-        if let Some(err) = &inner.fatal_error {
-            return Err(err.clone());
+        let (ready, level, message) = readiness(&inner);
+        match ready {
+            Err(error) => {
+                // SLF4J prints the throwable Java passes after the message.
+                log::log!(level, "{}{} {}", self.log_context.prefix(), message, error);
+                Err(error.clone())
+            },
+            Ok(ready) => {
+                log::log!(level, "{}{}", self.log_context.prefix(), message);
+                Ok(ready)
+            },
         }
-        if inner.cluster.nodes().is_empty() {
-            kafka_warn!(self.log_context, "Metadata is not ready because there are no known nodes.");
-            return Ok(false);
-        }
-        if inner.cluster.is_bootstrap_configured() {
-            kafka_warn!(self.log_context, "Metadata is not ready because it contains bootstrap nodes.");
-            return Ok(false);
-        }
-        Ok(true)
     }
 
     /// The current controller node, if known.
@@ -339,6 +344,38 @@ impl AdminMetadataManager {
             "The remote node is not a BROKER that supports the METADATA api."
         })
     }
+}
+
+/// The body of `AdminMetadataManager.isReady` (`AdminMetadataManager.java:228-245`)
+/// for `inner`'s state: the answer, and the level and text of the line Java
+/// logs with it. [`AdminMetadataManager::is_ready`] logs exactly this line.
+///
+/// It is split out because the line itself cannot be captured in a test: the
+/// `log` crate's logger is process-wide, the `ffi` tests install `env_logger`
+/// into the same test binary, and raising the global level to TRACE would
+/// change what every concurrently running test logs. The test asserts on this
+/// function instead, and `deny(dead_code)` fails the non-test build if
+/// `is_ready` stops calling it.
+#[deny(dead_code)]
+fn readiness(inner: &Inner) -> (Result<bool, &Error>, log::Level, &'static str) {
+    if let Some(error) = &inner.fatal_error {
+        return (Err(error), log::Level::Debug, "Metadata is not usable: failed to get metadata.");
+    }
+    if inner.cluster.nodes().is_empty() {
+        return (
+            Ok(false),
+            log::Level::Trace,
+            "Metadata is not ready: bootstrap nodes have not been initialized yet.",
+        );
+    }
+    if inner.cluster.is_bootstrap_configured() {
+        return (
+            Ok(false),
+            log::Level::Trace,
+            "Metadata is not ready: we have not fetched metadata from the bootstrap nodes yet.",
+        );
+    }
+    (Ok(true), log::Level::Trace, "Metadata is ready to use.")
 }
 
 /// The body of `AdminMetadataManager.needsRebootstrap`, shared with the updater.
@@ -597,6 +634,58 @@ mod tests {
 
         time.sleep(METADATA_EXPIRE_MS);
         assert_eq!(0, mgr.metadata_fetch_delay_ms(time.milliseconds()));
+    }
+
+    /// New test, no Java original: in each state `testMetadataReady` walks, and
+    /// with a stored fatal error, `is_ready` logs Java's line at Java's level
+    /// (`AdminMetadataManager.java:228-245`): TRACE while the metadata is not
+    /// ready or once it is, DEBUG for the fatal error. The line is read from
+    /// [`readiness`], the function `is_ready` logs (see its doc for why the log
+    /// itself is not captured), and its answer must be `is_ready`'s.
+    #[test]
+    fn is_ready_logs_java_level_and_text_for_each_state() {
+        let time = mock_time();
+        let mgr = mgr();
+        let line = |mgr: &AdminMetadataManager| {
+            let inner = mgr.inner.lock().unwrap();
+            let (ready, level, message) = readiness(&inner);
+            (ready.map_err(Error::clone), level, message)
+        };
+
+        let (ready, level, message) = line(&mgr);
+        assert!(!ready.unwrap());
+        assert!(!mgr.is_ready().unwrap());
+        assert_eq!(level, log::Level::Trace);
+        assert_eq!(message, "Metadata is not ready: bootstrap nodes have not been initialized yet.");
+
+        let bootstrap_address: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        mgr.update(
+            Cluster::bootstrap(&[("localhost".to_string(), bootstrap_address)]),
+            time.milliseconds(),
+        );
+        let (ready, level, message) = line(&mgr);
+        assert!(!ready.unwrap());
+        assert!(!mgr.is_ready().unwrap());
+        assert_eq!(level, log::Level::Trace);
+        assert_eq!(
+            message,
+            "Metadata is not ready: we have not fetched metadata from the bootstrap nodes yet."
+        );
+
+        mgr.update(mock_cluster(), time.milliseconds());
+        let (ready, level, message) = line(&mgr);
+        assert!(ready.unwrap());
+        assert!(mgr.is_ready().unwrap());
+        assert_eq!(level, log::Level::Trace);
+        assert_eq!(message, "Metadata is ready to use.");
+
+        mgr.update_failed(Error::Authentication(AuthenticationError::new("Authentication failed")));
+        let (ready, level, message) = line(&mgr);
+        let error = ready.unwrap_err();
+        assert!(matches!(error, Error::Authentication(_)), "got {error:?}");
+        assert!(matches!(mgr.is_ready(), Err(Error::Authentication(_))));
+        assert_eq!(level, log::Level::Debug);
+        assert_eq!(message, "Metadata is not usable: failed to get metadata.");
     }
 
     /// Translated from `AdminMetadataManagerTest.testMetadataRefreshBackoff`.
