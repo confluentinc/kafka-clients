@@ -25,23 +25,12 @@ kinds. Java's own tests of these classes are translated here too:
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
-import threading
 from typing import Any
 
 import pytest
 
-from confluent_kafka.admin._futures import (
-    Async,
-    Sync,
-    _all_of,
-    _complete,
-    _complete_with_error,
-    _completed_future,
-    _kind_of,
-    _new_future,
-    _then_apply,
-)
+from confluent_kafka import ExecutionError
+from confluent_kafka.admin._futures import Async, Sync, _kind_of
 from confluent_kafka.admin.abstract_options import AbstractOptions
 from confluent_kafka.admin.alter_configs_result import AlterConfigsResult
 from confluent_kafka.admin.config import Config
@@ -81,7 +70,6 @@ from confluent_kafka.illegal_state_error import IllegalStateError
 from confluent_kafka.null_pointer_error import NullPointerError
 
 # Fix round 1 additions.
-from confluent_kafka.admin._futures import _when_complete
 from confluent_kafka.admin._internals import _CoordinatorKey, _sub_level_error
 from confluent_kafka.admin.delete_consumer_group_offsets_result import (
     DeleteConsumerGroupOffsetsResult,
@@ -99,21 +87,64 @@ from confluent_kafka.admin.list_transactions_result import ListTransactionsResul
 from confluent_kafka.admin.transaction_description import TransactionDescription
 from confluent_kafka.admin.transaction_listing import TransactionListing
 from confluent_kafka.admin.transaction_state import TransactionState
-from confluent_kafka.common import IsolationLevel
+from confluent_kafka.common import AsyncKafkaFuture, IsolationLevel, KafkaFuture
+from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 from confluent_kafka.common.errors import UnknownTopicOrPartitionError
 
 # ``ConsumerProtocol.PROTOCOL_TYPE``.
 PROTOCOL_TYPE = "consumer"
 
 
+def _new_future(kind: type[Sync] | type[Async]) -> Any:
+    """Java's ``new KafkaFutureImpl<>()`` of the kind: a future over a
+    ``_KafkaFutureImpl``, completed through it."""
+    return kind._FUTURE._of_impl(_KafkaFutureImpl())
+
+
+def _complete(future: Any, value: Any) -> bool:
+    return bool(future._impl.complete(value))
+
+
+def _complete_with_error(future: Any, error: BaseException) -> bool:
+    return bool(future._impl.complete_with_error(error))
+
+
 def _done(kind: type[Sync] | type[Async], value: Any) -> Any:
-    return _completed_future(kind, value)
+    return kind._FUTURE.completed_future(value=value)
 
 
 def _failed(kind: type[Sync] | type[Async], error: BaseException) -> Any:
     future = _new_future(kind)
     _complete_with_error(future, error)
     return future
+
+
+def _result(future: Any, timeout: float = 1) -> Any:
+    """A sync future's value; its failure raised as it is (``get()``'s cause)."""
+    try:
+        return future.get(timeout=timeout)
+    except ExecutionError as error:
+        assert error.__cause__ is not None
+        raise error.__cause__ from None
+
+
+def _exception(future: Any, timeout: float = 1) -> BaseException | None:
+    """A sync future's failure (``get()``'s cause), or ``None``."""
+    try:
+        future.get(timeout=timeout)
+    except ExecutionError as error:
+        return error.__cause__
+    return None
+
+
+async def _await(future: Any) -> Any:
+    """An ``AsyncKafkaFuture``'s value; its failure raised as it is."""
+    assert isinstance(future, AsyncKafkaFuture)
+    try:
+        return await future.get(timeout=1)
+    except ExecutionError as error:
+        assert error.__cause__ is not None
+        raise error.__cause__ from None
 
 
 # --------------------------------------------------------------------------------------
@@ -439,86 +470,23 @@ class TestRemoveMembersFromConsumerGroupOptions:
 
 
 class TestFutureHelpers:
+    """The client-kind marker (``_futures``); the futures are the Phase 1
+    ``KafkaFuture`` / ``AsyncKafkaFuture``, tested by ``test_kafka_future.py``."""
+
     def test_markers_have_no_instances(self) -> None:
         with pytest.raises(TypeError):
             Sync()
         with pytest.raises(TypeError):
             Async()
 
+    def test_markers_name_their_future_class(self) -> None:
+        assert Sync._FUTURE is KafkaFuture
+        assert Async._FUTURE is AsyncKafkaFuture
+
     def test_kind_of(self) -> None:
         assert _kind_of([]) is Sync
-        assert _kind_of([concurrent.futures.Future()]) is Sync
-
-    async def test_kind_of_async(self) -> None:
-        assert _kind_of([asyncio.get_running_loop().create_future()]) is Async
-
-    def test_then_apply_sync_done_and_pending(self) -> None:
-        done = _done(Sync, 2)
-        derived = _then_apply(done, lambda v: v * 10)
-        assert isinstance(derived, concurrent.futures.Future)
-        assert derived.done() and derived.result() == 20
-        pending: concurrent.futures.Future[int] = concurrent.futures.Future()
-        derived = _then_apply(pending, lambda v: v + 1)
-        assert not derived.done()
-        _complete(pending, 1)
-        assert derived.result(timeout=1) == 2
-
-    def test_then_apply_propagates_errors(self) -> None:
-        error = TopicAuthorizationError(message="x")
-        derived = _then_apply(_failed(Sync, error), lambda v: v)
-        assert derived.exception() is error
-
-        def boom(_: int) -> int:
-            raise IllegalStateError(message="boom")
-
-        assert str(_then_apply(_done(Sync, 1), boom).exception()) == "boom"
-
-    def test_then_apply_cancelled(self) -> None:
-        source: concurrent.futures.Future[int] = concurrent.futures.Future()
-        source.cancel()
-        assert _then_apply(source, lambda v: v).cancelled()
-
-    def test_all_of_sync(self) -> None:
-        assert _all_of([], Sync).result() is None
-        first = TopicAuthorizationError(message="first")
-        second = TopicAuthorizationError(message="second")
-        futures = [_done(Sync, 1), _failed(Sync, first), _failed(Sync, second)]
-        assert _all_of(futures, Sync).exception() is first
-
-    def test_all_of_waits_for_every_future(self) -> None:
-        a: concurrent.futures.Future[int] = concurrent.futures.Future()
-        b: concurrent.futures.Future[int] = concurrent.futures.Future()
-        all_of = _all_of([a, b], Sync)
-        _complete_with_error(a, IllegalStateError(message="a"))
-        assert not all_of.done()
-        thread = threading.Thread(target=_complete, args=(b, 2))
-        thread.start()
-        thread.join()
-        assert str(all_of.exception(timeout=1)) == "a"
-
-    def test_complete_twice_returns_false(self) -> None:
-        future = _new_future(Sync)
-        assert _complete(future, 1) is True
-        assert _complete(future, 2) is False
-        assert _complete_with_error(future, IllegalStateError(message="x")) is False
-        assert future.result() == 1
-
-    async def test_async_helpers(self) -> None:
-        assert (await _all_of([], Async)) is None
-        source = _new_future(Async)
-        derived = _then_apply(source, lambda v: v * 2)
-        assert isinstance(derived, asyncio.Future)
-        # Completed from another thread: through call_soon_threadsafe.
-        thread = threading.Thread(target=_complete, args=(source, 21))
-        thread.start()
-        thread.join()
-        assert (await asyncio.wait_for(derived, 1)) == 42
-        done = _then_apply(_done(Async, 1), lambda v: v + 1)
-        assert done.done() and done.result() == 2
-
-    def test_async_future_needs_a_running_loop(self) -> None:
-        with pytest.raises(IllegalStateError):
-            _new_future(Async)
+        assert _kind_of([_done(Sync, 1)]) is Sync
+        assert _kind_of([_done(Async, 1)]) is Async
 
 
 # --------------------------------------------------------------------------------------
@@ -553,21 +521,21 @@ class TestAlterConfigsResult:
         futures = {_resource("a"): _done(Sync, None), _resource("b"): _failed(Sync, error)}
         result = AlterConfigsResult._new(futures=futures, kind=Sync)
         assert result.values() == futures
-        assert result.values()[_resource("a")].result() is None
-        assert result.all().exception() is error
+        assert _result(result.values()[_resource("a")]) is None
+        assert _exception(result.all()) is error
 
     def test_sync_all_succeeds(self) -> None:
         result = AlterConfigsResult._new(futures={_resource("a"): _done(Sync, None)}, kind=Sync)
-        assert result.all().result() is None
-        assert AlterConfigsResult._new(futures={}, kind=Sync).all().result() is None
+        assert _result(result.all()) is None
+        assert _result(AlterConfigsResult._new(futures={}, kind=Sync).all()) is None
 
     async def test_async(self) -> None:
         result = AlterConfigsResult._new(futures={_resource("a"): _done(Async, None)}, kind=Async)
-        assert isinstance(result.all(), asyncio.Future)
-        assert (await result.all()) is None
+        assert isinstance(result.all(), AsyncKafkaFuture)
+        assert (await _await(result.all())) is None
         empty = AlterConfigsResult._new(futures={}, kind=Async)
-        assert isinstance(empty.all(), asyncio.Future)
-        assert (await empty.all()) is None
+        assert isinstance(empty.all(), AsyncKafkaFuture)
+        assert (await _await(empty.all())) is None
 
 
 class TestListTopicsResult:
@@ -582,21 +550,21 @@ class TestListTopicsResult:
 
     def test_sync(self) -> None:
         result = ListTopicsResult._new(future=_done(Sync, dict(self.LISTINGS)), kind=Sync)
-        assert result.names_to_listings().result() == self.LISTINGS
-        assert result.names().result() == {"a", "b"}
-        assert sorted(listing.name() for listing in result.listings().result()) == ["a", "b"]
-        assert isinstance(result.listings().result(), list)
+        assert _result(result.names_to_listings()) == self.LISTINGS
+        assert _result(result.names()) == {"a", "b"}
+        assert sorted(listing.name() for listing in _result(result.listings())) == ["a", "b"]
+        assert isinstance(_result(result.listings()), list)
 
     def test_failure_propagates(self) -> None:
         error = TopicAuthorizationError(message="denied")
         result = ListTopicsResult._new(future=_failed(Sync, error), kind=Sync)
-        assert result.names().exception() is error
-        assert result.listings().exception() is error
+        assert _exception(result.names()) is error
+        assert _exception(result.listings()) is error
 
     async def test_async(self) -> None:
         result = ListTopicsResult._new(future=_done(Async, dict(self.LISTINGS)), kind=Async)
-        assert (await result.names()) == {"a", "b"}
-        assert len(await result.listings()) == 2
+        assert (await _await(result.names())) == {"a", "b"}
+        assert len(await _await(result.listings())) == 2
 
 
 class TestDescribeClusterResult:
@@ -609,18 +577,18 @@ class TestDescribeClusterResult:
             nodes=_done(Sync, [node]), controller=_done(Sync, node),
             cluster_id=_done(Sync, "cid"), authorized_operations=_failed(Sync, error),
             kind=Sync)
-        assert result.nodes().result() == [node]
-        assert result.controller().result() == node
-        assert result.cluster_id().result() == "cid"
-        assert result.authorized_operations().exception() is error
+        assert _result(result.nodes()) == [node]
+        assert _result(result.controller()) == node
+        assert _result(result.cluster_id()) == "cid"
+        assert _exception(result.authorized_operations()) is error
 
     async def test_async(self) -> None:
         result = DescribeClusterResult._new(
             nodes=_done(Async, []), controller=_done(Async, None),
             cluster_id=_done(Async, "cid"),
             authorized_operations=_done(Async, {AclOperation.READ}), kind=Async)
-        assert (await result.cluster_id()) == "cid"
-        assert (await result.authorized_operations()) == {AclOperation.READ}
+        assert (await _await(result.cluster_id())) == "cid"
+        assert (await _await(result.authorized_operations())) == {AclOperation.READ}
 
 
 class TestDeleteTopicsResult:
@@ -635,7 +603,7 @@ class TestDeleteTopicsResult:
                                                                 kind=Sync)
         assert topic_name_futures.topic_name_values() == topic_names
         assert topic_name_futures.topic_id_values() is None
-        assert topic_name_futures.all().done()
+        assert topic_name_futures.all().is_done()
 
     def test_delete_topics_result_with_ids(self) -> None:
         future = _new_future(Sync)
@@ -644,7 +612,7 @@ class TestDeleteTopicsResult:
         topic_id_futures = DeleteTopicsResult._of_topic_ids(topic_id_futures=topic_ids, kind=Sync)
         assert topic_id_futures.topic_id_values() == topic_ids
         assert topic_id_futures.topic_name_values() is None
-        assert topic_id_futures.all().done()
+        assert topic_id_futures.all().is_done()
 
     def test_invalid_configurations(self) -> None:
         with pytest.raises(IllegalArgumentError,
@@ -657,7 +625,7 @@ class TestDeleteTopicsResult:
     async def test_async(self) -> None:
         result = DeleteTopicsResult._of_topic_names(name_futures={"foo": _done(Async, None)},
                                                     kind=Async)
-        assert (await result.all()) is None
+        assert (await _await(result.all())) is None
 
 
 class TestCreateTopicsResult:
@@ -674,25 +642,25 @@ class TestCreateTopicsResult:
 
     def test_sync_getters(self) -> None:
         result = self._result(Sync)
-        assert result.topic_id(topic="ok").result() == self.TOPIC_ID
-        assert result.num_partitions(topic="ok").result() == 3
-        assert result.replication_factor(topic="ok").result() == 2
-        assert result.config(topic="ok").result() == Config(entries=[])
+        assert _result(result.topic_id(topic="ok")) == self.TOPIC_ID
+        assert _result(result.num_partitions(topic="ok")) == 3
+        assert _result(result.replication_factor(topic="ok")) == 2
+        assert _result(result.config(topic="ok")) == Config(entries=[])
         assert set(result.values()) == {"ok", "denied"}
-        assert result.values()["ok"].result() is None
+        assert _result(result.values()["ok"]) is None
         # A future holding an error-carrying helper succeeds; its getters fail.
-        assert result.values()["denied"].result() is None
-        assert result.all().result() is None
+        assert _result(result.values()["denied"]) is None
+        assert _result(result.all()) is None
         for getter in (result.topic_id, result.num_partitions, result.replication_factor,
                        result.config):
-            assert str(getter(topic="denied").exception()) == "denied"
+            assert str(_exception(getter(topic="denied"))) == "denied"
 
     def test_failed_future_fails_every_view(self) -> None:
         error = TopicAuthorizationError(message="x")
         result = CreateTopicsResult._new(futures={"t": _failed(Sync, error)}, kind=Sync)
-        assert result.all().exception() is error
-        assert result.values()["t"].exception() is error
-        assert result.num_partitions(topic="t").exception() is error
+        assert _exception(result.all()) is error
+        assert _exception(result.values()["t"]) is error
+        assert _exception(result.num_partitions(topic="t")) is error
 
     def test_unknown_topic_raises_null_pointer_error(self) -> None:
         with pytest.raises(NullPointerError):
@@ -711,10 +679,10 @@ class TestCreateTopicsResult:
 
     async def test_async(self) -> None:
         result = self._result(Async)
-        assert (await result.num_partitions(topic="ok")) == 3
-        assert (await result.all()) is None
+        assert (await _await(result.num_partitions(topic="ok"))) == 3
+        assert (await _await(result.all())) is None
         with pytest.raises(TopicAuthorizationError):
-            await result.config(topic="denied")
+            await _await(result.config(topic="denied"))
 
 
 class TestListOffsetsResult:
@@ -738,8 +706,8 @@ class TestListOffsetsResult:
         info1 = ListOffsetsResult.ListOffsetsResultInfo(offset=3, timestamp=4, leader_epoch=0)
         result = ListOffsetsResult(futures={self.TP0: _done(Sync, info0),
                                             self.TP1: _done(Sync, info1)})
-        assert result.partition_result(partition=self.TP0).result() is info0
-        assert result.all().result() == {self.TP0: info0, self.TP1: info1}
+        assert _result(result.partition_result(partition=self.TP0)) is info0
+        assert _result(result.all()) == {self.TP0: info0, self.TP1: info1}
 
     def test_partition_not_attempted(self) -> None:
         result = ListOffsetsResult(futures={})
@@ -752,47 +720,20 @@ class TestListOffsetsResult:
         info = ListOffsetsResult.ListOffsetsResultInfo(offset=1, timestamp=2, leader_epoch=None)
         result = ListOffsetsResult._new(futures={self.TP0: _done(Sync, info),
                                                  self.TP1: _failed(Sync, error)}, kind=Sync)
-        assert result.all().exception() is error
+        assert _exception(result.all()) is error
 
     async def test_async(self) -> None:
         info = ListOffsetsResult.ListOffsetsResultInfo(offset=1, timestamp=2, leader_epoch=None)
         result = ListOffsetsResult(futures={self.TP0: _done(Async, info)})
-        assert isinstance(result.all(), asyncio.Future)
-        assert (await result.all()) == {self.TP0: info}
+        assert isinstance(result.all(), AsyncKafkaFuture)
+        assert (await _await(result.all())) == {self.TP0: info}
         empty = ListOffsetsResult._new(futures={}, kind=Async)
-        assert (await empty.all()) == {}
+        assert (await _await(empty.all())) == {}
 
 
 # --------------------------------------------------------------------------------------
 # Fix round 1: the shapes the first set did not cover
 # --------------------------------------------------------------------------------------
-
-
-class TestWhenComplete:
-    def test_done_runs_at_once_and_pending_runs_later(self) -> None:
-        seen: list[tuple[Any, Any]] = []
-        _when_complete(_done(Sync, 1), lambda v, e: seen.append((v, e)))
-        assert seen == [(1, None)]
-        pending = _new_future(Sync)
-        _when_complete(pending, lambda v, e: seen.append((v, e)))
-        error = IllegalStateError(message="x")
-        _complete_with_error(pending, error)
-        assert seen[1] == (None, error)
-
-    def test_cancelled_source_cancels_the_dependent(self) -> None:
-        source = _new_future(Sync)
-        source.cancel()
-        result = _new_future(Sync)
-        _when_complete(source, lambda v, e: _complete_with_error(result, e))  # type: ignore[arg-type]
-        assert result.cancelled()
-
-    async def test_async(self) -> None:
-        source = _new_future(Async)
-        seen: list[Any] = []
-        _when_complete(source, lambda v, e: seen.append(v))
-        _complete(source, 7)
-        await asyncio.sleep(0)
-        assert seen == [7]
 
 
 class TestInternals:
@@ -826,41 +767,41 @@ class TestDeleteConsumerGroupOffsetsResult:
     def test_partition_result(self) -> None:
         error = UnknownTopicOrPartitionError(message="gone")
         result = self._result(Sync, {self.TP0: None, self.TP1: error})
-        assert result.partition_result(partition=self.TP0).result() is None
-        assert result.partition_result(partition=self.TP1).exception() is error
+        assert _result(result.partition_result(partition=self.TP0)) is None
+        assert _exception(result.partition_result(partition=self.TP1)) is error
         with pytest.raises(IllegalArgumentError) as info:
             result.partition_result(partition=self.TP2)
         assert str(info.value) == "Partition t-2 was not included in the original request"
 
     def test_all(self) -> None:
-        assert self._result(Sync, {self.TP0: None, self.TP1: None}).all().result() is None
+        assert _result(self._result(Sync, {self.TP0: None, self.TP1: None}).all()) is None
         error = UnknownTopicOrPartitionError(message="gone")
-        assert self._result(Sync, {self.TP0: None, self.TP1: error}).all().exception() is error
+        assert _exception(self._result(Sync, {self.TP0: None, self.TP1: error}).all()) is error
 
     def test_missing_from_response(self) -> None:
         result = self._result(Sync, {self.TP0: None})
-        assert str(result.partition_result(partition=self.TP1).exception()) == (
+        assert str(_exception(result.partition_result(partition=self.TP1))) == (
             'Offset deletion result for partition "t-1" was not included in the response')
-        assert isinstance(result.all().exception(), IllegalArgumentError)
+        assert isinstance(_exception(result.all()), IllegalArgumentError)
 
     def test_top_level_failure_and_pending(self) -> None:
         error = IllegalStateError(message="top")
         failed = DeleteConsumerGroupOffsetsResult._new(
             future=_failed(Sync, error), partitions={self.TP0}, kind=Sync)
-        assert failed.all().exception() is error
+        assert _exception(failed.all()) is error
         source = _new_future(Sync)
         pending = DeleteConsumerGroupOffsetsResult._new(future=source, partitions={self.TP0},
                                                         kind=Sync)
         all_future = pending.all()
-        assert not all_future.done()
+        assert not all_future.is_done()
         _complete(source, {self.TP0: None})
-        assert all_future.result(timeout=1) is None
+        assert _result(all_future) is None
 
     async def test_async(self) -> None:
         result = self._result(Async, {self.TP0: None, self.TP1: None})
-        assert isinstance(result.all(), asyncio.Future)
-        assert (await result.all()) is None
-        assert (await result.partition_result(partition=self.TP1)) is None
+        assert isinstance(result.all(), AsyncKafkaFuture)
+        assert (await _await(result.all())) is None
+        assert (await _await(result.partition_result(partition=self.TP1))) is None
 
 
 class TestDescribeTransactionsResult:
@@ -877,8 +818,8 @@ class TestDescribeTransactionsResult:
         key = _CoordinatorKey.by_transactional_id(transactional_id="tx")
         result = DescribeTransactionsResult._new(futures={key: _done(Sync, description)},
                                                  kind=Sync)
-        assert result.description(transactional_id="tx").result() is description
-        assert result.all().result() == {"tx": description}
+        assert _result(result.description(transactional_id="tx")) is description
+        assert _result(result.all()) == {"tx": description}
         with pytest.raises(IllegalArgumentError) as info:
             result.description(transactional_id="other")
         assert str(info.value) == "TransactionalId `other` was not included in the request"
@@ -888,7 +829,7 @@ class TestDescribeTransactionsResult:
         key = _CoordinatorKey.by_transactional_id(transactional_id="tx")
         result = DescribeTransactionsResult._new(futures={key: _done(Async, description)},
                                                  kind=Async)
-        assert (await result.all()) == {"tx": description}
+        assert (await _await(result.all())) == {"tx": description}
 
 
 class TestListTransactionsResult:
@@ -905,37 +846,37 @@ class TestListTransactionsResult:
     def test_sync(self) -> None:
         brokers = {1: _done(Sync, [self.L1]), 2: _done(Sync, [self.L2])}
         result = self._result(Sync, brokers)
-        by_broker = result.by_broker_id().result()
+        by_broker = _result(result.by_broker_id())
         assert by_broker == brokers and by_broker is not brokers
-        assert result.all_by_broker_id().result() == {1: [self.L1], 2: [self.L2]}
-        assert sorted(x.transactional_id() for x in result.all().result()) == ["a", "b"]
+        assert _result(result.all_by_broker_id()) == {1: [self.L1], 2: [self.L2]}
+        assert sorted(x.transactional_id() for x in _result(result.all())) == ["a", "b"]
 
     def test_failures(self) -> None:
         error = IllegalStateError(message="broker")
         result = self._result(Sync, {1: _done(Sync, [self.L1]), 2: _failed(Sync, error)})
-        assert result.all().exception() is error
+        assert _exception(result.all()) is error
         top = IllegalStateError(message="top")
         failed = ListTransactionsResult._new(future=_failed(Sync, top), kind=Sync)
-        assert failed.by_broker_id().exception() is top
-        assert failed.all_by_broker_id().exception() is top
+        assert _exception(failed.by_broker_id()) is top
+        assert _exception(failed.all_by_broker_id()) is top
 
     def test_broker_future_completing_later(self) -> None:
         later = _new_future(Sync)
         result = self._result(Sync, {1: _done(Sync, [self.L1]), 2: later})
         all_future = result.all()
-        assert not all_future.done()
+        assert not all_future.is_done()
         _complete(later, [self.L2])
-        assert len(all_future.result(timeout=1)) == 2
+        assert len(_result(all_future)) == 2
 
     def test_no_brokers_never_completes_as_in_java(self) -> None:
         # Java completes allByBrokerId() only from a broker future's whenComplete.
-        assert not self._result(Sync, {}).all_by_broker_id().done()
+        assert not self._result(Sync, {}).all_by_broker_id().is_done()
 
     async def test_async(self) -> None:
         result = self._result(Async, {1: _done(Async, [self.L1])})
-        by_broker = await result.by_broker_id()
-        assert isinstance(by_broker[1], asyncio.Future)
-        assert (await result.all()) == [self.L1]
+        by_broker = await _await(result.by_broker_id())
+        assert isinstance(by_broker[1], AsyncKafkaFuture)
+        assert (await _await(result.all())) == [self.L1]
 
 
 class TestDeleteConsumerGroupsResult:
@@ -948,11 +889,11 @@ class TestDeleteConsumerGroupsResult:
         assert copy == futures
         copy.clear()
         assert result.deleted_groups() == futures
-        assert result.all().result() is None
+        assert _result(result.all()) is None
 
     async def test_async(self) -> None:
         result = DeleteConsumerGroupsResult._new(futures={"g": _done(Async, None)}, kind=Async)
-        assert (await result.all()) is None
+        assert (await _await(result.all())) is None
 
 
 class TestListTransactionsOptions:

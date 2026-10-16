@@ -14,8 +14,8 @@
 
 """The hand-written admin Result classes (outside every generator pattern).
 
-Behaviour tests of each class for the sync (``concurrent.futures``) and the async
-(``asyncio``) client kinds, and the private Java internals they use. Java's own tests of
+Behaviour tests of each class for the sync (``KafkaFuture``) and the async
+(``AsyncKafkaFuture``) client kinds, and the private Java internals they use. Java's own tests of
 these classes are translated here: ``DescribeTopicsResultTest``,
 ``DescribeUserScramCredentialsResultTest`` and ``RemoveMembersFromConsumerGroupResultTest``
 (the other classes have no Java test).
@@ -24,7 +24,6 @@ these classes are translated here: ``DescribeTopicsResultTest``,
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import gc
 from typing import Any
 
@@ -48,15 +47,8 @@ from confluent_kafka.admin import (
     TopicDescription,
     UserScramCredentialsDescription,
 )
-from confluent_kafka.admin._futures import (
-    Async,
-    Sync,
-    _complete,
-    _complete_with_error,
-    _completed_future,
-    _mark_retrieved,
-    _new_future,
-)
+from confluent_kafka import ExecutionError
+from confluent_kafka.admin._futures import Async, Sync
 from confluent_kafka.admin._internals import (
     _CoordinatorKey,
     _DescribeUserScramCredentialsResponseData,
@@ -94,6 +86,7 @@ from confluent_kafka.common.errors import (
     UnknownTopicOrPartitionError,
 )
 from confluent_kafka.common.kafka_error import KafkaError
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture, _KafkaFutureImpl
 from confluent_kafka.consumer import OffsetAndMetadata
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 from confluent_kafka.illegal_state_error import IllegalStateError
@@ -104,8 +97,22 @@ KINDS = [Sync, Async]
 _ResponseData = _DescribeUserScramCredentialsResponseData
 
 
+def _new_future(kind: type[Sync] | type[Async]) -> Any:
+    """Java's ``new KafkaFutureImpl<>()`` of the kind: a future over a
+    ``_KafkaFutureImpl``, completed through it."""
+    return kind._FUTURE._of_impl(_KafkaFutureImpl())
+
+
+def _complete(future: Any, value: Any) -> bool:
+    return bool(future._impl.complete(value))
+
+
+def _complete_with_error(future: Any, error: BaseException) -> bool:
+    return bool(future._impl.complete_with_error(error))
+
+
 def _done(kind: type[Sync] | type[Async], value: Any) -> Any:
-    return _completed_future(kind, value)
+    return kind._FUTURE.completed_future(value=value)
 
 
 def _failed(kind: type[Sync] | type[Async], error: BaseException) -> Any:
@@ -115,20 +122,53 @@ def _failed(kind: type[Sync] | type[Async], error: BaseException) -> Any:
 
 
 def _future_type(kind: type[Sync] | type[Async]) -> type:
-    return asyncio.Future if kind is Async else concurrent.futures.Future
+    return AsyncKafkaFuture if kind is Async else KafkaFuture
 
 
 def _value(future: Any) -> Any:
-    """The value of a done future of either kind."""
-    assert future.done()
-    return future.result()
+    """The value of a done future of either kind (``get_now``)."""
+    assert future.is_done()
+    return future.get_now(value_if_absent=None)
 
 
 def _error(future: Any) -> BaseException:
-    assert future.done()
-    error = future.exception()
-    assert error is not None
-    return error
+    """The failure of a done future of either kind (the cause of ``get_now``'s
+    ``ExecutionError``)."""
+    assert future.is_done()
+    try:
+        future.get_now(value_if_absent=None)
+    except ExecutionError as error:
+        assert error.__cause__ is not None
+        return error.__cause__
+    raise AssertionError("the future succeeded")
+
+
+def _result(future: Any, timeout: float = 1) -> Any:
+    """A sync future's value; its failure raised as it is (``get()``'s cause)."""
+    try:
+        return future.get(timeout=timeout)
+    except ExecutionError as error:
+        assert error.__cause__ is not None
+        raise error.__cause__ from None
+
+
+def _exception(future: Any, timeout: float = 1) -> BaseException | None:
+    """A sync future's failure (``get()``'s cause), or ``None``."""
+    try:
+        future.get(timeout=timeout)
+    except ExecutionError as error:
+        return error.__cause__
+    return None
+
+
+async def _await(future: Any) -> Any:
+    """An ``AsyncKafkaFuture``'s value; its failure raised as it is."""
+    assert isinstance(future, AsyncKafkaFuture)
+    try:
+        return await future.get(timeout=1)
+    except ExecutionError as error:
+        assert error.__cause__ is not None
+        raise error.__cause__ from None
 
 
 async def _unretrieved_logs(body: Any) -> list[str]:
@@ -315,22 +355,22 @@ class TestAlterConsumerGroupOffsetsResult:
     def test_top_level_failure_and_pending(self) -> None:
         error = GroupAuthorizationError(message="denied")
         result = AlterConsumerGroupOffsetsResult._new(future=_failed(Sync, error), kind=Sync)
-        assert result.all().exception() is error
-        assert result.partition_result(partition=TP0).exception() is error
+        assert _exception(result.all()) is error
+        assert _exception(result.partition_result(partition=TP0)) is error
         source = _new_future(Sync)
         pending = AlterConsumerGroupOffsetsResult._new(future=source, kind=Sync)
         partition = pending.partition_result(partition=TP0)
         all_future = pending.all()
-        assert not partition.done() and not all_future.done()
+        assert not partition.is_done() and not all_future.is_done()
         _complete(source, {TP0: None})
-        assert partition.result(timeout=1) is None
-        assert all_future.result(timeout=1) is None
+        assert _result(partition) is None
+        assert _result(all_future) is None
 
     async def test_async_awaits(self) -> None:
         result = AlterConsumerGroupOffsetsResult._new(future=_done(Async, {TP0: None}),
                                                       kind=Async)
-        assert (await result.all()) is None
-        assert (await result.partition_result(partition=TP0)) is None
+        assert (await _await(result.all())) is None
+        assert (await _await(result.partition_result(partition=TP0))) is None
 
 
 # --------------------------------------------------------------------------------------
@@ -344,10 +384,10 @@ class TestAlterUserScramCredentialsResult:
         futures = {"a": _done(Sync, None), "b": _failed(Sync, error)}
         result = AlterUserScramCredentialsResult(futures=futures)
         assert result.values() == futures
-        assert result.all().exception() is error
+        assert _exception(result.all()) is error
         empty = AlterUserScramCredentialsResult(futures={})
-        assert isinstance(empty.all(), concurrent.futures.Future)
-        assert empty.all().result() is None
+        assert isinstance(empty.all(), KafkaFuture)
+        assert _result(empty.all()) is None
 
     def test_values_is_unmodifiable(self) -> None:
         futures = {"a": _done(Sync, None)}
@@ -365,11 +405,11 @@ class TestAlterUserScramCredentialsResult:
 
     async def test_async(self) -> None:
         result = AlterUserScramCredentialsResult(futures={"a": _done(Async, None)})
-        assert isinstance(result.all(), asyncio.Future)
-        assert (await result.all()) is None
+        assert isinstance(result.all(), AsyncKafkaFuture)
+        assert (await _await(result.all())) is None
         empty = AlterUserScramCredentialsResult._new(futures={}, kind=Async)
-        assert isinstance(empty.all(), asyncio.Future)
-        assert (await empty.all()) is None
+        assert isinstance(empty.all(), AsyncKafkaFuture)
+        assert (await _await(empty.all())) is None
 
 
 # --------------------------------------------------------------------------------------
@@ -425,12 +465,12 @@ class TestDeleteAclsResult:
             DeleteAclsResult.FilterResult._new(binding=_binding("a"), exception=None),
             DeleteAclsResult.FilterResult._new(binding=None, exception=error)])
         result = DeleteAclsResult._new(futures={_filter("a"): _done(Sync, results)}, kind=Sync)
-        assert result.all().exception() is error
+        assert _exception(result.all()) is error
 
     def test_all_fails_with_a_failed_filter_future(self) -> None:
         error = TopicAuthorizationError(message="denied")
         result = DeleteAclsResult._new(futures={_filter("a"): _failed(Sync, error)}, kind=Sync)
-        assert result.all().exception() is error
+        assert _exception(result.all()) is error
 
     def test_get_acl_bindings_internal_error(self) -> None:
         # Unreachable through all() (allOf fails first); the private helper wraps it.
@@ -440,7 +480,9 @@ class TestDeleteAclsResult:
             result._get_acl_bindings(result.values())
         assert type(info.value) is KafkaError
         assert str(info.value) == "DeleteAclsResult#all: internal error"
-        assert info.value.__cause__ is error
+        # Java wraps what ``get()`` threw: the ``ExecutionException``.
+        assert type(info.value.__cause__) is ExecutionError
+        assert info.value.__cause__.__cause__ is error
 
 
 # --------------------------------------------------------------------------------------
@@ -647,38 +689,38 @@ class TestDescribeUserScramCredentialsResult:
             _user("u", error_code=92, error_message="dup"),
             _user("v", credentials=[(9, 1)])])
         results = self._result(Sync, _done(Sync, data))
-        assert str(results.all().exception()) == "dup"
-        assert str(results.description(user_name="u").exception()) == "dup"
-        description = results.description(user_name="v").result()
+        assert str(_exception(results.all())) == "dup"
+        assert str(_exception(results.description(user_name="u"))) == "dup"
+        description = _result(results.description(user_name="v"))
         assert description.credential_infos()[0].mechanism() is ScramMechanism.UNKNOWN
 
     def test_null_error_message_gives_the_default(self) -> None:
         data = _ResponseData(results=[_user("u", error_code=92, error_message=None)])
         results = self._result(Sync, _done(Sync, data))
         expected = "A request illegally referred to the same resource twice."
-        assert str(results.all().exception()) == expected
-        assert str(results.description(user_name="u").exception()) == expected
+        assert str(_exception(results.all())) == expected
+        assert str(_exception(results.description(user_name="u"))) == expected
 
     def test_all_includes_resource_not_found_users(self) -> None:
         # Java's all() puts every result into the map, RESOURCE_NOT_FOUND ones included.
         data = _ResponseData(results=[_user("a"), _user("gone", error_code=91)])
         results = self._result(Sync, _done(Sync, data))
-        assert sorted(results.all().result()) == ["a", "gone"]
-        assert results.users().result() == ["a"]
+        assert sorted(_result(results.all())) == ["a", "gone"]
+        assert _result(results.users()) == ["a"]
 
     def test_pending(self) -> None:
         source = _new_future(Sync)
         results = self._result(Sync, source)
         users = results.users()
-        assert not users.done()
+        assert not users.is_done()
         _complete(source, _ResponseData(results=[_user("a")]))
-        assert users.result(timeout=1) == ["a"]
+        assert _result(users) == ["a"]
 
     async def test_async_awaits(self) -> None:
         results = self._result(Async, _done(Async, _ResponseData(results=[_user("a")])))
-        assert isinstance(results.users(), asyncio.Future)
-        assert (await results.users()) == ["a"]
-        assert list(await results.all()) == ["a"]
+        assert isinstance(results.users(), AsyncKafkaFuture)
+        assert (await _await(results.users())) == ["a"]
+        assert list(await _await(results.all())) == ["a"]
 
 
 # --------------------------------------------------------------------------------------
@@ -716,7 +758,6 @@ class TestFenceProducersResult:
 
         def unread() -> None:
             future: Any = _new_future(Async)
-            _mark_retrieved(future)  # the client's own per-key future
             _complete_with_error(future, error)
             FenceProducersResult._new(futures={key: future}, kind=Async).fenced_producers()
 
@@ -725,22 +766,7 @@ class TestFenceProducersResult:
         _complete_with_error(future, error)
         fenced = FenceProducersResult._new(futures={key: future}, kind=Async).fenced_producers()
         with pytest.raises(TopicAuthorizationError):
-            await fenced["a"]
-
-    def test_mark_retrieved_ignores_sync_and_cancelled(self) -> None:
-        sync_future: Any = _new_future(Sync)
-        _mark_retrieved(sync_future)
-        _complete_with_error(sync_future, RuntimeError("x"))
-        assert isinstance(sync_future.exception(), RuntimeError)
-
-        async def main() -> None:
-            cancelled: Any = _new_future(Async)
-            _mark_retrieved(cancelled)
-            cancelled.cancel()
-            await asyncio.sleep(0)
-            assert cancelled.cancelled()
-
-        asyncio.run(main())
+            await _await(fenced["a"])
 
     def test_unknown_transactional_id(self) -> None:
         result = FenceProducersResult._new(futures={}, kind=Sync)
@@ -838,14 +864,14 @@ class TestListGroupsResult:
     def test_pending_and_failed_source(self) -> None:
         source = _new_future(Sync)
         result = ListGroupsResult._new(future=source, kind=Sync)
-        assert not result.all().done()
+        assert not result.all().is_done()
         _complete(source, [_listing("a")])
-        assert result.valid().result(timeout=1) == [_listing("a")]
+        assert _result(result.valid()) == [_listing("a")]
         # As in Java, a failed source leaves the three futures pending.
         failed = ListGroupsResult._new(future=_failed(Sync, RuntimeError("x")), kind=Sync)
-        assert not failed.all().done()
-        assert not failed.valid().done()
-        assert not failed.errors().done()
+        assert not failed.all().is_done()
+        assert not failed.valid().is_done()
+        assert not failed.errors().is_done()
 
     async def test_unread_futures_do_not_log(self) -> None:
         error = GroupAuthorizationError(message="first")
@@ -863,20 +889,18 @@ class TestListGroupsResult:
 
         for body in (with_errors, failed_source, pending_source):
             assert await _unretrieved_logs(body) == [], body.__name__
-        # Control: an unread failed asyncio future the result did not build does log.
-        assert await _unretrieved_logs(lambda: _failed(Async, error)) != []
 
     async def test_read_futures_still_fail(self) -> None:
         error = GroupAuthorizationError(message="first")
         result = ListGroupsResult._new(future=_done(Async, [error]), kind=Async)
         with pytest.raises(GroupAuthorizationError):
-            await result.all()
-        assert result.all().exception() is error
+            await _await(result.all())
+        assert _error(result.all()) is error
 
     async def test_async_awaits(self) -> None:
         result = ListGroupsResult._new(future=_done(Async, [_listing("a")]), kind=Async)
-        assert (await result.all()) == [_listing("a")]
-        assert (await result.errors()) == []
+        assert (await _await(result.all())) == [_listing("a")]
+        assert (await _await(result.errors())) == []
 
 
 # --------------------------------------------------------------------------------------
@@ -903,7 +927,7 @@ class TestRemoveMembersFromConsumerGroupResult:
     def test_top_level_error_constructor(self) -> None:
         _complete_with_error(self.member_futures, GroupAuthorizationError(message="denied"))
         top_level_error_result = self._result()
-        assert isinstance(top_level_error_result.all().exception(), GroupAuthorizationError)
+        assert isinstance(_exception(top_level_error_result.all()), GroupAuthorizationError)
 
     def test_member_level_error_constructor(self) -> None:
         self._create_and_verify_member_level_error()
@@ -911,16 +935,16 @@ class TestRemoveMembersFromConsumerGroupResult:
     def test_member_missing_error_in_request_constructor(self) -> None:
         del self.errors_map[_to_member_identity(self.instance_two)]
         _complete(self.member_futures, self.errors_map)
-        assert self.member_futures.exception() is None
+        assert _exception(self.member_futures) is None
         missing_member_result = self._result()
-        all_error = missing_member_result.all().exception()
+        all_error = _exception(missing_member_result.all())
         assert isinstance(all_error, IllegalArgumentError)
         assert str(all_error) == (
             "Member \"MemberIdentity(memberId='', groupInstanceId='instance-2', reason=null)\" "
             "was not included in the removal response")
-        assert missing_member_result.member_result(member=self.instance_one).result() is None
+        assert _result(missing_member_result.member_result(member=self.instance_one)) is None
         assert isinstance(
-            missing_member_result.member_result(member=self.instance_two).exception(),
+            _exception(missing_member_result.member_result(member=self.instance_two)),
             IllegalArgumentError)
 
     def test_member_level_error_in_response_constructor(self) -> None:
@@ -938,18 +962,18 @@ class TestRemoveMembersFromConsumerGroupResult:
                       _to_member_identity(self.instance_two): None}
         no_error_result = self._result()
         _complete(self.member_futures, errors_map)
-        assert no_error_result.all().result() is None
-        assert no_error_result.member_result(member=self.instance_one).result() is None
-        assert no_error_result.member_result(member=self.instance_two).result() is None
+        assert _result(no_error_result.all()) is None
+        assert _result(no_error_result.member_result(member=self.instance_one)) is None
+        assert _result(no_error_result.member_result(member=self.instance_two)) is None
 
     def _create_and_verify_member_level_error(self) -> Any:
         _complete(self.member_futures, self.errors_map)
-        assert self.member_futures.exception() is None
+        assert _exception(self.member_futures) is None
         member_level_error_result = self._result()
-        assert isinstance(member_level_error_result.all().exception(), FencedInstanceIdError)
-        assert member_level_error_result.member_result(member=self.instance_one).result() is None
+        assert isinstance(_exception(member_level_error_result.all()), FencedInstanceIdError)
+        assert _result(member_level_error_result.member_result(member=self.instance_one)) is None
         assert isinstance(
-            member_level_error_result.member_result(member=self.instance_two).exception(),
+            _exception(member_level_error_result.member_result(member=self.instance_two)),
             FencedInstanceIdError)
         return member_level_error_result
 
@@ -959,7 +983,7 @@ class TestRemoveMembersFromConsumerGroupResult:
         result = RemoveMembersFromConsumerGroupResult._new(
             future=_done(Sync, {_MemberIdentity(member_id="m-0"): None, identity: error}),
             member_infos=(), kind=Sync)
-        all_error = result.all().exception()
+        all_error = _exception(result.all())
         assert type(all_error) is KafkaError
         assert str(all_error) == (
             "Encounter exception when trying to remove: "
@@ -971,12 +995,12 @@ class TestRemoveMembersFromConsumerGroupResult:
             "The method: memberResult is not applicable in 'removeAll' mode")
         ok = RemoveMembersFromConsumerGroupResult._new(
             future=_done(Sync, {identity: None}), member_infos=(), kind=Sync)
-        assert ok.all().result() is None
+        assert _result(ok.all()) is None
 
     async def test_async(self) -> None:
         result = RemoveMembersFromConsumerGroupResult._new(
             future=_done(Async, {_to_member_identity(self.instance_one): None}),
             member_infos={self.instance_one}, kind=Async)
-        assert isinstance(result.all(), asyncio.Future)
-        assert (await result.all()) is None
-        assert (await result.member_result(member=self.instance_one)) is None
+        assert isinstance(result.all(), AsyncKafkaFuture)
+        assert (await _await(result.all())) is None
+        assert (await _await(result.member_result(member=self.instance_one))) is None

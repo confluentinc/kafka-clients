@@ -13,14 +13,15 @@
 # limitations under the License.
 
 """The admin client's topic, cluster, config, log-dir, partition, record, election,
-reassignment and offset RPCs, without a broker:
+reassignment, offset and controller RPCs, without a broker:
 ``deleteTopics``, ``describeTopics``, ``describeCluster``, ``describeConfigs``,
 ``incrementalAlterConfigs``, ``alterReplicaLogDirs``, ``describeLogDirs``,
 ``describeReplicaLogDirs``, ``createPartitions``, ``deleteRecords``,
 ``electLeaders``, ``alterPartitionReassignments``, ``listPartitionReassignments``,
-``listOffsets`` and ``listConfigResources``, sync and async.
+``listOffsets``, ``listConfigResources`` and ``unregisterController``, sync and
+async.
 
-The ``KafkaAdminClientTest.java`` (Apache Kafka 4.3.1) tests of these RPCs, ported
+The ``KafkaAdminClientTest.java`` (Apache Kafka 4.4.0) tests of these RPCs, ported
 or skipped with the reason, are listed in the inventory of all its tests in
 ``test_admin_java_ports.py``'s module docstring, which also holds the ports that need
 no scripted broker (``testInvalidTopicNames``' ``deleteTopics`` / ``describeTopics``
@@ -29,21 +30,22 @@ ones are translated in the core, ``rust/src/admin/kafka_admin_client.rs``.
 
 The binding's own part is tested here: keyword-only signatures and the
 ``java_forms`` messages, the closed client, the plain values each RPC hands the
-extension for its options (read from the conversions, not from a broker), the
-results built from the core's per-key and whole-call errors, and the call timeout
-with the core's message.
+extension (read from the conversions, not from a broker), the setters each
+Options records and the extension runs, the value classes built from the plain
+values the extension's converters deliver, and every RPC returning at once with
+futures that fail later with the call timeout and the core's message.
 """
 
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Callable
 from typing import Any
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 import pytest
 
-import _confluentkafka as _lib  # type: ignore[import-not-found]
 from confluent_kafka import IllegalArgumentError, IllegalStateError
 from confluent_kafka.admin import (
     Admin,
@@ -77,13 +79,16 @@ from confluent_kafka.admin import (
     RecordsToDelete,
     ReplicaInfo,
     TopicDescription,
+    UnregisterControllerOptions,
 )
 from confluent_kafka.admin import _conversions
 from confluent_kafka.admin._futures import Async, Sync
 from confluent_kafka.common import (
     AclOperation,
+    AsyncKafkaFuture,
     ElectionType,
     IsolationLevel,
+    KafkaFuture,
     Node,
     TopicCollection,
     TopicPartition,
@@ -94,11 +99,12 @@ from confluent_kafka.common import (
 from confluent_kafka.common.config import ConfigResource
 from confluent_kafka.common.errors import (
     KafkaStorageError,
-    TopicAuthorizationError,
     UnknownServerError,
     UnknownTopicOrPartitionError,
 )
 from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
+
+from .admin_futures import assert_future_throws, async_assert_future_throws
 
 UNREACHABLE = {"bootstrap.servers": "localhost:1"}
 CLOSED = "Cannot accept new calls when AdminClient is closing."
@@ -119,18 +125,14 @@ def _timed_out(call: str) -> str:
     return "Timed out waiting for a node assignment. Call: " + call
 
 
-def _whole_call_error(message: str = "boom") -> tuple[int, int]:
-    """A ``(result_int, error_int)`` payload failed as a whole (an owned handle)."""
-    return 0, _lib.KafkaError_new(UnknownServerError._ffi_id, message)
-
-
 def _raw_error(error_class: type[BaseException], message: str) -> tuple[Any, ...]:
-    """A per-key error as a drain gives it (the borrowed form of ``from_ffi_error``)."""
+    """An error embedded in a delivered value (a log dir's, an election's), as the
+    extension's ``borrowed_error_to_py`` gives it."""
     return (error_class._ffi_id, message, 0, 0, None, 1, None)  # type: ignore[attr-defined]
 
 
-# Each RPC once, with a short call timeout: (Java call name in the core's message,
-# the call, the future to read). The sync and async tests share it.
+# Each RPC once, with a short call timeout: (name, Java call name in the core's
+# message, the call, the future to read). The sync and async tests share it.
 _CALLS: list[tuple[str, str, Callable[[Any], Any], Callable[[Any], Any]]] = [
     ("delete_topics", "deleteTopics",
      lambda a: a.delete_topics(topics=["t"], options=DeleteTopicsOptions(timeout_ms=SHORT)),
@@ -195,6 +197,10 @@ _CALLS: list[tuple[str, str, Callable[[Any], Any], Callable[[Any], Any]]] = [
      lambda a: a.list_config_resources(config_resource_types=(),
                                        options=ListConfigResourcesOptions(timeout_ms=SHORT)),
      lambda r: r.all()),
+    ("unregister_controller", "unregisterController",
+     lambda a: a.unregister_controller(controller_id=3,
+                                       options=UnregisterControllerOptions(timeout_ms=SHORT)),
+     lambda r: r.all()),
 ]
 
 
@@ -202,18 +208,17 @@ _CALLS: list[tuple[str, str, Callable[[Any], Any], Callable[[Any], Any]]] = [
 
 
 @pytest.mark.xfail(strict=True, reason=(
-    "core gap: the Rust core names the by-name describeTopics call 'describeTopics'; "
-    "Java's KafkaAdminClient sends it as 'describeTopicPartitions' "
-    "(KafkaAdminClient.java:2231)"))
+    "core gap: the Rust core's by-name describeTopics times out as 'listNodes' "
+    "(its first step); Java's KafkaAdminClient sends it as "
+    "'describeTopicPartitions' (KafkaAdminClient.java:2231)"))
 def test_describe_topics_by_name_times_out_with_java_call_name() -> None:
     with _admin() as admin:
         result = admin.describe_topics(topic_names=["t"],
                                        options=DescribeTopicsOptions(timeout_ms=SHORT))
         all_names = result.all_topic_names()
         assert all_names is not None
-        with pytest.raises(KafkaTimeoutError) as info:
-            all_names.result()
-        assert str(info.value) == _timed_out("describeTopicPartitions")
+        cause = assert_future_throws(all_names, KafkaTimeoutError)
+        assert str(cause) == _timed_out("describeTopicPartitions")
 
 
 # ---- signatures and forms ---------------------------------------------------
@@ -237,6 +242,7 @@ def test_positional_calls_raise_type_error() -> None:
             lambda: admin.list_partition_reassignments(None),  # type: ignore[misc]
             lambda: admin.list_offsets({}),  # type: ignore[misc]
             lambda: admin.list_config_resources((), ListConfigResourcesOptions()),  # type: ignore[call-overload]
+            lambda: admin.unregister_controller(1),  # type: ignore[misc]
         ]
         for call in calls:
             with pytest.raises(TypeError):
@@ -307,92 +313,71 @@ def test_calls_after_close_raise_illegal_state() -> None:
         admin.delete_topics(topics=TopicCollection.__new__(TopicCollection))
 
 
-# ---- options reach the extension --------------------------------------------
+# ---- the plain values each RPC hands the extension ---------------------------
 
 
 def test_delete_and_describe_topics_args() -> None:
     by_ids, keys = _conversions.topic_collection_target(["a", "b"], "deleteTopics")
     assert (by_ids, keys) == (False, ["a", "b"])
-    options = DeleteTopicsOptions(timeout_ms=7, retry_on_quota_violation=False)
-    assert _conversions.delete_topics_args(False, keys, options) == (["a", "b"], 7, False)
-    assert _conversions.delete_topics_args(False, keys, DeleteTopicsOptions()) == (
-        ["a", "b"], -1, True)
+    assert _conversions.delete_topics_args(False, keys) == (["a", "b"], False)
     topic_id = Uuid.random_uuid()
     by_ids, keys = _conversions.topic_collection_target(
         TopicCollection.of_topic_ids(topics=[topic_id]), "deleteTopics")
     assert (by_ids, keys) == (True, [topic_id])
-    assert _conversions.delete_topics_args(True, keys, options) == ([str(topic_id)], 7, False)
+    assert _conversions.delete_topics_args(True, keys) == ([str(topic_id)], True)
     names = TopicCollection.of_topic_names(topics=["x"])
     assert _conversions.topic_collection_target(names, "describeTopics") == (False, ["x"])
-    described = DescribeTopicsOptions(timeout_ms=9, include_authorized_operations=True,
-                                      partition_size_limit_per_response=5)
-    assert _conversions.describe_topics_args(True, [topic_id], described) == (
-        [str(topic_id)], 9, True, 5)
-    assert _conversions.describe_topics_args(False, ["x"], DescribeTopicsOptions()) == (
-        ["x"], -1, False, 2000)
+    assert _conversions.describe_topics_args(_conversions.DESCRIBE_TOPIC_ID_COLLECTION,
+                                             [topic_id]) == (2, [str(topic_id)])
+    assert _conversions.describe_topics_args(_conversions.DESCRIBE_TOPIC_NAMES, ["x"]) == (
+        0, ["x"])
+    assert _conversions.describe_topics_args(_conversions.DESCRIBE_TOPIC_NAME_COLLECTION,
+                                             ["x"]) == (1, ["x"])
 
 
 def test_cluster_and_config_args() -> None:
-    assert _conversions.describe_cluster_args(DescribeClusterOptions(
-        timeout_ms=3, include_authorized_operations=True, include_fenced_brokers=True)) == (
-        3, True, True)
-    assert _conversions.describe_cluster_args(DescribeClusterOptions()) == (-1, False, False)
     broker = ConfigResource(type=ConfigResource.Type.BROKER, name="1")
-    assert _conversions.describe_configs_args([RESOURCE, broker], DescribeConfigsOptions(
-        include_synonyms=True, include_documentation=True)) == (
-        [(2, "t"), (4, "1")], -1, True, True)
+    assert _conversions.describe_configs_args([RESOURCE, broker]) == ([(2, "t"), (4, "1")],)
     delete = AlterConfigOp(config_entry=ConfigEntry(name="cleanup.policy", value=None),
                            operation_type=AlterConfigOp.OpType.DELETE)
-    args = _conversions.incremental_alter_configs_args(
-        {RESOURCE: [SET_OP, delete], broker: []}, AlterConfigsOptions(validate_only=True))
-    assert args == ([(2, "t", "retention.ms", "1000", 0), (2, "t", "cleanup.policy", None, 1)],
-                    -1, True)
+    # A resource with no op crosses too, as Java sends it with no config.
+    args = _conversions.incremental_alter_configs_args({RESOURCE: [SET_OP, delete], broker: []})
+    assert args == ([(2, "t", [("retention.ms", "1000", 0), ("cleanup.policy", None, 1)]),
+                     (4, "1", [])],)
     assert _conversions.list_config_resources_args(
-        [ConfigResource.Type.GROUP, ConfigResource.Type.TOPIC],
-        ListConfigResourcesOptions(timeout_ms=4)) == ([32, 2], 4)
-    assert _conversions.list_config_resources_args((), ListConfigResourcesOptions()) == ([], -1)
+        [ConfigResource.Type.GROUP, ConfigResource.Type.TOPIC]) == ([32, 2],)
+    assert _conversions.list_config_resources_args(()) == ([],)
 
 
 def test_log_dir_and_partition_args() -> None:
-    assert _conversions.alter_replica_log_dirs_args(
-        {REPLICA: "/data"}, AlterReplicaLogDirsOptions(timeout_ms=8)) == (
-        [("t", 0, 1, "/data")], 8)
-    assert _conversions.describe_log_dirs_args([1, 2], DescribeLogDirsOptions()) == ([1, 2], -1)
-    assert _conversions.describe_replica_log_dirs_args(
-        [REPLICA], DescribeReplicaLogDirsOptions(timeout_ms=0)) == ([("t", 0, 1)], 0)
+    assert _conversions.alter_replica_log_dirs_args({REPLICA: "/data"}) == (
+        [("t", 0, 1, "/data")],)
+    assert _conversions.describe_log_dirs_args([1, 2]) == ([1, 2],)
+    assert _conversions.describe_replica_log_dirs_args([REPLICA]) == ([("t", 0, 1)],)
     args = _conversions.create_partitions_args(
         {"a": NewPartitions.increase_to(total_count=3),
          "b": NewPartitions.increase_to(total_count=2, new_assignments=[[1, 2]]),
-         "c": NewPartitions.increase_to(total_count=4, new_assignments=[])},
-        CreatePartitionsOptions(validate_only=True, retry_on_quota_violation=False))
-    assert args == ([("a", 3, None), ("b", 2, [[1, 2]]), ("c", 4, [])], -1, True, False)
-    assert _conversions.delete_records_args(
-        {TP: RecordsToDelete.before_offset(offset=-1)}, DeleteRecordsOptions(timeout_ms=1)) == (
-        [("t", 0, -1)], 1)
+         "c": NewPartitions.increase_to(total_count=4, new_assignments=[])})
+    assert args == ([("a", 3, None), ("b", 2, [[1, 2]]), ("c", 4, [])],)
+    assert _conversions.delete_records_args({TP: RecordsToDelete.before_offset(offset=-1)}) == (
+        [("t", 0, -1)],)
 
 
 def test_election_reassignment_and_offset_args() -> None:
     tp1 = TopicPartition(topic="u", partition=3)
-    assert _conversions.elect_leaders_args(ElectionType.UNCLEAN, None, ElectLeadersOptions()) == (
-        1, True, [], -1)
-    assert _conversions.elect_leaders_args(ElectionType.PREFERRED, [tp1],
-                                           ElectLeadersOptions(timeout_ms=5)) == (
-        0, False, [("u", 3)], 5)
+    assert _conversions.elect_leaders_args(ElectionType.UNCLEAN, None) == (1, None)
+    assert _conversions.elect_leaders_args(ElectionType.PREFERRED, [tp1]) == (0, [("u", 3)])
     # Java's electLeaders(type, emptySet) is not its null: no partition, not all.
-    assert _conversions.elect_leaders_args(ElectionType.PREFERRED, [],
-                                           ElectLeadersOptions())[1:3] == (False, [])
+    assert _conversions.elect_leaders_args(ElectionType.PREFERRED, []) == (0, [])
     assert _conversions.alter_partition_reassignments_args(
-        {TP: NewPartitionReassignment(target_replicas=[1, 2]), tp1: None},
-        AlterPartitionReassignmentsOptions(allow_replication_factor_change=False)) == (
-        [("t", 0, False, [1, 2]), ("u", 3, True, [])], -1, False)
-    assert _conversions.list_partition_reassignments_args(
-        None, ListPartitionReassignmentsOptions()) == (True, [], -1)
-    assert _conversions.list_partition_reassignments_args(
-        [tp1], ListPartitionReassignmentsOptions(timeout_ms=2)) == (False, [("u", 3)], 2)
+        {TP: NewPartitionReassignment(target_replicas=[1, 2]), tp1: None}) == (
+        [("t", 0, [1, 2]), ("u", 3, None)],)
+    assert _conversions.list_partition_reassignments_args(None) == (None,)
+    assert _conversions.list_partition_reassignments_args([tp1]) == ([("u", 3)],)
     args = _conversions.list_offsets_args(
         {TP: OffsetSpec.for_timestamp(timestamp=-2), tp1: OffsetSpec.earliest()},
         ListOffsetsOptions(isolation_level=IsolationLevel.READ_COMMITTED))
-    assert args == ([("t", 0, True, -2), ("u", 3, False, -2)], -1, 1)
+    assert args == ([("t", 0, True, -2), ("u", 3, False, -2)], 1)
 
 
 def test_offset_spec_values() -> None:
@@ -408,7 +393,81 @@ def test_offset_spec_values() -> None:
     assert _conversions.offset_spec_value(OffsetSpec()) == (False, -1)
 
 
-# ---- results from core data -------------------------------------------------
+# ---- the setters that ran reach the extension ---------------------------------
+
+
+_OPTIONS_WITH_EVERY_SETTER: list[tuple[str, Callable[[Any], Any], list[tuple[str, Any]]]] = [
+    ("delete_topics",
+     lambda a: a.delete_topics(topics=["t"], options=DeleteTopicsOptions(
+         timeout_ms=1, retry_on_quota_violation=False)),
+     [("timeout_ms", 1), ("retry_on_quota_violation", False)]),
+    ("describe_topics",
+     lambda a: a.describe_topics(topic_names=["t"], options=DescribeTopicsOptions(
+         timeout_ms=1, include_authorized_operations=True, partition_size_limit_per_response=5)),
+     [("timeout_ms", 1), ("include_authorized_operations", True),
+      ("partition_size_limit_per_response", 5)]),
+    ("describe_cluster",
+     lambda a: a.describe_cluster(options=DescribeClusterOptions(
+         timeout_ms=1, include_authorized_operations=True, include_fenced_brokers=True)),
+     [("timeout_ms", 1), ("include_authorized_operations", True),
+      ("include_fenced_brokers", True)]),
+    ("describe_configs",
+     lambda a: a.describe_configs(resources=[RESOURCE], options=DescribeConfigsOptions(
+         timeout_ms=1, include_synonyms=True, include_documentation=True)),
+     [("timeout_ms", 1), ("include_synonyms", True), ("include_documentation", True)]),
+    ("incremental_alter_configs",
+     lambda a: a.incremental_alter_configs(configs={RESOURCE: [SET_OP]},
+                                           options=AlterConfigsOptions(timeout_ms=1,
+                                                                       validate_only=True)),
+     [("timeout_ms", 1), ("validate_only", True)]),
+    ("create_partitions",
+     lambda a: a.create_partitions(
+         new_partitions={"t": NewPartitions.increase_to(total_count=3)},
+         options=CreatePartitionsOptions(timeout_ms=1, validate_only=True,
+                                         retry_on_quota_violation=False)),
+     [("timeout_ms", 1), ("validate_only", True), ("retry_on_quota_violation", False)]),
+    ("alter_partition_reassignments",
+     lambda a: a.alter_partition_reassignments(
+         reassignments={TP: None},
+         options=AlterPartitionReassignmentsOptions(timeout_ms=1,
+                                                    allow_replication_factor_change=False)),
+     [("timeout_ms", 1), ("allow_replication_factor_change", False)]),
+    ("list_offsets",
+     lambda a: a.list_offsets(
+         topic_partition_offsets={TP: OffsetSpec.latest()},
+         options=ListOffsetsOptions(isolation_level=IsolationLevel.READ_COMMITTED).timeout_ms(
+             timeout_ms=1)),
+     [("timeout_ms", 1)]),
+    ("unregister_controller",
+     lambda a: a.unregister_controller(controller_id=1,
+                                       options=UnregisterControllerOptions(timeout_ms=1)),
+     [("timeout_ms", 1)]),
+]
+
+
+@pytest.mark.parametrize("name, run, ran", _OPTIONS_WITH_EVERY_SETTER,
+                         ids=[c[0] for c in _OPTIONS_WITH_EVERY_SETTER])
+def test_every_setter_reaches_the_extension(name: str, run: Callable[[Any], Any],
+                                            ran: list[tuple[str, Any]]) -> None:
+    """Each Options records the setters that ran, and the extension runs each on
+    the C options (an unknown one would raise ``RuntimeError``)."""
+    seen: list[list[tuple[str, Any]]] = []
+    with _admin() as admin:
+        call = admin._call
+
+        def recording(entry: Any, *args: Any) -> Any:
+            seen.append(args[-1])
+            return call(entry, *args)
+
+        admin._call = recording  # type: ignore[method-assign]
+        try:
+            run(admin)
+        finally:
+            del admin._call
+    assert seen == [ran]
+
+
+# ---- the value classes from the extension's plain values ----------------------
 
 
 def test_topic_description_from_core_data() -> None:
@@ -416,9 +475,8 @@ def test_topic_description_from_core_data() -> None:
     leader = (1, "h1", 9092, "r1")
     follower = (2, "h2", 9093, None)
     partition = (0, leader, [leader, follower], [leader], [follower], [])
-    error, description = _conversions._topic_description(
-        (None, ("t", str(topic_id), 1, [partition, (1, None, [], [], None, None)], [3, 4])))
-    assert error is None
+    description = _conversions._topic_description(
+        ("t", str(topic_id), 1, [partition, (1, None, [], [], None, None)], [3, 4]))
     assert description == TopicDescription(
         name="t", internal=True,
         partitions=[TopicPartitionInfo(
@@ -432,20 +490,26 @@ def test_topic_description_from_core_data() -> None:
     assert description.topic_id() == topic_id
     assert description.partitions()[1].elr() is None
     # Java's null authorizedOperations (not requested) stays None.
-    _, unrequested = _conversions._topic_description((None, ("t", str(topic_id), 0, [], None)))
+    unrequested = _conversions._topic_description(("t", str(topic_id), 0, [], None))
     assert unrequested.authorized_operations() is None
-    raw = _raw_error(UnknownTopicOrPartitionError, "unknown")
-    error, value = _conversions._topic_description((raw, None))
-    assert type(error) is UnknownTopicOrPartitionError and value is None
+
+
+def test_cluster_nodes_carry_the_fenced_flag() -> None:
+    """``KafkaAdminClient.describeCluster`` builds ``new Node(id, host, port, rack,
+    isFenced)``."""
+    nodes = _conversions._cluster_nodes([(1, "h", 9092, None, True), (2, "g", 9093, "r", False)])
+    assert nodes == [Node(id=1, host="h", port=9092, rack=None, is_fenced=True),
+                     Node(id=2, host="g", port=9093, rack="r", is_fenced=False)]
+    assert nodes[0].is_fenced() and not nodes[1].is_fenced()
+    assert _conversions._cluster_controller(None) is None
 
 
 def test_config_from_core_data() -> None:
-    error, config = _conversions._described_config((None, [
+    config = _conversions.config_from_rows([
         ("retention.ms", "1000", 0, 0, 1, "DYNAMIC_TOPIC_CONFIG", "LONG", "how long",
          [("retention.ms", "1000", "DYNAMIC_TOPIC_CONFIG"),
           ("log.retention.ms", None, "DEFAULT_CONFIG")]),
-        ("password", None, 1, 1, 0, "DEFAULT_CONFIG", "PASSWORD", None, [])]))
-    assert error is None
+        ("password", None, 1, 1, 0, "DEFAULT_CONFIG", "PASSWORD", None, [])])
     assert isinstance(config, Config)
     entry = config.get(name="retention.ms")
     assert entry is not None
@@ -540,14 +604,14 @@ def test_config_future_hook_names_only_config_accessors() -> None:
 
 
 def test_log_dirs_from_core_data() -> None:
-    raw = {"/a": (None, 100, 40, [("t", 0, 10, 0, 0), ("t", 1, 20, 5, 1)]),
-           "/b": (_raw_error(KafkaStorageError, "offline"), -1, -1, [])}
-    error, dirs = _conversions._log_dir_descriptions((None, raw))
-    assert error is None
+    raw = {"/a": (None, 100, 40, [("t", 0, 10, 0, 0), ("t", 1, 20, 5, 1)], False),
+           "/b": (_raw_error(KafkaStorageError, "offline"), -1, -1, [], True)}
+    dirs = _conversions._log_dir_descriptions(raw)
     assert set(dirs) == {"/a", "/b"}
     first: LogDirDescription = dirs["/a"]
     assert first.error() is None
     assert first.total_bytes() == 100 and first.usable_bytes() == 40
+    assert first.is_cordoned() is False
     infos = first.replica_infos()
     assert {tp: (i.size(), i.offset_lag(), i.is_future()) for tp, i in infos.items()} == {
         TopicPartition(topic="t", partition=0): (10, 0, False),
@@ -556,32 +620,29 @@ def test_log_dirs_from_core_data() -> None:
     offline: LogDirDescription = dirs["/b"]
     assert type(offline.error()) is KafkaStorageError
     assert offline.total_bytes() is None and offline.usable_bytes() is None
-    # A log-dir error that is no ApiError cannot sit in LogDirDescription.error()
+    # ``kafka_admin_LogDirDescription_is_cordoned``: Java's five-argument form.
+    assert offline.is_cordoned() is True
+    # A log-dir error that is no ApiError cannot sit in LogDirDescription.error(),
     # so the broker's future fails with it.
     not_api = (UnknownServerError._ffi_id, "bare", 0, 0, None, 0, None)
-    error, dirs = _conversions._log_dir_descriptions((None, {"/c": (not_api, 0, 0, [])}))
-    assert type(error).__name__ == "KafkaError" and dirs is None
+    with pytest.raises(Exception) as info:
+        _conversions._log_dir_descriptions({"/c": (not_api, 0, 0, [], False)})
+    assert type(info.value).__name__ == "KafkaError"
 
 
 def test_replica_log_dir_info_offsets_and_records_from_core_data() -> None:
-    error, info = _conversions._replica_log_dir_info((None, ("/a", 0, "/b", 7)))
-    assert error is None
+    info = _conversions._replica_log_dir_info(("/a", 0, "/b", 7))
     assert isinstance(info, DescribeReplicaLogDirsResult.ReplicaLogDirInfo)
     assert (info.current_replica_log_dir(), info.current_replica_offset_lag(),
             info.future_replica_log_dir(), info.future_replica_offset_lag()) == ("/a", 0, "/b", 7)
-    error, missing = _conversions._replica_log_dir_info((None, (None, -1, None, -1)))
+    missing = _conversions._replica_log_dir_info((None, -1, None, -1))
     assert missing.current_replica_log_dir() is None
-    error, listed = _conversions._listed_offset((None, (12, 34, None)))
+    listed = _conversions._listed_offset((12, 34, None))
     assert isinstance(listed, ListOffsetsResult.ListOffsetsResultInfo)
     assert (listed.offset(), listed.timestamp(), listed.leader_epoch()) == (12, 34, None)
-    error, listed = _conversions._listed_offset((None, (12, 34, 5)))
-    assert listed.leader_epoch() == 5
-    error, deleted = _conversions._deleted_records((None, 9))
-    assert error is None and type(deleted) is DeletedRecords
-    assert deleted.low_watermark() == 9
-    error, deleted = _conversions._deleted_records(
-        (_raw_error(TopicAuthorizationError, "Not authorized to access topics: [t]"), -1))
-    assert type(error) is TopicAuthorizationError and deleted is None
+    assert _conversions._listed_offset((12, 34, 5)).leader_epoch() == 5
+    deleted = _conversions._deleted_records(9)
+    assert type(deleted) is DeletedRecords and deleted.low_watermark() == 9
     reassignments = _conversions._reassignments({("t", 0): ([1, 2, 3], [3], [1])})
     assert set(reassignments) == {TP}
     assert type(reassignments[TP]) is PartitionReassignment
@@ -592,68 +653,24 @@ def test_replica_log_dir_info_offsets_and_records_from_core_data() -> None:
     assert elections[TP] is None
     assert type(elections[TopicPartition(topic="u", partition=1)]) is (
         UnknownTopicOrPartitionError)
+    resources = _conversions._config_resources([(2, "t"), (4, "1")])
+    assert resources == [RESOURCE, ConfigResource(type=ConfigResource.Type.BROKER, name="1")]
 
 
-def test_whole_call_error_fails_every_requested_key() -> None:
-    """A call the core rejects as a whole (``error_int`` set) fails every future of its
-    result with that error, keyed as requested (Java's ``completeAllExceptionally``)."""
-    topic_id = Uuid.random_uuid()
-    deleted = _conversions.delete_topics_result(True, [topic_id], _whole_call_error(), Sync)
-    assert deleted.topic_name_values() is None
-    by_id = deleted.topic_id_values()
-    assert by_id is not None and set(by_id) == {topic_id}
-    with pytest.raises(UnknownServerError, match="boom"):
-        by_id[topic_id].result()
-    described = _conversions.describe_topics_result(False, ["t"], _whole_call_error(), Sync)
-    assert described.topic_id_values() is None
-    configs = _conversions.describe_configs_result([RESOURCE], _whole_call_error(), Sync)
-    assert set(configs.values()) == {RESOURCE}
-    altered = _conversions.incremental_alter_configs_result([RESOURCE], _whole_call_error(),
-                                                            Sync)
-    assert set(altered.values()) == {RESOURCE}
-    replicas = _conversions.alter_replica_log_dirs_result([REPLICA], _whole_call_error(), Sync)
-    assert set(replicas.values()) == {REPLICA}
-    log_dirs = _conversions.describe_log_dirs_result([1, 2], _whole_call_error(), Sync)
-    assert set(log_dirs.descriptions()) == {1, 2}
-    replica_dirs = _conversions.describe_replica_log_dirs_result([REPLICA], _whole_call_error(),
-                                                                 Sync)
-    assert set(replica_dirs.values()) == {REPLICA}
-    partitions = _conversions.create_partitions_result(["t"], _whole_call_error(), Sync)
-    assert set(partitions.values()) == {"t"}
-    records = _conversions.delete_records_result([TP], _whole_call_error(), Sync)
-    assert set(records.low_watermarks()) == {TP}
-    reassigned = _conversions.alter_partition_reassignments_result([TP], _whole_call_error(),
-                                                                   Sync)
-    assert set(reassigned.values()) == {TP}
-    offsets = _conversions.list_offsets_result([TP], _whole_call_error(), Sync)
-    with pytest.raises(UnknownServerError, match="boom"):
-        offsets.partition_result(partition=TP).result()
-    for single in (_conversions.elect_leaders_result(_whole_call_error(), Sync).partitions(),
-                   _conversions.list_partition_reassignments_result(
-                       _whole_call_error(), Sync).reassignments(),
-                   _conversions.list_config_resources_result(_whole_call_error(), Sync).all()):
-        with pytest.raises(UnknownServerError, match="boom"):
-            single.result()
-    cluster = _conversions.describe_cluster_result(_whole_call_error(), Sync)
-    for future in (cluster.nodes(), cluster.controller(), cluster.cluster_id(),
-                   cluster.authorized_operations()):
-        with pytest.raises(UnknownServerError, match="boom"):
-            future.result()
-
-
-# ---- the call timeout, sync and async ---------------------------------------
+# ---- returned at once, failing later with the call timeout --------------------
 
 
 @pytest.mark.parametrize("name, call, run, future", _CALLS, ids=[c[0] for c in _CALLS])
 def test_call_fails_with_the_call_timeout(name: str, call: str, run: Callable[[Any], Any],
                                           future: Callable[[Any], Any]) -> None:
     with _admin() as admin:
+        started = time.monotonic()
         result = run(admin)
+        assert time.monotonic() - started < 1
         outcome = future(result)
-        assert outcome.done()
-        with pytest.raises(KafkaTimeoutError) as info:
-            outcome.result()
-        assert str(info.value) == _timed_out(call)
+        assert isinstance(outcome, KafkaFuture)
+        cause = assert_future_throws(outcome, KafkaTimeoutError)
+        assert str(cause) == _timed_out(call)
 
 
 def test_per_key_futures_are_keyed_as_requested() -> None:
@@ -663,6 +680,9 @@ def test_per_key_futures_are_keyed_as_requested() -> None:
                                       options=DeleteTopicsOptions(timeout_ms=SHORT))
         assert deleted.topic_name_values() is None
         assert set(deleted.topic_id_values() or {}) == {topic_id}
+        by_name = admin.delete_topics(topics=["a"], options=DeleteTopicsOptions(timeout_ms=SHORT))
+        assert by_name.topic_id_values() is None
+        assert set(by_name.topic_name_values() or {}) == {"a"}
         described = admin.describe_topics(
             topics=TopicCollection.of_topic_names(topics=["a", "b"]),
             options=DescribeTopicsOptions(timeout_ms=SHORT))
@@ -671,13 +691,21 @@ def test_per_key_futures_are_keyed_as_requested() -> None:
         configs = admin.describe_configs(resources=[RESOURCE],
                                          options=DescribeConfigsOptions(timeout_ms=SHORT))
         assert set(configs.values()) == {RESOURCE}
+        altered = admin.incremental_alter_configs(configs={RESOURCE: []},
+                                                  options=AlterConfigsOptions(timeout_ms=SHORT))
+        assert set(altered.values()) == {RESOURCE}
         replicas = admin.describe_replica_log_dirs(
             replicas=[REPLICA], options=DescribeReplicaLogDirsOptions(timeout_ms=SHORT))
         assert set(replicas.values()) == {REPLICA}
+        log_dirs = admin.describe_log_dirs(brokers=[1, 2],
+                                           options=DescribeLogDirsOptions(timeout_ms=SHORT))
+        assert set(log_dirs.descriptions()) == {1, 2}
+        records = admin.delete_records(records_to_delete={TP: RecordsToDelete.before_offset(
+            offset=1)}, options=DeleteRecordsOptions(timeout_ms=SHORT))
+        assert set(records.low_watermarks()) == {TP}
         offsets = admin.list_offsets(topic_partition_offsets={TP: OffsetSpec.earliest()},
                                      options=ListOffsetsOptions().timeout_ms(timeout_ms=SHORT))
-        with pytest.raises(KafkaTimeoutError):
-            offsets.partition_result(partition=TP).result()
+        assert_future_throws(offsets.partition_result(partition=TP), KafkaTimeoutError)
 
 
 def test_default_options_use_default_api_timeout() -> None:
@@ -693,101 +721,59 @@ def test_default_options_use_default_api_timeout() -> None:
                                         partitions=None).partitions(),
             lambda: admin.list_partition_reassignments(partitions=[TP]).reassignments(),
             lambda: admin.list_config_resources().all(),
+            lambda: admin.unregister_controller(controller_id=1).all(),
         ]
         for short_form in short_forms:
-            with pytest.raises(KafkaTimeoutError):
-                short_form().result()
+            assert_future_throws(short_form(), KafkaTimeoutError)
 
 
-def test_free_functions_free_their_own_payloads() -> None:
-    """Each ``free_x`` frees a real payload of its own RPC (the late result of an
-    interrupted call), through that RPC's drain."""
-    frees = {
-        "delete_topics": _conversions.free_delete_topics,
-        "delete_topics_by_id": _conversions.free_delete_topics,
-        "describe_topics_by_id": _conversions.free_describe_topics,
-        "describe_cluster": _conversions.free_describe_cluster,
-        "describe_configs": _conversions.free_describe_configs,
-        "incremental_alter_configs": _conversions.free_incremental_alter_configs,
-        "alter_replica_log_dirs": _conversions.free_alter_replica_log_dirs,
-        "describe_log_dirs": _conversions.free_describe_log_dirs,
-        "describe_replica_log_dirs": _conversions.free_describe_replica_log_dirs,
-        "create_partitions": _conversions.free_create_partitions,
-        "delete_records": _conversions.free_delete_records,
-        "elect_leaders": _conversions.free_elect_leaders,
-        "alter_partition_reassignments": _conversions.free_alter_partition_reassignments,
-        "list_partition_reassignments": _conversions.free_list_partition_reassignments,
-        "list_offsets": _conversions.free_list_offsets,
-        "list_config_resources": _conversions.free_list_config_resources,
-    }
-    assert set(frees) == {c[0] for c in _CALLS}
-    with _admin() as admin:
-        real_wait_for = admin._wait_for
-        for name, _call, run, _future in _CALLS:
-            raw: list[Any] = []
-
-            def keep(submit: Any, free: Any) -> Any:
-                raw.append(real_wait_for(submit, lambda payload: None))
-                raise _Stop
-
-            admin._wait_for = keep  # type: ignore[method-assign]
-            try:
-                with pytest.raises(_Stop):
-                    run(admin)
-            finally:
-                del admin._wait_for
-            frees[name](raw[0])
-
-
-class _Stop(Exception):
-    pass
+# ---- the async peers --------------------------------------------------------
 
 
 async def test_async_calls_fail_with_the_call_timeout() -> None:
     async with AsyncAdmin.create(configs=UNREACHABLE) as admin:
         for name, call, run, future in _CALLS:
-            result = await run(admin)
+            result = run(admin)
             outcome = future(result)
-            assert isinstance(outcome, asyncio.Future) and outcome.done(), name
-            with pytest.raises(KafkaTimeoutError) as info:
-                await outcome
-            assert str(info.value) == _timed_out(call), name
-        described = await admin.describe_topics(topic_names=["t"],
-                                                options=DescribeTopicsOptions(timeout_ms=SHORT))
+            assert isinstance(outcome, AsyncKafkaFuture), name
+            cause = await async_assert_future_throws(outcome, KafkaTimeoutError)
+            assert str(cause) == _timed_out(call), name
+        described = admin.describe_topics(topic_names=["t"],
+                                          options=DescribeTopicsOptions(timeout_ms=SHORT))
         names = described.topic_name_values()
         assert names is not None
-        with pytest.raises(KafkaTimeoutError):
-            await names["t"]
+        await async_assert_future_throws(names["t"], KafkaTimeoutError)
 
 
 async def test_async_signatures_forms_and_closed() -> None:
     admin = AsyncAdmin.create(configs=UNREACHABLE)
     with pytest.raises(TypeError):
-        await admin.delete_topics(["t"])  # type: ignore[call-overload]
+        admin.delete_topics(["t"])  # type: ignore[call-overload]
     with pytest.raises(TypeError):
-        await admin.list_offsets({})  # type: ignore[misc]
+        admin.list_offsets({})  # type: ignore[misc]
     with pytest.raises(IllegalArgumentError) as info:
-        await admin.describe_topics()  # type: ignore[call-overload]
+        admin.describe_topics()  # type: ignore[call-overload]
     assert str(info.value).endswith("; got ()")
     with pytest.raises(IllegalArgumentError) as info:
-        await admin.list_config_resources(  # type: ignore[call-overload]
+        admin.list_config_resources(  # type: ignore[call-overload]
             options=ListConfigResourcesOptions())
     assert str(info.value) == ("list_config_resources() takes one of "
                                "(config_resource_types, options), (); got (options)")
     await admin.close()
     for _name, _call, run, _future in _CALLS:
         with pytest.raises(IllegalStateError) as closed:
-            await run(admin)
+            run(admin)
         assert str(closed.value) == CLOSED
 
 
-async def test_async_results_hold_asyncio_futures() -> None:
+async def test_async_cluster_futures() -> None:
     async with AsyncAdmin.create(configs=UNREACHABLE) as admin:
-        cluster = await admin.describe_cluster(options=DescribeClusterOptions(timeout_ms=SHORT))
+        cluster = admin.describe_cluster(options=DescribeClusterOptions(timeout_ms=SHORT))
         for future in (cluster.nodes(), cluster.controller(), cluster.cluster_id(),
                        cluster.authorized_operations()):
-            assert isinstance(future, asyncio.Future)
-            assert isinstance(future.exception(), KafkaTimeoutError)
-    whole = _conversions.describe_configs_result([RESOURCE], _whole_call_error(), Async)
-    with pytest.raises(UnknownServerError):
-        await whole.values()[RESOURCE]
+            assert isinstance(future, AsyncKafkaFuture)
+        results = await asyncio.gather(
+            *(async_assert_future_throws(f, KafkaTimeoutError)
+              for f in (cluster.nodes(), cluster.controller(), cluster.cluster_id(),
+                        cluster.authorized_operations())))
+        assert all(str(r) == _timed_out("listNodes") for r in results)

@@ -25,7 +25,6 @@ Java tests of the reference and hand-written classes are translated in
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import importlib
 import re
 from collections.abc import Awaitable, Callable
@@ -59,8 +58,10 @@ from confluent_kafka.admin import (
     TerminateTransactionResult,
     UpdateFeaturesResult,
 )
+from confluent_kafka import ExecutionError
 from confluent_kafka.admin._futures import Async, Sync
-from confluent_kafka.common import TopicPartition
+from confluent_kafka.common import AsyncKafkaFuture, KafkaFuture, TopicPartition
+from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
 KINDS = [Sync, Async]
@@ -73,32 +74,42 @@ def _run(kind: type[Sync] | type[Async], body: Callable[[], Awaitable[None]]) ->
 
 
 def _pending(kind: type[Sync] | type[Async]) -> Any:
-    if kind is Async:
-        return asyncio.get_running_loop().create_future()
-    return concurrent.futures.Future()
+    """Java's ``new KafkaFutureImpl<>()`` of the kind: a future over a
+    ``_KafkaFutureImpl``, completed through it (:func:`_complete`)."""
+    return kind._FUTURE._of_impl(_KafkaFutureImpl())
+
+
+def _complete(future: Any, value: Any) -> None:
+    future._impl.complete(value)
 
 
 def _done(kind: type[Sync] | type[Async], value: Any) -> Any:
     future = _pending(kind)
-    future.set_result(value)
+    _complete(future, value)
     return future
 
 
 def _failed(kind: type[Sync] | type[Async], error: BaseException) -> Any:
     future = _pending(kind)
-    future.set_exception(error)
+    future._impl.complete_with_error(error)
     return future
 
 
 async def _get(future: Any) -> Any:
-    if isinstance(future, asyncio.Future):
-        return await asyncio.wait_for(future, 1)
-    assert isinstance(future, concurrent.futures.Future)
-    return future.result(timeout=1)
+    """The future's value, or its failure raised as it is (the cause of ``get()``'s
+    ``ExecutionError``)."""
+    try:
+        if isinstance(future, AsyncKafkaFuture):
+            return await future.get(timeout=1)
+        assert isinstance(future, KafkaFuture)
+        return future.get(timeout=1)
+    except ExecutionError as error:
+        assert error.__cause__ is not None
+        raise error.__cause__ from None
 
 
 def _assert_kind(kind: type[Sync] | type[Async], future: Any) -> None:
-    expected = asyncio.Future if kind is Async else concurrent.futures.Future
+    expected = AsyncKafkaFuture if kind is Async else KafkaFuture
     assert isinstance(future, expected), type(future)
 
 
@@ -229,19 +240,19 @@ def test_map_of_futures_and_all(cls: type, getter: str | None, keyword: str,
 
         # No keys: all() is already complete.
         empty = cls._new(**{keyword: {}}, kind=kind)
-        assert empty.all().done()
+        assert empty.all().is_done()
         assert await _get(empty.all()) is None
 
     _run(kind, body)
 
 
 def test_all_waits_for_pending_futures() -> None:
-    pending: concurrent.futures.Future[None] = concurrent.futures.Future()
+    pending = _pending(Sync)
     result = CreateAclsResult._new(futures={"a": pending}, kind=Sync)
     everything = result.all()
-    assert not everything.done()
-    pending.set_result(None)
-    assert everything.result(timeout=1) is None
+    assert not everything.is_done()
+    _complete(pending, None)
+    assert everything.get(timeout=1) is None
 
 
 # -- single stored futures -------------------------------------------------------
@@ -375,11 +386,11 @@ def test_elect_leaders_all(kind: type[Sync] | type[Async]) -> None:
 
 
 def test_elect_leaders_all_completes_later() -> None:
-    source: concurrent.futures.Future[Any] = concurrent.futures.Future()
+    source = _pending(Sync)
     everything = ElectLeadersResult._new(election_future=source, kind=Sync).all()
-    assert not everything.done()
-    source.set_result({})
-    assert everything.result(timeout=1) is None
+    assert not everything.is_done()
+    _complete(source, {})
+    assert everything.get(timeout=1) is None
 
 
 @pytest.mark.parametrize("kind", KINDS, ids=["sync", "async"])
@@ -398,9 +409,9 @@ def test_list_config_resources_all(kind: type[Sync] | type[Async]) -> None:
             await _get(failed.all())
 
         cancelled = _pending(kind)
-        cancelled.cancel()
+        cancelled.cancel(may_interrupt_if_running=True)
         relayed = ListConfigResourcesResult._new(future=cancelled, kind=kind).all()
-        assert relayed.cancelled()
+        assert relayed.is_cancelled()
 
     _run(kind, body)
 
@@ -420,13 +431,12 @@ def test_every_generated_module_has_a_stub() -> None:
 # -- maps of derived futures (CreateTopicsResult.values()) ----------------------------
 
 def test_values_unread_failed_topic_logs_nothing() -> None:
-    """Each derived per-topic future of ``values()`` is marked retrieved, as the client
-    marks its own per-key futures: an unread failed topic does not make asyncio log
-    "Future exception was never retrieved" (Java logs nothing); a reader still gets the
-    error."""
+    """Each per-topic future of ``values()`` is a dependant of the stored one
+    (Java's ``thenApply(v -> null)``): an unread failed topic does not make
+    asyncio log "Future exception was never retrieved" (Java logs nothing); a
+    reader still gets the error."""
     import gc
 
-    from confluent_kafka.admin._futures import _mark_retrieved
     from confluent_kafka.admin.create_topics_result import CreateTopicsResult
 
     reports: list[dict[str, Any]] = []
@@ -434,7 +444,6 @@ def test_values_unread_failed_topic_logs_nothing() -> None:
     async def body() -> None:
         asyncio.get_running_loop().set_exception_handler(lambda loop, ctx: reports.append(ctx))
         failed = _failed(Async, RuntimeError("boom"))
-        _mark_retrieved(failed)
         result = CreateTopicsResult._new(futures={"t": failed, "u": _done(Async, None)}, kind=Async)
         values = result.values()
         _assert_kind(Async, values["t"])
