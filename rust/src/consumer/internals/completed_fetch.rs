@@ -463,7 +463,7 @@ impl RecordStream {
         self.record.advance(consumed.min(self.record.len()));
     }
 
-    /// Whether any bytes follow the records read so far: Java's
+    /// Whether any bytes follow the record last read, consumed or not: Java's
     /// `ensureNoneRemaining`, which reads one more byte to find out
     /// (`DefaultRecordBatch.java:657-663`). Reaching the end of the stream
     /// also makes the codec verify its trailing checksum, where it has one.
@@ -472,9 +472,6 @@ impl RecordStream {
     ///
     /// The stream failed before its end, with Java's text for that.
     fn has_remaining(&mut self) -> Result<bool, InvalidRecordError> {
-        if !self.record.is_empty() {
-            return Ok(true);
-        }
         if !self.eof && self.error.is_none() {
             match self.reader.fill_buf() {
                 Ok([]) => self.eof = true,
@@ -1157,18 +1154,6 @@ impl CompletedFetch {
                 None => true,
             };
             if needs_new_batch {
-                // Declared count < actual ("too little"): we consumed all
-                // `records_count` declared records but the batch's record
-                // section still has unconsumed bytes. Java's
-                // `DefaultRecordBatch.RecordIterator` validates this via
-                // `ensureNoneRemaining()` and throws `InvalidRecordException`
-                // ("...records still remaining"), independent of CRC. Mirror
-                // that here rather than silently dropping the trailing
-                // records. For an uncompressed batch the check is O(1) — it
-                // compares the already-walked byte offset against the
-                // (already-known) record section length, with no re-walk or
-                // copy; a compressed batch's stream is read one byte further.
-                self.ensure_current_batch_fully_consumed()?;
                 self.maybe_close_record_stream();
                 if !self.load_next_batch(config)? {
                     // No more batches. Advance to the next-after-last-batch
@@ -1215,6 +1200,11 @@ impl CompletedFetch {
                 // gate is therefore a no-op at the record level.
                 (record.offset(), record.size_in_bytes() as usize, batch_meta.is_control_batch)
             };
+
+            // Declared count < actual ("too little"): bytes follow the last
+            // record the batch declares. Checked as that record is read, before
+            // it is skipped or returned, as Java checks it.
+            self.ensure_none_remaining(record_bytes_consumed)?;
 
             // Skip out-of-range records.
             if record_offset < self.next_fetch_offset {
@@ -1266,47 +1256,48 @@ impl CompletedFetch {
         }
     }
 
-    /// Validates that the currently-loaded batch, whose declared record count
-    /// has just been exhausted (`records_remaining <= 0`), has no record bytes
-    /// left over.
+    /// Validates, when the current record is the last its batch declares, that
+    /// no record bytes follow it. `record_size` is the current record's length.
     ///
-    /// This is the analog of Java `DefaultRecordBatch.RecordIterator`'s
-    /// `ensureNoneRemaining()`, which throws `InvalidRecordException`
-    /// ("Incorrect declared batch size, records still remaining") when the
-    /// declared record count is *fewer* than the records actually present
-    /// (the "too little" direction). Without this check the cursor would
-    /// silently drop the trailing valid records and advance to the next
-    /// batch. Java performs this validation independently of CRC, so it must
-    /// fire even under `check.crcs=false`.
+    /// This is Java's `ensureNoneRemaining()`, which
+    /// `DefaultRecordBatch.RecordIterator.next()` runs as it reads a batch's
+    /// last declared record, throwing `InvalidRecordException` ("Incorrect
+    /// declared batch size, records still remaining") instead of returning
+    /// that record when the declared count is *fewer* than the records
+    /// actually present (`DefaultRecordBatch.java:607-621`). So the record is
+    /// withheld and the position stays on it: the records before it are
+    /// returned and the error comes on the next call, as Java's `fetchRecords`
+    /// returns the records it has (`CompletedFetch.java:299-305`), and seeking
+    /// past the record lands on the batch's next offset. Java runs the check
+    /// whether the record is then skipped or returned, independently of CRC,
+    /// so it must fire even under `check.crcs=false`; and never for a batch
+    /// declaring no records, whose iterator reads nothing. Without it the
+    /// cursor would silently drop the trailing records.
     ///
-    /// For an uncompressed batch this is O(1): it compares the already-walked
-    /// `record_byte_offset` against the (already-known) length of the batch's
-    /// record section — no re-walk and no copy. A compressed batch's stream is
-    /// read one byte further, as Java's `StreamRecordIterator` reads it, which
-    /// also lets the codec verify the stream's trailing checksum. Returns
-    /// `Ok(())` when there is no batch loaded yet (nothing to validate).
+    /// For an uncompressed batch this is O(1): it compares where the record
+    /// ends against the (already-known) length of the batch's record section —
+    /// no re-walk and no copy. A compressed batch's stream is read one byte
+    /// further, as Java's `StreamRecordIterator` reads it, which also lets the
+    /// codec verify the stream's trailing checksum.
     ///
     /// # Errors
     ///
     /// Records remain, or the compressed stream failed while looking for them
     /// (Java's `KafkaException("Error checking for remaining bytes after
     /// reading batch", e)`, `DefaultRecordBatch.java:657-663`).
-    fn ensure_current_batch_fully_consumed(&mut self) -> Result<(), Error> {
+    fn ensure_none_remaining(&mut self, record_size: usize) -> Result<(), Error> {
         let Some(cursor) = self.cursor.as_mut() else {
             return Ok(());
         };
-        // Only meaningful once a batch has been loaded and its declared count
-        // consumed. `current_batch == None` means we have not loaded a batch
-        // yet (first iteration).
         let Some(batch) = cursor.current_batch.as_ref() else {
             return Ok(());
         };
-        if cursor.records_remaining > 0 {
+        if cursor.records_remaining != 1 {
             return Ok(());
         }
         let records_remain = match &mut cursor.record_source {
             RecordSource::None => false,
-            RecordSource::Borrowed(range) => cursor.record_byte_offset < range.len(),
+            RecordSource::Borrowed(range) => cursor.record_byte_offset + record_size < range.len(),
             RecordSource::Stream(stream) => stream
                 .has_remaining()
                 .map_err(|e| invalid_batch_error(&self.partition, batch.base_offset, e.message()))?,
@@ -2591,11 +2582,14 @@ mod tests {
     /// actually present ("too little") must surface a recoverable
     /// [`Error`] — NOT silently drop the trailing valid records. Mirrors
     /// Java `ensureNoneRemaining()` ("...records still remaining"), which is
-    /// CRC-independent, so we drive it under `check.crcs=false`.
+    /// CRC-independent, so we drive it under `check.crcs=false`. Java runs it
+    /// as it reads the last declared record and throws instead of returning
+    /// that record (`DefaultRecordBatch.java:607-621`), so only the records
+    /// before it are returned and the position stays on it.
     #[test]
     fn test_invalid_record_count_too_little_through_fetch_records() {
         // 3 real records, header declares 2 — the 3rd would be silently lost
-        // under the buggy cursor.
+        // under the buggy cursor, and the 2nd is the one Java withholds.
         let bytes = batch_with_overridden_record_count(0, 3, 2);
         let mut cf = new_completed_fetch(0, bytes);
         let fetch_config = make_fetch_config(IsolationLevel::ReadUncommitted, false);
@@ -2642,7 +2636,8 @@ mod tests {
             }
         }
         assert!(saw_error, "declared count < actual must error, not silently drop records");
-        assert_eq!(2, total, "only the declared-count records are returned before the error");
+        assert_eq!(1, total, "the last declared record is withheld, as Java withholds it");
+        assert_eq!(1, cf.next_fetch_offset(), "the position stays on the withheld record");
     }
 
     /// Builds a v2 batch whose attributes carry the control-batch flag, holding
@@ -3821,15 +3816,17 @@ mod tests {
     }
 
     /// A compressed batch holding more records than it declares fails with the
-    /// records-remaining text the uncompressed path uses, after the declared
-    /// records are returned.
+    /// records-remaining text the uncompressed path uses, as its last declared
+    /// record is read: that record is withheld and the ones before it are
+    /// returned, as Java's `RecordIterator.next()` throws instead of returning
+    /// it (`DefaultRecordBatch.java:607-621`).
     #[test]
     fn test_compressed_batch_holding_more_records_than_declared_is_invalid() {
         for compression in codecs() {
             for check_crcs in [false, true] {
                 let buf = compressed_batch(3, 2, 0, &compression);
                 let (offsets, fault) = records_then_fault(&buf, check_crcs);
-                assert_eq!(vec![0, 1], offsets, "{compression:?}");
+                assert_eq!(vec![0], offsets, "{compression:?}");
                 assert!(matches!(fault, Error::InvalidRecord(_)), "{fault:?}");
                 assert_eq!(
                     "Incorrect declared batch size for partition test-0, records still remaining in batch \
@@ -4536,12 +4533,14 @@ mod tests {
         }
     }
 
-    /// A gzip stream whose trailing checksum is wrong fails once its records
-    /// have been read: the codec checks the checksum when the cursor reads past
-    /// the last record, as Java's `ensureNoneRemaining` reads past it
-    /// (`DefaultRecordBatch.java:657-663`).
+    /// A gzip stream whose trailing checksum is wrong fails as its last record
+    /// is read: the codec checks the checksum when the cursor reads past that
+    /// record, as Java's `ensureNoneRemaining` reads past it
+    /// (`DefaultRecordBatch.java:657-663`), and the record is withheld, as
+    /// Java's `RecordIterator.next()` throws instead of returning it
+    /// (`:607-621`).
     #[test]
-    fn test_compressed_batch_with_a_wrong_gzip_checksum_fails_after_its_records() {
+    fn test_compressed_batch_with_a_wrong_gzip_checksum_fails_on_its_last_record() {
         for check_crcs in [false, true] {
             let mut buf = compressed_batch(2, 2, 0, &Compression::gzip().build());
             // A gzip stream ends with its CRC-32 and then its length, four
@@ -4550,7 +4549,7 @@ mod tests {
             buf[checksum] ^= 0x01;
             recompute_crc(&mut buf);
             let (offsets, fault) = records_then_fault(&buf, check_crcs);
-            assert_eq!(vec![0, 1], offsets);
+            assert_eq!(vec![0], offsets);
             assert!(matches!(fault, Error::KafkaError(_)), "{fault:?}");
             assert_eq!(
                 "Record batch for partition test-0 at offset 0 is invalid, cause: Error checking for remaining \
@@ -4558,6 +4557,94 @@ mod tests {
                 fault.message(),
                 "check.crcs={check_crcs}"
             );
+        }
+    }
+
+    /// When bytes follow a batch's last declared record, that record is
+    /// withheld and the position stays on it, as Java's `RecordIterator.next()`
+    /// throws instead of returning it (`DefaultRecordBatch.java:607-621`). So
+    /// seeking past the record, as the error says to, moves on to the batch's
+    /// next offset, not past the first record of the next batch. The bytes may
+    /// be a record more than the batch declares, or the end of a gzip stream:
+    /// a checksum that does not match, or a trailer cut off. The text after
+    /// `batch: ` comes from the gzip library, so a new version of it may change
+    /// it.
+    #[test]
+    fn test_last_declared_record_followed_by_bytes_is_withheld() {
+        let gzip = Compression::gzip().build();
+        let remaining = "Incorrect declared batch size for partition test-0, records still remaining in batch \
+                         (declared record count is fewer than the records present)";
+        let checking = |cause: &str| {
+            format!(
+                "Record batch for partition test-0 at offset 0 is invalid, cause: Error checking for remaining \
+                 bytes after reading batch: {cause}"
+            )
+        };
+        // Two records, offsets 0 and 1, each batch; the uncompressed and the
+        // compressed ones hold a third the header does not declare.
+        let mut uncompressed = batch_with_overridden_record_count(0, 3, 2);
+        recompute_crc(&mut uncompressed);
+        let mut cases = vec![("uncompressed".to_string(), uncompressed, remaining.to_string())];
+        for compression in codecs() {
+            let buf = compressed_batch(3, 2, 0, &compression);
+            cases.push((format!("{compression:?}"), buf, remaining.to_string()));
+        }
+        // A gzip stream ends with its CRC-32 and then its length, four
+        // little-endian bytes each.
+        let mut wrong_checksum = compressed_batch(2, 2, 0, &gzip);
+        let checksum = wrong_checksum.len() - 8;
+        wrong_checksum[checksum] ^= 0x01;
+        recompute_crc(&mut wrong_checksum);
+        let mismatch = checking("corrupt gzip stream does not have a matching checksum");
+        cases.push(("gzip, checksum wrong".to_string(), wrong_checksum, mismatch));
+        let whole = compressed_batch(2, 2, 0, &gzip);
+        let mut cut = whole[..whole.len() - 8].to_vec();
+        let length = (cut.len() - AbstractRecords::LOG_OVERHEAD) as i32;
+        put_i32(&mut cut, RecordBatch::LENGTH_OFFSET, length);
+        recompute_crc(&mut cut);
+        cases.push(("gzip, trailer cut off".to_string(), cut, checking("unexpected end of file")));
+        for (shape, buf, expected) in cases {
+            for check_crcs in [false, true] {
+                let mut cf = new_completed_fetch(0, buf.clone());
+                let config = make_fetch_config(IsolationLevel::ReadUncommitted, check_crcs);
+                let first = cf
+                    .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+                    .expect("the records before the last are returned");
+                assert_eq!(vec![0], first.iter().map(ConsumerRecord::offset).collect::<Vec<_>>(), "{shape}");
+                assert_eq!(1, cf.next_fetch_offset(), "{shape}: the position stays on the withheld record");
+                let err = cf
+                    .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+                    .expect_err("the fault surfaces on the next call");
+                assert_eq!(SEEK_PAST_MESSAGE, err.message());
+                assert_eq!(expected, cause(&err).message(), "{shape} check.crcs={check_crcs}");
+                assert_eq!(1, cf.next_fetch_offset(), "{shape}: the position still stays on it");
+            }
+        }
+    }
+
+    /// A batch declaring no records yields none and is not checked for bytes
+    /// in its records section, uncompressed or under any codec, as Java's
+    /// iterator reads nothing of it (`DefaultRecordBatch.java:603-605`): the
+    /// position moves past it (`CompletedFetch.java:188-200`).
+    #[test]
+    fn test_batch_declaring_no_records_is_not_read() {
+        let mut uncompressed = batch_with_overridden_record_count(0, 1, 0);
+        recompute_crc(&mut uncompressed);
+        let mut cases = vec![("uncompressed".to_string(), uncompressed)];
+        for compression in codecs() {
+            cases.push((format!("{compression:?}"), compressed_batch(1, 0, 0, &compression)));
+        }
+        for (shape, buf) in cases {
+            for check_crcs in [false, true] {
+                let mut cf = new_completed_fetch(0, buf.clone());
+                let config = make_fetch_config(IsolationLevel::ReadUncommitted, check_crcs);
+                let records = cf
+                    .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+                    .expect("a batch declaring no records is not an error");
+                assert!(records.is_empty(), "{shape} check.crcs={check_crcs}");
+                assert_eq!(1, cf.next_fetch_offset(), "{shape} check.crcs={check_crcs}");
+                assert!(cf.is_exhausted(), "{shape} check.crcs={check_crcs}");
+            }
         }
     }
 
