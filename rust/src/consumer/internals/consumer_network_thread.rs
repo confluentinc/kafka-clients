@@ -3097,4 +3097,144 @@ mod tests {
                 .count();
         assert_eq!(1, staged, "the application poll event must start exactly one auto-commit");
     }
+
+    /// Audit finding C4-14: a lag monitor calling `end_offsets` on an
+    /// otherwise idle consumer. In Java the `ListOffsets` response is handled
+    /// in the request future's `whenComplete` on the network thread
+    /// (`OffsetsRequestManager.buildListOffsetsRequests`), so the call returns
+    /// one round trip later. In Rust a spawned forwarder queues the response
+    /// for the offsets manager's next `poll`; unless it wakes the bg loop, the
+    /// result waits until something else ends the network poll — up to
+    /// `MAX_POLL_TIMEOUT_MS` (5 s), so `end_offsets_with_timeout(tps, 2s)`
+    /// always timed out.
+    ///
+    /// The network poll here never returns on its own (a socket wait with no
+    /// data, idle otherwise) and the offsets manager is given the client's
+    /// wakeup handle exactly as the production constructor does, so only that
+    /// wake can complete the lookup. The deadline is far below the 5 s max
+    /// poll timeout.
+    #[tokio::test]
+    async fn list_offsets_event_completes_on_response_on_idle_background_task() {
+        use std::collections::HashMap;
+
+        use crate::ListOffsetsResponseData;
+        use crate::common::TopicPartition;
+        use crate::common::requests::{ConcreteResponse, ListOffsetsRequest, ListOffsetsResponse, RequestTestUtils};
+        use crate::consumer::internals::events::CompletableEventHandle;
+        use crate::list_offsets_response_data::{ListOffsetsPartitionResponse, ListOffsetsTopicResponse};
+
+        let config = make_config();
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let metadata = make_metadata(&config, subs.clone());
+        // `t1-0` has a known leader (node 0), so the lookup is sent at once.
+        metadata.add_transient_topics(HashSet::from(["t1".to_string()]));
+        let metadata_response = RequestTestUtils::metadata_update_with(1, &HashMap::from([("t1".to_string(), 1)]));
+        metadata
+            .metadata_arc()
+            .update_with_current_request_version(&metadata_response, false, 0);
+        let tp = TopicPartition::new("t1".to_string(), 0);
+
+        // The broker answers the ListOffsets request with end offset 7.
+        let mut partition = ListOffsetsPartitionResponse::new();
+        partition.set_partition_index(0);
+        partition.set_timestamp(ListOffsetsResponse::UNKNOWN_TIMESTAMP);
+        partition.set_offset(7);
+        partition.set_leader_epoch(ListOffsetsResponse::UNKNOWN_EPOCH);
+        let mut topic = ListOffsetsTopicResponse::new();
+        topic.set_name("t1".to_string());
+        topic.set_partitions(vec![partition]);
+        let mut data = ListOffsetsResponseData::new();
+        data.set_topics(vec![topic]);
+        let mut mock = MockClient::with_static_nodes(Vec::<Node>::new(), Arc::new(mock_time(0)));
+        mock.prepare_response(ConcreteResponse::ListOffsets(ListOffsetsResponse::new(data)));
+        let client = CountingClient::new(mock);
+        // The network poll blocks until woken, emulating an idle socket wait.
+        client.poll_block().store(true, Ordering::SeqCst);
+        let (bg_tx, _bg_rx) = mpsc::unbounded_channel();
+        let counting_delegate = NetworkClientDelegate::new(
+            &config,
+            client,
+            metadata.metadata_arc(),
+            Arc::new(BackgroundEventHandler::new(bg_tx)),
+            false,
+        );
+        // The one wakeup primitive, taken from the delegate and installed in
+        // the offsets manager exactly as the production constructor does.
+        let event_notify = counting_delegate.wakeup_handle();
+        let offsets = make_offsets_manager(&config, subs.clone(), metadata.clone());
+        offsets.set_completion_notify(Arc::clone(&event_notify));
+        let request_managers = Arc::new(Mutex::new(RequestManagers::new(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(offsets),
+            None,
+        )));
+        let delegate = Arc::new(AsyncMutex::new(counting_delegate));
+        let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
+        let time: Arc<MockTime> = Arc::new(mock_time(1_000));
+        let processor = ApplicationEventProcessor::new(
+            request_managers.clone(),
+            metadata.clone(),
+            subs.clone(),
+            reaper.clone(),
+            time.clone(),
+        );
+        let (tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
+        let mut thread = ConsumerNetworkThread::new(
+            time.clone() as Arc<dyn Time>,
+            rx,
+            reaper,
+            processor,
+            delegate.clone(),
+            request_managers,
+            None,
+            WakeupTrigger::new(),
+            Arc::new(AtomicI64::new(NetThread::MAX_POLL_TIMEOUT_MS)),
+        );
+
+        // The application calls `end_offsets([t1-0])`: its
+        // `ApplicationEventHandler::add` enqueues the ListOffsets event and
+        // pokes the wakeup handle.
+        let now_ms = time.milliseconds();
+        let (handle, mut result_rx) = CompletableEventHandle::new(now_ms + 60_000);
+        let event = ApplicationEvent::ListOffsets {
+            handle,
+            timestamps_to_search: HashMap::from([(tp.clone(), ListOffsetsRequest::LATEST_TIMESTAMP)]),
+            require_timestamps: false,
+        };
+        tx.send(ApplicationEventEnvelope { event, enqueued_ms: now_ms })
+            .expect("send ok");
+        event_notify.notify_one();
+
+        // Drive the bg loop until the lookup completes or the deadline passes,
+        // then stop it between iterations — releasing the blocked poll with
+        // the wakeup handle, as `close()` does — rather than cancelling
+        // `run_once` mid-poll.
+        let stop = AtomicBool::new(false);
+        let mut outcome = None;
+        let driver = async {
+            while !stop.load(Ordering::SeqCst) {
+                thread.run_once().await;
+            }
+        };
+        let watcher = async {
+            outcome = tokio::time::timeout(Duration::from_secs(1), &mut result_rx).await.ok();
+            stop.store(true, Ordering::SeqCst);
+            event_notify.notify_one();
+        };
+        tokio::join!(driver, watcher);
+
+        let offsets = outcome
+            .expect(
+                "Java completes the ListOffsets lookup when the response arrives; the response must wake \
+                 the bg loop instead of waiting out the network poll (up to MAX_POLL_TIMEOUT_MS)",
+            )
+            .expect("event handle dropped")
+            .expect("the lookup must succeed");
+        let end_offset = offsets.get(&tp).expect("entry for t1-0").as_ref().expect("an offset");
+        assert_eq!(7, end_offset.offset());
+    }
 }

@@ -45,7 +45,9 @@
 //! `spawn`s a small task that awaits the response and forwards the
 //! result back into the manager via a `mpsc` channel. The manager
 //! drains the channel on its next `poll`, applying the success/failure
-//! handler from `OffsetFetcherUtils`.
+//! handler from `OffsetFetcherUtils`. After enqueueing, the task wakes the
+//! bg task (see `OffsetsManagerShared::completion_notify`) so that next
+//! `poll` happens at once rather than after the network poll times out.
 
 #![expect(dead_code)]
 
@@ -276,6 +278,35 @@ pub(crate) struct OffsetsManagerShared {
     /// Drained by [`OffsetsRequestManager::poll`] into
     /// [`PollResult::try_connect`].
     pub(crate) try_connect_queue: Mutex<Vec<Node>>,
+    /// The bg task's wakeup `Notify` (a clone of the consumer's
+    /// `event_notify`, i.e. the selector wakeup — Java's `Selector.wakeup()`;
+    /// never the user-facing `WakeupTrigger`, consumer-threading.md §31),
+    /// poked whenever work for [`OffsetsRequestManager::poll`] is queued off
+    /// the bg loop:
+    ///
+    /// - a spawned response forwarder has queued a [`PendingCompletion`]
+    ///   (`ListOffsets` for `fetch_offsets` / the reset path,
+    ///   `OffsetsForLeaderEpoch` for validation);
+    /// - the spawned committed-offsets follow-up of `update_fetch_positions`
+    ///   has queued a [`PendingFollowupReset`];
+    /// - `update_fetch_positions`, which the `AsyncPoll` event runs on a
+    ///   spawned task, has queued requests or connection attempts.
+    ///
+    /// Java needs no equivalent: its `whenComplete` handlers run inside the
+    /// network poll on the network thread, so a `ListOffsets` result is
+    /// applied before the next `runOnce` (and an `AsyncPollEvent`'s requests
+    /// are queued before the same `runOnce` polls the request managers). Here
+    /// the work lands after the bg loop has polled this manager; without the
+    /// poke it waits until something else ends the network poll — up to
+    /// `MAX_POLL_TIMEOUT_MS` (5 s) on an otherwise idle consumer, which made
+    /// every `end_offsets` / `beginning_offsets` / `offsets_for_times` call
+    /// take 5 s. The commit, coordinator, heartbeat and fetch managers wake
+    /// the bg task the same way.
+    ///
+    /// Empty until the production wiring installs it via
+    /// [`OffsetsRequestManager::set_completion_notify`]; unit tests that do
+    /// not drive a real bg task leave it unset.
+    completion_notify: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
     /// Test seam: runs once between the per-partition leader lookup and the
     /// regroup by node in `group_list_offset_requests`, so a test can update
     /// the metadata in that window. It reproduces the race KAFKA-20312 guards
@@ -286,6 +317,34 @@ pub(crate) struct OffsetsManagerShared {
 }
 
 impl OffsetsManagerShared {
+    /// Pokes the bg task's wakeup `Notify`, if installed, so its network poll
+    /// returns and the next `run_once` polls this manager. See
+    /// [`Self::completion_notify`]. `Notify` keeps at most one permit, so a
+    /// burst of wakes costs at most one extra loop iteration.
+    fn wake_background_task(&self) {
+        if let Some(notify) = self.completion_notify.get() {
+            notify.notify_one();
+        }
+    }
+
+    /// Queues a response forwarder's [`PendingCompletion`] for the next
+    /// [`OffsetsRequestManager::poll`] and wakes the bg task so that poll
+    /// happens at once. Nothing is woken when the manager (the receiver) is
+    /// gone.
+    fn forward_completion(&self, completion: PendingCompletion) {
+        if self.pending_completions_tx.send(completion).is_ok() {
+            self.wake_background_task();
+        }
+    }
+
+    /// Number of requests and connection attempts queued for the next
+    /// [`OffsetsRequestManager::poll`].
+    fn queued_poll_work(&self) -> usize {
+        let requests = self.requests_to_send.lock().expect("requests_to_send mutex poisoned").len();
+        let try_connect = self.try_connect_queue.lock().expect("try_connect_queue mutex poisoned").len();
+        requests + try_connect
+    }
+
     /// Mirrors Java's `prepareFetchOffsetsRequests(timestampsToSearch,
     /// requireTimestamps, listOffsetsRequestState)`.
     ///
@@ -369,7 +428,7 @@ impl OffsetsManagerShared {
 
             let mut unsent = UnsentRequest::new(Box::new(builder), Some(node));
             let response_rx = unsent.take_response_receiver().expect("receiver fresh");
-            let tx = self_arc.pending_completions_tx.clone();
+            let shared = Arc::clone(self_arc);
             let state_for_task = Arc::clone(state);
             let target_times_for_task = target_times.clone();
             tokio::spawn(async move {
@@ -377,7 +436,7 @@ impl OffsetsManagerShared {
                     Ok(r) => r,
                     Err(_) => Err(Error::new(crate::common::protocol::Errors::NetworkError)),
                 };
-                let _ = tx.send(PendingCompletion::ListOffsetsForFetchOffsets {
+                shared.forward_completion(PendingCompletion::ListOffsetsForFetchOffsets {
                     state: state_for_task,
                     node_partitions: target_times_for_task,
                     result,
@@ -805,6 +864,7 @@ impl OffsetsRequestManager {
             requests_to_retry: Mutex::new(Vec::new()),
             metadata_updated: std::sync::atomic::AtomicBool::new(false),
             try_connect_queue: Mutex::new(Vec::new()),
+            completion_notify: std::sync::OnceLock::new(),
             #[cfg(test)]
             before_regroup_for_test: Mutex::new(None),
         });
@@ -828,6 +888,16 @@ impl OffsetsRequestManager {
             .metadata_arc()
             .add_cluster_update_listener(Box::new(OffsetsClusterListener { shared }));
         manager
+    }
+
+    /// Installs the bg task's wakeup `Notify` (a clone of `event_notify`) so
+    /// the spawned response forwarders and follow-ups can wake the network
+    /// poll once they have queued work for [`RequestManager::poll`]. See
+    /// `OffsetsManagerShared::completion_notify`. Mirrors
+    /// `CommitRequestManager::set_completion_notify`; the first installed
+    /// handle wins (it is wired exactly once, at construction).
+    pub(crate) fn set_completion_notify(&self, notify: Arc<tokio::sync::Notify>) {
+        let _ = self.shared.completion_notify.set(notify);
     }
 
     /// Reset offsets for all assigned partitions that require it. Offsets
@@ -1144,7 +1214,7 @@ impl OffsetsRequestManager {
             let mut unsent = UnsentRequest::new(Box::new(builder), Some(node));
             // Take the receiver and spawn a forwarder.
             let response_rx = unsent.take_response_receiver().expect("receiver fresh");
-            let tx = self.shared.pending_completions_tx.clone();
+            let shared = Arc::clone(&self.shared);
             let strategies = partition_strategies.clone();
             let timestamps = reset_timestamps.clone();
             tokio::spawn(async move {
@@ -1152,7 +1222,7 @@ impl OffsetsRequestManager {
                     Ok(r) => r,
                     Err(_) => Err(Error::new(crate::common::protocol::Errors::NetworkError)),
                 };
-                let _ = tx.send(PendingCompletion::ListOffsetsForReset {
+                shared.forward_completion(PendingCompletion::ListOffsetsForReset {
                     reset_timestamps: timestamps,
                     partition_strategies: strategies,
                     result,
@@ -1218,14 +1288,17 @@ impl OffsetsRequestManager {
             let builder = OffsetsForLeaderEpochClient::prepare_request(&fetch_positions);
             let mut unsent = UnsentRequest::new(Box::new(builder), Some(node));
             let response_rx = unsent.take_response_receiver().expect("receiver fresh");
-            let tx = self.shared.pending_completions_tx.clone();
+            let shared = Arc::clone(&self.shared);
             let positions = fetch_positions.clone();
             tokio::spawn(async move {
                 let result = match response_rx.await {
                     Ok(r) => r,
                     Err(_) => Err(Error::new(crate::common::protocol::Errors::NetworkError)),
                 };
-                let _ = tx.send(PendingCompletion::OffsetsForLeaderEpoch { fetch_positions: positions, result });
+                shared.forward_completion(PendingCompletion::OffsetsForLeaderEpoch {
+                    fetch_positions: positions,
+                    result,
+                });
             });
             self.shared
                 .requests_to_send
@@ -1426,6 +1499,7 @@ impl OffsetsRequestManager {
         current_time_ms: i64,
     ) -> oneshot::Receiver<Result<(), Error>> {
         let (tx, rx) = oneshot::channel();
+        let queued_before = self.shared.queued_poll_work();
 
         // Java's outer try wraps the whole body in `maybeWrapAsKafkaException`,
         // which is CONDITIONAL: an error already in the `KafkaException`
@@ -1453,6 +1527,15 @@ impl OffsetsRequestManager {
                 // already surfaced the same error.
                 let _ = tx.send(Err(ConsumerUtils::maybe_wrap_as_kafka_error(err)));
             },
+        }
+        // The `AsyncPoll` event calls this from a spawned task, possibly after
+        // the bg loop polled this manager for the current iteration. Java's
+        // network thread processes the `AsyncPollEvent` and then polls the
+        // request managers in the same `runOnce`, so the validation /
+        // reset requests go out at once; wake the bg loop to match. Nothing is
+        // woken when nothing was queued.
+        if self.shared.queued_poll_work() > queued_before {
+            self.shared.wake_background_task();
         }
         rx
     }
@@ -1575,6 +1658,7 @@ impl OffsetsRequestManager {
     ) {
         let subscription_state = Arc::clone(&self.shared.subscription_state);
         let pending_followup_tx = self.pending_followup_tx.clone();
+        let shared = Arc::clone(&self.shared);
         let cached = Arc::clone(&self.cached_update_positions_error);
         let time = Arc::clone(&self.time);
         tokio::spawn(async move {
@@ -1611,7 +1695,12 @@ impl OffsetsRequestManager {
                             // subscription state, so a subsequent
                             // `reset_positions_if_needed` call will pick them
                             // up.
-                            let _ = pending_followup_tx.send(PendingFollowupReset { initial_partitions });
+                            if pending_followup_tx.send(PendingFollowupReset { initial_partitions }).is_ok() {
+                                // Java sends the ListOffsets requests from
+                                // this `whenComplete` on the network thread;
+                                // wake the bg loop so its next poll does.
+                                shared.wake_background_task();
+                            }
                             Ok(())
                         },
                         Err(err) => Err(err),
@@ -6631,5 +6720,224 @@ mod tests {
                 assert!(result.is_ok(), "iteration {iteration}: {name} caller got {result:?}");
             }
         }
+    }
+
+    // -----------------------------------------------------------------
+    //   bg-task wake when work is queued off the bg loop (audit C4-14)
+    // -----------------------------------------------------------------
+
+    /// Installs a fresh wakeup `Notify` through
+    /// [`OffsetsRequestManager::set_completion_notify`], the path the
+    /// production constructor uses for the consumer's selector wakeup handle.
+    fn install_completion_notify(mgr: &OffsetsRequestManager) -> Arc<tokio::sync::Notify> {
+        let notify = Arc::new(tokio::sync::Notify::new());
+        mgr.set_completion_notify(Arc::clone(&notify));
+        notify
+    }
+
+    /// Consumes the wake permit if one is stored. `notify_one` with nobody
+    /// parked stores one permit, which a fresh `notified()` takes at once; no
+    /// permit means it stays pending.
+    fn take_wake(notify: &tokio::sync::Notify) -> bool {
+        use futures_util::FutureExt;
+        notify.notified().now_or_never().is_some()
+    }
+
+    /// Audit finding C4-14: in Java the `ListOffsets` response for
+    /// `fetchOffsets` is handled in the request future's `whenComplete` on
+    /// the network thread (`OffsetsRequestManager.buildListOffsetsRequests`),
+    /// so `endOffsets` / `beginningOffsets` / `offsetsForTimes` return one
+    /// round trip after the call. The Rust forwarder queues the response for
+    /// the next `poll`, so it must wake the bg loop — exactly once — or the
+    /// result waits out the network poll (up to 5 s on an idle consumer).
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_offsets_response_for_fetch_offsets_wakes_background_task() {
+        let (mut mgr, _commit_rm, _subs) = new_manager_with_commit();
+        let notify = install_completion_notify(&mgr);
+        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+
+        let mut rx = mgr.fetch_offsets(HashMap::from([(tp.clone(), ListOffsetsRequest::LATEST_TIMESTAMP)]), false);
+        assert!(
+            !take_wake(&notify),
+            "building the request on the bg loop must not wake it (the same iteration sends it)"
+        );
+
+        let response =
+            build_list_offsets_response("t1", vec![(1, Errors::None, 100, 7, ListOffsetsResponse::UNKNOWN_EPOCH)]);
+        assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
+        assert!(
+            take_wake(&notify),
+            "Java handles the ListOffsets response on the network thread at once; \
+             the forwarder must wake the bg loop so its next poll applies it"
+        );
+        assert!(!take_wake(&notify), "one response must wake the bg loop exactly once");
+        assert!(
+            matches!(rx.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "the response is applied by the bg loop's poll, not by the forwarder task"
+        );
+
+        let _ = RequestManager::poll(&mut mgr, 0);
+        let result = rx.try_recv().expect("the woken poll completes the result").expect("ok");
+        let oat = result.get(&tp).expect("entry present").as_ref().expect("non-null offset");
+        assert_eq!(7, oat.offset());
+        assert!(
+            !take_wake(&notify),
+            "draining the completion in poll must not wake the bg loop again"
+        );
+    }
+
+    /// Audit finding C4-14, reset path: the `ListOffsets` response of a
+    /// position reset (Java: `sendListOffsetsRequestsAndResetPositions`'s
+    /// `whenComplete`) wakes the bg loop once, and the next poll sets the
+    /// position.
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_offsets_response_for_reset_wakes_background_task() {
+        let (mut mgr, _commit_rm, subscription_state) = new_manager_with_commit();
+        let notify = install_completion_notify(&mgr);
+        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        assign_and_request_reset(&subscription_state, &tp, AutoOffsetResetStrategy::EARLIEST);
+
+        mgr.reset_positions_if_needed(0).expect("ok");
+        assert_eq!(1, mgr.requests_to_send_count(), "one ListOffsets request expected");
+        assert!(!take_wake(&notify), "building the reset request must not wake the bg loop");
+
+        let response =
+            build_list_offsets_response("t1", vec![(1, Errors::None, 1, 5, ListOffsetsResponse::UNKNOWN_EPOCH)]);
+        assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
+        assert!(take_wake(&notify), "the reset ListOffsets response must wake the bg loop");
+        assert!(!take_wake(&notify), "one response must wake the bg loop exactly once");
+        assert!(
+            subscription_state
+                .lock()
+                .expect("subs")
+                .is_offset_reset_needed(&tp)
+                .expect("assigned"),
+            "the response is applied by the bg loop's poll, not by the forwarder task"
+        );
+
+        let _ = RequestManager::poll(&mut mgr, 0);
+        let subs = subscription_state.lock().expect("subs");
+        assert!(!subs.is_offset_reset_needed(&tp).expect("assigned"), "reset no longer needed");
+        assert_eq!(5, subs.position(&tp).expect("lookup").expect("present").offset);
+    }
+
+    /// Audit finding C4-14, validation path: the `OffsetsForLeaderEpoch`
+    /// response (Java: `sendOffsetsForLeaderEpochRequestsAndValidatePositions`'s
+    /// `whenComplete`) wakes the bg loop once, and the next poll completes
+    /// the validation.
+    #[tokio::test(flavor = "current_thread")]
+    async fn offsets_for_leader_epoch_response_wakes_background_task() {
+        let (mut mgr, _commit_rm, subscription_state) = new_manager_with_commit();
+        let notify = install_completion_notify(&mgr);
+        bootstrap_metadata_with_epoch(&mgr.shared.metadata, "t1", 2, 3);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        seek_unvalidated_and_install_api_versions(&mgr, &subscription_state, &tp, 5, 3);
+
+        mgr.validate_positions_if_needed(0).expect("ok");
+        assert_eq!(1, mgr.requests_to_send_count(), "one OffsetsForLeaderEpoch request expected");
+        assert!(!take_wake(&notify), "building the validation request must not wake the bg loop");
+
+        let response = build_offsets_for_leader_epoch_response("t1", vec![(1, Errors::None, 3, 100)]);
+        assert!(complete_first_oitle_with_response(&mut mgr, response, 0).await);
+        assert!(take_wake(&notify), "the OffsetsForLeaderEpoch response must wake the bg loop");
+        assert!(!take_wake(&notify), "one response must wake the bg loop exactly once");
+        assert!(
+            subscription_state
+                .lock()
+                .expect("subs")
+                .awaiting_validation(&tp)
+                .expect("assigned"),
+            "the response is applied by the bg loop's poll, not by the forwarder task"
+        );
+
+        let _ = RequestManager::poll(&mut mgr, 0);
+        let subs = subscription_state.lock().expect("subs");
+        assert!(!subs.awaiting_validation(&tp).expect("assigned"), "validation completed");
+        assert!(subs.is_fetchable(&tp), "partition must be fetchable after validation");
+    }
+
+    /// `update_fetch_positions` runs on the spawned `AsyncPoll` task, so the
+    /// requests it queues may land after the bg loop polled this manager. It
+    /// wakes the bg loop when — and only when — it queued something, so an
+    /// application `poll()` with nothing to reset or validate costs nothing.
+    #[tokio::test(flavor = "current_thread")]
+    async fn update_fetch_positions_wakes_background_task_only_when_it_queues_requests() {
+        let mut mgr = new_manager(); // No commit manager: resets inline.
+        let notify = install_completion_notify(&mgr);
+        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+
+        // No assigned partitions: nothing to do, nothing queued.
+        assert!(mgr.update_fetch_positions(i64::MAX, 0).await.expect("oneshot").is_ok());
+        assert!(!take_wake(&notify), "nothing was queued, so the bg loop must not be woken");
+
+        // An initializing partition is reset: one ListOffsets request queued.
+        {
+            let mut subs = mgr.shared.subscription_state.lock().unwrap();
+            subs.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+        }
+        assert!(mgr.update_fetch_positions(i64::MAX, 0).await.expect("oneshot").is_ok());
+        assert_eq!(1, mgr.requests_to_send_count(), "the reset must queue one ListOffsets request");
+        assert!(
+            take_wake(&notify),
+            "Java sends the reset request in the same runOnce that processes the AsyncPollEvent; \
+             the bg loop must be woken to send it"
+        );
+        assert!(!take_wake(&notify), "one call must wake the bg loop at most once");
+
+        // The reset is in flight (retry backoff set): a second call queues
+        // nothing and must not wake the bg loop.
+        assert!(mgr.update_fetch_positions(i64::MAX, 0).await.expect("oneshot").is_ok());
+        assert_eq!(
+            1,
+            mgr.requests_to_send_count(),
+            "no second ListOffsets request while one is in flight"
+        );
+        assert!(!take_wake(&notify), "nothing new was queued, so the bg loop must not be woken");
+    }
+
+    /// When the committed-offset fetch of `update_fetch_positions` returns
+    /// without an offset for a partition, its spawned follow-up queues the
+    /// position reset for the next `poll`. Java runs
+    /// `initWithPartitionOffsetsIfNeeded` (and sends the ListOffsets request)
+    /// in that `whenComplete` on the network thread; the follow-up must wake
+    /// the bg loop so the reset is not left waiting for the network poll.
+    #[tokio::test(flavor = "current_thread")]
+    async fn committed_offsets_followup_wakes_background_task() {
+        let (mut mgr, commit_rm, subscription_state) = new_manager_with_commit();
+        let notify = install_completion_notify(&mgr);
+        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        subscription_state
+            .lock()
+            .unwrap()
+            .assign_from_user(HashSet::from([tp.clone()]))
+            .expect("assign");
+
+        let rx = mgr.update_fetch_positions(i64::MAX, 0);
+        assert_eq!(1, commit_rm.inner_state_for_test(), "one OffsetFetch expected");
+        assert!(
+            !take_wake(&notify),
+            "the OffsetFetch is queued on the commit manager; this manager queued nothing"
+        );
+
+        // No committed offset for tp: the follow-up marks it for reset.
+        assert!(commit_rm.complete_first_unsent_fetch_for_test(HashMap::new()));
+        assert!(rx.await.expect("oneshot").is_ok());
+        assert!(
+            take_wake(&notify),
+            "the follow-up queued the position reset; it must wake the bg loop"
+        );
+        assert!(!take_wake(&notify), "one follow-up must wake the bg loop exactly once");
+
+        // The woken poll sends the ListOffsets request for the reset.
+        let result = RequestManager::poll(&mut mgr, 0);
+        assert_eq!(
+            1,
+            result.unsent_requests.len(),
+            "the woken poll must send the reset's ListOffsets request"
+        );
     }
 }
