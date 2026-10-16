@@ -4196,8 +4196,8 @@ mod tests {
     /// (`DefaultRecord.java:299-301`). The largest allocation of each fetch is
     /// measured against that of the same batch whose second record declares
     /// 100 bytes and has four, so the codec's own buffers, which can be bigger
-    /// than `MAX_RECORD_PREALLOCATION` (zstd reads its input through 128 KiB),
-    /// are not counted against the record.
+    /// than `MAX_RECORD_PREALLOCATION` (lz4 decodes into a buffer the size of
+    /// the frame's blocks, up to 4 MiB), are not counted against the record.
     #[test]
     fn test_compressed_record_size_is_trusted_no_further_than_its_bytes() {
         let max = AbstractRecords::SOFT_MAX_ARRAY_LENGTH;
