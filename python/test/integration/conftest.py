@@ -15,6 +15,6 @@
 """Fixtures of the broker-backed Python tests: the single-node KRaft broker of
 the performance tests (``kafka_broker``, which skips without Docker)."""
 
-from ..performance.conftest import create_topic, kafka_broker
+from ..performance.conftest import KAFKA_BIN, create_topic, kafka_broker
 
-__all__ = ["create_topic", "kafka_broker"]
+__all__ = ["KAFKA_BIN", "create_topic", "kafka_broker"]
