@@ -668,7 +668,9 @@ pub(crate) struct OffsetsRequestManager {
     /// `pendingOffsetFetchEvent`. Reused by subsequent calls when the
     /// initializing-partition set matches, so a poll that times out
     /// while an `OffsetFetch` is still in flight does not waste the
-    /// outstanding request. Cleared when the underlying fetch resolves.
+    /// outstanding request. Cleared when ANY committed-offset fetch
+    /// resolves, as Java's `whenComplete` sets the field to `null`
+    /// unconditionally.
     pending_offset_fetch_event: Arc<Mutex<Option<PendingFetchCommittedRequest>>>,
 
     /// Completions waiting to be applied on the next `poll` call.
@@ -695,45 +697,60 @@ pub(crate) struct OffsetsRequestManager {
 }
 
 /// In-flight `OffsetFetch` carrying the set of initializing partitions
-/// that triggered it plus any additional `oneshot::Sender`s that have
-/// piggy-backed on the same request (the "reuse" path).
+/// that triggered it plus the waiter list of that fetch, which a later
+/// caller with the same partition set joins (the "reuse" path).
 ///
 /// Mirrors Java's `OffsetsRequestManager.PendingFetchCommittedRequest`.
 /// Java holds a `CompletableFuture` whose downstream `whenComplete`
-/// handlers form a chain; Rust uses a `Vec<oneshot::Sender>` because
+/// handlers form a chain; Rust uses a list of `oneshot::Sender`s because
 /// `oneshot::Receiver` is single-consumer.
 #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager$PendingFetchCommittedRequest")]
 struct PendingFetchCommittedRequest {
     requested_partitions: HashSet<TopicPartition>,
-    /// Senders waiting for the in-flight fetch to resolve. The first
-    /// entry is for the caller that initially issued the fetch; each
-    /// subsequent reuse adds another sender. When the fetch completes,
-    /// the driver task drains the vec and forwards the result (or its
-    /// `()` ack on success — offsets are written into the
-    /// `SubscriptionState` as side effects) to every sender.
-    waiters: Vec<oneshot::Sender<Result<(), Error>>>,
+    /// Senders waiting for this fetch to resolve. The first entry is for
+    /// the caller that issued the fetch; each reuse adds another sender.
+    ///
+    /// The list belongs to ONE fetch: its completion task holds the other
+    /// handle and, when the fetch resolves, drains it and forwards the
+    /// result (or its `()` ack on success — offsets are written into the
+    /// `SubscriptionState` as side effects) to those senders only. Java's
+    /// equivalent is that each caller's future is chained onto the fetch it
+    /// created or reused, so a fetch that is replaced in the slot still
+    /// completes its own callers, and never completes a newer fetch's.
+    ///
+    /// Lock order: the `pending_offset_fetch_event` slot lock is taken
+    /// before this list's lock, both when a caller joins and when the
+    /// completion task clears the slot and drains the list. A caller can
+    /// therefore only join while the fetch is still in the slot, i.e.
+    /// before its list is drained.
+    waiters: CommittedFetchWaiters,
 }
 
-/// The error used when a committed-offset fetch's waiter is orphaned because
-/// the pending-fetch slot was replaced by a request for a different partition
-/// set (see `init_with_committed_offsets_if_needed`).
+/// The waiter list of one committed-offset fetch, shared between the
+/// pending-fetch slot (so a same-set caller can join it) and the fetch's
+/// completion task (which drains it).
+type CommittedFetchWaiters = Arc<Mutex<Vec<oneshot::Sender<Result<(), Error>>>>>;
+
+/// The error used when a committed-offset fetch's result channel closes
+/// without a value: the commit manager dropped the fetch's sender, or the
+/// completion task holding a caller's sender was dropped before it ran (e.g.
+/// the runtime shut down). See `init_with_committed_offsets_if_needed`.
 ///
 /// This state has no Java counterpart. In Java
 /// (`OffsetsRequestManager.initWithCommittedOffsetsIfNeeded`) each caller's
 /// `result` future is completed by a `whenComplete` handler hung off
-/// `commitRequestManager.fetchOffsets(...)`; that chain is independent of the
-/// `pendingOffsetFetchEvent` field, so reassigning the field only swaps the
-/// reuse-lookup entry and never abandons an earlier caller. The earlier caller
-/// still resolves with whatever the fetch yields: success, or — once
-/// `fetchCommittedDeadlineMs` passes — the `TimeoutException` that
+/// `commitRequestManager.fetchOffsets(...)`, so a caller resolves with
+/// whatever the fetch yields: success, or — once `fetchCommittedDeadlineMs`
+/// passes — the `TimeoutException` that
 /// `CommitRequestManager.fetchOffsetsWithRetries` wraps its retriable failures
-/// in. Java therefore cannot surface a `DisconnectException` here.
+/// in. Java therefore cannot surface a `DisconnectException` here. (Being
+/// superseded by a fetch for a different partition set does NOT reach this
+/// error: like Java, the superseded fetch still completes its own callers.)
 ///
-/// Rust's `oneshot` is single-consumer, so the waiter list lives *inside* the
-/// replaceable slot and its senders are dropped on replacement. We must still
-/// complete the caller (CLAUDE.md §7 — a silently hung future is worse than an
-/// explicit error), so we complete it with the outcome Java produces for an
-/// abandoned fetch: a timeout. That matters beyond cosmetics —
+/// We must still complete the caller (CLAUDE.md §7 — a silently hung future is
+/// worse than an explicit error), so we complete it with the outcome Java
+/// produces for a fetch that never resolves: a timeout. That matters beyond
+/// cosmetics —
 /// `is_ignorable_async_poll_error` swallows only `Error::Timeout`, exactly
 /// as Java's `maybeCompleteAsyncPollEventExceptionally` swallows only
 /// `TimeoutException`, so `poll()` returns empty records and retries instead of
@@ -1228,16 +1245,19 @@ impl OffsetsRequestManager {
     /// 1. Empty `initializing_partitions` ⇒ completed `Ok(())`.
     /// 2. Otherwise, if there is an in-flight `OffsetFetch` whose
     ///    requested-partition set matches the new request, **reuse it**:
-    ///    register the caller's `oneshot::Sender` on the existing
-    ///    pending event. Java:
+    ///    register the caller's `oneshot::Sender` on that fetch's waiter
+    ///    list. Java:
     ///    `OffsetsRequestManager.canReusePendingOffsetFetchEvent`.
     /// 3. Otherwise, build a new `OffsetFetch` via the commit manager,
     ///    using `max(deadline_ms, current_time_ms + default_api_timeout_ms)`
     ///    as the request deadline so the OffsetFetch outlives the
     ///    triggering `updateFetchPositions` deadline if needed.
-    /// 4. On fetch completion: apply offsets via [`Self::refresh_offsets`]
-    ///    (mirrors Java's `refreshOffsets` + `ConsumerUtils.refreshCommittedOffsets`)
-    ///    and fan the result out to every waiter on the pending event.
+    /// 4. On fetch completion: clear the pending event, apply offsets via
+    ///    [`Self::refresh_offsets`] (mirrors Java's `refreshOffsets` +
+    ///    `ConsumerUtils.refreshCommittedOffsets`) and fan the result out to
+    ///    the waiters of THIS fetch only — a fetch replaced in the slot by
+    ///    one for a different partition set still completes its own callers,
+    ///    and never those of the newer fetch.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#initWithCommittedOffsetsIfNeeded")]
     pub(crate) fn init_with_committed_offsets_if_needed(
         &self,
@@ -1254,14 +1274,17 @@ impl OffsetsRequestManager {
 
         // Reuse path — same partition set still in flight.
         {
-            let mut guard = self
+            let guard = self
                 .pending_offset_fetch_event
                 .lock()
                 .expect("pending_offset_fetch_event mutex poisoned");
-            if let Some(pending) = guard.as_mut()
+            if let Some(pending) = guard.as_ref()
                 && pending.requested_partitions == initializing_partitions
             {
-                pending.waiters.push(tx);
+                // Pushed while the slot lock is held: the fetch's completion
+                // task clears the slot before draining this list under the
+                // same lock, so a fetch still in the slot has not drained it.
+                pending.waiters.lock().expect("committed fetch waiters mutex poisoned").push(tx);
                 return rx;
             }
         }
@@ -1283,18 +1306,28 @@ impl OffsetsRequestManager {
         let inner_rx =
             commit_rm.fetch_offsets(initializing_partitions.clone(), fetch_committed_deadline_ms, current_time_ms);
 
+        // This fetch's own waiter list. Replacing a previous pending event
+        // (different partition set) does not touch that event's list: its
+        // completion task still holds it and completes those callers, as
+        // Java's per-caller `whenComplete` chain does.
+        let waiters: CommittedFetchWaiters = Arc::new(Mutex::new(vec![tx]));
         {
             let mut guard = self
                 .pending_offset_fetch_event
                 .lock()
                 .expect("pending_offset_fetch_event mutex poisoned");
-            *guard =
-                Some(PendingFetchCommittedRequest { requested_partitions: initializing_partitions, waiters: vec![tx] });
+            *guard = Some(PendingFetchCommittedRequest {
+                requested_partitions: initializing_partitions,
+                waiters: Arc::clone(&waiters),
+            });
         }
 
         // Drive the in-flight fetch: when it resolves, apply the offsets
         // to the subscription state and fan the result out to every
-        // waiter that registered on this pending event.
+        // waiter that registered on this fetch. Spawned only after the
+        // pending event is stored above, so the task's unconditional clear
+        // can never run before the store and leave this (drained) fetch
+        // joinable in the slot.
         let pending_slot = Arc::clone(&self.pending_offset_fetch_event);
         let subscription_state = Arc::clone(&self.shared.subscription_state);
         let metadata = Arc::clone(&self.shared.metadata);
@@ -1304,12 +1337,17 @@ impl OffsetsRequestManager {
                 Err(_) => Err(superseded_committed_fetch_error()),
             };
 
-            // Take the waiters out of the pending slot and clear it
-            // (Java: `pendingOffsetFetchEvent = null` inside the
-            // `whenComplete` callback).
+            // Clear the pending slot (Java: `pendingOffsetFetchEvent = null`
+            // inside the `whenComplete` callback — unconditionally, even if
+            // the slot now holds a newer fetch for a different partition
+            // set; that fetch still completes its own waiters, and a later
+            // caller simply issues a new OffsetFetch). Then drain THIS
+            // fetch's waiters, under the slot lock so that no caller can
+            // join the list after it has been drained.
             let waiters = {
                 let mut guard = pending_slot.lock().expect("pending_offset_fetch_event mutex poisoned");
-                guard.take().map(|p| p.waiters).unwrap_or_default()
+                *guard = None;
+                std::mem::take(&mut *waiters.lock().expect("committed fetch waiters mutex poisoned"))
             };
 
             // Apply the committed offsets to the subscription state.
@@ -1540,9 +1578,10 @@ impl OffsetsRequestManager {
         let cached = Arc::clone(&self.cached_update_positions_error);
         let time = Arc::clone(&self.time);
         tokio::spawn(async move {
-            // Await the committed-offset fetch. The sender can be dropped
-            // when the pending-fetch slot is replaced by a later request for
-            // a different partition set — see
+            // Await the committed-offset fetch. The fetch's completion task
+            // completes this caller even when the pending-fetch slot was
+            // replaced by a later request for a different partition set; the
+            // sender is dropped only if that task never runs — see
             // `superseded_committed_fetch_error` for why that completes as a
             // timeout rather than a wire error.
             let fetch_result = match inner_rx.await {
@@ -2569,23 +2608,19 @@ mod tests {
         assert_eq!(position.offset, 10);
     }
 
-    /// Regression test: a committed-offset fetch superseded by a later request
-    /// for a *different* partition set must complete its orphaned waiter with a
-    /// `Timeout`, never a fabricated `NetworkException`.
+    /// A committed-offset fetch superseded by a later request for a
+    /// *different* partition set still completes its own caller, with its own
+    /// result (audit finding C4-12).
     ///
-    /// Java never reaches this state — each caller's `result` future is
-    /// completed by a `whenComplete` chain hung off
-    /// `commitRequestManager.fetchOffsets(...)`, independent of the
-    /// `pendingOffsetFetchEvent` field, so replacing that field cannot abandon
-    /// an earlier caller; it resolves with success or `TimeoutException`. Rust's
-    /// single-consumer `oneshot` keeps the waiters inside the replaceable slot,
-    /// so we must synthesise a completion — and it has to be a `Timeout`,
-    /// because `is_ignorable_async_poll_error` swallows only `Timeout` (exactly
-    /// as Java swallows only `TimeoutException`). Using a retriable wire error
-    /// here previously escaped that predicate and surfaced from `poll()` as a
-    /// spurious `NetworkException` during rebalances.
+    /// Java: in `OffsetsRequestManager.initWithCommittedOffsetsIfNeeded` each
+    /// caller's `result` future is completed by the `whenComplete` hung off
+    /// the `commitRequestManager.fetchOffsets(...)` that caller created;
+    /// replacing `pendingOffsetFetchEvent` only changes which fetch later
+    /// callers can reuse, so the earlier caller resolves normally when its
+    /// fetch returns. (Rust used to drop that caller's waiter on replacement
+    /// and fail it with a synthetic timeout.)
     #[tokio::test(flavor = "current_thread")]
-    async fn superseded_committed_offset_fetch_completes_with_timeout_not_network_error() {
+    async fn superseded_committed_offset_fetch_completes_its_own_caller() {
         let (mut mgr, commit_rm, subscription_state) = new_manager_with_commit();
         let tp1 = TopicPartition::new("topic1".to_string(), 1);
         let tp2 = TopicPartition::new("topic2".to_string(), 2);
@@ -2595,12 +2630,12 @@ mod tests {
             subs.assign_from_user(HashSet::from([tp1.clone()])).expect("assign");
         }
 
-        let rx1 = mgr.update_fetch_positions(i64::MAX, 0);
+        let mut rx1 = mgr.update_fetch_positions(i64::MAX, 0);
         assert_eq!(commit_rm.inner_state_for_test(), 1);
 
         // Expand the assignment so the initializing set differs. The next call
-        // cannot reuse the pending event, so it replaces the slot — dropping
-        // the first call's waiter.
+        // cannot reuse the pending event, so it issues a new fetch and
+        // replaces the pending event.
         {
             let mut subs = subscription_state.lock().unwrap();
             subs.assign_from_user(HashSet::from([tp1.clone(), tp2.clone()]))
@@ -2614,20 +2649,25 @@ mod tests {
             "a differing initializing set must issue a new OffsetFetch, superseding the first"
         );
 
-        // The orphaned caller must still be completed (CLAUDE.md §7 — never
-        // leave the future hanging) and with an ignorable timeout.
-        let err = rx1
-            .await
-            .expect("superseded caller must be completed, not left hanging")
-            .expect_err("a superseded committed-offset fetch cannot report success");
+        // Being superseded neither completes nor fails the first caller.
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
         assert!(
-            matches!(err, Error::Timeout(_)),
-            "superseded fetch must yield an ignorable Timeout (Java's TimeoutException), got {err:?}"
+            matches!(rx1.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "Java: the superseded caller keeps waiting for its own fetch"
         );
-        assert_eq!(
-            err.to_string(),
-            "TimeoutError: Committed-offset fetch was superseded before it completed"
+
+        // Its own fetch returns: it completes normally and the offset applies.
+        let offsets = HashMap::from([(tp1.clone(), Some(OffsetAndMetadata::new(10).expect("offset")))]);
+        assert!(commit_rm.complete_first_unsent_fetch_for_test(offsets));
+        let result = rx1.await.expect("superseded caller must be completed, not left hanging");
+        assert!(
+            result.is_ok(),
+            "Java: the superseded caller is completed by its own fetch, got {result:?}"
         );
+        let subs = subscription_state.lock().unwrap();
+        assert_eq!(10, subs.position(&tp1).expect("tp1").expect("tp1 position").offset);
     }
 
     /// Java parity:
@@ -6091,5 +6131,184 @@ mod tests {
             .expect_err("not assigned");
         assert!(matches!(err, Error::LocalIllegalState(_)), "got {err:?}");
         assert_eq!("No current assignment for partition t1-0", err.message());
+    }
+
+    /// Audit finding C4-12. Java's `initWithCommittedOffsetsIfNeeded` gives
+    /// every caller its own `result` future, completed only by the
+    /// `whenComplete` hung off the OffsetFetch that caller created (or joined
+    /// via `canReusePendingOffsetFetchEvent`). When the first fetch (for
+    /// `{tp1}`) returns, the second caller (for `{tp1, tp2}`) must keep
+    /// waiting for its own fetch, and `tp2` must stay INITIALIZING so its
+    /// committed offset can be applied when that fetch returns.
+    #[tokio::test(flavor = "current_thread")]
+    async fn first_committed_fetch_does_not_complete_callers_of_a_newer_fetch() {
+        let (mut mgr, commit_rm, subscription_state) = new_manager_with_commit();
+        let tp1 = TopicPartition::new("topic1".to_string(), 1);
+        let tp2 = TopicPartition::new("topic2".to_string(), 2);
+        subscription_state
+            .lock()
+            .unwrap()
+            .assign_from_user(HashSet::from([tp1.clone()]))
+            .expect("assign");
+        let _rx1 = mgr.update_fetch_positions(i64::MAX, 0);
+        assert_eq!(commit_rm.inner_state_for_test(), 1);
+
+        // The assignment grows while the first OffsetFetch is in flight.
+        subscription_state
+            .lock()
+            .unwrap()
+            .assign_from_user(HashSet::from([tp1.clone(), tp2.clone()]))
+            .expect("assign");
+        let mut rx2 = mgr.update_fetch_positions(i64::MAX, 0);
+        assert_eq!(
+            commit_rm.inner_state_for_test(),
+            2,
+            "a different initializing set issues a second OffsetFetch"
+        );
+
+        // The FIRST fetch ({tp1}) returns.
+        let offsets = HashMap::from([(tp1.clone(), Some(OffsetAndMetadata::new(10).expect("offset")))]);
+        assert!(commit_rm.complete_first_unsent_fetch_for_test(offsets));
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+
+        let second_done = rx2.try_recv().is_ok();
+        let tp2_initializing = subscription_state.lock().unwrap().initializing_partitions().contains(&tp2);
+        assert!(
+            !second_done && tp2_initializing,
+            "Java: the 2nd caller waits for its own OffsetFetch and tp2 stays INITIALIZING until it returns; \
+             Rust: 2nd caller completed by the 1st fetch = {second_done}, tp2 still initializing = \
+             {tp2_initializing} (tp2 was sent to auto.offset.reset)"
+        );
+    }
+
+    /// Audit finding C4-12, end to end through `update_fetch_positions`: a
+    /// partition added while the OffsetFetch for the previous assignment is
+    /// slow gets its committed offset from the second fetch, instead of being
+    /// reset by `auto.offset.reset` when the first fetch returns. Both callers
+    /// complete normally, each by its own fetch (Java:
+    /// `OffsetsRequestManager.initWithCommittedOffsetsIfNeeded` /
+    /// `refreshOffsets`).
+    #[tokio::test(flavor = "current_thread")]
+    async fn partition_added_during_slow_committed_fetch_gets_its_committed_offset() {
+        let (mut mgr, commit_rm, subscription_state) = new_manager_with_commit();
+        let tp0 = TopicPartition::new("topic".to_string(), 0);
+        let tp1 = TopicPartition::new("topic".to_string(), 1);
+        subscription_state
+            .lock()
+            .unwrap()
+            .assign_from_user(HashSet::from([tp0.clone()]))
+            .expect("assign");
+        let rx1 = mgr.update_fetch_positions(i64::MAX, 0);
+
+        subscription_state
+            .lock()
+            .unwrap()
+            .assign_from_user(HashSet::from([tp0.clone(), tp1.clone()]))
+            .expect("assign");
+        let rx2 = mgr.update_fetch_positions(i64::MAX, 0);
+        assert_eq!(commit_rm.inner_state_for_test(), 2);
+
+        // Fetch #1 ({tp0}) returns: its caller completes normally, tp0 gets
+        // its committed offset, tp1 is untouched.
+        let offsets = HashMap::from([(tp0.clone(), Some(OffsetAndMetadata::new(7).expect("offset")))]);
+        assert!(commit_rm.complete_first_unsent_fetch_for_test(offsets));
+        assert!(
+            rx1.await.expect("rx1").is_ok(),
+            "Java: the first caller is completed by its own fetch"
+        );
+        {
+            let subs = subscription_state.lock().unwrap();
+            assert_eq!(7, subs.position(&tp0).expect("tp0").expect("tp0 position").offset);
+            assert!(
+                subs.initializing_partitions().contains(&tp1),
+                "tp1 must still be initializing (not reset to auto.offset.reset) after fetch #1"
+            );
+            assert!(!subs.is_offset_reset_needed(&tp1).expect("tp1 assigned"));
+        }
+
+        // Fetch #2 ({tp0, tp1}) returns with tp1's committed offset 4.
+        let offsets = HashMap::from([
+            (tp0.clone(), Some(OffsetAndMetadata::new(7).expect("offset"))),
+            (tp1.clone(), Some(OffsetAndMetadata::new(4).expect("offset"))),
+        ]);
+        assert!(commit_rm.complete_first_unsent_fetch_for_test(offsets));
+        assert!(rx2.await.expect("rx2").is_ok());
+
+        let subs = subscription_state.lock().unwrap();
+        assert_eq!(
+            4,
+            subs.position(&tp1).expect("tp1").expect("tp1 position").offset,
+            "Java: tp1 starts from its committed offset, not from auto.offset.reset"
+        );
+        assert!(!subs.is_offset_reset_needed(&tp1).expect("tp1 assigned"));
+        assert!(subs.has_all_fetch_positions());
+    }
+
+    /// Audit finding C4-12: a same-set caller arriving after a different-set
+    /// fetch replaced the pending event joins THAT newer fetch (Java:
+    /// `canReusePendingOffsetFetchEvent`), so no third OffsetFetch is sent, and
+    /// it is completed when the newer fetch returns — not by the older one.
+    #[tokio::test(flavor = "current_thread")]
+    async fn same_set_caller_joins_the_newest_committed_fetch() {
+        let (mgr, commit_rm, _subs) = new_manager_with_commit();
+        let tp1 = TopicPartition::new("t".to_string(), 1);
+        let tp2 = TopicPartition::new("t".to_string(), 2);
+        let first = HashSet::from([tp1.clone()]);
+        let second = HashSet::from([tp1.clone(), tp2.clone()]);
+
+        let rx1 = mgr.init_with_committed_offsets_if_needed(first, i64::MAX, 0);
+        let mut rx2 = mgr.init_with_committed_offsets_if_needed(second.clone(), i64::MAX, 0);
+        let mut rx3 = mgr.init_with_committed_offsets_if_needed(second, i64::MAX, 0);
+        assert_eq!(
+            commit_rm.inner_state_for_test(),
+            2,
+            "the third call reuses the in-flight fetch for the same partition set"
+        );
+
+        assert!(commit_rm.complete_first_unsent_fetch_for_test(HashMap::new()));
+        assert!(rx1.await.expect("rx1").is_ok());
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        assert!(rx2.try_recv().is_err(), "fetch #1 must not complete fetch #2's caller");
+        assert!(
+            rx3.try_recv().is_err(),
+            "fetch #1 must not complete the caller that joined fetch #2"
+        );
+
+        assert!(commit_rm.complete_first_unsent_fetch_for_test(HashMap::new()));
+        assert!(rx2.await.expect("rx2").is_ok());
+        assert!(rx3.await.expect("rx3").is_ok());
+    }
+
+    /// Rust-specific race pin for audit finding C4-12: the fetch's completion
+    /// task runs on another worker thread while the bg task registers a
+    /// same-set caller. The caller must either join the fetch before it drains
+    /// its waiters (and be completed by it) or find the pending event cleared
+    /// and start a new fetch — never be left hanging on a drained list.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn same_set_caller_racing_fetch_completion_is_never_lost() {
+        let (mgr, commit_rm, _subs) = new_manager_with_commit();
+        let partitions = HashSet::from([TopicPartition::new("t".to_string(), 0)]);
+        for iteration in 0..500 {
+            let rx1 = mgr.init_with_committed_offsets_if_needed(partitions.clone(), i64::MAX, 0);
+            let completer = {
+                let commit_rm = Arc::clone(&commit_rm);
+                std::thread::spawn(move || commit_rm.complete_first_unsent_fetch_for_test(HashMap::new()))
+            };
+            let rx2 = mgr.init_with_committed_offsets_if_needed(partitions.clone(), i64::MAX, 0);
+            assert!(completer.join().expect("completer thread"));
+            // If the second caller started a new fetch, complete it too.
+            while commit_rm.complete_first_unsent_fetch_for_test(HashMap::new()) {}
+            for (name, rx) in [("first", rx1), ("second", rx2)] {
+                let result = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+                    .await
+                    .unwrap_or_else(|_| panic!("iteration {iteration}: {name} caller was never completed"))
+                    .expect("sender dropped");
+                assert!(result.is_ok(), "iteration {iteration}: {name} caller got {result:?}");
+            }
+        }
     }
 }
