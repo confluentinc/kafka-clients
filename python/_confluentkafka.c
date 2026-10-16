@@ -685,14 +685,17 @@ static PyTypeObject ConsumerGroupMetadataType = {
 //
 // The C layer runs NO background threads of its own and holds no business
 // logic. Both Python producer families drive the `_cb` twins of the
-// blocking-in-Java operations (`send_with_callback_cb`, `flush_cb`,
-// `partitions_for_cb`, `close_cb` / `close_with_timeout_cb`, the
-// transaction-control `_cb` ops); the blocking entry points (`Producer_flush`,
-// ...) stay exported for completeness but neither family calls them. The
-// blocking send has no entry point here: a record's outcome reaches Python
-// only through its delivery callback, so the extension hands out no record
+// blocking-in-Java operations: `send_with_callback_cb` for `send`, `flush_cb`,
+// `partitions_for_cb`, `close_cb` / `close_with_timeout_cb` and the
+// transaction-control `_cb` ops; the blocking entry points (`Producer_send`,
+// `Producer_flush`, ...) stay exported, and only the sync producer's send()
+// on a thread that runs a producer's callbacks calls one (Producer_send).
+// `send_with_callback_cb` hands the record to the producer on the calling
+// thread when it can take it at once and queues it on the core's submission
+// task otherwise (Producer_send_cb below). Neither send hands out a record
 // future over a C handle (whose C `get` would run the producer's queued
-// callbacks on the calling thread).
+// callbacks on the calling thread): a record's outcome reaches Python only
+// through its delivery callback.
 // Delivery callbacks and `_cb` completions are QUEUED by Rust on the
 // producer's callback vector and only run when this extension calls
 // `kafka_producer_Producer__execute_callbacks_err` (Producer_poll /
@@ -742,7 +745,7 @@ static PyObject* error_handle_to_py(const kafka_common_Error_t* e) {
 // (released when it resolves). A send that resolved with an error may still
 // fire the callback, once, later: Java's doSend appends the record, whose
 // appendCallbacks carry the Callback, before maybeAddPartition throws
-// (KafkaProducer.java:1027-1039), so a record that had reached the accumulator
+// (KafkaProducer.java:1110-1120), so a record that had reached the accumulator
 // completes with its batch; one rejected before the append never fires. Which
 // one it was cannot be told from here, so the context is then parked on the
 // producer's orphan list and freed at destroy, after `_destroy` ran every
@@ -1606,12 +1609,72 @@ static kafka_producer_ProducerRecord_t* producer_record_to_c(ProducerRecordObjec
     return out;
 }
 
-// ---- send (queued) ---------------------------------------------------------
+// ---- send (blocking) -------------------------------------------------------
+
+// Producer_send(handle, record, on_completion) -> owned_error_int
+// Blocks (GIL released) until the record is registered, as Java's send(). The
+// on_completion callable is registered as a kafka_producer_Callback_t and is
+// run by Producer_poll / Producer__execute_callbacks / Producer_destroy, at
+// most once; it receives (meta_tuple | None, borrowed_error_int, callback_id)
+// and reports as producer_on_completion describes (returning None, raising, or
+// returning True to report later through Producer__set_callback_result). After
+// an error return it still runs if the record had reached the accumulator (see
+// Producer_send_cb). The error is OWNED by the caller. The record's outcome
+// reaches Python only through on_completion, so the C future the call returns
+// is destroyed here. The sync Python producer calls this on a thread that runs
+// a producer's callbacks (a delivery callback, or a record future's
+// dependant), which the handover of a record that Producer_send_cb could not
+// hand over at once may need.
+static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
+    kafka_common_Error_t *ffi_err = NULL;
+    unsigned long long ptr;
+    PyObject* rec_obj;
+    PyObject* callable;
+    if (!PyArg_ParseTuple(args, "KO!O", &ptr, &ProducerRecordType, &rec_obj, &callable)) return NULL;
+    Producer* p = producer_from_handle(ptr);
+
+    kafka_common_Error_t* err = NULL;
+    kafka_producer_ProducerRecord_t* rec =
+        producer_record_to_c((ProducerRecordObject*)rec_obj, &err);
+    if (rec == NULL) return error_handle_to_py(err);
+
+    DeliveryCtx* ctx = delivery_ctx_new(callable, p->producer);
+    if (ctx == NULL) { ffi_unraisable((kafka_producer_ProducerRecord_destroy_err(rec, &ffi_err), ffi_take(&ffi_err))); return NULL; }
+    kafka_producer_Callback_t* cb = NULL;
+    err = (cb = kafka_producer_Callback_new_err(ctx, producer_on_completion, &ffi_err), ffi_take(&ffi_err));
+    if (err != NULL) {
+        // Never registered: no callback can fire.
+        delivery_ctx_free(ctx);
+        ffi_unraisable((kafka_producer_ProducerRecord_destroy_err(rec, &ffi_err), ffi_take(&ffi_err)));
+        return error_handle_to_py(err);
+    }
+
+    kafka_common_KafkaFuture_t* fut = NULL;
+    Py_BEGIN_ALLOW_THREADS
+    err = (fut = kafka_producer_Producer_send_with_callback(p->producer, rec, cb, &ffi_err), ffi_take(&ffi_err));
+    Py_END_ALLOW_THREADS
+    // Both are read during the call only (the record was cloned -- its key and
+    // value bytes were read during the call -- and the callback registration
+    // copied into the Rust closure).
+    ffi_unraisable((kafka_producer_Callback_destroy_err(cb, &ffi_err), ffi_take(&ffi_err)));
+    ffi_unraisable((kafka_producer_ProducerRecord_destroy_err(rec, &ffi_err), ffi_take(&ffi_err)));
+
+    if (err != NULL) {
+        producer_orphan_delivery(p, ctx);
+        return error_handle_to_py(err);
+    }
+    delivery_ctx_release(ctx);
+    ffi_unraisable((kafka_common_KafkaFuture_destroy_err(fut, &ffi_err), ffi_take(&ffi_err)));
+    return PyLong_FromLong(0);
+}
+
+// ---- send (tried on the calling thread first, queued otherwise) -----------
 
 // The completion of a `send_with_callback_cb`: the Python record (whose
 // kafka_Bytes_t the C record's key/value point at) stays alive until `cb`
-// fires, which is when the submission task has handed the record to the
-// producer.
+// fires, which is when the record has been handed to the producer: from the
+// callback pump for a record that waited in the core, or inside the call, on
+// the calling thread, for one the producer takes or refuses at once.
 typedef struct {
     PyObject* resolve;         // Python callable(owned_error_int)
     PyObject* record;
@@ -1645,19 +1708,23 @@ static void producer_send_cb(kafka_common_KafkaFuture_t* value, kafka_common_Err
 }
 
 // Producer_send_cb(handle, record, on_completion, resolve) -> error_int
-// Queues the record on the producer's submission task and returns at once.
+// Hands the record to the producer on this thread when it can take it at once
+// (the C API's send tries the producer first) and queues it on the producer's
+// submission task otherwise; returns at once either way.
 // `on_completion(meta_tuple | None, borrowed_error_int, callback_id)` is the
 // record's delivery callback (Java's Callback, run at most once); it reports as
 // producer_on_completion describes: returning None reports success, raising
 // reports the exception, and returning True defers the report to
 // Producer__set_callback_result(handle, callback_id, exception | None).
-// `resolve(owned_error_int)` runs from the callback pump once the record is
-// handed to the producer: 0 when it was, else the error the producer's send()
-// returned (Java's doSend rethrow). After an error `on_completion` still runs,
-// once, if the record had reached the accumulator before the error (Java's
-// maybeAddPartition throws after the append), and never if it had not.
-// A record the C API rejects before queuing returns its OWNED error and calls
-// neither.
+// `resolve(owned_error_int)` runs once the record is handed to the producer:
+// 0 when it was, else the error the producer's send() returned (Java's doSend
+// rethrow). It runs here, before the call returns, for a record the producer
+// takes or refuses at once, and from the callback pump for one that was queued
+// (its topic's metadata missing, the buffer full). After an error
+// `on_completion` still runs, once, if the record had reached the accumulator
+// before the error (Java's maybeAddPartition throws after the append), and
+// never if it had not. A record the C API rejects before either returns its
+// OWNED error and calls neither.
 static PyObject* py_Producer_send_cb(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
     unsigned long long ptr;
@@ -1699,13 +1766,22 @@ static PyObject* py_Producer_send_cb(PyObject* self, PyObject* args) {
     ctx->record = rec_obj;
     ctx->producer = p;
 
-    // With the GIL held, which saves each send a GIL handoff: the call only
-    // hands the record to the submission task, under the client's submit_tx
-    // mutex (held by other sends, the drain barrier and _destroy only around
-    // the channel send) and tokio's scheduler locks when it wakes the task;
-    // none is held while waiting for the GIL. It never queues a completion
-    // (whose notify hook would wait for the GIL): when the task is gone it
-    // calls producer_send_cb here, which re-enters the GIL this thread holds.
+    // With the GIL held, which saves each send a GIL handoff: the call first
+    // runs the producer's non-blocking try_send on this thread, under the
+    // accumulator's own locks, and only hands a record the producer would have
+    // waited for to the submission task, under the client's submit_tx mutex
+    // (held by other sends, the drain barrier and _destroy only around the
+    // channel send) and tokio's scheduler locks when it wakes the task; none
+    // is held while waiting for the GIL. A completion it queues (try_send
+    // fires the delivery callback of a record the producer rejects, as Java's
+    // doSend does for an ApiException) fires the notify hook on this thread,
+    // where PyGILState_Ensure is a no-op; the hook runs outside the queue's
+    // lock (CallbackQueue::notify_if), so a Rust task whose hook waits for the
+    // GIL this thread holds never holds this thread up. For a record taken or
+    // refused at once, and when the submission task is gone, the call runs
+    // producer_send_cb itself, here, before returning: it re-enters the GIL
+    // this thread holds, and the handover completion runs on this thread
+    // exactly as the pump runs a queued record's.
     kafka_producer_Producer_send_with_callback_cb(p->producer, rec, cb, producer_send_cb, ctx);
     // Both are copied by the call; the record's key/value bytes stay borrowed
     // until producer_send_cb (ctx->record holds them).
@@ -10658,8 +10734,10 @@ static PyMethodDef ProducerNativeMethods[] = {
      "MockProducer_new(auto_complete, notify_cb=None) -> handle"},
     {"KafkaProducer_new", py_KafkaProducer_new, METH_VARARGS,
      "KafkaProducer_new(config_dict, notify_cb) -> (handle, 0) or (0, owned_error_int)"},
+    {"Producer_send", py_Producer_send, METH_VARARGS,
+     "Blocking send(handle, record, on_completion) -> owned_error_int; on_completion(meta | None, borrowed_error_int, callback_id) -> None | True"},
     {"Producer_send_cb", py_Producer_send_cb, METH_VARARGS,
-     "Queued send(handle, record, on_completion, resolve) -> owned_error_int; resolve(owned_error_int) once handed to the producer"},
+     "send(handle, record, on_completion, resolve) -> owned_error_int; resolve(owned_error_int) runs here, before the call returns, when the producer takes or refuses the record at once, else from the callback pump once the queued record is handed to it"},
     {"Producer_poll", py_Producer_poll, METH_VARARGS,
      "poll(timeout_ms): run queued callbacks on this thread, waiting up to timeout_ms; returns count"},
     {"Producer__set_callback_result", py_Producer__set_callback_result, METH_VARARGS,

@@ -35,23 +35,28 @@ whenever the C API's notify hook signals it (CLAUDE.md, Python Binding
 Conventions, Threads and callbacks).
 
 ``send()`` waits for its record to reach the producer, as Java's does, and so
-gives Java's backpressure (see ``_base``).
+gives Java's backpressure (see ``_base``): the record is taken on the calling
+thread when the producer can take it at once, and waits on a core task
+otherwise, not in ``send()``'s native call.
 
 *(deviation)* A call from a ``send()`` callback, or from a ``then_apply``
 function or ``when_complete`` action of a record's future (all of which run on
 the completion thread), cannot have its completion run, since that runs on the
-thread the call blocks: ``send()`` there does not
-wait for its record to reach the producer, so what Java's would raise goes to
-the record's callback and future instead, and ``init_transactions``,
-``send_offsets_to_transaction``, ``commit_transaction``, ``abort_transaction``
-and ``partitions_for`` raise ``TimeoutError`` after ``max.block.ms``, which is
-when Java's waits, blocking the I/O thread its completion needs, time out; the
-operation itself may still complete. ``begin_transaction`` does too, although
-Java's does not wait: its queued form first drains the records already sent
-(producer-transactions.md §13), and its completion needs that same thread.
-The core may then have begun the transaction although the call raised: a
-retried ``begin_transaction`` raises Java's ``IllegalStateError`` for a
-transaction already in progress.
+thread the call blocks: ``init_transactions``, ``send_offsets_to_transaction``,
+``commit_transaction``, ``abort_transaction`` and ``partitions_for`` raise
+``TimeoutError`` after ``max.block.ms``, which is when Java's waits, blocking
+the I/O thread its completion needs, time out; the operation itself may still
+complete. ``begin_transaction`` does too, although Java's does not wait: its
+queued form first drains the records already sent (producer-transactions.md
+§13), and its completion needs that same thread. The core may then have begun
+the transaction although the call raised: a retried ``begin_transaction``
+raises Java's ``IllegalStateError`` for a transaction already in progress.
+``send()`` there calls the C API's blocking send instead, which hands its
+record over on that thread, as Java's ``send()`` does on the I/O thread. So
+does a ``send()`` from another producer's completion thread: two producers
+whose callbacks send to each other would otherwise each wait for the
+completion thread the other's callback blocks, where Java's sends time out
+after ``max.block.ms``.
 """
 
 from __future__ import annotations
@@ -91,10 +96,9 @@ from ._base import (
 from ._send import (
     MetadataTuple,
     completion_to_python,
-    failure_metadata,
+    in_any_callback,
     in_callback,
     invoke_callback,
-    log_unreported_callback_error,
     mark_completion_thread,
     reject_coroutine_callback,
 )
@@ -134,18 +138,21 @@ class _Completion:
     Java's ``ProducerBatch.completeFutureAndFireCallbacks`` for one record, and
     :meth:`resolve` at its handover.
 
-    Both run on the producer's callback pump (the completion thread, or the
-    thread ``close()`` runs the callbacks still pending on), one at a time, with
-    the GIL held. :meth:`resolve` completes ``handed_over``, the internal future
-    ``send()`` waits for, or fails it with the error to rethrow. The delivery
-    callback runs the user's callback before it completes the record's future
-    (the ``_KafkaFutureImpl`` under the ``KafkaFuture`` send() returns), as
-    Java fires the callbacks before ``produceFuture.done()``; then the future is
-    untracked (see _ProducerState._track). The future's dependants
-    (``then_apply``, ``when_complete``) and a waiting ``get()`` are released
-    there, on the completion thread. It is one object rather than closures over its
-    values, so a record in flight keeps fewer objects alive for the garbage
-    collector to scan.
+    The delivery callback runs on the producer's callback pump (the completion
+    thread, or the thread ``close()`` runs the callbacks still pending on), one
+    at a time, with the GIL held; :meth:`resolve` runs there for a record that
+    waited in the core, and on the sending thread, inside
+    ``Producer_send_cb``, for one the producer takes or refuses at once. It
+    completes ``handed_over``, the internal future ``send()`` waits for, or
+    fails it with the error to rethrow. The delivery callback runs the user's
+    callback before it completes the record's future (the ``_KafkaFutureImpl``
+    under the ``KafkaFuture`` send() returns), as Java fires the callbacks
+    before ``produceFuture.done()``; then the future is untracked (see
+    _ProducerState._track). The future's dependants (``then_apply``,
+    ``when_complete``) and a waiting ``get()`` are released there, on the
+    completion thread. It is one object rather than closures over its values,
+    so a record in flight keeps fewer objects alive for the garbage collector
+    to scan.
     """
 
     __slots__ = ("_producer", "_callback", "_future", "_topic", "_partition", "_untrack",
@@ -154,19 +161,16 @@ class _Completion:
     def __init__(self, producer: object, callback: Callback | None,
                  future: _KafkaFutureImpl[RecordMetadata], topic: str, partition: int | None,
                  untrack: Callable[[_KafkaFutureImpl[RecordMetadata]], None],
-                 handed_over: Future[None] | None) -> None:
+                 handed_over: Future[None]) -> None:
         self._producer = producer
         self._callback = callback
         self._future = future
         self._topic = topic
         self._partition = partition
         self._untrack = untrack
-        # None for a send from a send() callback, which cannot wait for it
-        # (see the module docstring).
         self.handed_over = handed_over
-        # Whether the record completed: once per record, though both the
-        # delivery callback and a failed handover can complete it. The pump
-        # runs them one at a time, so a plain flag suffices.
+        # Whether the record completed: the pump runs the delivery callback at
+        # most once per record, so a plain flag suffices.
         self._fired = False
         # Set before the future is untracked: send() reads it after tracking
         # the future, to untrack one whose completion ran first.
@@ -184,30 +188,19 @@ class _Completion:
 
     def resolve(self, error: int) -> None:
         """The handover: the error the Rust send() returned, if any, which
-        send() rethrows, as Java's doSend does (KafkaProducer.java:1150-1162).
+        send() rethrows, as Java's doSend does (KafkaProducer.java:1143-1155).
         The Callback may still run, once, if the record had reached the
         accumulator: doSend appends the record, its appendCallbacks carrying the
-        Callback, before maybeAddPartition throws (KafkaProducer.java:1027-1039),
+        Callback, before maybeAddPartition throws (KafkaProducer.java:1110-1120),
         so such a record completes with its batch; one rejected before the
-        append never does.
-
-        A send from a send() callback is not waited for, so nothing rethrows
-        its error: the Callback and the future get it here, and an exception
-        the callback raises has no core report to go to, so it is logged
-        instead (see _send); :meth:`_complete` keeps the completion to once."""
-        handed_over = self.handed_over
-        if handed_over is not None:
-            if error:
-                handed_over.set_exception(cast("Exception", from_ffi_error(error)))
-            else:
-                handed_over.set_result(None)
-            return
+        append never does. Runs on the sending thread, inside
+        Producer_send_cb, for a record the producer takes or refuses at
+        once, and on the pump for one that waited in the core for its topic's
+        metadata or for buffer space."""
         if error:
-            exception = cast("Exception", from_ffi_error(error))
-            metadata = failure_metadata(self._topic, self._partition)
-            failure = self._complete(metadata, exception)
-            if failure is not None:
-                log_unreported_callback_error(metadata, failure)
+            self.handed_over.set_exception(cast("Exception", from_ffi_error(error)))
+        else:
+            self.handed_over.set_result(None)
 
     def _complete(self, metadata: RecordMetadata,
                   exception: Exception | None) -> Exception | None:
@@ -427,11 +420,11 @@ class Producer(Generic[K, V], _ProducerState):
 
         The send is asynchronous and this method will return immediately
         (except for rare cases described below) once the record has been stored
-        in the buffer of records waiting to be sent. It can block 1) for the
-        first record sent to a topic, up to ``max.block.ms`` while waiting for
-        the topic's metadata, and 2) while the buffer is full. The key and value
-        are serialized on the calling thread, and a serializer's error is raised
-        here.
+        in the buffer of records waiting to be sent. It blocks 1) for the first
+        record sent to a topic, up to ``max.block.ms`` while waiting for the
+        topic's metadata, and 2) while the buffer is full, up to
+        ``max.block.ms``, as Java's does. The key and value are serialized on
+        the calling thread, and a serializer's error is raised here.
 
         The result of the send is a ``KafkaFuture`` of the ``RecordMetadata``
         specifying the partition the record was sent to, the offset it was
@@ -444,9 +437,9 @@ class Producer(Generic[K, V], _ProducerState):
         producer's completion thread, once the record's callback has returned.
 
         The ``callback`` runs on the producer's background completion thread,
-        never on the calling thread, after the record completes and before its
-        future does. Callbacks for records being sent to the same partition are
-        guaranteed to execute in order. A raising callback fails nothing: its
+        after the record completes and before its future does. Callbacks for
+        records being sent to the same partition are guaranteed to execute in
+        order. A raising callback fails nothing: its
         exception is reported to the core, which logs it once with Java's
         message, "Error executing user-provided callback on message for
         topic-partition '<topic>-<partition>'", and the exception's text. It
@@ -480,9 +473,8 @@ class Producer(Generic[K, V], _ProducerState):
         callback, as in Java. The other errors of a send (``TimeoutError`` for
         the metadata wait, ``RecordTooLargeError``, ``ProducerFencedError``, …)
         are given to the callback and the future, as in Java. From a ``send()``
-        callback, ``send()`` returns without waiting for the record to reach the
-        producer, and what it would raise goes to the callback and the future
-        instead (see the module docstring).
+        callback, of this producer or another, ``send()`` hands its record over
+        on the calling thread (see the module docstring).
         """
         if callback is UNSET:
             callback = None
@@ -494,18 +486,36 @@ class Producer(Generic[K, V], _ProducerState):
         # KafkaFuture returned (RecordFuture: cancel() answers False, as Java's
         # FutureRecordMetadata).
         future: _KafkaFutureImpl[RecordMetadata] = _KafkaFutureImpl()
-        # From a send() callback the handover cannot be waited for: it runs on
-        # the thread the callback blocks (see the module docstring).
-        handed_over: Future[None] | None = None if in_callback(self) else Future()
+        handed_over: Future[None] = Future()
         cb = _Completion(self, callback, future, topic, partition, self._discard_future,
                          handed_over)
-        # A close() that began since the check above (the serializers ran in
-        # between) refuses the record as Java's RecordAccumulator.append does.
+        # send() returns once the record is handed over and raises the error
+        # the Rust send() returned: Java's doSend rethrows those
+        # (KafkaProducer.java:1143-1155), where an ApiException reaches the
+        # callback and the future (:1130-1142). The record's Callback may still
+        # run after such an error: doSend appends the record, its
+        # appendCallbacks carrying the Callback, before maybeAddPartition throws
+        # (KafkaProducer.java:1110-1120), so a record that had reached the
+        # accumulator completes with its batch (once); one rejected before the
+        # append never does. A close() that began since the check above (the
+        # serializers ran in between) refuses the record as Java's
+        # RecordAccumulator.append does.
+        if in_any_callback():
+            # A queued record's handover would run on the completion thread,
+            # which a callback of this producer blocks; and two producers whose
+            # callbacks send to each other would each wait for the completion
+            # thread the other's callback blocks. The blocking C send hands the
+            # record over on this thread instead (see the module docstring).
+            with self._send_use as c_producer:
+                raise_if_error(_lib.Producer_send(c_producer, native, cb))
+            self._track_sent(cb, future)
+            return RecordFuture._of_impl(future)
         with self._send_use as c_producer:
+            # The record is tried on this thread first and queued to the
+            # submission task only when the producer would have to wait for
+            # it: cb.resolve runs inside the call for a record taken or refused
+            # at once, on the completion thread otherwise.
             raise_if_error(_lib.Producer_send_cb(c_producer, native, cb, cb.resolve))
-            if handed_over is None:
-                self._track_sent(cb, future)
-                return RecordFuture._of_impl(future)
         try:
             # A Ctrl+C is raised once the record is handed over.
             result_sliced(handed_over)

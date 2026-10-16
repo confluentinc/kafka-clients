@@ -48,7 +48,8 @@ dropped (see ``_send``).
 
 Awaiting ``send()`` waits for the record to reach the producer, as Java's
 ``send()`` does, without blocking the loop, and so gives Java's backpressure
-(see ``_base``).
+(see ``_base``): the record is taken on the loop's thread when the producer can
+take it at once, and waits on a core task otherwise.
 """
 
 from __future__ import annotations
@@ -220,12 +221,14 @@ def _drop_completion(metadata: RecordMetadata) -> None:
 
 
 class _AsyncCompletion:
-    """The completions of one send, called by the callback pump (the loop's
-    thread, or a helper once the loop closed): the record's delivery callback,
+    """The completions of one send: the record's delivery callback, called by
+    the callback pump (the loop's thread, or a helper once the loop closed),
     which hands the completion to the producer's event loop (see
-    AsyncProducer._deliver), once, and :meth:`resolve` at its handover, which
-    completes ``handed_over``, the internal future ``send()`` awaits, or fails
-    it with the error to rethrow. One object rather than
+    AsyncProducer._deliver), once, and :meth:`resolve` at its handover, called
+    by the pump too, or on the loop's thread inside ``Producer_send_cb``
+    for a record the producer takes or refuses at once, which completes
+    ``handed_over``, the internal future ``send()`` awaits, or fails it with
+    the error to rethrow. One object rather than
     closures over its values, so a record in flight keeps fewer objects alive
     for the garbage collector to scan."""
 
@@ -585,6 +588,11 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         # A close() that began since the check above (the serializers ran in
         # between) refuses the record as Java's RecordAccumulator.append does.
         with self._send_use as c_producer:
+            # The record is tried on the loop's thread first and queued to the
+            # submission task only when the producer would have to wait for
+            # it: cb.resolve runs inside the call for a record taken or refused
+            # at once (handed_over is then done before it is awaited), from the
+            # pump otherwise.
             raise_if_error(_lib.Producer_send_cb(c_producer, native, cb, cb.resolve))
         try:
             await await_to_end(handed_over)
