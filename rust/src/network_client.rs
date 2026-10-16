@@ -614,8 +614,13 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// Visible for testing.
     #[doc(alias = "org.apache.kafka.clients.NetworkClient#nextCorrelationId")]
     fn next_correlation_id(&mut self) -> i32 {
+        if SaslClientAuthenticator::is_reserved(self.correlation) {
+            // the numeric overflow is fine as negative values is acceptable
+            self.correlation =
+                SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MAX_RESERVED_CORRELATION_ID.wrapping_add(1);
+        }
         let id = self.correlation;
-        self.correlation += 1;
+        self.correlation = self.correlation.wrapping_add(1);
         id
     }
 
@@ -3530,6 +3535,28 @@ mod tests {
             ids.insert(client.next_correlation_id());
         }
         assert_eq!(count, ids.len(), "All correlation IDs should be unique");
+        for id in &ids {
+            assert!(
+                *id < SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
+                "correlation id {id} is in the range reserved for SASL"
+            );
+        }
+    }
+
+    /// Regression test: ids must skip the SASL-reserved range `[i32::MAX-7, i32::MAX]` and wrap to
+    /// `i32::MIN` like Java's `nextCorrelationId`, instead of issuing reserved ids and then
+    /// overflowing.
+    #[tokio::test]
+    async fn test_correlation_id_skips_sasl_reserved_range_and_wraps() {
+        let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
+        client.correlation = i32::MAX - 9;
+        let ids: Vec<i32> = (0..4).map(|_| client.next_correlation_id()).collect();
+        assert_eq!(vec![i32::MAX - 9, i32::MAX - 8, i32::MIN, i32::MIN + 1], ids);
+
+        // Starting inside the reserved range must not overflow either.
+        client.correlation = i32::MAX;
+        assert_eq!(i32::MIN, client.next_correlation_id());
+        assert_eq!(i32::MIN + 1, client.next_correlation_id());
     }
 
     /// Translated from `NetworkClientTest.testLeastLoadedNodeProvideDisconnectedNodesPrioritizedByLastConnectionTimestamp`.
