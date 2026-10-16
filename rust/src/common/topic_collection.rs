@@ -154,8 +154,7 @@ mod tests {
         let TopicCollection::TopicIds(id_collection) = TopicCollection::of_topic_ids(topic_ids.clone()) else {
             panic!("ofTopicIds builds a TopicIdCollection");
         };
-        let TopicCollection::TopicNames(name_collection) = TopicCollection::of_topic_names(topic_names.clone())
-        else {
+        let TopicCollection::TopicNames(name_collection) = TopicCollection::of_topic_names(topic_names.clone()) else {
             panic!("ofTopicNames builds a TopicNameCollection");
         };
 
