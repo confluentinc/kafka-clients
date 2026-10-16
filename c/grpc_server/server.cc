@@ -1338,28 +1338,23 @@ class ProducerServiceImpl final : public ProducerService::Service {
 // ---------------------------------------------------------------------------
 
 // A consumer as CreateConsumer built it. `view` is the `Consumer` interface
-// handle (`kafka_consumer_Consumer_t`, Rust's `Box<dyn Consumer>`) every
-// operation takes. For a MockConsumer it is the `__as_Consumer` view BORROWED
-// from the class handle `mock`, valid until that handle is destroyed and never
-// passed to `kafka_consumer_Consumer_destroy`. For a KafkaConsumer there is no
-// class handle at all — `kafka_consumer_KafkaConsumer_new` delivers the boxed
-// `Consumer` itself — so `view` is OWNED and freed with
-// `kafka_consumer_Consumer_destroy`. Exactly one of the two shapes applies,
-// selected by `mock != nullptr`.
+// handle (`kafka_consumer_Consumer_t`) every operation takes: the
+// `__as_Consumer` view BORROWED from the class handle, `kafka` or `mock`
+// (exactly one is set), valid until that handle is destroyed and never
+// destroyed itself.
 struct ConsumerEntry {
+  kafka_consumer_KafkaConsumer_t* kafka = nullptr;
   kafka_consumer_MockConsumer_t* mock = nullptr;
   kafka_consumer_Consumer_t* view = nullptr;
 
-  // Frees whichever handle owns the consumer; the view is invalid afterwards.
-  // Both destroys close the consumer if close() never ran and run the
-  // callbacks still queued on it — none here, since this server only uses the
-  // blocking entry points, whose listener / commit callbacks fire inline.
+  // Frees the class handle; the view is invalid afterwards. Both destroys
+  // close the consumer if close() never ran and run the callbacks still
+  // queued on it — none here, since this server only uses the blocking entry
+  // points, whose listener / commit callbacks fire inline.
   void destroy() {
-    if (mock != nullptr) {
-      kafka_consumer_MockConsumer_destroy(mock);
-    } else if (view != nullptr) {
-      kafka_consumer_Consumer_destroy(view);
-    }
+    if (kafka != nullptr) kafka_consumer_KafkaConsumer_destroy(kafka);
+    if (mock != nullptr) kafka_consumer_MockConsumer_destroy(mock);
+    kafka = nullptr;
     mock = nullptr;
     view = nullptr;
   }
@@ -1601,12 +1596,13 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
       // NULL deserializers: keys and values cross as `kafka_Bytes_t *` owned by
       // the records that delivered them (see record_to_proto). The config stays
       // ours and can be destroyed right after the consumer was built from it.
-      entry.view = kafka_consumer_KafkaConsumer_new(config, nullptr, nullptr, &err);
+      entry.kafka = kafka_consumer_KafkaConsumer_new(config, nullptr, nullptr, &err);
       kafka_consumer_ConsumerConfig_destroy(config);
       if (err != nullptr) {
         fill_proto_error(resp->mutable_error(), err);
         return grpc::Status::OK;
       }
+      entry.view = kafka_consumer_KafkaConsumer__as_Consumer(entry.kafka);
     }
     const uint64_t id = next_id_.fetch_add(1);
     {
@@ -2118,8 +2114,8 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     kafka_common_Error_t* err = nullptr;
     kafka_consumer_Consumer_close(entry.view, &err);
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
-    // Frees the class handle (mock) or the owned Consumer (KafkaConsumer); the
-    // view is invalid afterwards. The log entries stay in callback_log_ and the
+    // Frees the class handle (`kafka` or `mock`); the view is invalid
+    // afterwards. The log entries stay in callback_log_ and the
     // LogState stays in log_states_, so GetCallbackLog still works post-close.
     entry.destroy();
     return grpc::Status::OK;
@@ -5849,11 +5845,11 @@ void chaos_read_back(kafka_consumer_Consumer_t* consumer, ChaosEventQueue& event
 // must outlive close. The C API lets the handle outlive the consumer too, so it
 // goes last: nothing the consumer runs, up to and including its `_destroy`, can
 // find it released.
-kafka_common_Error_t* chaos_close_consumer(kafka_consumer_Consumer_t* consumer,
+kafka_common_Error_t* chaos_close_consumer(kafka_consumer_KafkaConsumer_t* kafka,
                                            ChaosListenerState* state) {
   kafka_common_Error_t* err = nullptr;
-  kafka_consumer_Consumer_close(consumer, &err);
-  kafka_consumer_Consumer_destroy(consumer);
+  kafka_consumer_Consumer_close(kafka_consumer_KafkaConsumer__as_Consumer(kafka), &err);
+  kafka_consumer_KafkaConsumer_destroy(kafka);
   kafka_consumer_ConsumerHandle_t* handle = nullptr;
   {
     // Waits out a callback still inside a handle call; later ones see null.
@@ -6174,13 +6170,13 @@ class ChaosWorkloadServiceImpl final : public ChaosWorkloadService::Service {
     kafka_common_Error_t* err = nullptr;
     kafka_consumer_ConsumerConfig_t* config = kafka_consumer_ConsumerConfig_new(props, &err);
     kafka_Map_destroy(props);
-    // Owned (KafkaConsumer has no class handle), freed with
-    // kafka_consumer_Consumer_destroy.
-    kafka_consumer_Consumer_t* consumer = nullptr;
+    // The owned class handle, freed by chaos_close_consumer; every operation
+    // takes its borrowed `__as_Consumer` view.
+    kafka_consumer_KafkaConsumer_t* kafka = nullptr;
     if (err == nullptr) {
       // NULL deserializers: keys and values cross as `kafka_Bytes_t *` owned by
       // the records that delivered them.
-      consumer = kafka_consumer_KafkaConsumer_new(config, nullptr, nullptr, &err);
+      kafka = kafka_consumer_KafkaConsumer_new(config, nullptr, nullptr, &err);
       kafka_consumer_ConsumerConfig_destroy(config);
     }
     if (err != nullptr) {
@@ -6189,6 +6185,7 @@ class ChaosWorkloadServiceImpl final : public ChaosWorkloadService::Service {
       events->push(chaos_failed(chaos_error(err)));
       return;
     }
+    kafka_consumer_Consumer_t* consumer = kafka_consumer_KafkaConsumer__as_Consumer(kafka);
 
     // Read-backs after the revoke-time and final commits (both synchronous, so
     // in either commit mode); the periodic poll-loop read-back additionally
@@ -6213,7 +6210,7 @@ class ChaosWorkloadServiceImpl final : public ChaosWorkloadService::Service {
     kafka_consumer_ConsumerRebalanceListener_destroy(listener);
     if (err != nullptr) {
       KafkaError subscribe_error = chaos_error(err);
-      kafka_common_Error_t* close_err = chaos_close_consumer(consumer, state.get());
+      kafka_common_Error_t* close_err = chaos_close_consumer(kafka, state.get());
       if (close_err != nullptr) kafka_common_Error_destroy(close_err);
       events->push(chaos_failed(std::move(subscribe_error)));
       return;
@@ -6308,7 +6305,7 @@ class ChaosWorkloadServiceImpl final : public ChaosWorkloadService::Service {
     // Partitions close releases from here on may not have been announced as
     // assigned; the verifier learns that from this event.
     events->push(chaos_consumer_closing());
-    kafka_common_Error_t* close_err = chaos_close_consumer(consumer, state.get());
+    kafka_common_Error_t* close_err = chaos_close_consumer(kafka, state.get());
     if (close_err != nullptr) {
       // The consumer's error, not the workload's: it drained, and it is closed
       // and destroyed either way.

@@ -30,7 +30,7 @@ void tearDown(void) {}
 //
 // The mock is a `kafka_consumer_MockConsumer_t`; the `Consumer` interface is
 // reached through the borrowed `__as_Consumer` view, which stays valid until
-// the mock is destroyed and is never passed to `Consumer_destroy`
+// the mock is destroyed and is never destroyed itself
 // (CLAUDE.md §4, "Traits"). The mock has no deserializers, so a record's key
 // and value are opaque `void *`s it never reads: the tests pass
 // `kafka_Bytes_t` views the way a deserializer-less KafkaConsumer would.

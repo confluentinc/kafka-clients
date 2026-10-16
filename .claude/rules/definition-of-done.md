@@ -28,9 +28,10 @@ Every change must at least pass all of the following before it is considered com
 10. **Hot-path allocation audit**: For any class that sits on the producer send path, verify there are no avoidable per-message heap allocations: no intermediate copy buffers, no identifier `String` clones, no `Box<dyn Future>` per send. If the translated class is not on the send path, this check can be skipped.
 
 11. **Consumer trait surface check** (when translating consumer files):
-    - The top-level `Consumer<K, V>` dispatch is a single `#[async_trait]` trait with `Box<dyn Consumer<K, V>>` from the factory. No enum dispatch wrapping `AsyncKafkaConsumer` / `MockConsumer`.
+    - The top-level `Consumer<K, V>` trait declares its asynchronous methods as returning `impl Future + Send` (no `#[async_trait]`), and has the sealed, dyn-compatible `DynConsumer<K, V>` companion blanket-implemented for every `Consumer` (`consumer-threading.md` §2). Every `Consumer` method has a `DynConsumer` counterpart and a forwarding method on `KafkaConsumer`.
+    - `KafkaConsumer::new` returns the concrete `KafkaConsumer<K, V>`, which holds the private `AsyncKafkaConsumer` delegate and forwards to its `Consumer` impl. No public enum dispatch wrapping `AsyncKafkaConsumer` / `MockConsumer`; code holding several implementations uses `Box<dyn DynConsumer<K, V>>`.
     - Per-record traits (`Deserializer`, `Serializer`, anything on the `Fetcher` / `FetchCollector` path) do NOT use `#[async_trait]` — sync `fn` or generic dispatch only.
     - No `block_on`-wrapped sync façade for any async consumer method (see `consumer-threading.md` §1).
-    - `#[async_trait]` is used with default `Send` bound (no `?Send`).
+    - Every future returned by a `Consumer` method is `Send`; where `#[async_trait]` is used (the `ConsumerRebalanceListener` / `OffsetCommitCallback` callback traits), it keeps the default `Send` bound (no `?Send`).
 
 12. **Test-fixture fidelity**: When a unit-test fixture stands in for a production closure / callback (`wakeup_fn`, `signal_close_fn`, ...), the fixture must invoke the *same* primitives production does — preferably by calling the same builder function the production constructor uses, so the two cannot diverge. A fixture that substitutes a working primitive for a broken one turns the test into a proof about the fixture.

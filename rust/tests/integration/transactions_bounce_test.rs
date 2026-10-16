@@ -150,7 +150,7 @@ async fn create_consumer_and_subscribe(
     group_id: &str,
     topics: Vec<String>,
     read_committed: bool,
-) -> Box<dyn Consumer<Vec<u8>, Vec<u8>>> {
+) -> Box<dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>> {
     let props = HashMap::from([
         ("bootstrap.servers".to_string(), bootstrap.to_string()),
         ("group.protocol".to_string(), "consumer".to_string()),
@@ -167,21 +167,21 @@ async fn create_consumer_and_subscribe(
             .to_string(),
         ),
     ]);
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         ConsumerConfig::new(&props).expect("valid consumer config"),
         Box::new(ByteArrayDeserializer::default()),
         Box::new(ByteArrayDeserializer::default()),
     )
     .expect("build consumer");
     consumer.subscribe_with_topics(topics).await.expect("subscribe");
-    consumer
+    Box::new(consumer)
 }
 
 /// `TestUtils.pollUntilAtLeastNumRecords(consumer, numRecords, waitTimeMs)`
 /// (`TestUtils.scala:1184-1196`): poll (100 ms each) until at least
 /// `num_records` arrive within `wait_time_ms`.
 async fn poll_until_at_least_num_records(
-    consumer: &mut Box<dyn Consumer<Vec<u8>, Vec<u8>>>,
+    consumer: &mut Box<dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>>,
     num_records: usize,
     wait_time_ms: u64,
 ) -> Vec<ConsumerRecord<Vec<u8>, Vec<u8>>> {
