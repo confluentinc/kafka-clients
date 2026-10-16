@@ -1207,8 +1207,9 @@ static PyObject* py_Producer_poll(PyObject* self, PyObject* args) {
 //
 // The extension's future object over an OWNED kafka_common_KafkaFuture_t, the
 // value source of `confluent_kafka.common.KafkaFuture` /
-// `AsyncKafkaFuture` (CLAUDE.md, Python Binding Conventions, Futures). It never
-// blocks: `is_done()` reads the handle, `get_cb(cb)` queues the delivery on the
+// `AsyncKafkaFuture` (CLAUDE.md, Python Binding Conventions, Futures), for a
+// future whose C `get` does not drain a client's callback queue (see
+// get_if_done). It never blocks: `is_done()` reads the handle, `get_cb(cb)` queues the delivery on the
 // owning client's callbacks vector (inline for a future of no client), and
 // `get_if_done()` reads a future that is already done.
 //
@@ -1311,10 +1312,13 @@ static PyObject* KafkaFuture_is_done(KafkaFutureObject* self, PyObject* Py_UNUSE
 }
 
 // get_if_done() -> None while the future is pending, else the `(value, error)`
-// pair of kafka_future_outcome. A done future answers `kafka_common_KafkaFuture_get`
-// at once; for a future that waits for its client's report, that call first
-// runs the client's queued callbacks on this thread, so only the asyncio
-// classes, whose loop is that client's callback thread, call it.
+// pair of kafka_future_outcome, read through `kafka_common_KafkaFuture_get`,
+// which answers a done future at once (the handle caches its one value).
+// Precondition of this object: it wraps only futures whose C `get` does not
+// drain a client's callback queue (every admin future), so this neither waits
+// nor runs the client's callbacks, on any thread. A producer record future
+// (`box_report_future`) would run them on the calling thread; the producer's
+// `send()` future is a Python `_KafkaFutureImpl` instead.
 static PyObject* KafkaFuture_get_if_done(KafkaFutureObject* self, PyObject* Py_UNUSED(ignored)) {
     kafka_common_Error_t *ffi_err = NULL;
     int8_t done = 0;

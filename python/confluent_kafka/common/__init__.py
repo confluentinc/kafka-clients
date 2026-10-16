@@ -49,6 +49,8 @@ from .group_state import GroupState as GroupState
 from .group_type import GroupType as GroupType
 from .headers import Headers as Headers
 from .isolation_level import IsolationLevel as IsolationLevel
+from .kafka_future import AsyncKafkaFuture as AsyncKafkaFuture
+from .kafka_future import KafkaFuture as KafkaFuture
 from .kafka_metric import KafkaMetric as KafkaMetric
 from .kafka_principal import KafkaPrincipal as KafkaPrincipal
 from .measurable import Measurable as Measurable
@@ -77,6 +79,7 @@ __all__ = [
     "AclBindingFilter",
     "AclOperation",
     "AclPermissionType",
+    "AsyncKafkaFuture",
     "ClassicGroupState",
     "ClientQuotaAlteration",
     "ClientQuotaEntity",
@@ -89,6 +92,7 @@ __all__ = [
     "GroupType",
     "Headers",
     "IsolationLevel",
+    "KafkaFuture",
     "KafkaMetric",
     "KafkaPrincipal",
     "Measurable",
