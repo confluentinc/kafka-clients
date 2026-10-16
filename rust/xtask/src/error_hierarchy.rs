@@ -3372,8 +3372,8 @@ mod tests {
     #[test]
     fn errors_default_messages_follow_errors_java() {
         let messages = errors_default_messages(&repo_root()).expect("Errors.java must parse");
-        // UNKNOWN_SERVER_ERROR (-1) and codes 1..=133; NONE's null message is left out.
-        assert_eq!(messages.len(), 134);
+        // UNKNOWN_SERVER_ERROR (-1) and codes 1..=136; NONE's null message is left out.
+        assert_eq!(messages.len(), 137);
         assert!(!messages.contains_key(&0));
         assert_eq!(
             messages[&-1],

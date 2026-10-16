@@ -275,6 +275,7 @@ CONSUMER: dict[str, str] = {
 
 ADMIN: dict[str, str] = {
     "bootstrap.controllers": "LIST",
+    "bootstrap.resolve.timeout.ms": "LONG",
     "bootstrap.servers": "LIST",
     "client.dns.lookup": "STRING",
     "client.id": "STRING",
@@ -282,6 +283,7 @@ ADMIN: dict[str, str] = {
     "connections.max.idle.ms": "LONG",
     "default.api.timeout.ms": "INT",
     "enable.metrics.push": "BOOLEAN",
+    "metadata.cluster.check.enable": "BOOLEAN",
     "metadata.max.age.ms": "LONG",
     "metadata.recovery.rebootstrap.trigger.ms": "LONG",
     "metadata.recovery.strategy": "STRING",
@@ -314,6 +316,8 @@ ADMIN: dict[str, str] = {
     "sasl.login.retry.backoff.max.ms": "LONG",
     "sasl.login.retry.backoff.ms": "LONG",
     "sasl.mechanism": "STRING",
+    "sasl.oauthbearer.allow.unverified.audience": "BOOLEAN",
+    "sasl.oauthbearer.allow.unverified.issuer": "BOOLEAN",
     "sasl.oauthbearer.assertion.algorithm": "STRING",
     "sasl.oauthbearer.assertion.claim.aud": "STRING",
     "sasl.oauthbearer.assertion.claim.exp.seconds": "INT",

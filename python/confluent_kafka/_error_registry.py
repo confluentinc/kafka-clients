@@ -326,7 +326,7 @@ DEFAULT_MESSAGES: dict[int, str] = {
     121: "The record state is invalid. The acknowledgement of delivery could not be completed.",
     122: "The share session was not found.",
     123: "The share session epoch is invalid.",
-    124: "The share coordinator rejected the request because the share-group state epoch did not match.",
+    124: "The coordinator rejected the request because the state epoch did not match.",
     125: "The voter key doesn't match the receiving replica's key.",
     126: "The voter is already part of the set of voters.",
     127: "The voter is not part of the set of voters.",
@@ -336,4 +336,7 @@ DEFAULT_MESSAGES: dict[int, str] = {
     131: "The supplied topology epoch is invalid.",
     132: "The supplied topology epoch is outdated.",
     133: "The limit of share sessions has been reached.",
+    134: "DeleteGroups could not complete; see the error message on the per-group result for details.",
+    135: "The broker could not process the topology description update; see the error message for details.",
+    136: "The given controller ID was not registered.",
 }

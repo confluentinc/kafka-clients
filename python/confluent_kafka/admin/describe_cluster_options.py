@@ -70,7 +70,7 @@ class DescribeClusterOptions(AbstractOptions):
         """With ``include_authorized_operations``: set it and return this object.
 
         Without: specify if authorized operations should be included in the response.
-        Note that some older brokers cannot not supply this information even if it is
+        Note that some older brokers cannot supply this information even if it is
         requested.
         """
         if include_authorized_operations is None:
@@ -82,7 +82,7 @@ class DescribeClusterOptions(AbstractOptions):
         """With ``include_fenced_brokers``: set it and return this object.
 
         Without: specify if fenced brokers should be included in the response. Note that
-        some older brokers cannot not supply this information even if it is requested.
+        some older brokers cannot supply this information even if it is requested.
         """
         if include_fenced_brokers is None:
             return self._include_fenced_brokers

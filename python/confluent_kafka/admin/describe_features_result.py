@@ -14,7 +14,7 @@
 
 """``DescribeFeaturesResult``: Java's ``org.apache.kafka.clients.admin.DescribeFeaturesResult``.
 
-Java's constructor is package-private: ``__init__`` raises ``TypeError`` and ``_new``
+Java's constructor is protected: ``__init__`` raises ``TypeError`` and ``_new``
 builds it (CLAUDE.md, Python Binding Conventions, Class family).
 """
 
@@ -46,7 +46,7 @@ class DescribeFeaturesResult(Generic[KindT]):
     @classmethod
     def _new(cls, *, future: AnyFuture[FeatureMetadata],
              kind: type[Sync] | type[Async]) -> DescribeFeaturesResult[Any]:
-        """Java's package-private ``DescribeFeaturesResult(future)``."""
+        """Java's protected ``DescribeFeaturesResult(future)``."""
         result = cls.__new__(cls)
         result._future = future
         result._kind = kind
