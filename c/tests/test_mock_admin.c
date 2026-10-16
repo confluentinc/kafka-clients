@@ -1529,8 +1529,8 @@ static void test_mock_admin_describe_topics_by_names(void) {
         kafka_admin_Admin_describe_topics_with_topic_names_options(f.admin, names, options);
     kafka_admin_DescribeTopicsOptions_destroy(options);
     TEST_ASSERT_NOT_NULL(result);
-    TEST_ASSERT_EQUAL_INT(kafka_admin_DescribeTopicsResult_BY_TOPIC_NAME, kafka_admin_DescribeTopicsResult__enum(result));
     TEST_ASSERT_NULL(kafka_admin_DescribeTopicsResult_topic_id_values(result));
+    TEST_ASSERT_NULL(kafka_admin_DescribeTopicsResult_all_topic_ids(result));
     kafka_Map_t *values = kafka_admin_DescribeTopicsResult_topic_name_values(result);
     TEST_ASSERT_EQUAL_INT32(2, kafka_Map_size(values));
 
@@ -1618,8 +1618,8 @@ static void test_mock_admin_describe_topics_by_ids(void) {
     TEST_ASSERT_NOT_NULL(collection);
     kafka_admin_DescribeTopicsResult_t *result = kafka_admin_Admin_describe_topics_with_topics(f.admin, collection);
     TEST_ASSERT_NOT_NULL(result);
-    TEST_ASSERT_EQUAL_INT(kafka_admin_DescribeTopicsResult_BY_TOPIC_ID, kafka_admin_DescribeTopicsResult__enum(result));
     TEST_ASSERT_NULL(kafka_admin_DescribeTopicsResult_topic_name_values(result));
+    TEST_ASSERT_NULL(kafka_admin_DescribeTopicsResult_all_topic_names(result));
     kafka_Map_t *values = kafka_admin_DescribeTopicsResult_topic_id_values(result);
     TEST_ASSERT_EQUAL_INT32(2, kafka_Map_size(values));
     const kafka_admin_TopicDescription_t *d = (const kafka_admin_TopicDescription_t *)get_ok(future_for(values, id));
@@ -1692,7 +1692,6 @@ static void test_mock_admin_delete_topics_by_names(void) {
     kafka_admin_DeleteTopicsResult_t *result = kafka_admin_Admin_delete_topics_with_options(f.admin, collection, options);
     kafka_admin_DeleteTopicsOptions_destroy(options);
     TEST_ASSERT_NOT_NULL(result);
-    TEST_ASSERT_EQUAL_INT(kafka_admin_DeleteTopicsResult_BY_TOPIC_NAME, kafka_admin_DeleteTopicsResult__enum(result));
     TEST_ASSERT_NULL(kafka_admin_DeleteTopicsResult_topic_id_values(result));
     kafka_Map_t *values = kafka_admin_DeleteTopicsResult_topic_name_values(result);
     TEST_ASSERT_EQUAL_INT32(2, kafka_Map_size(values));
@@ -1734,7 +1733,6 @@ static void test_mock_admin_delete_topics_by_ids(void) {
     kafka_List_add(ids, id);
     kafka_common_TopicCollection_t *collection = kafka_common_TopicCollection_of_topic_ids(ids);
     kafka_admin_DeleteTopicsResult_t *result = kafka_admin_Admin_delete_topics(f.admin, collection);
-    TEST_ASSERT_EQUAL_INT(kafka_admin_DeleteTopicsResult_BY_TOPIC_ID, kafka_admin_DeleteTopicsResult__enum(result));
     TEST_ASSERT_NULL(kafka_admin_DeleteTopicsResult_topic_name_values(result));
     kafka_Map_t *values = kafka_admin_DeleteTopicsResult_topic_id_values(result);
     TEST_ASSERT_EQUAL_INT32(1, kafka_Map_size(values));

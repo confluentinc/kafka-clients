@@ -512,7 +512,7 @@ pub(crate) struct FutureCtx {
 
 impl FutureCtx {
     /// The context of a future that belongs to no client: a result built by
-    /// C through a factory such as `kafka_admin_DescribeTopicsResult_by_topic_name`.
+    /// C through a constructor such as `kafka_admin_ListOffsetsResult_new`.
     pub(crate) fn detached() -> Self {
         Self { runtime: None, queue: None }
     }

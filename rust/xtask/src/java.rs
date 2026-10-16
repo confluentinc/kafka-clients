@@ -128,6 +128,23 @@ pub struct JavaClass {
     pub deprecated: bool,
     /// Whether it comes from the test tree.
     pub is_test: bool,
+    /// What it is declared as.
+    pub kind: JavaKind,
+    /// Whether it is declared `abstract`.
+    pub is_abstract: bool,
+    /// The types it `extends` or `implements`, as written but without type
+    /// arguments: `class A extends B<T> implements Outer.C` → `["B", "Outer.C"]`.
+    pub supertypes: Vec<String>,
+}
+
+/// What a Java type is declared as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JavaKind {
+    Class,
+    /// An `interface` or an `@interface`.
+    Interface,
+    Enum,
+    Record,
 }
 
 /// One method or constructor overload.
@@ -565,6 +582,22 @@ impl JavaIndex {
         self.classes.is_empty()
     }
 
+    /// Whether a main class in `class`'s package extends or implements it.
+    /// A supertype is matched as written: the class's simple name, or its
+    /// nested path (`Outer.Inner`), so an unqualified `extends Builder` matches
+    /// every nested `Builder` of the package.
+    pub fn has_subclass(&self, class: &JavaClass) -> bool {
+        let nested = class.path.join(".");
+        let simple = class.path.last().map_or("", String::as_str);
+        self.classes.iter().any(|c| {
+            !c.is_test
+                && c.package == class.package
+                && c.supertypes
+                    .iter()
+                    .any(|s| s == simple || s == &nested || s.strip_suffix(&nested).is_some_and(|q| q.ends_with('.')))
+        })
+    }
+
     /// The class a marker names (ignoring any `#method`).
     pub fn resolve(&self, marker: &str) -> Option<&JavaClass> {
         let path = marker.strip_prefix(MARKER_PREFIX)?;
@@ -810,6 +843,9 @@ fn push_classes(package: &[String], source: &str, is_test: bool, out: &mut Vec<J
             field_visibility: class.field_visibility,
             deprecated: class.deprecated,
             is_test,
+            kind: class.kind,
+            is_abstract: class.is_abstract,
+            supertypes: class.supertypes,
         });
     }
 }
@@ -926,6 +962,19 @@ struct Scanned {
     fields: BTreeMap<String, bool>,
     field_visibility: BTreeMap<String, Visibility>,
     deprecated: bool,
+    kind: JavaKind,
+    is_abstract: bool,
+    supertypes: Vec<String>,
+}
+
+/// A class declaration seen, waiting for its `{`.
+struct Pending {
+    name: String,
+    deprecated: bool,
+    keyword: String,
+    access: Option<Visibility>,
+    is_abstract: bool,
+    supertypes: Vec<String>,
 }
 
 impl Scanned {
@@ -989,15 +1038,16 @@ fn scan(src: &str) -> Vec<Scanned> {
     let mut stack: Vec<Open> = Vec::new();
     let mut depth = 0usize;
     let mut paren = 0usize;
-    // A class declaration seen, waiting for its `{`: (name, deprecated,
-    // keyword, access modifier).
-    let mut pending: Option<(String, bool, String, Option<Visibility>)> = None;
+    // A class declaration seen, waiting for its `{`.
+    let mut pending: Option<Pending> = None;
     // An `@Deprecated` seen, waiting for the declaration it annotates.
     let mut deprecated = false;
     // An access modifier seen, waiting for the declaration it applies to.
     let mut visibility: Option<Visibility> = None;
     // A `static` seen, waiting for the declaration it applies to.
     let mut is_static = false;
+    // An `abstract` seen, waiting for the declaration it applies to.
+    let mut is_abstract = false;
     let mut i = 0;
     while i < toks.len() {
         let member_level = paren == 0 && stack.last().map_or(depth == 0, |o| depth == o.body);
@@ -1011,7 +1061,9 @@ fn scan(src: &str) -> Vec<Scanned> {
                 continue;
             },
             Tok::Punct('{') => {
-                if let Some((name, dep, keyword, access)) = pending.take() {
+                if let Some(Pending { name, deprecated: dep, keyword, access, is_abstract: abs, supertypes }) =
+                    pending.take()
+                {
                     let parent = stack.last().map(|o| &out[o.idx]);
                     let mut path: Vec<String> = parent.map(|p| p.path.clone()).unwrap_or_default();
                     let dep = dep || parent.is_some_and(|p| p.deprecated);
@@ -1030,6 +1082,14 @@ fn scan(src: &str) -> Vec<Scanned> {
                         fields: BTreeMap::new(),
                         field_visibility: BTreeMap::new(),
                         deprecated: dep,
+                        kind: match keyword.as_str() {
+                            "interface" => JavaKind::Interface,
+                            "enum" => JavaKind::Enum,
+                            "record" => JavaKind::Record,
+                            _ => JavaKind::Class,
+                        },
+                        is_abstract: abs,
+                        supertypes,
                     });
                     depth += 1;
                     let is_enum = keyword == "enum";
@@ -1041,6 +1101,7 @@ fn scan(src: &str) -> Vec<Scanned> {
                     deprecated = false;
                     visibility = None;
                     is_static = false;
+                    is_abstract = false;
                 }
                 depth += 1;
             },
@@ -1052,11 +1113,13 @@ fn scan(src: &str) -> Vec<Scanned> {
                 deprecated = false;
                 visibility = None;
                 is_static = false;
+                is_abstract = false;
             },
             Tok::Punct(';') if member_level => {
                 deprecated = false;
                 visibility = None;
                 is_static = false;
+                is_abstract = false;
                 if let Some(o) = stack.last_mut() {
                     o.enum_constants = false;
                 }
@@ -1073,13 +1136,21 @@ fn scan(src: &str) -> Vec<Scanned> {
                 // `Foo.class` is a literal, not a declaration; `@interface` is one.
                 let is_literal = i > 0 && toks[i - 1] == Tok::Punct('.');
                 if let (false, Some(Tok::Ident(name))) = (is_literal, toks.get(i + 1)) {
-                    pending = Some((name.clone(), std::mem::take(&mut deprecated), kw.clone(), visibility.take()));
+                    pending = Some(Pending {
+                        name: name.clone(),
+                        deprecated: std::mem::take(&mut deprecated),
+                        keyword: kw.clone(),
+                        access: visibility.take(),
+                        is_abstract: std::mem::take(&mut is_abstract),
+                        supertypes: supertypes(&toks, i + 2),
+                    });
                     is_static = false;
                     i += 2;
                     continue;
                 }
             },
             Tok::Ident(m) if member_level && m == "static" => is_static = true,
+            Tok::Ident(m) if member_level && m == "abstract" => is_abstract = true,
             Tok::Ident(m) if member_level && matches!(m.as_str(), "public" | "protected" | "private") => {
                 visibility = Some(match m.as_str() {
                     "public" => Visibility::Public,
@@ -1141,6 +1212,47 @@ fn scan(src: &str) -> Vec<Scanned> {
             _ => {},
         }
         i += 1;
+    }
+    out
+}
+
+/// The types a class declaration `extends` or `implements`, read from index
+/// `from` (just past its name) up to its `{`: each as written, without type
+/// arguments or annotations. A `permits` list names subclasses, not supertypes.
+fn supertypes(toks: &[Tok], from: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut listing = false;
+    let mut angle = 0usize;
+    let mut paren = 0usize;
+    let mut j = from;
+    while let Some(tok) = toks.get(j) {
+        match tok {
+            Tok::Punct('{') if angle == 0 && paren == 0 => break,
+            Tok::Punct('@') => {
+                j = annotation(toks, j).1;
+                continue;
+            },
+            Tok::Punct('<') => angle += 1,
+            Tok::Punct('>') => angle = angle.saturating_sub(1),
+            Tok::Punct('(') => paren += 1,
+            Tok::Punct(')') => paren = paren.saturating_sub(1),
+            Tok::Ident(word) if angle == 0 && paren == 0 => match word.as_str() {
+                "extends" | "implements" => listing = true,
+                "permits" => listing = false,
+                _ if listing => {
+                    let mut name = word.clone();
+                    while toks.get(j + 1) == Some(&Tok::Punct('.')) {
+                        let Some(Tok::Ident(part)) = toks.get(j + 2) else { break };
+                        name = format!("{name}.{part}");
+                        j += 2;
+                    }
+                    out.push(name);
+                },
+                _ => {},
+            },
+            _ => {},
+        }
+        j += 1;
     }
     out
 }
@@ -1313,6 +1425,51 @@ mod tests {
         }
         let args: Vec<_> = command.get_args().collect();
         assert_eq!(args, ["-C", KAFKA_SUBMODULE]);
+    }
+
+    #[test]
+    fn scans_kinds_and_supertypes() {
+        let src = r#"
+            package x;
+            @InterfaceAudience.Public
+            public abstract class Spec<T extends Comparable<T>> implements java.io.Serializable, Outer.Api<Map<K, V>> {
+                abstract void apply();
+                public static class Earliest extends Spec<Long> { }
+                static final class Sealed permits A, B { }
+            }
+            public class Result { protected Result(Map<String, Integer> futures) { } }
+            interface Api extends Base<String> { }
+            enum Kind implements Api { A, B }
+            record Point(int x, List<String> y) implements Api { }
+        "#;
+        let mut classes = Vec::new();
+        push_classes(&["clients".into(), "x".into()], src, false, &mut classes);
+        let find = |path: &[&str]| classes.iter().find(|c| c.path == path).unwrap();
+
+        let spec = find(&["Spec"]);
+        assert_eq!((spec.kind, spec.is_abstract), (JavaKind::Class, true));
+        assert_eq!(spec.supertypes, ["java.io.Serializable", "Outer.Api"]);
+        let earliest = find(&["Spec", "Earliest"]);
+        assert_eq!((earliest.kind, earliest.is_abstract), (JavaKind::Class, false));
+        assert_eq!(earliest.supertypes, ["Spec"]);
+        // A `permits` list names subclasses, not supertypes.
+        assert!(find(&["Spec", "Sealed"]).supertypes.is_empty());
+        // An abstract method does not make the next class abstract.
+        let result = find(&["Result"]);
+        assert_eq!((result.kind, result.is_abstract), (JavaKind::Class, false));
+        assert!(result.supertypes.is_empty());
+        assert_eq!(find(&["Api"]).kind, JavaKind::Interface);
+        assert_eq!(find(&["Api"]).supertypes, ["Base"]);
+        assert_eq!(find(&["Kind"]).kind, JavaKind::Enum);
+        assert_eq!(find(&["Kind"]).supertypes, ["Api"]);
+        assert_eq!(find(&["Point"]).kind, JavaKind::Record);
+        assert_eq!(find(&["Point"]).supertypes, ["Api"]);
+
+        let index = JavaIndex { classes: classes.clone() };
+        assert!(index.has_subclass(find(&["Spec"])));
+        assert!(index.has_subclass(find(&["Api"])));
+        assert!(!index.has_subclass(find(&["Result"])));
+        assert!(!index.has_subclass(find(&["Spec", "Earliest"])));
     }
 
     #[test]
@@ -1647,6 +1804,9 @@ mod tests {
             field_visibility: BTreeMap::new(),
             deprecated: false,
             is_test: false,
+            kind: JavaKind::Class,
+            is_abstract: false,
+            supertypes: Vec::new(),
         };
         assert!(class.is_rust_name_of("send", "send", true));
         assert!(class.is_rust_name_of("send", "send_with_callback", true));
@@ -1673,6 +1833,9 @@ mod tests {
             field_visibility: BTreeMap::new(),
             deprecated: false,
             is_test: false,
+            kind: JavaKind::Class,
+            is_abstract: false,
+            supertypes: Vec::new(),
         };
         let oor = class(&["consumer"], "clients.consumer", "OffsetOutOfRangeException");
         assert_eq!(oor.rust_name(), "ConsumerOffsetOutOfRangeError");
