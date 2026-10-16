@@ -96,10 +96,15 @@ struct TopicMetadata {
     // Read by `describe_configs` / `incremental_alter_configs`. Java's
     // `TopicMetadata.configs` is never null (defaults to an empty map); the
     // Rust `Option` treats `None` as an empty map.
-    configs: Option<BTreeMap<String, String>>,
+    configs: Option<ConfigMap>,
     marked_for_deletion: bool,
     fetches_remaining_until_visible: i32,
 }
+
+/// An in-memory config map: Java's `Map<String, String>`, whose values are
+/// nullable (a `NewTopic` config, `addTopic`'s configs, or an `AlterConfigOp`
+/// SET of a null value), so a `None` value is Java's null.
+type ConfigMap = BTreeMap<String, Option<String>>;
 
 /// Mutable state, guarded by a mutex (mirrors Java's `synchronized` methods).
 ///
@@ -117,14 +122,14 @@ struct State {
     timeout_next_requests: i32,
     // Per-broker config maps (index = broker id), mirroring Java's
     // `brokerConfigs`. Each is seeded with `default.replication.factor`.
-    broker_configs: Vec<BTreeMap<String, String>>,
+    broker_configs: Vec<ConfigMap>,
     // Client-metrics subscription configs, keyed by resource name.
-    client_metrics_configs: BTreeMap<String, BTreeMap<String, String>>,
+    client_metrics_configs: BTreeMap<String, ConfigMap>,
     // Group configs, keyed by group id.
-    group_configs: BTreeMap<String, BTreeMap<String, String>>,
+    group_configs: BTreeMap<String, ConfigMap>,
     // Defaults overlaid onto group configs on read (mirrors Java's
     // `defaultGroupConfigs`; set by `Builder::set_default_group_configs`).
-    default_group_configs: BTreeMap<String, String>,
+    default_group_configs: ConfigMap,
     // Per-broker list of log directories (index = broker id), mirroring Java's
     // `brokerLogDirs`. Seeded with `DEFAULT_LOG_DIRS` for each broker.
     broker_log_dirs: Vec<Vec<String>>,
@@ -169,7 +174,7 @@ struct State {
 /// `ProducerConfig`'s `Debug` prints no value of its raw `originals` map. The
 /// map is a `BTreeMap`, so the keys are already sorted; they are borrowed, not
 /// copied.
-fn config_keys(configs: &BTreeMap<String, String>) -> BTreeSet<&str> {
+fn config_keys<V>(configs: &BTreeMap<String, V>) -> BTreeSet<&str> {
     configs.keys().map(String::as_str).collect()
 }
 
@@ -598,6 +603,18 @@ impl MockAdminClient {
     /// Mirrors Java's `MockAdminClient.DEFAULT_LOG_DIRS`.
     pub const DEFAULT_LOG_DIRS: &'static [&'static str] = &["/tmp/kafka-logs"];
 
+    /// Poisons the mock's state lock, so the next call that locks it panics on
+    /// the `unwrap`: how the FFI tests make an admin RPC's submission panic.
+    /// Test-only; no Java counterpart.
+    #[cfg(all(test, feature = "ffi"))]
+    pub(crate) fn poison_state_for_test(&self) {
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = self.state.lock().unwrap();
+            panic!("poisoning the mock's state lock for a test");
+        }));
+        assert!(poisoned.is_err() && self.state.is_poisoned());
+    }
+
     /// Creates a [`Builder`] with one broker.
     ///
     /// Mirrors Java's `public static Builder create()`
@@ -703,11 +720,14 @@ impl MockAdminClient {
         check_controller(&brokers, &controller)?;
         // Seed one config map per broker with `default.replication.factor`
         // (mirrors Java's constructor).
-        let broker_configs: Vec<BTreeMap<String, String>> = brokers
+        let broker_configs: Vec<ConfigMap> = brokers
             .iter()
             .map(|_| {
                 let mut config = BTreeMap::new();
-                config.insert("default.replication.factor".to_string(), default_replication_factor.to_string());
+                config.insert(
+                    "default.replication.factor".to_string(),
+                    Some(default_replication_factor.to_string()),
+                );
                 config
             })
             .collect();
@@ -725,7 +745,7 @@ impl MockAdminClient {
                 broker_configs,
                 client_metrics_configs: BTreeMap::new(),
                 group_configs: BTreeMap::new(),
-                default_group_configs: default_group_configs.into_iter().collect(),
+                default_group_configs: default_group_configs.into_iter().map(|(k, v)| (k, Some(v))).collect(),
                 broker_log_dirs,
                 replica_moves: HashMap::new(),
                 reassignments: HashMap::new(),
@@ -843,7 +863,7 @@ impl MockAdminClient {
         internal: bool,
         name: &str,
         partitions: Vec<TopicPartitionInfo>,
-        configs: Option<BTreeMap<String, String>>,
+        configs: Option<BTreeMap<String, Option<String>>>,
     ) -> Result<(), Error> {
         let mut state = self.state.lock().unwrap();
         if state.all_topics.contains_key(name) {
@@ -916,6 +936,18 @@ impl MockAdminClient {
             .ok_or_else(|| Error::local_illegal_argument(format!("Topic {name} did not exist.")))?;
         topic.marked_for_deletion = true;
         Ok(())
+    }
+
+    /// The mock's brokers, in broker-id order.
+    ///
+    /// No Java counterpart: a Java test holds the `List<Node>` it handed to
+    /// `MockAdminClient(brokers, controller)` / `Builder.brokers`, but a
+    /// [`Builder`] that was not given [`set_brokers`](Builder::set_brokers)
+    /// builds the brokers itself, so a caller needs this to obtain `Node`s
+    /// equal to them — for example the leader, replica and ISR nodes
+    /// [`add_topic`](Self::add_topic) validates against the broker list.
+    pub fn brokers(&self) -> Vec<Node> {
+        self.state.lock().unwrap().brokers.clone()
     }
 
     /// Hides a topic from the next `fetches_remaining_until_visible` fetches.
@@ -1020,7 +1052,7 @@ fn config_from_new_topic(new_topic: &NewTopic) -> Config {
         .map(|configs| {
             configs
                 .iter()
-                .map(|(k, v)| ConfigEntry::new(k.clone(), Some(v.clone())))
+                .map(|(k, v)| ConfigEntry::new(k.clone(), v.clone()))
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
@@ -1030,10 +1062,10 @@ fn config_from_new_topic(new_topic: &NewTopic) -> Config {
 /// Builds a [`Config`] from an in-memory config map.
 ///
 /// Corresponds to `MockAdminClient.toConfigObject`.
-fn to_config_object(map: &BTreeMap<String, String>) -> Config {
+fn to_config_object(map: &ConfigMap) -> Config {
     let entries = map
         .iter()
-        .map(|(k, v)| ConfigEntry::new(k.clone(), Some(v.clone())))
+        .map(|(k, v)| ConfigEntry::new(k.clone(), v.clone()))
         .collect::<Vec<_>>();
     Config::new(entries)
 }
@@ -1043,13 +1075,15 @@ fn to_config_object(map: &BTreeMap<String, String>) -> Config {
 /// Returns an error for an unsupported op type (mirrors Java's
 /// `InvalidRequestException`). `Append` / `Subtract` are list-type operations
 /// that Java's mock does not implement, matching its `default` branch.
-fn apply_alter_ops(map: &mut BTreeMap<String, String>, ops: &[AlterConfigOp]) -> Result<(), Error> {
+fn apply_alter_ops(map: &mut ConfigMap, ops: &[AlterConfigOp]) -> Result<(), Error> {
     for op in ops {
         match op.op_type() {
             OpType::Set => {
+                // Java: `newMap.put(op.configEntry().name(), op.configEntry().value())`,
+                // a null value included.
                 map.insert(
                     op.config_entry().name().to_string(),
-                    op.config_entry().value().unwrap_or_default().to_string(),
+                    op.config_entry().value().map(str::to_string),
                 );
             },
             OpType::Delete => {
@@ -1072,10 +1106,11 @@ fn apply_alter_ops(map: &mut BTreeMap<String, String>, ops: &[AlterConfigOp]) ->
 fn get_resource_description(state: &mut State, resource: &ConfigResource) -> Result<Config, Error> {
     match resource.resource_type() {
         config_resource::Type::Broker => {
-            let broker_id: usize = resource.name().parse().map_err(|_| {
-                Error::with_message(Errors::InvalidRequest, format!("Broker {} not found.", resource.name()))
-            })?;
-            match state.broker_configs.get(broker_id) {
+            // Java's `Integer.parseInt(resource.name())` throws
+            // `NumberFormatException` for a non-numeric name, which
+            // `describeConfigs` catches into the resource's future.
+            let broker_id = super::kafka_admin_client::parse_java_int(resource.name())?;
+            match usize::try_from(broker_id).ok().and_then(|id| state.broker_configs.get(id)) {
                 Some(config) => Ok(to_config_object(config)),
                 None => Err(Error::with_message(
                     Errors::InvalidRequest,
@@ -1133,15 +1168,15 @@ fn handle_incremental_resource_alteration(
 ) -> Result<(), Error> {
     match resource.resource_type() {
         config_resource::Type::Broker => {
-            let broker_id: usize = resource.name().parse().map_err(|_| {
-                Error::with_message(Errors::InvalidRequest, format!("no such broker as {}", resource.name()))
-            })?;
-            if broker_id >= state.broker_configs.len() {
+            // Java returns `Integer.parseInt`'s `NumberFormatException` for a
+            // non-numeric name (`MockAdminClient.java:923-927`).
+            let broker_id = super::kafka_admin_client::parse_java_int(resource.name())?;
+            let Some(broker_id) = usize::try_from(broker_id).ok().filter(|id| *id < state.broker_configs.len()) else {
                 return Err(Error::with_message(
                     Errors::InvalidRequest,
                     format!("no such broker as {broker_id}"),
                 ));
-            }
+            };
             let mut new_map = state.broker_configs[broker_id].clone();
             apply_alter_ops(&mut new_map, ops)?;
             state.broker_configs[broker_id] = new_map;
@@ -1675,7 +1710,7 @@ impl Admin for MockAdminClient {
         let mut state = self.state.lock().unwrap();
         let nodes: KafkaFutureImpl<Vec<Node>> = KafkaFutureImpl::new();
         let controller: KafkaFutureImpl<Option<Node>> = KafkaFutureImpl::new();
-        let cluster_id: KafkaFutureImpl<String> = KafkaFutureImpl::new();
+        let cluster_id: KafkaFutureImpl<Option<String>> = KafkaFutureImpl::new();
         let authorized_operations: KafkaFutureImpl<Option<BTreeSet<AclOperation>>> = KafkaFutureImpl::new();
 
         if state.timeout_next_requests > 0 {
@@ -1688,7 +1723,7 @@ impl Admin for MockAdminClient {
         } else {
             nodes.complete(state.brokers.clone());
             controller.complete(Some(state.controller.clone()));
-            cluster_id.complete(state.cluster_id.clone());
+            cluster_id.complete(Some(state.cluster_id.clone()));
             // Java completes with an empty set (not null).
             authorized_operations.complete(Some(BTreeSet::new()));
         }
@@ -2686,7 +2721,7 @@ mod tests {
             state.broker_configs,
             vec![BTreeMap::from([(
                 "default.replication.factor".to_string(),
-                "1".to_string()
+                Some("1".to_string())
             )])]
         );
     }
@@ -2739,7 +2774,10 @@ mod tests {
         let result = mock.describe_cluster_with_options(DescribeClusterOptions::new());
         assert_eq!(result.nodes().get().await.unwrap(), nodes);
         assert_eq!(result.controller().get().await.unwrap().unwrap().id(), 2);
-        assert_eq!(result.cluster_id().get().await.unwrap(), MockAdminClient::DEFAULT_CLUSTER_ID);
+        assert_eq!(
+            result.cluster_id().get().await.unwrap().as_deref(),
+            Some(MockAdminClient::DEFAULT_CLUSTER_ID)
+        );
 
         let state = mock.state.lock().unwrap();
         assert_eq!(state.default_partitions, 1);
@@ -2747,7 +2785,7 @@ mod tests {
         assert_eq!(state.broker_log_dirs, vec![default_dirs(); 4]);
         assert_eq!(
             state.broker_configs,
-            vec![BTreeMap::from([("default.replication.factor".to_string(), "4".to_string())]); 4]
+            vec![BTreeMap::from([("default.replication.factor".to_string(), Some("4".to_string()))]); 4]
         );
         assert!(!state.using_raft_controller);
         assert!(state.feature_levels.is_empty());
@@ -2775,7 +2813,7 @@ mod tests {
             state.broker_configs,
             vec![BTreeMap::from([(
                 "default.replication.factor".to_string(),
-                "1".to_string()
+                Some("1".to_string())
             )])]
         );
     }
@@ -2809,7 +2847,7 @@ mod tests {
         {
             let state = mock.state.lock().unwrap();
             assert_eq!(state.default_replication_factor, 32_768);
-            assert_eq!(state.broker_configs[0]["default.replication.factor"], "32768");
+            assert_eq!(state.broker_configs[0]["default.replication.factor"].as_deref(), Some("32768"));
         }
 
         let result = mock.create_topics_with_options(
@@ -3080,9 +3118,12 @@ mod tests {
         assert_eq!(state.max_supported_feature_levels, max);
         assert_eq!(
             state.default_group_configs,
-            group_defaults.into_iter().collect::<BTreeMap<_, _>>()
+            group_defaults
+                .into_iter()
+                .map(|(k, v)| (k, Some(v)))
+                .collect::<BTreeMap<_, _>>()
         );
-        assert_eq!(state.broker_configs[0]["default.replication.factor"], "2");
+        assert_eq!(state.broker_configs[0]["default.replication.factor"].as_deref(), Some("2"));
     }
 
     /// `build()` narrows the replication factor with `Integer.shortValue()`,
@@ -3098,7 +3139,7 @@ mod tests {
             assert_eq!(state.default_replication_factor, narrowed, "shortValue() of {factor}");
             assert_eq!(
                 state.broker_configs[0]["default.replication.factor"],
-                narrowed.to_string(),
+                Some(narrowed.to_string()),
                 "String.valueOf of the narrowed value for {factor}"
             );
         }
@@ -3460,7 +3501,10 @@ mod tests {
         assert_eq!(nodes.len(), 3);
         let controller = result.controller().get().await.unwrap();
         assert_eq!(controller.unwrap().id(), 0);
-        assert_eq!(result.cluster_id().get().await.unwrap(), MockAdminClient::DEFAULT_CLUSTER_ID);
+        assert_eq!(
+            result.cluster_id().get().await.unwrap().as_deref(),
+            Some(MockAdminClient::DEFAULT_CLUSTER_ID)
+        );
         assert!(result.authorized_operations().get().await.unwrap().unwrap().is_empty());
     }
 
@@ -3482,7 +3526,7 @@ mod tests {
     async fn describe_configs_topic_returns_stored_configs() {
         let client = admin();
         let mut configs = BTreeMap::new();
-        configs.insert("retention.ms".to_string(), "1000".to_string());
+        configs.insert("retention.ms".to_string(), Some("1000".to_string()));
         let new_topic = NewTopic::with_num_partitions_replication_factor("t", Some(1), Some(1)).set_configs(configs);
         client
             .create_topics_with_options(&[new_topic], CreateTopicsOptions::new())
@@ -3528,6 +3572,19 @@ mod tests {
         let err = result.values()[&resource].get().await.unwrap_err();
         assert_eq!(err.error(), Errors::InvalidRequest);
         assert_eq!(err.message(), "Broker 99 not found.");
+    }
+
+    /// Java's mock parses the broker name with `Integer.parseInt`, so a
+    /// non-numeric name fails that resource with `NumberFormatException`.
+    #[tokio::test]
+    async fn describe_configs_non_numeric_broker_is_a_number_format_error() {
+        let client = admin();
+        let resource = ConfigResource::new(config_resource::Type::Broker, "x".to_string());
+        let result =
+            client.describe_configs_with_options(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
+        let err = result.values()[&resource].get().await.unwrap_err();
+        assert!(matches!(err, Error::LocalIllegalArgument(_)), "{err:?}");
+        assert_eq!(err.message(), "For input string: \"x\"");
     }
 
     #[tokio::test]
@@ -3843,7 +3900,7 @@ mod tests {
                 false,
                 "orders",
                 Vec::new(),
-                Some(BTreeMap::from([(TOPIC_KEY.to_string(), TOPIC_SECRET.to_string())])),
+                Some(BTreeMap::from([(TOPIC_KEY.to_string(), Some(TOPIC_SECRET.to_string()))])),
             )
             .unwrap();
         let set = |name: &str, value: &str| {
@@ -3877,14 +3934,17 @@ mod tests {
             let mut state = client.state.lock().unwrap();
             state
                 .default_group_configs
-                .insert(DEFAULT_GROUP_KEY.to_string(), DEFAULT_GROUP_SECRET.to_string());
-            assert_eq!(state.broker_configs[0][BROKER_KEY], BROKER_SECRET);
-            assert_eq!(state.all_topics["orders"].configs.as_ref().unwrap()[TOPIC_KEY], TOPIC_SECRET);
+                .insert(DEFAULT_GROUP_KEY.to_string(), Some(DEFAULT_GROUP_SECRET.to_string()));
+            assert_eq!(state.broker_configs[0][BROKER_KEY].as_deref(), Some(BROKER_SECRET));
             assert_eq!(
-                state.client_metrics_configs["metrics"][CLIENT_METRICS_KEY],
-                CLIENT_METRICS_SECRET
+                state.all_topics["orders"].configs.as_ref().unwrap()[TOPIC_KEY].as_deref(),
+                Some(TOPIC_SECRET)
             );
-            assert_eq!(state.group_configs["group"][GROUP_KEY], GROUP_SECRET);
+            assert_eq!(
+                state.client_metrics_configs["metrics"][CLIENT_METRICS_KEY].as_deref(),
+                Some(CLIENT_METRICS_SECRET)
+            );
+            assert_eq!(state.group_configs["group"][GROUP_KEY].as_deref(), Some(GROUP_SECRET));
         }
 
         let rendered = format!("{client:?}");
