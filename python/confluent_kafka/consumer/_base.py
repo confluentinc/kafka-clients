@@ -75,6 +75,8 @@ from confluent_kafka.common.errors.invalid_group_id_error import InvalidGroupIdE
 from confluent_kafka.common.errors.wakeup_error import WakeupError
 from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.common.serialization import bytes_deserializer
+from confluent_kafka.common.config.config_error import ConfigError
+from confluent_kafka.common.serialization._supply import _resolve_class as resolve_class
 from confluent_kafka.common.serialization._supply import close_if_defined, resolve_serde
 from confluent_kafka.common.topic_partition import TopicPartition
 from confluent_kafka.concurrent_modification_error import ConcurrentModificationError
@@ -142,6 +144,7 @@ GROUP_ID_NOT_DEFINED_MESSAGE = ("To use the group management or offset commit AP
                                 "provide a valid group.id in the consumer configuration.")
 
 _GROUP_ID = "group.id"
+_CLIENT_ID = "client.id"
 
 # Java's ConsumerConfig keys of a deserializer given through the config route.
 _KEY_DESERIALIZER = "key.deserializer"
@@ -212,6 +215,20 @@ def _wraps_its_source(error: int) -> bool:
     return bool(source) and _lib.KafkaError_code(source) == _LOCAL_CALLBACK and (
         _lib.KafkaError_message(error)
         == "LocalCallbackError: " + _lib.KafkaError_message(source))
+
+
+def _parse_class_key(originals: dict[str, Any], key: str) -> None:
+    """The checks Java's ``ConfigDef`` makes on a deserializer's ``CLASS`` key
+    while it parses the configs, before the consumer is built: an unresolvable
+    name, or a value that is neither a name nor a class, raises
+    ``ConfigError`` (``resolve_serde`` constructs the class later)."""
+    value = originals.get(key)
+    if value is None or inspect.isclass(value):
+        return
+    if isinstance(value, str):
+        resolve_class(key, value)
+        return
+    raise ConfigError(name=key, value=value, message="Expected a Class instance or class name.")
 
 
 class _ListenerAdapter:
@@ -462,34 +479,66 @@ class _ConsumerState:
     def _start(self, configs: dict[str, Any], key_deserializer: Deserializer[Any] | None,
                value_deserializer: Deserializer[Any] | None) -> None:
         """Java's ``KafkaConsumer(configs, keyDeserializer, valueDeserializer)``:
-        parse ``configs``, take the deserializers (an argument wins over the
-        config key; neither means ``bytes_deserializer()``), build the core
-        consumer (which reports the keys it does not know). A given
+        parse ``configs``, build the core consumer (which reports the keys it
+        does not know), then take the deserializers (an argument wins over the
+        config key; neither means ``bytes_deserializer()``). A given
         deserializer argument replaces its config key, which is then not parsed
-        (``ConsumerConfig.appendDeserializerToConfig``). A construction failure
-        raises its typed error after closing the deserializers built so far."""
+        (``ConsumerConfig.appendDeserializerToConfig``).
+
+        A deserializer the config route builds is configured with the user's
+        configs and the consumer's ``client.id``, the one the core generated
+        when none is set (``consumer-<group.id>-<n>``), as Java's
+        ``Deserializers`` passes ``config.originals(singletonMap(CLIENT_ID_CONFIG,
+        clientId))``: so it is constructed once the core consumer exists, the
+        core holding the id *(deviation: Java builds it before the bootstrap
+        metadata, the core resolves the bootstrap hosts first)*. Its checks
+        that Java's ``ConfigDef`` makes while it parses the configs (an
+        unresolvable name, an instance) and the arguments' checks run first.
+
+        A construction failure raises its typed error after closing the
+        deserializers built so far, and the core consumer when it was built."""
         given = [key for key, argument in ((_KEY_DESERIALIZER, key_deserializer),
                                            (_VALUE_DESERIALIZER, value_deserializer))
                  if argument is not None]
         originals, native = prepare(configs, client="consumer", given_serdes=given)
-        key = cast("Deserializer[Any]", resolve_serde(
-            key_deserializer, originals, _KEY_DESERIALIZER, is_key=True,
-            default=bytes_deserializer()))
-        value: Deserializer[Any] | None = None
+        arguments: list[Deserializer[Any]] = []
         try:
-            value = cast("Deserializer[Any]", resolve_serde(
-                value_deserializer, originals, _VALUE_DESERIALIZER, is_key=False,
-                default=bytes_deserializer()))
+            for argument, config_key, is_key in ((key_deserializer, _KEY_DESERIALIZER, True),
+                                                 (value_deserializer, _VALUE_DESERIALIZER,
+                                                  False)):
+                if argument is not None:
+                    arguments.append(cast("Deserializer[Any]", resolve_serde(
+                        argument, originals, config_key, is_key=is_key,
+                        default=bytes_deserializer())))
+                else:
+                    _parse_class_key(originals, config_key)
             handle, error = _lib.Consumer_KafkaConsumer_new(native)
         except BaseException:
-            close_if_defined(key)
-            if value is not None:
-                close_if_defined(value)
+            for argument in arguments:
+                close_if_defined(argument)
             raise
         if error:
-            close_if_defined(key)
-            close_if_defined(value)
+            for argument in arguments:
+                close_if_defined(argument)
             raise from_ffi_error(error)
+        key: Deserializer[Any] | None = None
+        try:
+            serde_configs = dict(originals)
+            serde_configs[_CLIENT_ID] = _lib.Consumer_client_id(handle)
+            key = cast("Deserializer[Any]", resolve_serde(
+                key_deserializer, serde_configs, _KEY_DESERIALIZER, is_key=True,
+                default=bytes_deserializer()))
+            value = cast("Deserializer[Any]", resolve_serde(
+                value_deserializer, serde_configs, _VALUE_DESERIALIZER, is_key=False,
+                default=bytes_deserializer()))
+        except BaseException:
+            # The key deserializer built or given, and a given value one (one
+            # the config route builds is built last, so nothing fails after it).
+            for built in (key if key is not None else key_deserializer, value_deserializer):
+                if built is not None:
+                    close_if_defined(built)
+            _lib.Consumer_destroy(handle)
+            raise
         self._key_deserializer = key
         self._value_deserializer = value
         self._h = handle

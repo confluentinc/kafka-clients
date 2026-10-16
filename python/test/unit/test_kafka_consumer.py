@@ -22,8 +22,8 @@ only to make an operation time out, an unreachable bootstrap address and a short
 ``default.api.timeout.ms`` stand for it. ``test/integration/test_kafka_consumer_broker.py``
 runs, against a broker, the cases Java scripts through a ``MockClient``.
 
-Of Java's 135 tests, 35 are translated here and 14 in the broker module; the
-other 86, each named, are not, with the reason:
+Of Java's 135 tests, 36 are translated here and 14 in the broker module; the
+other 85, each named, are not, with the reason:
 
 - the classic protocol: Java runs these with ``group.protocol=classic`` only, and
   the core implements KIP-848 only (``consumer-threading.md`` §20):
@@ -113,13 +113,13 @@ other 86, each named, are not, with the reason:
   ``send.buffer.bytes`` / ``receive.buffer.bytes`` ranges, Rust-core gap 11);
   ``testUnusedConfigs`` (only the core reports the keys it does not know, in its
   own log);
-  ``testInterceptorConstructorClose``,
+  ``testInterceptorConstructorClose`` and
   ``testInterceptorConstructorConfigurationWithExceptionShouldCloseRemainingInstances``
-  and ``configurableObjectsShouldSeeGeneratedClientId`` (the client runs no
-  interceptors: ``interceptor.classes`` is a key the core does not know; the
-  last also needs the generated ``client.id`` in a
-  config-route deserializer's ``configure``, which the binding does not have when
-  it builds the deserializers, before the core consumer, in Java's order).
+  (the client runs no interceptors: ``interceptor.classes`` is a key the core
+  does not know).
+
+``configurableObjectsShouldSeeGeneratedClientId`` runs without its interceptor,
+for the two deserializers.
 
 ``testOperationsBySubscribingConsumerWithDefaultGroupId``'s
 ``enable.auto.commit=true`` half is not asserted (the core does not reject it,
@@ -1944,11 +1944,102 @@ def test_given_deserializers_are_closed_at_close_but_not_configured() -> None:
 
 
 def test_a_failed_construction_closes_the_deserializers_built() -> None:
+    # The core consumer fails: the config route has built nothing yet, a given
+    # deserializer is closed.
     RecordingDeserializer.instances.clear()
     with pytest.raises(KafkaError):
         KafkaConsumer(configs=configs("", **{"key.deserializer": RecordingDeserializer,
                                              "value.deserializer": RecordingDeserializer}))
-    assert [d.closed for d in RecordingDeserializer.instances] == [1, 1]
+    assert RecordingDeserializer.instances == []
+    given = RecordingDeserializer()
+    with pytest.raises(KafkaError):
+        KafkaConsumer(configs=configs("", **{"key.deserializer": RecordingDeserializer}),
+                      value_deserializer=given)
+    assert RecordingDeserializer.instances == [given] and given.closed == 1
+
+
+class FailingConfigureDeserializer(RecordingDeserializer):
+    def configure(self, configs: dict[str, Any], is_key: bool) -> None:
+        raise ValueError("cannot configure")
+
+
+def test_a_failing_configure_closes_the_key_deserializer_and_the_core_consumer(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # The value deserializer is built last: its configure fails once the core
+    # consumer exists, which is destroyed, and the key deserializer is closed.
+    destroyed: list[int] = []
+    real_destroy = _lib.Consumer_destroy
+
+    def destroy(handle: int) -> None:
+        destroyed.append(handle)
+        real_destroy(handle)
+
+    monkeypatch.setattr(_lib, "Consumer_destroy", destroy)
+    RecordingDeserializer.instances.clear()
+    with pytest.raises(ValueError, match="cannot configure"):
+        KafkaConsumer(configs=configs(**{"key.deserializer": RecordingDeserializer,
+                                         "value.deserializer": FailingConfigureDeserializer}))
+    key, value = RecordingDeserializer.instances
+    assert (key.closed, value.closed) == (1, 0)
+    assert len(destroyed) == 1
+
+
+@pytest.mark.parametrize("key, value, message", [
+    ("key.deserializer", "no.such.Deserializer", "Class no.such.Deserializer could not be found."),
+    ("value.deserializer", RecordingDeserializer(), "Expected a Class instance or class name."),
+])
+def test_a_config_route_class_is_parsed_before_the_core_consumer(
+        key: str, value: Any, message: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Java's ConfigDef parses a CLASS key with the other configs, before the
+    # consumer is built; the core is not called.
+    def unexpected(native: Any) -> Any:
+        raise AssertionError("the core consumer was built")
+
+    monkeypatch.setattr(_lib, "Consumer_KafkaConsumer_new", unexpected)
+    with pytest.raises(ConfigError) as e:
+        KafkaConsumer(configs=configs(**{key: value}))
+    assert str(e.value) == f"Invalid value {value} for configuration {key}: {message}"
+
+
+class DeserializerForClientId(RecordingDeserializer):
+    """Java's ``KafkaConsumerTest.DeserializerForClientId``: records the
+    ``client.id`` its ``configure`` sees."""
+
+    client_ids: list[str] = []
+
+    def configure(self, configs: dict[str, Any], is_key: bool) -> None:
+        DeserializerForClientId.client_ids.append(configs["client.id"])
+
+
+def test_configurable_objects_should_see_generated_client_id() -> None:
+    # configurableObjectsShouldSeeGeneratedClientId, without its interceptor
+    # (the client runs no interceptors): the two config-route deserializers see
+    # the client.id the consumer generated.
+    DeserializerForClientId.client_ids.clear()
+    with KafkaConsumer(configs=configs(**{
+            "key.deserializer": DeserializerForClientId,
+            "value.deserializer": f"{__name__}.DeserializerForClientId"})) as consumer:
+        client_id = _lib.Consumer_client_id(consumer._h)
+        assert client_id
+        assert client_id.startswith(f"consumer-{GROUP_ID}-")
+        assert DeserializerForClientId.client_ids == [client_id, client_id]
+    # A client.id the user sets is the one they see.
+    DeserializerForClientId.client_ids.clear()
+    with KafkaConsumer(configs=configs(**{"client.id": "mine",
+                                          "key.deserializer": DeserializerForClientId})):
+        assert DeserializerForClientId.client_ids == ["mine"]
+
+
+def test_the_async_consumer_configures_with_the_generated_client_id() -> None:
+    async def main() -> None:
+        DeserializerForClientId.client_ids.clear()
+        consumer = AsyncKafkaConsumer(configs=configs(
+            **{"value.deserializer": DeserializerForClientId}))
+        client_id = _lib.Consumer_client_id(consumer._h)
+        assert DeserializerForClientId.client_ids == [client_id]
+        await consumer.close(option=CloseOptions.timeout(0))
+
+    asyncio.run(main())
 
 
 def test_no_deserializer_means_bytes() -> None:
