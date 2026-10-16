@@ -61,6 +61,7 @@ class DescribeConfigsOptions(AbstractOptions):
         if timeout_ms is UNSET:
             return self._timeout_ms
         self._timeout_ms = timeout_ms
+        self._record("timeout_ms", self._timeout_ms)
         return self
 
     def include_synonyms(self, *, include_synonyms: bool | None = None) -> Any:
@@ -72,6 +73,7 @@ class DescribeConfigsOptions(AbstractOptions):
         if include_synonyms is None:
             return self._include_synonyms
         self._include_synonyms = include_synonyms
+        self._record("include_synonyms", self._include_synonyms)
         return self
 
     def include_documentation(self, *, include_documentation: bool | None = None) -> Any:
@@ -83,4 +85,5 @@ class DescribeConfigsOptions(AbstractOptions):
         if include_documentation is None:
             return self._include_documentation
         self._include_documentation = include_documentation
+        self._record("include_documentation", self._include_documentation)
         return self

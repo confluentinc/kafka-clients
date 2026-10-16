@@ -54,6 +54,7 @@ class DescribeProducersOptions(AbstractOptions):
         if broker_id is None:
             return self._broker_id
         self._broker_id = broker_id  # OptionalInt.of(brokerId)
+        self._record("broker_id", self._broker_id)
         return self
 
     def __eq__(self, other: object) -> bool:

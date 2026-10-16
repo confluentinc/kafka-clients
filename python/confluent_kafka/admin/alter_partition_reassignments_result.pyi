@@ -14,27 +14,27 @@
 
 # Stub for confluent_kafka.admin.AlterPartitionReassignmentsResult.
 
-import asyncio
-import concurrent.futures
 from collections.abc import Mapping
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.common import TopicPartition
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["AlterPartitionReassignmentsResult"]
 
 class AlterPartitionReassignmentsResult(Generic[KindT]):
     @classmethod
-    def _new(cls, *, futures: Mapping[TopicPartition, AnyFuture[None]],
+    def _new(cls, *,
+             futures: Mapping[TopicPartition, KafkaFuture[None] | AsyncKafkaFuture[None]],
              kind: type[KindT]) -> AlterPartitionReassignmentsResult[KindT]: ...
     @overload
     def values(self: AlterPartitionReassignmentsResult[Sync]
-               ) -> dict[TopicPartition, concurrent.futures.Future[None]]: ...
+               ) -> dict[TopicPartition, KafkaFuture[None]]: ...
     @overload
     def values(self: AlterPartitionReassignmentsResult[Async]
-               ) -> dict[TopicPartition, asyncio.Future[None]]: ...
+               ) -> dict[TopicPartition, AsyncKafkaFuture[None]]: ...
     @overload
-    def all(self: AlterPartitionReassignmentsResult[Sync]) -> concurrent.futures.Future[None]: ...
+    def all(self: AlterPartitionReassignmentsResult[Sync]) -> KafkaFuture[None]: ...
     @overload
-    def all(self: AlterPartitionReassignmentsResult[Async]) -> asyncio.Future[None]: ...
+    def all(self: AlterPartitionReassignmentsResult[Async]) -> AsyncKafkaFuture[None]: ...

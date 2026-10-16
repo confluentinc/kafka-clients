@@ -14,49 +14,48 @@
 
 # Stub for confluent_kafka.admin.DescribeTopicsResult.
 
-import asyncio
-import concurrent.futures
 from collections.abc import Mapping
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.admin.topic_description import TopicDescription
 from confluent_kafka.common import Uuid
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DescribeTopicsResult"]
 
 class DescribeTopicsResult(Generic[KindT]):
     @classmethod
-    def _new(cls, *, topic_id_futures: Mapping[Uuid, AnyFuture[TopicDescription]] | None,
-             name_futures: Mapping[str, AnyFuture[TopicDescription]] | None,
+    def _new(cls, *, topic_id_futures: Mapping[Uuid, KafkaFuture[TopicDescription] | AsyncKafkaFuture[TopicDescription]] | None,
+             name_futures: Mapping[str, KafkaFuture[TopicDescription] | AsyncKafkaFuture[TopicDescription]] | None,
              kind: type[KindT]) -> DescribeTopicsResult[KindT]: ...
     @staticmethod
-    def _of_topic_ids(*, topic_id_futures: Mapping[Uuid, AnyFuture[TopicDescription]],
+    def _of_topic_ids(*, topic_id_futures: Mapping[Uuid, KafkaFuture[TopicDescription] | AsyncKafkaFuture[TopicDescription]],
                       kind: type[KindT]) -> DescribeTopicsResult[KindT]: ...
     @staticmethod
-    def _of_topic_names(*, name_futures: Mapping[str, AnyFuture[TopicDescription]],
+    def _of_topic_names(*, name_futures: Mapping[str, KafkaFuture[TopicDescription] | AsyncKafkaFuture[TopicDescription]],
                         kind: type[KindT]) -> DescribeTopicsResult[KindT]: ...
     @overload
     def topic_id_values(self: DescribeTopicsResult[Sync]
-                        ) -> dict[Uuid, concurrent.futures.Future[TopicDescription]] | None: ...
+                        ) -> dict[Uuid, KafkaFuture[TopicDescription]] | None: ...
     @overload
     def topic_id_values(self: DescribeTopicsResult[Async]
-                        ) -> dict[Uuid, asyncio.Future[TopicDescription]] | None: ...
+                        ) -> dict[Uuid, AsyncKafkaFuture[TopicDescription]] | None: ...
     @overload
     def topic_name_values(self: DescribeTopicsResult[Sync]
-                          ) -> dict[str, concurrent.futures.Future[TopicDescription]] | None: ...
+                          ) -> dict[str, KafkaFuture[TopicDescription]] | None: ...
     @overload
     def topic_name_values(self: DescribeTopicsResult[Async]
-                          ) -> dict[str, asyncio.Future[TopicDescription]] | None: ...
+                          ) -> dict[str, AsyncKafkaFuture[TopicDescription]] | None: ...
     @overload
     def all_topic_names(self: DescribeTopicsResult[Sync]
-                        ) -> concurrent.futures.Future[dict[str, TopicDescription]] | None: ...
+                        ) -> KafkaFuture[dict[str, TopicDescription]] | None: ...
     @overload
     def all_topic_names(self: DescribeTopicsResult[Async]
-                        ) -> asyncio.Future[dict[str, TopicDescription]] | None: ...
+                        ) -> AsyncKafkaFuture[dict[str, TopicDescription]] | None: ...
     @overload
     def all_topic_ids(self: DescribeTopicsResult[Sync]
-                      ) -> concurrent.futures.Future[dict[Uuid, TopicDescription]] | None: ...
+                      ) -> KafkaFuture[dict[Uuid, TopicDescription]] | None: ...
     @overload
     def all_topic_ids(self: DescribeTopicsResult[Async]
-                      ) -> asyncio.Future[dict[Uuid, TopicDescription]] | None: ...
+                      ) -> AsyncKafkaFuture[dict[Uuid, TopicDescription]] | None: ...

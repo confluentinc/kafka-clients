@@ -26,19 +26,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import (
-    AnyFuture,
-    Async,
-    KindT,
-    Sync,
-    _all_of,
-    _then_apply,
-)
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.admin._internals import _CoordinatorKey
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
 if TYPE_CHECKING:
     from confluent_kafka.admin.transaction_description import TransactionDescription
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DescribeTransactionsResult"]
 
@@ -57,15 +51,19 @@ class DescribeTransactionsResult(Generic[KindT]):
             "client's describe_transactions()")
 
     @classmethod
-    def _new(cls, *, futures: Mapping[_CoordinatorKey, AnyFuture[TransactionDescription]],
-             kind: type[Sync] | type[Async]) -> DescribeTransactionsResult[Any]:
+    def _new(
+            cls, *,
+            futures: Mapping[_CoordinatorKey, KafkaFuture[TransactionDescription] | AsyncKafkaFuture[TransactionDescription]],
+            kind: type[Sync] | type[Async]) -> DescribeTransactionsResult[Any]:
         """Java's package-private ``DescribeTransactionsResult(futures)``."""
         result = cls.__new__(cls)
         result._futures = dict(futures)
         result._kind = kind
         return result
 
-    def description(self, *, transactional_id: str) -> AnyFuture[TransactionDescription]:
+    def description(
+            self, *,
+            transactional_id: str) -> KafkaFuture[TransactionDescription] | AsyncKafkaFuture[TransactionDescription]:
         """Get the description of a specific transactional ID: a future which completes
         when the transaction description of a particular transactional ID is available.
 
@@ -80,7 +78,8 @@ class DescribeTransactionsResult(Generic[KindT]):
                 + "` was not included in the request")
         return future
 
-    def all(self) -> AnyFuture[dict[str, TransactionDescription]]:
+    def all(
+            self) -> KafkaFuture[dict[str, TransactionDescription]] | AsyncKafkaFuture[dict[str, TransactionDescription]]:
         """Get a future which returns a map of the transaction descriptions requested in
         the respective call to ``Admin.describe_transactions()``.
 
@@ -91,6 +90,6 @@ class DescribeTransactionsResult(Generic[KindT]):
 
         def collect(_: None) -> dict[str, TransactionDescription]:
             # allOf ensured that all the futures completed successfully.
-            return {key.id_value: future.result() for key, future in futures.items()}
+            return {key.id_value: future.get_now(value_if_absent=None) for key, future in futures.items()}
 
-        return _then_apply(_all_of(futures.values(), self._kind), collect)
+        return self._kind._FUTURE.all_of(futures=tuple(futures.values())).then_apply(function=collect)

@@ -14,26 +14,25 @@
 
 # Stub for confluent_kafka.admin.AlterConfigsResult.
 
-import asyncio
-import concurrent.futures
 from collections.abc import Mapping
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.common.config import ConfigResource
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["AlterConfigsResult"]
 
 class AlterConfigsResult(Generic[KindT]):
     @classmethod
-    def _new(cls, *, futures: Mapping[ConfigResource, AnyFuture[None]],
+    def _new(cls, *,
+             futures: Mapping[ConfigResource, KafkaFuture[None] | AsyncKafkaFuture[None]],
              kind: type[KindT]) -> AlterConfigsResult[KindT]: ...
     @overload
-    def values(self: AlterConfigsResult[Sync]
-               ) -> dict[ConfigResource, concurrent.futures.Future[None]]: ...
+    def values(self: AlterConfigsResult[Sync]) -> dict[ConfigResource, KafkaFuture[None]]: ...
     @overload
-    def values(self: AlterConfigsResult[Async]) -> dict[ConfigResource, asyncio.Future[None]]: ...
+    def values(self: AlterConfigsResult[Async]) -> dict[ConfigResource, AsyncKafkaFuture[None]]: ...
     @overload
-    def all(self: AlterConfigsResult[Sync]) -> concurrent.futures.Future[None]: ...
+    def all(self: AlterConfigsResult[Sync]) -> KafkaFuture[None]: ...
     @overload
-    def all(self: AlterConfigsResult[Async]) -> asyncio.Future[None]: ...
+    def all(self: AlterConfigsResult[Async]) -> AsyncKafkaFuture[None]: ...

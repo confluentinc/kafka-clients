@@ -60,4 +60,5 @@ class DescribeClassicGroupsOptions(AbstractOptions):
         if include_authorized_operations is None:
             return self._include_authorized_operations
         self._include_authorized_operations = include_authorized_operations
+        self._record("include_authorized_operations", self._include_authorized_operations)
         return self

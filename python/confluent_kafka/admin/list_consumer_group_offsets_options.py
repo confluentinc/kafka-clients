@@ -58,4 +58,5 @@ class ListConsumerGroupOffsetsOptions(AbstractOptions):
         if require_stable is None:
             return self._require_stable
         self._require_stable = require_stable
+        self._record("require_stable", self._require_stable)
         return self

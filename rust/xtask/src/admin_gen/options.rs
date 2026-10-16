@@ -1234,7 +1234,10 @@ impl Renderer<'_> {
     // -- members -------------------------------------------------------------
 
     fn slots(&self) -> String {
-        let names: Vec<String> = self.o.fields.iter().map(|f| format!("\"_{}\"", f.py)).collect();
+        let mut names: Vec<String> = self.o.fields.iter().map(|f| format!("\"_{}\"", f.py)).collect();
+        if self.o.class.is_abstract() {
+            names.push("\"_setters\"".into());
+        }
         match names.as_slice() {
             [] => "    __slots__ = ()".to_string(),
             [one] => format!("    __slots__ = ({one},)"),
@@ -1277,6 +1280,12 @@ impl Renderer<'_> {
                     ),
                 ];
                 lines.extend(self.init_fields(None)?);
+                lines.push(
+                    "        # The setters that ran, the latest last (``_record``): the client runs the same\n        \
+                     # ones on the C options (CLAUDE.md conversion table, \"an Options object\").\n        \
+                     self._setters: dict[str, Any] = {}"
+                        .into(),
+                );
                 Ok(Some(lines.join("\n")))
             },
             Construction::Keywords => {
@@ -1445,6 +1454,9 @@ impl Renderer<'_> {
                 lines.push(format!("        if {p} is {default}:"));
                 lines.push(format!("            {read}"));
                 lines.push(format!("        self._{} = {store}{comment}", self.field(&s.field).py));
+                // What the setter stored (Java's copy of a collection, `Set.copyOf`,
+                // `new HashSet<>(x)`): a one-shot iterator crosses as that copy.
+                lines.push(format!("        self._record(\"{py}\", self._{})", self.field(&s.field).py));
                 lines.push(if s.ret == Ret::Void {
                     "        return None".into()
                 } else {
@@ -1474,6 +1486,9 @@ impl Renderer<'_> {
                 let (store, comment) = self.store_expr(&s)?;
                 let comment = comment.map(|c| format!("  # {c}")).unwrap_or_default();
                 lines.push(format!("        self._{} = {store}{comment}", self.field(&s.field).py));
+                // What the setter stored (Java's copy of a collection, `Set.copyOf`,
+                // `new HashSet<>(x)`): a one-shot iterator crosses as that copy.
+                lines.push(format!("        self._record(\"{py}\", self._{})", self.field(&s.field).py));
                 if s.ret != Ret::Void {
                     lines.push("        return self".into());
                 }
@@ -1742,6 +1757,10 @@ impl Renderer<'_> {
                 pyi_members.push(s);
             }
         }
+        if abstract_ {
+            py_members.push(RECORD_PY.to_string());
+            pyi_members.push(RECORD_PYI.to_string());
+        }
         let base = if abstract_ {
             String::new()
         } else {
@@ -1828,6 +1847,9 @@ impl Renderer<'_> {
         if self.uses.sequence_pyi {
             imp.std("collections.abc", "Sequence");
         }
+        if abstract_ {
+            imp.std("typing", "Any");
+        }
         if self.uses.overload {
             imp.std("typing", "overload");
         }
@@ -1849,6 +1871,23 @@ impl Renderer<'_> {
         Ok((py, pyi))
     }
 }
+
+/// `AbstractOptions`' record of the setters that ran: each generated setter
+/// calls `_record` with the value it stored, and the client hands
+/// `_setters_ran()` to the C extension, which runs the same setters on the C
+/// options (CLAUDE.md conversion table, "an Options object").
+const RECORD_PY: &str = "    def _record(self, setter: str, value: Any) -> None:
+        \"\"\"Record that ``setter`` ran with ``value`` (the latest run last).\"\"\"
+        self._setters.pop(setter, None)
+        self._setters[setter] = value
+
+    def _setters_ran(self) -> list[tuple[str, Any]]:
+        \"\"\"The ``(setter, value)`` pairs of the setters that ran, in the order they
+        last ran.\"\"\"
+        return list(self._setters.items())";
+
+const RECORD_PYI: &str = "    def _record(self, setter: str, value: Any) -> None: ...
+    def _setters_ran(self) -> list[tuple[str, Any]]: ...";
 
 // ---------------------------------------------------------------------------
 // Driving
@@ -2068,6 +2107,11 @@ mod tests {
         assert_eq!(manifest, REFERENCE, "the manifest's Options rows");
         let refs = REFERENCE;
         let g = render_all(&root).unwrap();
+        if let Ok(dir) = std::env::var("ADMIN_OPTIONS_DUMP") {
+            for (p, c) in &g.files {
+                fs::write(Path::new(&dir).join(p.file_name().unwrap()), c).unwrap();
+            }
+        }
         let mut failures = Vec::new();
         for class in &refs {
             if let Some(s) = g.stops.iter().find(|s| &s.class == class) {

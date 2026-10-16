@@ -66,4 +66,5 @@ class DescribeDelegationTokenOptions(AbstractOptions):
         if owners is UNSET:
             return self._owners
         self._owners = None if owners is None else list(owners)
+        self._record("owners", self._owners)
         return self

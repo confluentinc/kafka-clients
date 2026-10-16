@@ -25,7 +25,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from .admin import _AdminState
 from .async_admin import AsyncAdmin
 
 __all__ = ["AsyncKafkaAdminClient"]
@@ -46,10 +45,7 @@ class AsyncKafkaAdminClient(AsyncAdmin):
     @classmethod
     def _create_internal(cls, *, configs: dict[str, Any]) -> AsyncKafkaAdminClient:
         """See ``KafkaAdminClient._create_internal``."""
-        from confluent_kafka._async import Undelivered
-
         client = cls.__new__(cls)
-        _AdminState.__init__(client)
-        client._undelivered = Undelivered()
+        client._init_async_state()
         client._start(configs)
         return client

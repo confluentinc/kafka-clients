@@ -65,6 +65,7 @@ class RemoveMembersFromConsumerGroupOptions(AbstractOptions):
         if reason is UNSET:
             return self._reason
         self._reason = reason
+        self._record("reason", self._reason)
         return None
 
     def members(self) -> set[MemberToRemove]:

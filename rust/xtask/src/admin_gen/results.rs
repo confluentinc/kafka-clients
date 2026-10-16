@@ -313,9 +313,10 @@ enum Flavor {
 impl Flavor {
     fn future(self) -> &'static str {
         match self {
-            Flavor::Any => "AnyFuture",
-            Flavor::Sync => "concurrent.futures.Future",
-            Flavor::Async => "asyncio.Future",
+            // Either kind: written as the union of the two (`Types::py`).
+            Flavor::Any => "KafkaFuture",
+            Flavor::Sync => "KafkaFuture",
+            Flavor::Async => "AsyncKafkaFuture",
         }
     }
 }
@@ -358,7 +359,11 @@ impl Types<'_> {
             "KafkaFuture" | "KafkaFutureImpl" => {
                 let inner = self.py(t.arg(0)?, flavor, false, false)?;
                 let inner = if nullable { format!("{inner} | None") } else { inner };
-                format!("{}[{inner}]", flavor.future())
+                if flavor == Flavor::Any {
+                    format!("KafkaFuture[{inner}] | AsyncKafkaFuture[{inner}]")
+                } else {
+                    format!("{}[{inner}]", flavor.future())
+                }
             },
             "Map" => {
                 let k = self.py(t.arg(0)?, flavor, false, false)?;
@@ -1315,10 +1320,10 @@ fn pyi_def(indent: usize, name: &str, params: &[String], ret: &str) -> String {
 }
 
 /// The width of a stub line: [`WIDTH`], and [`SLACK`] more for a sync one
-/// (the reference set keeps 103-character `concurrent.futures.Future` stubs on
-/// one line and wraps a 102-character `asyncio.Future` one).
+/// (the reference set keeps 103-character sync stubs on one line and wraps a
+/// 102-character async one).
 fn stub_limit(ret: &str) -> usize {
-    if ret.contains(Flavor::Sync.future()) {
+    if ret.contains(Flavor::Sync.future()) && !ret.contains(Flavor::Async.future()) {
         WIDTH + SLACK
     } else {
         WIDTH
@@ -1412,6 +1417,8 @@ struct Uses {
     mapping_pyi: bool,
     iterable_pyi: bool,
     sequence_pyi: bool,
+    callable_py: bool,
+    callable_pyi: bool,
 }
 
 impl Uses {
@@ -1427,15 +1434,10 @@ impl Uses {
         self.sequence_pyi |= s.contains("Sequence[");
     }
 
+    /// A new future completed from another's `whenComplete`: Java's
+    /// `new KafkaFutureImpl<>()` is `_KafkaFutureImpl`.
     fn when_complete(&mut self) {
-        for h in [
-            "_complete",
-            "_complete_with_error",
-            "_new_future_like",
-            "_when_complete",
-        ] {
-            self.helpers.insert(h);
-        }
+        self.helpers.insert("_KafkaFutureImpl");
     }
 }
 
@@ -1604,7 +1606,7 @@ impl Renderer<'_> {
         }
         let mut text = match self.r.visibility {
             Visibility::Public => "Java's constructor is public, so it stays the keyword-only ``__init__``; the \
-                                   client-kind marker is read from the futures given (``asyncio.Future``\\\\ s: the \
+                                   client-kind marker is read from the futures given (``AsyncKafkaFuture``\\\\ s: the \
                                    async kind, else the sync one), and the clients build it through ``_new``, which \
                                    sets the kind explicitly, as for every result class (CLAUDE.md, Python Binding \
                                    Conventions, Class family)."
@@ -1623,20 +1625,19 @@ impl Renderer<'_> {
                     "``{j}()`` returns a copy of the stored map, so each call gives a new ``dict``."
                 )),
                 Pat::AllOf(_) => extra.push(format!(
-                    "``{j}()`` is Java's ``KafkaFuture.allOf``, kept through the private helper ``_all_of`` (Idiom \
-                     translations)."
+                    "``{j}()`` is Java's ``KafkaFuture.allOf``, the ``all_of`` of the kind's future class (Futures)."
                 )),
                 Pat::Collect { .. } => extra.push(format!(
-                    "``{j}()`` is Java's ``allOf(...).thenApply(...)``, kept through the private helpers ``_all_of`` \
-                     / ``_then_apply``."
+                    "``{j}()`` is Java's ``allOf(...).thenApply(...)``, through the futures' ``all_of`` and \
+                     ``then_apply``."
                 )),
                 Pat::Lookup { .. } => extra.push(format!(
                     "``{j}()`` raises ``IllegalArgumentError`` with Java's message for a key that was not part of the \
                      call."
                 )),
                 Pat::Relay { .. } | Pat::FirstError { .. } => extra.push(format!(
-                    "``{j}()`` makes a new future completed from the stored future's ``whenComplete``, kept through \
-                     the private helpers ``_new_future_like`` / ``_when_complete`` / ``_complete*``."
+                    "``{j}()`` makes a new future completed from the stored future's ``when_complete``: Java's \
+                     ``new KafkaFutureImpl<>()`` is the private ``_KafkaFutureImpl``."
                 )),
                 _ => {},
             }
@@ -1706,12 +1707,16 @@ impl Renderer<'_> {
         for (p, f) in self.r.ctor.clone() {
             let field = self.field(&f);
             let mut t = if self.broker_futures() && !stub {
-                "AnyFuture[_BrokerFutures]".to_string()
+                "KafkaFuture[_BrokerFutures] | AsyncKafkaFuture[_BrokerFutures]".to_string()
             } else if self.broker_futures() {
                 // A future of a map of futures: the map is a parameter's map.
                 let k = self.arg_ty(&field.ty, &[0, 0], flavor, false)?;
                 let v = self.arg_ty(&field.ty, &[0, 1], flavor, false)?;
-                format!("{}[Mapping[{k}, {v}]]", flavor.future())
+                if flavor == Flavor::Any {
+                    format!("KafkaFuture[Mapping[{k}, {v}]] | AsyncKafkaFuture[Mapping[{k}, {v}]]")
+                } else {
+                    format!("{}[Mapping[{k}, {v}]]", flavor.future())
+                }
             } else {
                 self.field_ty(&field, flavor, true)?
             };
@@ -1796,8 +1801,44 @@ impl Renderer<'_> {
             body.push(format!("        {}", self.store("result", &p, &field)));
         }
         body.push("        result._kind = kind".into());
+        if self.r.holder.is_some() {
+            body.push("        result._refine = None".into());
+        }
         body.push("        return result".into());
         Ok(format!("    @classmethod\n{sig}\n{}", body.join("\n")))
+    }
+
+    /// `CreateTopicsResult`'s client builder: the futures are the core's
+    /// per-topic `values()` futures, and each per-topic getter reads the core's
+    /// own future through `refine(topic, accessor)` (CLAUDE.md, Python Binding
+    /// Conventions, Futures: no Python-side check for a topic not in the
+    /// request).
+    fn of_client_py(&mut self) -> String {
+        let cls = self.name().to_string();
+        let params = [
+            "cls".to_string(),
+            "*".to_string(),
+            "futures: Mapping[str, KafkaFuture[Any] | AsyncKafkaFuture[Any]]".to_string(),
+            "refine: Callable[[str, str], Any]".to_string(),
+            "kind: type[Sync] | type[Async]".to_string(),
+        ];
+        self.uses.mapping_py = true;
+        self.uses.callable_py = true;
+        let sig = py_def(4, "_of_client", &params, &format!("{cls}[Any]"), false);
+        let doc = docstring(
+            8,
+            &[
+                "The client's result: ``futures`` are the core's per-topic ``values()`` futures, and the per-topic \
+               getters return the core's own future of the topic, ``refine(topic, accessor)``, which fails with \
+               ``IllegalArgumentError`` for a topic not in the request."
+                    .to_string(),
+            ],
+            &[],
+        );
+        format!(
+            "    @classmethod\n{sig}\n{doc}\n        result = cls._new(futures=futures, kind=kind)\n        \
+             result._refine = refine\n        return result"
+        )
     }
 
     fn public_init_py(&mut self) -> Result<String, Stop> {
@@ -1888,13 +1929,11 @@ impl Renderer<'_> {
         Ok(match &m.pat {
             Pat::Stored(j) => format!("        return {}", sf(self, j)),
             Pat::Copy(j) => format!("        return dict({})", sf(self, j)),
-            Pat::AllOf(j) => {
-                self.uses.helpers.insert("_all_of");
-                format!("        return _all_of({}.values(), self._kind)", sf(self, j))
-            },
+            Pat::AllOf(j) => format!(
+                "        return self._kind._FUTURE.all_of(futures=tuple({}.values()))",
+                sf(self, j)
+            ),
             Pat::Collect { field, key, var } => {
-                self.uses.helpers.insert("_all_of");
-                self.uses.helpers.insert("_then_apply");
                 let fd = self.field(field);
                 let local = fd.py.clone();
                 let var = if var.is_empty() {
@@ -1938,7 +1977,6 @@ impl Renderer<'_> {
                 s
             },
             Pat::MapView { field, keys } => {
-                self.uses.helpers.insert("_then_apply");
                 let fd = self.field(field);
                 let value = fd.ty.arg(0).and_then(|t| t.arg(1)).map_err(|e| self.st(e))?.name.clone();
                 let v = format!("{}s", snake(&value).rsplit('_').next().unwrap_or("value"));
@@ -1947,16 +1985,17 @@ impl Renderer<'_> {
                 } else {
                     format!("list({v}.values())")
                 };
-                format!("        return _then_apply({}, lambda {v}: {expr})", sf(self, field))
+                format!("        return {}.then_apply(function=lambda {v}: {expr})", sf(self, field))
             },
             Pat::Relay { field, value, error } => {
                 self.uses.when_complete();
                 let fd = self.field(field);
                 let inner = self.arg_ty(&fd.ty, &[0], Flavor::Any, false)?;
                 let action = self.action_def(&snake(value), &inner, &snake(error));
+                let made = self.arg_ty(&m.ret, &[0], Flavor::Any, false)?;
                 RELAY
                     .replace("{ACTION}", &action)
-                    .replace("{R}", ret)
+                    .replace("{R}", &made)
                     .replace("{F}", &sf(self, field))
                     .replace("{V}", &snake(value))
                     .replace("{E}", &snake(error))
@@ -1967,9 +2006,10 @@ impl Renderer<'_> {
                 let inner = self.arg_ty(&fd.ty, &[0], Flavor::Any, true)?;
                 self.uses.note_py(&inner);
                 let action = self.action_def(&snake(value), &inner, &snake(error));
+                let made = self.arg_ty(&m.ret, &[0], Flavor::Any, false)?;
                 FIRST_ERROR
                     .replace("{ACTION}", &action)
-                    .replace("{R}", ret)
+                    .replace("{R}", &made)
                     .replace("{F}", &sf(self, field))
                     .replace("{G}", &snake(getter))
                     .replace("{V}", &snake(value))
@@ -1977,8 +2017,6 @@ impl Renderer<'_> {
                     .replace("{X}", &snake(item))
             },
             Pat::ValuesToVoid(field) => {
-                self.uses.helpers.insert("_then_apply");
-                self.uses.helpers.insert("_mark_retrieved");
                 let value = self.arg_ty(&m.ret, &[1], Flavor::Any, false)?;
                 VALUES_TO_VOID
                     .replace("{R}", ret)
@@ -1986,20 +2024,19 @@ impl Renderer<'_> {
                     .replace("{F}", &sf(self, field))
             },
             Pat::PerKeyGetter { param, getter, .. } => {
-                self.uses.helpers.insert("_then_apply");
                 let holder = self.r.holder.clone().unwrap_or_default();
+                let (p, g) = (snake(param), snake(getter));
                 format!(
-                    "        return _then_apply(self._future_of({}), _{holder}.{})",
-                    snake(param),
-                    snake(getter)
+                    "        if self._refine is not None:\n            return self._refine({p}, \"{g}\")\n        return \
+                     self._future_of({p}).then_apply(function=_{holder}.{g})"
                 )
             },
             Pat::EitherAllOf { first, second } => {
-                self.uses.helpers.insert("_all_of");
                 let (a, b) = (sf(self, first), sf(self, second));
                 format!(
-                    "        if {a} is None:\n            assert {b} is not None\n            return _all_of({b}.values(), \
-                     self._kind)\n        return _all_of({a}.values(), self._kind)"
+                    "        if {a} is None:\n            assert {b} is not None\n            return \
+                     self._kind._FUTURE.all_of(futures=tuple({b}.values()))\n        return \
+                     self._kind._FUTURE.all_of(futures=tuple({a}.values()))"
                 )
             },
             Pat::SubErrorOne { future, partitions, message } => {
@@ -2025,12 +2062,11 @@ impl Renderer<'_> {
             },
             Pat::SubErrorHelper { message } => {
                 self.uses.sub_level_error = true;
-                self.uses.helpers.insert("_complete_with_error");
                 let terms = self.py_terms(message, &m.params);
                 let errors = snake(&m.params[0].name);
                 format!(
                     "        assert {errors} is not None\n        exception = _sub_level_error(\n            {errors}, \
-                     {},\n{})\n        if exception is not None:\n            _complete_with_error({}, exception)\n            \
+                     {},\n{})\n        if exception is not None:\n            {}.complete_with_error(exception)\n            \
                      return True\n        return False",
                     snake(&m.params[1].name),
                     concat_lines(12, "", &terms, ""),
@@ -2038,20 +2074,21 @@ impl Renderer<'_> {
                 )
             },
             Pat::Flatten { getter } => {
-                self.uses.helpers.insert("_then_apply");
                 self.uses.mapping_py = true;
                 let elem = self.arg_ty(&m.ret, &[0, 0], Flavor::Any, false)?;
                 FLATTEN.replace("{T}", &elem).replace("{G}", &snake(getter))
             },
             Pat::CopyOnComplete(field) => {
                 self.uses.when_complete();
-                COPY_ON_COMPLETE.replace("{R}", ret).replace("{F}", &sf(self, field))
+                let made = self.arg_ty(&m.ret, &[0], Flavor::Any, false)?;
+                COPY_ON_COMPLETE.replace("{R}", &made).replace("{F}", &sf(self, field))
             },
             Pat::AllByKey(field) => {
                 self.uses.when_complete();
                 let elem = self.arg_ty(&m.ret, &[0, 1], Flavor::Any, false)?;
+                let made = self.arg_ty(&m.ret, &[0], Flavor::Any, false)?;
                 ALL_BY_KEY
-                    .replace("{R}", ret)
+                    .replace("{R}", &made)
                     .replace("{F}", &sf(self, field))
                     .replace("{T}", &elem)
             },
@@ -2071,8 +2108,14 @@ impl Renderer<'_> {
         let mut params = vec!["self".to_string()];
         let mut ps = self.param_list(m, Flavor::Any)?;
         if let Pat::SubErrorHelper { .. } = m.pat {
-            // The map argument is the `whenComplete` value, `None` on failure.
+            // The map argument is the `whenComplete` value, `None` on failure;
+            // Java's `KafkaFutureImpl` result is the private `_KafkaFutureImpl`.
             ps[0].push_str(" | None");
+            if let Some(last) = ps.last_mut() {
+                if let Some((name, _)) = last.split_once(':') {
+                    *last = format!("{name}: _KafkaFutureImpl[None]");
+                }
+            }
         } else if !ps.is_empty() {
             params.push("*".into());
         }
@@ -2279,6 +2322,9 @@ impl Renderer<'_> {
         }
         let mut slot_names: Vec<String> = self.r.fields.iter().map(|f| f.py.clone()).collect();
         slot_names.push("kind".into());
+        if self.r.holder.is_some() {
+            slot_names.push("refine".into());
+        }
         py_members.push(self.slots(4, &slot_names));
         py_members.push(if public {
             self.public_init_py()?
@@ -2286,6 +2332,10 @@ impl Renderer<'_> {
             self.type_error_init()
         });
         py_members.push(self.new_py()?);
+        if self.r.holder.is_some() {
+            let of_client = self.of_client_py();
+            py_members.push(of_client);
+        }
         for (name, p, args) in self.r.factories.clone() {
             py_members.push(self.factory_py(&name, &p, &args)?);
         }
@@ -2325,6 +2375,15 @@ impl Renderer<'_> {
             pyi_filled("_new", &params, &format!("{cls}[KindT]"))
         };
         pyi_members.push(format!("    @classmethod\n{new}"));
+        if self.r.holder.is_some() {
+            self.uses.mapping_pyi = true;
+            self.uses.callable_pyi = true;
+            pyi_members.push(format!(
+                "    @classmethod\n    def _of_client(cls, *, futures: Mapping[str, KafkaFuture[Any] | \
+                 AsyncKafkaFuture[Any]],\n                   refine: Callable[[str, str], Any],\n                   \
+                 kind: type[KindT]) -> {cls}[KindT]: ..."
+            ));
+        }
         for (name, p, _) in self.r.factories.clone() {
             let ty = self.ty(&parse_type(&p.ty), Flavor::Any, true, false)?;
             self.uses.note_pyi(&ty);
@@ -2360,13 +2419,17 @@ impl Renderer<'_> {
             let f = self.r.fields[0].clone();
             let v = self.arg_ty(&f.ty, &[0, 1, 0], Flavor::Any, false)?;
             let quoted = v.replacen('[', "[\"", 1).replacen(']', "\"]", 1);
-            py_items.push_str(&format!("\n_BrokerFutures = Mapping[int, AnyFuture[{quoted}]]\n"));
+            py_items.push_str(&format!(
+                "\n_BrokerFutures = Mapping[int, \"KafkaFuture[{v}] | AsyncKafkaFuture[{v}]\"]\n"
+            ));
+            let _ = quoted;
             self.uses.mapping_py = true;
         }
 
         // Imports.
         let mut imp = Imports::default();
         for (on, name) in [
+            (self.uses.callable_py, "Callable"),
             (self.uses.iterable_py, "Iterable"),
             (self.uses.mapping_py, "Mapping"),
             (self.uses.sequence_py, "Sequence"),
@@ -2377,9 +2440,8 @@ impl Renderer<'_> {
         }
         imp.std("typing", "Any");
         imp.std("typing", "Generic");
-        if !self.types.used.is_empty() {
-            imp.std("typing", "TYPE_CHECKING");
-        }
+        // `KafkaFuture` / `AsyncKafkaFuture` are always annotated.
+        imp.std("typing", "TYPE_CHECKING");
         if self.uses.java_str {
             imp.first("confluent_kafka._java", "java_str");
         }
@@ -2387,11 +2449,17 @@ impl Renderer<'_> {
             imp.first("confluent_kafka._args", "Form");
             imp.first("confluent_kafka._args", "java_forms");
         }
-        for n in ["AnyFuture", "Async", "KindT", "Sync"] {
+        for n in ["Async", "KindT", "Sync"] {
             imp.first("confluent_kafka.admin._futures", n);
         }
         for h in self.uses.helpers.clone() {
-            imp.first("confluent_kafka.admin._futures", h);
+            match h {
+                "_KafkaFutureImpl" => imp.first("confluent_kafka.common.kafka_future", h),
+                _ => imp.first("confluent_kafka.admin._futures", h),
+            }
+        }
+        for n in ["AsyncKafkaFuture", "KafkaFuture"] {
+            imp.checking("confluent_kafka.common.kafka_future", n);
         }
         if self.uses.sub_level_error {
             imp.first("confluent_kafka.admin._internals", "_sub_level_error");
@@ -2411,9 +2479,8 @@ impl Renderer<'_> {
         let py_imports = wrap_imports(&imp.render(""));
 
         let mut si = Imports::default();
-        si.plain.insert("asyncio".into());
-        si.plain.insert("concurrent.futures".into());
         for (on, name) in [
+            (self.uses.callable_pyi, "Callable"),
             (self.uses.iterable_pyi, "Iterable"),
             (self.uses.mapping_pyi, "Mapping"),
             (self.uses.sequence_pyi, "Sequence"),
@@ -2422,11 +2489,18 @@ impl Renderer<'_> {
                 si.std("collections.abc", name);
             }
         }
+        if self.r.holder.is_some() {
+            si.std("typing", "Any");
+        }
         si.std("typing", "Generic");
         si.std("typing", "overload");
-        for n in ["AnyFuture", "Async", "KindT", "Sync"] {
+        for n in ["Async", "KindT", "Sync"] {
             si.first("confluent_kafka.admin._futures", n);
         }
+        for n in ["AsyncKafkaFuture", "KafkaFuture"] {
+            si.first("confluent_kafka.common.kafka_future", n);
+        }
+
         for i in &self.types.internals {
             si.first("confluent_kafka.admin._internals", i);
         }
@@ -2460,80 +2534,74 @@ const COLLECT: &str = "        {L} = self._{L}
 
         def collect(_: None) -> {T}:
             # allOf ensured that all the futures completed successfully.
-            return {{K}: future.result() for {V}, future in {L}.items()}
+            return {{K}: future.get_now(value_if_absent=None) for {V}, future in {L}.items()}
 
-        return _then_apply(_all_of({L}.values(), self._kind), collect)";
+        return self._kind._FUTURE.all_of(futures=tuple({L}.values())).then_apply(function=collect)";
 
-/// `CreateTopicsResult.values()`: one derived future per key, each marked
-/// retrieved, as the client marks its own per-key futures (a key the caller
-/// leaves unread does not log "Future exception was never retrieved"; Java
-/// logs nothing).
+/// `CreateTopicsResult.values()`: one derived future per key, as Java's
+/// `thenApply(v -> (Void) null)`.
 const VALUES_TO_VOID: &str = "        values: {R} = {}
         for topic, future in {F}.items():
-            derived: {V} = _then_apply(future, lambda v: None)
-            # A topic the caller leaves unread does not log its error, as with the
-            # client's own per-key futures.
-            _mark_retrieved(derived)
-            values[topic] = derived
+            values[topic] = future.then_apply(function=lambda v: None)
         return values";
 
 /// A new future relaying the stored one's outcome.
-const RELAY: &str = "        result: {R} = _new_future_like({F})
+const RELAY: &str = "        result: _KafkaFutureImpl[{R}] = _KafkaFutureImpl()
 
 {ACTION}
             if {E} is not None:
-                _complete_with_error(result, {E})
+                result.complete_with_error({E})
             else:
                 assert {V} is not None
-                _complete(result, {V})
+                result.complete({V})
 
-        _when_complete({F}, action)
-        return result";
+        {F}.when_complete(action=action)
+        return self._kind._FUTURE._of_impl(result)";
 
 /// A new future failing with the first present `Optional<Throwable>`.
-const FIRST_ERROR: &str = "        result: {R} = _new_future_like({F})
+const FIRST_ERROR: &str = "        result: _KafkaFutureImpl[{R}] = _KafkaFutureImpl()
 
 {ACTION}
             if {E} is not None:
-                _complete_with_error(result, {E})
+                result.complete_with_error({E})
             else:
                 assert {V} is not None
                 for {X} in {V}.values():
                     if {X} is not None:
-                        _complete_with_error(result, {X})
+                        result.complete_with_error({X})
                         return
-                _complete(result, None)
+                result.complete(None)
 
-        _when_complete(self.{G}(), action)
-        return result";
+        self.{G}().when_complete(action=action)
+        return self._kind._FUTURE._of_impl(result)";
 
 const SUB_ERROR_ONE: &str = "        if partition not in {S}:
             raise IllegalArgumentError(
 {MSG}
-        result: AnyFuture[None] = _new_future_like({F})
+        result: _KafkaFutureImpl[None] = _KafkaFutureImpl()
 
 {ACTION}
             if throwable is not None:
-                _complete_with_error(result, throwable)
+                result.complete_with_error(throwable)
             elif not self._maybe_complete_exceptionally(topic_partitions, partition, result):
-                _complete(result, None)
+                result.complete(None)
 
-        _when_complete({F}, action)
-        return result";
+        {F}.when_complete(action=action)
+        return self._kind._FUTURE._of_impl(result)";
 
-const SUB_ERROR_ALL: &str = "        result: AnyFuture[None] = _new_future_like({F})
+const SUB_ERROR_ALL: &str = "        result: _KafkaFutureImpl[None] = _KafkaFutureImpl()
 
 {ACTION}
             if throwable is not None:
-                _complete_with_error(result, throwable)
+                result.complete_with_error(throwable)
             else:
                 for partition in {S}:
                     if self._maybe_complete_exceptionally(topic_partitions, partition, result):
                         return
-                _complete(result, None)
+                result.complete(None)
 
-        _when_complete({F}, action)
-        return result";
+        {F}.when_complete(action=action)
+        return self._kind._FUTURE._of_impl(result)";
 
 const FLATTEN: &str = "        def flatten(by_broker: Mapping[int, list[{T}]]) -> list[{T}]:
             all_listings: list[{T}] = []
@@ -2541,29 +2609,29 @@ const FLATTEN: &str = "        def flatten(by_broker: Mapping[int, list[{T}]]) -
                 all_listings.extend(listings)
             return all_listings
 
-        return _then_apply(self.{G}(), flatten)";
+        return self.{G}().then_apply(function=flatten)";
 
-const COPY_ON_COMPLETE: &str = "        result: {R} = (
-            _new_future_like({F}))
+const COPY_ON_COMPLETE: &str = "        result: _KafkaFutureImpl[{R}] = (
+            _KafkaFutureImpl())
 
         def action(broker_futures: _BrokerFutures | None, exception: BaseException | None) -> None:
             if broker_futures is not None:
-                _complete(result, dict(broker_futures))
+                result.complete(dict(broker_futures))
             else:
                 assert exception is not None
-                _complete_with_error(result, exception)
+                result.complete_with_error(exception)
 
-        _when_complete({F}, action)
-        return result";
+        {F}.when_complete(action=action)
+        return self._kind._FUTURE._of_impl(result)";
 
-const ALL_BY_KEY: &str = "        all_future: {R} = (
-            _new_future_like({F}))
+const ALL_BY_KEY: &str = "        all_future: _KafkaFutureImpl[{R}] = (
+            _KafkaFutureImpl())
         all_listings_map: dict[int, {T}] = {}
 
         def action(by_broker: _BrokerFutures | None,
                    top_level_exception: BaseException | None) -> None:
             if top_level_exception is not None:
-                _complete_with_error(all_future, top_level_exception)
+                all_future.complete_with_error(top_level_exception)
                 return
             assert by_broker is not None
             remaining_responses = set(by_broker.keys())
@@ -2572,20 +2640,20 @@ const ALL_BY_KEY: &str = "        all_future: {R} = (
                 def broker_action(listings: {T} | None,
                                   broker_exception: BaseException | None) -> None:
                     if broker_exception is not None:
-                        _complete_with_error(all_future, broker_exception)
-                    elif not all_future.done():
+                        all_future.complete_with_error(broker_exception)
+                    elif not all_future.is_done():
                         assert listings is not None
                         all_listings_map[broker_id] = listings
                         remaining_responses.discard(broker_id)
                         if not remaining_responses:
-                            _complete(all_future, all_listings_map)
+                            all_future.complete(all_listings_map)
                 return broker_action
 
             for broker_id, future in by_broker.items():
-                _when_complete(future, on_broker(broker_id))
+                future.when_complete(action=on_broker(broker_id))
 
-        _when_complete({F}, action)
-        return all_future";
+        {F}.when_complete(action=action)
+        return self._kind._FUTURE._of_impl(all_future)";
 
 /// `CreateTopicsResult.TopicMetadataAndConfig` and `UNKNOWN` (decision log 6:
 /// a private helper, as no public signature reaches it).
@@ -2985,7 +3053,10 @@ mod tests {
                    public Map<String, KafkaFuture<Void>> values() {\n return futures;\n }\n}\n";
         let admin = BTreeMap::from([("XResult".to_string(), "x".to_string())]);
         let (py, pyi) = render_source(src, &Prose::default(), &admin).unwrap().unwrap();
-        assert!(py.contains("futures: Mapping[str, AnyFuture[None]],\n"), "{py}");
+        assert!(
+            py.contains("futures: Mapping[str, KafkaFuture[None] | AsyncKafkaFuture[None]],\n"),
+            "{py}"
+        );
         assert!(
             py.contains(
                 "        if futures is None:\n            raise IllegalArgumentError(\n                \
@@ -3022,8 +3093,8 @@ mod tests {
         let elect = joined(file("elect_leaders_result.py"));
         assert!(
             elect.contains(
-                "``all()`` makes a new future completed from the stored future's ``whenComplete``, kept through \
-                 the private helpers ``_new_future_like`` / ``_when_complete`` / ``_complete*``. Java's \
+                "``all()`` makes a new future completed from the stored future's ``when_complete``: Java's \
+                 ``new KafkaFutureImpl<>()`` is the private ``_KafkaFutureImpl``. Java's \
                  ``Optional<Throwable>`` is ``BaseException | None`` (Types)."
             ),
             "{elect}"
@@ -3031,8 +3102,8 @@ mod tests {
         let list = joined(file("list_config_resources_result.py"));
         assert!(
             list.contains(
-                "``all()`` makes a new future completed from the stored future's ``whenComplete``, kept through \
-                 the private helpers ``_new_future_like`` / ``_when_complete`` / ``_complete*``. A ``Collection`` \
+                "``all()`` makes a new future completed from the stored future's ``when_complete``: Java's \
+                 ``new KafkaFutureImpl<>()`` is the private ``_KafkaFutureImpl``. A ``Collection`` \
                  yields a ``list``: Java's ``KafkaAdminClient`` builds no ``Set`` for it (Types)."
             ),
             "{list}"

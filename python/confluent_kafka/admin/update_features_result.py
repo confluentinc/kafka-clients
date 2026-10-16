@@ -16,16 +16,18 @@
 
 Java's constructor is package-private: ``__init__`` raises ``TypeError`` and ``_new``
 builds it (CLAUDE.md, Python Binding Conventions, Class family). ``all()`` is Java's
-``KafkaFuture.allOf``, kept through the private helper ``_all_of`` (Idiom
-translations).
+``KafkaFuture.allOf``, the ``all_of`` of the kind's future class (Futures).
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Generic
+from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync, _all_of
+from confluent_kafka.admin._futures import Async, KindT, Sync
+
+if TYPE_CHECKING:
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["UpdateFeaturesResult"]
 
@@ -44,7 +46,7 @@ class UpdateFeaturesResult(Generic[KindT]):
             "update_features()")
 
     @classmethod
-    def _new(cls, *, futures: Mapping[str, AnyFuture[None]],
+    def _new(cls, *, futures: Mapping[str, KafkaFuture[None] | AsyncKafkaFuture[None]],
              kind: type[Sync] | type[Async]) -> UpdateFeaturesResult[Any]:
         """Java's package-private ``UpdateFeaturesResult(futures)``.
 
@@ -56,9 +58,9 @@ class UpdateFeaturesResult(Generic[KindT]):
         result._kind = kind
         return result
 
-    def values(self) -> Mapping[str, AnyFuture[None]]:
+    def values(self) -> Mapping[str, KafkaFuture[None] | AsyncKafkaFuture[None]]:
         return self._futures
 
-    def all(self) -> AnyFuture[None]:
+    def all(self) -> KafkaFuture[None] | AsyncKafkaFuture[None]:
         """Return a future which succeeds if all the feature updates succeed."""
-        return _all_of(self._futures.values(), self._kind)
+        return self._kind._FUTURE.all_of(futures=tuple(self._futures.values()))

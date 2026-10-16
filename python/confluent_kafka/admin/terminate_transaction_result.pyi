@@ -14,19 +14,18 @@
 
 # Stub for confluent_kafka.admin.TerminateTransactionResult.
 
-import asyncio
-import concurrent.futures
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["TerminateTransactionResult"]
 
 class TerminateTransactionResult(Generic[KindT]):
     @classmethod
-    def _new(cls, *, future: AnyFuture[None],
+    def _new(cls, *, future: KafkaFuture[None] | AsyncKafkaFuture[None],
              kind: type[KindT]) -> TerminateTransactionResult[KindT]: ...
     @overload
-    def result(self: TerminateTransactionResult[Sync]) -> concurrent.futures.Future[None]: ...
+    def result(self: TerminateTransactionResult[Sync]) -> KafkaFuture[None]: ...
     @overload
-    def result(self: TerminateTransactionResult[Async]) -> asyncio.Future[None]: ...
+    def result(self: TerminateTransactionResult[Async]) -> AsyncKafkaFuture[None]: ...

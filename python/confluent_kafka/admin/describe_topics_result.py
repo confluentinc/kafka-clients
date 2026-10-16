@@ -30,19 +30,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
-from confluent_kafka.admin._futures import (
-    AnyFuture,
-    Async,
-    KindT,
-    Sync,
-    _all_of,
-    _then_apply,
-)
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
 if TYPE_CHECKING:
     from confluent_kafka.admin.topic_description import TopicDescription
     from confluent_kafka.common import Uuid
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DescribeTopicsResult"]
 
@@ -63,8 +57,8 @@ class DescribeTopicsResult(Generic[KindT]):
             "describe_topics()")
 
     @classmethod
-    def _new(cls, *, topic_id_futures: Mapping[Uuid, AnyFuture[TopicDescription]] | None,
-             name_futures: Mapping[str, AnyFuture[TopicDescription]] | None,
+    def _new(cls, *, topic_id_futures: Mapping[Uuid, KafkaFuture[TopicDescription] | AsyncKafkaFuture[TopicDescription]] | None,
+             name_futures: Mapping[str, KafkaFuture[TopicDescription] | AsyncKafkaFuture[TopicDescription]] | None,
              kind: type[Sync] | type[Async]) -> DescribeTopicsResult[Any]:
         """Java's protected ``DescribeTopicsResult(topicIdFutures, nameFutures)``."""
         if topic_id_futures is not None and name_futures is not None:
@@ -80,39 +74,39 @@ class DescribeTopicsResult(Generic[KindT]):
         return result
 
     @staticmethod
-    def _of_topic_ids(*, topic_id_futures: Mapping[Uuid, AnyFuture[TopicDescription]],
+    def _of_topic_ids(*, topic_id_futures: Mapping[Uuid, KafkaFuture[TopicDescription] | AsyncKafkaFuture[TopicDescription]],
                       kind: type[Sync] | type[Async]) -> DescribeTopicsResult[Any]:
         """Java's package-private ``ofTopicIds(topicIdFutures)``."""
         return DescribeTopicsResult._new(topic_id_futures=topic_id_futures, name_futures=None,
                                          kind=kind)
 
     @staticmethod
-    def _of_topic_names(*, name_futures: Mapping[str, AnyFuture[TopicDescription]],
+    def _of_topic_names(*, name_futures: Mapping[str, KafkaFuture[TopicDescription] | AsyncKafkaFuture[TopicDescription]],
                         kind: type[Sync] | type[Async]) -> DescribeTopicsResult[Any]:
         """Java's package-private ``ofTopicNames(nameFutures)``."""
         return DescribeTopicsResult._new(topic_id_futures=None, name_futures=name_futures,
                                          kind=kind)
 
-    def topic_id_values(self) -> dict[Uuid, AnyFuture[TopicDescription]] | None:
+    def topic_id_values(self) -> dict[Uuid, KafkaFuture[TopicDescription] | AsyncKafkaFuture[TopicDescription]] | None:
         """Use when ``Admin.describe_topics()`` used a ``TopicIdCollection``: a map from
         topic IDs to futures which can be used to check the status of individual topics
         if the request used topic IDs, otherwise return ``None``."""
         return self._topic_id_futures
 
-    def topic_name_values(self) -> dict[str, AnyFuture[TopicDescription]] | None:
+    def topic_name_values(self) -> dict[str, KafkaFuture[TopicDescription] | AsyncKafkaFuture[TopicDescription]] | None:
         """Use when ``Admin.describe_topics()`` used a ``TopicNameCollection``: a map from
         topic names to futures which can be used to check the status of individual topics
         if the request used topic names, otherwise return ``None``."""
         return self._name_futures
 
-    def all_topic_names(self) -> AnyFuture[dict[str, TopicDescription]] | None:
+    def all_topic_names(self) -> KafkaFuture[dict[str, TopicDescription]] | AsyncKafkaFuture[dict[str, TopicDescription]] | None:
         """A future map from topic names to descriptions which can be used to check the
         status of individual description if the describe topic request used topic names,
         otherwise return ``None``; this request succeeds only if all the topic
         descriptions succeed."""
         return DescribeTopicsResult._all(self._name_futures, self._kind)
 
-    def all_topic_ids(self) -> AnyFuture[dict[Uuid, TopicDescription]] | None:
+    def all_topic_ids(self) -> KafkaFuture[dict[Uuid, TopicDescription]] | AsyncKafkaFuture[dict[Uuid, TopicDescription]] | None:
         """A future map from topic ids to descriptions which can be used to check the
         status of individual description if the describe topic request used topic ids,
         otherwise return ``None``; this request succeeds only if all the topic
@@ -120,16 +114,16 @@ class DescribeTopicsResult(Generic[KindT]):
         return DescribeTopicsResult._all(self._topic_id_futures, self._kind)
 
     @staticmethod
-    def _all(futures: Mapping[_T, AnyFuture[TopicDescription]] | None,
-             kind: type[Sync] | type[Async]) -> AnyFuture[dict[_T, TopicDescription]] | None:
+    def _all(futures: Mapping[_T, KafkaFuture[TopicDescription] | AsyncKafkaFuture[TopicDescription]] | None,
+             kind: type[Sync] | type[Async]) -> KafkaFuture[dict[_T, TopicDescription]] | AsyncKafkaFuture[dict[_T, TopicDescription]] | None:
         """Java's private static ``all(futures)``: a future which succeeds only if all
         the topic descriptions succeed."""
         if futures is None:
             return None
-        future = _all_of(futures.values(), kind)
+        future = kind._FUTURE.all_of(futures=tuple(futures.values()))
 
         def collect(_: None) -> dict[_T, TopicDescription]:
             # allOf ensured that all the futures completed successfully.
-            return {key: value.result() for key, value in futures.items()}
+            return {key: value.get_now(value_if_absent=None) for key, value in futures.items()}
 
-        return _then_apply(future, collect)
+        return future.then_apply(function=collect)

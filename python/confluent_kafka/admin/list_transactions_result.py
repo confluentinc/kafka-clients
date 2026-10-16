@@ -18,8 +18,8 @@ Java's constructor is package-private: ``__init__`` raises ``TypeError`` and ``_
 builds it (CLAUDE.md, Python Binding Conventions, Class family). It holds a future of a
 map of futures (one per broker), both of the client's kind, so ``by_broker_id()`` is a
 future of a ``dict`` of futures of that kind. The methods make a new future completed
-from ``whenComplete`` (``_new_future_like`` / ``_when_complete``); ``all()`` is a
-``thenApply`` of ``all_by_broker_id()``. Java builds the listings as ``List``\\ s, so a
+from ``when_complete`` (Java's ``new KafkaFutureImpl<>()`` is the private
+``_KafkaFutureImpl``); ``all()`` is a ``then_apply`` of ``all_by_broker_id()``. Java builds the listings as ``List``\\ s, so a
 ``Collection<TransactionListing>`` is a ``list`` (Types).
 """
 
@@ -28,24 +28,16 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import (
-    AnyFuture,
-    Async,
-    KindT,
-    Sync,
-    _complete,
-    _complete_with_error,
-    _new_future_like,
-    _then_apply,
-    _when_complete,
-)
+from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 
 if TYPE_CHECKING:
     from confluent_kafka.admin.transaction_listing import TransactionListing
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["ListTransactionsResult"]
 
-_BrokerFutures = Mapping[int, AnyFuture[list["TransactionListing"]]]
+_BrokerFutures = Mapping[int, "KafkaFuture[list[TransactionListing]] | AsyncKafkaFuture[list[TransactionListing]]"]
 
 
 class ListTransactionsResult(Generic[KindT]):
@@ -62,7 +54,7 @@ class ListTransactionsResult(Generic[KindT]):
             "list_transactions()")
 
     @classmethod
-    def _new(cls, *, future: AnyFuture[_BrokerFutures],
+    def _new(cls, *, future: KafkaFuture[_BrokerFutures] | AsyncKafkaFuture[_BrokerFutures],
              kind: type[Sync] | type[Async]) -> ListTransactionsResult[Any]:
         """Java's package-private ``ListTransactionsResult(future)``."""
         result = cls.__new__(cls)
@@ -70,7 +62,8 @@ class ListTransactionsResult(Generic[KindT]):
         result._kind = kind
         return result
 
-    def all(self) -> AnyFuture[list[TransactionListing]]:
+    def all(
+            self) -> KafkaFuture[list[TransactionListing]] | AsyncKafkaFuture[list[TransactionListing]]:
         """Get all transaction listings. If any of the underlying requests fail, then the
         future returned from this method will also fail with the first encountered error.
 
@@ -83,9 +76,10 @@ class ListTransactionsResult(Generic[KindT]):
                 all_listings.extend(listings)
             return all_listings
 
-        return _then_apply(self.all_by_broker_id(), flatten)
+        return self.all_by_broker_id().then_apply(function=flatten)
 
-    def by_broker_id(self) -> AnyFuture[dict[int, AnyFuture[list[TransactionListing]]]]:
+    def by_broker_id(
+            self) -> KafkaFuture[dict[int, KafkaFuture[list[TransactionListing]] | AsyncKafkaFuture[list[TransactionListing]]]] | AsyncKafkaFuture[dict[int, KafkaFuture[list[TransactionListing]] | AsyncKafkaFuture[list[TransactionListing]]]]:
         """Get a future which returns a map containing the underlying listing future for
         each broker in the cluster. This is useful, for example, if a partial listing of
         transactions is sufficient, or if you want more granular error details.
@@ -93,20 +87,21 @@ class ListTransactionsResult(Generic[KindT]):
         The top-level future may fail if the admin client is unable to lookup the
         available brokers in the cluster; the futures in the map complete individually.
         """
-        result: AnyFuture[dict[int, AnyFuture[list[TransactionListing]]]] = (
-            _new_future_like(self._future))
+        result: _KafkaFutureImpl[dict[int, KafkaFuture[list[TransactionListing]] | AsyncKafkaFuture[list[TransactionListing]]]] = (
+            _KafkaFutureImpl())
 
         def action(broker_futures: _BrokerFutures | None, exception: BaseException | None) -> None:
             if broker_futures is not None:
-                _complete(result, dict(broker_futures))
+                result.complete(dict(broker_futures))
             else:
                 assert exception is not None
-                _complete_with_error(result, exception)
+                result.complete_with_error(exception)
 
-        _when_complete(self._future, action)
-        return result
+        self._future.when_complete(action=action)
+        return self._kind._FUTURE._of_impl(result)
 
-    def all_by_broker_id(self) -> AnyFuture[dict[int, list[TransactionListing]]]:
+    def all_by_broker_id(
+            self) -> KafkaFuture[dict[int, list[TransactionListing]]] | AsyncKafkaFuture[dict[int, list[TransactionListing]]]:
         """Get all transaction listings in a map which is keyed by the ID of respective
         broker that is currently managing them. If any of the underlying requests fail,
         then the future returned from this method will also fail with the first
@@ -115,14 +110,14 @@ class ListTransactionsResult(Generic[KindT]):
         This future completes when all transaction listings are available and fails
         after any non-retriable error.
         """
-        all_future: AnyFuture[dict[int, list[TransactionListing]]] = (
-            _new_future_like(self._future))
+        all_future: _KafkaFutureImpl[dict[int, list[TransactionListing]]] = (
+            _KafkaFutureImpl())
         all_listings_map: dict[int, list[TransactionListing]] = {}
 
         def action(by_broker: _BrokerFutures | None,
                    top_level_exception: BaseException | None) -> None:
             if top_level_exception is not None:
-                _complete_with_error(all_future, top_level_exception)
+                all_future.complete_with_error(top_level_exception)
                 return
             assert by_broker is not None
             remaining_responses = set(by_broker.keys())
@@ -131,17 +126,17 @@ class ListTransactionsResult(Generic[KindT]):
                 def broker_action(listings: list[TransactionListing] | None,
                                   broker_exception: BaseException | None) -> None:
                     if broker_exception is not None:
-                        _complete_with_error(all_future, broker_exception)
-                    elif not all_future.done():
+                        all_future.complete_with_error(broker_exception)
+                    elif not all_future.is_done():
                         assert listings is not None
                         all_listings_map[broker_id] = listings
                         remaining_responses.discard(broker_id)
                         if not remaining_responses:
-                            _complete(all_future, all_listings_map)
+                            all_future.complete(all_listings_map)
                 return broker_action
 
             for broker_id, future in by_broker.items():
-                _when_complete(future, on_broker(broker_id))
+                future.when_complete(action=on_broker(broker_id))
 
-        _when_complete(self._future, action)
-        return all_future
+        self._future.when_complete(action=action)
+        return self._kind._FUTURE._of_impl(all_future)

@@ -15,7 +15,7 @@
 # Stub for confluent_kafka.admin.AbstractOptions.
 
 import sys
-from typing import overload
+from typing import Any, overload
 
 if sys.version_info >= (3, 11):
     from typing import Self
@@ -29,3 +29,5 @@ class AbstractOptions:
     def timeout_ms(self) -> int | None: ...
     @overload
     def timeout_ms(self, *, timeout_ms: int | None) -> Self: ...
+    def _record(self, setter: str, value: Any) -> None: ...
+    def _setters_ran(self) -> list[tuple[str, Any]]: ...

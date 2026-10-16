@@ -63,6 +63,7 @@ class DescribeClusterOptions(AbstractOptions):
         if timeout_ms is UNSET:
             return self._timeout_ms
         self._timeout_ms = timeout_ms
+        self._record("timeout_ms", self._timeout_ms)
         return self
 
     def include_authorized_operations(self, *,
@@ -76,6 +77,7 @@ class DescribeClusterOptions(AbstractOptions):
         if include_authorized_operations is None:
             return self._include_authorized_operations
         self._include_authorized_operations = include_authorized_operations
+        self._record("include_authorized_operations", self._include_authorized_operations)
         return self
 
     def include_fenced_brokers(self, *, include_fenced_brokers: bool | None = None) -> Any:
@@ -87,4 +89,5 @@ class DescribeClusterOptions(AbstractOptions):
         if include_fenced_brokers is None:
             return self._include_fenced_brokers
         self._include_fenced_brokers = include_fenced_brokers
+        self._record("include_fenced_brokers", self._include_fenced_brokers)
         return self

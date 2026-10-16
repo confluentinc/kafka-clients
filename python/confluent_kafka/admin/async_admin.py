@@ -14,32 +14,37 @@
 
 """``AsyncAdmin``: the asyncio peer of :class:`~confluent_kafka.admin.Admin`.
 
-By rule 3, ``Admin``'s methods in the same order, each RPC an ``async def`` that
-awaits its ``_async`` entry point on the event loop (CLAUDE.md, Python Binding
+By rule 3, ``Admin``'s methods in the same order (CLAUDE.md, Python Binding
 Conventions, Class family); a client class in a signature is its async peer, so
 ``AsyncAdmin.create`` returns an ``AsyncAdmin``, built as an
-``AsyncKafkaAdminClient``. A result's futures are ``asyncio.Future``\\ s of the
-loop that awaited the call, every one complete. ``create`` is a plain ``def``:
-``kafka_admin_AdminClient_new`` has no ``_async`` form.
-
-The completion runs on the FFI's dispatcher thread and hops onto the loop with
-``call_soon_threadsafe`` (``_async.Undelivered``). Cancelling the awaiting task
-raises ``CancelledError`` at once; the call goes on in the core and its result is
-freed when it arrives. The overloads left out are ``Admin``'s (see its module).
+``AsyncKafkaAdminClient``. The RPCs are plain ``def``\\ s that return their
+``*Result`` at once, as ``Admin``'s; the result's futures are
+:class:`~confluent_kafka.common.AsyncKafkaFuture`\\ s, completed on the client's
+event loop, where the notify hook schedules the client's queued callbacks
+(Implementation over the FFI). ``close`` is the one ``async def``: its entry
+point has a ``_cb`` twin. ``create`` is a plain ``def``:
+``kafka_admin_AdminClient_create`` has none. The overloads left out are
+``Admin``'s (see its module).
 """
 
 from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Iterable, Mapping, Sequence
+import weakref
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, overload
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
 from confluent_kafka._args import UNSET, Form, java_forms
-from confluent_kafka._async import Undelivered
-from confluent_kafka._errors import from_ffi_error
+from confluent_kafka._async import (
+    LoopBinding,
+    OffLoopPump,
+    Undelivered,
+    await_to_end,
+    call_soon_on,
+)
 from confluent_kafka.admin import _conversions
 from confluent_kafka.admin._futures import Async
 from confluent_kafka.admin.abort_transaction_options import AbortTransactionOptions
@@ -207,6 +212,16 @@ class AsyncAdmin(_AdminState):
     ``Admin``. Instances returned from ``create`` are safe to share between the
     tasks of one event loop.
 
+    Its RPCs are plain ``def``\\ s that return their ``*Result`` at once, as
+    ``Admin``'s, its futures :class:`~confluent_kafka.common.AsyncKafkaFuture`\\ s
+    (Futures). The client is bound to one event loop (``_async.LoopBinding``): the
+    one running when it is constructed, or else the loop of its first call made on
+    a running loop; the notify hook schedules the client's queued callbacks
+    (``kafka_admin_Admin__execute_callbacks``) there with ``call_soon_threadsafe``,
+    so the futures complete, and their ``then_apply`` functions and
+    ``when_complete`` actions run, on that loop. Until a loop is bound, or once it
+    has closed, a helper thread runs them instead (``_async.OffLoopPump``).
+
     Java: ``org.apache.kafka.clients.admin.Admin`` (``AutoCloseable``: an async
     context manager whose exit calls ``close()``).
     """
@@ -216,8 +231,70 @@ class AsyncAdmin(_AdminState):
             raise TypeError(
                 "AsyncAdmin is a non-instantiable base; use AsyncAdmin.create or "
                 "AsyncMockAdminClient")
+        self._init_async_state()
+
+    def _init_async_state(self) -> None:
+        """The shared state, the loop binding and the off-loop pump."""
         _AdminState.__init__(self)
         self._undelivered = Undelivered()
+        self._binding = LoopBinding(type(self).__name__)
+        self._off_loop_pump = OffLoopPump(self._run_pump, "confluent-kafka-admin-pump")
+        # One drainer at a time: the loop and the off-loop pump never drain at once.
+        self._drain_lock = threading.Lock()
+
+    # ---- callback pump -----------------------------------------------------------
+
+    def _notify_hook(self) -> Callable[[], None]:
+        # A weak reference: the native client keeps the hook until it is
+        # destroyed, and must not keep an unclosed client alive.
+        ref = weakref.ref(self)
+
+        def notify() -> None:
+            client = ref()
+            if client is not None:
+                client._schedule_pump()
+
+        return notify
+
+    def _schedule_pump(self) -> None:
+        """The notify hook (any thread, the GIL held): schedule :meth:`_run_pump`
+        on the client's loop, or run it on the helper thread when no loop is bound
+        or it has closed. It only schedules, never runs a callback (CLAUDE.md §4)."""
+        loop = self._binding.loop
+        if loop is not None and not loop.is_closed():
+            try:
+                call_soon_on(loop, self._run_pump)
+                return
+            except RuntimeError:  # the loop closed since the check
+                pass
+        self._off_loop_pump.start()
+
+    def _run_pump(self) -> None:
+        """Run the client's queued callbacks on this thread, until the teardown
+        begins (it runs what is left itself)."""
+        if not self._begin_pump():
+            return
+        try:
+            with self._drain_lock:
+                _lib.Admin__execute_callbacks(self._c_admin)
+        finally:
+            self._end_use()
+
+    def _rpc_loop(self) -> asyncio.AbstractEventLoop | None:
+        """The loop an RPC's futures complete on: the client's; an RPC called on a
+        running loop binds it (``RuntimeError`` when the client is bound to
+        another loop)."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return self._binding.loop
+        return self._binding.bind()
+
+    def _call(self, entry: Callable[..., Any], *args: Any) -> Any:
+        self._rpc_loop()
+        return super()._call(entry, *args)
+
+    # ---- the Admin methods -----------------------------------------------------------
 
     @staticmethod
     def create(*, configs: dict[str, Any]) -> AsyncAdmin:
@@ -235,42 +312,38 @@ class AsyncAdmin(_AdminState):
         if self._closed:
             return
         timeout_ms = close_timeout_ms(timeout)
+        loop = self._binding.bind()
         if not self._begin_close():
             return
-        c_admin = self._c_admin
-        loop = asyncio.get_running_loop()
         closed = threading.Event()
         done: asyncio.Future[None] = loop.create_future()
-        box: list[int] = []
 
-        def cb(error: int) -> None:
-            box.append(error)
+        def on_closed() -> None:
+            # Runs where the client's callbacks run: the loop, or the helper thread.
             closed.set()
-            if not loop.is_closed():
-                try:
-                    loop.call_soon_threadsafe(_set_if_pending, done)
-                except RuntimeError:  # the loop closed since the check
-                    pass
+            try:
+                call_soon_on(loop, _set_if_pending, done)
+            except RuntimeError:  # the loop closed
+                pass
 
-        _lib.Admin_close_async(c_admin, timeout_ms, cb)
+        _lib.Admin_close_cb(self._c_admin, timeout_ms, on_closed)
         try:
             await done
         except BaseException:
-            self._destroy_when_idle(c_admin, closed)
+            threading.Thread(target=self._finish_close, args=(closed,),
+                             name="kafka-admin-client-close", daemon=True).start()
             self._undelivered.free_closed()
             raise
         try:
             # Off the loop: waits for the uses still in flight, then frees the
             # handle; a cancellation meanwhile lets it run to its end.
-            await loop.run_in_executor(None, self._teardown, c_admin)
+            await await_to_end(loop.run_in_executor(None, self._teardown))
         finally:
             self._undelivered.free_closed()
-        if box and box[0]:
-            raise from_ffi_error(box[0])
 
-    def _teardown(self, c_admin: int) -> None:
-        self._wait_for_uses()
-        _lib.Admin_destroy(c_admin)
+    def _finish_close(self, closed: threading.Event) -> None:
+        closed.wait()
+        self._teardown()
 
     async def __aenter__(self) -> AsyncAdmin:
         return self
@@ -278,10 +351,11 @@ class AsyncAdmin(_AdminState):
     async def __aexit__(self, *exc: object) -> None:
         await self.close()
 
+    # ---- the previous FFI's whole-result callback --------------------------------
+    # The RPCs not yet on the extension's ``AdminResult`` still await an ``_async``
+    # entry point through this; it goes once every RPC uses ``_call``.
+
     async def _await_for(self, submit: _Submit, free: _Free) -> _Payload:
-        """Submit one ``_async`` entry point and await its completion payload on the
-        loop. A payload nobody awaits any more (a cancelled task, a closed loop) is
-        freed with ``free`` (``_async.Undelivered``)."""
         self._undelivered.free_closed()
         loop = asyncio.get_running_loop()
         future: asyncio.Future[_Payload] = loop.create_future()
@@ -302,26 +376,20 @@ class AsyncAdmin(_AdminState):
         try:
             return await future
         except asyncio.CancelledError:
-            # Delivered, then cancelled before this task resumed (an
-            # ``asyncio.wait_for`` timeout in the same loop iteration): ``cancel()``
-            # could not cancel the done future, so ``deliver`` kept the payload.
             if future.done() and not future.cancelled():
                 free(future.result())
             raise
 
-    async def create_topics(self, *, new_topics: Iterable[NewTopic],
-                            options: CreateTopicsOptions | None = None
-                            ) -> CreateTopicsResult[Async]:
+    def create_topics(self, *, new_topics: Iterable[NewTopic],
+                      options: CreateTopicsOptions | None = None) -> CreateTopicsResult[Async]:
         """See :meth:`Admin.create_topics`; the result's futures are
-        ``asyncio.Future``\\ s."""
+        ``AsyncKafkaFuture``\\ s."""
         if options is None:
             options = CreateTopicsOptions()
-        topics = list(new_topics)
-        args = _conversions.create_topics_args(topics, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_create_topics_async(c_admin, *args, cb),
-            _conversions.free_create_topics)
-        return _conversions.create_topics_result(topics, payload, Async)
+        native = self._call(_lib.Admin_create_topics,
+                            *_conversions.create_topics_args(new_topics),
+                            options._setters_ran())
+        return _conversions.create_topics_result(native, Async, self._binding.loop)
 
     @overload
     async def delete_topics(self, *, topics: Iterable[str],
@@ -348,17 +416,13 @@ class AsyncAdmin(_AdminState):
                                         _conversions.free_delete_topics)
         return _conversions.delete_topics_result(by_ids, keys, payload, Async)
 
-    async def list_topics(self, *, options: ListTopicsOptions | None = None
-                          ) -> ListTopicsResult[Async]:
-        """See :meth:`Admin.list_topics`; the result's future is an
-        ``asyncio.Future``."""
+    def list_topics(self, *, options: ListTopicsOptions | None = None
+                    ) -> ListTopicsResult[Async]:
+        """See :meth:`Admin.list_topics`."""
         if options is None:
             options = ListTopicsOptions()
-        args = _conversions.list_topics_args(options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_list_topics_async(c_admin, *args, cb),
-            _conversions.free_list_topics)
-        return _conversions.list_topics_result(payload, Async)
+        native = self._call(_lib.Admin_list_topics, options._setters_ran())
+        return _conversions.list_topics_result(native, Async, self._binding.loop)
 
     @overload
     async def describe_topics(self, *, topic_names: Iterable[str],

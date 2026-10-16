@@ -26,7 +26,8 @@ kind marker of ``_futures``) decides which futures the results hold. Java's
 The nested ``Builder``'s setters live in :class:`MockAdminClientBuilderCore`, which
 each class's ``Builder`` extends with its own ``build()``.
 
-The Java internals it uses are private here: ``KafkaFutureImpl`` is ``_futures``,
+The Java internals it uses are private here: ``KafkaFutureImpl`` is a future of the
+client's kind over ``_KafkaFutureImpl`` (completed through it, ``_complete``),
 ``DescribeLogDirsResponse.INVALID_OFFSET_LAG`` / ``UNKNOWN_VOLUME_BYTES`` are module
 constants, the private nested ``TopicMetadata`` is :class:`_TopicMetadata`,
 ``CoordinatorKey`` and ``ConsumerProtocol.PROTOCOL_TYPE`` are ``_internals``'
@@ -59,14 +60,8 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from confluent_kafka._args import UNSET
 from confluent_kafka._java import java_str, parse_int
-from confluent_kafka.admin._futures import (
-    AnyFuture,
-    Async,
-    Sync,
-    _complete,
-    _complete_with_error,
-    _new_future,
-)
+from confluent_kafka.admin._futures import Async, Sync
+from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 from confluent_kafka.null_pointer_error import NullPointerError
 
@@ -184,12 +179,30 @@ if TYPE_CHECKING:
         Uuid,
     )
     from confluent_kafka.common.config import ConfigResource
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
     from confluent_kafka.consumer import OffsetAndMetadata
 
 __all__ = ["DEFAULT_CLUSTER_ID", "DEFAULT_LOG_DIRS", "MockAdminClientBuilderCore",
            "MockAdminClientCore"]
 
 _T = TypeVar("_T")
+
+
+def _complete(future: KafkaFuture[_T] | AsyncKafkaFuture[_T], value: _T) -> bool:
+    """Java's ``KafkaFutureImpl.complete(value)`` on a future :meth:`_future` made:
+    ``False`` when it was already done."""
+    impl = future._impl
+    assert impl is not None
+    return impl.complete(value)
+
+
+def _complete_with_error(future: KafkaFuture[Any] | AsyncKafkaFuture[Any],
+                         error: BaseException) -> bool:
+    """Java's ``KafkaFutureImpl.completeExceptionally(error)`` on a future
+    :meth:`_future` made: ``False`` when it was already done."""
+    impl = future._impl
+    assert impl is not None
+    return impl.complete_with_error(error)
 
 #: ``MockAdminClient.DEFAULT_CLUSTER_ID``.
 DEFAULT_CLUSTER_ID = "I4ZmrWqfT2e-upky_4fdPA"
@@ -600,14 +613,14 @@ class MockAdminClientCore:
             self._timeout_next_requests = number_of_request
 
     def _handle_describe_topics_using_ids(
-            self, topic_ids: Iterable[Uuid]) -> dict[Uuid, AnyFuture[TopicDescription]]:
+            self, topic_ids: Iterable[Uuid]) -> dict[Uuid, KafkaFuture[TopicDescription] | AsyncKafkaFuture[TopicDescription]]:
         """The body of Java's public ``handleDescribeTopicsUsingIds``, which each class
         wraps with its own future type."""
         from confluent_kafka.admin.topic_description import TopicDescription
         from confluent_kafka.common.errors.unknown_topic_id_error import UnknownTopicIdError
 
         with self._lock:
-            topic_descriptions: dict[Uuid, AnyFuture[TopicDescription]] = {}
+            topic_descriptions: dict[Uuid, KafkaFuture[TopicDescription] | AsyncKafkaFuture[TopicDescription]] = {}
             if self._timeout_next_requests > 0:
                 for requested_topic_id in topic_ids:
                     topic_descriptions[requested_topic_id] = self._failed(_timeout())
@@ -669,16 +682,17 @@ class MockAdminClientCore:
 
     # ---- Futures (Java's KafkaFutureImpl) ---------------------------------------
 
-    def _future(self) -> AnyFuture[Any]:
-        """``new KafkaFutureImpl<>()`` of this client's kind."""
-        return _new_future(self._kind)
+    def _future(self) -> KafkaFuture[Any] | AsyncKafkaFuture[Any]:
+        """``new KafkaFutureImpl<>()`` of this client's kind: a future over a
+        ``_KafkaFutureImpl``, completed through it (``_complete``)."""
+        return self._kind._FUTURE._of_impl(_KafkaFutureImpl())  # type: ignore[no-any-return]
 
-    def _done(self, value: _T) -> AnyFuture[_T]:
-        future: AnyFuture[_T] = self._future()
+    def _done(self, value: _T) -> KafkaFuture[_T] | AsyncKafkaFuture[_T]:
+        future: KafkaFuture[_T] | AsyncKafkaFuture[_T] = self._future()
         _complete(future, value)
         return future
 
-    def _failed(self, error: BaseException) -> AnyFuture[Any]:
+    def _failed(self, error: BaseException) -> KafkaFuture[Any] | AsyncKafkaFuture[Any]:
         future = self._future()
         _complete_with_error(future, error)
         return future
@@ -697,7 +711,7 @@ class MockAdminClientCore:
         from confluent_kafka.common.errors.topic_exists_error import TopicExistsError
 
         with self._lock:
-            create_topic_result: dict[str, AnyFuture[_TopicMetadataAndConfig]] = {}
+            create_topic_result: dict[str, KafkaFuture[_TopicMetadataAndConfig] | AsyncKafkaFuture[_TopicMetadataAndConfig]] = {}
             if self._timeout_next_requests > 0:
                 for new_topic in new_topics:
                     create_topic_result[new_topic.name()] = self._failed(_timeout())
@@ -767,12 +781,12 @@ class MockAdminClientCore:
                         "for deleteTopics.")
 
     def _handle_delete_topics_using_names(
-            self, topic_name_collection: Iterable[str]) -> dict[str, AnyFuture[None]]:
+            self, topic_name_collection: Iterable[str]) -> dict[str, KafkaFuture[None] | AsyncKafkaFuture[None]]:
         from confluent_kafka.common.errors.unknown_topic_or_partition_error import (
             UnknownTopicOrPartitionError,
         )
 
-        delete_topics_result: dict[str, AnyFuture[None]] = {}
+        delete_topics_result: dict[str, KafkaFuture[None] | AsyncKafkaFuture[None]] = {}
         topic_names: list[Any] = list(topic_name_collection)
         if self._timeout_next_requests > 0:
             for topic_name in topic_names:
@@ -794,12 +808,12 @@ class MockAdminClientCore:
         return delete_topics_result
 
     def _handle_delete_topics_using_ids(
-            self, topic_id_collection: Iterable[Uuid]) -> dict[Uuid, AnyFuture[None]]:
+            self, topic_id_collection: Iterable[Uuid]) -> dict[Uuid, KafkaFuture[None] | AsyncKafkaFuture[None]]:
         from confluent_kafka.common.errors.unknown_topic_or_partition_error import (
             UnknownTopicOrPartitionError,
         )
 
-        delete_topics_result: dict[Uuid, AnyFuture[None]] = {}
+        delete_topics_result: dict[Uuid, KafkaFuture[None] | AsyncKafkaFuture[None]] = {}
         topic_ids: list[Any] = list(topic_id_collection)
         if self._timeout_next_requests > 0:
             for topic_id in topic_ids:
@@ -862,14 +876,14 @@ class MockAdminClientCore:
                         "for describeTopics.")
 
     def _handle_describe_topics_by_names(
-            self, topic_names: Iterable[str]) -> dict[str, AnyFuture[TopicDescription]]:
+            self, topic_names: Iterable[str]) -> dict[str, KafkaFuture[TopicDescription] | AsyncKafkaFuture[TopicDescription]]:
         from confluent_kafka.admin.topic_description import TopicDescription
         from confluent_kafka.common import Uuid
         from confluent_kafka.common.errors.unknown_topic_or_partition_error import (
             UnknownTopicOrPartitionError,
         )
 
-        topic_descriptions: dict[str, AnyFuture[TopicDescription]] = {}
+        topic_descriptions: dict[str, KafkaFuture[TopicDescription] | AsyncKafkaFuture[TopicDescription]] = {}
         if self._timeout_next_requests > 0:
             for requested_topic in topic_names:
                 topic_descriptions[requested_topic] = self._failed(_timeout())
@@ -930,12 +944,12 @@ class MockAdminClientCore:
 
         with self._lock:
             if self._timeout_next_requests > 0:
-                configs: dict[ConfigResource, AnyFuture[Config]] = {}
+                configs: dict[ConfigResource, KafkaFuture[Config] | AsyncKafkaFuture[Config]] = {}
                 for requested_resource in resources:
                     configs[requested_resource] = self._failed(_timeout())
                 self._timeout_next_requests -= 1
                 return DescribeConfigsResult._new(futures=configs, kind=self._kind)
-            results: dict[ConfigResource, AnyFuture[Config]] = {}
+            results: dict[ConfigResource, KafkaFuture[Config] | AsyncKafkaFuture[Config]] = {}
             for resource in resources:
                 future = self._future()
                 results[resource] = future
@@ -991,7 +1005,7 @@ class MockAdminClientCore:
         from confluent_kafka.admin.alter_configs_result import AlterConfigsResult
 
         with self._lock:
-            futures: dict[ConfigResource, AnyFuture[None]] = {}
+            futures: dict[ConfigResource, KafkaFuture[None] | AsyncKafkaFuture[None]] = {}
             for resource, ops in configs.items():
                 future = self._future()
                 futures[resource] = future
@@ -1082,7 +1096,7 @@ class MockAdminClientCore:
         )
 
         with self._lock:
-            results: dict[TopicPartitionReplica, AnyFuture[None]] = {}
+            results: dict[TopicPartitionReplica, KafkaFuture[None] | AsyncKafkaFuture[None]] = {}
             for replica, new_log_dir in replica_assignment.items():
                 future = self._future()
                 results[replica] = future
@@ -1143,7 +1157,7 @@ class MockAdminClientCore:
                                          else total_bytes),
                             usable_bytes=(_UNKNOWN_VOLUME_BYTES if usable_bytes is None
                                           else usable_bytes))
-            results: dict[int, AnyFuture[dict[str, LogDirDescription]]] = {}
+            results: dict[int, KafkaFuture[dict[str, LogDirDescription]] | AsyncKafkaFuture[dict[str, LogDirDescription]]] = {}
             for broker_id, descriptions in unwrapped_results.items():
                 results[broker_id] = self._done(descriptions)
             return DescribeLogDirsResult._new(futures=results, kind=self._kind)
@@ -1157,7 +1171,7 @@ class MockAdminClientCore:
         info_class = DescribeReplicaLogDirsResult.ReplicaLogDirInfo
         with self._lock:
             results: dict[TopicPartitionReplica,
-                          AnyFuture[DescribeReplicaLogDirsResult.ReplicaLogDirInfo]] = {}
+                          KafkaFuture[DescribeReplicaLogDirsResult.ReplicaLogDirInfo] | AsyncKafkaFuture[DescribeReplicaLogDirsResult.ReplicaLogDirInfo]] = {}
             for replica in replicas:
                 if self._all_topics.get(replica.topic()) is not None:
                     future = self._future()
@@ -1224,7 +1238,7 @@ class MockAdminClientCore:
         )
 
         with self._lock:
-            future: AnyFuture[DelegationToken] = self._future()
+            future: KafkaFuture[DelegationToken] | AsyncKafkaFuture[DelegationToken] = self._future()
             renewers: list[KafkaPrincipal] = options.renewers()
             for renewer in renewers:
                 if renewer.principal_type() != KafkaPrincipal.USER_TYPE:
@@ -1253,7 +1267,7 @@ class MockAdminClientCore:
         )
 
         with self._lock:
-            future: AnyFuture[int] = self._future()
+            future: KafkaFuture[int] | AsyncKafkaFuture[int] = self._future()
             token_found = False
             expiry_timestamp: int = options.renew_time_period_ms()
             for token in self._all_tokens:
@@ -1276,7 +1290,7 @@ class MockAdminClientCore:
         )
 
         with self._lock:
-            future: AnyFuture[int] = self._future()
+            future: KafkaFuture[int] | AsyncKafkaFuture[int] = self._future()
             expiry_timestamp: int = options.expiry_time_period_ms()
             tokens_to_remove: list[DelegationToken] = []
             token_found = False
@@ -1303,7 +1317,7 @@ class MockAdminClientCore:
         )
 
         with self._lock:
-            future: AnyFuture[list[DelegationToken]] = self._future()
+            future: KafkaFuture[list[DelegationToken]] | AsyncKafkaFuture[list[DelegationToken]] = self._future()
             owners: list[KafkaPrincipal] | None = options.owners()
             if owners is None:
                 raise NullPointerError()
@@ -1370,7 +1384,7 @@ class MockAdminClientCore:
         from confluent_kafka.common import GroupState, GroupType
 
         with self._lock:
-            future: AnyFuture[Iterable[object]] = self._done([
+            future: KafkaFuture[Iterable[object]] | AsyncKafkaFuture[Iterable[object]] = self._done([
                 GroupListing(group_id=g, type=GroupType.CONSUMER,
                              protocol=_ConsumerProtocol.PROTOCOL_TYPE,
                              group_state=GroupState.STABLE)
@@ -1393,7 +1407,7 @@ class MockAdminClientCore:
         )
 
         with self._lock:
-            futures: dict[TopicPartition, AnyFuture[None]] = {}
+            futures: dict[TopicPartition, KafkaFuture[None] | AsyncKafkaFuture[None]] = {}
             for partition, new_reassignment in reassignments.items():
                 future = self._future()
                 futures[partition] = future
@@ -1475,7 +1489,7 @@ class MockAdminClientCore:
 
         info_class = ListOffsetsResult.ListOffsetsResultInfo
         with self._lock:
-            futures: dict[TopicPartition, AnyFuture[ListOffsetsResult.ListOffsetsResultInfo]] = {}
+            futures: dict[TopicPartition, KafkaFuture[ListOffsetsResult.ListOffsetsResultInfo] | AsyncKafkaFuture[ListOffsetsResult.ListOffsetsResultInfo]] = {}
             for tp, spec in topic_partition_offsets.items():
                 future = self._future()
                 if isinstance(spec, OffsetSpec.TimestampSpec):
@@ -1586,9 +1600,9 @@ class MockAdminClientCore:
                 error = InvalidRequestError(
                     message=f"Invalid update version {next_} for feature {feature}. {e}")
                 break
-        results: dict[str, AnyFuture[None]] = {}
+        results: dict[str, KafkaFuture[None] | AsyncKafkaFuture[None]] = {}
         for feature, update in feature_updates.items():
-            future: AnyFuture[None] = self._future()
+            future: KafkaFuture[None] | AsyncKafkaFuture[None] = self._future()
             if error is None:
                 _complete(future, None)
                 if not validate_only:

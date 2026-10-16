@@ -279,9 +279,8 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
     async def __aexit__(self, *exc: object) -> None:
         await self.close()
 
-    async def create_topics(self, *, new_topics: Iterable[NewTopic],
-                            options: CreateTopicsOptions | None = None
-                            ) -> CreateTopicsResult[Async]:
+    def create_topics(self, *, new_topics: Iterable[NewTopic],
+                      options: CreateTopicsOptions | None = None) -> CreateTopicsResult[Async]:
         """See :meth:`MockAdminClient.create_topics`."""
         return self._create_topics(new_topics)
 
@@ -300,9 +299,8 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
         """See :meth:`MockAdminClient.delete_topics`."""
         return self._delete_topics(topics)
 
-    async def list_topics(
-        self, *, options: ListTopicsOptions | None = None
-    ) -> ListTopicsResult[Async]:
+    def list_topics(self, *, options: ListTopicsOptions | None = None
+                    ) -> ListTopicsResult[Async]:
         """See :meth:`MockAdminClient.list_topics`."""
         return self._list_topics()
 

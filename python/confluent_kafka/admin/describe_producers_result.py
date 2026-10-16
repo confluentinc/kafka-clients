@@ -17,10 +17,10 @@
 Java's constructor is package-private: ``__init__`` raises ``TypeError`` and ``_new``
 builds it (CLAUDE.md, Python Binding Conventions, Class family). ``partitionResult()``
 raises ``IllegalArgumentError`` with Java's message for a key that was not part of the
-call. ``all()`` is Java's ``allOf(...).thenApply(...)``, kept through the private
-helpers ``_all_of`` / ``_then_apply``. Java's public nested ``PartitionProducerState``
-is the nested class ``DescribeProducersResult.PartitionProducerState`` (Idiom
-translations); it has no ``equals`` / ``hashCode`` in Java, so neither here.
+call. ``all()`` is Java's ``allOf(...).thenApply(...)``, through the futures' ``all_of``
+and ``then_apply``. Java's public nested ``PartitionProducerState`` is the nested class
+``DescribeProducersResult.PartitionProducerState`` (Idiom translations); it has no
+``equals`` / ``hashCode`` in Java, so neither here.
 """
 
 from __future__ import annotations
@@ -29,19 +29,13 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Generic
 
 from confluent_kafka._java import java_str
-from confluent_kafka.admin._futures import (
-    AnyFuture,
-    Async,
-    KindT,
-    Sync,
-    _all_of,
-    _then_apply,
-)
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
 if TYPE_CHECKING:
     from confluent_kafka.admin.producer_state import ProducerState
     from confluent_kafka.common import TopicPartition
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DescribeProducersResult"]
 
@@ -80,7 +74,7 @@ class DescribeProducersResult(Generic[KindT]):
     @classmethod
     def _new(
             cls, *,
-            futures: Mapping[TopicPartition, AnyFuture[DescribeProducersResult.PartitionProducerState]],
+            futures: Mapping[TopicPartition, KafkaFuture[DescribeProducersResult.PartitionProducerState] | AsyncKafkaFuture[DescribeProducersResult.PartitionProducerState]],
             kind: type[Sync] | type[Async]) -> DescribeProducersResult[Any]:
         """Java's package-private ``DescribeProducersResult(futures)``."""
         result = cls.__new__(cls)
@@ -90,7 +84,7 @@ class DescribeProducersResult(Generic[KindT]):
 
     def partition_result(
             self, *,
-            partition: TopicPartition) -> AnyFuture[DescribeProducersResult.PartitionProducerState]:
+            partition: TopicPartition) -> KafkaFuture[DescribeProducersResult.PartitionProducerState] | AsyncKafkaFuture[DescribeProducersResult.PartitionProducerState]:
         future = self._futures.get(partition)
         if future is None:
             raise IllegalArgumentError(
@@ -98,11 +92,11 @@ class DescribeProducersResult(Generic[KindT]):
         return future
 
     def all(
-            self) -> AnyFuture[dict[TopicPartition, DescribeProducersResult.PartitionProducerState]]:
+            self) -> KafkaFuture[dict[TopicPartition, DescribeProducersResult.PartitionProducerState]] | AsyncKafkaFuture[dict[TopicPartition, DescribeProducersResult.PartitionProducerState]]:
         futures = self._futures
 
         def collect(_: None) -> dict[TopicPartition, DescribeProducersResult.PartitionProducerState]:
             # allOf ensured that all the futures completed successfully.
-            return {partition: future.result() for partition, future in futures.items()}
+            return {partition: future.get_now(value_if_absent=None) for partition, future in futures.items()}
 
-        return _then_apply(_all_of(futures.values(), self._kind), collect)
+        return self._kind._FUTURE.all_of(futures=tuple(futures.values())).then_apply(function=collect)

@@ -18,34 +18,31 @@ Java's constructor is protected: ``__init__`` raises ``TypeError`` and ``_new`` 
 it (CLAUDE.md, Python Binding Conventions, Class family). Its futures carry Java's
 public nested ``TopicMetadataAndConfig``, which no public signature reaches, so it is
 the private helper ``_TopicMetadataAndConfig`` (decision log, entry 6); the public
-methods are ``thenApply`` views of those futures (``_then_apply``). The
-package-private constant ``UNKNOWN`` is ``_UNKNOWN``. Java's ``config`` /
-``topicId`` / ``numPartitions`` / ``replicationFactor`` call ``thenApply`` on
-``futures.get(topic)``, which throws ``NullPointerException`` for a topic that was
-not part of the call; they raise ``NullPointerError`` the same way.
+methods are ``then_apply`` views of those futures (Futures). The package-private
+constant ``UNKNOWN`` is ``_UNKNOWN``. On a result the client builds
+(``_of_client``), the futures are the core's per-topic ``values()`` futures and
+``config`` / ``topic_id`` / ``num_partitions`` / ``replication_factor`` return the
+core's own future of the topic, which fails with ``IllegalArgumentError`` for a topic
+that was not part of the call, with no Python-side check. On a result built through
+``_new`` (the mock's), they call ``then_apply`` on ``futures.get(topic)`` as Java's
+do, which throws ``NullPointerException`` for a topic that was not part of the call;
+they raise ``NullPointerError`` the same way.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
 from confluent_kafka._args import Form, java_forms
-from confluent_kafka.admin._futures import (
-    AnyFuture,
-    Async,
-    KindT,
-    Sync,
-    _all_of,
-    _mark_retrieved,
-    _then_apply,
-)
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.null_pointer_error import NullPointerError
 
 if TYPE_CHECKING:
     from confluent_kafka.admin.config import Config
     from confluent_kafka.common import Uuid
     from confluent_kafka.common.errors import ApiError
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["CreateTopicsResult"]
 
@@ -111,7 +108,7 @@ class CreateTopicsResult(Generic[KindT]):
     Java: ``org.apache.kafka.clients.admin.CreateTopicsResult``.
     """
 
-    __slots__ = ("_futures", "_kind")
+    __slots__ = ("_futures", "_kind", "_refine")
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         raise TypeError(
@@ -119,31 +116,42 @@ class CreateTopicsResult(Generic[KindT]):
             "create_topics()")
 
     @classmethod
-    def _new(cls, *, futures: Mapping[str, AnyFuture[_TopicMetadataAndConfig]],
-             kind: type[Sync] | type[Async]) -> CreateTopicsResult[Any]:
+    def _new(
+            cls, *,
+            futures: Mapping[str, KafkaFuture[_TopicMetadataAndConfig] | AsyncKafkaFuture[_TopicMetadataAndConfig]],
+            kind: type[Sync] | type[Async]) -> CreateTopicsResult[Any]:
         """Java's protected ``CreateTopicsResult(futures)``."""
         result = cls.__new__(cls)
         result._futures = dict(futures)
         result._kind = kind
+        result._refine = None
         return result
 
-    def values(self) -> dict[str, AnyFuture[None]]:
+    @classmethod
+    def _of_client(cls, *, futures: Mapping[str, KafkaFuture[Any] | AsyncKafkaFuture[Any]],
+                   refine: Callable[[str, str], Any],
+                   kind: type[Sync] | type[Async]) -> CreateTopicsResult[Any]:
+        """The client's result: ``futures`` are the core's per-topic ``values()``
+        futures, and the per-topic getters return the core's own future of the topic,
+        ``refine(topic, accessor)``, which fails with ``IllegalArgumentError`` for a
+        topic not in the request."""
+        result = cls._new(futures=futures, kind=kind)
+        result._refine = refine
+        return result
+
+    def values(self) -> dict[str, KafkaFuture[None] | AsyncKafkaFuture[None]]:
         """Return a map from topic names to futures, which can be used to check the
         status of individual topic creations."""
-        values: dict[str, AnyFuture[None]] = {}
+        values: dict[str, KafkaFuture[None] | AsyncKafkaFuture[None]] = {}
         for topic, future in self._futures.items():
-            derived: AnyFuture[None] = _then_apply(future, lambda v: None)
-            # A topic the caller leaves unread does not log its error, as with the
-            # client's own per-key futures.
-            _mark_retrieved(derived)
-            values[topic] = derived
+            values[topic] = future.then_apply(function=lambda v: None)
         return values
 
-    def all(self) -> AnyFuture[None]:
+    def all(self) -> KafkaFuture[None] | AsyncKafkaFuture[None]:
         """Return a future which succeeds if all the topic creations succeed."""
-        return _all_of(self._futures.values(), self._kind)
+        return self._kind._FUTURE.all_of(futures=tuple(self._futures.values()))
 
-    def config(self, *, topic: str) -> AnyFuture[Config]:
+    def config(self, *, topic: str) -> KafkaFuture[Config] | AsyncKafkaFuture[Config]:
         """Returns a future that provides topic configs for the topic when the request
         completes.
 
@@ -153,24 +161,32 @@ class CreateTopicsResult(Generic[KindT]):
         user does not have permission to describe topic configs. Note that the values
         for the type and documentation fields will be ``None``.
         """
-        return _then_apply(self._future_of(topic), _TopicMetadataAndConfig.config)
+        if self._refine is not None:
+            return self._refine(topic, "config")
+        return self._future_of(topic).then_apply(function=_TopicMetadataAndConfig.config)
 
-    def topic_id(self, *, topic: str) -> AnyFuture[Uuid]:
+    def topic_id(self, *, topic: str) -> KafkaFuture[Uuid] | AsyncKafkaFuture[Uuid]:
         """Returns a future that provides topic ID for the topic when the request
         completes; it fails as ``config(topic=…)`` does."""
-        return _then_apply(self._future_of(topic), _TopicMetadataAndConfig.topic_id)
+        if self._refine is not None:
+            return self._refine(topic, "topic_id")
+        return self._future_of(topic).then_apply(function=_TopicMetadataAndConfig.topic_id)
 
-    def num_partitions(self, *, topic: str) -> AnyFuture[int]:
+    def num_partitions(self, *, topic: str) -> KafkaFuture[int] | AsyncKafkaFuture[int]:
         """Returns a future that provides number of partitions in the topic when the
         request completes; it fails as ``config(topic=…)`` does."""
-        return _then_apply(self._future_of(topic), _TopicMetadataAndConfig.num_partitions)
+        if self._refine is not None:
+            return self._refine(topic, "num_partitions")
+        return self._future_of(topic).then_apply(function=_TopicMetadataAndConfig.num_partitions)
 
-    def replication_factor(self, *, topic: str) -> AnyFuture[int]:
+    def replication_factor(self, *, topic: str) -> KafkaFuture[int] | AsyncKafkaFuture[int]:
         """Returns a future that provides replication factor for the topic when the
         request completes; it fails as ``config(topic=…)`` does."""
-        return _then_apply(self._future_of(topic), _TopicMetadataAndConfig.replication_factor)
+        if self._refine is not None:
+            return self._refine(topic, "replication_factor")
+        return self._future_of(topic).then_apply(function=_TopicMetadataAndConfig.replication_factor)
 
-    def _future_of(self, topic: str) -> AnyFuture[_TopicMetadataAndConfig]:
+    def _future_of(self, topic: str) -> KafkaFuture[_TopicMetadataAndConfig] | AsyncKafkaFuture[_TopicMetadataAndConfig]:
         future = self._futures.get(topic)
         if future is None:
             # ``futures.get(topic).thenApply(...)`` on a topic not in the call.

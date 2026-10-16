@@ -74,6 +74,7 @@ class CreateDelegationTokenOptions(AbstractOptions):
         if renewers is None:
             return self._renewers
         self._renewers = list(renewers)
+        self._record("renewers", self._renewers)
         return self
 
     def owner(self, *, owner: KafkaPrincipal | None = UNSET) -> Any:
@@ -82,6 +83,7 @@ class CreateDelegationTokenOptions(AbstractOptions):
         if owner is UNSET:
             return self._owner  # Optional.ofNullable(owner)
         self._owner = owner
+        self._record("owner", self._owner)
         return self
 
     def max_lifetime_ms(self, *, max_lifetime_ms: int | None = None) -> Any:
@@ -90,4 +92,5 @@ class CreateDelegationTokenOptions(AbstractOptions):
         if max_lifetime_ms is None:
             return self._max_lifetime_ms
         self._max_lifetime_ms = max_lifetime_ms
+        self._record("max_lifetime_ms", self._max_lifetime_ms)
         return self

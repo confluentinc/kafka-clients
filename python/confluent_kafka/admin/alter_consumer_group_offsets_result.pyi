@@ -14,26 +14,25 @@
 
 # Stub for confluent_kafka.admin.AlterConsumerGroupOffsetsResult.
 
-import asyncio
-import concurrent.futures
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.common import TopicPartition
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["AlterConsumerGroupOffsetsResult"]
 
 class AlterConsumerGroupOffsetsResult(Generic[KindT]):
     @classmethod
-    def _new(cls, *, future: AnyFuture[dict[TopicPartition, BaseException | None]],
+    def _new(cls, *, future: KafkaFuture[dict[TopicPartition, BaseException | None]] | AsyncKafkaFuture[dict[TopicPartition, BaseException | None]],
              kind: type[KindT]) -> AlterConsumerGroupOffsetsResult[KindT]: ...
     @overload
     def partition_result(self: AlterConsumerGroupOffsetsResult[Sync], *,
-                         partition: TopicPartition) -> concurrent.futures.Future[None]: ...
+                         partition: TopicPartition) -> KafkaFuture[None]: ...
     @overload
     def partition_result(self: AlterConsumerGroupOffsetsResult[Async], *,
-                         partition: TopicPartition) -> asyncio.Future[None]: ...
+                         partition: TopicPartition) -> AsyncKafkaFuture[None]: ...
     @overload
-    def all(self: AlterConsumerGroupOffsetsResult[Sync]) -> concurrent.futures.Future[None]: ...
+    def all(self: AlterConsumerGroupOffsetsResult[Sync]) -> KafkaFuture[None]: ...
     @overload
-    def all(self: AlterConsumerGroupOffsetsResult[Async]) -> asyncio.Future[None]: ...
+    def all(self: AlterConsumerGroupOffsetsResult[Async]) -> AsyncKafkaFuture[None]: ...

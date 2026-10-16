@@ -14,24 +14,23 @@
 
 # Stub for confluent_kafka.admin.ListPartitionReassignmentsResult.
 
-import asyncio
-import concurrent.futures
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.admin.partition_reassignment import PartitionReassignment
 from confluent_kafka.common import TopicPartition
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["ListPartitionReassignmentsResult"]
 
 class ListPartitionReassignmentsResult(Generic[KindT]):
     @classmethod
     def _new(cls, *,
-             reassignments: AnyFuture[dict[TopicPartition, PartitionReassignment]],
+             reassignments: KafkaFuture[dict[TopicPartition, PartitionReassignment]] | AsyncKafkaFuture[dict[TopicPartition, PartitionReassignment]],
              kind: type[KindT]) -> ListPartitionReassignmentsResult[KindT]: ...
     @overload
     def reassignments(self: ListPartitionReassignmentsResult[Sync]
-                      ) -> concurrent.futures.Future[dict[TopicPartition, PartitionReassignment]]: ...
+                      ) -> KafkaFuture[dict[TopicPartition, PartitionReassignment]]: ...
     @overload
     def reassignments(self: ListPartitionReassignmentsResult[Async]
-                      ) -> asyncio.Future[dict[TopicPartition, PartitionReassignment]]: ...
+                      ) -> AsyncKafkaFuture[dict[TopicPartition, PartitionReassignment]]: ...

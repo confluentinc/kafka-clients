@@ -20,25 +20,28 @@ which call the admin FFI (CLAUDE.md, Python Binding Conventions, Class family);
 ``MockAdminClient`` overrides every method in pure Python. Java's
 ``AutoCloseable``: a context manager whose exit calls ``close()``.
 
-Every RPC waits for the FFI's one callback: its ``_async`` entry point
-(``python/ffi-entry-points.md``) is submitted and the caller's thread waits for
-the completion, so every future in the returned result is complete *(deviation:
-Java's RPCs return at once and fill each key's future later. Why: the FFI calls
-back once, when every key is done. Goes when: the FFI gives per-key or
-return-at-once completion)*. The client is thread-safe; ``close()`` frees the
-native handle only after every call using it has completed. Ctrl+C during a call
-re-raises at once, the call going on in the core, and its result is freed when
-it arrives. After ``close()`` every call raises ``IllegalStateError("Cannot
-accept new calls when AdminClient is closing.")``, Java's own message for a call
-on a closing client.
+Every RPC is a plain ``def`` that returns its ``*Result`` at once, as Java's do:
+the extension's ``Admin_<rpc>`` builds the C options from the setters the user ran
+(``AbstractOptions._setters_ran``), calls ``kafka_admin_Admin_<rpc>_with_options``
+and hands back the C result, whose per-key futures become
+:class:`~confluent_kafka.common.KafkaFuture`\\ s (Futures). A future completes
+later, on the client's one daemon pump thread, which runs the client's queued
+callbacks (``kafka_admin_Admin__execute_callbacks``) whenever the C API's notify
+hook signals it (Threads and callbacks): the ``then_apply`` functions and
+``when_complete`` actions of the futures run there, so one that blocks blocks the
+client's callbacks, as in Java; reading a sibling future that is already done
+(``get()``, ``get_now()``) is safe there, but waiting there on a pending one never
+ends. The client is thread-safe; ``close()`` frees the native handle only after
+every call using it has returned. After ``close()`` every call raises
+``IllegalStateError("Cannot accept new calls when AdminClient is closing.")``,
+Java's own message for a call on a closing client.
 
 Members are in Java's declaration order.
 
-Not generated, for want of an entry point (``python/ffi-entry-points.md``,
-"Overloads with no entry point"; the name looked for is
-``kafka_admin_Admin_<name>(_async)``): ``listStreamsGroupOffsets`` (both
-overloads, ``list_streams_group_offsets``), ``deleteStreamsGroups``
-(``delete_streams_groups``), ``deleteStreamsGroupOffsets``
+Not generated, for want of an entry point (the name looked for is
+``kafka_admin_Admin_<name>``, with ``_with_options`` for the form with options):
+``listStreamsGroupOffsets`` (both overloads, ``list_streams_group_offsets``),
+``deleteStreamsGroups`` (``delete_streams_groups``), ``deleteStreamsGroupOffsets``
 (``delete_streams_group_offsets``), ``alterStreamsGroupOffsets``
 (``alter_streams_group_offsets``), ``describeMetadataQuorum``
 (``describe_metadata_quorum``), ``unregisterBroker`` (``unregister_broker``),
@@ -52,13 +55,14 @@ overloads, ``list_streams_group_offsets``), ``deleteStreamsGroups``
 (``describe_streams_groups``), ``registerMetricForSubscription(KafkaMetric)``
 (``register_metric_for_subscription``),
 ``unregisterMetricFromSubscription(KafkaMetric)``
-(``unregister_metric_from_subscription``) and ``metrics()`` (``metrics``); each
-form with options has the ``_with_options`` name. Deprecated, so not generated:
-``listConsumerGroups`` and ``listClientMetricsResources``.
+(``unregister_metric_from_subscription``) and ``metrics()`` (``metrics``).
+Deprecated, so not generated: ``listConsumerGroups`` and
+``listClientMetricsResources``.
 """
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, overload
@@ -68,6 +72,7 @@ import _confluentkafka as _lib  # type: ignore[import-not-found]
 from confluent_kafka._args import UNSET, Form, java_forms
 from confluent_kafka._config import duration_to_ms
 from confluent_kafka._errors import from_ffi_error
+from confluent_kafka._wait import WAIT_SLICE_S
 from confluent_kafka.admin import _conversions
 from confluent_kafka.admin._futures import Sync
 from confluent_kafka.admin.abort_transaction_options import AbortTransactionOptions
@@ -224,6 +229,8 @@ if TYPE_CHECKING:
 
 __all__ = ["Admin"]
 
+_LOG = logging.getLogger("confluent_kafka.admin")
+
 #: Java's message for a call on a closing ``KafkaAdminClient``
 #: (``KafkaAdminClient.java:1601``).
 CLOSED_MESSAGE = "Cannot accept new calls when AdminClient is closing."
@@ -231,36 +238,41 @@ CLOSED_MESSAGE = "Cannot accept new calls when AdminClient is closing."
 #: ``close()``'s timeout: Java's ``Duration.ofMillis(Long.MAX_VALUE)`` crosses as -1.
 _CLOSE_FOREVER_MS = -1
 
+#: Java's admin thread name prefix (``KafkaAdminClient.NETWORK_THREAD_PREFIX``).
+_PUMP_THREAD_NAME = "kafka-admin-client-thread"
+
 _Payload = tuple[Any, ...]
 _Submit = Callable[[int, Callable[..., None]], None]
 _Free = Callable[[_Payload], None]
 
 
 class _AdminState:
-    """The native admin handle and the closed flag, shared by ``Admin`` and
-    ``AsyncAdmin``.
+    """The native admin handle, the closed flag and the uses in flight, shared by
+    ``Admin`` and ``AsyncAdmin``.
 
-    The handle lives until ``close()`` frees it. Every RPC is one *use*, counted
-    under ``_lifecycle`` from before its ``_async`` entry point is submitted until
-    its callback has fired, as the FFI requires ("The handle must not be destroyed
-    until ``callback`` has fired"); a use cannot start once ``_closed`` is set.
+    The handle lives until the teardown frees it. Every RPC is one *use* of it,
+    counted under ``_lifecycle`` around its extension call, which returns at once
+    with the call's C result; a use cannot start once ``_closed`` is set. A run of
+    the client's queued callbacks is a use too (:meth:`_begin_pump`), which can
+    start until the teardown begins, so the close's own completion still runs.
     ``close()`` sets ``_closed`` under the same lock, so exactly one ``close()``
-    tears the client down, and frees the handle only once no use is left. A use
-    ends on the FFI's dispatcher thread, not on the caller's, so a call that
-    Ctrl+C or a cancellation stopped still holds the handle until the core
-    answers.
+    tears the client down; the teardown waits until no use is left, then frees the
+    handle (``Admin_destroy``), which fires the ``get_cb`` deliveries still pending
+    with ``LOCAL_ILLEGAL_STATE``.
     """
 
     def __init__(self) -> None:
         self._c_admin: int = 0
         self._closed = False
+        self._tearing_down = False
         self._lifecycle = threading.Condition()
         self._uses = 0
 
     def _start(self, configs: dict[str, Any]) -> None:
         """Java's ``KafkaAdminClient.createInternal(new AdminClientConfig(configs,
         true), null)``: parse ``configs`` (Configuration) and build the native
-        client; a construction error raises the core's error."""
+        client; a construction error raises the core's error. The client's notify
+        hook (:meth:`_notify_hook`) is set before any call."""
         from confluent_kafka._config import prepare
 
         _user_configs, native = prepare(configs, client="admin")
@@ -268,6 +280,13 @@ class _AdminState:
         if error:
             raise from_ffi_error(error)
         self._c_admin = c_admin
+        _lib.Admin__set_callbacks_notify(c_admin, self._notify_hook())
+
+    def _notify_hook(self) -> Callable[[], None]:
+        """The callable the C API's notify hook fires (from a Rust task, the GIL
+        held) when the client's callback queue turns non-empty: it only
+        schedules the pump."""
+        raise NotImplementedError
 
     def _begin_use(self) -> int:
         """Start a use of the handle and return it; ``IllegalStateError`` with
@@ -277,6 +296,15 @@ class _AdminState:
                 raise IllegalStateError(message=CLOSED_MESSAGE)
             self._uses += 1
             return self._c_admin
+
+    def _begin_pump(self) -> bool:
+        """Start a run of the client's queued callbacks: ``False`` once the
+        teardown has begun (it runs what is left itself)."""
+        with self._lifecycle:
+            if self._tearing_down or not self._c_admin:
+                return False
+            self._uses += 1
+            return True
 
     def _end_use(self) -> None:
         with self._lifecycle:
@@ -296,29 +324,31 @@ class _AdminState:
             self._closed = True
             return True
 
-    def _wait_for_uses(self) -> None:
-        """Wait until no use of the handle is left (none can start: ``_closed``
-        is set)."""
+    def _teardown(self) -> None:
+        """Wait until no use is left (none can start any more), then free the
+        handle, which runs the callbacks still pending on this thread."""
         with self._lifecycle:
+            self._tearing_down = True
             while self._uses:
                 self._lifecycle.wait()
-
-    def _destroy_when_idle(self, c_admin: int, closed: threading.Event) -> None:
-        """Free the handle once the core's close has called back and no use is
-        left: on this thread when both hold, else on a helper thread, for a
-        ``close()`` that Ctrl+C or a cancellation stopped (the core's close goes
-        on, as Java's does when ``close`` is interrupted)."""
-        def destroy() -> None:
-            closed.wait()
-            self._wait_for_uses()
+            c_admin = self._c_admin
+        if c_admin:
             _lib.Admin_destroy(c_admin)
 
-        threading.Thread(target=destroy, name="kafka-admin-client-close", daemon=True).start()
+    def _call(self, entry: Callable[..., Any], *args: Any) -> Any:
+        """One RPC: ``entry(handle, *args)``, an ``Admin_<rpc>`` of the extension,
+        which returns the C result at once (Java's RPCs return at once)."""
+        c_admin = self._begin_use()
+        try:
+            return entry(c_admin, *args)
+        finally:
+            self._end_use()
+
+    # ---- the previous FFI's whole-result callback --------------------------------
+    # The RPCs not yet on the extension's ``AdminResult`` still submit an
+    # ``_async`` entry point through these; they go once every RPC uses ``_call``.
 
     def _submit(self, submit: _Submit, cb: Callable[..., None]) -> None:
-        """One use: submit ``submit(handle, cb)``; ``cb`` must call ``_end_use``
-        once it has run. A submit that raises (an argument the extension rejects)
-        never calls back, so its use ends here."""
         c_admin = self._begin_use()
         try:
             submit(c_admin, cb)
@@ -327,10 +357,6 @@ class _AdminState:
             raise
 
     def _wait_for(self, submit: _Submit, free: _Free) -> _Payload:
-        """Submit one ``_async`` entry point and wait for its completion payload on
-        a ``threading.Event``, which releases the GIL and stays interruptible by
-        Ctrl+C. Ctrl+C re-raises at once; the payload that arrives later is freed
-        with ``free`` on the dispatcher thread."""
         box: dict[str, _Payload] = {}
         done = threading.Event()
         lock = threading.Lock()
@@ -360,6 +386,66 @@ class _AdminState:
         return box["payload"]
 
 
+
+class _Pump:
+    """The sync client's one daemon pump thread, Java's admin thread for the
+    callbacks: it waits for the notify hook and runs the client's queued
+    callbacks (``Admin__execute_callbacks``) each time it fires (Threads and
+    callbacks). The ``then_apply`` functions and ``when_complete`` actions of the
+    client's futures run here; one that waits for a pending future of this client
+    never ends, as its delivery needs this thread. At ``close()`` it stops after
+    its current run."""
+
+    __slots__ = ("_state", "_event", "_stopping", "_after", "_thread")
+
+    def __init__(self, state: _AdminState) -> None:
+        self._state = state
+        self._event = threading.Event()
+        self._stopping = False
+        self._after: Callable[[], None] | None = None
+        self._thread = threading.Thread(target=self._run, name=_PUMP_THREAD_NAME, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def notify(self) -> None:
+        """The notify hook: only signals the thread."""
+        self._event.set()
+
+    def is_current(self) -> bool:
+        """Whether this is the pump thread (a callback calling into the client)."""
+        return threading.current_thread() is self._thread
+
+    def stop(self, after: Callable[[], None] | None = None) -> None:
+        """Stop after the current run, then run ``after`` on the pump thread."""
+        self._after = after
+        self._stopping = True
+        self._event.set()
+
+    def join(self) -> None:
+        if self._thread.is_alive() and not self.is_current():
+            self._thread.join()
+
+    def _run(self) -> None:
+        state = self._state
+        while True:
+            self._event.wait()
+            self._event.clear()
+            if self._stopping:
+                break
+            if not state._begin_pump():
+                break
+            try:
+                _lib.Admin__execute_callbacks(state._c_admin)
+            except Exception:  # noqa: BLE001 - the pump thread has no caller
+                _LOG.exception("Error running the admin client's callbacks")
+            finally:
+                state._end_use()
+        after = self._after
+        if after is not None:
+            after()
+
+
 def close_timeout_ms(timeout: Duration | None) -> int:
     """``close(Duration)``'s timeout in milliseconds (``-1`` for ``close()``); a
     negative one raises ``IllegalArgumentError("The timeout cannot be
@@ -377,8 +463,8 @@ class Admin(_AdminState):
     The operations exposed by ``Admin`` follow a consistent pattern: an
     ``Admin`` instance is created with ``Admin.create(configs=…)``; each operation
     takes the arguments it needs and an optional ``*Options`` object, and returns
-    a ``*Result`` whose futures give the outcome per key (here every future is
-    complete when the call returns).
+    a ``*Result`` at once, whose ``KafkaFuture``\\ s give the outcome per key when
+    the call completes.
 
     The minimum broker version required is 0.10.0.0. Methods with stricter
     requirements will specify the minimum broker version required.
@@ -392,6 +478,13 @@ class Admin(_AdminState):
             raise TypeError(
                 "Admin is a non-instantiable base; use Admin.create or MockAdminClient")
         _AdminState.__init__(self)
+        self._pump: _Pump | None = None
+
+    def _notify_hook(self) -> Callable[[], None]:
+        pump = _Pump(self)
+        self._pump = pump
+        pump.start()
+        return pump.notify
 
     @staticmethod
     def create(*, configs: dict[str, Any]) -> Admin:
@@ -416,8 +509,11 @@ class Admin(_AdminState):
 
         Closing twice is harmless. A negative ``timeout`` raises
         ``IllegalArgumentError``, except that a second ``close()`` returns before
-        checking it *(deviation)*. Ctrl+C re-raises at once; the close goes on in
-        the core and the handle is freed when it ends.
+        checking it *(deviation)*. The wait is in short slices: Ctrl+C re-raises at
+        once, the close going on in the core, and the handle is freed when it ends.
+        Called from a callback on the client's pump thread, it does not wait, as
+        Java's ``close`` does not join its own thread: the pump thread frees the
+        handle once the close completed.
         """
         if self._closed:
             return
@@ -425,25 +521,30 @@ class Admin(_AdminState):
         # Check and set at once: exactly one close() tears the client down.
         if not self._begin_close():
             return
-        c_admin = self._c_admin
         closed = threading.Event()
-        box: list[int] = []
-
-        def cb(error: int) -> None:
-            box.append(error)
-            closed.set()
-
-        _lib.Admin_close_async(c_admin, timeout_ms, cb)
+        _lib.Admin_close_cb(self._c_admin, timeout_ms, closed.set)
+        pump = self._pump
+        if pump is not None and pump.is_current():
+            pump.stop(after=self._teardown)
+            return
         try:
-            closed.wait()
-            self._wait_for_uses()
+            while not closed.wait(WAIT_SLICE_S):
+                pass
         except BaseException:
-            self._destroy_when_idle(c_admin, closed)
+            threading.Thread(target=self._finish_close, args=(closed,),
+                             name="kafka-admin-client-close", daemon=True).start()
             raise
-        _lib.Admin_destroy(c_admin)
-        # Java's close returns void; the FFI documents the error as always null.
-        if box and box[0]:
-            raise from_ffi_error(box[0])
+        self._finish_close(closed)
+
+    def _finish_close(self, closed: threading.Event) -> None:
+        """Once the core's close completed: stop the pump thread after its current
+        run, then free the handle (:meth:`_AdminState._teardown`)."""
+        closed.wait()
+        pump = self._pump
+        if pump is not None:
+            pump.stop()
+            pump.join()
+        self._teardown()
 
     def __enter__(self) -> Admin:
         return self
@@ -468,18 +569,14 @@ class Admin(_AdminState):
 
         ``new_topics``: the new topics to create; ``options``: the options to use
         when creating the new topics (Java's ``createTopics(newTopics)`` passes
-        ``new CreateTopicsOptions()``). Returns the ``CreateTopicsResult``, every
-        future of which is complete *(deviation: Java returns at once and completes
-        each future later; here the call waits for the core's one callback)*.
+        ``new CreateTopicsOptions()``). Returns the ``CreateTopicsResult``.
         """
         if options is None:
             options = CreateTopicsOptions()
-        topics = list(new_topics)
-        args = _conversions.create_topics_args(topics, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_create_topics_async(c_admin, *args, cb),
-            _conversions.free_create_topics)
-        return _conversions.create_topics_result(topics, payload, Sync)
+        native = self._call(_lib.Admin_create_topics,
+                            *_conversions.create_topics_args(new_topics),
+                            options._setters_ran())
+        return _conversions.create_topics_result(native, Sync, None)
 
     @overload
     def delete_topics(self, *, topics: Iterable[str],
@@ -530,16 +627,12 @@ class Admin(_AdminState):
 
         ``options``: the options to use when listing the topics (Java's
         ``listTopics()`` passes ``new ListTopicsOptions()``). Returns the
-        ``ListTopicsResult``, its future complete *(deviation: see
-        ``create_topics``)*.
+        ``ListTopicsResult``.
         """
         if options is None:
             options = ListTopicsOptions()
-        args = _conversions.list_topics_args(options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_list_topics_async(c_admin, *args, cb),
-            _conversions.free_list_topics)
-        return _conversions.list_topics_result(payload, Sync)
+        native = self._call(_lib.Admin_list_topics, options._setters_ran())
+        return _conversions.list_topics_result(native, Sync, None)
 
     @overload
     def describe_topics(self, *, topic_names: Iterable[str],

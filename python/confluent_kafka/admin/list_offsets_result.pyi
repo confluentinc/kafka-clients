@@ -14,13 +14,12 @@
 
 # Stub for confluent_kafka.admin.ListOffsetsResult.
 
-import asyncio
-import concurrent.futures
 from collections.abc import Mapping
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.common import TopicPartition
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["ListOffsetsResult"]
 
@@ -34,27 +33,27 @@ class ListOffsetsResult(Generic[KindT]):
     @overload
     def __init__(self: ListOffsetsResult[Sync], *,
                  futures: Mapping[TopicPartition,
-                                  concurrent.futures.Future[ListOffsetsResult.ListOffsetsResultInfo]]
+                                  KafkaFuture[ListOffsetsResult.ListOffsetsResultInfo]]
                  ) -> None: ...
     @overload
     def __init__(self: ListOffsetsResult[Async], *,
                  futures: Mapping[TopicPartition,
-                                  asyncio.Future[ListOffsetsResult.ListOffsetsResultInfo]]
+                                  AsyncKafkaFuture[ListOffsetsResult.ListOffsetsResultInfo]]
                  ) -> None: ...
     @classmethod
     def _new(cls, *,
-             futures: Mapping[TopicPartition, AnyFuture[ListOffsetsResult.ListOffsetsResultInfo]],
+             futures: Mapping[TopicPartition, KafkaFuture[ListOffsetsResult.ListOffsetsResultInfo] | AsyncKafkaFuture[ListOffsetsResult.ListOffsetsResultInfo]],
              kind: type[KindT]) -> ListOffsetsResult[KindT]: ...
     @overload
     def partition_result(self: ListOffsetsResult[Sync], *, partition: TopicPartition
-                         ) -> concurrent.futures.Future[ListOffsetsResult.ListOffsetsResultInfo]: ...
+                         ) -> KafkaFuture[ListOffsetsResult.ListOffsetsResultInfo]: ...
     @overload
     def partition_result(self: ListOffsetsResult[Async], *, partition: TopicPartition
-                         ) -> asyncio.Future[ListOffsetsResult.ListOffsetsResultInfo]: ...
+                         ) -> AsyncKafkaFuture[ListOffsetsResult.ListOffsetsResultInfo]: ...
     @overload
     def all(self: ListOffsetsResult[Sync]
-            ) -> concurrent.futures.Future[dict[TopicPartition,
-                                                ListOffsetsResult.ListOffsetsResultInfo]]: ...
+            ) -> KafkaFuture[dict[TopicPartition, ListOffsetsResult.ListOffsetsResultInfo]]: ...
     @overload
     def all(self: ListOffsetsResult[Async]
-            ) -> asyncio.Future[dict[TopicPartition, ListOffsetsResult.ListOffsetsResultInfo]]: ...
+            ) -> AsyncKafkaFuture[dict[TopicPartition,
+                                       ListOffsetsResult.ListOffsetsResultInfo]]: ...

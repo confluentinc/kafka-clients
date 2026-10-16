@@ -63,4 +63,5 @@ class ExpireDelegationTokenOptions(AbstractOptions):
         if expiry_time_period_ms is None:
             return self._expiry_time_period_ms
         self._expiry_time_period_ms = expiry_time_period_ms
+        self._record("expiry_time_period_ms", self._expiry_time_period_ms)
         return self

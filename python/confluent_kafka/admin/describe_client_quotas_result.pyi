@@ -14,29 +14,28 @@
 
 # Stub for confluent_kafka.admin.DescribeClientQuotasResult.
 
-import asyncio
-import concurrent.futures
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.common import ClientQuotaEntity
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DescribeClientQuotasResult"]
 
 class DescribeClientQuotasResult(Generic[KindT]):
     @overload
     def __init__(self: DescribeClientQuotasResult[Sync], *,
-                 entities: concurrent.futures.Future[dict[ClientQuotaEntity, dict[str, float]]]
-                 ) -> None: ...
+                 entities: KafkaFuture[dict[ClientQuotaEntity, dict[str, float]]]) -> None: ...
     @overload
     def __init__(self: DescribeClientQuotasResult[Async], *,
-                 entities: asyncio.Future[dict[ClientQuotaEntity, dict[str, float]]]) -> None: ...
+                 entities: AsyncKafkaFuture[dict[ClientQuotaEntity, dict[str, float]]]) -> None: ...
     @classmethod
-    def _new(cls, *, entities: AnyFuture[dict[ClientQuotaEntity, dict[str, float]]],
+    def _new(cls, *,
+             entities: KafkaFuture[dict[ClientQuotaEntity, dict[str, float]]] | AsyncKafkaFuture[dict[ClientQuotaEntity, dict[str, float]]],
              kind: type[KindT]) -> DescribeClientQuotasResult[KindT]: ...
     @overload
     def entities(self: DescribeClientQuotasResult[Sync]
-                 ) -> concurrent.futures.Future[dict[ClientQuotaEntity, dict[str, float]]]: ...
+                 ) -> KafkaFuture[dict[ClientQuotaEntity, dict[str, float]]]: ...
     @overload
     def entities(self: DescribeClientQuotasResult[Async]
-                 ) -> asyncio.Future[dict[ClientQuotaEntity, dict[str, float]]]: ...
+                 ) -> AsyncKafkaFuture[dict[ClientQuotaEntity, dict[str, float]]]: ...

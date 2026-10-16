@@ -23,11 +23,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync, _all_of
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
 if TYPE_CHECKING:
     from confluent_kafka.common import Uuid
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DeleteTopicsResult"]
 
@@ -46,8 +47,9 @@ class DeleteTopicsResult(Generic[KindT]):
             "delete_topics()")
 
     @classmethod
-    def _new(cls, *, topic_id_futures: Mapping[Uuid, AnyFuture[None]] | None,
-             name_futures: Mapping[str, AnyFuture[None]] | None,
+    def _new(cls, *,
+             topic_id_futures: Mapping[Uuid, KafkaFuture[None] | AsyncKafkaFuture[None]] | None,
+             name_futures: Mapping[str, KafkaFuture[None] | AsyncKafkaFuture[None]] | None,
              kind: type[Sync] | type[Async]) -> DeleteTopicsResult[Any]:
         """Java's protected ``DeleteTopicsResult(topicIdFutures, nameFutures)``."""
         if topic_id_futures is not None and name_futures is not None:
@@ -63,34 +65,35 @@ class DeleteTopicsResult(Generic[KindT]):
         return result
 
     @staticmethod
-    def _of_topic_ids(*, topic_id_futures: Mapping[Uuid, AnyFuture[None]],
+    def _of_topic_ids(*,
+                      topic_id_futures: Mapping[Uuid, KafkaFuture[None] | AsyncKafkaFuture[None]],
                       kind: type[Sync] | type[Async]) -> DeleteTopicsResult[Any]:
         """Java's package-private ``ofTopicIds(topicIdFutures)``."""
         return DeleteTopicsResult._new(topic_id_futures=topic_id_futures, name_futures=None,
                                        kind=kind)
 
     @staticmethod
-    def _of_topic_names(*, name_futures: Mapping[str, AnyFuture[None]],
+    def _of_topic_names(*, name_futures: Mapping[str, KafkaFuture[None] | AsyncKafkaFuture[None]],
                         kind: type[Sync] | type[Async]) -> DeleteTopicsResult[Any]:
         """Java's package-private ``ofTopicNames(nameFutures)``."""
         return DeleteTopicsResult._new(topic_id_futures=None, name_futures=name_futures,
                                        kind=kind)
 
-    def topic_id_values(self) -> dict[Uuid, AnyFuture[None]] | None:
+    def topic_id_values(self) -> dict[Uuid, KafkaFuture[None] | AsyncKafkaFuture[None]] | None:
         """Use when ``Admin.delete_topics()`` used a ``TopicIdCollection``: a map from
         topic IDs to futures which can be used to check the status of individual
         deletions if the request used topic IDs. Otherwise return ``None``."""
         return self._topic_id_futures
 
-    def topic_name_values(self) -> dict[str, AnyFuture[None]] | None:
+    def topic_name_values(self) -> dict[str, KafkaFuture[None] | AsyncKafkaFuture[None]] | None:
         """Use when ``Admin.delete_topics()`` used a ``TopicNameCollection``: a map from
         topic names to futures which can be used to check the status of individual
         deletions if the request used topic names. Otherwise return ``None``."""
         return self._name_futures
 
-    def all(self) -> AnyFuture[None]:
+    def all(self) -> KafkaFuture[None] | AsyncKafkaFuture[None]:
         """A future which succeeds only if all the topic deletions succeed."""
         if self._topic_id_futures is None:
             assert self._name_futures is not None
-            return _all_of(self._name_futures.values(), self._kind)
-        return _all_of(self._topic_id_futures.values(), self._kind)
+            return self._kind._FUTURE.all_of(futures=tuple(self._name_futures.values()))
+        return self._kind._FUTURE.all_of(futures=tuple(self._topic_id_futures.values()))

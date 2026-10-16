@@ -64,4 +64,5 @@ class AlterPartitionReassignmentsOptions(AbstractOptions):
         if allow is None:
             return self._allow_replication_factor_change
         self._allow_replication_factor_change = allow
+        self._record("allow_replication_factor_change", self._allow_replication_factor_change)
         return self

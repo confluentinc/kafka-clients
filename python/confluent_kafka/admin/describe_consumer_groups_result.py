@@ -16,12 +16,12 @@
 ``org.apache.kafka.clients.admin.DescribeConsumerGroupsResult``.
 
 Java's constructor is public, so it stays the keyword-only ``__init__``; the
-client-kind marker is read from the futures given (``asyncio.Future``\\ s: the async
+client-kind marker is read from the futures given (``AsyncKafkaFuture``\\ s: the async
 kind, else the sync one), and the clients build it through ``_new``, which sets the kind
 explicitly, as for every result class (CLAUDE.md, Python Binding Conventions, Class
 family). ``describedGroups()`` returns a copy of the stored map, so each call gives a
-new ``dict``. ``all()`` is Java's ``allOf(...).thenApply(...)``, kept through the
-private helpers ``_all_of`` / ``_then_apply``.
+new ``dict``. ``all()`` is Java's ``allOf(...).thenApply(...)``, through the futures'
+``all_of`` and ``then_apply``.
 """
 
 from __future__ import annotations
@@ -29,20 +29,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import (
-    AnyFuture,
-    Async,
-    KindT,
-    Sync,
-    _all_of,
-    _kind_of,
-    _then_apply,
-)
+from confluent_kafka.admin._futures import Async, KindT, Sync, _kind_of
 
 if TYPE_CHECKING:
     from confluent_kafka.admin.consumer_group_description import (
         ConsumerGroupDescription,
     )
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DescribeConsumerGroupsResult"]
 
@@ -55,13 +48,17 @@ class DescribeConsumerGroupsResult(Generic[KindT]):
 
     __slots__ = ("_futures", "_kind")
 
-    def __init__(self, *, futures: Mapping[str, AnyFuture[ConsumerGroupDescription]]) -> None:
+    def __init__(
+            self, *,
+            futures: Mapping[str, KafkaFuture[ConsumerGroupDescription] | AsyncKafkaFuture[ConsumerGroupDescription]]) -> None:
         self._futures = dict(futures)
         self._kind: type[Sync] | type[Async] = _kind_of(self._futures.values())
 
     @classmethod
-    def _new(cls, *, futures: Mapping[str, AnyFuture[ConsumerGroupDescription]],
-             kind: type[Sync] | type[Async]) -> DescribeConsumerGroupsResult[Any]:
+    def _new(
+            cls, *,
+            futures: Mapping[str, KafkaFuture[ConsumerGroupDescription] | AsyncKafkaFuture[ConsumerGroupDescription]],
+            kind: type[Sync] | type[Async]) -> DescribeConsumerGroupsResult[Any]:
         """The clients' builder: Java's public ``DescribeConsumerGroupsResult(futures)``
         with the client kind set by the caller."""
         result = cls.__new__(cls)
@@ -69,17 +66,19 @@ class DescribeConsumerGroupsResult(Generic[KindT]):
         result._kind = kind
         return result
 
-    def described_groups(self) -> dict[str, AnyFuture[ConsumerGroupDescription]]:
+    def described_groups(
+            self) -> dict[str, KafkaFuture[ConsumerGroupDescription] | AsyncKafkaFuture[ConsumerGroupDescription]]:
         """Return a map from group id to futures which yield group descriptions."""
         return dict(self._futures)
 
-    def all(self) -> AnyFuture[dict[str, ConsumerGroupDescription]]:
+    def all(
+            self) -> KafkaFuture[dict[str, ConsumerGroupDescription]] | AsyncKafkaFuture[dict[str, ConsumerGroupDescription]]:
         """Return a future which yields all ConsumerGroupDescription objects, if all the
         describes succeed."""
         futures = self._futures
 
         def collect(_: None) -> dict[str, ConsumerGroupDescription]:
             # allOf ensured that all the futures completed successfully.
-            return {key: future.result() for key, future in futures.items()}
+            return {key: future.get_now(value_if_absent=None) for key, future in futures.items()}
 
-        return _then_apply(_all_of(futures.values(), self._kind), collect)
+        return self._kind._FUTURE.all_of(futures=tuple(futures.values())).then_apply(function=collect)

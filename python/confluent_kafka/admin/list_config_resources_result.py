@@ -17,28 +17,21 @@
 
 Java's constructor is package-private: ``__init__`` raises ``TypeError`` and ``_new``
 builds it (CLAUDE.md, Python Binding Conventions, Class family). ``all()`` makes a new
-future completed from the stored future's ``whenComplete``, kept through the private
-helpers ``_new_future_like`` / ``_when_complete`` / ``_complete*``. A ``Collection``
-yields a ``list``: Java's ``KafkaAdminClient`` builds no ``Set`` for it (Types).
+future completed from the stored future's ``when_complete``: Java's ``new
+KafkaFutureImpl<>()`` is the private ``_KafkaFutureImpl``. A ``Collection`` yields a
+``list``: Java's ``KafkaAdminClient`` builds no ``Set`` for it (Types).
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import (
-    AnyFuture,
-    Async,
-    KindT,
-    Sync,
-    _complete,
-    _complete_with_error,
-    _new_future_like,
-    _when_complete,
-)
+from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 
 if TYPE_CHECKING:
     from confluent_kafka.common.config import ConfigResource
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["ListConfigResourcesResult"]
 
@@ -57,7 +50,8 @@ class ListConfigResourcesResult(Generic[KindT]):
             "client's list_config_resources()")
 
     @classmethod
-    def _new(cls, *, future: AnyFuture[list[ConfigResource]],
+    def _new(cls, *,
+             future: KafkaFuture[list[ConfigResource]] | AsyncKafkaFuture[list[ConfigResource]],
              kind: type[Sync] | type[Async]) -> ListConfigResourcesResult[Any]:
         """Java's package-private ``ListConfigResourcesResult(future)``."""
         result = cls.__new__(cls)
@@ -65,21 +59,21 @@ class ListConfigResourcesResult(Generic[KindT]):
         result._kind = kind
         return result
 
-    def all(self) -> AnyFuture[list[ConfigResource]]:
+    def all(self) -> KafkaFuture[list[ConfigResource]] | AsyncKafkaFuture[list[ConfigResource]]:
         """Returns a future that yields either an exception, or the full set of config
         resources.
 
         In the event of a failure, the future yields nothing but the first exception
         which occurred.
         """
-        result: AnyFuture[list[ConfigResource]] = _new_future_like(self._future)
+        result: _KafkaFutureImpl[list[ConfigResource]] = _KafkaFutureImpl()
 
         def action(resources: list[ConfigResource] | None, throwable: BaseException | None) -> None:
             if throwable is not None:
-                _complete_with_error(result, throwable)
+                result.complete_with_error(throwable)
             else:
                 assert resources is not None
-                _complete(result, resources)
+                result.complete(resources)
 
-        _when_complete(self._future, action)
-        return result
+        self._future.when_complete(action=action)
+        return self._kind._FUTURE._of_impl(result)

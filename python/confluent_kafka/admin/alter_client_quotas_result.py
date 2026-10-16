@@ -15,11 +15,11 @@
 """``AlterClientQuotasResult``: Java's ``org.apache.kafka.clients.admin.AlterClientQuotasResult``.
 
 Java's constructor is public, so it stays the keyword-only ``__init__``; the
-client-kind marker is read from the futures given (``asyncio.Future``\\ s: the async
+client-kind marker is read from the futures given (``AsyncKafkaFuture``\\ s: the async
 kind, else the sync one), and the clients build it through ``_new``, which sets the kind
 explicitly, as for every result class (CLAUDE.md, Python Binding Conventions, Class
-family). ``all()`` is Java's ``KafkaFuture.allOf``, kept through the private helper
-``_all_of`` (Idiom translations).
+family). ``all()`` is Java's ``KafkaFuture.allOf``, the ``all_of`` of the kind's future
+class (Futures).
 """
 
 from __future__ import annotations
@@ -27,17 +27,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import (
-    AnyFuture,
-    Async,
-    KindT,
-    Sync,
-    _all_of,
-    _kind_of,
-)
+from confluent_kafka.admin._futures import Async, KindT, Sync, _kind_of
 
 if TYPE_CHECKING:
     from confluent_kafka.common import ClientQuotaEntity
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["AlterClientQuotasResult"]
 
@@ -50,7 +44,9 @@ class AlterClientQuotasResult(Generic[KindT]):
 
     __slots__ = ("_futures", "_kind")
 
-    def __init__(self, *, futures: Mapping[ClientQuotaEntity, AnyFuture[None]]) -> None:
+    def __init__(self, *,
+                 futures: Mapping[ClientQuotaEntity,
+                                  KafkaFuture[None] | AsyncKafkaFuture[None]]) -> None:
         """Maps an entity to its alteration result.
 
         :param futures: maps entity to its alteration result
@@ -59,7 +55,8 @@ class AlterClientQuotasResult(Generic[KindT]):
         self._kind: type[Sync] | type[Async] = _kind_of(self._futures.values())
 
     @classmethod
-    def _new(cls, *, futures: Mapping[ClientQuotaEntity, AnyFuture[None]],
+    def _new(cls, *,
+             futures: Mapping[ClientQuotaEntity, KafkaFuture[None] | AsyncKafkaFuture[None]],
              kind: type[Sync] | type[Async]) -> AlterClientQuotasResult[Any]:
         """The clients' builder: Java's public ``AlterClientQuotasResult(futures)`` with
         the client kind set by the caller.
@@ -71,11 +68,11 @@ class AlterClientQuotasResult(Generic[KindT]):
         result._kind = kind
         return result
 
-    def values(self) -> Mapping[ClientQuotaEntity, AnyFuture[None]]:
+    def values(self) -> Mapping[ClientQuotaEntity, KafkaFuture[None] | AsyncKafkaFuture[None]]:
         """Returns a map from quota entity to a future which can be used to check the
         status of the operation."""
         return self._futures
 
-    def all(self) -> AnyFuture[None]:
+    def all(self) -> KafkaFuture[None] | AsyncKafkaFuture[None]:
         """Returns a future which succeeds only if all quota alterations succeed."""
-        return _all_of(self._futures.values(), self._kind)
+        return self._kind._FUTURE.all_of(futures=tuple(self._futures.values()))

@@ -18,16 +18,18 @@
 Java's constructor is package-private: ``__init__`` raises ``TypeError`` and ``_new``
 builds it (CLAUDE.md, Python Binding Conventions, Class family). ``deletedGroups()``
 returns a copy of the stored map, so each call gives a new ``dict``. ``all()`` is Java's
-``KafkaFuture.allOf``, kept through the private helper ``_all_of`` (Idiom
-translations).
+``KafkaFuture.allOf``, the ``all_of`` of the kind's future class (Futures).
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Generic
+from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync, _all_of
+from confluent_kafka.admin._futures import Async, KindT, Sync
+
+if TYPE_CHECKING:
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DeleteConsumerGroupsResult"]
 
@@ -46,7 +48,7 @@ class DeleteConsumerGroupsResult(Generic[KindT]):
             "client's delete_consumer_groups()")
 
     @classmethod
-    def _new(cls, *, futures: Mapping[str, AnyFuture[None]],
+    def _new(cls, *, futures: Mapping[str, KafkaFuture[None] | AsyncKafkaFuture[None]],
              kind: type[Sync] | type[Async]) -> DeleteConsumerGroupsResult[Any]:
         """Java's package-private ``DeleteConsumerGroupsResult(futures)``."""
         result = cls.__new__(cls)
@@ -54,12 +56,12 @@ class DeleteConsumerGroupsResult(Generic[KindT]):
         result._kind = kind
         return result
 
-    def deleted_groups(self) -> dict[str, AnyFuture[None]]:
+    def deleted_groups(self) -> dict[str, KafkaFuture[None] | AsyncKafkaFuture[None]]:
         """Return a map from group id to futures which can be used to check the status
         of individual deletions."""
         return dict(self._futures)
 
-    def all(self) -> AnyFuture[None]:
+    def all(self) -> KafkaFuture[None] | AsyncKafkaFuture[None]:
         """Return a future which succeeds only if all the consumer group deletions
         succeed."""
-        return _all_of(self._futures.values(), self._kind)
+        return self._kind._FUTURE.all_of(futures=tuple(self._futures.values()))

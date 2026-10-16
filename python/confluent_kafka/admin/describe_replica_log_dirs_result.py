@@ -32,17 +32,11 @@ from typing import TYPE_CHECKING, Any, Generic
 
 from confluent_kafka._args import UNSET, Form, java_forms
 from confluent_kafka._java import java_str
-from confluent_kafka.admin._futures import (
-    AnyFuture,
-    Async,
-    KindT,
-    Sync,
-    _all_of,
-    _then_apply,
-)
+from confluent_kafka.admin._futures import Async, KindT, Sync
 
 if TYPE_CHECKING:
     from confluent_kafka.common import TopicPartitionReplica
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DescribeReplicaLogDirsResult"]
 
@@ -138,7 +132,7 @@ class DescribeReplicaLogDirsResult(Generic[KindT]):
     @classmethod
     def _new(cls, *,
              futures: Mapping[TopicPartitionReplica,
-                              AnyFuture[DescribeReplicaLogDirsResult.ReplicaLogDirInfo]],
+                              KafkaFuture[DescribeReplicaLogDirsResult.ReplicaLogDirInfo] | AsyncKafkaFuture[DescribeReplicaLogDirsResult.ReplicaLogDirInfo]],
              kind: type[Sync] | type[Async]) -> DescribeReplicaLogDirsResult[Any]:
         """Java's package-private ``DescribeReplicaLogDirsResult(futures)``."""
         result = cls.__new__(cls)
@@ -147,12 +141,13 @@ class DescribeReplicaLogDirsResult(Generic[KindT]):
         return result
 
     def values(self) -> dict[TopicPartitionReplica,
-                             AnyFuture[DescribeReplicaLogDirsResult.ReplicaLogDirInfo]]:
+                             KafkaFuture[DescribeReplicaLogDirsResult.ReplicaLogDirInfo] | AsyncKafkaFuture[DescribeReplicaLogDirsResult.ReplicaLogDirInfo]]:
         """Return a map from replica to future which can be used to check the log
         directory information of individual replicas."""
         return self._futures
 
-    def all(self) -> AnyFuture[dict[TopicPartitionReplica,
+    def all(self) -> KafkaFuture[dict[TopicPartitionReplica,
+                                    DescribeReplicaLogDirsResult.ReplicaLogDirInfo]] | AsyncKafkaFuture[dict[TopicPartitionReplica,
                                     DescribeReplicaLogDirsResult.ReplicaLogDirInfo]]:
         """Return a future which succeeds if log directory information of all replicas
         are available."""
@@ -161,6 +156,6 @@ class DescribeReplicaLogDirsResult(Generic[KindT]):
         def collect(_: None) -> dict[TopicPartitionReplica,
                                      DescribeReplicaLogDirsResult.ReplicaLogDirInfo]:
             # allOf ensured that all the futures completed successfully.
-            return {key: future.result() for key, future in futures.items()}
+            return {key: future.get_now(value_if_absent=None) for key, future in futures.items()}
 
-        return _then_apply(_all_of(futures.values(), self._kind), collect)
+        return self._kind._FUTURE.all_of(futures=tuple(futures.values())).then_apply(function=collect)

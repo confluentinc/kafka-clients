@@ -14,36 +14,35 @@
 
 # Stub for confluent_kafka.admin.DescribeClassicGroupsResult.
 
-import asyncio
-import concurrent.futures
 from collections.abc import Mapping
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.admin.classic_group_description import ClassicGroupDescription
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DescribeClassicGroupsResult"]
 
 class DescribeClassicGroupsResult(Generic[KindT]):
     @overload
     def __init__(self: DescribeClassicGroupsResult[Sync], *,
-                 futures: Mapping[str, concurrent.futures.Future[ClassicGroupDescription]]
-                 ) -> None: ...
+                 futures: Mapping[str, KafkaFuture[ClassicGroupDescription]]) -> None: ...
     @overload
     def __init__(self: DescribeClassicGroupsResult[Async], *,
-                 futures: Mapping[str, asyncio.Future[ClassicGroupDescription]]) -> None: ...
+                 futures: Mapping[str, AsyncKafkaFuture[ClassicGroupDescription]]) -> None: ...
     @classmethod
-    def _new(cls, *, futures: Mapping[str, AnyFuture[ClassicGroupDescription]],
+    def _new(cls, *,
+             futures: Mapping[str, KafkaFuture[ClassicGroupDescription] | AsyncKafkaFuture[ClassicGroupDescription]],
              kind: type[KindT]) -> DescribeClassicGroupsResult[KindT]: ...
     @overload
     def described_groups(self: DescribeClassicGroupsResult[Sync]
-                         ) -> dict[str, concurrent.futures.Future[ClassicGroupDescription]]: ...
+                         ) -> dict[str, KafkaFuture[ClassicGroupDescription]]: ...
     @overload
     def described_groups(self: DescribeClassicGroupsResult[Async]
-                         ) -> dict[str, asyncio.Future[ClassicGroupDescription]]: ...
+                         ) -> dict[str, AsyncKafkaFuture[ClassicGroupDescription]]: ...
     @overload
     def all(self: DescribeClassicGroupsResult[Sync]
-            ) -> concurrent.futures.Future[dict[str, ClassicGroupDescription]]: ...
+            ) -> KafkaFuture[dict[str, ClassicGroupDescription]]: ...
     @overload
     def all(self: DescribeClassicGroupsResult[Async]
-            ) -> asyncio.Future[dict[str, ClassicGroupDescription]]: ...
+            ) -> AsyncKafkaFuture[dict[str, ClassicGroupDescription]]: ...

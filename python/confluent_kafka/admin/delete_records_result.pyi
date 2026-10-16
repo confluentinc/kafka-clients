@@ -14,35 +14,34 @@
 
 # Stub for confluent_kafka.admin.DeleteRecordsResult.
 
-import asyncio
-import concurrent.futures
 from collections.abc import Mapping
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.admin.deleted_records import DeletedRecords
 from confluent_kafka.common import TopicPartition
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DeleteRecordsResult"]
 
 class DeleteRecordsResult(Generic[KindT]):
     @overload
     def __init__(self: DeleteRecordsResult[Sync], *,
-                 futures: Mapping[TopicPartition, concurrent.futures.Future[DeletedRecords]]
-                 ) -> None: ...
+                 futures: Mapping[TopicPartition, KafkaFuture[DeletedRecords]]) -> None: ...
     @overload
     def __init__(self: DeleteRecordsResult[Async], *,
-                 futures: Mapping[TopicPartition, asyncio.Future[DeletedRecords]]) -> None: ...
+                 futures: Mapping[TopicPartition, AsyncKafkaFuture[DeletedRecords]]) -> None: ...
     @classmethod
-    def _new(cls, *, futures: Mapping[TopicPartition, AnyFuture[DeletedRecords]],
+    def _new(cls, *,
+             futures: Mapping[TopicPartition, KafkaFuture[DeletedRecords] | AsyncKafkaFuture[DeletedRecords]],
              kind: type[KindT]) -> DeleteRecordsResult[KindT]: ...
     @overload
     def low_watermarks(self: DeleteRecordsResult[Sync]
-                       ) -> dict[TopicPartition, concurrent.futures.Future[DeletedRecords]]: ...
+                       ) -> dict[TopicPartition, KafkaFuture[DeletedRecords]]: ...
     @overload
     def low_watermarks(self: DeleteRecordsResult[Async]
-                       ) -> dict[TopicPartition, asyncio.Future[DeletedRecords]]: ...
+                       ) -> dict[TopicPartition, AsyncKafkaFuture[DeletedRecords]]: ...
     @overload
-    def all(self: DeleteRecordsResult[Sync]) -> concurrent.futures.Future[None]: ...
+    def all(self: DeleteRecordsResult[Sync]) -> KafkaFuture[None]: ...
     @overload
-    def all(self: DeleteRecordsResult[Async]) -> asyncio.Future[None]: ...
+    def all(self: DeleteRecordsResult[Async]) -> AsyncKafkaFuture[None]: ...

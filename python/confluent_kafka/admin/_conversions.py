@@ -19,16 +19,19 @@ plain values it returns, by the conversion table of CLAUDE.md (Python Binding
 Conventions, Implementation over the FFI). Each RPC has, in Java declaration
 order:
 
-- ``<rpc>_args(...)``: the plain arguments of its ``Admin_<rpc>_async`` call
-  (before the callback);
-- ``<rpc>_result(payload, kind)``: its ``*Result``, built through ``_new`` from
-  the callback's ``(result_int, error_int)`` payload, every future complete
-: a per-key error read in the borrowed form of ``from_ffi_error``,
-  a whole-call error failing every future;
-- ``free_<rpc>(payload)``: frees a payload nobody takes any more (a call
-  interrupted by Ctrl+C or a cancelled task).
+- ``<rpc>_args(...)``: the plain arguments of its ``Admin_<rpc>`` call (the
+  options' ``(setter, value)`` pairs follow them);
+- ``<rpc>_result(native, kind, loop)``: its ``*Result`` over the extension's
+  ``AdminResult`` ``native``, returned at once: each future of the C result is a
+  :class:`KafkaFuture` (``kind`` ``Sync``) or an :class:`AsyncKafkaFuture` on
+  ``loop`` (``Async``) over the extension's future object (:func:`wrap`), whose
+  delivery converts the C value to plain values in C and builds the value class
+  from them in Python (the ``post`` of ``AdminResult.futures`` /
+  ``AdminResult.future``).
 
-The shared helpers come first.
+The shared helpers come first. An RPC still on the previous FFI's whole-result
+callback keeps its ``<rpc>_args`` / ``<rpc>_result(payload, kind)`` /
+``free_<rpc>`` until it moves to an ``AdminResult``.
 """
 
 from __future__ import annotations
@@ -40,14 +43,13 @@ from typing import TYPE_CHECKING, Any, TypeVar
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
 from confluent_kafka._errors import from_borrowed_ffi_error, from_ffi_error
+from confluent_kafka.admin._futures import Async, Sync
 from confluent_kafka.common.errors.api_error import ApiError
-from confluent_kafka.admin._futures import (
-    AnyFuture,
-    Async,
-    Sync,
-    _complete,
-    _complete_with_error,
-    _new_future,
+from confluent_kafka.common.kafka_future import (
+    _CANCELLED,
+    AsyncKafkaFuture,
+    KafkaFuture,
+    _KafkaFutureImpl,
 )
 
 if TYPE_CHECKING:
@@ -149,6 +151,7 @@ if TYPE_CHECKING:
         ClientQuotaFilter,
         DelegationToken,
         KafkaPrincipal,
+        Uuid,
     )
     from confluent_kafka.common.acl_operation import AclOperation
     from confluent_kafka.common.config.config_resource import ConfigResource
@@ -162,6 +165,9 @@ if TYPE_CHECKING:
 __all__ = [
     "Kind",
     "Payload",
+    "linked",
+    "wrap",
+    "wrap_map",
     "abort_transaction_args",
     "abort_transaction_result",
     "acl_operations_from_codes",
@@ -176,6 +182,7 @@ __all__ = [
     "alter_user_scram_credentials_args",
     "alter_user_scram_credentials_result",
     "borrowed_error",
+    "config_from_rows",
     "config_resource_from_tuple",
     "create_acls_args",
     "create_acls_result",
@@ -242,7 +249,6 @@ __all__ = [
     "free_create_acls",
     "free_create_delegation_token",
     "free_create_partitions",
-    "free_create_topics",
     "free_delete_acls",
     "free_delete_consumer_group_offsets",
     "free_delete_consumer_groups",
@@ -272,7 +278,6 @@ __all__ = [
     "free_list_groups",
     "free_list_offsets",
     "free_list_partition_reassignments",
-    "free_list_topics",
     "free_list_transactions",
     "free_remove_members_from_consumer_group",
     "free_renew_delegation_token",
@@ -292,7 +297,6 @@ __all__ = [
     "list_offsets_result",
     "list_partition_reassignments_args",
     "list_partition_reassignments_result",
-    "list_topics_args",
     "list_topics_result",
     "list_transactions_args",
     "list_transactions_result",
@@ -331,6 +335,50 @@ _NO_TIMEOUT = -1
 # ---- shared helpers ---------------------------------------------------------
 
 
+def wrap(kind: Kind, loop: asyncio.AbstractEventLoop | None, native: Any
+         ) -> KafkaFuture[Any] | AsyncKafkaFuture[Any]:
+    """The package's future over the extension's future object ``native``: a
+    :class:`KafkaFuture` for the sync kind, an :class:`AsyncKafkaFuture` whose
+    inner future is on ``loop`` (the client's, else the loop of its first wait)
+    for the async one (Futures)."""
+    if kind is Async:
+        return AsyncKafkaFuture._of_native(native, loop)
+    return KafkaFuture._of_native(native)
+
+
+def wrap_map(kind: Kind, loop: asyncio.AbstractEventLoop | None, natives: Mapping[Any, Any],
+             key: Callable[[Any], _T] | None = None
+             ) -> dict[_T, KafkaFuture[Any] | AsyncKafkaFuture[Any]]:
+    """:func:`wrap` of each future of an ``AdminResult.futures`` map, its key
+    turned into the Python key by ``key`` (as it is when ``None``)."""
+    return {(raw if key is None else key(raw)): wrap(kind, loop, native)
+            for raw, native in natives.items()}
+
+
+def linked(kind: Kind, loop: asyncio.AbstractEventLoop | None,
+           key_future: KafkaFuture[Any] | AsyncKafkaFuture[Any],
+           source: KafkaFuture[_T] | AsyncKafkaFuture[_T]
+           ) -> KafkaFuture[_T] | AsyncKafkaFuture[_T]:
+    """A refinement whose value comes from a C future (``source``), linked as a
+    dependant of its key's future (Futures): it completes as ``source`` does,
+    and is cancelled when ``key_future`` is, as Java's
+    ``futures.get(key).thenApply(...)`` is."""
+    impl: _KafkaFutureImpl[_T] = _KafkaFutureImpl()
+
+    def on_key(key_state: _KafkaFutureImpl[Any]) -> None:
+        if key_state._state == _CANCELLED:
+            impl.cancel(key_state._outcome)
+
+    def on_source(source_state: _KafkaFutureImpl[_T]) -> None:
+        impl._settle(source_state._state, source_state._outcome)
+
+    key_future._state()._add_listener(on_key)
+    source._state()._add_listener(on_source)
+    if kind is Async:
+        return AsyncKafkaFuture._of_impl(impl, loop)
+    return KafkaFuture._of_impl(impl)
+
+
 def timeout_ms(options: AbstractOptions) -> int:
     """``options.timeoutMs()`` as the extension's ``timeout_ms``: ``-1`` when Java's
     is ``null`` (use ``default.api.timeout.ms``). A given negative value is sent as
@@ -348,23 +396,19 @@ def borrowed_error(raw: tuple[Any, ...] | None) -> BaseException | None:
 
 
 def future_of(kind: Kind, value: Any = None, error: BaseException | None = None
-              ) -> AnyFuture[Any]:
+              ) -> KafkaFuture[Any] | AsyncKafkaFuture[Any]:
     """Java's ``KafkaFutureImpl`` completed with ``value``, or failed with ``error``,
     of ``kind``."""
-    future: AnyFuture[Any] = _new_future(kind)
+    impl: _KafkaFutureImpl[Any] = _KafkaFutureImpl()
     if error is not None:
-        _complete_with_error(future, error)
-        if isinstance(future, asyncio.Future):
-            # Marks the error retrieved, so asyncio does not log "Future exception
-            # was never retrieved" for a key the caller never reads (Java's futures
-            # and ``concurrent.futures`` log nothing).
-            future.exception()
+        impl.complete_with_error(error)
     else:
-        _complete(future, value)
+        impl.complete(value)
+    future: KafkaFuture[Any] | AsyncKafkaFuture[Any] = kind._FUTURE._of_impl(impl)
     return future
 
 
-def failed_future(kind: Kind, error: BaseException) -> AnyFuture[Any]:
+def failed_future(kind: Kind, error: BaseException) -> KafkaFuture[Any] | AsyncKafkaFuture[Any]:
     """A future of ``kind`` failed with ``error``."""
     return future_of(kind, error=error)
 
@@ -372,7 +416,7 @@ def failed_future(kind: Kind, error: BaseException) -> AnyFuture[Any]:
 def per_key_futures(keys: Iterable[_T], payload: Payload,
                     drain: Callable[[int], Mapping[Any, Any]],
                     convert: Callable[[Any], tuple[BaseException | None, Any]], kind: Kind,
-                    key_of: Callable[[Any], _T] | None = None) -> dict[_T, AnyFuture[Any]]:
+                    key_of: Callable[[Any], _T] | None = None) -> dict[_T, KafkaFuture[Any] | AsyncKafkaFuture[Any]]:
     """The per-key futures of a keyed result: from the drained result handle, each
     key's ``convert(raw) -> (error, value)``; on a whole-call error, every requested
     key fails with it (Java's ``completeAllExceptionally``). ``key_of`` maps a
@@ -383,7 +427,7 @@ def per_key_futures(keys: Iterable[_T], payload: Payload,
         if result_handle:
             drain(result_handle)
         return {key: failed_future(kind, failure) for key in dict.fromkeys(keys)}
-    futures: dict[_T, AnyFuture[Any]] = {}
+    futures: dict[_T, KafkaFuture[Any] | AsyncKafkaFuture[Any]] = {}
     for raw_key, raw in drain(result_handle).items():
         key_error, value = convert(raw)
         key = raw_key if key_of is None else key_of(raw_key)
@@ -392,7 +436,7 @@ def per_key_futures(keys: Iterable[_T], payload: Payload,
 
 
 def single_future(payload: Payload, drain: Callable[[int], Any],
-                  convert: Callable[[Any], Any], kind: Kind) -> AnyFuture[Any]:
+                  convert: Callable[[Any], Any], kind: Kind) -> KafkaFuture[Any] | AsyncKafkaFuture[Any]:
     """The one future of a single-future result: ``convert(drain(handle))``, or the
     whole-call error."""
     result_handle, error = payload
@@ -404,7 +448,7 @@ def single_future(payload: Payload, drain: Callable[[int], Any],
     return future_of(kind, convert(drain(result_handle)))
 
 
-def void_future(payload: Payload, kind: Kind) -> AnyFuture[None]:
+def void_future(payload: Payload, kind: Kind) -> KafkaFuture[None] | AsyncKafkaFuture[None]:
     """The ``KafkaFuture<Void>`` of a ``void`` call's ``(error_int,)`` payload:
     completed with ``None``, or failed with the typed error (the owned handle is
     consumed)."""
@@ -412,15 +456,15 @@ def void_future(payload: Payload, kind: Kind) -> AnyFuture[None]:
     return future_of(kind, None, from_ffi_error(error) if error else None)
 
 
-def free_value_payload(drain: Callable[[int], Any]) -> Callable[[Payload], None]:
+def free_value_payload(drain: str) -> Callable[[Payload], None]:
     """The free function of a ``(result_int, error_int)`` payload whose result is
-    freed by ``drain``."""
+    freed by the extension's ``drain`` (read when it runs)."""
     def free(payload: Payload) -> None:
         result_handle, error = payload
         if error:
             _lib.KafkaError_destroy(error)
         if result_handle:
-            drain(result_handle)
+            getattr(_lib, drain)(result_handle)
     return free
 
 
@@ -470,11 +514,13 @@ def topic_partition_from_tuple(raw: tuple[str, int]) -> TopicPartition:
 # ---- the RPCs, in Java declaration order ------------------------------------
 
 
-def create_topics_args(new_topics: Iterable[NewTopic], options: Any) -> tuple[Any, ...]:
-    """``Admin_create_topics_async(h, spec, timeout_ms, validate_only,
-    retry_on_quota_violation, cb)``'s arguments: each ``NewTopic`` as
-    ``(name, num_partitions or -1, replication_factor or -1, configs, assignments)``
-    (``build_new_topics``)."""
+def create_topics_args(new_topics: Iterable[NewTopic]) -> tuple[Any, ...]:
+    """``Admin_create_topics(h, spec, options)``'s arguments: each ``NewTopic`` as
+    ``(name, num_partitions, replication_factor, configs, assignments)``, the
+    counts ``-1`` for Java's empty ``Optional``, the configs and assignments
+    ``None`` when not set (``NewTopic(name, replicasAssignments)`` when the
+    assignments are set, else ``NewTopic(name, numPartitions,
+    replicationFactor)``)."""
     spec = []
     for topic in new_topics:
         configs = topic.configs()
@@ -484,64 +530,53 @@ def create_topics_args(new_topics: Iterable[NewTopic], options: Any) -> tuple[An
             None if configs is None else list(configs.items()),
             None if assignments is None else list(assignments.items()),
         ))
-    return (spec, timeout_ms(options), options.should_validate_only(),
-            options.should_retry_on_quota_violation())
+    return (spec,)
 
 
-def _config_from_create_topics(rows: list[tuple[str, str | None, int, int, int]]) -> Config:
-    """Java's ``KafkaAdminClient.createTopics`` config: one ``ConfigEntry`` per
-    returned config, with no synonyms, type or documentation. The FFI gives no
-    source, only ``is_default``: ``DEFAULT_CONFIG`` when it is set, else ``UNKNOWN``
-    (decision log, entry 7)."""
+def config_from_rows(rows: list[tuple[Any, ...]]) -> Config:
+    """A ``Config`` from the extension's config entry rows (``config_to_py``):
+    ``(name, value, is_default, is_sensitive, is_read_only, source, type,
+    documentation, synonyms)``."""
     from confluent_kafka.admin.config import Config
-    from confluent_kafka.admin.config_entry import ConfigEntry
 
-    entries = []
-    for name, value, is_default, is_sensitive, is_read_only in rows:
-        source = (ConfigEntry.ConfigSource.DEFAULT_CONFIG if is_default
-                  else ConfigEntry.ConfigSource.UNKNOWN)
-        entries.append(ConfigEntry(name=name, value=value, source=source,
-                                   is_sensitive=bool(is_sensitive),
-                                   is_read_only=bool(is_read_only), synonyms=(),
-                                   type=ConfigEntry.ConfigType.UNKNOWN, documentation=None))
-    return Config(entries=entries)
+    return Config(entries=[_config_entry(row) for row in rows])
 
 
-def _topic_metadata_and_config(raw: tuple[Any, Any]) -> tuple[BaseException | None, Any]:
-    """A drained ``(error, metadata)`` as the key's ``(error, TopicMetadataAndConfig)``:
-    Java's ``new TopicMetadataAndConfig(configErrorCode.exception())`` for a config
-    error, else the topic id, partitions, replication factor and config."""
-    from confluent_kafka.admin.create_topics_result import _TopicMetadataAndConfig
+def _uuid_from_string(raw: str) -> Uuid:
     from confluent_kafka.common import Uuid
 
-    raw_error, metadata = raw
-    error = borrowed_error(raw_error)
-    if error is not None or metadata is None:
-        return error, None
-    topic_id, num_partitions, replication_factor, configs, config_error = metadata
-    embedded = borrowed_error(config_error)
-    if embedded is None:
-        return None, _TopicMetadataAndConfig(
-            topic_id=Uuid.from_string(str=topic_id), num_partitions=num_partitions,
-            replication_factor=replication_factor, config=_config_from_create_topics(configs))
-    if isinstance(embedded, ApiError):
-        # ``Errors.forCode(topicConfigErrorCode).exception()`` is an ApiException.
-        return None, _TopicMetadataAndConfig(exception=embedded)
-    # Not reachable from Java's wire codes; the key fails with the core's error.
-    return embedded, None
+    return Uuid.from_string(str=raw)
 
 
-def create_topics_result(new_topics: Iterable[NewTopic], payload: Payload,
-                         kind: Kind) -> CreateTopicsResult[Any]:
-    """The ``CreateTopicsResult`` of a ``create_topics`` payload."""
+#: ``CreateTopicsResult``'s per-topic C accessors and the value class each
+#: future's delivery builds from the plain value.
+_CREATE_TOPICS_REFINEMENTS: dict[str, Callable[[Any], Any] | None] = {
+    "config": config_from_rows,
+    "topic_id": _uuid_from_string,
+    "num_partitions": None,
+    "replication_factor": None,
+}
+
+
+def create_topics_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None
+                         ) -> CreateTopicsResult[Any]:
+    """The ``CreateTopicsResult`` over the C result: the per-topic ``values()``
+    futures, and each per-topic getter's future read from the C accessor of the
+    same name (``config(topic)``, ...), which fails with ``IllegalArgumentError``
+    for a topic not in the request, linked as a dependant of the topic's
+    future (:func:`linked`)."""
     from confluent_kafka.admin.create_topics_result import CreateTopicsResult
 
-    futures = per_key_futures((t.name() for t in new_topics), payload,
-                              _lib.CreateTopicsResult_drain, _topic_metadata_and_config, kind)
-    return CreateTopicsResult._new(futures=futures, kind=kind)
+    futures: dict[str, KafkaFuture[Any] | AsyncKafkaFuture[Any]] = wrap_map(
+        kind, loop, native.futures("values"))
 
+    def refine(topic: str, accessor: str) -> KafkaFuture[Any] | AsyncKafkaFuture[Any]:
+        source = wrap(kind, loop, native.future(accessor, topic,
+                                                _CREATE_TOPICS_REFINEMENTS[accessor]))
+        key_future = futures.get(topic)
+        return source if key_future is None else linked(kind, loop, key_future, source)
 
-free_create_topics = free_value_payload(_lib.CreateTopicsResult_drain)
+    return CreateTopicsResult._of_client(futures=futures, refine=refine, kind=kind)
 
 
 def topic_collection_target(topics: Any, rpc: str) -> tuple[bool, list[Any]]:
@@ -595,32 +630,27 @@ def delete_topics_result(by_ids: bool, keys: list[Any], payload: Payload,
     return DeleteTopicsResult._new(topic_id_futures=None, name_futures=futures, kind=kind)
 
 
-free_delete_topics = free_value_payload(_lib.DeleteTopicsResult_drain)
+free_delete_topics = free_value_payload("DeleteTopicsResult_drain")
 
 
-def list_topics_args(options: Any) -> tuple[Any, ...]:
-    """``Admin_list_topics_async(h, timeout_ms, list_internal, cb)``'s arguments."""
-    return (timeout_ms(options), options.should_list_internal())
-
-
-def _listings(drained: Mapping[str, tuple[str, str, int]]) -> dict[str, TopicListing]:
+def _listings(rows: Mapping[str, tuple[str, str, int]]) -> dict[str, TopicListing]:
+    """``{name: TopicListing}`` from the extension's ``{name: (name, topic_id,
+    is_internal)}``."""
     from confluent_kafka.admin.topic_listing import TopicListing
     from confluent_kafka.common import Uuid
 
     return {key: TopicListing(name=name, topic_id=Uuid.from_string(str=topic_id),
                               internal=bool(internal))
-            for key, (name, topic_id, internal) in drained.items()}
+            for key, (name, topic_id, internal) in rows.items()}
 
 
-def list_topics_result(payload: Payload, kind: Kind) -> ListTopicsResult[Any]:
-    """The ``ListTopicsResult`` of a ``list_topics`` payload."""
+def list_topics_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None
+                       ) -> ListTopicsResult[Any]:
+    """The ``ListTopicsResult`` over the C result's ``namesToListings()`` future."""
     from confluent_kafka.admin.list_topics_result import ListTopicsResult
 
-    future = single_future(payload, _lib.ListTopicsResult_drain, _listings, kind)
+    future = wrap(kind, loop, native.future("names_to_listings", None, _listings))
     return ListTopicsResult._new(future=future, kind=kind)
-
-
-free_list_topics = free_value_payload(_lib.ListTopicsResult_drain)
 
 
 def describe_topics_args(by_ids: bool, keys: list[Any], options: Any) -> tuple[Any, ...]:
@@ -689,7 +719,7 @@ def describe_topics_result(by_ids: bool, keys: list[Any], payload: Payload,
     return DescribeTopicsResult._new(topic_id_futures=None, name_futures=futures, kind=kind)
 
 
-free_describe_topics = free_value_payload(_lib.DescribeTopicsResult_drain)
+free_describe_topics = free_value_payload("DescribeTopicsResult_drain")
 
 
 def describe_cluster_args(options: Any) -> tuple[Any, ...]:
@@ -722,7 +752,7 @@ def describe_cluster_result(payload: Payload, kind: Kind) -> DescribeClusterResu
         authorized_operations=future_of(kind, acl_operations_from_codes(operations)), kind=kind)
 
 
-free_describe_cluster = free_value_payload(_lib.DescribeClusterResult_drain)
+free_describe_cluster = free_value_payload("DescribeClusterResult_drain")
 
 
 def _acl_binding_args(binding: AclBinding) -> tuple[Any, ...]:
@@ -806,7 +836,7 @@ def describe_acls_result(payload: Payload, kind: Kind) -> DescribeAclsResult[Any
     return DescribeAclsResult._new(future=future, kind=kind)
 
 
-free_describe_acls = free_value_payload(_lib.DescribeAclsResult_drain)
+free_describe_acls = free_value_payload("DescribeAclsResult_drain")
 
 
 def create_acls_args(acls: Iterable[AclBinding], options: Any) -> tuple[Any, ...]:
@@ -827,7 +857,7 @@ def create_acls_result(acls: Iterable[AclBinding], payload: Payload,
     return CreateAclsResult._new(futures=futures, kind=kind)
 
 
-free_create_acls = free_value_payload(_lib.CreateAclsResult_drain)
+free_create_acls = free_value_payload("CreateAclsResult_drain")
 
 
 def delete_acls_args(filters: Iterable[AclBindingFilter], options: Any) -> tuple[Any, ...]:
@@ -870,7 +900,7 @@ def delete_acls_result(filters: Iterable[AclBindingFilter], payload: Payload,
     return DeleteAclsResult._new(futures=futures, kind=kind)
 
 
-free_delete_acls = free_value_payload(_lib.DeleteAclsResult_drain)
+free_delete_acls = free_value_payload("DeleteAclsResult_drain")
 
 
 def config_resource_from_tuple(raw: tuple[int, str]) -> ConfigResource:
@@ -931,7 +961,7 @@ def describe_configs_result(resources: list[ConfigResource], payload: Payload,
     return DescribeConfigsResult._new(futures=futures, kind=kind)
 
 
-free_describe_configs = free_value_payload(_lib.DescribeConfigsResult_drain)
+free_describe_configs = free_value_payload("DescribeConfigsResult_drain")
 
 
 def incremental_alter_configs_args(configs: Mapping[ConfigResource, Iterable[AlterConfigOp]],
@@ -960,7 +990,7 @@ def incremental_alter_configs_result(resources: Iterable[ConfigResource], payloa
     return AlterConfigsResult._new(futures=futures, kind=kind)
 
 
-free_incremental_alter_configs = free_value_payload(_lib.AlterConfigsResult_drain)
+free_incremental_alter_configs = free_value_payload("AlterConfigsResult_drain")
 
 
 def replica_from_tuple(raw: tuple[str, int, int]) -> TopicPartitionReplica:
@@ -991,7 +1021,7 @@ def alter_replica_log_dirs_result(replicas: Iterable[TopicPartitionReplica], pay
     return AlterReplicaLogDirsResult._new(futures=futures, kind=kind)
 
 
-free_alter_replica_log_dirs = free_value_payload(_lib.AlterReplicaLogDirsResult_drain)
+free_alter_replica_log_dirs = free_value_payload("AlterReplicaLogDirsResult_drain")
 
 
 def describe_log_dirs_args(brokers: list[int], options: Any) -> tuple[Any, ...]:
@@ -1039,7 +1069,7 @@ def describe_log_dirs_result(brokers: list[int], payload: Payload,
     return DescribeLogDirsResult._new(futures=futures, kind=kind)
 
 
-free_describe_log_dirs = free_value_payload(_lib.DescribeLogDirsResult_drain)
+free_describe_log_dirs = free_value_payload("DescribeLogDirsResult_drain")
 
 
 def describe_replica_log_dirs_args(replicas: list[TopicPartitionReplica],
@@ -1081,7 +1111,7 @@ def describe_replica_log_dirs_result(replicas: list[TopicPartitionReplica], payl
     return DescribeReplicaLogDirsResult._new(futures=futures, kind=kind)
 
 
-free_describe_replica_log_dirs = free_value_payload(_lib.DescribeReplicaLogDirsResult_drain)
+free_describe_replica_log_dirs = free_value_payload("DescribeReplicaLogDirsResult_drain")
 
 
 def create_partitions_args(new_partitions: Mapping[str, NewPartitions],
@@ -1106,7 +1136,7 @@ def create_partitions_result(topics: Iterable[str], payload: Payload,
     return CreatePartitionsResult._new(values=futures, kind=kind)
 
 
-free_create_partitions = free_value_payload(_lib.CreatePartitionsResult_drain)
+free_create_partitions = free_value_payload("CreatePartitionsResult_drain")
 
 
 def delete_records_args(records_to_delete: Mapping[TopicPartition, RecordsToDelete],
@@ -1140,7 +1170,7 @@ def delete_records_result(partitions: Iterable[TopicPartition], payload: Payload
     return DeleteRecordsResult._new(futures=futures, kind=kind)
 
 
-free_delete_records = free_value_payload(_lib.DeleteRecordsResult_drain)
+free_delete_records = free_value_payload("DeleteRecordsResult_drain")
 
 
 def _principal_args(principal: KafkaPrincipal) -> tuple[str, str]:
@@ -1198,7 +1228,7 @@ def create_delegation_token_result(payload: Payload,
     return CreateDelegationTokenResult._new(delegation_token=future, kind=kind)
 
 
-free_create_delegation_token = free_value_payload(_lib.CreateDelegationTokenResult_drain)
+free_create_delegation_token = free_value_payload("CreateDelegationTokenResult_drain")
 
 
 def renew_delegation_token_args(hmac: bytes, options: Any) -> tuple[Any, ...]:
@@ -1217,7 +1247,7 @@ def renew_delegation_token_result(payload: Payload,
     return RenewDelegationTokenResult._new(expiry_timestamp=future, kind=kind)
 
 
-free_renew_delegation_token = free_value_payload(_lib.RenewDelegationTokenResult_drain)
+free_renew_delegation_token = free_value_payload("RenewDelegationTokenResult_drain")
 
 
 def expire_delegation_token_args(hmac: bytes, options: Any) -> tuple[Any, ...]:
@@ -1238,7 +1268,7 @@ def expire_delegation_token_result(payload: Payload,
     return ExpireDelegationTokenResult._new(expiry_timestamp=future, kind=kind)
 
 
-free_expire_delegation_token = free_value_payload(_lib.ExpireDelegationTokenResult_drain)
+free_expire_delegation_token = free_value_payload("ExpireDelegationTokenResult_drain")
 
 
 def describe_delegation_token_args(options: Any) -> tuple[Any, ...]:
@@ -1263,7 +1293,7 @@ def describe_delegation_token_result(payload: Payload,
     return DescribeDelegationTokenResult._new(delegation_tokens=future, kind=kind)
 
 
-free_describe_delegation_token = free_value_payload(_lib.DescribeDelegationTokenResult_drain)
+free_describe_delegation_token = free_value_payload("DescribeDelegationTokenResult_drain")
 
 
 def _group_member_assignment(raw: list[tuple[str, int]] | None) -> MemberAssignment | None:
@@ -1335,7 +1365,7 @@ def describe_consumer_groups_result(group_ids: Iterable[str], payload: Payload,
     return DescribeConsumerGroupsResult._new(futures=futures, kind=kind)
 
 
-free_describe_consumer_groups = free_value_payload(_lib.DescribeConsumerGroupsResult_drain)
+free_describe_consumer_groups = free_value_payload("DescribeConsumerGroupsResult_drain")
 
 
 def list_consumer_group_offsets_args(group_specs: Mapping[str, ListConsumerGroupOffsetsSpec],
@@ -1389,8 +1419,7 @@ def list_consumer_group_offsets_result(group_specs: Mapping[str, Any], payload: 
     return ListConsumerGroupOffsetsResult._new(futures=futures, kind=kind)
 
 
-free_list_consumer_group_offsets = free_value_payload(
-    _lib.ListConsumerGroupOffsetsResult_drain)
+free_list_consumer_group_offsets = free_value_payload("ListConsumerGroupOffsetsResult_drain")
 
 
 def delete_consumer_groups_args(group_ids: list[str], options: Any) -> tuple[Any, ...]:
@@ -1410,7 +1439,7 @@ def delete_consumer_groups_result(group_ids: Iterable[str], payload: Payload,
     return DeleteConsumerGroupsResult._new(futures=futures, kind=kind)
 
 
-free_delete_consumer_groups = free_value_payload(_lib.DeleteConsumerGroupsResult_drain)
+free_delete_consumer_groups = free_value_payload("DeleteConsumerGroupsResult_drain")
 
 
 def _is_errors_entry(error: BaseException) -> bool:
@@ -1428,7 +1457,7 @@ def _is_errors_entry(error: BaseException) -> bool:
 
 def _sub_level_errors_future(payload: Payload, drain: Callable[[int], Mapping[Any, Any]],
                              key_of: Callable[[Any], Any], absent_message: Callable[[Any], str],
-                             kind: Kind) -> AnyFuture[Any]:
+                             kind: Kind) -> KafkaFuture[Any] | AsyncKafkaFuture[Any]:
     """Java's one future over a ``Map<K, Errors>`` (``deleteConsumerGroupOffsets``,
     ``alterConsumerGroupOffsets``, ``removeMembersFromConsumerGroup``), rebuilt from
     the FFI's per-key outcomes ``{key: error_or_None}``.
@@ -1503,8 +1532,7 @@ def delete_consumer_group_offsets_result(partitions: Iterable[TopicPartition],
                                                  kind=kind)
 
 
-free_delete_consumer_group_offsets = free_value_payload(
-    _lib.DeleteConsumerGroupOffsetsResult_drain)
+free_delete_consumer_group_offsets = free_value_payload("DeleteConsumerGroupOffsetsResult_drain")
 
 
 def list_groups_args(options: Any) -> tuple[Any, ...]:
@@ -1546,7 +1574,7 @@ def list_groups_result(payload: Payload, kind: Kind) -> ListGroupsResult[Any]:
     return ListGroupsResult._new(future=future, kind=kind)
 
 
-free_list_groups = free_value_payload(_lib.ListGroupsResult_drain)
+free_list_groups = free_value_payload("ListGroupsResult_drain")
 
 
 def partitions_spec(partitions: Iterable[TopicPartition]) -> list[tuple[str, int]]:
@@ -1580,7 +1608,7 @@ def elect_leaders_result(payload: Payload, kind: Kind) -> ElectLeadersResult[Any
     return ElectLeadersResult._new(election_future=future, kind=kind)
 
 
-free_elect_leaders = free_value_payload(_lib.ElectLeadersResult_drain)
+free_elect_leaders = free_value_payload("ElectLeadersResult_drain")
 
 
 def alter_partition_reassignments_args(
@@ -1609,8 +1637,7 @@ def alter_partition_reassignments_result(partitions: Iterable[TopicPartition], p
     return AlterPartitionReassignmentsResult._new(futures=futures, kind=kind)
 
 
-free_alter_partition_reassignments = free_value_payload(
-    _lib.AlterPartitionReassignmentsResult_drain)
+free_alter_partition_reassignments = free_value_payload("AlterPartitionReassignmentsResult_drain")
 
 
 def list_partition_reassignments_args(partitions: Iterable[TopicPartition] | None,
@@ -1647,8 +1674,7 @@ def list_partition_reassignments_result(payload: Payload,
     return ListPartitionReassignmentsResult._new(reassignments=future, kind=kind)
 
 
-free_list_partition_reassignments = free_value_payload(
-    _lib.ListPartitionReassignmentsResult_drain)
+free_list_partition_reassignments = free_value_payload("ListPartitionReassignmentsResult_drain")
 
 
 def remove_members_from_consumer_group_args(group_id: str, options: Any) -> tuple[Any, ...]:
@@ -1696,8 +1722,7 @@ def remove_members_from_consumer_group_result(
                                                      kind=kind)
 
 
-free_remove_members_from_consumer_group = free_value_payload(
-    _lib.RemoveMembersFromConsumerGroupResult_drain)
+free_remove_members_from_consumer_group = free_value_payload("RemoveMembersFromConsumerGroupResult_drain")
 
 
 def alter_consumer_group_offsets_args(group_id: str,
@@ -1737,8 +1762,7 @@ def alter_consumer_group_offsets_result(payload: Payload,
     return AlterConsumerGroupOffsetsResult._new(future=future, kind=kind)
 
 
-free_alter_consumer_group_offsets = free_value_payload(
-    _lib.AlterConsumerGroupOffsetsResult_drain)
+free_alter_consumer_group_offsets = free_value_payload("AlterConsumerGroupOffsetsResult_drain")
 
 
 def offset_spec_value(spec: OffsetSpec) -> tuple[bool, int]:
@@ -1797,7 +1821,7 @@ def list_offsets_result(partitions: Iterable[TopicPartition], payload: Payload,
     return ListOffsetsResult._new(futures=futures, kind=kind)
 
 
-free_list_offsets = free_value_payload(_lib.ListOffsetsResult_drain)
+free_list_offsets = free_value_payload("ListOffsetsResult_drain")
 
 
 # ``DescribeClientQuotasRequest.MATCH_TYPE_EXACT`` / ``_DEFAULT`` / ``_SPECIFIED``.
@@ -1846,7 +1870,7 @@ def describe_client_quotas_result(payload: Payload,
     return DescribeClientQuotasResult._new(entities=future, kind=kind)
 
 
-free_describe_client_quotas = free_value_payload(_lib.DescribeClientQuotasResult_drain)
+free_describe_client_quotas = free_value_payload("DescribeClientQuotasResult_drain")
 
 
 def alter_client_quotas_args(entries: Iterable[ClientQuotaAlteration],
@@ -1872,7 +1896,7 @@ def alter_client_quotas_result(entries: Iterable[ClientQuotaAlteration], payload
     return AlterClientQuotasResult._new(futures=futures, kind=kind)
 
 
-free_alter_client_quotas = free_value_payload(_lib.AlterClientQuotasResult_drain)
+free_alter_client_quotas = free_value_payload("AlterClientQuotasResult_drain")
 
 
 def describe_user_scram_credentials_args(users: Iterable[str] | None,
@@ -1916,8 +1940,7 @@ def describe_user_scram_credentials_result(
     return DescribeUserScramCredentialsResult._new(data_future=future, kind=kind)
 
 
-free_describe_user_scram_credentials = free_value_payload(
-    _lib.DescribeUserScramCredentialsResult_drain)
+free_describe_user_scram_credentials = free_value_payload("DescribeUserScramCredentialsResult_drain")
 
 
 def _scram_alteration_row(alteration: UserScramCredentialAlteration) -> tuple[Any, ...]:
@@ -1963,8 +1986,7 @@ def alter_user_scram_credentials_result(alterations: Iterable[UserScramCredentia
     return AlterUserScramCredentialsResult._new(futures=futures, kind=kind)
 
 
-free_alter_user_scram_credentials = free_value_payload(
-    _lib.AlterUserScramCredentialsResult_drain)
+free_alter_user_scram_credentials = free_value_payload("AlterUserScramCredentialsResult_drain")
 
 
 def describe_features_args(options: Any) -> tuple[Any, ...]:
@@ -2002,7 +2024,7 @@ def describe_features_result(payload: Payload, kind: Kind) -> DescribeFeaturesRe
     return DescribeFeaturesResult._new(future=future, kind=kind)
 
 
-free_describe_features = free_value_payload(_lib.DescribeFeaturesResult_drain)
+free_describe_features = free_value_payload("DescribeFeaturesResult_drain")
 
 
 def update_features_args(feature_updates: Mapping[str, FeatureUpdate],
@@ -2034,7 +2056,7 @@ def update_features_result(feature_updates: Mapping[str, FeatureUpdate], payload
     return UpdateFeaturesResult._new(futures=futures, kind=kind)
 
 
-free_update_features = free_value_payload(_lib.UpdateFeaturesResult_drain)
+free_update_features = free_value_payload("UpdateFeaturesResult_drain")
 
 
 def describe_producers_args(partitions: Iterable[TopicPartition],
@@ -2079,7 +2101,7 @@ def describe_producers_result(partitions: Iterable[TopicPartition], payload: Pay
     return DescribeProducersResult._new(futures=futures, kind=kind)
 
 
-free_describe_producers = free_value_payload(_lib.DescribeProducersResult_drain)
+free_describe_producers = free_value_payload("DescribeProducersResult_drain")
 
 
 def _transactional_id_key(transactional_id: str) -> _CoordinatorKey:
@@ -2130,7 +2152,7 @@ def describe_transactions_result(transactional_ids: Iterable[str], payload: Payl
     return DescribeTransactionsResult._new(futures=futures, kind=kind)
 
 
-free_describe_transactions = free_value_payload(_lib.DescribeTransactionsResult_drain)
+free_describe_transactions = free_value_payload("DescribeTransactionsResult_drain")
 
 
 def abort_transaction_args(spec: AbortTransactionSpec, options: Any) -> tuple[Any, ...]:
@@ -2172,8 +2194,8 @@ def list_transactions_result(payload: Payload, kind: Kind) -> ListTransactionsRe
     from confluent_kafka.admin.transaction_state import TransactionState
 
     def by_broker(drained: Mapping[int, tuple[Any, list[tuple[str, int, str]]]]
-                  ) -> dict[int, AnyFuture[Any]]:
-        futures: dict[int, AnyFuture[Any]] = {}
+                  ) -> dict[int, KafkaFuture[Any] | AsyncKafkaFuture[Any]]:
+        futures: dict[int, KafkaFuture[Any] | AsyncKafkaFuture[Any]] = {}
         for broker_id, (raw_error, listings) in drained.items():
             error = borrowed_error(raw_error)
             value = None if error is not None else [
@@ -2187,7 +2209,7 @@ def list_transactions_result(payload: Payload, kind: Kind) -> ListTransactionsRe
     return ListTransactionsResult._new(future=future, kind=kind)
 
 
-free_list_transactions = free_value_payload(_lib.ListTransactionsResult_drain)
+free_list_transactions = free_value_payload("ListTransactionsResult_drain")
 
 
 def fence_producers_args(transactional_ids: Iterable[str], options: Any) -> tuple[Any, ...]:
@@ -2221,7 +2243,7 @@ def fence_producers_result(transactional_ids: Iterable[str], payload: Payload,
     return FenceProducersResult._new(futures=futures, kind=kind)
 
 
-free_fence_producers = free_value_payload(_lib.FenceProducersResult_drain)
+free_fence_producers = free_value_payload("FenceProducersResult_drain")
 
 
 def list_config_resources_args(config_resource_types: Iterable[ConfigResource.Type],
@@ -2246,7 +2268,7 @@ def list_config_resources_result(payload: Payload, kind: Kind) -> ListConfigReso
     return ListConfigResourcesResult._new(future=future, kind=kind)
 
 
-free_list_config_resources = free_value_payload(_lib.ListConfigResourcesResult_drain)
+free_list_config_resources = free_value_payload("ListConfigResourcesResult_drain")
 
 
 def describe_classic_groups_args(group_ids: list[str], options: Any) -> tuple[Any, ...]:
@@ -2290,7 +2312,7 @@ def describe_classic_groups_result(group_ids: Iterable[str], payload: Payload,
     return DescribeClassicGroupsResult._new(futures=futures, kind=kind)
 
 
-free_describe_classic_groups = free_value_payload(_lib.DescribeClassicGroupsResult_drain)
+free_describe_classic_groups = free_value_payload("DescribeClassicGroupsResult_drain")
 
 
 def force_terminate_transaction_args(transactional_id: str, options: Any) -> tuple[Any, ...]:

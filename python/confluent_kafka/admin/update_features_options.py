@@ -56,4 +56,5 @@ class UpdateFeaturesOptions(AbstractOptions):
         if validate_only is None:
             return self._validate_only
         self._validate_only = validate_only
+        self._record("validate_only", self._validate_only)
         return self

@@ -14,13 +14,12 @@
 
 # Stub for confluent_kafka.admin.DescribeReplicaLogDirsResult.
 
-import asyncio
-import concurrent.futures
 from collections.abc import Mapping
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.common import TopicPartitionReplica
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DescribeReplicaLogDirsResult"]
 
@@ -44,21 +43,21 @@ class DescribeReplicaLogDirsResult(Generic[KindT]):
     @classmethod
     def _new(cls, *,
              futures: Mapping[TopicPartitionReplica,
-                              AnyFuture[DescribeReplicaLogDirsResult.ReplicaLogDirInfo]],
+                              KafkaFuture[DescribeReplicaLogDirsResult.ReplicaLogDirInfo] | AsyncKafkaFuture[DescribeReplicaLogDirsResult.ReplicaLogDirInfo]],
              kind: type[KindT]) -> DescribeReplicaLogDirsResult[KindT]: ...
     @overload
     def values(self: DescribeReplicaLogDirsResult[Sync]
                ) -> dict[TopicPartitionReplica,
-                         concurrent.futures.Future[DescribeReplicaLogDirsResult.ReplicaLogDirInfo]]: ...
+                         KafkaFuture[DescribeReplicaLogDirsResult.ReplicaLogDirInfo]]: ...
     @overload
     def values(self: DescribeReplicaLogDirsResult[Async]
                ) -> dict[TopicPartitionReplica,
-                         asyncio.Future[DescribeReplicaLogDirsResult.ReplicaLogDirInfo]]: ...
+                         AsyncKafkaFuture[DescribeReplicaLogDirsResult.ReplicaLogDirInfo]]: ...
     @overload
     def all(self: DescribeReplicaLogDirsResult[Sync]
-            ) -> concurrent.futures.Future[dict[TopicPartitionReplica,
+            ) -> KafkaFuture[dict[TopicPartitionReplica,
                                                 DescribeReplicaLogDirsResult.ReplicaLogDirInfo]]: ...
     @overload
     def all(self: DescribeReplicaLogDirsResult[Async]
-            ) -> asyncio.Future[dict[TopicPartitionReplica,
+            ) -> AsyncKafkaFuture[dict[TopicPartitionReplica,
                                      DescribeReplicaLogDirsResult.ReplicaLogDirInfo]]: ...

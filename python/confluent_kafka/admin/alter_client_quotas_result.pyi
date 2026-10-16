@@ -14,33 +14,32 @@
 
 # Stub for confluent_kafka.admin.AlterClientQuotasResult.
 
-import asyncio
-import concurrent.futures
 from collections.abc import Mapping
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.common import ClientQuotaEntity
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["AlterClientQuotasResult"]
 
 class AlterClientQuotasResult(Generic[KindT]):
     @overload
     def __init__(self: AlterClientQuotasResult[Sync], *,
-                 futures: Mapping[ClientQuotaEntity, concurrent.futures.Future[None]]) -> None: ...
+                 futures: Mapping[ClientQuotaEntity, KafkaFuture[None]]) -> None: ...
     @overload
     def __init__(self: AlterClientQuotasResult[Async], *,
-                 futures: Mapping[ClientQuotaEntity, asyncio.Future[None]]) -> None: ...
+                 futures: Mapping[ClientQuotaEntity, AsyncKafkaFuture[None]]) -> None: ...
     @classmethod
-    def _new(cls, *, futures: Mapping[ClientQuotaEntity, AnyFuture[None]],
+    def _new(cls, *,
+             futures: Mapping[ClientQuotaEntity, KafkaFuture[None] | AsyncKafkaFuture[None]],
              kind: type[KindT]) -> AlterClientQuotasResult[KindT]: ...
     @overload
-    def values(self: AlterClientQuotasResult[Sync]
-               ) -> dict[ClientQuotaEntity, concurrent.futures.Future[None]]: ...
+    def values(self: AlterClientQuotasResult[Sync]) -> dict[ClientQuotaEntity, KafkaFuture[None]]: ...
     @overload
     def values(self: AlterClientQuotasResult[Async]
-               ) -> dict[ClientQuotaEntity, asyncio.Future[None]]: ...
+               ) -> dict[ClientQuotaEntity, AsyncKafkaFuture[None]]: ...
     @overload
-    def all(self: AlterClientQuotasResult[Sync]) -> concurrent.futures.Future[None]: ...
+    def all(self: AlterClientQuotasResult[Sync]) -> KafkaFuture[None]: ...
     @overload
-    def all(self: AlterClientQuotasResult[Async]) -> asyncio.Future[None]: ...
+    def all(self: AlterClientQuotasResult[Async]) -> AsyncKafkaFuture[None]: ...

@@ -5,28 +5,32 @@
 === ListTopicsResult module
 Java's constructor is package-private: ``__init__`` raises ``TypeError`` and ``_new``
 builds it (CLAUDE.md, Python Binding Conventions, Class family). One future; Java's
-``listings()`` / ``names()`` are ``thenApply`` views of it, kept through the private
-helper ``_then_apply`` (Idiom translations). ``Map::values`` is no ``Set``, so
-``listings()`` yields a ``list``; ``Map::keySet`` yields a ``set`` (Types).
+``listings()`` / ``names()`` are ``then_apply`` views of it (Futures). ``Map::values``
+is no ``Set``, so ``listings()`` yields a ``list``; ``Map::keySet`` yields a ``set``
+(Types).
 """
 === CreateTopicsResult module
 Java's constructor is protected: ``__init__`` raises ``TypeError`` and ``_new`` builds
 it (CLAUDE.md, Python Binding Conventions, Class family). Its futures carry Java's
 public nested ``TopicMetadataAndConfig``, which no public signature reaches, so it is
 the private helper ``_TopicMetadataAndConfig`` (decision log, entry 6); the public
-methods are ``thenApply`` views of those futures (``_then_apply``). The
-package-private constant ``UNKNOWN`` is ``_UNKNOWN``. Java's ``config`` /
-``topicId`` / ``numPartitions`` / ``replicationFactor`` call ``thenApply`` on
-``futures.get(topic)``, which throws ``NullPointerException`` for a topic that was
-not part of the call; they raise ``NullPointerError`` the same way.
+methods are ``then_apply`` views of those futures (Futures). The package-private
+constant ``UNKNOWN`` is ``_UNKNOWN``. On a result the client builds
+(``_of_client``), the futures are the core's per-topic ``values()`` futures and
+``config`` / ``topic_id`` / ``num_partitions`` / ``replication_factor`` return the
+core's own future of the topic, which fails with ``IllegalArgumentError`` for a topic
+that was not part of the call, with no Python-side check. On a result built through
+``_new`` (the mock's), they call ``then_apply`` on ``futures.get(topic)`` as Java's
+do, which throws ``NullPointerException`` for a topic that was not part of the call;
+they raise ``NullPointerError`` the same way.
 """
 === DeleteConsumerGroupOffsetsResult module
 Java's constructor is package-private: ``__init__`` raises ``TypeError`` and ``_new``
 builds it (CLAUDE.md, Python Binding Conventions, Class family). Its methods make a new
-future completed from the stored future's ``whenComplete``, kept through the private
-helpers ``_new_future_like`` / ``_when_complete`` / ``_complete*`` (Idiom
-translations). The stored map's values are Java's internal ``Errors``, carried as what
-``Errors.exception()`` gives (``None`` for ``NONE``; ``_internals``).
+future completed from the stored future's ``when_complete``: Java's
+``new KafkaFutureImpl<>()`` is the private ``_KafkaFutureImpl`` (Futures). The stored
+map's values are Java's internal ``Errors``, carried as what ``Errors.exception()``
+gives (``None`` for ``NONE``; ``_internals``).
 """
 === DescribeTransactionsResult module
 Java's constructor is package-private: ``__init__`` raises ``TypeError`` and ``_new``
@@ -39,8 +43,8 @@ Java's constructor is package-private: ``__init__`` raises ``TypeError`` and ``_
 builds it (CLAUDE.md, Python Binding Conventions, Class family). It holds a future of a
 map of futures (one per broker), both of the client's kind, so ``by_broker_id()`` is a
 future of a ``dict`` of futures of that kind. The methods make a new future completed
-from ``whenComplete`` (``_new_future_like`` / ``_when_complete``); ``all()`` is a
-``thenApply`` of ``all_by_broker_id()``. Java builds the listings as ``List``\\ s, so a
+from ``when_complete`` (Java's ``new KafkaFutureImpl<>()`` is the private
+``_KafkaFutureImpl``); ``all()`` is a ``then_apply`` of ``all_by_broker_id()``. Java builds the listings as ``List``\\ s, so a
 ``Collection<TransactionListing>`` is a ``list`` (Types).
 """
 === ListOffsetsResult nested ListOffsetsResultInfo

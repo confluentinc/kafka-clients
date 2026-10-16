@@ -21,9 +21,12 @@ builds it (CLAUDE.md, Python Binding Conventions, Class family).
 
 from __future__ import annotations
 
-from typing import Any, Generic
+from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
+
+if TYPE_CHECKING:
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["TerminateTransactionResult"]
 
@@ -42,7 +45,7 @@ class TerminateTransactionResult(Generic[KindT]):
             "client's force_terminate_transaction()")
 
     @classmethod
-    def _new(cls, *, future: AnyFuture[None],
+    def _new(cls, *, future: KafkaFuture[None] | AsyncKafkaFuture[None],
              kind: type[Sync] | type[Async]) -> TerminateTransactionResult[Any]:
         """Java's package-private ``TerminateTransactionResult(future)``."""
         result = cls.__new__(cls)
@@ -50,7 +53,7 @@ class TerminateTransactionResult(Generic[KindT]):
         result._kind = kind
         return result
 
-    def result(self) -> AnyFuture[None]:
+    def result(self) -> KafkaFuture[None] | AsyncKafkaFuture[None]:
         """Return a future which indicates whether the transaction was successfully
         terminated."""
         return self._future

@@ -23,10 +23,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 
 if TYPE_CHECKING:
     from confluent_kafka.common import DelegationToken
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["CreateDelegationTokenResult"]
 
@@ -45,7 +46,8 @@ class CreateDelegationTokenResult(Generic[KindT]):
             "client's create_delegation_token()")
 
     @classmethod
-    def _new(cls, *, delegation_token: AnyFuture[DelegationToken],
+    def _new(cls, *,
+             delegation_token: KafkaFuture[DelegationToken] | AsyncKafkaFuture[DelegationToken],
              kind: type[Sync] | type[Async]) -> CreateDelegationTokenResult[Any]:
         """Java's package-private ``CreateDelegationTokenResult(delegationToken)``."""
         result = cls.__new__(cls)
@@ -53,6 +55,6 @@ class CreateDelegationTokenResult(Generic[KindT]):
         result._kind = kind
         return result
 
-    def delegation_token(self) -> AnyFuture[DelegationToken]:
+    def delegation_token(self) -> KafkaFuture[DelegationToken] | AsyncKafkaFuture[DelegationToken]:
         """Returns a future which yields a delegation token"""
         return self._delegation_token

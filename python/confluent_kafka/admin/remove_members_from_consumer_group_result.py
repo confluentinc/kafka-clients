@@ -33,16 +33,8 @@ from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
 from confluent_kafka._java import java_str
-from confluent_kafka.admin._futures import (
-    AnyFuture,
-    Async,
-    KindT,
-    Sync,
-    _complete,
-    _complete_with_error,
-    _new_future_like,
-    _when_complete,
-)
+from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 from confluent_kafka.admin._internals import (
     _MemberIdentity,
     _sub_level_error,
@@ -53,6 +45,7 @@ from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
 if TYPE_CHECKING:
     from confluent_kafka.admin.member_to_remove import MemberToRemove
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["RemoveMembersFromConsumerGroupResult"]
 
@@ -75,7 +68,7 @@ class RemoveMembersFromConsumerGroupResult(Generic[KindT]):
             "admin client's remove_members_from_consumer_group()")
 
     @classmethod
-    def _new(cls, *, future: AnyFuture[dict[_MemberIdentity, BaseException | None]],
+    def _new(cls, *, future: KafkaFuture[dict[_MemberIdentity, BaseException | None]] | AsyncKafkaFuture[dict[_MemberIdentity, BaseException | None]],
              member_infos: Iterable[MemberToRemove],
              kind: type[Sync] | type[Async]) -> RemoveMembersFromConsumerGroupResult[Any]:
         """Java's package-private ``RemoveMembersFromConsumerGroupResult(future,
@@ -86,16 +79,16 @@ class RemoveMembersFromConsumerGroupResult(Generic[KindT]):
         result._kind = kind
         return result
 
-    def all(self) -> AnyFuture[None]:
+    def all(self) -> KafkaFuture[None] | AsyncKafkaFuture[None]:
         """Returns a future which indicates whether the request was 100% success, i.e. no
         either top level or member level error. If not, the first member error shall be
         returned."""
-        result: AnyFuture[None] = _new_future_like(self._future)
+        result: _KafkaFutureImpl[None] = _KafkaFutureImpl()
 
         def action(member_errors: _MemberErrors | None, throwable: BaseException | None
                    ) -> None:
             if throwable is not None:
-                _complete_with_error(result, throwable)
+                result.complete_with_error(throwable)
                 return
             assert member_errors is not None
             if self._remove_all():
@@ -104,19 +97,19 @@ class RemoveMembersFromConsumerGroupResult(Generic[KindT]):
                         ex = KafkaError(
                             message="Encounter exception when trying to remove: "
                             + java_str(member), cause=exception)
-                        _complete_with_error(result, ex)
+                        result.complete_with_error(ex)
                         return
             else:
                 for member_to_remove in self._member_infos:
                     if self._maybe_complete_exceptionally(
                             member_errors, _to_member_identity(member_to_remove), result):
                         return
-            _complete(result, None)
+            result.complete(None)
 
-        _when_complete(self._future, action)
-        return result
+        self._future.when_complete(action=action)
+        return self._kind._FUTURE._of_impl(result)
 
-    def member_result(self, *, member: MemberToRemove) -> AnyFuture[None]:
+    def member_result(self, *, member: MemberToRemove) -> KafkaFuture[None] | AsyncKafkaFuture[None]:
         """Returns the selected member future."""
         if self._remove_all():
             raise IllegalArgumentError(
@@ -125,28 +118,28 @@ class RemoveMembersFromConsumerGroupResult(Generic[KindT]):
             raise IllegalArgumentError(
                 message="Member " + java_str(member) + " was not included in the original "
                 "request")
-        result: AnyFuture[None] = _new_future_like(self._future)
+        result: _KafkaFutureImpl[None] = _KafkaFutureImpl()
 
         def action(member_errors: _MemberErrors | None, throwable: BaseException | None
                    ) -> None:
             if throwable is not None:
-                _complete_with_error(result, throwable)
+                result.complete_with_error(throwable)
                 return
             assert member_errors is not None
             if not self._maybe_complete_exceptionally(
                     member_errors, _to_member_identity(member), result):
-                _complete(result, None)
+                result.complete(None)
 
-        _when_complete(self._future, action)
-        return result
+        self._future.when_complete(action=action)
+        return self._kind._FUTURE._of_impl(result)
 
     def _maybe_complete_exceptionally(self, member_errors: _MemberErrors,
-                                      member: _MemberIdentity, result: AnyFuture[None]) -> bool:
+                                      member: _MemberIdentity, result: KafkaFuture[None] | AsyncKafkaFuture[None]) -> bool:
         exception = _sub_level_error(
             member_errors, member,
             "Member \"" + java_str(member) + "\" was not included in the removal response")
         if exception is not None:
-            _complete_with_error(result, exception)
+            result.complete_with_error(exception)
             return True
         return False
 

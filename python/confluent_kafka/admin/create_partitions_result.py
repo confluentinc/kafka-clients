@@ -16,16 +16,18 @@
 
 Java's constructor is package-private: ``__init__`` raises ``TypeError`` and ``_new``
 builds it (CLAUDE.md, Python Binding Conventions, Class family). ``all()`` is Java's
-``KafkaFuture.allOf``, kept through the private helper ``_all_of`` (Idiom
-translations).
+``KafkaFuture.allOf``, the ``all_of`` of the kind's future class (Futures).
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Generic
+from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync, _all_of
+from confluent_kafka.admin._futures import Async, KindT, Sync
+
+if TYPE_CHECKING:
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["CreatePartitionsResult"]
 
@@ -44,7 +46,7 @@ class CreatePartitionsResult(Generic[KindT]):
             "create_partitions()")
 
     @classmethod
-    def _new(cls, *, values: Mapping[str, AnyFuture[None]],
+    def _new(cls, *, values: Mapping[str, KafkaFuture[None] | AsyncKafkaFuture[None]],
              kind: type[Sync] | type[Async]) -> CreatePartitionsResult[Any]:
         """Java's package-private ``CreatePartitionsResult(values)``."""
         result = cls.__new__(cls)
@@ -52,11 +54,11 @@ class CreatePartitionsResult(Generic[KindT]):
         result._kind = kind
         return result
 
-    def values(self) -> Mapping[str, AnyFuture[None]]:
+    def values(self) -> Mapping[str, KafkaFuture[None] | AsyncKafkaFuture[None]]:
         """Return a map from topic names to futures, which can be used to check the
         status of individual partition creations."""
         return self._values
 
-    def all(self) -> AnyFuture[None]:
+    def all(self) -> KafkaFuture[None] | AsyncKafkaFuture[None]:
         """Return a future which succeeds if all the partition creations succeed."""
-        return _all_of(self._values.values(), self._kind)
+        return self._kind._FUTURE.all_of(futures=tuple(self._values.values()))

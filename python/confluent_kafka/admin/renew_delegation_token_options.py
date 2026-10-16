@@ -58,4 +58,5 @@ class RenewDelegationTokenOptions(AbstractOptions):
         if renew_time_period_ms is None:
             return self._renew_time_period_ms
         self._renew_time_period_ms = renew_time_period_ms
+        self._record("renew_time_period_ms", self._renew_time_period_ms)
         return self

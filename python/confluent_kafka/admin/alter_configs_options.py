@@ -56,6 +56,7 @@ class AlterConfigsOptions(AbstractOptions):
         if timeout_ms is UNSET:
             return self._timeout_ms
         self._timeout_ms = timeout_ms
+        self._record("timeout_ms", self._timeout_ms)
         return self
 
     def should_validate_only(self) -> bool:
@@ -67,4 +68,5 @@ class AlterConfigsOptions(AbstractOptions):
         """Set to true if the request should be validated without altering the
         configs."""
         self._validate_only = validate_only
+        self._record("validate_only", self._validate_only)
         return self

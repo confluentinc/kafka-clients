@@ -62,12 +62,14 @@ class CreatePartitionsOptions(AbstractOptions):
         if validate_only is None:
             return self._validate_only
         self._validate_only = validate_only
+        self._record("validate_only", self._validate_only)
         return self
 
     def retry_on_quota_violation(self, *,
                                  retry_on_quota_violation: bool) -> CreatePartitionsOptions:
         """Set to true if quota violation should be automatically retried."""
         self._retry_on_quota_violation = retry_on_quota_violation
+        self._record("retry_on_quota_violation", self._retry_on_quota_violation)
         return self
 
     def should_retry_on_quota_violation(self) -> bool:

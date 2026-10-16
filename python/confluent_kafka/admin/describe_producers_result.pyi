@@ -14,14 +14,13 @@
 
 # Stub for confluent_kafka.admin.DescribeProducersResult.
 
-import asyncio
-import concurrent.futures
 from collections.abc import Mapping, Sequence
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.admin.producer_state import ProducerState
 from confluent_kafka.common import TopicPartition
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DescribeProducersResult"]
 
@@ -32,19 +31,18 @@ class DescribeProducersResult(Generic[KindT]):
 
     @classmethod
     def _new(cls, *,
-             futures: Mapping[TopicPartition, AnyFuture[DescribeProducersResult.PartitionProducerState]],
+             futures: Mapping[TopicPartition, KafkaFuture[DescribeProducersResult.PartitionProducerState] | AsyncKafkaFuture[DescribeProducersResult.PartitionProducerState]],
              kind: type[KindT]) -> DescribeProducersResult[KindT]: ...
     @overload
     def partition_result(self: DescribeProducersResult[Sync], *, partition: TopicPartition
-                         ) -> concurrent.futures.Future[DescribeProducersResult.PartitionProducerState]: ...
+                         ) -> KafkaFuture[DescribeProducersResult.PartitionProducerState]: ...
     @overload
     def partition_result(self: DescribeProducersResult[Async], *, partition: TopicPartition
-                         ) -> asyncio.Future[DescribeProducersResult.PartitionProducerState]: ...
+                         ) -> AsyncKafkaFuture[DescribeProducersResult.PartitionProducerState]: ...
     @overload
     def all(self: DescribeProducersResult[Sync]
-            ) -> concurrent.futures.Future[dict[TopicPartition,
-                                                DescribeProducersResult.PartitionProducerState]]: ...
+            ) -> KafkaFuture[dict[TopicPartition, DescribeProducersResult.PartitionProducerState]]: ...
     @overload
     def all(self: DescribeProducersResult[Async]
-            ) -> asyncio.Future[dict[TopicPartition,
-                                     DescribeProducersResult.PartitionProducerState]]: ...
+            ) -> AsyncKafkaFuture[dict[TopicPartition,
+                                       DescribeProducersResult.PartitionProducerState]]: ...

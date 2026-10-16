@@ -55,6 +55,7 @@ class ListTopicsOptions(AbstractOptions):
         if timeout_ms is UNSET:
             return self._timeout_ms
         self._timeout_ms = timeout_ms
+        self._record("timeout_ms", self._timeout_ms)
         return self
 
     def list_internal(self, *, list_internal: bool) -> ListTopicsOptions:
@@ -64,6 +65,7 @@ class ListTopicsOptions(AbstractOptions):
         :return: This ListTopicsOptions object.
         """
         self._list_internal = list_internal
+        self._record("list_internal", self._list_internal)
         return self
 
     def should_list_internal(self) -> bool:

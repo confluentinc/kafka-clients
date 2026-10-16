@@ -14,30 +14,30 @@
 
 # Stub for confluent_kafka.admin.DescribeTransactionsResult.
 
-import asyncio
-import concurrent.futures
 from collections.abc import Mapping
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.admin._internals import _CoordinatorKey
 from confluent_kafka.admin.transaction_description import TransactionDescription
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DescribeTransactionsResult"]
 
 class DescribeTransactionsResult(Generic[KindT]):
     @classmethod
-    def _new(cls, *, futures: Mapping[_CoordinatorKey, AnyFuture[TransactionDescription]],
+    def _new(cls, *,
+             futures: Mapping[_CoordinatorKey, KafkaFuture[TransactionDescription] | AsyncKafkaFuture[TransactionDescription]],
              kind: type[KindT]) -> DescribeTransactionsResult[KindT]: ...
     @overload
     def description(self: DescribeTransactionsResult[Sync], *, transactional_id: str
-                    ) -> concurrent.futures.Future[TransactionDescription]: ...
+                    ) -> KafkaFuture[TransactionDescription]: ...
     @overload
     def description(self: DescribeTransactionsResult[Async], *, transactional_id: str
-                    ) -> asyncio.Future[TransactionDescription]: ...
+                    ) -> AsyncKafkaFuture[TransactionDescription]: ...
     @overload
     def all(self: DescribeTransactionsResult[Sync]
-            ) -> concurrent.futures.Future[dict[str, TransactionDescription]]: ...
+            ) -> KafkaFuture[dict[str, TransactionDescription]]: ...
     @overload
     def all(self: DescribeTransactionsResult[Async]
-            ) -> asyncio.Future[dict[str, TransactionDescription]]: ...
+            ) -> AsyncKafkaFuture[dict[str, TransactionDescription]]: ...

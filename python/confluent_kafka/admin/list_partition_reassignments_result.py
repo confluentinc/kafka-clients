@@ -23,11 +23,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 
 if TYPE_CHECKING:
     from confluent_kafka.admin.partition_reassignment import PartitionReassignment
     from confluent_kafka.common import TopicPartition
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["ListPartitionReassignmentsResult"]
 
@@ -46,15 +47,18 @@ class ListPartitionReassignmentsResult(Generic[KindT]):
             "client's list_partition_reassignments()")
 
     @classmethod
-    def _new(cls, *, reassignments: AnyFuture[dict[TopicPartition, PartitionReassignment]],
-             kind: type[Sync] | type[Async]) -> ListPartitionReassignmentsResult[Any]:
+    def _new(
+            cls, *,
+            reassignments: KafkaFuture[dict[TopicPartition, PartitionReassignment]] | AsyncKafkaFuture[dict[TopicPartition, PartitionReassignment]],
+            kind: type[Sync] | type[Async]) -> ListPartitionReassignmentsResult[Any]:
         """Java's package-private ``ListPartitionReassignmentsResult(reassignments)``."""
         result = cls.__new__(cls)
         result._future = reassignments
         result._kind = kind
         return result
 
-    def reassignments(self) -> AnyFuture[dict[TopicPartition, PartitionReassignment]]:
+    def reassignments(
+            self) -> KafkaFuture[dict[TopicPartition, PartitionReassignment]] | AsyncKafkaFuture[dict[TopicPartition, PartitionReassignment]]:
         """Return a future which yields a map containing each partition's
         reassignments"""
         return self._future

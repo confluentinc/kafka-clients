@@ -16,7 +16,7 @@
 ``org.apache.kafka.clients.admin.DescribeClientQuotasResult``.
 
 Java's constructor is public, so it stays the keyword-only ``__init__``; the
-client-kind marker is read from the futures given (``asyncio.Future``\\ s: the async
+client-kind marker is read from the futures given (``AsyncKafkaFuture``\\ s: the async
 kind, else the sync one), and the clients build it through ``_new``, which sets the kind
 explicitly, as for every result class (CLAUDE.md, Python Binding Conventions, Class
 family).
@@ -26,10 +26,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync, _kind_of
+from confluent_kafka.admin._futures import Async, KindT, Sync, _kind_of
 
 if TYPE_CHECKING:
     from confluent_kafka.common import ClientQuotaEntity
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DescribeClientQuotasResult"]
 
@@ -42,7 +43,9 @@ class DescribeClientQuotasResult(Generic[KindT]):
 
     __slots__ = ("_entities", "_kind")
 
-    def __init__(self, *, entities: AnyFuture[dict[ClientQuotaEntity, dict[str, float]]]) -> None:
+    def __init__(
+            self, *,
+            entities: KafkaFuture[dict[ClientQuotaEntity, dict[str, float]]] | AsyncKafkaFuture[dict[ClientQuotaEntity, dict[str, float]]]) -> None:
         """Maps an entity to its configured quota value(s). Note if no value is defined
         for a quota type for that entity's config, then it is not included in the
         resulting value map.
@@ -53,8 +56,10 @@ class DescribeClientQuotasResult(Generic[KindT]):
         self._kind: type[Sync] | type[Async] = _kind_of((self._entities,))
 
     @classmethod
-    def _new(cls, *, entities: AnyFuture[dict[ClientQuotaEntity, dict[str, float]]],
-             kind: type[Sync] | type[Async]) -> DescribeClientQuotasResult[Any]:
+    def _new(
+            cls, *,
+            entities: KafkaFuture[dict[ClientQuotaEntity, dict[str, float]]] | AsyncKafkaFuture[dict[ClientQuotaEntity, dict[str, float]]],
+            kind: type[Sync] | type[Async]) -> DescribeClientQuotasResult[Any]:
         """The clients' builder: Java's public ``DescribeClientQuotasResult(entities)``
         with the client kind set by the caller.
 
@@ -65,7 +70,8 @@ class DescribeClientQuotasResult(Generic[KindT]):
         result._kind = kind
         return result
 
-    def entities(self) -> AnyFuture[dict[ClientQuotaEntity, dict[str, float]]]:
+    def entities(
+            self) -> KafkaFuture[dict[ClientQuotaEntity, dict[str, float]]] | AsyncKafkaFuture[dict[ClientQuotaEntity, dict[str, float]]]:
         """Returns a map from quota entity to a future which can be used to check the
         status of the operation."""
         return self._entities

@@ -31,20 +31,12 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import (
-    AnyFuture,
-    Async,
-    KindT,
-    Sync,
-    _complete,
-    _complete_with_error,
-    _mark_retrieved,
-    _new_future_like,
-    _then_apply,
-)
+from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 
 if TYPE_CHECKING:
     from confluent_kafka.admin.group_listing import GroupListing
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["ListGroupsResult"]
 
@@ -63,16 +55,16 @@ class ListGroupsResult(Generic[KindT]):
             "list_groups()")
 
     @classmethod
-    def _new(cls, *, future: AnyFuture[Iterable[object]],
+    def _new(cls, *, future: KafkaFuture[Iterable[object]] | AsyncKafkaFuture[Iterable[object]],
              kind: type[Sync] | type[Async]) -> ListGroupsResult[Any]:
         """Java's package-private ``ListGroupsResult(future)``."""
         result = cls.__new__(cls)
-        all_future: AnyFuture[list[GroupListing]] = _new_future_like(future)
-        valid: AnyFuture[list[GroupListing]] = _new_future_like(future)
-        errors: AnyFuture[list[BaseException]] = _new_future_like(future)
-        result._all = all_future
-        result._valid = valid
-        result._errors = errors
+        all_future: _KafkaFutureImpl[list[GroupListing]] = _KafkaFutureImpl()
+        valid: _KafkaFutureImpl[list[GroupListing]] = _KafkaFutureImpl()
+        errors: _KafkaFutureImpl[list[BaseException]] = _KafkaFutureImpl()
+        result._all = kind._FUTURE._of_impl(all_future)
+        result._valid = kind._FUTURE._of_impl(valid)
+        result._errors = kind._FUTURE._of_impl(errors)
         result._kind = kind
 
         def split(results: Iterable[object]) -> None:
@@ -84,20 +76,18 @@ class ListGroupsResult(Generic[KindT]):
                 else:
                     cur_valid.append(result_object)
             if cur_errors:
-                _complete_with_error(all_future, cur_errors[0])
+                all_future.complete_with_error(cur_errors[0])
             else:
-                _complete(all_future, cur_valid)
-            _complete(valid, cur_valid)
-            _complete(errors, cur_errors)
+                all_future.complete(cur_valid)
+            valid.complete(cur_valid)
+            errors.complete(cur_errors)
             return None
 
-        # Java discards this future; ``all()`` is built here whether or not a caller
-        # reads it. Neither logs an unread error (``_mark_retrieved``).
-        _mark_retrieved(_then_apply(future, split))
-        _mark_retrieved(all_future)
+        # Java discards this future.
+        future.then_apply(function=split)
         return result
 
-    def all(self) -> AnyFuture[list[GroupListing]]:
+    def all(self) -> KafkaFuture[list[GroupListing]] | AsyncKafkaFuture[list[GroupListing]]:
         """Returns a future that yields either an exception, or the full set of group
         listings.
 
@@ -106,7 +96,7 @@ class ListGroupsResult(Generic[KindT]):
         """
         return self._all
 
-    def valid(self) -> AnyFuture[list[GroupListing]]:
+    def valid(self) -> KafkaFuture[list[GroupListing]] | AsyncKafkaFuture[list[GroupListing]]:
         """Returns a future which yields just the valid listings.
 
         This future never fails with an error, no matter what happens. Errors are
@@ -117,7 +107,7 @@ class ListGroupsResult(Generic[KindT]):
         """
         return self._valid
 
-    def errors(self) -> AnyFuture[list[BaseException]]:
+    def errors(self) -> KafkaFuture[list[BaseException]] | AsyncKafkaFuture[list[BaseException]]:
         """Returns a future which yields just the errors which occurred.
 
         If this future yields a non-empty collection, it is very likely that elements are

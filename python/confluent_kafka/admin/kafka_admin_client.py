@@ -53,5 +53,6 @@ class KafkaAdminClient(Admin):
         built from ``configs``."""
         client = cls.__new__(cls)
         _AdminState.__init__(client)
+        client._pump = None
         client._start(configs)
         return client

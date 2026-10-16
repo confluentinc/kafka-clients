@@ -14,20 +14,20 @@
 
 # Stub for confluent_kafka.admin.DescribeAclsResult.
 
-import asyncio
-import concurrent.futures
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.common import AclBinding
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DescribeAclsResult"]
 
 class DescribeAclsResult(Generic[KindT]):
     @classmethod
-    def _new(cls, *, future: AnyFuture[list[AclBinding]],
+    def _new(cls, *,
+             future: KafkaFuture[list[AclBinding]] | AsyncKafkaFuture[list[AclBinding]],
              kind: type[KindT]) -> DescribeAclsResult[KindT]: ...
     @overload
-    def values(self: DescribeAclsResult[Sync]) -> concurrent.futures.Future[list[AclBinding]]: ...
+    def values(self: DescribeAclsResult[Sync]) -> KafkaFuture[list[AclBinding]]: ...
     @overload
-    def values(self: DescribeAclsResult[Async]) -> asyncio.Future[list[AclBinding]]: ...
+    def values(self: DescribeAclsResult[Async]) -> AsyncKafkaFuture[list[AclBinding]]: ...

@@ -14,14 +14,13 @@
 
 # Stub for confluent_kafka.admin.ListConsumerGroupOffsetsResult.
 
-import asyncio
-import concurrent.futures
 from collections.abc import Mapping
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.admin._internals import _CoordinatorKey
 from confluent_kafka.common import TopicPartition
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 from confluent_kafka.consumer import OffsetAndMetadata
 
 __all__ = ["ListConsumerGroupOffsetsResult"]
@@ -30,20 +29,20 @@ class ListConsumerGroupOffsetsResult(Generic[KindT]):
     @classmethod
     def _new(cls, *,
              futures: Mapping[_CoordinatorKey,
-                              AnyFuture[dict[TopicPartition, OffsetAndMetadata | None]]],
+                              KafkaFuture[dict[TopicPartition, OffsetAndMetadata | None]] | AsyncKafkaFuture[dict[TopicPartition, OffsetAndMetadata | None]]],
              kind: type[KindT]) -> ListConsumerGroupOffsetsResult[KindT]: ...
     @overload
     def partitions_to_offset_and_metadata(
         self: ListConsumerGroupOffsetsResult[Sync], *, group_id: str | None = None
-    ) -> concurrent.futures.Future[dict[TopicPartition, OffsetAndMetadata | None]]: ...
+    ) -> KafkaFuture[dict[TopicPartition, OffsetAndMetadata | None]]: ...
     @overload
     def partitions_to_offset_and_metadata(
         self: ListConsumerGroupOffsetsResult[Async], *, group_id: str | None = None
-    ) -> asyncio.Future[dict[TopicPartition, OffsetAndMetadata | None]]: ...
+    ) -> AsyncKafkaFuture[dict[TopicPartition, OffsetAndMetadata | None]]: ...
     @overload
     def all(self: ListConsumerGroupOffsetsResult[Sync]
-            ) -> concurrent.futures.Future[dict[str, dict[TopicPartition,
+            ) -> KafkaFuture[dict[str, dict[TopicPartition,
                                                           OffsetAndMetadata | None]]]: ...
     @overload
     def all(self: ListConsumerGroupOffsetsResult[Async]
-            ) -> asyncio.Future[dict[str, dict[TopicPartition, OffsetAndMetadata | None]]]: ...
+            ) -> AsyncKafkaFuture[dict[str, dict[TopicPartition, OffsetAndMetadata | None]]]: ...

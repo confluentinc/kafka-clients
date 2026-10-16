@@ -14,27 +14,27 @@
 
 # Stub for confluent_kafka.admin.AlterReplicaLogDirsResult.
 
-import asyncio
-import concurrent.futures
 from collections.abc import Mapping
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.common import TopicPartitionReplica
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["AlterReplicaLogDirsResult"]
 
 class AlterReplicaLogDirsResult(Generic[KindT]):
     @classmethod
-    def _new(cls, *, futures: Mapping[TopicPartitionReplica, AnyFuture[None]],
+    def _new(cls, *,
+             futures: Mapping[TopicPartitionReplica, KafkaFuture[None] | AsyncKafkaFuture[None]],
              kind: type[KindT]) -> AlterReplicaLogDirsResult[KindT]: ...
     @overload
     def values(self: AlterReplicaLogDirsResult[Sync]
-               ) -> dict[TopicPartitionReplica, concurrent.futures.Future[None]]: ...
+               ) -> dict[TopicPartitionReplica, KafkaFuture[None]]: ...
     @overload
     def values(self: AlterReplicaLogDirsResult[Async]
-               ) -> dict[TopicPartitionReplica, asyncio.Future[None]]: ...
+               ) -> dict[TopicPartitionReplica, AsyncKafkaFuture[None]]: ...
     @overload
-    def all(self: AlterReplicaLogDirsResult[Sync]) -> concurrent.futures.Future[None]: ...
+    def all(self: AlterReplicaLogDirsResult[Sync]) -> KafkaFuture[None]: ...
     @overload
-    def all(self: AlterReplicaLogDirsResult[Async]) -> asyncio.Future[None]: ...
+    def all(self: AlterReplicaLogDirsResult[Async]) -> AsyncKafkaFuture[None]: ...

@@ -60,11 +60,13 @@ class CreateTopicsOptions(AbstractOptions):
         if timeout_ms is UNSET:
             return self._timeout_ms
         self._timeout_ms = timeout_ms
+        self._record("timeout_ms", self._timeout_ms)
         return self
 
     def validate_only(self, *, validate_only: bool) -> CreateTopicsOptions:
         """Set to true if the request should be validated without creating the topic."""
         self._validate_only = validate_only
+        self._record("validate_only", self._validate_only)
         return self
 
     def should_validate_only(self) -> bool:
@@ -74,6 +76,7 @@ class CreateTopicsOptions(AbstractOptions):
     def retry_on_quota_violation(self, *, retry_on_quota_violation: bool) -> CreateTopicsOptions:
         """Set to true if quota violation should be automatically retried."""
         self._retry_on_quota_violation = retry_on_quota_violation
+        self._record("retry_on_quota_violation", self._retry_on_quota_violation)
         return self
 
     def should_retry_on_quota_violation(self) -> bool:

@@ -22,10 +22,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 
 if TYPE_CHECKING:
     from confluent_kafka.admin.feature_metadata import FeatureMetadata
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DescribeFeaturesResult"]
 
@@ -44,7 +45,7 @@ class DescribeFeaturesResult(Generic[KindT]):
             "describe_features()")
 
     @classmethod
-    def _new(cls, *, future: AnyFuture[FeatureMetadata],
+    def _new(cls, *, future: KafkaFuture[FeatureMetadata] | AsyncKafkaFuture[FeatureMetadata],
              kind: type[Sync] | type[Async]) -> DescribeFeaturesResult[Any]:
         """Java's protected ``DescribeFeaturesResult(future)``."""
         result = cls.__new__(cls)
@@ -52,5 +53,5 @@ class DescribeFeaturesResult(Generic[KindT]):
         result._kind = kind
         return result
 
-    def feature_metadata(self) -> AnyFuture[FeatureMetadata]:
+    def feature_metadata(self) -> KafkaFuture[FeatureMetadata] | AsyncKafkaFuture[FeatureMetadata]:
         return self._future

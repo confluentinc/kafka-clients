@@ -16,8 +16,8 @@
 
 Java's constructor is package-private: ``__init__`` raises ``TypeError`` and ``_new``
 builds it (CLAUDE.md, Python Binding Conventions, Class family). ``all()`` makes a new
-future completed from the stored future's ``whenComplete``, kept through the private
-helpers ``_new_future_like`` / ``_when_complete`` / ``_complete*``. Java's
+future completed from the stored future's ``when_complete``: Java's ``new
+KafkaFutureImpl<>()`` is the private ``_KafkaFutureImpl``. Java's
 ``Optional<Throwable>`` is ``BaseException | None`` (Types).
 """
 
@@ -26,19 +26,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import (
-    AnyFuture,
-    Async,
-    KindT,
-    Sync,
-    _complete,
-    _complete_with_error,
-    _new_future_like,
-    _when_complete,
-)
+from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 
 if TYPE_CHECKING:
     from confluent_kafka.common import TopicPartition
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["ElectLeadersResult"]
 
@@ -57,35 +50,38 @@ class ElectLeadersResult(Generic[KindT]):
             "elect_leaders()")
 
     @classmethod
-    def _new(cls, *, election_future: AnyFuture[dict[TopicPartition, BaseException | None]],
-             kind: type[Sync] | type[Async]) -> ElectLeadersResult[Any]:
+    def _new(
+            cls, *,
+            election_future: KafkaFuture[dict[TopicPartition, BaseException | None]] | AsyncKafkaFuture[dict[TopicPartition, BaseException | None]],
+            kind: type[Sync] | type[Async]) -> ElectLeadersResult[Any]:
         """Java's package-private ``ElectLeadersResult(electionFuture)``."""
         result = cls.__new__(cls)
         result._election_future = election_future
         result._kind = kind
         return result
 
-    def partitions(self) -> AnyFuture[dict[TopicPartition, BaseException | None]]:
+    def partitions(
+            self) -> KafkaFuture[dict[TopicPartition, BaseException | None]] | AsyncKafkaFuture[dict[TopicPartition, BaseException | None]]:
         """Get a future for the topic partitions for which a leader election was attempted. If
         the election succeeded then the value for a topic partition is ``None``; otherwise the
         election failed and the value is the error."""
         return self._election_future
 
-    def all(self) -> AnyFuture[None]:
+    def all(self) -> KafkaFuture[None] | AsyncKafkaFuture[None]:
         """Return a future which succeeds if all the topic elections succeed."""
-        result: AnyFuture[None] = _new_future_like(self._election_future)
+        result: _KafkaFutureImpl[None] = _KafkaFutureImpl()
 
         def action(topic_partitions: Mapping[TopicPartition, BaseException | None] | None,
                    throwable: BaseException | None) -> None:
             if throwable is not None:
-                _complete_with_error(result, throwable)
+                result.complete_with_error(throwable)
             else:
                 assert topic_partitions is not None
                 for exception in topic_partitions.values():
                     if exception is not None:
-                        _complete_with_error(result, exception)
+                        result.complete_with_error(exception)
                         return
-                _complete(result, None)
+                result.complete(None)
 
-        _when_complete(self.partitions(), action)
-        return result
+        self.partitions().when_complete(action=action)
+        return self._kind._FUTURE._of_impl(result)

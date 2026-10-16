@@ -23,10 +23,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 
 if TYPE_CHECKING:
     from confluent_kafka.common import AclBinding
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DescribeAclsResult"]
 
@@ -45,7 +46,7 @@ class DescribeAclsResult(Generic[KindT]):
             "describe_acls()")
 
     @classmethod
-    def _new(cls, *, future: AnyFuture[list[AclBinding]],
+    def _new(cls, *, future: KafkaFuture[list[AclBinding]] | AsyncKafkaFuture[list[AclBinding]],
              kind: type[Sync] | type[Async]) -> DescribeAclsResult[Any]:
         """Java's package-private ``DescribeAclsResult(future)``."""
         result = cls.__new__(cls)
@@ -53,6 +54,6 @@ class DescribeAclsResult(Generic[KindT]):
         result._kind = kind
         return result
 
-    def values(self) -> AnyFuture[list[AclBinding]]:
+    def values(self) -> KafkaFuture[list[AclBinding]] | AsyncKafkaFuture[list[AclBinding]]:
         """Return a future containing the ACLs requested."""
         return self._future

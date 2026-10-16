@@ -14,15 +14,14 @@
 
 # Stub for confluent_kafka.admin.DescribeUserScramCredentialsResult.
 
-import asyncio
-import concurrent.futures
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.admin._internals import _DescribeUserScramCredentialsResponseData
 from confluent_kafka.admin.user_scram_credentials_description import (
     UserScramCredentialsDescription,
 )
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DescribeUserScramCredentialsResult"]
 
@@ -31,22 +30,22 @@ _RESOURCE_NOT_FOUND_CODE: int
 
 class DescribeUserScramCredentialsResult(Generic[KindT]):
     @classmethod
-    def _new(cls, *, data_future: AnyFuture[_DescribeUserScramCredentialsResponseData],
+    def _new(cls, *, data_future: KafkaFuture[_DescribeUserScramCredentialsResponseData] | AsyncKafkaFuture[_DescribeUserScramCredentialsResponseData],
              kind: type[KindT]) -> DescribeUserScramCredentialsResult[KindT]: ...
     @overload
     def all(self: DescribeUserScramCredentialsResult[Sync]
-            ) -> concurrent.futures.Future[dict[str, UserScramCredentialsDescription]]: ...
+            ) -> KafkaFuture[dict[str, UserScramCredentialsDescription]]: ...
     @overload
     def all(self: DescribeUserScramCredentialsResult[Async]
-            ) -> asyncio.Future[dict[str, UserScramCredentialsDescription]]: ...
+            ) -> AsyncKafkaFuture[dict[str, UserScramCredentialsDescription]]: ...
     @overload
     def users(self: DescribeUserScramCredentialsResult[Sync]
-              ) -> concurrent.futures.Future[list[str]]: ...
+              ) -> KafkaFuture[list[str]]: ...
     @overload
-    def users(self: DescribeUserScramCredentialsResult[Async]) -> asyncio.Future[list[str]]: ...
+    def users(self: DescribeUserScramCredentialsResult[Async]) -> AsyncKafkaFuture[list[str]]: ...
     @overload
     def description(self: DescribeUserScramCredentialsResult[Sync], *, user_name: str
-                    ) -> concurrent.futures.Future[UserScramCredentialsDescription]: ...
+                    ) -> KafkaFuture[UserScramCredentialsDescription]: ...
     @overload
     def description(self: DescribeUserScramCredentialsResult[Async], *, user_name: str
-                    ) -> asyncio.Future[UserScramCredentialsDescription]: ...
+                    ) -> AsyncKafkaFuture[UserScramCredentialsDescription]: ...

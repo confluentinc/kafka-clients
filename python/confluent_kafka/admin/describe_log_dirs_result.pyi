@@ -14,29 +14,29 @@
 
 # Stub for confluent_kafka.admin.DescribeLogDirsResult.
 
-import asyncio
-import concurrent.futures
 from collections.abc import Mapping
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.admin.log_dir_description import LogDirDescription
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DescribeLogDirsResult"]
 
 class DescribeLogDirsResult(Generic[KindT]):
     @classmethod
-    def _new(cls, *, futures: Mapping[int, AnyFuture[dict[str, LogDirDescription]]],
+    def _new(cls, *,
+             futures: Mapping[int, KafkaFuture[dict[str, LogDirDescription]] | AsyncKafkaFuture[dict[str, LogDirDescription]]],
              kind: type[KindT]) -> DescribeLogDirsResult[KindT]: ...
     @overload
     def descriptions(self: DescribeLogDirsResult[Sync]
-                     ) -> dict[int, concurrent.futures.Future[dict[str, LogDirDescription]]]: ...
+                     ) -> dict[int, KafkaFuture[dict[str, LogDirDescription]]]: ...
     @overload
     def descriptions(self: DescribeLogDirsResult[Async]
-                     ) -> dict[int, asyncio.Future[dict[str, LogDirDescription]]]: ...
+                     ) -> dict[int, AsyncKafkaFuture[dict[str, LogDirDescription]]]: ...
     @overload
     def all_descriptions(self: DescribeLogDirsResult[Sync]
-                         ) -> concurrent.futures.Future[dict[int, dict[str, LogDirDescription]]]: ...
+                         ) -> KafkaFuture[dict[int, dict[str, LogDirDescription]]]: ...
     @overload
     def all_descriptions(self: DescribeLogDirsResult[Async]
-                         ) -> asyncio.Future[dict[int, dict[str, LogDirDescription]]]: ...
+                         ) -> AsyncKafkaFuture[dict[int, dict[str, LogDirDescription]]]: ...

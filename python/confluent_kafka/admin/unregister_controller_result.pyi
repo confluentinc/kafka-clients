@@ -14,19 +14,18 @@
 
 # Stub for confluent_kafka.admin.UnregisterControllerResult.
 
-import asyncio
-import concurrent.futures
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["UnregisterControllerResult"]
 
 class UnregisterControllerResult(Generic[KindT]):
     @classmethod
-    def _new(cls, *, future: AnyFuture[None],
+    def _new(cls, *, future: KafkaFuture[None] | AsyncKafkaFuture[None],
              kind: type[KindT]) -> UnregisterControllerResult[KindT]: ...
     @overload
-    def all(self: UnregisterControllerResult[Sync]) -> concurrent.futures.Future[None]: ...
+    def all(self: UnregisterControllerResult[Sync]) -> KafkaFuture[None]: ...
     @overload
-    def all(self: UnregisterControllerResult[Async]) -> asyncio.Future[None]: ...
+    def all(self: UnregisterControllerResult[Async]) -> AsyncKafkaFuture[None]: ...

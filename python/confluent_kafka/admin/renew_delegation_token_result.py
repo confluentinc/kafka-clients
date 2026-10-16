@@ -21,9 +21,12 @@ builds it (CLAUDE.md, Python Binding Conventions, Class family).
 
 from __future__ import annotations
 
-from typing import Any, Generic
+from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
+
+if TYPE_CHECKING:
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["RenewDelegationTokenResult"]
 
@@ -43,7 +46,7 @@ class RenewDelegationTokenResult(Generic[KindT]):
             "client's renew_delegation_token()")
 
     @classmethod
-    def _new(cls, *, expiry_timestamp: AnyFuture[int],
+    def _new(cls, *, expiry_timestamp: KafkaFuture[int] | AsyncKafkaFuture[int],
              kind: type[Sync] | type[Async]) -> RenewDelegationTokenResult[Any]:
         """Java's package-private ``RenewDelegationTokenResult(expiryTimestamp)``."""
         result = cls.__new__(cls)
@@ -51,6 +54,6 @@ class RenewDelegationTokenResult(Generic[KindT]):
         result._kind = kind
         return result
 
-    def expiry_timestamp(self) -> AnyFuture[int]:
+    def expiry_timestamp(self) -> KafkaFuture[int] | AsyncKafkaFuture[int]:
         """Returns a future which yields expiry timestamp"""
         return self._expiry_timestamp

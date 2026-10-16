@@ -23,10 +23,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 
 if TYPE_CHECKING:
     from confluent_kafka.common import AclOperation, Node
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DescribeClusterResult"]
 
@@ -45,9 +46,12 @@ class DescribeClusterResult(Generic[KindT]):
             "describe_cluster()")
 
     @classmethod
-    def _new(cls, *, nodes: AnyFuture[list[Node]], controller: AnyFuture[Node],
-             cluster_id: AnyFuture[str], authorized_operations: AnyFuture[set[AclOperation] | None],
-             kind: type[Sync] | type[Async]) -> DescribeClusterResult[Any]:
+    def _new(
+            cls, *, nodes: KafkaFuture[list[Node]] | AsyncKafkaFuture[list[Node]],
+            controller: KafkaFuture[Node] | AsyncKafkaFuture[Node],
+            cluster_id: KafkaFuture[str] | AsyncKafkaFuture[str],
+            authorized_operations: KafkaFuture[set[AclOperation] | None] | AsyncKafkaFuture[set[AclOperation] | None],
+            kind: type[Sync] | type[Async]) -> DescribeClusterResult[Any]:
         """Java's package-private ``DescribeClusterResult(nodes, controller, clusterId,
         authorizedOperations)``."""
         result = cls.__new__(cls)
@@ -58,11 +62,11 @@ class DescribeClusterResult(Generic[KindT]):
         result._kind = kind
         return result
 
-    def nodes(self) -> AnyFuture[list[Node]]:
+    def nodes(self) -> KafkaFuture[list[Node]] | AsyncKafkaFuture[list[Node]]:
         """Returns a future which yields a collection of nodes."""
         return self._nodes
 
-    def controller(self) -> AnyFuture[Node]:
+    def controller(self) -> KafkaFuture[Node] | AsyncKafkaFuture[Node]:
         """Returns a future which yields the current controller node.
 
         When using ``bootstrap.servers``, the controller refer to a random broker. When
@@ -70,11 +74,12 @@ class DescribeClusterResult(Generic[KindT]):
         """
         return self._controller
 
-    def cluster_id(self) -> AnyFuture[str]:
+    def cluster_id(self) -> KafkaFuture[str] | AsyncKafkaFuture[str]:
         """Returns a future which yields the current cluster id."""
         return self._cluster_id
 
-    def authorized_operations(self) -> AnyFuture[set[AclOperation] | None]:
+    def authorized_operations(
+            self) -> KafkaFuture[set[AclOperation] | None] | AsyncKafkaFuture[set[AclOperation] | None]:
         """Returns a future which yields authorized operations. The future value will be
         non-null if the broker supplied this information, and null otherwise."""
         return self._authorized_operations

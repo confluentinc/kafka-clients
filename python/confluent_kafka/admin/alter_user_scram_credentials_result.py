@@ -26,17 +26,13 @@ futures, plus the clients' ``_new`` (rule interpretation 2). ``requireNonNull`` 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Generic
+from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import (
-    AnyFuture,
-    Async,
-    KindT,
-    Sync,
-    _all_of,
-    _kind_of,
-)
+from confluent_kafka.admin._futures import Async, KindT, Sync, _kind_of
 from confluent_kafka.null_pointer_error import NullPointerError
+
+if TYPE_CHECKING:
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["AlterUserScramCredentialsResult"]
 
@@ -49,7 +45,7 @@ class AlterUserScramCredentialsResult(Generic[KindT]):
 
     __slots__ = ("_futures", "_kind")
 
-    def __init__(self, *, futures: Mapping[str, AnyFuture[None]]) -> None:
+    def __init__(self, *, futures: Mapping[str, KafkaFuture[None] | AsyncKafkaFuture[None]]) -> None:
         """``futures``: the required map from user names to futures representing the
         results of the alteration(s) for each user."""
         if futures is None:
@@ -58,7 +54,7 @@ class AlterUserScramCredentialsResult(Generic[KindT]):
         self._kind: type[Sync] | type[Async] = _kind_of(self._futures.values())
 
     @classmethod
-    def _new(cls, *, futures: Mapping[str, AnyFuture[None]],
+    def _new(cls, *, futures: Mapping[str, KafkaFuture[None] | AsyncKafkaFuture[None]],
              kind: type[Sync] | type[Async]) -> AlterUserScramCredentialsResult[Any]:
         """The clients' builder: Java's public ``AlterUserScramCredentialsResult(futures)``
         with the client kind set by the caller."""
@@ -69,12 +65,12 @@ class AlterUserScramCredentialsResult(Generic[KindT]):
         result._kind = kind
         return result
 
-    def values(self) -> dict[str, AnyFuture[None]]:
+    def values(self) -> dict[str, KafkaFuture[None] | AsyncKafkaFuture[None]]:
         """Return a map from user names to futures, which can be used to check the status
         of the alteration(s) for each user."""
         return dict(self._futures)
 
-    def all(self) -> AnyFuture[None]:
+    def all(self) -> KafkaFuture[None] | AsyncKafkaFuture[None]:
         """Return a future which succeeds only if all the user SCRAM credential
         alterations succeed."""
-        return _all_of(self._futures.values(), self._kind)
+        return self._kind._FUTURE.all_of(futures=tuple(self._futures.values()))

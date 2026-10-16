@@ -16,8 +16,7 @@
 
 Java's constructor is package-private: ``__init__`` raises ``TypeError`` and ``_new``
 builds it (CLAUDE.md, Python Binding Conventions, Class family). ``all()`` is Java's
-``KafkaFuture.allOf``, kept through the private helper ``_all_of`` (Idiom
-translations).
+``KafkaFuture.allOf``, the ``all_of`` of the kind's future class (Futures).
 """
 
 from __future__ import annotations
@@ -25,10 +24,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync, _all_of
+from confluent_kafka.admin._futures import Async, KindT, Sync
 
 if TYPE_CHECKING:
     from confluent_kafka.common import AclBinding
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["CreateAclsResult"]
 
@@ -47,7 +47,7 @@ class CreateAclsResult(Generic[KindT]):
             "create_acls()")
 
     @classmethod
-    def _new(cls, *, futures: Mapping[AclBinding, AnyFuture[None]],
+    def _new(cls, *, futures: Mapping[AclBinding, KafkaFuture[None] | AsyncKafkaFuture[None]],
              kind: type[Sync] | type[Async]) -> CreateAclsResult[Any]:
         """Java's package-private ``CreateAclsResult(futures)``."""
         result = cls.__new__(cls)
@@ -55,11 +55,11 @@ class CreateAclsResult(Generic[KindT]):
         result._kind = kind
         return result
 
-    def values(self) -> Mapping[AclBinding, AnyFuture[None]]:
+    def values(self) -> Mapping[AclBinding, KafkaFuture[None] | AsyncKafkaFuture[None]]:
         """Return a map from ACL bindings to futures which can be used to check the
         status of the creation of each ACL binding."""
         return self._futures
 
-    def all(self) -> AnyFuture[None]:
+    def all(self) -> KafkaFuture[None] | AsyncKafkaFuture[None]:
         """Return a future which succeeds only if all the ACL creations succeed."""
-        return _all_of(self._futures.values(), self._kind)
+        return self._kind._FUTURE.all_of(futures=tuple(self._futures.values()))

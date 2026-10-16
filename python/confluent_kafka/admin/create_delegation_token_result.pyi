@@ -14,22 +14,21 @@
 
 # Stub for confluent_kafka.admin.CreateDelegationTokenResult.
 
-import asyncio
-import concurrent.futures
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.common import DelegationToken
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["CreateDelegationTokenResult"]
 
 class CreateDelegationTokenResult(Generic[KindT]):
     @classmethod
-    def _new(cls, *, delegation_token: AnyFuture[DelegationToken],
+    def _new(cls, *,
+             delegation_token: KafkaFuture[DelegationToken] | AsyncKafkaFuture[DelegationToken],
              kind: type[KindT]) -> CreateDelegationTokenResult[KindT]: ...
     @overload
-    def delegation_token(self: CreateDelegationTokenResult[Sync]
-                         ) -> concurrent.futures.Future[DelegationToken]: ...
+    def delegation_token(self: CreateDelegationTokenResult[Sync]) -> KafkaFuture[DelegationToken]: ...
     @overload
     def delegation_token(self: CreateDelegationTokenResult[Async]
-                         ) -> asyncio.Future[DelegationToken]: ...
+                         ) -> AsyncKafkaFuture[DelegationToken]: ...

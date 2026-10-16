@@ -17,10 +17,10 @@
 
 Java's constructor is package-private: ``__init__`` raises ``TypeError`` and ``_new``
 builds it (CLAUDE.md, Python Binding Conventions, Class family). Its methods make a new
-future completed from the stored future's ``whenComplete``, kept through the private
-helpers ``_new_future_like`` / ``_when_complete`` / ``_complete*`` (Idiom
-translations). The stored map's values are Java's internal ``Errors``, carried as what
-``Errors.exception()`` gives (``None`` for ``NONE``; ``_internals``).
+future completed from the stored future's ``when_complete``: Java's
+``new KafkaFutureImpl<>()`` is the private ``_KafkaFutureImpl`` (Futures). The stored
+map's values are Java's internal ``Errors``, carried as what ``Errors.exception()``
+gives (``None`` for ``NONE``; ``_internals``).
 """
 
 from __future__ import annotations
@@ -29,21 +29,14 @@ from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
 from confluent_kafka._java import java_str
-from confluent_kafka.admin._futures import (
-    AnyFuture,
-    Async,
-    KindT,
-    Sync,
-    _complete,
-    _complete_with_error,
-    _new_future_like,
-    _when_complete,
-)
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.admin._internals import _sub_level_error
+from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
 if TYPE_CHECKING:
     from confluent_kafka.common import TopicPartition
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DeleteConsumerGroupOffsetsResult"]
 
@@ -62,9 +55,11 @@ class DeleteConsumerGroupOffsetsResult(Generic[KindT]):
             "client's delete_consumer_group_offsets()")
 
     @classmethod
-    def _new(cls, *, future: AnyFuture[dict[TopicPartition, BaseException | None]],
-             partitions: Iterable[TopicPartition],
-             kind: type[Sync] | type[Async]) -> DeleteConsumerGroupOffsetsResult[Any]:
+    def _new(
+            cls, *,
+            future: KafkaFuture[dict[TopicPartition, BaseException | None]] | AsyncKafkaFuture[dict[TopicPartition, BaseException | None]],
+            partitions: Iterable[TopicPartition],
+            kind: type[Sync] | type[Async]) -> DeleteConsumerGroupOffsetsResult[Any]:
         """Java's package-private ``DeleteConsumerGroupOffsetsResult(future, partitions)``."""
         result = cls.__new__(cls)
         result._future = future
@@ -72,51 +67,52 @@ class DeleteConsumerGroupOffsetsResult(Generic[KindT]):
         result._kind = kind
         return result
 
-    def partition_result(self, *, partition: TopicPartition) -> AnyFuture[None]:
+    def partition_result(self, *,
+                         partition: TopicPartition) -> KafkaFuture[None] | AsyncKafkaFuture[None]:
         """Return a future which can be used to check the result for a given partition."""
         if partition not in self._partitions:
             raise IllegalArgumentError(
                 message="Partition " + java_str(partition)
                 + " was not included in the original request")
-        result: AnyFuture[None] = _new_future_like(self._future)
+        result: _KafkaFutureImpl[None] = _KafkaFutureImpl()
 
         def action(topic_partitions: Mapping[TopicPartition, BaseException | None] | None,
                    throwable: BaseException | None) -> None:
             if throwable is not None:
-                _complete_with_error(result, throwable)
+                result.complete_with_error(throwable)
             elif not self._maybe_complete_exceptionally(topic_partitions, partition, result):
-                _complete(result, None)
+                result.complete(None)
 
-        _when_complete(self._future, action)
-        return result
+        self._future.when_complete(action=action)
+        return self._kind._FUTURE._of_impl(result)
 
-    def all(self) -> AnyFuture[None]:
+    def all(self) -> KafkaFuture[None] | AsyncKafkaFuture[None]:
         """Return a future which succeeds only if all the deletions succeed. If not, the
         first partition error shall be returned."""
-        result: AnyFuture[None] = _new_future_like(self._future)
+        result: _KafkaFutureImpl[None] = _KafkaFutureImpl()
 
         def action(topic_partitions: Mapping[TopicPartition, BaseException | None] | None,
                    throwable: BaseException | None) -> None:
             if throwable is not None:
-                _complete_with_error(result, throwable)
+                result.complete_with_error(throwable)
             else:
                 for partition in self._partitions:
                     if self._maybe_complete_exceptionally(topic_partitions, partition, result):
                         return
-                _complete(result, None)
+                result.complete(None)
 
-        _when_complete(self._future, action)
-        return result
+        self._future.when_complete(action=action)
+        return self._kind._FUTURE._of_impl(result)
 
     def _maybe_complete_exceptionally(
             self, partition_level_errors: Mapping[TopicPartition, BaseException | None] | None,
-            partition: TopicPartition, result: AnyFuture[None]) -> bool:
+            partition: TopicPartition, result: _KafkaFutureImpl[None]) -> bool:
         assert partition_level_errors is not None
         exception = _sub_level_error(
             partition_level_errors, partition,
             "Offset deletion result for partition \"" + java_str(partition)
             + "\" was not included in the response")
         if exception is not None:
-            _complete_with_error(result, exception)
+            result.complete_with_error(exception)
             return True
         return False

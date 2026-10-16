@@ -14,36 +14,35 @@
 
 # Stub for confluent_kafka.admin.DescribeConsumerGroupsResult.
 
-import asyncio
-import concurrent.futures
 from collections.abc import Mapping
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.admin.consumer_group_description import ConsumerGroupDescription
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DescribeConsumerGroupsResult"]
 
 class DescribeConsumerGroupsResult(Generic[KindT]):
     @overload
     def __init__(self: DescribeConsumerGroupsResult[Sync], *,
-                 futures: Mapping[str, concurrent.futures.Future[ConsumerGroupDescription]]
-                 ) -> None: ...
+                 futures: Mapping[str, KafkaFuture[ConsumerGroupDescription]]) -> None: ...
     @overload
     def __init__(self: DescribeConsumerGroupsResult[Async], *,
-                 futures: Mapping[str, asyncio.Future[ConsumerGroupDescription]]) -> None: ...
+                 futures: Mapping[str, AsyncKafkaFuture[ConsumerGroupDescription]]) -> None: ...
     @classmethod
-    def _new(cls, *, futures: Mapping[str, AnyFuture[ConsumerGroupDescription]],
+    def _new(cls, *,
+             futures: Mapping[str, KafkaFuture[ConsumerGroupDescription] | AsyncKafkaFuture[ConsumerGroupDescription]],
              kind: type[KindT]) -> DescribeConsumerGroupsResult[KindT]: ...
     @overload
     def described_groups(self: DescribeConsumerGroupsResult[Sync]
-                         ) -> dict[str, concurrent.futures.Future[ConsumerGroupDescription]]: ...
+                         ) -> dict[str, KafkaFuture[ConsumerGroupDescription]]: ...
     @overload
     def described_groups(self: DescribeConsumerGroupsResult[Async]
-                         ) -> dict[str, asyncio.Future[ConsumerGroupDescription]]: ...
+                         ) -> dict[str, AsyncKafkaFuture[ConsumerGroupDescription]]: ...
     @overload
     def all(self: DescribeConsumerGroupsResult[Sync]
-            ) -> concurrent.futures.Future[dict[str, ConsumerGroupDescription]]: ...
+            ) -> KafkaFuture[dict[str, ConsumerGroupDescription]]: ...
     @overload
     def all(self: DescribeConsumerGroupsResult[Async]
-            ) -> asyncio.Future[dict[str, ConsumerGroupDescription]]: ...
+            ) -> AsyncKafkaFuture[dict[str, ConsumerGroupDescription]]: ...

@@ -77,6 +77,7 @@ class ListTransactionsOptions(AbstractOptions):
         :return: this object
         """
         self._filtered_states = frozenset(states)
+        self._record("filter_states", self._filtered_states)
         return self
 
     def filter_producer_ids(self, *, producer_id_filters: Iterable[int]) -> ListTransactionsOptions:
@@ -88,6 +89,7 @@ class ListTransactionsOptions(AbstractOptions):
         :return: this object
         """
         self._filtered_producer_ids = frozenset(producer_id_filters)
+        self._record("filter_producer_ids", self._filtered_producer_ids)
         return self
 
     def filter_on_duration(self, *, duration_ms: int) -> ListTransactionsOptions:
@@ -99,6 +101,7 @@ class ListTransactionsOptions(AbstractOptions):
         :return: this object
         """
         self._filtered_duration = duration_ms
+        self._record("filter_on_duration", self._filtered_duration)
         return self
 
     def filter_on_transactional_id_pattern(self, *, pattern: str | None) -> ListTransactionsOptions:
@@ -110,6 +113,7 @@ class ListTransactionsOptions(AbstractOptions):
         :return: this object
         """
         self._filtered_transactional_id_pattern = pattern
+        self._record("filter_on_transactional_id_pattern", self._filtered_transactional_id_pattern)
         return self
 
     def filtered_states(self) -> set[TransactionState]:

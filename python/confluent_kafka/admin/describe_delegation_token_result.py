@@ -23,10 +23,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 
 if TYPE_CHECKING:
     from confluent_kafka.common import DelegationToken
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DescribeDelegationTokenResult"]
 
@@ -45,14 +46,17 @@ class DescribeDelegationTokenResult(Generic[KindT]):
             "client's describe_delegation_token()")
 
     @classmethod
-    def _new(cls, *, delegation_tokens: AnyFuture[list[DelegationToken]],
-             kind: type[Sync] | type[Async]) -> DescribeDelegationTokenResult[Any]:
+    def _new(
+            cls, *,
+            delegation_tokens: KafkaFuture[list[DelegationToken]] | AsyncKafkaFuture[list[DelegationToken]],
+            kind: type[Sync] | type[Async]) -> DescribeDelegationTokenResult[Any]:
         """Java's package-private ``DescribeDelegationTokenResult(delegationTokens)``."""
         result = cls.__new__(cls)
         result._delegation_tokens = delegation_tokens
         result._kind = kind
         return result
 
-    def delegation_tokens(self) -> AnyFuture[list[DelegationToken]]:
+    def delegation_tokens(
+            self) -> KafkaFuture[list[DelegationToken]] | AsyncKafkaFuture[list[DelegationToken]]:
         """Returns a future which yields list of delegation tokens"""
         return self._delegation_tokens

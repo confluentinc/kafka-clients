@@ -16,19 +16,20 @@
 
 Java's constructor is package-private: ``__init__`` raises ``TypeError`` and ``_new``
 builds it (CLAUDE.md, Python Binding Conventions, Class family). One future; Java's
-``listings()`` / ``names()`` are ``thenApply`` views of it, kept through the private
-helper ``_then_apply`` (Idiom translations). ``Map::values`` is no ``Set``, so
-``listings()`` yields a ``list``; ``Map::keySet`` yields a ``set`` (Types).
+``listings()`` / ``names()`` are ``then_apply`` views of it (Futures). ``Map::values``
+is no ``Set``, so ``listings()`` yields a ``list``; ``Map::keySet`` yields a ``set``
+(Types).
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync, _then_apply
+from confluent_kafka.admin._futures import Async, KindT, Sync
 
 if TYPE_CHECKING:
     from confluent_kafka.admin.topic_listing import TopicListing
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["ListTopicsResult"]
 
@@ -47,22 +48,25 @@ class ListTopicsResult(Generic[KindT]):
             "list_topics()")
 
     @classmethod
-    def _new(cls, *, future: AnyFuture[dict[str, TopicListing]],
-             kind: type[Sync] | type[Async]) -> ListTopicsResult[Any]:
+    def _new(
+            cls, *,
+            future: KafkaFuture[dict[str, TopicListing]] | AsyncKafkaFuture[dict[str, TopicListing]],
+            kind: type[Sync] | type[Async]) -> ListTopicsResult[Any]:
         """Java's package-private ``ListTopicsResult(future)``."""
         result = cls.__new__(cls)
         result._future = future
         result._kind = kind
         return result
 
-    def names_to_listings(self) -> AnyFuture[dict[str, TopicListing]]:
+    def names_to_listings(
+            self) -> KafkaFuture[dict[str, TopicListing]] | AsyncKafkaFuture[dict[str, TopicListing]]:
         """Return a future which yields a map of topic names to TopicListing objects."""
         return self._future
 
-    def listings(self) -> AnyFuture[list[TopicListing]]:
+    def listings(self) -> KafkaFuture[list[TopicListing]] | AsyncKafkaFuture[list[TopicListing]]:
         """Return a future which yields a collection of TopicListing objects."""
-        return _then_apply(self._future, lambda listings: list(listings.values()))
+        return self._future.then_apply(function=lambda listings: list(listings.values()))
 
-    def names(self) -> AnyFuture[set[str]]:
+    def names(self) -> KafkaFuture[set[str]] | AsyncKafkaFuture[set[str]]:
         """Return a future which yields a collection of topic names."""
-        return _then_apply(self._future, lambda listings: set(listings.keys()))
+        return self._future.then_apply(function=lambda listings: set(listings.keys()))

@@ -18,12 +18,14 @@ imports use the file path (`confluent_kafka.admin.abstract_options`), never the 
 other modules a `.py` only annotates are imported under `TYPE_CHECKING`; one used at run time is
 imported inside the function (`ListGroupsOptions.for_consumer_groups` imports `GroupType`).
 
-`_futures.py` (private, not generated: written once) holds the client-kind marker and the future
-helpers: `Sync` / `Async` (marker classes, no instances), `KindT = TypeVar("KindT", Sync, Async)`,
-`AnyFuture[T]` (either future), `_then_apply`, `_all_of`, `_new_future`, `_new_future_like`
-(Java's `new KafkaFutureImpl<>()` for a future completed from another's `whenComplete`),
-`_when_complete`, `_completed_future`, `_complete`, `_complete_with_error` (a `CancelledError`
-cancels), `_kind_of`.
+`_futures.py` (private, not generated: written once) holds the client-kind marker: `Sync` /
+`Async` (marker classes, no instances; each one's `_FUTURE` is the future class of its kind,
+`KafkaFuture` / `AsyncKafkaFuture`), `KindT = TypeVar("KindT", Sync, Async)` and `_kind_of`. The
+futures are `confluent_kafka.common.KafkaFuture` / `AsyncKafkaFuture` (CLAUDE.md, Futures): a result
+composes `all()` and its refinements through their `then_apply` / `when_complete` and the kind's
+`_FUTURE.all_of`; Java's `new KafkaFutureImpl<>()` for a future completed from another's
+`whenComplete` is `_KafkaFutureImpl`, handed out as `self._kind._FUTURE._of_impl(impl)`. A future
+of either kind is written `KafkaFuture[T] | AsyncKafkaFuture[T]` in the runtime annotations.
 
 `_internals.py` (private, written once) holds the Java internals results use: `_CoordinatorKey`
 (`admin.internals.CoordinatorKey`, its `FindCoordinatorRequest.CoordinatorType` nested) and
@@ -58,19 +60,19 @@ constructor `@overload`: any subset is a form.
 ## Result classes
 
 Every result is `Generic[KindT]`, `__slots__` including `_kind`; methods returning a future (or a
-map of futures) have one `@overload` per kind (`self: X[Sync]` -> `concurrent.futures.Future[...]`,
-`self: X[Async]` -> `asyncio.Future[...]`). `__init__` of a non-public constructor raises
+map of futures) have one `@overload` per kind (`self: X[Sync]` -> `KafkaFuture[...]`,
+`self: X[Async]` -> `AsyncKafkaFuture[...]`). `__init__` of a non-public constructor raises
 `TypeError("<Class> cannot be constructed directly; use the admin client's <method>()")`.
 
 | Class | Patterns |
 |---|---|
-| `AlterConfigsResult` | Per-key futures map (`values()` returns the stored `dict`) + `all()` = `_all_of(values, kind)`. |
-| `ListTopicsResult` | One future; `listings()` / `names()` = `_then_apply` (`Map::values` -> `list`, `Map::keySet` -> `set`). |
+| `AlterConfigsResult` | Per-key futures map (`values()` returns the stored `dict`) + `all()` = `self._kind._FUTURE.all_of(...)`. |
+| `ListTopicsResult` | One future; `listings()` / `names()` = `then_apply` (`Map::values` -> `list`, `Map::keySet` -> `set`). |
 | `DescribeClusterResult` | Several independent futures, returned as stored; Javadoc "null otherwise" -> `set[AclOperation] \| None`. |
 | `DeleteTopicsResult` | Constructor body with Java's checks and messages; package-private static factories -> private `@staticmethod`s `_of_topic_ids` / `_of_topic_names`; nullable map getters; conditional `all()`. Translates `DeleteTopicsResultTest`. |
-| `CreateTopicsResult` | Futures carrying a private helper class `_TopicMetadataAndConfig` (decision log 6) with Java's two constructors under `java_forms(name="TopicMetadataAndConfig")` and `ensureSuccess`; package-private `UNKNOWN` -> `_UNKNOWN`; `values()` maps each future through `_then_apply(f, lambda v: None)`; per-topic getters on an unknown topic raise `NullPointerError()` (Java's NPE on `futures.get(topic).thenApply`). |
-| `ListOffsetsResult` | Public nested value class `ListOffsetsResult.ListOffsetsResultInfo` (keyword constructor, getters, `__str__` rendering `Optional` as Java does); public constructor kept as `__init__(*, futures)` with the kind read from the futures, plus `_new`; `all()` = `_then_apply(_all_of(...), collect)`; `partition_result` raises Java's `IllegalArgumentException` message. |
-| `DeleteConsumerGroupOffsetsResult` | A method building a new future completed from the stored future's `whenComplete` (`_new_future_like` + `_when_complete` + `_complete*`, early `return` inside the action); a private helper method (`maybeCompleteExceptionally` -> `_maybe_complete_exceptionally`); a map of Java's internal `Errors`; `KafkaAdminClient.getSubLevelError`; a synchronous `IllegalArgumentException` before the future. |
+| `CreateTopicsResult` | Futures carrying a private helper class `_TopicMetadataAndConfig` (decision log 6) with Java's two constructors under `java_forms(name="TopicMetadataAndConfig")` and `ensureSuccess`; package-private `UNKNOWN` -> `_UNKNOWN`; `values()` maps each future through `then_apply(function=lambda v: None)`; the client builds it through `_of_client`, its per-topic getters returning the core's own per-topic future (`refine(topic, accessor)`; an unknown topic fails it with `IllegalArgumentError`); on a result built through `_new` (the mock's) they raise `NullPointerError()` for an unknown topic (Java's NPE on `futures.get(topic).thenApply`). |
+| `ListOffsetsResult` | Public nested value class `ListOffsetsResult.ListOffsetsResultInfo` (keyword constructor, getters, `__str__` rendering `Optional` as Java does); public constructor kept as `__init__(*, futures)` with the kind read from the futures, plus `_new`; `all()` = `all_of(...).then_apply(function=collect)`; `partition_result` raises Java's `IllegalArgumentException` message. |
+| `DeleteConsumerGroupOffsetsResult` | A method building a new future completed from the stored future's `when_complete` (a `_KafkaFutureImpl` completed in the action, early `return` inside it, handed out as `self._kind._FUTURE._of_impl`); a private helper method (`maybeCompleteExceptionally` -> `_maybe_complete_exceptionally`); a map of Java's internal `Errors`; `KafkaAdminClient.getSubLevelError`; a synchronous `IllegalArgumentException` before the future. |
 | `DescribeTransactionsResult` | A map keyed by Java's internal `CoordinatorKey` (`_CoordinatorKey`); lookup-or-`IllegalArgumentException`; `allOf` + `thenApply` collecting by `key.idValue`. |
 | `ListTransactionsResult` | A future of a map of futures, both of the client's kind (stub: `Future[dict[int, Future[...]]]` per kind); nested `whenComplete` actions; `thenApply` of another public method. Java's `allByBrokerId()` never completes for an empty broker map (it completes only from a broker future); translated as is. |
 | `DeleteConsumerGroupsResult` | A getter returning a copy of the stored map (`new HashMap<>` + `putAll` -> `dict(...)`). |
@@ -80,10 +82,10 @@ map of futures) have one `@overload` per kind (`self: X[Sync]` -> `concurrent.fu
 1. `.py` + `.pyi` per generated module, so stubs can show Java starting values / `= ...` while the
    runtime default is `UNSET`.
 2. `_new` takes a trailing keyword `kind` (`Sync` / `Async`) after Java's constructor parameters,
-   stored as `_kind`; it is how "set by the client that returns it" is done, and `_all_of` needs it
+   stored as `_kind`; it is how "set by the client that returns it" is done, and `all()` needs it
    for an empty map. A result with a public constructor also gets `_new`, and its `__init__` reads
-   the kind from the futures (none or `concurrent.futures.Future` -> `Sync`); its `.pyi` binds the
-   kind with one `__init__` stub per future type.
+   the kind from the futures (none or `KafkaFuture` -> `Sync`); its `.pyi` binds the kind with one
+   `__init__` stub per future type.
 3. `_new` copies a given map into a `dict` (the stubs promise `dict`).
 4. A keyword constructor calls the public setter. For a one-name pair with a non-nullable argument,
    an explicit `None` therefore reads and leaves the field (the "not given" meaning of `None` for
@@ -91,10 +93,9 @@ map of futures) have one `@overload` per kind (`self: X[Sync]` -> `concurrent.fu
 5. A Java immutable set field (`Set.of` / `Set.copyOf`), or a set field Java's `hashCode` hashes,
    is stored as a `frozenset` and its getter returns a new `set`; any other Java mutable collection
    field is stored as a `list` / `set` and returned as is.
-6. `_then_apply` / `_all_of` of done futures are done on return; `_all_of` fails with the first
-   failed future in input order (as `CompletableFuture.allOf`), cancelled if that one was cancelled;
-   an `asyncio.Future` is completed through `call_soon_threadsafe` from another thread; a new
-   `asyncio.Future` with no source future needs a running loop (`IllegalStateError` otherwise).
+6. `then_apply` / `all_of` of done futures are done on return; `all_of` fails with the first
+   failure among its sources (Java's `KafkaFuture.allOf`); an `AsyncKafkaFuture`'s inner
+   `asyncio.Future` is completed through `call_soon_threadsafe` from another thread (Futures).
 7. Several setters for one field: the Options classes have no live case in Java 4.3.1
    (`CreateTopicsOptions.validate` is gone since 4.0; `CreateDelegationTokenOptions.maxlifeTimeMs` is
    deprecated, so not generated). The live case is `MockAdminClient.Builder` (`brokers(List<Node>)`

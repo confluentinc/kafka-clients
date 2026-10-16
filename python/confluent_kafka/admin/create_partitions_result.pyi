@@ -14,24 +14,23 @@
 
 # Stub for confluent_kafka.admin.CreatePartitionsResult.
 
-import asyncio
-import concurrent.futures
 from collections.abc import Mapping
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["CreatePartitionsResult"]
 
 class CreatePartitionsResult(Generic[KindT]):
     @classmethod
-    def _new(cls, *, values: Mapping[str, AnyFuture[None]],
+    def _new(cls, *, values: Mapping[str, KafkaFuture[None] | AsyncKafkaFuture[None]],
              kind: type[KindT]) -> CreatePartitionsResult[KindT]: ...
     @overload
-    def values(self: CreatePartitionsResult[Sync]) -> dict[str, concurrent.futures.Future[None]]: ...
+    def values(self: CreatePartitionsResult[Sync]) -> dict[str, KafkaFuture[None]]: ...
     @overload
-    def values(self: CreatePartitionsResult[Async]) -> dict[str, asyncio.Future[None]]: ...
+    def values(self: CreatePartitionsResult[Async]) -> dict[str, AsyncKafkaFuture[None]]: ...
     @overload
-    def all(self: CreatePartitionsResult[Sync]) -> concurrent.futures.Future[None]: ...
+    def all(self: CreatePartitionsResult[Sync]) -> KafkaFuture[None]: ...
     @overload
-    def all(self: CreatePartitionsResult[Async]) -> asyncio.Future[None]: ...
+    def all(self: CreatePartitionsResult[Async]) -> AsyncKafkaFuture[None]: ...

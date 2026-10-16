@@ -265,3 +265,43 @@ def test_constructor_only_classes() -> None:
     member = MemberToRemove(group_instance_id="i")
     assert RemoveMembersFromConsumerGroupOptions(members=[member]).members() == {member}
     assert RemoveMembersFromConsumerGroupOptions().remove_all() is True
+
+
+# ---- the setters that ran (the client hands them to the extension) -------------------
+
+
+def test_setters_ran_in_the_order_they_last_ran() -> None:
+    """``AbstractOptions`` records each setter that ran, the latest last; the
+    client runs the same setters on the C options (CLAUDE.md conversion table, "an
+    Options object"). A field never set is not sent: the core keeps Java's starting
+    value."""
+    options = admin.CreateTopicsOptions()
+    assert options._setters_ran() == []
+    options.validate_only(validate_only=True)
+    options.timeout_ms(timeout_ms=5)
+    options.validate_only(validate_only=False)
+    assert options._setters_ran() == [("timeout_ms", 5), ("validate_only", False)]
+    # A getter is no setter.
+    options.timeout_ms()
+    options.should_validate_only()
+    assert options._setters_ran() == [("timeout_ms", 5), ("validate_only", False)]
+    # The keyword constructor calls the setters.
+    assert admin.DescribeClusterOptions(include_fenced_brokers=True)._setters_ran() == [
+        ("include_fenced_brokers", True)]
+    assert admin.DeleteRecordsOptions(timeout_ms=None)._setters_ran() == [("timeout_ms", None)]
+
+
+def test_setters_ran_carry_what_the_setter_stored() -> None:
+    """A collection argument crosses as the copy Java's setter stores
+    (``Set.copyOf``, ``new HashSet<>(states)``), so a one-shot iterator is read once
+    and arrives whole."""
+    states = admin.ListTransactionsOptions().filter_states(
+        states=(s for s in [TransactionState.ONGOING, TransactionState.EMPTY]))
+    assert states._setters_ran() == [
+        ("filter_states", frozenset({TransactionState.ONGOING, TransactionState.EMPTY}))]
+    groups = admin.ListGroupsOptions().in_group_states(
+        group_states=(g for g in [GroupState.STABLE]))
+    assert groups._setters_ran() == [("in_group_states", frozenset({GroupState.STABLE}))]
+    # Java's null set is Set.of().
+    assert admin.ListGroupsOptions().in_group_states(group_states=None)._setters_ran() == [
+        ("in_group_states", frozenset())]

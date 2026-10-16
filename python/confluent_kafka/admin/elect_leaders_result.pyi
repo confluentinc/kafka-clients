@@ -14,27 +14,26 @@
 
 # Stub for confluent_kafka.admin.ElectLeadersResult.
 
-import asyncio
-import concurrent.futures
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.common import TopicPartition
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["ElectLeadersResult"]
 
 class ElectLeadersResult(Generic[KindT]):
     @classmethod
     def _new(cls, *,
-             election_future: AnyFuture[dict[TopicPartition, BaseException | None]],
+             election_future: KafkaFuture[dict[TopicPartition, BaseException | None]] | AsyncKafkaFuture[dict[TopicPartition, BaseException | None]],
              kind: type[KindT]) -> ElectLeadersResult[KindT]: ...
     @overload
     def partitions(self: ElectLeadersResult[Sync]
-                   ) -> concurrent.futures.Future[dict[TopicPartition, BaseException | None]]: ...
+                   ) -> KafkaFuture[dict[TopicPartition, BaseException | None]]: ...
     @overload
     def partitions(self: ElectLeadersResult[Async]
-                   ) -> asyncio.Future[dict[TopicPartition, BaseException | None]]: ...
+                   ) -> AsyncKafkaFuture[dict[TopicPartition, BaseException | None]]: ...
     @overload
-    def all(self: ElectLeadersResult[Sync]) -> concurrent.futures.Future[None]: ...
+    def all(self: ElectLeadersResult[Sync]) -> KafkaFuture[None]: ...
     @overload
-    def all(self: ElectLeadersResult[Async]) -> asyncio.Future[None]: ...
+    def all(self: ElectLeadersResult[Async]) -> AsyncKafkaFuture[None]: ...

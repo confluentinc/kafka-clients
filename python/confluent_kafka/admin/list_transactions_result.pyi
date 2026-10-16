@@ -14,35 +14,33 @@
 
 # Stub for confluent_kafka.admin.ListTransactionsResult.
 
-import asyncio
-import concurrent.futures
 from collections.abc import Mapping
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.admin.transaction_listing import TransactionListing
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["ListTransactionsResult"]
 
 class ListTransactionsResult(Generic[KindT]):
     @classmethod
     def _new(cls, *,
-             future: AnyFuture[Mapping[int, AnyFuture[list[TransactionListing]]]],
+             future: KafkaFuture[Mapping[int, KafkaFuture[list[TransactionListing]] | AsyncKafkaFuture[list[TransactionListing]]]] | AsyncKafkaFuture[Mapping[int, KafkaFuture[list[TransactionListing]] | AsyncKafkaFuture[list[TransactionListing]]]],
              kind: type[KindT]) -> ListTransactionsResult[KindT]: ...
     @overload
-    def all(self: ListTransactionsResult[Sync]
-            ) -> concurrent.futures.Future[list[TransactionListing]]: ...
+    def all(self: ListTransactionsResult[Sync]) -> KafkaFuture[list[TransactionListing]]: ...
     @overload
-    def all(self: ListTransactionsResult[Async]) -> asyncio.Future[list[TransactionListing]]: ...
+    def all(self: ListTransactionsResult[Async]) -> AsyncKafkaFuture[list[TransactionListing]]: ...
     @overload
-    def by_broker_id(self: ListTransactionsResult[Sync]) -> concurrent.futures.Future[
-        dict[int, concurrent.futures.Future[list[TransactionListing]]]]: ...
+    def by_broker_id(self: ListTransactionsResult[Sync]) -> KafkaFuture[
+        dict[int, KafkaFuture[list[TransactionListing]]]]: ...
     @overload
-    def by_broker_id(self: ListTransactionsResult[Async]) -> asyncio.Future[
-        dict[int, asyncio.Future[list[TransactionListing]]]]: ...
+    def by_broker_id(self: ListTransactionsResult[Async]) -> AsyncKafkaFuture[
+        dict[int, AsyncKafkaFuture[list[TransactionListing]]]]: ...
     @overload
     def all_by_broker_id(self: ListTransactionsResult[Sync]
-                         ) -> concurrent.futures.Future[dict[int, list[TransactionListing]]]: ...
+                         ) -> KafkaFuture[dict[int, list[TransactionListing]]]: ...
     @overload
     def all_by_broker_id(self: ListTransactionsResult[Async]
-                         ) -> asyncio.Future[dict[int, list[TransactionListing]]]: ...
+                         ) -> AsyncKafkaFuture[dict[int, list[TransactionListing]]]: ...

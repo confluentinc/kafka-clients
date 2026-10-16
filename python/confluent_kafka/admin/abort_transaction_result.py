@@ -16,8 +16,7 @@
 
 Java's constructor is package-private: ``__init__`` raises ``TypeError`` and ``_new``
 builds it (CLAUDE.md, Python Binding Conventions, Class family). ``all()`` is Java's
-``KafkaFuture.allOf``, kept through the private helper ``_all_of`` (Idiom
-translations).
+``KafkaFuture.allOf``, the ``all_of`` of the kind's future class (Futures).
 """
 
 from __future__ import annotations
@@ -25,10 +24,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync, _all_of
+from confluent_kafka.admin._futures import Async, KindT, Sync
 
 if TYPE_CHECKING:
     from confluent_kafka.common import TopicPartition
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["AbortTransactionResult"]
 
@@ -47,7 +47,7 @@ class AbortTransactionResult(Generic[KindT]):
             "abort_transaction()")
 
     @classmethod
-    def _new(cls, *, futures: Mapping[TopicPartition, AnyFuture[None]],
+    def _new(cls, *, futures: Mapping[TopicPartition, KafkaFuture[None] | AsyncKafkaFuture[None]],
              kind: type[Sync] | type[Async]) -> AbortTransactionResult[Any]:
         """Java's package-private ``AbortTransactionResult(futures)``."""
         result = cls.__new__(cls)
@@ -55,11 +55,11 @@ class AbortTransactionResult(Generic[KindT]):
         result._kind = kind
         return result
 
-    def all(self) -> AnyFuture[None]:
+    def all(self) -> KafkaFuture[None] | AsyncKafkaFuture[None]:
         """Get a future which completes when the transaction specified by
         ``AbortTransactionSpec`` in the respective call to ``Admin.abort_transaction()``
         returns successfully or fails due to an error or timeout.
 
         :return: the future
         """
-        return _all_of(self._futures.values(), self._kind)
+        return self._kind._FUTURE.all_of(futures=tuple(self._futures.values()))

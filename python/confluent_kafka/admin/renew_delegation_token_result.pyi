@@ -14,19 +14,18 @@
 
 # Stub for confluent_kafka.admin.RenewDelegationTokenResult.
 
-import asyncio
-import concurrent.futures
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["RenewDelegationTokenResult"]
 
 class RenewDelegationTokenResult(Generic[KindT]):
     @classmethod
-    def _new(cls, *, expiry_timestamp: AnyFuture[int],
+    def _new(cls, *, expiry_timestamp: KafkaFuture[int] | AsyncKafkaFuture[int],
              kind: type[KindT]) -> RenewDelegationTokenResult[KindT]: ...
     @overload
-    def expiry_timestamp(self: RenewDelegationTokenResult[Sync]) -> concurrent.futures.Future[int]: ...
+    def expiry_timestamp(self: RenewDelegationTokenResult[Sync]) -> KafkaFuture[int]: ...
     @overload
-    def expiry_timestamp(self: RenewDelegationTokenResult[Async]) -> asyncio.Future[int]: ...
+    def expiry_timestamp(self: RenewDelegationTokenResult[Async]) -> AsyncKafkaFuture[int]: ...

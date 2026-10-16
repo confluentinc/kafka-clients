@@ -14,40 +14,40 @@
 
 # Stub for confluent_kafka.admin.DeleteTopicsResult.
 
-import asyncio
-import concurrent.futures
 from collections.abc import Mapping
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.common import Uuid
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DeleteTopicsResult"]
 
 class DeleteTopicsResult(Generic[KindT]):
     @classmethod
-    def _new(cls, *, topic_id_futures: Mapping[Uuid, AnyFuture[None]] | None,
-             name_futures: Mapping[str, AnyFuture[None]] | None,
+    def _new(cls, *,
+             topic_id_futures: Mapping[Uuid, KafkaFuture[None] | AsyncKafkaFuture[None]] | None,
+             name_futures: Mapping[str, KafkaFuture[None] | AsyncKafkaFuture[None]] | None,
              kind: type[KindT]) -> DeleteTopicsResult[KindT]: ...
     @staticmethod
-    def _of_topic_ids(*, topic_id_futures: Mapping[Uuid, AnyFuture[None]],
+    def _of_topic_ids(*,
+                      topic_id_futures: Mapping[Uuid, KafkaFuture[None] | AsyncKafkaFuture[None]],
                       kind: type[KindT]) -> DeleteTopicsResult[KindT]: ...
     @staticmethod
-    def _of_topic_names(*, name_futures: Mapping[str, AnyFuture[None]],
+    def _of_topic_names(*,
+                        name_futures: Mapping[str, KafkaFuture[None] | AsyncKafkaFuture[None]],
                         kind: type[KindT]) -> DeleteTopicsResult[KindT]: ...
     @overload
-    def topic_id_values(self: DeleteTopicsResult[Sync]
-                        ) -> dict[Uuid, concurrent.futures.Future[None]] | None: ...
+    def topic_id_values(self: DeleteTopicsResult[Sync]) -> dict[Uuid, KafkaFuture[None]] | None: ...
     @overload
     def topic_id_values(self: DeleteTopicsResult[Async]
-                        ) -> dict[Uuid, asyncio.Future[None]] | None: ...
+                        ) -> dict[Uuid, AsyncKafkaFuture[None]] | None: ...
     @overload
-    def topic_name_values(self: DeleteTopicsResult[Sync]
-                          ) -> dict[str, concurrent.futures.Future[None]] | None: ...
+    def topic_name_values(self: DeleteTopicsResult[Sync]) -> dict[str, KafkaFuture[None]] | None: ...
     @overload
     def topic_name_values(self: DeleteTopicsResult[Async]
-                          ) -> dict[str, asyncio.Future[None]] | None: ...
+                          ) -> dict[str, AsyncKafkaFuture[None]] | None: ...
     @overload
-    def all(self: DeleteTopicsResult[Sync]) -> concurrent.futures.Future[None]: ...
+    def all(self: DeleteTopicsResult[Sync]) -> KafkaFuture[None]: ...
     @overload
-    def all(self: DeleteTopicsResult[Async]) -> asyncio.Future[None]: ...
+    def all(self: DeleteTopicsResult[Async]) -> AsyncKafkaFuture[None]: ...

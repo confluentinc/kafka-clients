@@ -14,28 +14,28 @@
 
 # Stub for confluent_kafka.admin.DeleteConsumerGroupOffsetsResult.
 
-import asyncio
-import concurrent.futures
 from collections.abc import Iterable
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.common import TopicPartition
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DeleteConsumerGroupOffsetsResult"]
 
 class DeleteConsumerGroupOffsetsResult(Generic[KindT]):
     @classmethod
-    def _new(cls, *, future: AnyFuture[dict[TopicPartition, BaseException | None]],
+    def _new(cls, *,
+             future: KafkaFuture[dict[TopicPartition, BaseException | None]] | AsyncKafkaFuture[dict[TopicPartition, BaseException | None]],
              partitions: Iterable[TopicPartition],
              kind: type[KindT]) -> DeleteConsumerGroupOffsetsResult[KindT]: ...
     @overload
     def partition_result(self: DeleteConsumerGroupOffsetsResult[Sync], *,
-                         partition: TopicPartition) -> concurrent.futures.Future[None]: ...
+                         partition: TopicPartition) -> KafkaFuture[None]: ...
     @overload
     def partition_result(self: DeleteConsumerGroupOffsetsResult[Async], *,
-                         partition: TopicPartition) -> asyncio.Future[None]: ...
+                         partition: TopicPartition) -> AsyncKafkaFuture[None]: ...
     @overload
-    def all(self: DeleteConsumerGroupOffsetsResult[Sync]) -> concurrent.futures.Future[None]: ...
+    def all(self: DeleteConsumerGroupOffsetsResult[Sync]) -> KafkaFuture[None]: ...
     @overload
-    def all(self: DeleteConsumerGroupOffsetsResult[Async]) -> asyncio.Future[None]: ...
+    def all(self: DeleteConsumerGroupOffsetsResult[Async]) -> AsyncKafkaFuture[None]: ...

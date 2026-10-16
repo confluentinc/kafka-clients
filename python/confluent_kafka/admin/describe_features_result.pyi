@@ -14,22 +14,21 @@
 
 # Stub for confluent_kafka.admin.DescribeFeaturesResult.
 
-import asyncio
-import concurrent.futures
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.admin.feature_metadata import FeatureMetadata
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DescribeFeaturesResult"]
 
 class DescribeFeaturesResult(Generic[KindT]):
     @classmethod
-    def _new(cls, *, future: AnyFuture[FeatureMetadata],
+    def _new(cls, *,
+             future: KafkaFuture[FeatureMetadata] | AsyncKafkaFuture[FeatureMetadata],
              kind: type[KindT]) -> DescribeFeaturesResult[KindT]: ...
     @overload
-    def feature_metadata(self: DescribeFeaturesResult[Sync]
-                         ) -> concurrent.futures.Future[FeatureMetadata]: ...
+    def feature_metadata(self: DescribeFeaturesResult[Sync]) -> KafkaFuture[FeatureMetadata]: ...
     @overload
     def feature_metadata(self: DescribeFeaturesResult[Async]
-                         ) -> asyncio.Future[FeatureMetadata]: ...
+                         ) -> AsyncKafkaFuture[FeatureMetadata]: ...

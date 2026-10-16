@@ -57,4 +57,5 @@ class DescribeFeaturesOptions(AbstractOptions):
         if node_id is None:
             return self._node_id
         self._node_id = node_id  # OptionalInt.of(nodeId)
+        self._record("node_id", self._node_id)
         return self

@@ -61,6 +61,7 @@ class DescribeTopicsOptions(AbstractOptions):
         if timeout_ms is UNSET:
             return self._timeout_ms
         self._timeout_ms = timeout_ms
+        self._record("timeout_ms", self._timeout_ms)
         return self
 
     def include_authorized_operations(self, *,
@@ -70,6 +71,7 @@ class DescribeTopicsOptions(AbstractOptions):
         if include_authorized_operations is None:
             return self._include_authorized_operations
         self._include_authorized_operations = include_authorized_operations
+        self._record("include_authorized_operations", self._include_authorized_operations)
         return self
 
     def partition_size_limit_per_response(
@@ -86,4 +88,5 @@ class DescribeTopicsOptions(AbstractOptions):
         if partition_size_limit_per_response is None:
             return self._partition_size_limit_per_response
         self._partition_size_limit_per_response = partition_size_limit_per_response
+        self._record("partition_size_limit_per_response", self._partition_size_limit_per_response)
         return self

@@ -112,18 +112,21 @@ class ListGroupsOptions(AbstractOptions):
 
         This operation is supported by brokers with version 2.6.0 or later."""
         self._group_states = _copy_of(group_states)
+        self._record("in_group_states", self._group_states)
         return self
 
     def with_protocol_types(self, *, protocol_types: Iterable[str] | None) -> ListGroupsOptions:
         """If protocol types is set, only groups of these protocol types will be
         returned by ``list_groups()``. Otherwise, all groups are returned."""
         self._protocol_types = _copy_of(protocol_types)
+        self._record("with_protocol_types", self._protocol_types)
         return self
 
     def with_types(self, *, types: Iterable[GroupType] | None) -> ListGroupsOptions:
         """If types is set, only groups of these types will be returned by
         ``list_groups()``. Otherwise, all groups are returned."""
         self._types = _copy_of(types)
+        self._record("with_types", self._types)
         return self
 
     def group_states(self) -> set[GroupState]:

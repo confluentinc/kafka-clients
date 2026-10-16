@@ -29,22 +29,14 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
 from confluent_kafka._java import java_str
-from confluent_kafka.admin._futures import (
-    AnyFuture,
-    Async,
-    KindT,
-    Sync,
-    _complete,
-    _complete_with_error,
-    _new_future_like,
-    _then_apply,
-    _when_complete,
-)
+from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 from confluent_kafka.admin._internals import _errors_exception
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
 if TYPE_CHECKING:
     from confluent_kafka.common import TopicPartition
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["AlterConsumerGroupOffsetsResult"]
 
@@ -63,7 +55,7 @@ class AlterConsumerGroupOffsetsResult(Generic[KindT]):
             "client's alter_consumer_group_offsets()")
 
     @classmethod
-    def _new(cls, *, future: AnyFuture[dict[TopicPartition, BaseException | None]],
+    def _new(cls, *, future: KafkaFuture[dict[TopicPartition, BaseException | None]] | AsyncKafkaFuture[dict[TopicPartition, BaseException | None]],
              kind: type[Sync] | type[Async]) -> AlterConsumerGroupOffsetsResult[Any]:
         """Java's package-private ``AlterConsumerGroupOffsetsResult(future)``."""
         result = cls.__new__(cls)
@@ -71,31 +63,31 @@ class AlterConsumerGroupOffsetsResult(Generic[KindT]):
         result._kind = kind
         return result
 
-    def partition_result(self, *, partition: TopicPartition) -> AnyFuture[None]:
+    def partition_result(self, *, partition: TopicPartition) -> KafkaFuture[None] | AsyncKafkaFuture[None]:
         """Return a future which can be used to check the result for a given partition."""
-        result: AnyFuture[None] = _new_future_like(self._future)
+        result: _KafkaFutureImpl[None] = _KafkaFutureImpl()
 
         def action(topic_partitions: Mapping[TopicPartition, BaseException | None] | None,
                    throwable: BaseException | None) -> None:
             if throwable is not None:
-                _complete_with_error(result, throwable)
+                result.complete_with_error(throwable)
                 return
             assert topic_partitions is not None
             if partition not in topic_partitions:
-                _complete_with_error(result, IllegalArgumentError(
+                result.complete_with_error(IllegalArgumentError(
                     message="Alter offset for partition \"" + java_str(partition)
                     + "\" was not attempted"))
             else:
                 error = topic_partitions[partition]
                 if error is None:
-                    _complete(result, None)
+                    result.complete(None)
                 else:
-                    _complete_with_error(result, error)
+                    result.complete_with_error(error)
 
-        _when_complete(self._future, action)
-        return result
+        self._future.when_complete(action=action)
+        return self._kind._FUTURE._of_impl(result)
 
-    def all(self) -> AnyFuture[None]:
+    def all(self) -> KafkaFuture[None] | AsyncKafkaFuture[None]:
         """Return a future which succeeds if all the alter offsets succeed."""
         def check(topic_partition_errors_map: Mapping[TopicPartition, BaseException | None]
                   ) -> None:
@@ -110,4 +102,4 @@ class AlterConsumerGroupOffsetsResult(Generic[KindT]):
                     raise exception
             return None
 
-        return _then_apply(self._future, check)
+        return self._future.then_apply(function=check)

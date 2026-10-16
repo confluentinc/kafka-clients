@@ -15,11 +15,11 @@
 """``DeleteRecordsResult``: Java's ``org.apache.kafka.clients.admin.DeleteRecordsResult``.
 
 Java's constructor is public, so it stays the keyword-only ``__init__``; the
-client-kind marker is read from the futures given (``asyncio.Future``\\ s: the async
+client-kind marker is read from the futures given (``AsyncKafkaFuture``\\ s: the async
 kind, else the sync one), and the clients build it through ``_new``, which sets the kind
 explicitly, as for every result class (CLAUDE.md, Python Binding Conventions, Class
-family). ``all()`` is Java's ``KafkaFuture.allOf``, kept through the private helper
-``_all_of`` (Idiom translations).
+family). ``all()`` is Java's ``KafkaFuture.allOf``, the ``all_of`` of the kind's future
+class (Futures).
 """
 
 from __future__ import annotations
@@ -27,18 +27,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import (
-    AnyFuture,
-    Async,
-    KindT,
-    Sync,
-    _all_of,
-    _kind_of,
-)
+from confluent_kafka.admin._futures import Async, KindT, Sync, _kind_of
 
 if TYPE_CHECKING:
     from confluent_kafka.admin.deleted_records import DeletedRecords
     from confluent_kafka.common import TopicPartition
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DeleteRecordsResult"]
 
@@ -51,13 +45,17 @@ class DeleteRecordsResult(Generic[KindT]):
 
     __slots__ = ("_futures", "_kind")
 
-    def __init__(self, *, futures: Mapping[TopicPartition, AnyFuture[DeletedRecords]]) -> None:
+    def __init__(
+            self, *,
+            futures: Mapping[TopicPartition, KafkaFuture[DeletedRecords] | AsyncKafkaFuture[DeletedRecords]]) -> None:
         self._futures = dict(futures)
         self._kind: type[Sync] | type[Async] = _kind_of(self._futures.values())
 
     @classmethod
-    def _new(cls, *, futures: Mapping[TopicPartition, AnyFuture[DeletedRecords]],
-             kind: type[Sync] | type[Async]) -> DeleteRecordsResult[Any]:
+    def _new(
+            cls, *,
+            futures: Mapping[TopicPartition, KafkaFuture[DeletedRecords] | AsyncKafkaFuture[DeletedRecords]],
+            kind: type[Sync] | type[Async]) -> DeleteRecordsResult[Any]:
         """The clients' builder: Java's public ``DeleteRecordsResult(futures)`` with the
         client kind set by the caller."""
         result = cls.__new__(cls)
@@ -65,11 +63,12 @@ class DeleteRecordsResult(Generic[KindT]):
         result._kind = kind
         return result
 
-    def low_watermarks(self) -> Mapping[TopicPartition, AnyFuture[DeletedRecords]]:
+    def low_watermarks(
+            self) -> Mapping[TopicPartition, KafkaFuture[DeletedRecords] | AsyncKafkaFuture[DeletedRecords]]:
         """Return a map from topic partition to futures which can be used to check the
         status of individual deletions."""
         return self._futures
 
-    def all(self) -> AnyFuture[None]:
+    def all(self) -> KafkaFuture[None] | AsyncKafkaFuture[None]:
         """Return a future which succeeds only if all the records deletions succeed."""
-        return _all_of(self._futures.values(), self._kind)
+        return self._kind._FUTURE.all_of(futures=tuple(self._futures.values()))

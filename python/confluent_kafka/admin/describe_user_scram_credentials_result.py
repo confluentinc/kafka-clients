@@ -31,16 +31,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Generic
 
 from confluent_kafka._java import java_str
-from confluent_kafka.admin._futures import (
-    AnyFuture,
-    Async,
-    KindT,
-    Sync,
-    _complete,
-    _complete_with_error,
-    _new_future_like,
-    _when_complete,
-)
+from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 from confluent_kafka.admin._internals import (
     _DescribeUserScramCredentialsResponseData,
     _errors_for_code,
@@ -52,6 +44,7 @@ if TYPE_CHECKING:
     from confluent_kafka.admin.user_scram_credentials_description import (
         UserScramCredentialsDescription,
     )
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DescribeUserScramCredentialsResult"]
 
@@ -76,7 +69,7 @@ class DescribeUserScramCredentialsResult(Generic[KindT]):
             "admin client's describe_user_scram_credentials()")
 
     @classmethod
-    def _new(cls, *, data_future: AnyFuture[_DescribeUserScramCredentialsResponseData],
+    def _new(cls, *, data_future: KafkaFuture[_DescribeUserScramCredentialsResponseData] | AsyncKafkaFuture[_DescribeUserScramCredentialsResponseData],
              kind: type[Sync] | type[Async]) -> DescribeUserScramCredentialsResult[Any]:
         """Java's package-private ``DescribeUserScramCredentialsResult(dataFuture)``:
         ``data_future`` is the future indicating response data from the call."""
@@ -87,7 +80,7 @@ class DescribeUserScramCredentialsResult(Generic[KindT]):
         result._kind = kind
         return result
 
-    def all(self) -> AnyFuture[dict[str, UserScramCredentialsDescription]]:
+    def all(self) -> KafkaFuture[dict[str, UserScramCredentialsDescription]] | AsyncKafkaFuture[dict[str, UserScramCredentialsDescription]]:
         """A future for the results of all described users with map keys (one per user)
         being consistent with the contents of the list returned by ``users()``. The future
         will complete successfully only if all such user descriptions complete
@@ -96,13 +89,12 @@ class DescribeUserScramCredentialsResult(Generic[KindT]):
             UserScramCredentialsDescription,
         )
 
-        retval: AnyFuture[dict[str, UserScramCredentialsDescription]] = (
-            _new_future_like(self._data_future))
+        retval: _KafkaFutureImpl[dict[str, UserScramCredentialsDescription]] = _KafkaFutureImpl()
 
         def action(data: _DescribeUserScramCredentialsResponseData | None,
                    throwable: BaseException | None) -> None:
             if throwable is not None:
-                _complete_with_error(retval, throwable)
+                retval.complete_with_error(throwable)
                 return
             assert data is not None
             # Check to make sure every individual described user succeeded. Note that a
@@ -119,19 +111,19 @@ class DescribeUserScramCredentialsResult(Generic[KindT]):
                 error = _errors_for_code(first_failed_describe.error_code(),
                                          first_failed_describe.error_message())
                 assert error is not None
-                _complete_with_error(retval, error)
+                retval.complete_with_error(error)
             else:
                 retval_map: dict[str, UserScramCredentialsDescription] = {}
                 for user_result in data.results():
                     retval_map[user_result.user()] = UserScramCredentialsDescription(
                         name=user_result.user(),
                         credential_infos=self._get_scram_credential_infos_for(user_result))
-                _complete(retval, retval_map)
+                retval.complete(retval_map)
 
-        _when_complete(self._data_future, action)
-        return retval
+        self._data_future.when_complete(action=action)
+        return self._kind._FUTURE._of_impl(retval)
 
-    def users(self) -> AnyFuture[list[str]]:
+    def users(self) -> KafkaFuture[list[str]] | AsyncKafkaFuture[list[str]]:
         """A future indicating the distinct users that meet the request criteria and that
         have at least one credential. The future will not complete successfully if the
         user is not authorized to perform the describe operation; otherwise, it will
@@ -142,21 +134,21 @@ class DescribeUserScramCredentialsResult(Generic[KindT]):
         credential, will result in a future that returns an empty list being returned
         here. A returned list will include users that have a credential but that could
         not be described."""
-        retval: AnyFuture[list[str]] = _new_future_like(self._data_future)
+        retval: _KafkaFutureImpl[list[str]] = _KafkaFutureImpl()
 
         def action(data: _DescribeUserScramCredentialsResponseData | None,
                    throwable: BaseException | None) -> None:
             if throwable is not None:
-                _complete_with_error(retval, throwable)
+                retval.complete_with_error(throwable)
             else:
                 assert data is not None
-                _complete(retval, [result.user() for result in data.results()
+                retval.complete([result.user() for result in data.results()
                                    if result.error_code() != _RESOURCE_NOT_FOUND_CODE])
 
-        _when_complete(self._data_future, action)
-        return retval
+        self._data_future.when_complete(action=action)
+        return self._kind._FUTURE._of_impl(retval)
 
-    def description(self, *, user_name: str) -> AnyFuture[UserScramCredentialsDescription]:
+    def description(self, *, user_name: str) -> KafkaFuture[UserScramCredentialsDescription] | AsyncKafkaFuture[UserScramCredentialsDescription]:
         """A future indicating the description results for the given user
         (``user_name``: the name of the user description being requested). The future
         will complete exceptionally if the future returned by ``users()`` completes
@@ -167,13 +159,12 @@ class DescribeUserScramCredentialsResult(Generic[KindT]):
             UserScramCredentialsDescription,
         )
 
-        retval: AnyFuture[UserScramCredentialsDescription] = (
-            _new_future_like(self._data_future))
+        retval: _KafkaFutureImpl[UserScramCredentialsDescription] = _KafkaFutureImpl()
 
         def action(data: _DescribeUserScramCredentialsResponseData | None,
                    throwable: BaseException | None) -> None:
             if throwable is not None:
-                _complete_with_error(retval, throwable)
+                retval.complete_with_error(throwable)
                 return
             assert data is not None
             # it is possible that there is no future for this user (for example, the
@@ -184,20 +175,20 @@ class DescribeUserScramCredentialsResult(Generic[KindT]):
             if user_result is None:
                 from confluent_kafka.common.errors import ResourceNotFoundError
 
-                _complete_with_error(retval, ResourceNotFoundError(
+                retval.complete_with_error(ResourceNotFoundError(
                     message="No such user: " + java_str(user_name)))
             elif user_result.error_code() != _NONE_CODE:
                 # RESOURCE_NOT_FOUND is included here
                 error = _errors_for_code(user_result.error_code(), user_result.error_message())
                 assert error is not None
-                _complete_with_error(retval, error)
+                retval.complete_with_error(error)
             else:
-                _complete(retval, UserScramCredentialsDescription(
+                retval.complete(UserScramCredentialsDescription(
                     name=user_result.user(),
                     credential_infos=self._get_scram_credential_infos_for(user_result)))
 
-        _when_complete(self._data_future, action)
-        return retval
+        self._data_future.when_complete(action=action)
+        return self._kind._FUTURE._of_impl(retval)
 
     @staticmethod
     def _get_scram_credential_infos_for(user_result: _UserResult) -> list[ScramCredentialInfo]:

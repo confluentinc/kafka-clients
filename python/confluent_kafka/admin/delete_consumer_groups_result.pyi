@@ -14,26 +14,24 @@
 
 # Stub for confluent_kafka.admin.DeleteConsumerGroupsResult.
 
-import asyncio
-import concurrent.futures
 from collections.abc import Mapping
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DeleteConsumerGroupsResult"]
 
 class DeleteConsumerGroupsResult(Generic[KindT]):
     @classmethod
-    def _new(cls, *, futures: Mapping[str, AnyFuture[None]],
+    def _new(cls, *, futures: Mapping[str, KafkaFuture[None] | AsyncKafkaFuture[None]],
              kind: type[KindT]) -> DeleteConsumerGroupsResult[KindT]: ...
     @overload
-    def deleted_groups(self: DeleteConsumerGroupsResult[Sync]
-                       ) -> dict[str, concurrent.futures.Future[None]]: ...
+    def deleted_groups(self: DeleteConsumerGroupsResult[Sync]) -> dict[str, KafkaFuture[None]]: ...
     @overload
     def deleted_groups(self: DeleteConsumerGroupsResult[Async]
-                       ) -> dict[str, asyncio.Future[None]]: ...
+                       ) -> dict[str, AsyncKafkaFuture[None]]: ...
     @overload
-    def all(self: DeleteConsumerGroupsResult[Sync]) -> concurrent.futures.Future[None]: ...
+    def all(self: DeleteConsumerGroupsResult[Sync]) -> KafkaFuture[None]: ...
     @overload
-    def all(self: DeleteConsumerGroupsResult[Async]) -> asyncio.Future[None]: ...
+    def all(self: DeleteConsumerGroupsResult[Async]) -> AsyncKafkaFuture[None]: ...

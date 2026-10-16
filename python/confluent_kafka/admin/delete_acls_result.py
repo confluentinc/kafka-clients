@@ -29,19 +29,13 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import (
-    AnyFuture,
-    Async,
-    KindT,
-    Sync,
-    _all_of,
-    _then_apply,
-)
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.common.kafka_error import KafkaError
 
 if TYPE_CHECKING:
     from confluent_kafka.common import AclBinding, AclBindingFilter
     from confluent_kafka.common.errors import ApiError
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DeleteAclsResult"]
 
@@ -118,7 +112,7 @@ class DeleteAclsResult(Generic[KindT]):
 
     @classmethod
     def _new(cls, *,
-             futures: Mapping[AclBindingFilter, AnyFuture[DeleteAclsResult.FilterResults]],
+             futures: Mapping[AclBindingFilter, KafkaFuture[DeleteAclsResult.FilterResults] | AsyncKafkaFuture[DeleteAclsResult.FilterResults]],
              kind: type[Sync] | type[Async]) -> DeleteAclsResult[Any]:
         """Java's package-private ``DeleteAclsResult(futures)``."""
         result = cls.__new__(cls)
@@ -126,26 +120,25 @@ class DeleteAclsResult(Generic[KindT]):
         result._kind = kind
         return result
 
-    def values(self) -> dict[AclBindingFilter, AnyFuture[DeleteAclsResult.FilterResults]]:
+    def values(self) -> dict[AclBindingFilter, KafkaFuture[DeleteAclsResult.FilterResults] | AsyncKafkaFuture[DeleteAclsResult.FilterResults]]:
         """Return a map from acl filters to futures which can be used to check the status
         of the deletions by each filter."""
         return self._futures
 
-    def all(self) -> AnyFuture[list[AclBinding]]:
+    def all(self) -> KafkaFuture[list[AclBinding]] | AsyncKafkaFuture[list[AclBinding]]:
         """Return a future which succeeds only if all the ACLs deletions succeed, and
         which contains all the deleted ACLs. Note that it if the filters don't match any
         ACLs, this is not considered an error."""
         futures = self._futures
-        return _then_apply(_all_of(futures.values(), self._kind),
-                           lambda v: self._get_acl_bindings(futures))
+        return self._kind._FUTURE.all_of(futures=tuple(futures.values())).then_apply(function=lambda v: self._get_acl_bindings(futures))
 
     def _get_acl_bindings(
-            self, futures: Mapping[AclBindingFilter, AnyFuture[DeleteAclsResult.FilterResults]]
+            self, futures: Mapping[AclBindingFilter, KafkaFuture[DeleteAclsResult.FilterResults] | AsyncKafkaFuture[DeleteAclsResult.FilterResults]]
     ) -> list[AclBinding]:
         acls: list[AclBinding] = []
         for value in futures.values():
             try:
-                results = value.result()
+                results = value.get_now(value_if_absent=None)
             except BaseException as e:  # noqa: BLE001 - Java catches Throwable
                 # This should be unreachable, since the future returned by
                 # KafkaFuture#allOf should have failed if any Future failed.

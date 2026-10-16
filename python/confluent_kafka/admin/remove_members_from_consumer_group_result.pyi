@@ -14,30 +14,29 @@
 
 # Stub for confluent_kafka.admin.RemoveMembersFromConsumerGroupResult.
 
-import asyncio
-import concurrent.futures
 from collections.abc import Iterable
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.admin._internals import _MemberIdentity
 from confluent_kafka.admin.member_to_remove import MemberToRemove
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["RemoveMembersFromConsumerGroupResult"]
 
 class RemoveMembersFromConsumerGroupResult(Generic[KindT]):
     @classmethod
-    def _new(cls, *, future: AnyFuture[dict[_MemberIdentity, BaseException | None]],
+    def _new(cls, *, future: KafkaFuture[dict[_MemberIdentity, BaseException | None]] | AsyncKafkaFuture[dict[_MemberIdentity, BaseException | None]],
              member_infos: Iterable[MemberToRemove],
              kind: type[KindT]) -> RemoveMembersFromConsumerGroupResult[KindT]: ...
     @overload
     def all(self: RemoveMembersFromConsumerGroupResult[Sync]
-            ) -> concurrent.futures.Future[None]: ...
+            ) -> KafkaFuture[None]: ...
     @overload
-    def all(self: RemoveMembersFromConsumerGroupResult[Async]) -> asyncio.Future[None]: ...
+    def all(self: RemoveMembersFromConsumerGroupResult[Async]) -> AsyncKafkaFuture[None]: ...
     @overload
     def member_result(self: RemoveMembersFromConsumerGroupResult[Sync], *,
-                      member: MemberToRemove) -> concurrent.futures.Future[None]: ...
+                      member: MemberToRemove) -> KafkaFuture[None]: ...
     @overload
     def member_result(self: RemoveMembersFromConsumerGroupResult[Async], *,
-                      member: MemberToRemove) -> asyncio.Future[None]: ...
+                      member: MemberToRemove) -> AsyncKafkaFuture[None]: ...

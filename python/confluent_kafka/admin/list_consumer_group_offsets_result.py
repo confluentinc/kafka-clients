@@ -31,14 +31,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import (
-    AnyFuture,
-    Async,
-    KindT,
-    Sync,
-    _all_of,
-    _then_apply,
-)
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 from confluent_kafka.illegal_state_error import IllegalStateError
 
@@ -46,6 +39,7 @@ if TYPE_CHECKING:
     from confluent_kafka.admin._internals import _CoordinatorKey
     from confluent_kafka.common import TopicPartition
     from confluent_kafka.consumer import OffsetAndMetadata
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["ListConsumerGroupOffsetsResult"]
 
@@ -66,7 +60,7 @@ class ListConsumerGroupOffsetsResult(Generic[KindT]):
             "client's list_consumer_group_offsets()")
 
     @classmethod
-    def _new(cls, *, futures: Mapping[_CoordinatorKey, AnyFuture[_Offsets]],
+    def _new(cls, *, futures: Mapping[_CoordinatorKey, KafkaFuture[_Offsets] | AsyncKafkaFuture[_Offsets]],
              kind: type[Sync] | type[Async]) -> ListConsumerGroupOffsetsResult[Any]:
         """Java's package-private ``ListConsumerGroupOffsetsResult(futures)``."""
         result = cls.__new__(cls)
@@ -75,7 +69,7 @@ class ListConsumerGroupOffsetsResult(Generic[KindT]):
         return result
 
     def partitions_to_offset_and_metadata(self, *, group_id: str | None = None
-                                          ) -> AnyFuture[_Offsets]:
+                                          ) -> KafkaFuture[_Offsets] | AsyncKafkaFuture[_Offsets]:
         """Return a future which yields a map of topic partitions to
         ``OffsetAndMetadata`` objects, for the specified group (``group_id``) or, without
         it, for the one group requested. If the group does not have a committed offset for
@@ -96,7 +90,7 @@ class ListConsumerGroupOffsetsResult(Generic[KindT]):
                 message="Offsets for consumer group '" + group_id + "' were not requested.")
         return self._futures[group_id]
 
-    def all(self) -> AnyFuture[dict[str, _Offsets]]:
+    def all(self) -> KafkaFuture[dict[str, _Offsets]] | AsyncKafkaFuture[dict[str, _Offsets]]:
         """Return a future which yields all ``dict[str, dict[TopicPartition,
         OffsetAndMetadata]]`` objects, if requests for all the groups succeed."""
         futures = self._futures
@@ -104,6 +98,6 @@ class ListConsumerGroupOffsetsResult(Generic[KindT]):
         def collect(_: None) -> dict[str, _Offsets]:
             # KafkaFuture#allOf already ensured that all of the futures completed
             # successfully.
-            return {key: future.result() for key, future in futures.items()}
+            return {key: future.get_now(value_if_absent=None) for key, future in futures.items()}
 
-        return _then_apply(_all_of(futures.values(), self._kind), collect)
+        return self._kind._FUTURE.all_of(futures=tuple(futures.values())).then_apply(function=collect)

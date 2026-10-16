@@ -16,8 +16,7 @@
 
 Java's constructor is protected: ``__init__`` raises ``TypeError`` and ``_new``
 builds it (CLAUDE.md, Python Binding Conventions, Class family). ``all()`` is Java's
-``allOf(...).thenApply(...)``, kept through the private helpers ``_all_of`` /
-``_then_apply``.
+``allOf(...).thenApply(...)``, through the futures' ``all_of`` and ``then_apply``.
 """
 
 from __future__ import annotations
@@ -25,18 +24,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import (
-    AnyFuture,
-    Async,
-    KindT,
-    Sync,
-    _all_of,
-    _then_apply,
-)
+from confluent_kafka.admin._futures import Async, KindT, Sync
 
 if TYPE_CHECKING:
     from confluent_kafka.admin.config import Config
     from confluent_kafka.common.config import ConfigResource
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DescribeConfigsResult"]
 
@@ -55,7 +48,8 @@ class DescribeConfigsResult(Generic[KindT]):
             "describe_configs()")
 
     @classmethod
-    def _new(cls, *, futures: Mapping[ConfigResource, AnyFuture[Config]],
+    def _new(cls, *,
+             futures: Mapping[ConfigResource, KafkaFuture[Config] | AsyncKafkaFuture[Config]],
              kind: type[Sync] | type[Async]) -> DescribeConfigsResult[Any]:
         """Java's protected ``DescribeConfigsResult(futures)``."""
         result = cls.__new__(cls)
@@ -63,18 +57,19 @@ class DescribeConfigsResult(Generic[KindT]):
         result._kind = kind
         return result
 
-    def values(self) -> Mapping[ConfigResource, AnyFuture[Config]]:
+    def values(self) -> Mapping[ConfigResource, KafkaFuture[Config] | AsyncKafkaFuture[Config]]:
         """Return a map from resources to futures which can be used to check the status
         of the configuration for each resource."""
         return self._futures
 
-    def all(self) -> AnyFuture[dict[ConfigResource, Config]]:
+    def all(
+            self) -> KafkaFuture[dict[ConfigResource, Config]] | AsyncKafkaFuture[dict[ConfigResource, Config]]:
         """Return a future which succeeds only if all the config descriptions
         succeed."""
         futures = self._futures
 
         def collect(_: None) -> dict[ConfigResource, Config]:
             # allOf ensured that all the futures completed successfully.
-            return {resource: future.result() for resource, future in futures.items()}
+            return {resource: future.get_now(value_if_absent=None) for resource, future in futures.items()}
 
-        return _then_apply(_all_of(futures.values(), self._kind), collect)
+        return self._kind._FUTURE.all_of(futures=tuple(futures.values())).then_apply(function=collect)

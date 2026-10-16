@@ -14,25 +14,25 @@
 
 # Stub for confluent_kafka.admin.CreateAclsResult.
 
-import asyncio
-import concurrent.futures
 from collections.abc import Mapping
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.common import AclBinding
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["CreateAclsResult"]
 
 class CreateAclsResult(Generic[KindT]):
     @classmethod
-    def _new(cls, *, futures: Mapping[AclBinding, AnyFuture[None]],
+    def _new(cls, *,
+             futures: Mapping[AclBinding, KafkaFuture[None] | AsyncKafkaFuture[None]],
              kind: type[KindT]) -> CreateAclsResult[KindT]: ...
     @overload
-    def values(self: CreateAclsResult[Sync]) -> dict[AclBinding, concurrent.futures.Future[None]]: ...
+    def values(self: CreateAclsResult[Sync]) -> dict[AclBinding, KafkaFuture[None]]: ...
     @overload
-    def values(self: CreateAclsResult[Async]) -> dict[AclBinding, asyncio.Future[None]]: ...
+    def values(self: CreateAclsResult[Async]) -> dict[AclBinding, AsyncKafkaFuture[None]]: ...
     @overload
-    def all(self: CreateAclsResult[Sync]) -> concurrent.futures.Future[None]: ...
+    def all(self: CreateAclsResult[Sync]) -> KafkaFuture[None]: ...
     @overload
-    def all(self: CreateAclsResult[Async]) -> asyncio.Future[None]: ...
+    def all(self: CreateAclsResult[Async]) -> AsyncKafkaFuture[None]: ...

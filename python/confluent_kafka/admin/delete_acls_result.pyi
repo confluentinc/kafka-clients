@@ -14,14 +14,13 @@
 
 # Stub for confluent_kafka.admin.DeleteAclsResult.
 
-import asyncio
-import concurrent.futures
 from collections.abc import Iterable, Mapping
 from typing import Generic, overload
 
-from confluent_kafka.admin._futures import AnyFuture, Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.common import AclBinding, AclBindingFilter
 from confluent_kafka.common.errors import ApiError
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DeleteAclsResult"]
 
@@ -41,16 +40,16 @@ class DeleteAclsResult(Generic[KindT]):
 
     @classmethod
     def _new(cls, *,
-             futures: Mapping[AclBindingFilter, AnyFuture[DeleteAclsResult.FilterResults]],
+             futures: Mapping[AclBindingFilter, KafkaFuture[DeleteAclsResult.FilterResults] | AsyncKafkaFuture[DeleteAclsResult.FilterResults]],
              kind: type[KindT]) -> DeleteAclsResult[KindT]: ...
     @overload
     def values(self: DeleteAclsResult[Sync]
                ) -> dict[AclBindingFilter,
-                         concurrent.futures.Future[DeleteAclsResult.FilterResults]]: ...
+                         KafkaFuture[DeleteAclsResult.FilterResults]]: ...
     @overload
     def values(self: DeleteAclsResult[Async]
-               ) -> dict[AclBindingFilter, asyncio.Future[DeleteAclsResult.FilterResults]]: ...
+               ) -> dict[AclBindingFilter, AsyncKafkaFuture[DeleteAclsResult.FilterResults]]: ...
     @overload
-    def all(self: DeleteAclsResult[Sync]) -> concurrent.futures.Future[list[AclBinding]]: ...
+    def all(self: DeleteAclsResult[Sync]) -> KafkaFuture[list[AclBinding]]: ...
     @overload
-    def all(self: DeleteAclsResult[Async]) -> asyncio.Future[list[AclBinding]]: ...
+    def all(self: DeleteAclsResult[Async]) -> AsyncKafkaFuture[list[AclBinding]]: ...

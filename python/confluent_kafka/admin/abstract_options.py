@@ -38,13 +38,16 @@ class AbstractOptions:
     Java: ``org.apache.kafka.clients.admin.AbstractOptions`` (``abstract``).
     """
 
-    __slots__ = ("_timeout_ms",)
+    __slots__ = ("_timeout_ms", "_setters")
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         if type(self) is AbstractOptions:
             raise TypeError("AbstractOptions is an abstract class; use one of its subclasses")
         # Java's field initializer: ``protected Integer timeoutMs = null``.
         self._timeout_ms: int | None = None
+        # The setters that ran, the latest last (``_record``): the client runs the same
+        # ones on the C options (CLAUDE.md conversion table, "an Options object").
+        self._setters: dict[str, Any] = {}
 
     def timeout_ms(self, *, timeout_ms: int | None = UNSET) -> Any:
         """With ``timeout_ms``: set the timeout in milliseconds for this operation or
@@ -57,4 +60,15 @@ class AbstractOptions:
         if timeout_ms is UNSET:
             return self._timeout_ms
         self._timeout_ms = timeout_ms
+        self._record("timeout_ms", self._timeout_ms)
         return self
+
+    def _record(self, setter: str, value: Any) -> None:
+        """Record that ``setter`` ran with ``value`` (the latest run last)."""
+        self._setters.pop(setter, None)
+        self._setters[setter] = value
+
+    def _setters_ran(self) -> list[tuple[str, Any]]:
+        """The ``(setter, value)`` pairs of the setters that ran, in the order they
+        last ran."""
+        return list(self._setters.items())

@@ -16,8 +16,8 @@
 
 Java's constructor is package-private: ``__init__`` raises ``TypeError`` and ``_new``
 builds it (CLAUDE.md, Python Binding Conventions, Class family). ``allDescriptions()``
-is Java's ``allOf(...).thenApply(...)``, kept through the private helpers ``_all_of`` /
-``_then_apply``.
+is Java's ``allOf(...).thenApply(...)``, through the futures' ``all_of`` and
+``then_apply``.
 """
 
 from __future__ import annotations
@@ -25,17 +25,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import (
-    AnyFuture,
-    Async,
-    KindT,
-    Sync,
-    _all_of,
-    _then_apply,
-)
+from confluent_kafka.admin._futures import Async, KindT, Sync
 
 if TYPE_CHECKING:
     from confluent_kafka.admin.log_dir_description import LogDirDescription
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DescribeLogDirsResult"]
 
@@ -54,21 +48,25 @@ class DescribeLogDirsResult(Generic[KindT]):
             "describe_log_dirs()")
 
     @classmethod
-    def _new(cls, *, futures: Mapping[int, AnyFuture[dict[str, LogDirDescription]]],
-             kind: type[Sync] | type[Async]) -> DescribeLogDirsResult[Any]:
+    def _new(
+            cls, *,
+            futures: Mapping[int, KafkaFuture[dict[str, LogDirDescription]] | AsyncKafkaFuture[dict[str, LogDirDescription]]],
+            kind: type[Sync] | type[Async]) -> DescribeLogDirsResult[Any]:
         """Java's package-private ``DescribeLogDirsResult(futures)``."""
         result = cls.__new__(cls)
         result._futures = dict(futures)
         result._kind = kind
         return result
 
-    def descriptions(self) -> Mapping[int, AnyFuture[dict[str, LogDirDescription]]]:
+    def descriptions(
+            self) -> Mapping[int, KafkaFuture[dict[str, LogDirDescription]] | AsyncKafkaFuture[dict[str, LogDirDescription]]]:
         """Return a map from brokerId to future which can be used to check the
         information of partitions on each individual broker. The result of the future is
         a map from broker log directory path to a description of that log directory."""
         return self._futures
 
-    def all_descriptions(self) -> AnyFuture[dict[int, dict[str, LogDirDescription]]]:
+    def all_descriptions(
+            self) -> KafkaFuture[dict[int, dict[str, LogDirDescription]]] | AsyncKafkaFuture[dict[int, dict[str, LogDirDescription]]]:
         """Return a future which succeeds only if all the brokers have responded without
         error. The result of the future is a map from brokerId to a map from broker log
         directory path to a description of that log directory."""
@@ -76,6 +74,6 @@ class DescribeLogDirsResult(Generic[KindT]):
 
         def collect(_: None) -> dict[int, dict[str, LogDirDescription]]:
             # allOf ensured that all the futures completed successfully.
-            return {broker_id: future.result() for broker_id, future in futures.items()}
+            return {broker_id: future.get_now(value_if_absent=None) for broker_id, future in futures.items()}
 
-        return _then_apply(_all_of(futures.values(), self._kind), collect)
+        return self._kind._FUTURE.all_of(futures=tuple(futures.values())).then_apply(function=collect)
