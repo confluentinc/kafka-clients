@@ -366,16 +366,10 @@ impl DefaultRecord {
                 "Invalid record size: {size_of_body} is negative."
             )));
         }
-        // Reject, before reading the body, any record whose declared
-        // (decompressed) body exceeds the configured per-record maximum
-        // (`DefaultRecord.java:295-301`). Java's guard also keeps an adversarial
-        // size from reaching `ByteBuffer.allocate`; the read below is bounded
-        // by `take` instead, so here it only gives Java's error.
-        if size_of_body > max_record_body_size {
-            return Err(InvalidRecordError::new(format!(
-                "Invalid record size: {size_of_body} exceeds the configured maximum record size of {max_record_body_size}."
-            )));
-        }
+        // In Java this check also keeps an adversarial size from reaching
+        // `ByteBuffer.allocate`; the read below is bounded by `take` instead, so
+        // here it only gives Java's error.
+        Self::check_record_body_size(size_of_body, max_record_body_size)?;
 
         // Java allocates the declared body size before reading a byte of it
         // (`DefaultRecord.java:302`). The size is read off the stream, so here the
@@ -402,6 +396,26 @@ impl DefaultRecord {
             base_sequence,
             log_append_time,
         )
+    }
+
+    /// Rejects, before any of the body is read, a record whose declared
+    /// (decompressed) body exceeds `max_record_body_size`
+    /// (`DefaultRecord.java:295-301`). [`Self::read_from_stream`] checks its
+    /// records with it, and so does the consumer, which reads a compressed
+    /// batch's records itself, so the two keep Java's check alike.
+    ///
+    /// # Errors
+    /// "Invalid record size: N exceeds the configured maximum record size of M."
+    pub(crate) fn check_record_body_size(
+        size_of_body: i32,
+        max_record_body_size: i32,
+    ) -> Result<(), InvalidRecordError> {
+        if size_of_body > max_record_body_size {
+            return Err(InvalidRecordError::new(format!(
+                "Invalid record size: {size_of_body} exceeds the configured maximum record size of {max_record_body_size}."
+            )));
+        }
+        Ok(())
     }
 
     /// Read a record body from a byte slice. The slice should contain exactly
