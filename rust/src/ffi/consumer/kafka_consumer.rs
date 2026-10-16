@@ -153,11 +153,9 @@ pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
     value_deserializer: *mut kafka_common_serialization_Deserializer_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_consumer_Consumer_t {
-    // SAFETY: Per this function's `# Safety`, `config` is a live handle; no setter can run on it
-    // meanwhile, since the setters' `# Safety` excludes any other call using the handle at the same
-    // time, so `consumer_config_ref`'s requirement holds for this statement, the only use of the
-    // reference.
-    let config = unsafe { consumer_config_ref(config) }.config().clone();
+    // SAFETY: Per this function's `# Safety`, `config` is a live handle, kept alive for this
+    // statement, the only use of the reference, as `consumer_config_ref` requires.
+    let config = unsafe { consumer_config_ref(config) }.clone();
     // SAFETY: Per this function's `# Safety`, `key_deserializer` is null or a live handle not used
     // afterwards, as `deserializer_from` requires.
     let (key, owns_key) = unsafe { deserializer_from(key_deserializer) };

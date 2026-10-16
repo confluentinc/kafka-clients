@@ -692,12 +692,14 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         args.fetch_max_bytes.map_or("default".to_string(), |v| v.to_string()),
         args.max_poll_records.map_or("default".to_string(), |v| v.to_string()),
     );
-    let config = ConsumerConfig::new(&props)?
-        .set_client_id("consumer-perf")
-        .set_group_id(args.group_id.clone())
-        .set_group_protocol("consumer")
-        .set_auto_offset_reset(args.offset_reset.clone())
-        .set_enable_auto_commit(true);
+    // The map is the config's only input, as in Java: `ConsumerConfig::new`
+    // validates every key, `auto.offset.reset` included.
+    props.insert("client.id".to_string(), "consumer-perf".to_string());
+    props.insert("group.id".to_string(), args.group_id.clone());
+    props.insert("group.protocol".to_string(), "consumer".to_string());
+    props.insert("auto.offset.reset".to_string(), args.offset_reset.clone());
+    props.insert("enable.auto.commit".to_string(), "true".to_string());
+    let config = ConsumerConfig::new(&props)?;
 
     let mut consumer: Box<dyn Consumer<usize, usize>> =
         KafkaConsumer::new::<usize, usize>(config, Box::new(LenDeserializer), Box::new(LenDeserializer))?;
