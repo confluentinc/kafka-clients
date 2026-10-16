@@ -82,7 +82,7 @@ not "the method is `async`."
 
 **How to apply:**
 
-  - Do NOT copy the consumer's `#[async_trait]`-everything shape (§2 of
+  - Do NOT copy the consumer's all-async shape (§1–§2 of
     `consumer-threading.md`). Only `close()` / `close_with_timeout()` are
     `async fn` on `Admin`.
   - The `#[async_trait]` attribute is acceptable on the trait solely to

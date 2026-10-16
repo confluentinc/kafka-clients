@@ -66,7 +66,7 @@ use crate::common::test_utils;
 
 /// Bytes-typed `Consumer` trait object returned by
 /// `KafkaConsumer::new::<Vec<u8>, Vec<u8>>`.
-type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
+type BytesConsumer = dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>;
 
 /// Java's `BaseConsumerTestcase.BROKER_COUNT` / Scala's
 /// `AbstractConsumerTest.brokerCount`.
@@ -300,7 +300,7 @@ pub(super) async fn test_simple_consumption(ctx: &mut TestContext, config: Simpl
     let starting_timestamp = current_time_ms();
     send_records(&config, &tp, num_records, starting_timestamp).await;
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         ConsumerConfig::new(&merged(&config.client_props, &config.consumer_props)).expect("valid consumer config"),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
@@ -310,8 +310,8 @@ pub(super) async fn test_simple_consumption(ctx: &mut TestContext, config: Simpl
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
     assert_eq!(1, consumer.assignment().len());
     consumer.seek_with_offset(tp.clone(), 0).await.expect("seek should succeed");
-    consume_and_verify_records(consumer.as_mut(), &tp, num_records, 0, 0, starting_timestamp).await;
+    consume_and_verify_records(&mut consumer, &tp, num_records, 0, 0, starting_timestamp).await;
     // check async commit callbacks
-    send_and_await_async_commit(consumer.as_mut()).await;
+    send_and_await_async_commit(&mut consumer).await;
     consumer.close().await.expect("consumer close should succeed");
 }

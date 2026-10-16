@@ -105,8 +105,8 @@ use crate::common::test_utils;
 // Type alias matching the bytes-typed `Consumer` trait object returned
 // by `KafkaConsumer::new::<Vec<u8>, Vec<u8>>`. Used in helper signatures so
 // the tests pass `&mut consumer` (which deref-coerces from
-// `Box<dyn Consumer<Vec<u8>, Vec<u8>>>`).
-type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
+// `Box<dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>>`).
+type BytesConsumer = dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>;
 
 // ── Cluster config ────────────────────────────────────────────────────
 
@@ -504,7 +504,7 @@ async fn test_async_assign_and_commit_async_not_committed() {
     let num_records = 10_000;
     let starting_timestamp = current_time_ms();
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, Some(&group_id)),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
@@ -526,7 +526,7 @@ async fn test_async_assign_and_commit_async_not_committed() {
         .expect("commit_async_with_callback should succeed");
 
     poll_until_true(
-        consumer.as_mut(),
+        &mut consumer,
         || handles.success_count() >= 1 || handles.last_error_is_some(),
         Duration::from_secs(10),
         "Failed to observe commit callback before timeout",
@@ -570,7 +570,7 @@ async fn test_async_assign_and_commit_sync_not_committed() {
     let num_records = 10_000;
     let starting_timestamp = current_time_ms();
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, Some(&group_id)),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
@@ -616,7 +616,7 @@ async fn test_async_assign_and_commit_sync_all_consumed() {
 
     let num_records: usize = 10_000;
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, Some(&group_id)),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
@@ -631,7 +631,7 @@ async fn test_async_assign_and_commit_sync_all_consumed() {
     send_records_bytes(&ctx, &tp, num_records, starting_timestamp).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
     consumer.seek_with_offset(tp.clone(), 0).await.expect("seek should succeed");
-    consume_and_verify_records_bytes(consumer.as_mut(), &tp, num_records, 0, 0, starting_timestamp).await;
+    consume_and_verify_records_bytes(&mut consumer, &tp, num_records, 0, 0, starting_timestamp).await;
 
     consumer.commit_sync().await.expect("commit_sync should succeed");
     let committed_offset = consumer
@@ -662,7 +662,7 @@ async fn test_async_assign_and_consume() {
 
     let num_records: usize = 10;
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, Some(&group_id)),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
@@ -676,7 +676,7 @@ async fn test_async_assign_and_consume() {
     create_test_topic(&ctx, &topic, 2).await;
     send_records_bytes(&ctx, &tp, num_records, starting_timestamp).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
-    consume_and_verify_records_bytes(consumer.as_mut(), &tp, num_records, 0, 0, starting_timestamp).await;
+    consume_and_verify_records_bytes(&mut consumer, &tp, num_records, 0, 0, starting_timestamp).await;
 
     let pos = consumer.position(&tp).await.expect("position should succeed");
     assert_eq!(
@@ -699,7 +699,7 @@ async fn test_async_assign_and_consume_skipping_position() {
 
     let num_records: usize = 10;
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, Some(&group_id)),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
@@ -719,7 +719,7 @@ async fn test_async_assign_and_consume_skipping_position() {
         .await
         .expect("seek should succeed");
     consume_and_verify_records_bytes(
-        consumer.as_mut(),
+        &mut consumer,
         &tp,
         num_records - offset as usize,
         offset,
@@ -754,7 +754,7 @@ async fn test_async_assign_and_fetch_committed_offsets() {
     let starting_timestamp = current_time_ms();
 
     {
-        let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+        let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
             make_consumer_config_bytes(&ctx, Some(&group_id)),
             Box::new(ByteArrayDeserializer),
             Box::new(ByteArrayDeserializer),
@@ -768,7 +768,7 @@ async fn test_async_assign_and_fetch_committed_offsets() {
         send_records_bytes(&ctx, &tp, num_records, starting_timestamp).await;
         consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
         consumer.seek_with_offset(tp.clone(), 0).await.expect("seek should succeed");
-        consume_and_verify_records_bytes(consumer.as_mut(), &tp, num_records, 0, 0, starting_timestamp).await;
+        consume_and_verify_records_bytes(&mut consumer, &tp, num_records, 0, 0, starting_timestamp).await;
         consumer.commit_sync().await.expect("commit_sync should succeed");
 
         let committed = consumer
@@ -782,7 +782,7 @@ async fn test_async_assign_and_fetch_committed_offsets() {
     }
 
     {
-        let mut another = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+        let mut another = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
             make_consumer_config_bytes(&ctx, Some(&group_id)),
             Box::new(ByteArrayDeserializer),
             Box::new(ByteArrayDeserializer),
@@ -819,7 +819,7 @@ async fn test_async_assign_and_consume_from_committed_offsets() {
     let starting_timestamp = current_time_ms();
 
     {
-        let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+        let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
             make_consumer_config_bytes(&ctx, Some(&group_id)),
             Box::new(ByteArrayDeserializer),
             Box::new(ByteArrayDeserializer),
@@ -855,7 +855,7 @@ async fn test_async_assign_and_consume_from_committed_offsets() {
     }
 
     {
-        let mut another = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+        let mut another = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
             make_consumer_config_bytes(&ctx, Some(&group_id)),
             Box::new(ByteArrayDeserializer),
             Box::new(ByteArrayDeserializer),
@@ -873,7 +873,7 @@ async fn test_async_assign_and_consume_from_committed_offsets() {
 
         another.assign(vec![tp.clone()]).await.expect("assign should succeed");
         consume_and_verify_records_bytes(
-            another.as_mut(),
+            &mut another,
             &tp,
             num_records - offset as usize,
             offset,
@@ -902,7 +902,7 @@ async fn test_async_assign_and_retrieving_committed_offsets_multiple_times() {
     let num_records: usize = 100;
     let starting_timestamp = current_time_ms();
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, Some(&group_id)),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
@@ -917,7 +917,7 @@ async fn test_async_assign_and_retrieving_committed_offsets_multiple_times() {
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
 
     consumer.seek_with_offset(tp.clone(), 0).await.expect("seek should succeed");
-    consume_and_verify_records_bytes(consumer.as_mut(), &tp, num_records, 0, 0, starting_timestamp).await;
+    consume_and_verify_records_bytes(&mut consumer, &tp, num_records, 0, 0, starting_timestamp).await;
     consumer.commit_sync().await.expect("commit_sync should succeed");
 
     let first = consumer
@@ -978,7 +978,7 @@ async fn test_async_poll_after_topic_deleted() {
         ("auto.offset.reset".to_string(), "earliest".to_string()),
         ("client.id".to_string(), "integration-test-consumer".to_string()),
     ]);
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         ConsumerConfig::new(&props).expect("invalid test config"),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
@@ -995,7 +995,7 @@ async fn test_async_poll_after_topic_deleted() {
         .seek_with_offset(tp_to_delete.clone(), 0)
         .await
         .expect("seek should succeed");
-    consume_and_verify_records_bytes(consumer.as_mut(), &tp_to_delete, num_records, 0, 0, starting_timestamp).await;
+    consume_and_verify_records_bytes(&mut consumer, &tp_to_delete, num_records, 0, 0, starting_timestamp).await;
     consumer.commit_sync().await.expect("commit_sync should succeed");
 
     // Delete the topic and wait for deletion to propagate to metadata

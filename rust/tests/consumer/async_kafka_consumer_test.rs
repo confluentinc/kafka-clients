@@ -20,14 +20,16 @@
 //! does not synchronously connect, so the ctor succeeds even when the
 //! peer refuses connection. This exercises:
 //!
-//! 1. The `KafkaConsumer::new::<K, V>(...)` factory wires the
+//! 1. The `KafkaConsumer::<K, V>::new(...)` factory wires the
 //!    `GroupProtocol::Consumer` arm through to
 //!    `AsyncKafkaConsumer::new(config, kd, vd)`.
 //! 2. The full RequestManagers + bg-task scaffold builds and spawns
 //!    without panic.
-//! 3. `Box<dyn Consumer<K, V>>` dispatch works for sync accessors
-//!    (`client_id`).
-//! 4. `close().await` cleanly tears down the bg task with no broker.
+//! 3. `Consumer` dispatch works for sync accessors (`client_id`), both on
+//!    the concrete `KafkaConsumer` and boxed as
+//!    `Box<dyn DynConsumer<K, V>>`.
+//! 4. `close().await` through `Box<dyn DynConsumer<K, V>>` cleanly tears
+//!    down the bg task with no broker.
 //!
 //! Docker-free coverage; the integration tests in
 //! `tests/integration/consumer_test.rs` exercise the same path against
@@ -37,6 +39,7 @@ use std::collections::HashMap;
 
 use confluent_kafka::common::Error;
 use confluent_kafka::common::serialization::Deserializer;
+use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
 use confluent_kafka::consumer::KafkaConsumer;
 
@@ -67,23 +70,33 @@ fn make_smoke_config() -> ConsumerConfig {
 
 /// Smoke: the production ctor succeeds against a refuses-connection
 /// broker (metadata.bootstrap is non-connecting), trait dispatch works
-/// for `client_id()`, and `close().await` cleanly tears down the bg
-/// task. Covers commit (4/N) of Phase 12.
+/// for `client_id()` on the concrete type and through `DynConsumer`, and
+/// `close().await` through `DynConsumer` cleanly tears down the bg task.
+/// Covers commit (4/N) of Phase 12.
 #[tokio::test(flavor = "multi_thread")]
 async fn new_consumer_builds_and_closes_against_refused_broker() {
-    let mut consumer = KafkaConsumer::new::<String, String>(
+    let consumer = KafkaConsumer::<String, String>::new(
         make_smoke_config(),
         Box::new(StringDeserializer),
         Box::new(StringDeserializer),
     )
     .expect("KafkaConsumer::new should succeed even without a reachable broker");
 
-    // Trait dispatch through `Box<dyn Consumer<K, V>>`. `client_id` is
-    // the Phase-11-translated sync accessor.
+    // Static trait dispatch on the concrete type. `client_id` is the
+    // Phase-11-translated sync accessor.
     assert_eq!(
         consumer.client_id(),
         "smoke-test-consumer",
         "client_id() should round-trip the config value",
+    );
+
+    // Dynamic dispatch through `Box<dyn DynConsumer<K, V>>`: the same
+    // production consumer behind the type-erased view.
+    let mut consumer: Box<dyn confluent_kafka::consumer::DynConsumer<String, String>> = Box::new(consumer);
+    assert_eq!(
+        consumer.client_id(),
+        "smoke-test-consumer",
+        "client_id() through DynConsumer should match the concrete call",
     );
 
     // Bg-task graceful shutdown: signal close + drop the join handle.
@@ -107,7 +120,7 @@ async fn new_consumer_rejects_classic_group_protocol() {
     let config = ConsumerConfig::new(&props).expect("config should validate");
 
     let result =
-        KafkaConsumer::new::<String, String>(config, Box::new(StringDeserializer), Box::new(StringDeserializer));
+        KafkaConsumer::<String, String>::new(config, Box::new(StringDeserializer), Box::new(StringDeserializer));
 
     let err = result.err().expect("classic protocol must be rejected");
     assert!(
@@ -131,7 +144,7 @@ async fn test_pause_flag_preserved_for_retained_partition_on_manual_assignment_c
     use confluent_kafka::common::TopicPartition;
     use std::collections::HashSet;
 
-    let mut consumer = KafkaConsumer::new::<String, String>(
+    let mut consumer = KafkaConsumer::<String, String>::new(
         make_smoke_config(),
         Box::new(StringDeserializer),
         Box::new(StringDeserializer),
@@ -166,7 +179,7 @@ async fn test_pause_flag_preserved_for_retained_partition_on_manual_assignment_c
 /// and empty after it. Translates the `assertMetricsMap` helper of
 /// `KafkaConsumerTest` (KAFKA-19542, 9a28bd23ad), messages included.
 fn assert_metrics_map(
-    consumer: &dyn confluent_kafka::consumer::Consumer<String, String>,
+    consumer: &dyn confluent_kafka::consumer::DynConsumer<String, String>,
     metrics_should_be_present: bool,
 ) {
     // Copy the map because we're going to modify it.
@@ -220,17 +233,17 @@ async fn test_metrics_removed_on_close() {
         ("group.protocol".to_string(), "consumer".to_string()),
         ("bootstrap.servers".to_string(), "localhost:9999".to_string()),
     ]);
-    let mut consumer = KafkaConsumer::new::<String, String>(
+    let mut consumer = KafkaConsumer::<String, String>::new(
         ConsumerConfig::new(&props).expect("config should validate"),
         Box::new(StringDeserializer),
         Box::new(StringDeserializer),
     )
     .expect("KafkaConsumer::new");
 
-    assert_metrics_map(consumer.as_ref(), true);
+    assert_metrics_map(&consumer, true);
     consumer
         .close_with_options(CloseOptions::new_timeout(Duration::ZERO))
         .await
         .expect("close");
-    assert_metrics_map(consumer.as_ref(), false);
+    assert_metrics_map(&consumer, false);
 }

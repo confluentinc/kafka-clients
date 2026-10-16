@@ -35,7 +35,7 @@
 //!
 //!   - **Issue 8** (1 test): CLOSED by Phase 41. It was believed that a
 //!     `ConsumerRebalanceListener` callback could not call back into the
-//!     consumer in Rust — `Box<dyn Consumer>` is owned by one task and the
+//!     consumer in Rust — `Box<dyn DynConsumer>` is owned by one task and the
 //!     listener is shared as `Arc<dyn Listener>`, so there was no way to hand
 //!     the consumer back to `&self`. Phase 41 added [`ConsumerHandle`]
 //!     (`consumer.handle()`, `Clone + Send + Sync`), which is the Rust
@@ -159,8 +159,8 @@ use crate::common::test_utils::wait_for_partition_leaders;
 // Type alias matching the bytes-typed `Consumer` trait object returned
 // by `KafkaConsumer::new::<Vec<u8>, Vec<u8>>`. Used in helper signatures so
 // the tests pass `&mut consumer` (which deref-coerces from
-// `Box<dyn Consumer<Vec<u8>, Vec<u8>>>`).
-type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
+// `Box<dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>>`).
+type BytesConsumer = dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>;
 
 // ── Cluster config ────────────────────────────────────────────────────
 
@@ -697,7 +697,7 @@ async fn test_async_consumer_max_poll_records() {
     let starting_timestamp = current_time_ms();
     send_records_bytes(&ctx, &tp, num_records, starting_timestamp).await;
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[("max.poll.records", &max_poll_records.to_string())]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
@@ -706,7 +706,7 @@ async fn test_async_consumer_max_poll_records() {
 
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
     consume_and_verify_records_with_max_poll(
-        consumer.as_mut(),
+        &mut consumer,
         &tp,
         num_records,
         max_poll_records,
@@ -746,7 +746,7 @@ async fn test_async_consumer_max_poll_interval_ms() {
     // test's behavioral contract is "fence-rejoin after the poll
     // interval elapses without a poll" — preserved here by using
     // max.poll.interval.ms=5000 + sleep 7s (still > interval).
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[("max.poll.interval.ms", "5000")]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
@@ -779,7 +779,7 @@ async fn test_async_consumer_max_poll_interval_ms() {
     // depending on timing. So wait for the FULL assignment to be applied and
     // take the count of partition-carrying callbacks as the baseline (1, or 2
     // if the assignment was split across target epochs).
-    await_full_assignment(consumer.as_mut(), &all_partitions, Duration::from_secs(60)).await;
+    await_full_assignment(&mut consumer, &all_partitions, Duration::from_secs(60)).await;
     let assigned_baseline = counters.calls_to_assigned_non_empty();
     assert!(
         assigned_baseline >= 1,
@@ -972,7 +972,7 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_revocation() {
     create_topic(admin.as_ref(), &other_topic, 2, 1).await;
     admin.close_with_timeout(Duration::from_secs(5)).await;
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(
             &ctx,
             &group_id,
@@ -1004,7 +1004,7 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_revocation() {
         .expect("subscribe_with_topics_listener should succeed");
 
     // Rebalance to get the initial assignment.
-    await_rebalance_with_deadline(consumer.as_mut(), &counters, Duration::from_secs(60)).await;
+    await_rebalance_with_deadline(&mut consumer, &counters, Duration::from_secs(60)).await;
 
     // ...and then wait for `tp` itself. The helper above mirrors Java's
     // `awaitRebalance`, which returns on the first `on_partitions_assigned`
@@ -1015,7 +1015,7 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_revocation() {
     // does not have, and without this wait it fails intermittently under load
     // with "You can only check the position for partitions assigned to this
     // consumer" — the partition genuinely was not assigned yet.
-    await_partition_assigned(consumer.as_mut(), &tp, Duration::from_secs(60)).await;
+    await_partition_assigned(&mut consumer, &tp, Duration::from_secs(60)).await;
 
     // Resolve the position BEFORE forcing the rebalance — the precondition the
     // in-callback `position()` below depends on, and the one Java's test relies
@@ -1168,7 +1168,7 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_assignment() {
     // Java also produces no records in this test at all.
     create_test_topic(&ctx, &topic, 2).await;
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(
             &ctx,
             &group_id,
@@ -1188,10 +1188,10 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_assignment() {
         .expect("subscribe_with_topics_listener should succeed");
 
     // Rebalance to get the initial assignment (with the in-listener sleep).
-    await_rebalance_with_deadline(consumer.as_mut(), &counters, Duration::from_secs(60)).await;
+    await_rebalance_with_deadline(&mut consumer, &counters, Duration::from_secs(60)).await;
 
     // We should still be in the group after this invocation.
-    ensure_no_rebalance(consumer.as_mut(), &counters).await;
+    ensure_no_rebalance(&mut consumer, &counters).await;
 
     consumer.close().await.expect("consumer close should succeed");
 }
@@ -1212,7 +1212,7 @@ async fn test_async_consumer_max_poll_interval_ms_shorter_than_poll_timeout() {
 
     create_test_topic(&ctx, &topic, 2).await;
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[("max.poll.interval.ms", "1000")]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
@@ -1241,7 +1241,7 @@ async fn test_async_consumer_max_poll_interval_ms_shorter_than_poll_timeout() {
         TopicPartition::new(topic.clone(), 0),
         TopicPartition::new(topic.clone(), 1),
     ];
-    await_full_assignment(consumer.as_mut(), &all_partitions, Duration::from_secs(60)).await;
+    await_full_assignment(&mut consumer, &all_partitions, Duration::from_secs(60)).await;
     let calls_to_assigned_after_first_rebalance = counters.calls_to_assigned();
     assert_eq!(
         counters.calls_to_revoked(),
@@ -1289,7 +1289,7 @@ async fn test_async_consumer_poll_eventually_returns_records_with_zero_timeout()
     let num_messages: usize = 100;
     send_records_bytes(&ctx, &tp, num_messages, current_time_ms()).await;
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
@@ -1360,7 +1360,7 @@ async fn test_async_consumer_no_offset_for_partition_error_on_poll_zero() {
 
     create_test_topic(&ctx, &topic, 2).await;
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[("auto.offset.reset", "none")]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
@@ -1471,7 +1471,7 @@ async fn test_async_consumer_recovery_on_poll_after_delayed_rebalance() {
     send_records_with_producer(&producer, &tp, num_messages, now).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(
             &ctx,
             &group_id,
@@ -1502,8 +1502,7 @@ async fn test_async_consumer_recovery_on_poll_after_delayed_rebalance() {
     // rustdoc on `test_async_consumer_no_offset_for_partition_error_on_poll_zero`
     // for the equivalent translation deviation). Use 100ms per poll.
     let count =
-        await_non_empty_records_count(consumer.as_mut(), &tp, Duration::from_millis(100), Duration::from_secs(60))
-            .await;
+        await_non_empty_records_count(&mut consumer, &tp, Duration::from_millis(100), Duration::from_secs(60)).await;
     assert_eq!(count, num_messages, "expected to consume all {num_messages} initial records");
 
     // Subscribe to different topic. This will trigger the delayed
@@ -1535,13 +1534,9 @@ async fn test_async_consumer_recovery_on_poll_after_delayed_rebalance() {
     // Verify consumer recovers after being fenced, being able to
     // continue consuming. The member should automatically rejoin on
     // the next poll, with the new topic as subscription.
-    let count_after = await_non_empty_records_count(
-        consumer.as_mut(),
-        &tp_other,
-        Duration::from_millis(100),
-        Duration::from_secs(90),
-    )
-    .await;
+    let count_after =
+        await_non_empty_records_count(&mut consumer, &tp_other, Duration::from_millis(100), Duration::from_secs(90))
+            .await;
     assert_eq!(
         count_after, num_messages,
         "expected to consume all {num_messages} records from otherTopic after recovery"

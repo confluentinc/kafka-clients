@@ -444,17 +444,23 @@ enter it.*
 
 ### Consumer (`src/consumer/`)
 
-`Consumer<K, V>` is a single `#[async_trait]` trait (`src/consumer/mod.rs:133`)
-with 47 methods. The 38 async ones are the ones that block in Java. The nine
-sync ones are `assignment`, `subscription`, `paused`, `group_metadata`,
-`client_id`, `current_lag`, `metrics`, `wakeup` and `handle`.
+`Consumer<K, V>` (`src/consumer/mod.rs`) is a trait with 47 methods. The 38
+async ones are the ones that block in Java; they return `impl Future + Send`,
+as `Producer`'s do, so static dispatch involves no boxed future. The nine sync
+ones are `assignment`, `subscription`, `paused`, `group_metadata`,
+`client_id`, `current_lag`, `metrics`, `wakeup` and `handle`. Returning
+`impl Future` makes the trait not dyn-compatible, so the sealed
+`DynConsumer<K, V>` (`dyn_consumer.rs`) is blanket-implemented for every
+`Consumer` and boxes each future, for code that holds several implementations
+behind one type; `dyn DynConsumer<K, V>` implements `Consumer` in turn.
 
-`KafkaConsumer::new(config, key_deserializer, value_deserializer)`
-(`kafka_consumer.rs`) is the factory, and it returns
-`Box<dyn Consumer<K, V>>`. There is no free `new_consumer` function. The
+`KafkaConsumer<K, V>` (`kafka_consumer.rs`) is the public consumer type, built
+with `KafkaConsumer::new(config, key_deserializer, value_deserializer)`. As in
+Java, it holds a delegate and forwards every `Consumer` method to it. The
 implementations are:
-- `AsyncKafkaConsumer<K, V>`, which is crate-private (`mod.rs:44`) and
-  reachable only through that box.
+- `KafkaConsumer<K, V>`, whose delegate is `AsyncKafkaConsumer<K, V>`; that
+  type is crate-private (`mod.rs`) and reachable only through
+  `KafkaConsumer`.
 - `MockConsumer<K, V>`.
 
 A compile-time guard on this shape lives at

@@ -31,11 +31,12 @@ use confluent_kafka::consumer::{
 };
 
 /// Compile-time check that [`MockConsumer<K, V>`] is object-safe and can be
-/// used as `Box<dyn Consumer<K, V>>` (DoD §11). A regression that introduces
+/// used as `Box<dyn DynConsumer<K, V>>` (DoD §11). A regression that introduces
 /// a `Self: Sized` bound would fail this file at compile time.
 #[test]
 fn mock_consumer_is_consumer_trait_object() {
-    let _: Box<dyn Consumer<String, String>> = Box::new(MockConsumer::<String, String>::new("earliest").unwrap());
+    let _: Box<dyn confluent_kafka::consumer::DynConsumer<String, String>> =
+        Box::new(MockConsumer::<String, String>::new("earliest").unwrap());
 }
 
 /// Builder helper: matches Java's `new ConsumerRecord<>(topic, partition,

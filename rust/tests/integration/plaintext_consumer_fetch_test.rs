@@ -102,8 +102,8 @@ use crate::common::test_utils::wait_for_partition_leaders;
 // Type alias matching the bytes-typed `Consumer` trait object returned
 // by `KafkaConsumer::new::<Vec<u8>, Vec<u8>>`. Used in helper signatures so
 // the tests pass `&mut consumer` (which deref-coerces from
-// `Box<dyn Consumer<Vec<u8>, Vec<u8>>>`).
-type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
+// `Box<dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>>`).
+type BytesConsumer = dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>;
 
 // Consumed records bucketed by topic-partition, borrowed from the batch the
 // poll loop collected them into.
@@ -423,7 +423,7 @@ async fn test_async_consumer_fetch_invalid_offset() {
     let group_id = ctx.group_id("g_fetch_invalid_offset");
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[("auto.offset.reset", "none")]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
@@ -506,7 +506,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_earliest() {
     let group_id = ctx.group_id("g_fetch_oor_earliest");
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(
             &ctx,
             &group_id,
@@ -523,7 +523,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_earliest() {
     let starting_timestamp: i64 = 0;
     send_records_bytes(&ctx, &tp, total_records, starting_timestamp).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
-    consume_and_verify_records_bytes(consumer.as_mut(), &tp, total_records, 0, 0, starting_timestamp, -1).await;
+    consume_and_verify_records_bytes(&mut consumer, &tp, total_records, 0, 0, starting_timestamp, -1).await;
 
     // seek to out of range position
     let out_of_range_pos: i64 = total_records as i64 + 1;
@@ -533,7 +533,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_earliest() {
         .expect("seek should succeed");
     // assert that poll resets to the beginning position — only one
     // record needed to prove the reset (Java line 148).
-    consume_and_verify_records_bytes(consumer.as_mut(), &tp, 1, 0, 0, starting_timestamp, -1).await;
+    consume_and_verify_records_bytes(&mut consumer, &tp, 1, 0, 0, starting_timestamp, -1).await;
 
     consumer.close().await.expect("consumer close should succeed");
 }
@@ -553,7 +553,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_latest() {
     let group_id = ctx.group_id("g_fetch_oor_latest");
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(
             &ctx,
             &group_id,
@@ -577,7 +577,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_latest() {
     consumer.seek_with_offset(tp.clone(), 0).await.expect("seek should succeed");
 
     // consume some, but not all the records
-    consume_and_verify_records_bytes(consumer.as_mut(), &tp, total_records / 2, 0, 0, starting_timestamp, -1).await;
+    consume_and_verify_records_bytes(&mut consumer, &tp, total_records / 2, 0, 0, starting_timestamp, -1).await;
 
     // seek to out of range position
     let out_of_range_pos: i64 = total_records as i64 + 17; // arbitrary, much higher offset
@@ -616,7 +616,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_latest() {
 
     // After the new records land, the next poll should surface the
     // first one at offset = total_records.
-    let next_records = consume_records_bytes(consumer.as_mut(), 1).await;
+    let next_records = consume_records_bytes(&mut consumer, 1).await;
     let next_record = &next_records[0];
     assert_eq!(
         next_record.offset(),
@@ -649,7 +649,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_by_duration(
     let tp = TopicPartition::new(topic.clone(), 0);
     let tp2 = TopicPartition::new(topic.clone(), 1);
 
-    let mut consumer1 = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer1 = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(
             &ctx,
             &group_id_1,
@@ -667,7 +667,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_by_duration(
         .assign(vec![tp.clone()])
         .await
         .expect("consumer1 assign should succeed");
-    consume_and_verify_records_bytes(consumer1.as_mut(), &tp, total_records, 0, 0, starting_timestamp_1, -1).await;
+    consume_and_verify_records_bytes(&mut consumer1, &tp, total_records, 0, 0, starting_timestamp_1, -1).await;
 
     // seek to out of range position
     let out_of_range_pos: i64 = total_records as i64 + 1;
@@ -677,13 +677,13 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_by_duration(
         .expect("consumer1 seek should succeed");
     // assert that poll resets to the beginning position (everything is
     // within the 1h duration window)
-    consume_and_verify_records_bytes(consumer1.as_mut(), &tp, 1, 0, 0, starting_timestamp_1, -1).await;
+    consume_and_verify_records_bytes(&mut consumer1, &tp, 1, 0, 0, starting_timestamp_1, -1).await;
 
     consumer1.close().await.expect("consumer1 close should succeed");
 
     // Second scenario: starting offset is earlier than the requested
     // duration. Generate records with 1 hour interval for 1 day.
-    let mut consumer2 = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer2 = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(
             &ctx,
             &group_id_2,
@@ -708,7 +708,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_by_duration(
         .expect("consumer2 assign should succeed");
     // consumer should read one record from last one hour
     consume_and_verify_records_bytes(
-        consumer2.as_mut(),
+        &mut consumer2,
         &tp2,
         1,
         24,
@@ -727,7 +727,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_by_duration(
     // assert that poll resets to the duration offset. consumer should
     // read one record from last one hour
     consume_and_verify_records_bytes(
-        consumer2.as_mut(),
+        &mut consumer2,
         &tp2,
         1,
         24,
@@ -780,7 +780,7 @@ async fn check_large_record(consumer_overrides: &[(&str, &str)], producer_record
     let group_id = ctx.group_id(group_base_name);
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, consumer_overrides),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
@@ -808,7 +808,7 @@ async fn check_large_record(consumer_overrides: &[(&str, &str)], producer_record
 
     // consuming a record that is too large should succeed since KIP-74
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
-    let records = consume_records_bytes(consumer.as_mut(), 1).await;
+    let records = consume_records_bytes(&mut consumer, 1).await;
     assert_eq!(records.len(), 1, "should consume exactly one record (got {})", records.len());
     let consumer_record = &records[0];
     assert_eq!(consumer_record.offset(), 0);
@@ -865,7 +865,7 @@ async fn check_fetch_honours_size_if_large_record_not_first(
     let group_id = ctx.group_id(group_base_name);
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, consumer_overrides),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
@@ -912,7 +912,7 @@ async fn check_fetch_honours_size_if_large_record_not_first(
     // we should only get the small record in the first `poll`
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
 
-    let records = consume_records_bytes(consumer.as_mut(), 1).await;
+    let records = consume_records_bytes(&mut consumer, 1).await;
     assert_eq!(records.len(), 1, "should consume exactly one record (got {})", records.len());
     let consumer_record = &records[0];
     assert_eq!(consumer_record.offset(), 0);
@@ -956,7 +956,7 @@ async fn test_async_consumer_low_max_fetch_size_for_request_and_partition() {
         }
     }
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(
             &ctx,
             &group_id,
@@ -983,7 +983,7 @@ async fn test_async_consumer_low_max_fetch_size_for_request_and_partition() {
         .subscribe_with_topics(topics.clone())
         .await
         .expect("subscribe should succeed");
-    await_assignment(consumer.as_mut(), &partitions).await;
+    await_assignment(&mut consumer, &partitions).await;
 
     // Produce `partition_count` records per partition.
     let producer = build_producer_bytes(&ctx);
@@ -1006,8 +1006,7 @@ async fn test_async_consumer_low_max_fetch_size_for_request_and_partition() {
     // producer's per-partition `flush()` (90 sequential flushes total)
     // pushes total wall-clock past the default 60s budget; bump to 180s
     // for parity with Java's eventual-completion outcome.
-    let consumed =
-        consume_records_bytes_with_deadline(consumer.as_mut(), total_produced, Duration::from_secs(180)).await;
+    let consumed = consume_records_bytes_with_deadline(&mut consumer, total_produced, Duration::from_secs(180)).await;
     assert_eq!(
         consumed.len(),
         total_produced,

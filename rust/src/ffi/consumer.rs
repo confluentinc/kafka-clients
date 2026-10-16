@@ -160,7 +160,7 @@ impl Drop for OwnedReleaseGuard {
 /// The two consumer implementations exposed through the FFI.
 enum ConsumerKind {
     /// Production KIP-848 consumer.
-    Async(Box<dyn Consumer<Bytes, Bytes>>),
+    Async(Box<dyn crate::consumer::DynConsumer<Bytes, Bytes>>),
     /// Broker-less test consumer with FFI driver methods.
     Mock(Box<MockConsumer<Bytes, Bytes>>),
 }
@@ -581,8 +581,8 @@ pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
     // Replicate the `GroupProtocol::of` gate from `KafkaConsumer::new`
     // (`src/consumer/mod.rs`): classic protocol is unsupported in this client.
     // We construct the concrete `AsyncKafkaConsumer` directly (rather than
-    // routing through `KafkaConsumer::new`, which erases the concrete type) so we can
-    // capture its `handle()` before boxing it as a trait object.
+    // routing through `KafkaConsumer::new`) and capture its `handle()` before
+    // boxing it as a `dyn DynConsumer` next to the `MockConsumer` arm.
     match GroupProtocol::of(config.group_protocol()) {
         Ok(GroupProtocol::Consumer) => {},
         Ok(GroupProtocol::Classic) => {
@@ -893,7 +893,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_poll(
     let timeout = Duration::from_millis(timeout_ms.max(0) as u64);
     // SAFETY: `consumer_mut` requires the access guard: `acquire(h)` succeeded (an `Err`
     // returned early) and `_g: ReleaseGuard` holds it until this function returns, so the
-    // `&mut dyn Consumer` is exclusive for the whole `block_on(poll)` window per the
+    // `&mut dyn DynConsumer` is exclusive for the whole `block_on(poll)` window per the
     // `UnsafeCell` + `acquire` invariant documented on `FfiConsumerHandle`'s `unsafe impl
     // Send/Sync`. `block_on` drives the future to completion before `_g` drops, so no
     // borrow outlives the guard.
@@ -995,7 +995,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_poll_async(
         // SAFETY: `consumer_mut` requires the guard: `acquire(h)` on the calling thread
         // succeeded (the `Err` path fired the callback inline and returned without
         // spawning), and `guard` holds it until `PollCompletion::fire` drops it on the
-        // dispatcher thread, after `poll().await` has returned and the `&mut dyn Consumer`
+        // dispatcher thread, after `poll().await` has returned and the `&mut dyn DynConsumer`
         // borrow has ended. `h` is the `&'static` handle, kept alive by `destroy` joining
         // this registered task.
         let result = unsafe { consumer_mut(h).poll(timeout).await };
@@ -1087,7 +1087,7 @@ unsafe impl Send for PollCallbackTarget {}
 // The `&mut` from `&` is the whole point of the `UnsafeCell` + access-guard
 // design: the guard enforces the exclusivity the borrow checker cannot.
 #[expect(clippy::mut_from_ref)]
-unsafe fn consumer_mut(h: &FfiConsumerHandle) -> &mut dyn Consumer<Bytes, Bytes> {
+unsafe fn consumer_mut(h: &FfiConsumerHandle) -> &mut dyn crate::consumer::DynConsumer<Bytes, Bytes> {
     // SAFETY: Interior-mutability hand-out: per this function's `# Safety` the caller holds
     // the access guard, and `acquire()` guarantees at most one thread/future accesses
     // `*consumer.get()` at any instant (the invariant documented on the `unsafe impl
@@ -1736,7 +1736,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_assign(
     }
     // SAFETY: `consumer_mut` requires the access guard: `acquire(h)` succeeded (an `Err`
     // returned early with the error boxed) and `_g: ReleaseGuard` holds it until this
-    // function returns, so the `&mut dyn Consumer` is exclusive for the `block_on(assign)`
+    // function returns, so the `&mut dyn DynConsumer` is exclusive for the `block_on(assign)`
     // window and the borrow ends before `_g` drops, per the `UnsafeCell` + `acquire`
     // invariant documented on `FfiConsumerHandle`'s `unsafe impl Send/Sync`.
     match h.runtime.block_on(unsafe { consumer_mut(h).assign(tps) }) {
@@ -4995,7 +4995,7 @@ pub unsafe extern "C" fn kafka_consumer_string_destroy(s: *mut c_char) {
 /// Returns null on success, or a non-null error handle on failure (including a
 /// `LocalConcurrentModification` error if the guard cannot be acquired).
 ///
-/// `op` receives `&mut dyn Consumer` and returns the future to drive.
+/// `op` receives `&mut dyn DynConsumer` and returns the future to drive.
 ///
 /// # Safety
 ///
@@ -5007,7 +5007,7 @@ where
     // (which `FnOnce(&mut _) -> impl Future` cannot express with one type
     // parameter).
     F: for<'a> FnOnce(
-        &'a mut dyn Consumer<Bytes, Bytes>,
+        &'a mut dyn crate::consumer::DynConsumer<Bytes, Bytes>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Error>> + 'a>>,
 {
     // SAFETY: `handle_ref` requires a non-null handle created by a consumer constructor,
@@ -5020,7 +5020,7 @@ where
     let _g = ReleaseGuard(h);
     // SAFETY: `consumer_mut` requires the access guard: `acquire(h)` succeeded (an `Err`
     // returned early) and `_g: ReleaseGuard` holds it until this function returns. The
-    // higher-ranked bound on `F` ties the returned future to the `&mut dyn Consumer`
+    // higher-ranked bound on `F` ties the returned future to the `&mut dyn DynConsumer`
     // borrow, and `block_on(fut)` drives it to completion before `_g` drops, so the
     // exclusive access ends inside the guarded window, per the `UnsafeCell` + `acquire`
     // invariant documented on `FfiConsumerHandle`'s `unsafe impl Send/Sync`.
@@ -5042,14 +5042,14 @@ where
 /// # Safety
 ///
 /// `consumer` must be a valid handle. The closure runs on the runtime; it
-/// receives the guarded `&mut dyn Consumer`.
+/// receives the guarded `&mut dyn DynConsumer`.
 unsafe fn async_void_op<F, Fut>(
     consumer: *const kafka_consumer_Consumer_t,
     callback: OperationCallbackFn,
     user_data: *mut c_void,
     op: F,
 ) where
-    F: FnOnce(&'static mut dyn Consumer<Bytes, Bytes>) -> Fut + Send + 'static,
+    F: FnOnce(&'static mut dyn crate::consumer::DynConsumer<Bytes, Bytes>) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = Result<(), Error>> + Send,
 {
     // SAFETY: `handle_ref` requires a non-null handle from a consumer constructor, which
@@ -5083,7 +5083,7 @@ unsafe fn async_void_op<F, Fut>(
         let guard = guard;
         // SAFETY: `consumer_mut` requires the guard: `acquire(h)` succeeded (the rejection
         // path returned without spawning) and `guard` holds it until the completion job
-        // drops it, after `op`'s future has completed and its `&mut dyn Consumer` borrow
+        // drops it, after `op`'s future has completed and its `&mut dyn DynConsumer` borrow
         // has ended. `h` is the `&'static` handle, kept alive by `destroy` joining this
         // registered task.
         let result = op(unsafe { consumer_mut(h) }).await;
@@ -5155,7 +5155,7 @@ unsafe fn async_value_op<T, Fut, F, C>(
 ) where
     T: Send + 'static,
     Fut: std::future::Future<Output = Result<T, Error>> + Send,
-    F: FnOnce(&'static mut dyn Consumer<Bytes, Bytes>) -> Fut + Send + 'static,
+    F: FnOnce(&'static mut dyn crate::consumer::DynConsumer<Bytes, Bytes>) -> Fut + Send + 'static,
     C: FnOnce(Result<T, Error>, *mut c_void) + Send + 'static,
 {
     // SAFETY: `handle_ref` requires a non-null pointer created by a consumer constructor;

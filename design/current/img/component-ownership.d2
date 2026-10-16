@@ -13,7 +13,7 @@ app: "Application task(s)" {
   style.fill: "#eef6ff"
 
   producer: "KafkaProducer<K, V>\nproducer/kafka_producer.rs"
-  consumer: "AsyncKafkaConsumer<K, V> (pub(crate))\nbuilt by KafkaConsumer::new -> Box<dyn Consumer>"
+  consumer: "AsyncKafkaConsumer<K, V> (pub(crate))\nheld by KafkaConsumer<K, V>"
   admin: "KafkaAdminClient\nadmin/kafka_admin_client.rs"
 }
 

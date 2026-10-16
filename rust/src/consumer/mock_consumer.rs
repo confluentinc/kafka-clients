@@ -20,7 +20,8 @@
 //! `set_poll_error`, etc.) live on the concrete `MockConsumer<K, V>`
 //! type — they are NOT on the [`Consumer<K, V>`](crate::consumer::Consumer)
 //! trait. Tests hold a `MockConsumer` directly and pass `&mut consumer` where
-//! `&mut dyn Consumer<K, V>` is expected (see `consumer-threading.md` §2).
+//! a `C: Consumer<K, V>` or a `&mut dyn DynConsumer<K, V>` is expected (see
+//! `consumer-threading.md` §2).
 //!
 //! Threading: `MockConsumer` is `!Sync` and intended for single-task use
 //! through the `&mut self` dispatch surface. `wakeup()` is callable from
@@ -31,7 +32,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use indexmap::IndexMap;
 
 use crate::common::metrics::KafkaMetric;
@@ -520,7 +520,6 @@ impl<K, V> MockConsumer<K, V> {
 
 // ─── Consumer<K, V> trait impl ──────────────────────────────────────────
 
-#[async_trait]
 impl<K, V> Consumer<K, V> for MockConsumer<K, V>
 where
     K: Send + 'static,

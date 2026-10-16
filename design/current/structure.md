@@ -147,8 +147,9 @@ In practice:
   generated wire modules are `pub(crate)`. Tests that need them live inside the
   crate: the message and protocol tests sit under `rust/src/common/`, and the
   raw-socket integration suites under `rust/src/integration_tests/`.
-- `consumer::AsyncKafkaConsumer` is `pub(crate)`; `KafkaConsumer::new`
-  constructs it and returns it as `Box<dyn Consumer<K, V>>`.
+- `consumer::AsyncKafkaConsumer` is `pub(crate)`; the public
+  `KafkaConsumer<K, V>` holds it as its delegate and forwards every
+  `Consumer` method to it.
 - `Errors` (the wire enum) is `pub(crate)`, so `Error` has no public
   `error()` / `code()`. Callers classify by variant and `is_*_error()`, and C
   callers use `kafka_common_ErrorCode_t`.
@@ -270,7 +271,8 @@ Sender-confined fields live on `sender.rs`, not in the manager.*
 ```
 rust/src/consumer/               # 22 files + 45 internals + 10 metrics + 9 events (each incl. mod.rs)
 ├── mod.rs                  # Consumer<K, V> trait
-├── kafka_consumer.rs       # KafkaConsumer::new -> Box<dyn Consumer<K, V>>
+├── kafka_consumer.rs       # KafkaConsumer<K, V>, wrapping the AsyncKafkaConsumer delegate
+├── dyn_consumer.rs         # DynConsumer<K, V>, the dyn-compatible view of Consumer
 ├── async_kafka_consumer.rs # AsyncKafkaConsumer<K, V> (pub(crate))
 │                           # + ConsumerHandle (pub)
 ├── mock_consumer.rs        # MockConsumer<K, V>
