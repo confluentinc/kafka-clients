@@ -318,45 +318,33 @@ trait.
     and dedicated per-class test files (`NewTopicTest`, `TopicCollectionTest`,
     `*ResultTest`) translated alongside the `KafkaAdminClientTest` slices.
 
-## 11. Bindings (C FFI / Python): the Python admin binding is paused
+## 11. Bindings (C FFI / Python)
 
-The Admin client has a C FFI, `rust/src/ffi/admin.rs`, with sync and `*_async`
-forms over the shared dispatcher in `rust/src/ffi/common.rs` (`CompletionJob`,
-`spawn_dispatcher`, `enqueue_or_run_inline`). Its Python binding is
-`python/admin.py`: `AdminClient`, `MockAdminClient` and their
-asyncio peers, all driving the async C bindings.
+The Admin client's C FFI is `rust/src/ffi/admin/`, one file per Java class. Every RPC returns its
+`*Result` handle at once, as Java's methods do; the Result hands out one
+`kafka_common_KafkaFuture_t` per key (or one for the whole call), and each waiting entry point
+(`close`) has a `_cb` twin whose completion is queued on the client and run by
+`kafka_admin_Admin__execute_callbacks`. The Options objects are C handles built with
+`<X>Options_new` and their `set_*` functions.
 
-`admin.py` is **paused**. It predates CLAUDE.md's
-`## Python Binding Conventions`, which do not cover the Admin client, and it is
-not part of the `confluent_kafka` package. It keeps its flat `KafkaError`
-(`code()` / `is_retriable()`) and positional value types through the private
-`confluent_kafka/_legacy_compat.py`.
-
-**Why:** the conventions replaced the flat error and the positional value types
-for the producer and consumer. Porting admin is separate work; until then its
-callers (the gRPC admin translation, `test/unit/test_admin.py`) rely on its
-current surface.
+Its Python binding is the package `confluent_kafka.admin`, generated from CLAUDE.md's
+`## Python Binding Conventions` over that FFI, like the producer and consumer: `Admin`,
+`KafkaAdminClient` and their asyncio peers call the FFI; the Options, Result and value classes and
+`MockAdminClient` with its asyncio peer are pure-Python translations of their Java sources. The
+conventions cover the admin client's specifics: `KafkaFuture` / `AsyncKafkaFuture` over the C
+futures (Futures), the sync client's pump thread (Threads and callbacks), the Options objects
+built through `set_*` (Signatures), and the pure-Python `MockAdminClient` (Implementation over the
+FFI).
 
 **How to apply:**
 
-  - Do not change `admin.py`'s existing public surface until it is ported to
-    the conventions as a whole; `_legacy_compat.py` is deleted with that port.
-  - The one exception is additive: a method for an Admin RPC that Java newly
-    adds and that the multilanguage test suite exercises through the Python
-    gRPC arms, plus the mock helper that seeds that RPC's mock answer, may be
-    added to `admin.py` in its current style, without changing any existing
-    method. The current instance is the Apache Kafka 4.4 bump (Milestone 17):
-    `AdminClient.unregister_controller` (sync and asyncio, KAFKA-20395), which
-    `rust/tests/integration/admin_controllers_test.rs` drives through the Python
-    gRPC arms, and `MockAdminClient.set_using_raft_controller` (Java's
-    `MockAdminClient.Builder.usingRaftController`, which 4.4's
-    `unregisterController` reads), which `python/test/unit/test_admin.py` covers.
-  - Nothing in the `confluent_kafka` public surface may import
-    `_legacy_compat.py`.
+  - Generate and change the binding only through the conventions; do not hand-edit generated code.
+  - A new Admin RPC is generated like any other once its FFI is in the header:
+    `unregister_controller` (KAFKA-20395, Kafka 4.4) is one, with
+    `MockAdminClient.Builder.using_raft_controller`, which Java's mock reads for it.
+  - The old binding `python/admin.py` and its private shim `confluent_kafka/_legacy_compat.py` are
+    gone; the gRPC admin translation, the soak client and the admin tests use
+    `confluent_kafka.admin`.
 
-(This section used to record a branch-state caveat: on
-`dev/admin-client-implementation` the only FFI was a fully synchronous
-`rust/src/ffi/producer.rs` and the only Python binding `producer.py`, so the admin
-bindings were to mirror that. The admin bindings were since built on the async
-C API, and `producer.py` was replaced by the `confluent_kafka` package, so the
-caveat no longer applies.)
+(This section used to record the Python admin binding as paused, over a synchronous
+`rust/src/ffi/admin.rs` and the shared completion dispatcher; both were replaced.)

@@ -29,18 +29,21 @@ and ``commit_nowait()`` / ``(callback)`` / ``(offsets, callback)``, each checked
 by ``java_forms``, and ``close()`` / ``(option)``.
 ``commitSync`` / ``commitAsync`` are ``commit()`` / ``commit_nowait()``.
 
+The ``Duration`` overloads of ``commitSync``, ``position``, ``committed``,
+``partitionsFor``, ``listTopics``, ``offsetsForTimes``, ``beginningOffsets`` and
+``endOffsets`` are the optional ``timeout`` of their method (Signatures,
+Timeouts): ``None`` calls the overload without it, a given one the
+``kafka_consumer_Consumer_*_with_timeout`` entry point. Inside a callback this
+consumer delivers, only ``position`` takes a ``timeout``; the others raise
+``ConcurrentModificationError`` for one, as ``partitions_for`` and
+``list_topics`` are refused there with or without it *(deviation: inside a
+listener the core's handle has no timed form; goes when it has)*.
+
 Not generated, their FFI entry point being missing (the name looked for, after
-the ``kafka_consumer_Consumer_`` prefix, in parentheses): the ``Duration``
-overloads of ``commitSync`` (``commit_sync_with_timeout``,
-``commit_sync_with_offsets_timeout``), ``committed``
-(``committed_with_timeout``), ``position`` (``position_with_timeout``),
-``beginningOffsets`` (``beginning_offsets_with_timeout``), ``endOffsets``
-(``end_offsets_with_timeout``), ``offsetsForTimes``
-(``offsets_for_times_with_timeout``), ``partitionsFor``
-(``partitions_for_with_timeout``) and ``listTopics``
-(``list_topics_with_timeout``); ``clientInstanceId(Duration)``
-(``client_instance_id``); ``registerMetricForSubscription`` /
-``unregisterMetricFromSubscription`` (``register_metric_for_subscription`` /
+the ``kafka_consumer_Consumer_`` prefix, in parentheses):
+``clientInstanceId(Duration)`` (``client_instance_id``);
+``registerMetricForSubscription`` / ``unregisterMetricFromSubscription``
+(``register_metric_for_subscription`` /
 ``unregister_metric_from_subscription``).
 Not generated, Java deprecating it (Class family): ``close(Duration)``.
 Dropped: ``enforceRebalance()`` / ``enforceRebalance(String)``, whose
@@ -194,14 +197,14 @@ class Consumer(Generic[K, V], _ConsumerState):
         """
         return self._c_poll(timeout)
 
-    def commit(self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata] | None = None
-               ) -> None:
+    def commit(self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata] | None = None,
+               timeout: Duration | None = None) -> None:
         """Commit the offsets returned on the last ``poll()`` for all the
         subscribed topics and partitions, or the given ``offsets``. This is a
         synchronous commit and will block until either the commit succeeds, an
         unrecoverable error is encountered (in which case it is raised), or the
-        ``default.api.timeout.ms`` expires (``TimeoutError``). Java's
-        ``commitSync``.
+        ``timeout`` expires (``TimeoutError``), ``default.api.timeout.ms``
+        without one. Java's ``commitSync``.
 
         The committed offset should be the next message your application will
         consume, i.e. ``last_processed_message_offset + 1``.
@@ -209,10 +212,13 @@ class Consumer(Generic[K, V], _ConsumerState):
         Raises ``CommitFailedError`` if the commit failed and cannot be retried,
         ``RebalanceInProgressError`` while the consumer is in the middle of a
         rebalance, ``WakeupError`` if ``wakeup()`` is called before or while this
-        method is called, ``AuthorizationError`` if not authorized, and
-        ``KafkaError`` for any other unrecoverable error.
+        method is called, ``AuthorizationError`` if not authorized,
+        ``IllegalArgumentError`` if ``timeout`` is negative, and ``KafkaError``
+        for any other unrecoverable error. Inside a callback this consumer delivers, a given ``timeout`` raises
+        ``ConcurrentModificationError`` *(deviation: inside a listener the core's
+        handle has no timed form; goes when it has)*.
         """
-        self._c_commit(offsets)
+        self._c_commit(offsets, timeout)
 
     @overload
     def commit_nowait(self, *, callback: OffsetCommitCallback | None = None) -> None: ...
@@ -299,47 +305,58 @@ class Consumer(Generic[K, V], _ConsumerState):
         currently assigned partitions."""
         self._c_seek_to_end(partitions)
 
-    def position(self, *, partition: TopicPartition) -> int:
+    def position(self, *, partition: TopicPartition, timeout: Duration | None = None) -> int:
         """Get the offset of the next record that will be fetched (if a record
         with that offset exists). This method may issue a remote call to the
         server if there is no current position for the given partition, and
-        waits up to ``default.api.timeout.ms``.
+        waits up to ``timeout``, ``default.api.timeout.ms`` without one.
 
         Raises ``IllegalStateError`` if the partition is not assigned to this
         consumer, ``InvalidOffsetError`` if no offset is currently defined for
-        it, ``WakeupError`` on ``wakeup()``, and ``TimeoutError`` if the
-        position cannot be determined before the timeout expires.
+        it, ``WakeupError`` on ``wakeup()``, ``IllegalArgumentError`` if
+        ``timeout`` is negative, and ``TimeoutError`` if the position cannot be
+        determined before the timeout expires.
         """
-        return self._c_position(partition)
+        return self._c_position(partition, timeout)
 
-    def committed(self, *, partitions: Iterable[TopicPartition]
+    def committed(self, *, partitions: Iterable[TopicPartition],
+                  timeout: Duration | None = None
                   ) -> dict[TopicPartition, OffsetAndMetadata | None]:
         """Retrieve the last committed offset for the given partitions (whether
         the commit happened by this process or another). The returned offset is
         used as the consumption position in case of a failure. A partition
         without a committed offset maps to ``None``.
 
-        This call waits up to ``default.api.timeout.ms`` for the offsets.
+        This call waits up to ``timeout`` for the offsets,
+        ``default.api.timeout.ms`` without one, and raises ``TimeoutError`` if
+        they cannot be fetched before it expires. Inside a callback this consumer delivers, a given ``timeout`` raises
+        ``ConcurrentModificationError`` *(deviation: inside a listener the core's
+        handle has no timed form; goes when it has)*.
         """
-        return self._c_committed(partitions)
+        return self._c_committed(partitions, timeout)
 
     def metrics(self) -> dict[MetricName, Metric]:
         """Get the metrics kept by the consumer."""
         return self._c_metrics()
 
-    def partitions_for(self, *, topic: str) -> list[PartitionInfo]:
+    def partitions_for(self, *, topic: str, timeout: Duration | None = None
+                       ) -> list[PartitionInfo]:
         """Get metadata about the partitions for a given topic. This method
         issues a remote call to the server if it does not already have any
-        metadata about the given topic, and waits up to
-        ``default.api.timeout.ms``. Returns an empty list if the topic is not
-        found and ``allow.auto.create.topics`` is not set."""
-        return self._c_partitions_for(topic)
+        metadata about the given topic, and waits up to ``timeout``,
+        ``default.api.timeout.ms`` without one (``TimeoutError`` once it
+        expires; a zero ``timeout`` raises it at once when the metadata is not
+        cached). Returns an empty list if the topic is not found and
+        ``allow.auto.create.topics`` is not set."""
+        return self._c_partitions_for(topic, timeout)
 
-    def list_topics(self) -> dict[str, list[PartitionInfo]]:
+    def list_topics(self, *, timeout: Duration | None = None
+                    ) -> dict[str, list[PartitionInfo]]:
         """Get metadata about partitions for all topics that the user is
         authorized to view. This method issues a remote call to the server and
-        waits up to ``default.api.timeout.ms``."""
-        return self._c_list_topics()
+        waits up to ``timeout``, ``default.api.timeout.ms`` without one
+        (``TimeoutError`` once it expires, at once for a zero ``timeout``)."""
+        return self._c_list_topics(timeout)
 
     def paused(self) -> set[TopicPartition]:
         """Get the set of partitions that were previously paused by a call to
@@ -361,34 +378,49 @@ class Consumer(Generic[K, V], _ConsumerState):
         paused, this method is a no-op."""
         self._c_resume(partitions)
 
-    def offsets_for_times(self, *, timestamps_to_search: Mapping[TopicPartition, int]
+    def offsets_for_times(self, *, timestamps_to_search: Mapping[TopicPartition, int],
+                          timeout: Duration | None = None
                           ) -> dict[TopicPartition, OffsetAndTimestamp | None]:
         """Look up the offsets for the given partitions by timestamp. The
         returned offset for each partition is the earliest offset whose
         timestamp is greater than or equal to the given timestamp in the
         corresponding partition, or ``None`` if there is no such message. This
-        is a blocking call waiting up to ``default.api.timeout.ms``.
+        is a blocking call waiting up to ``timeout``, ``default.api.timeout.ms``
+        without one; a zero ``timeout`` returns every partition mapped to
+        ``None`` at once.
 
-        Raises ``IllegalArgumentError`` if a target timestamp is negative and
-        ``UnsupportedVersionError`` if the broker does not support looking up
-        the offsets by timestamp.
+        Raises ``IllegalArgumentError`` if a target timestamp or the
+        ``timeout`` is negative, ``UnsupportedVersionError`` if the broker does
+        not support looking up the offsets by timestamp, and ``TimeoutError``
+        if the offsets cannot be fetched before the timeout expires. Inside a callback this consumer delivers, a given ``timeout`` raises
+        ``ConcurrentModificationError`` *(deviation: inside a listener the core's
+        handle has no timed form; goes when it has)*.
         """
-        return self._c_offsets_for_times(timestamps_to_search)
+        return self._c_offsets_for_times(timestamps_to_search, timeout)
 
-    def beginning_offsets(self, *, partitions: Iterable[TopicPartition]
-                          ) -> dict[TopicPartition, int]:
+    def beginning_offsets(self, *, partitions: Iterable[TopicPartition],
+                          timeout: Duration | None = None) -> dict[TopicPartition, int]:
         """Get the first offset for the given partitions. This method does not
         change the current consumer position of the partitions, and waits up to
-        ``default.api.timeout.ms``."""
-        return self._c_beginning_offsets(partitions)
+        ``timeout``, ``default.api.timeout.ms`` without one (``TimeoutError``
+        once it expires; a zero ``timeout`` returns an empty map at once).
+        Inside a callback this consumer delivers, a given ``timeout`` raises
+        ``ConcurrentModificationError`` *(deviation: inside a listener the core's
+        handle has no timed form; goes when it has)*."""
+        return self._c_beginning_offsets(partitions, timeout)
 
-    def end_offsets(self, *, partitions: Iterable[TopicPartition]) -> dict[TopicPartition, int]:
+    def end_offsets(self, *, partitions: Iterable[TopicPartition],
+                    timeout: Duration | None = None) -> dict[TopicPartition, int]:
         """Get the end offsets for the given partitions: the offset of the
         upcoming message, i.e. the offset of the last available message + 1 (or
         the last stable offset under ``read_committed``). This method does not
         change the current consumer position of the partitions, and waits up to
-        ``default.api.timeout.ms``."""
-        return self._c_end_offsets(partitions)
+        ``timeout``, ``default.api.timeout.ms`` without one (``TimeoutError``
+        once it expires; a zero ``timeout`` returns an empty map at once).
+        Inside a callback this consumer delivers, a given ``timeout`` raises
+        ``ConcurrentModificationError`` *(deviation: inside a listener the core's
+        handle has no timed form; goes when it has)*."""
+        return self._c_end_offsets(partitions, timeout)
 
     def current_lag(self, *, topic_partition: TopicPartition) -> int | None:
         """Get the consumer's current lag on the partition, from the locally
@@ -480,11 +512,13 @@ class Consumer(Generic[K, V], _ConsumerState):
             raise result.error
         return result.records
 
-    def _c_commit(self, offsets: Mapping[TopicPartition, OffsetAndMetadata] | None) -> None:
+    def _c_commit(self, offsets: Mapping[TopicPartition, OffsetAndMetadata] | None,
+                  timeout: Duration | None = None) -> None:
+        timeout_ms = self._timeout_ms(timeout, timer=True, group=True)
         if self._in_callback():
             self._reentrant_use("commit", offsets)
             return
-        self._run_sync(*self._commit_spec(offsets))
+        self._run_sync(*self._commit_spec(offsets, timeout_ms))
 
     def _c_seek(self, partition: TopicPartition, offset: int | None,
                 offset_and_metadata: OffsetAndMetadata | None) -> None:
@@ -499,27 +533,31 @@ class Consumer(Generic[K, V], _ConsumerState):
     def _c_seek_to_end(self, partitions: Iterable[TopicPartition]) -> None:
         self._tp_op("seek_to_end", _lib.Consumer_seek_to_end_cb, partitions)
 
-    def _c_position(self, partition: TopicPartition) -> int:
+    def _c_position(self, partition: TopicPartition, timeout: Duration | None = None) -> int:
+        timeout_ms = self._timeout_ms(timeout, timer=True, handle_timed=True)
         if self._in_callback():
-            position: int = self._reentrant_use("position", partition)
+            position: int = self._reentrant_use("position", partition, timeout_ms)
             return position
-        fetched: int = self._run_sync(*self._position_spec(partition))
+        fetched: int = self._run_sync(*self._position_spec(partition, timeout_ms))
         return fetched
 
-    def _c_committed(self, partitions: Iterable[TopicPartition]
+    def _c_committed(self, partitions: Iterable[TopicPartition],
+                     timeout: Duration | None = None
                      ) -> dict[TopicPartition, OffsetAndMetadata | None]:
+        timeout_ms = self._timeout_ms(timeout, group=True)
         partition_list = list(partitions)
         if self._in_callback():
             committed: dict[TopicPartition, OffsetAndMetadata | None] = self._reentrant_use(
                 "committed", partition_list)
             return committed
-        return self._run_sync(*self._committed_spec(partition_list))
+        return self._run_sync(*self._committed_spec(partition_list, timeout_ms))
 
-    def _c_partitions_for(self, topic: str) -> list[PartitionInfo]:
-        return self._run_sync(*self._partitions_for_spec(topic))
+    def _c_partitions_for(self, topic: str, timeout: Duration | None = None
+                          ) -> list[PartitionInfo]:
+        return self._run_sync(*self._partitions_for_spec(topic, self._timeout_ms(timeout)))
 
-    def _c_list_topics(self) -> dict[str, list[PartitionInfo]]:
-        return self._run_sync(*self._list_topics_spec())
+    def _c_list_topics(self, timeout: Duration | None = None) -> dict[str, list[PartitionInfo]]:
+        return self._run_sync(*self._list_topics_spec(self._timeout_ms(timeout)))
 
     def _c_pause(self, partitions: Iterable[TopicPartition]) -> None:
         self._tp_op("pause", _lib.Consumer_pause_cb, partitions)
@@ -527,32 +565,37 @@ class Consumer(Generic[K, V], _ConsumerState):
     def _c_resume(self, partitions: Iterable[TopicPartition]) -> None:
         self._tp_op("resume", _lib.Consumer_resume_cb, partitions)
 
-    def _c_offsets_for_times(self, timestamps_to_search: Mapping[TopicPartition, int]
+    def _c_offsets_for_times(self, timestamps_to_search: Mapping[TopicPartition, int],
+                             timeout: Duration | None = None
                              ) -> dict[TopicPartition, OffsetAndTimestamp | None]:
         self._check_not_null("offsets_for_times", timestamps_to_search)
+        timeout_ms = self._timeout_ms(timeout)
         timestamps = dict(timestamps_to_search)
         if self._in_callback():
             found: dict[TopicPartition, OffsetAndTimestamp | None] = self._reentrant_use(
                 "offsets_for_times", timestamps)
             return found
-        return self._run_sync(*self._offsets_for_times_spec(timestamps))
+        return self._run_sync(*self._offsets_for_times_spec(timestamps, timeout_ms))
 
-    def _long_offsets(self, op: str, fn: Any, partitions: Iterable[TopicPartition]
-                      ) -> dict[TopicPartition, int]:
+    def _long_offsets(self, op: str, fn: Any, partitions: Iterable[TopicPartition],
+                      timeout: Duration | None) -> dict[TopicPartition, int]:
         self._check_not_null(op, partitions)
+        timeout_ms = self._timeout_ms(timeout)
         partition_list = list(partitions)
         if self._in_callback():
             offsets: dict[TopicPartition, int] = self._reentrant_use(op, partition_list)
             return offsets
-        return self._run_sync(*self._long_offsets_spec(fn, partition_list))
+        return self._run_sync(*self._long_offsets_spec(fn, partition_list, timeout_ms))
 
-    def _c_beginning_offsets(self, partitions: Iterable[TopicPartition]
-                             ) -> dict[TopicPartition, int]:
+    def _c_beginning_offsets(self, partitions: Iterable[TopicPartition],
+                             timeout: Duration | None = None) -> dict[TopicPartition, int]:
         return self._long_offsets("beginning_offsets", _lib.Consumer_beginning_offsets_cb,
-                                  partitions)
+                                  partitions, timeout)
 
-    def _c_end_offsets(self, partitions: Iterable[TopicPartition]) -> dict[TopicPartition, int]:
-        return self._long_offsets("end_offsets", _lib.Consumer_end_offsets_cb, partitions)
+    def _c_end_offsets(self, partitions: Iterable[TopicPartition],
+                       timeout: Duration | None = None) -> dict[TopicPartition, int]:
+        return self._long_offsets("end_offsets", _lib.Consumer_end_offsets_cb, partitions,
+                                  timeout)
 
     def _c_close(self, option: CloseOptions | None) -> None:
         if self._is_closed():

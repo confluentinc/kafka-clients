@@ -51,8 +51,10 @@ from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, TypeVar, overload
 
 from confluent_kafka._args import UNSET, java_forms
+from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 
 from ._mock_core import MockProducerCore
+from ._record_future import AsyncRecordFuture
 from ._send import run_callback
 from .async_producer import AsyncProducer, _AsyncCallback, _in_async_callback, _running_loop
 from .mock_producer import _FORMS
@@ -60,7 +62,13 @@ from .record_metadata import RecordMetadata
 
 if TYPE_CHECKING:
     from confluent_kafka import Duration
-    from confluent_kafka.common import Cluster, MetricName, PartitionInfo, TopicPartition
+    from confluent_kafka.common import (
+        AsyncKafkaFuture,
+        Cluster,
+        MetricName,
+        PartitionInfo,
+        TopicPartition,
+    )
     from confluent_kafka.common.metric import Metric
     from confluent_kafka.common.serialization import Serializer
     from confluent_kafka.consumer import ConsumerGroupMetadata, OffsetAndMetadata
@@ -207,15 +215,18 @@ class AsyncMockProducer(MockProducerCore[K, V], AsyncProducer[K, V]):
         await self._await_callbacks()
 
     async def send(self, *, record: ProducerRecord[K, V],
-                   callback: _AsyncCallback | None = UNSET) -> asyncio.Future[RecordMetadata]:
-        """See ``MockProducer.send``; the returned ``asyncio.Future`` is complete
-        when this returns if ``auto_complete``."""
+                   callback: _AsyncCallback | None = UNSET
+                   ) -> AsyncKafkaFuture[RecordMetadata]:
+        """See ``MockProducer.send``; the returned ``AsyncKafkaFuture`` is
+        complete when this returns if ``auto_complete`` (and the callback is
+        not an ``async def`` still awaited). ``cancel()`` on it returns
+        ``False``, as Java's."""
         self._raise_deferred_callback_error()
         if callback is UNSET:
             callback = None  # Java's send(record) passes null
-        future: asyncio.Future[RecordMetadata] = asyncio.get_running_loop().create_future()
-        result: asyncio.Future[RecordMetadata] = self._send(record, callback, future)
-        return result
+        future: _KafkaFutureImpl[RecordMetadata] = _KafkaFutureImpl()
+        self._send(record, callback, future)
+        return AsyncRecordFuture._of_impl(future, asyncio.get_running_loop())
 
     async def flush(self) -> None:
         self._raise_deferred_callback_error()
