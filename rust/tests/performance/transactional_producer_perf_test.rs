@@ -1923,7 +1923,7 @@ async fn transactional_producer_perf_test() {
                 .subscribe_with_topics(vec![source.clone()])
                 .await
                 .expect("consumer subscribe failed");
-            consumers.push_back(consumer);
+            consumers.push_back(Box::new(consumer));
         }
     }
 
