@@ -132,6 +132,7 @@ from confluent_kafka.admin.list_topics_options import ListTopicsOptions
 from confluent_kafka.admin.list_transactions_options import ListTransactionsOptions
 from confluent_kafka.admin.renew_delegation_token_options import RenewDelegationTokenOptions
 from confluent_kafka.admin.terminate_transaction_options import TerminateTransactionOptions
+from confluent_kafka.admin.unregister_controller_options import UnregisterControllerOptions
 from confluent_kafka.admin.update_features_options import UpdateFeaturesOptions
 from confluent_kafka.illegal_state_error import IllegalStateError
 
@@ -209,6 +210,7 @@ if TYPE_CHECKING:
     )
     from confluent_kafka.admin.renew_delegation_token_result import RenewDelegationTokenResult
     from confluent_kafka.admin.terminate_transaction_result import TerminateTransactionResult
+    from confluent_kafka.admin.unregister_controller_result import UnregisterControllerResult
     from confluent_kafka.admin.update_features_result import UpdateFeaturesResult
     from confluent_kafka.admin.user_scram_credential_alteration import (
         UserScramCredentialAlteration,
@@ -608,19 +610,15 @@ class Admin(_AdminState):
         ``deleteTopics(Collection<String>)``, which passes
         ``TopicCollection.ofTopicNames(topics)``) or a ``TopicCollection``;
         ``options``: the options to use when deleting the topics (Java's short forms
-        pass ``new DeleteTopicsOptions()``). Returns the ``DeleteTopicsResult``, every
-        future of which is complete *(deviation: see ``create_topics``)*.
+        pass ``new DeleteTopicsOptions()``). Returns the ``DeleteTopicsResult``.
         """
+        self._check_not_closed()
         if options is None:
             options = DeleteTopicsOptions()
-        self._check_not_closed()
         by_ids, keys = _conversions.topic_collection_target(topics, "deleteTopics")
-        args = _conversions.delete_topics_args(by_ids, keys, options)
-        submit = (_lib.Admin_delete_topics_by_ids_async if by_ids
-                  else _lib.Admin_delete_topics_async)
-        payload = self._wait_for(lambda c_admin, cb: submit(c_admin, *args, cb),
-                                 _conversions.free_delete_topics)
-        return _conversions.delete_topics_result(by_ids, keys, payload, Sync)
+        native = self._call(_lib.Admin_delete_topics, *_conversions.delete_topics_args(by_ids, keys),
+                            options._setters_ran())
+        return _conversions.delete_topics_result(native, by_ids, Sync, None)
 
     def list_topics(self, *, options: ListTopicsOptions | None = None) -> ListTopicsResult[Sync]:
         """List the topics available in the cluster.
@@ -659,20 +657,22 @@ class Admin(_AdminState):
         ``TopicCollection.ofTopicNames(topicNames)``), or ``topics``: the topics to
         describe; ``options``: the options to use when describing the topics (Java's
         short forms pass ``new DescribeTopicsOptions()``). Returns the
-        ``DescribeTopicsResult``, every future of which is complete *(deviation: see
-        ``create_topics``)*.
+        ``DescribeTopicsResult``.
         """
+        self._check_not_closed()
         if options is None:
             options = DescribeTopicsOptions()
-        self._check_not_closed()
-        by_ids, keys = _conversions.topic_collection_target(
-            topic_names if topics is None else topics, "describeTopics")
-        args = _conversions.describe_topics_args(by_ids, keys, options)
-        submit = (_lib.Admin_describe_topics_by_ids_async if by_ids
-                  else _lib.Admin_describe_topics_async)
-        payload = self._wait_for(lambda c_admin, cb: submit(c_admin, *args, cb),
-                                 _conversions.free_describe_topics)
-        return _conversions.describe_topics_result(by_ids, keys, payload, Sync)
+        if topics is None:
+            assert topic_names is not None
+            form, keys = _conversions.DESCRIBE_TOPIC_NAMES, list(topic_names)
+        else:
+            by_ids, keys = _conversions.topic_collection_target(topics, "describeTopics")
+            form = (_conversions.DESCRIBE_TOPIC_ID_COLLECTION if by_ids
+                    else _conversions.DESCRIBE_TOPIC_NAME_COLLECTION)
+        native = self._call(_lib.Admin_describe_topics, *_conversions.describe_topics_args(form, keys),
+                            options._setters_ran())
+        return _conversions.describe_topics_result(
+            native, form == _conversions.DESCRIBE_TOPIC_ID_COLLECTION, Sync, None)
 
     def describe_cluster(self, *, options: DescribeClusterOptions | None = None
                          ) -> DescribeClusterResult[Sync]:
@@ -684,17 +684,13 @@ class Admin(_AdminState):
 
         ``options``: the options to use when getting information about the cluster
         (Java's ``describeCluster()`` passes ``new DescribeClusterOptions()``).
-        Returns the ``DescribeClusterResult``, every future of which is complete
-        *(deviation: see ``create_topics``)*. Its nodes report ``is_fenced()`` as
-        ``False`` *(deviation: the FFI's nodes carry no fenced flag)*.
+        Returns the ``DescribeClusterResult``.
         """
+        self._check_not_closed()
         if options is None:
             options = DescribeClusterOptions()
-        args = _conversions.describe_cluster_args(options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_describe_cluster_async(c_admin, *args, cb),
-            _conversions.free_describe_cluster)
-        return _conversions.describe_cluster_result(payload, Sync)
+        native = self._call(_lib.Admin_describe_cluster, options._setters_ran())
+        return _conversions.describe_cluster_result(native, Sync, None)
 
     def describe_acls(self, *, filter: AclBindingFilter,  # noqa: A002 - Java's name
                       options: DescribeAclsOptions | None = None) -> DescribeAclsResult[Sync]:
@@ -798,17 +794,15 @@ class Admin(_AdminState):
         ``resources``: see the relevant ``ConfigResource.Type``; ``options``: the
         options to use when describing configs (Java's ``describeConfigs(resources)``
         passes ``new DescribeConfigsOptions()``). Returns the
-        ``DescribeConfigsResult``, every future of which is complete *(deviation: see
-        ``create_topics``)*.
+        ``DescribeConfigsResult``.
         """
+        self._check_not_closed()
         if options is None:
             options = DescribeConfigsOptions()
-        targets = list(resources)
-        args = _conversions.describe_configs_args(targets, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_describe_configs_async(c_admin, *args, cb),
-            _conversions.free_describe_configs)
-        return _conversions.describe_configs_result(targets, payload, Sync)
+        native = self._call(_lib.Admin_describe_configs,
+                            *_conversions.describe_configs_args(list(resources)),
+                            options._setters_ran())
+        return _conversions.describe_configs_result(native, Sync, None)
 
     def incremental_alter_configs(
             self, *, configs: Mapping[ConfigResource, Iterable[AlterConfigOp]],
@@ -834,20 +828,15 @@ class Admin(_AdminState):
 
         ``configs``: the resources with their configs; ``options``: the options to
         use when altering configs (Java's ``incrementalAlterConfigs(configs)`` passes
-        ``new AlterConfigsOptions()``). Returns the ``AlterConfigsResult``, every
-        future of which is complete *(deviation: see ``create_topics``)*. On success,
-        a resource given with no op gets no future *(deviation: the FFI takes one row
-        per op, so the resource does not reach the core; Java sends it with no
-        configs)*; on a whole-call error its future fails, as in Java.
+        ``new AlterConfigsOptions()``). Returns the ``AlterConfigsResult``.
         """
+        self._check_not_closed()
         if options is None:
             options = AlterConfigsOptions()
-        resources = list(configs)
-        args = _conversions.incremental_alter_configs_args(configs, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_incremental_alter_configs_async(c_admin, *args, cb),
-            _conversions.free_incremental_alter_configs)
-        return _conversions.incremental_alter_configs_result(resources, payload, Sync)
+        native = self._call(_lib.Admin_incremental_alter_configs,
+                            *_conversions.incremental_alter_configs_args(configs),
+                            options._setters_ran())
+        return _conversions.incremental_alter_configs_result(native, Sync, None)
 
     def alter_replica_log_dirs(
             self, *, replica_assignment: Mapping[TopicPartitionReplica, str],
@@ -870,17 +859,15 @@ class Admin(_AdminState):
         ``options``: the options to use when changing replica dir (Java's
         ``alterReplicaLogDirs(replicaAssignment)`` passes
         ``new AlterReplicaLogDirsOptions()``). Returns the
-        ``AlterReplicaLogDirsResult``, every future of which is complete *(deviation:
-        see ``create_topics``)*.
+        ``AlterReplicaLogDirsResult``.
         """
+        self._check_not_closed()
         if options is None:
             options = AlterReplicaLogDirsOptions()
-        replicas = list(replica_assignment)
-        args = _conversions.alter_replica_log_dirs_args(replica_assignment, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_alter_replica_log_dirs_async(c_admin, *args, cb),
-            _conversions.free_alter_replica_log_dirs)
-        return _conversions.alter_replica_log_dirs_result(replicas, payload, Sync)
+        native = self._call(_lib.Admin_alter_replica_log_dirs,
+                            *_conversions.alter_replica_log_dirs_args(replica_assignment),
+                            options._setters_ran())
+        return _conversions.alter_replica_log_dirs_result(native, Sync, None)
 
     def describe_log_dirs(self, *, brokers: Iterable[int],
                           options: DescribeLogDirsOptions | None = None
@@ -891,17 +878,15 @@ class Admin(_AdminState):
 
         ``brokers``: a list of brokers; ``options``: the options to use when querying
         log dir info (Java's ``describeLogDirs(brokers)`` passes
-        ``new DescribeLogDirsOptions()``). Returns the ``DescribeLogDirsResult``,
-        every future of which is complete *(deviation: see ``create_topics``)*.
+        ``new DescribeLogDirsOptions()``). Returns the ``DescribeLogDirsResult``.
         """
+        self._check_not_closed()
         if options is None:
             options = DescribeLogDirsOptions()
-        broker_ids = list(brokers)
-        args = _conversions.describe_log_dirs_args(broker_ids, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_describe_log_dirs_async(c_admin, *args, cb),
-            _conversions.free_describe_log_dirs)
-        return _conversions.describe_log_dirs_result(broker_ids, payload, Sync)
+        native = self._call(_lib.Admin_describe_log_dirs,
+                            *_conversions.describe_log_dirs_args(list(brokers)),
+                            options._setters_ran())
+        return _conversions.describe_log_dirs_result(native, Sync, None)
 
     def describe_replica_log_dirs(
             self, *, replicas: Iterable[TopicPartitionReplica],
@@ -914,17 +899,15 @@ class Admin(_AdminState):
         ``replicas``: the replicas to query; ``options``: the options to use when
         querying replica log dir info (Java's ``describeReplicaLogDirs(replicas)``
         passes ``new DescribeReplicaLogDirsOptions()``). Returns the
-        ``DescribeReplicaLogDirsResult``, every future of which is complete
-        *(deviation: see ``create_topics``)*.
+        ``DescribeReplicaLogDirsResult``.
         """
+        self._check_not_closed()
         if options is None:
             options = DescribeReplicaLogDirsOptions()
-        targets = list(replicas)
-        args = _conversions.describe_replica_log_dirs_args(targets, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_describe_replica_log_dirs_async(c_admin, *args, cb),
-            _conversions.free_describe_replica_log_dirs)
-        return _conversions.describe_replica_log_dirs_result(targets, payload, Sync)
+        native = self._call(_lib.Admin_describe_replica_log_dirs,
+                            *_conversions.describe_replica_log_dirs_args(list(replicas)),
+                            options._setters_ran())
+        return _conversions.describe_replica_log_dirs_result(native, Sync, None)
 
     def create_partitions(self, *, new_partitions: Mapping[str, NewPartitions],
                           options: CreatePartitionsOptions | None = None
@@ -967,17 +950,15 @@ class Admin(_AdminState):
         corresponding parameters for the created partitions; ``options``: the options
         to use when creating the new partitions (Java's
         ``createPartitions(newPartitions)`` passes ``new CreatePartitionsOptions()``).
-        Returns the ``CreatePartitionsResult``, every future of which is complete
-        *(deviation: see ``create_topics``)*.
+        Returns the ``CreatePartitionsResult``.
         """
+        self._check_not_closed()
         if options is None:
             options = CreatePartitionsOptions()
-        topics = list(new_partitions)
-        args = _conversions.create_partitions_args(new_partitions, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_create_partitions_async(c_admin, *args, cb),
-            _conversions.free_create_partitions)
-        return _conversions.create_partitions_result(topics, payload, Sync)
+        native = self._call(_lib.Admin_create_partitions,
+                            *_conversions.create_partitions_args(new_partitions),
+                            options._setters_ran())
+        return _conversions.create_partitions_result(native, Sync, None)
 
     def delete_records(self, *, records_to_delete: Mapping[TopicPartition, RecordsToDelete],
                        options: DeleteRecordsOptions | None = None
@@ -990,17 +971,15 @@ class Admin(_AdminState):
         ``records_to_delete``: the topic partitions and related offsets from which
         records deletion starts; ``options``: the options to use when deleting records
         (Java's ``deleteRecords(recordsToDelete)`` passes
-        ``new DeleteRecordsOptions()``). Returns the ``DeleteRecordsResult``, every
-        future of which is complete *(deviation: see ``create_topics``)*.
+        ``new DeleteRecordsOptions()``). Returns the ``DeleteRecordsResult``.
         """
+        self._check_not_closed()
         if options is None:
             options = DeleteRecordsOptions()
-        partitions = list(records_to_delete)
-        args = _conversions.delete_records_args(records_to_delete, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_delete_records_async(c_admin, *args, cb),
-            _conversions.free_delete_records)
-        return _conversions.delete_records_result(partitions, payload, Sync)
+        native = self._call(_lib.Admin_delete_records,
+                            *_conversions.delete_records_args(records_to_delete),
+                            options._setters_ran())
+        return _conversions.delete_records_result(native, Sync, None)
 
     def create_delegation_token(self, *, options: CreateDelegationTokenOptions | None = None
                                 ) -> CreateDelegationTokenResult[Sync]:
@@ -1296,16 +1275,15 @@ class Admin(_AdminState):
         topics and partitions for which to conduct elections; ``options``: the options
         to use when electing the leaders (Java's ``electLeaders(electionType,
         partitions)`` passes ``new ElectLeadersOptions()``). Returns the
-        ``ElectLeadersResult``, its future complete *(deviation: see
-        ``create_topics``)*.
+        ``ElectLeadersResult``.
         """
+        self._check_not_closed()
         if options is None:
             options = ElectLeadersOptions()
-        args = _conversions.elect_leaders_args(election_type, partitions, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_elect_leaders_async(c_admin, *args, cb),
-            _conversions.free_elect_leaders)
-        return _conversions.elect_leaders_result(payload, Sync)
+        native = self._call(_lib.Admin_elect_leaders,
+                            *_conversions.elect_leaders_args(election_type, partitions),
+                            options._setters_ran())
+        return _conversions.elect_leaders_result(native, Sync, None)
 
     def alter_partition_reassignments(
             self, *, reassignments: Mapping[TopicPartition, NewPartitionReassignment | None],
@@ -1340,18 +1318,15 @@ class Admin(_AdminState):
         ``reassignments``: the reassignments to add, modify, or remove, see
         ``NewPartitionReassignment``; ``options``: the options to use (Java's
         ``alterPartitionReassignments(reassignments)`` passes
-        ``new AlterPartitionReassignmentsOptions()``). Returns the result, every
-        future of which is complete *(deviation: see ``create_topics``)*.
+        ``new AlterPartitionReassignmentsOptions()``). Returns the result.
         """
+        self._check_not_closed()
         if options is None:
             options = AlterPartitionReassignmentsOptions()
-        partitions = list(reassignments)
-        args = _conversions.alter_partition_reassignments_args(reassignments, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_alter_partition_reassignments_async(
-                c_admin, *args, cb),
-            _conversions.free_alter_partition_reassignments)
-        return _conversions.alter_partition_reassignments_result(partitions, payload, Sync)
+        native = self._call(_lib.Admin_alter_partition_reassignments,
+                            *_conversions.alter_partition_reassignments_args(reassignments),
+                            options._setters_ran())
+        return _conversions.alter_partition_reassignments_result(native, Sync, None)
 
     def list_partition_reassignments(
             self, *, partitions: Iterable[TopicPartition] | None = None,
@@ -1375,17 +1350,15 @@ class Admin(_AdminState):
         ``listPartitionReassignments(options)``, which pass ``Optional.empty()``) if we
         want to get the reassignments for all partitions in the cluster; ``options``:
         the options to use (Java's short forms pass
-        ``new ListPartitionReassignmentsOptions()``). Returns the result, its future
-        complete *(deviation: see ``create_topics``)*.
+        ``new ListPartitionReassignmentsOptions()``). Returns the result.
         """
+        self._check_not_closed()
         if options is None:
             options = ListPartitionReassignmentsOptions()
-        args = _conversions.list_partition_reassignments_args(partitions, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_list_partition_reassignments_async(
-                c_admin, *args, cb),
-            _conversions.free_list_partition_reassignments)
-        return _conversions.list_partition_reassignments_result(payload, Sync)
+        native = self._call(_lib.Admin_list_partition_reassignments,
+                            *_conversions.list_partition_reassignments_args(partitions),
+                            options._setters_ran())
+        return _conversions.list_partition_reassignments_result(native, Sync, None)
 
     def remove_members_from_consumer_group(
         self, *, group_id: str, options: RemoveMembersFromConsumerGroupOptions
@@ -1442,17 +1415,16 @@ class Admin(_AdminState):
         ``topic_partition_offsets``: the mapping from partition to the ``OffsetSpec``
         to look up; ``options``: the options to use when retrieving the offsets
         (Java's ``listOffsets(topicPartitionOffsets)`` passes
-        ``new ListOffsetsOptions()``). Returns the ``ListOffsetsResult``, every future
-        of which is complete *(deviation: see ``create_topics``)*.
+        ``new ListOffsetsOptions()``). Returns the ``ListOffsetsResult``.
         """
+        self._check_not_closed()
         if options is None:
             options = ListOffsetsOptions()
         partitions = list(topic_partition_offsets)
-        args = _conversions.list_offsets_args(topic_partition_offsets, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_list_offsets_async(c_admin, *args, cb),
-            _conversions.free_list_offsets)
-        return _conversions.list_offsets_result(partitions, payload, Sync)
+        native = self._call(_lib.Admin_list_offsets,
+                            *_conversions.list_offsets_args(topic_partition_offsets, options),
+                            options._setters_ran())
+        return _conversions.list_offsets_result(native, partitions, Sync, None)
 
     def describe_client_quotas(self, *, filter: ClientQuotaFilter,  # noqa: A002 - Java's name
                                options: DescribeClientQuotasOptions | None = None
@@ -1693,6 +1665,37 @@ class Admin(_AdminState):
             _conversions.free_update_features)
         return _conversions.update_features_result(updates, payload, Sync)
 
+    def unregister_controller(self, *, controller_id: int,
+                              options: UnregisterControllerOptions | None = None
+                              ) -> UnregisterControllerResult[Sync]:
+        """Unregister a controller.
+
+        The following errors can be anticipated when calling ``get()`` on the future
+        from the returned ``UnregisterControllerResult``:
+
+        - ``TimeoutError`` If the request timed out before the unregister operation
+          could finish.
+        - ``UnsupportedVersionError`` If the software is too old to support the
+          unregistration API.
+        - ``ControllerIdNotRegisteredError`` If the requested controller id is not
+          currently registered.
+        - ``NotControllerError`` If the request does not arrive at the active
+          controller.
+        - ``InvalidRequestError`` If the request tries to unregister the current active
+          controller id.
+
+        ``controller_id``: the controller id to unregister; ``options``: the options to
+        use (Java's ``unregisterController(controllerId)`` passes
+        ``new UnregisterControllerOptions()``). Returns the
+        ``UnregisterControllerResult`` containing the result.
+        """
+        self._check_not_closed()
+        if options is None:
+            options = UnregisterControllerOptions()
+        native = self._call(_lib.Admin_unregister_controller, controller_id,
+                            options._setters_ran())
+        return _conversions.unregister_controller_result(native, Sync, None)
+
     def describe_producers(self, *, partitions: Iterable[TopicPartition],
                            options: DescribeProducersOptions | None = None
                            ) -> DescribeProducersResult[Sync]:
@@ -1820,16 +1823,15 @@ class Admin(_AdminState):
         ``options``: the options to use when listing the configuration resources
         (Java's ``listConfigResources()`` passes ``Set.of()`` and
         ``new ListConfigResourcesOptions()``). Returns the
-        ``ListConfigResourcesResult``, its future complete *(deviation: see
-        ``create_topics``)*.
+        ``ListConfigResourcesResult``.
         """
+        self._check_not_closed()
         if options is None:
             options = ListConfigResourcesOptions()
-        args = _conversions.list_config_resources_args(config_resource_types, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_list_config_resources_async(c_admin, *args, cb),
-            _conversions.free_list_config_resources)
-        return _conversions.list_config_resources_result(payload, Sync)
+        native = self._call(_lib.Admin_list_config_resources,
+                            *_conversions.list_config_resources_args(config_resource_types),
+                            options._setters_ran())
+        return _conversions.list_config_resources_result(native, Sync, None)
 
     def describe_classic_groups(self, *, group_ids: Iterable[str],
                                 options: DescribeClassicGroupsOptions | None = None

@@ -1248,7 +1248,8 @@ typedef struct {
     kafka_common_KafkaFuture_t* handle;
     int conv_id;          // used when `converter` is NULL
     PyObject* converter;  // Python callable(address) -> value, or NULL
-    PyObject* keep;       // the value of a PYOBJECT future, kept alive, or NULL
+    PyObject* keep;       // the value of a PYOBJECT future (or the C value of
+                          // Admin__config_future's), kept alive, or NULL
     future_conv_fn cconv;  // C converter, or NULL
     PyObject* post;       // Python callable(raw) -> value, or NULL
     PyObject* owner;      // keeps a BORROWED handle alive, or NULL (owned)
@@ -7112,24 +7113,9 @@ static PyObject* topic_listing_to_py(const kafka_admin_TopicListing_t* l) {
     return Py_BuildValue("(sNi)", name ? name : "", topic_id, is_internal ? 1 : 0);
 }
 
-// The 5-tuple `_to_config_entry` expects (createTopics' metadata).
-static PyObject* config_entry_short_to_py(const kafka_admin_ConfigEntry_t* e) {
-    kafka_common_Error_t *ffi_err = NULL;
-    const char* name = NULL;
-    const char* value = NULL;
-    int8_t is_default = 0, is_sensitive = 0, is_read_only = 0;
-    if (ffi_raise((name = kafka_admin_ConfigEntry_name_err(e, &ffi_err), ffi_take(&ffi_err)))
-        || ffi_raise((value = kafka_admin_ConfigEntry_value_err(e, &ffi_err), ffi_take(&ffi_err)))
-        || ffi_raise((is_default = kafka_admin_ConfigEntry_is_default_err(e, &ffi_err), ffi_take(&ffi_err)))
-        || ffi_raise((is_sensitive = kafka_admin_ConfigEntry_is_sensitive_err(e, &ffi_err), ffi_take(&ffi_err)))
-        || ffi_raise((is_read_only = kafka_admin_ConfigEntry_is_read_only_err(e, &ffi_err), ffi_take(&ffi_err)))) return NULL;
-    return Py_BuildValue("(sziii)", name ? name : "", value, is_default ? 1 : 0, is_sensitive ? 1 : 0,
-                         is_read_only ? 1 : 0);
-}
-
-// The 9-tuple `_to_full_config_entry` expects: (name, value, is_default,
-// is_sensitive, is_read_only, source_name, type_name, documentation | None,
-// [(name, value, source_name)]).
+// A ConfigEntry as `entry9`, the row `_conversions.config_from_rows` reads:
+// (name, value, is_default, is_sensitive, is_read_only, source_name,
+// type_name, documentation | None, [(name, value, source_name)]).
 static PyObject* config_entry_to_py(const kafka_admin_ConfigEntry_t* e) {
     kafka_common_Error_t *ffi_err = NULL;
     kafka_List_t* syns = NULL;  // owned
@@ -7182,8 +7168,8 @@ static PyObject* config_entry_to_py(const kafka_admin_ConfigEntry_t* e) {
                          is_read_only ? 1 : 0, source_name, type_name, documentation, synonyms);
 }
 
-// Config_t -> [entry]; `full` picks the 9-tuple over the 5-tuple.
-static PyObject* config_to_py(const kafka_admin_Config_t* c, int full) {
+// Config_t -> [entry9].
+static PyObject* config_to_py(const kafka_admin_Config_t* c) {
     kafka_common_Error_t *ffi_err = NULL;
     kafka_List_t* entries = NULL;  // owned
     if (ffi_raise((entries = kafka_admin_Config_entries_err(c, &ffi_err), ffi_take(&ffi_err)))) return NULL;
@@ -7195,7 +7181,7 @@ static PyObject* config_to_py(const kafka_admin_Config_t* c, int full) {
         PyObject* row = NULL;
         if (!ffi_raise((item = kafka_List_get_err(entries, i, &ffi_err), ffi_take(&ffi_err)))) {
             const kafka_admin_ConfigEntry_t* e = (const kafka_admin_ConfigEntry_t*)item;
-            row = full ? config_entry_to_py(e) : config_entry_short_to_py(e);
+            row = config_entry_to_py(e);
         }
         if (row == NULL) { Py_DECREF(out); ffi_unraisable((kafka_List_destroy_err(entries, &ffi_err), ffi_take(&ffi_err))); return NULL; }
         PyList_SET_ITEM(out, i, row);
@@ -7204,8 +7190,8 @@ static PyObject* config_to_py(const kafka_admin_Config_t* c, int full) {
     return out;
 }
 
-// (error | None, total_bytes, usable_bytes, [(topic, partition, size, offset_lag, is_future)])
-// -1 bytes are Java's empty OptionalLong; admin.py maps them to None.
+// (error | None, total_bytes, usable_bytes, [(topic, partition, size, offset_lag, is_future)],
+//  is_cordoned) -- -1 bytes are Java's empty OptionalLong, which Python maps to None.
 static PyObject* log_dir_description_to_py(const kafka_admin_LogDirDescription_t* d) {
     kafka_common_Error_t *ffi_err = NULL;
     kafka_Map_t* infos = NULL;  // owned TP* -> ReplicaInfo*
@@ -7237,16 +7223,19 @@ static PyObject* log_dir_description_to_py(const kafka_admin_LogDirDescription_t
     if (infos) ffi_unraisable((kafka_Map_destroy_err(infos, &ffi_err), ffi_take(&ffi_err)));
     const kafka_common_Error_t* error = NULL;
     int64_t total_bytes = 0, usable_bytes = 0;
+    int8_t is_cordoned = 0;
     PyObject* err = NULL;
     if (ffi_raise((error = kafka_admin_LogDirDescription_error_err(d, &ffi_err), ffi_take(&ffi_err)))
         || (err = borrowed_error_to_py(error)) == NULL
         || ffi_raise((total_bytes = kafka_admin_LogDirDescription_total_bytes_err(d, &ffi_err), ffi_take(&ffi_err)))
-        || ffi_raise((usable_bytes = kafka_admin_LogDirDescription_usable_bytes_err(d, &ffi_err), ffi_take(&ffi_err)))) {
+        || ffi_raise((usable_bytes = kafka_admin_LogDirDescription_usable_bytes_err(d, &ffi_err), ffi_take(&ffi_err)))
+        || ffi_raise((is_cordoned = kafka_admin_LogDirDescription_is_cordoned_err(d, &ffi_err), ffi_take(&ffi_err)))) {
         Py_XDECREF(err);
         Py_DECREF(replicas);
         return NULL;
     }
-    return Py_BuildValue("(NLLN)", err, (long long)total_bytes, (long long)usable_bytes, replicas);
+    return Py_BuildValue("(NLLNO)", err, (long long)total_bytes, (long long)usable_bytes, replicas,
+                         is_cordoned ? Py_True : Py_False);
 }
 
 // MemberAssignment -> [(topic, partition)]; NULL (Java's empty Optional) -> None.
@@ -7670,6 +7659,38 @@ static PyObject* conv_i64_ptr(void* v, PyObject* owner) {
     return PyLong_FromLongLong((long long)*(const int64_t*)v);
 }
 
+// (id, host, port, rack | None, is_fenced): a node of describeCluster, which
+// Java builds with the broker's fenced flag.
+static PyObject* admin_node_to_py(const kafka_common_Node_t* node) {
+    kafka_common_Error_t *ffi_err = NULL;
+    if (node == NULL) Py_RETURN_NONE;
+    PyObject* base = node_to_py(node);
+    if (base == NULL) return NULL;
+    int8_t fenced = 0;
+    if (ffi_raise((fenced = kafka_common_Node_is_fenced_err(node, &ffi_err), ffi_take(&ffi_err)))) {
+        Py_DECREF(base);
+        return NULL;
+    }
+    PyObject* out = Py_BuildValue("(OOOOO)", PyTuple_GET_ITEM(base, 0), PyTuple_GET_ITEM(base, 1),
+                                  PyTuple_GET_ITEM(base, 2), PyTuple_GET_ITEM(base, 3), fenced ? Py_True : Py_False);
+    Py_DECREF(base);
+    return out;
+}
+
+ITEM_TO_PY(item_admin_node, kafka_common_Node_t, admin_node_to_py)
+
+// describeCluster's nodes: [(id, host, port, rack | None, is_fenced)].
+static PyObject* conv_admin_node_list(void* v, PyObject* owner) {
+    (void)owner;
+    return borrowed_list_to_py((const kafka_List_t*)v, item_admin_node);
+}
+
+// describeCluster's controller: (id, host, port, rack | None, is_fenced) | None.
+static PyObject* conv_admin_node(void* v, PyObject* owner) {
+    (void)owner;
+    return admin_node_to_py((const kafka_common_Node_t*)v);
+}
+
 static PyObject* conv_node(void* v, PyObject* owner) {
     (void)owner;
     return node_to_py((const kafka_common_Node_t*)v);
@@ -7693,16 +7714,12 @@ static PyObject* conv_str_list(void* v, PyObject* owner) {
     return borrowed_list_to_py((const kafka_List_t*)v, item_str);
 }
 
-static PyObject* conv_config_short(void* v, PyObject* owner) {
+// [entry9] of a Config: createTopics' per-topic config (Java's entries built
+// from the response, `KafkaAdminClient.configEntry`) and describeConfigs'.
+static PyObject* conv_config(void* v, PyObject* owner) {
     (void)owner;
     if (v == NULL) return PyList_New(0);
-    return config_to_py((const kafka_admin_Config_t*)v, 0);
-}
-
-static PyObject* conv_config_full(void* v, PyObject* owner) {
-    (void)owner;
-    if (v == NULL) return PyList_New(0);
-    return config_to_py((const kafka_admin_Config_t*)v, 1);
+    return config_to_py((const kafka_admin_Config_t*)v);
 }
 
 static PyObject* conv_topic_description(void* v, PyObject* owner) {
@@ -8283,12 +8300,16 @@ static void AdminResult_dealloc(AdminResultObject* self) {
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
-static const AdminAccessor* admin_accessor(const AdminResultObject* self, const char* name) {
-    for (const AdminAccessor* a = self->desc->accessors; a->name != NULL; a++) {
+static const AdminAccessor* admin_desc_accessor(const AdminResultDesc* desc, const char* name) {
+    for (const AdminAccessor* a = desc->accessors; a->name != NULL; a++) {
         if (strcmp(a->name, name) == 0) return a;
     }
-    PyErr_Format(PyExc_AttributeError, "%s has no accessor %s in the extension", self->desc->name, name);
+    PyErr_Format(PyExc_AttributeError, "%s has no accessor %s in the extension", desc->name, name);
     return NULL;
+}
+
+static const AdminAccessor* admin_accessor(const AdminResultObject* self, const char* name) {
+    return admin_desc_accessor(self->desc, name);
 }
 
 static void admin_map_capsule_destroy(PyObject* capsule) {
@@ -8520,16 +8541,12 @@ static int admin_option_i32(PyObject* value, int32_t* out) {
     }
 #define ADMIN_SETTER(Rpc, field) {#field, Rpc##Options__##field}
 
-// The OWNED options of `desc` with the `(setter, value)` pairs applied, or
-// NULL with a Python exception set (a core error raised through ffi_raise).
-static void* admin_options_build(const AdminOptionsDesc* desc, PyObject* pairs) {
+// Applies the `(setter, value)` pairs to the OWNED `options` of `desc` (from
+// `<Rpc>Options_new` or a constructor of its own, `ListOffsetsOptions`):
+// `options`, or NULL with a Python exception set (a core error raised through
+// ffi_raise) and `options` destroyed.
+static void* admin_options_apply(const AdminOptionsDesc* desc, void* options, PyObject* pairs) {
     kafka_common_Error_t* err = NULL;
-    void* options = desc->create(&err);
-    if (ffi_raise(err)) return NULL;
-    if (options == NULL) {
-        PyErr_Format(PyExc_RuntimeError, "%s_new returned no options", desc->name);
-        return NULL;
-    }
     PyObject* fast = PySequence_Fast(pairs, "options must be a sequence of (setter, value)");
     int failed = fast == NULL;
     for (Py_ssize_t i = 0; !failed && i < PySequence_Fast_GET_SIZE(fast); i++) {
@@ -8554,6 +8571,19 @@ static void* admin_options_build(const AdminOptionsDesc* desc, PyObject* pairs) 
         return NULL;
     }
     return options;
+}
+
+// The OWNED options of `desc` from `<Rpc>Options_new` with the pairs applied,
+// or NULL with a Python exception set.
+static void* admin_options_build(const AdminOptionsDesc* desc, PyObject* pairs) {
+    kafka_common_Error_t* err = NULL;
+    void* options = desc->create(&err);
+    if (ffi_raise(err)) return NULL;
+    if (options == NULL) {
+        PyErr_Format(PyExc_RuntimeError, "%s_new returned no options", desc->name);
+        return NULL;
+    }
+    return admin_options_apply(desc, options, pairs);
 }
 
 static void admin_options_free(const AdminOptionsDesc* desc, void* options) {
@@ -8615,7 +8645,7 @@ static const AdminResultDesc CreateTopicsResult_desc = {
     "CreateTopicsResult", ADMIN_RESULT_DESTROY_FN(CreateTopics),
     {ADMIN_ACC_MAP(CreateTopics, values, key_str, NULL),
      ADMIN_ACC_ONE(CreateTopics, all, NULL),
-     ADMIN_ACC_STR(CreateTopics, config, conv_config_short),
+     ADMIN_ACC_STR(CreateTopics, config, conv_config),
      ADMIN_ACC_STR(CreateTopics, topic_id, conv_uuid),
      ADMIN_ACC_STR(CreateTopics, num_partitions, conv_i32_ptr),
      ADMIN_ACC_STR(CreateTopics, replication_factor, conv_i32_ptr),
@@ -8719,28 +8749,42 @@ static int topic_collection_build(PyObject* names, int by_ids, kafka_common_Topi
     return 0;
 }
 
-// Admin_delete_topics(h, [name|id], timeout_ms, retry_on_quota_violation, by_ids)
-// -> (job, err). Payload: {name|id: error}.
+// Admin_delete_topics(h, [name | id], by_ids, options) -> AdminResult: the
+// `TopicCollection` of the names, or of the ids (Java's `Uuid.toString()`).
+ADMIN_OPT_TIMEOUT(DeleteTopics)
+ADMIN_OPT_BOOL(DeleteTopics, retry_on_quota_violation)
+static const AdminOptionsDesc DeleteTopicsOptions_desc = {
+    "DeleteTopicsOptions", ADMIN_OPTIONS_NEW_FN(DeleteTopics), ADMIN_OPTIONS_DESTROY_FN(DeleteTopics),
+    {ADMIN_SETTER(DeleteTopics, timeout_ms), ADMIN_SETTER(DeleteTopics, retry_on_quota_violation), {NULL, NULL}},
+};
+static const AdminResultDesc DeleteTopicsResult_desc = {
+    "DeleteTopicsResult", ADMIN_RESULT_DESTROY_FN(DeleteTopics),
+    {ADMIN_ACC_MAP(DeleteTopics, topic_id_values, key_uuid, NULL),
+     ADMIN_ACC_MAP(DeleteTopics, topic_name_values, key_str, NULL),
+     ADMIN_ACC_ONE(DeleteTopics, all, NULL),
+     {NULL}},
+};
+
 static PyObject* py_Admin_delete_topics(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long h; PyObject* names; long long timeout_ms; int retry, by_ids;
-    if (!PyArg_ParseTuple(args, "KOLpp", &h, &names, &timeout_ms, &retry, &by_ids)) return NULL;
-    if (!admin_timeout_fits(timeout_ms)) return NULL;
+    unsigned long long h; PyObject* names; int by_ids; PyObject* opts;
+    if (!PyArg_ParseTuple(args, "KOpO", &h, &names, &by_ids, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     kafka_common_TopicCollection_t* topics; kafka_common_Error_t* err;
-    if (topic_collection_build(names, by_ids, &topics, &err) < 0) return err ? job_or_error(NULL, err) : NULL;
-    ADMIN_OPTIONS(DeleteTopics, o, timeout_ms);
-    FFI_STEP(o_err, (kafka_admin_DeleteTopicsOptions_set_retry_on_quota_violation_err(o, (int8_t)retry, &ffi_err), ffi_take(&ffi_err)));
+    if (topic_collection_build(names, by_ids, &topics, &err) < 0) {
+        ffi_raise(err);
+        return NULL;
+    }
+    void* o = admin_options_build(&DeleteTopicsOptions_desc, opts);
+    if (o == NULL) {
+        ffi_unraisable((kafka_common_TopicCollection_destroy_err(topics, &ffi_err), ffi_take(&ffi_err)));
+        return NULL;
+    }
     kafka_admin_DeleteTopicsResult_t* r = NULL;
-    FFI_STEP(o_err, (r = kafka_admin_Admin_delete_topics_with_options_err(a->admin, topics, o, &ffi_err), ffi_take(&ffi_err)));
-    if (o) ffi_unraisable((kafka_admin_DeleteTopicsOptions_destroy_err(o, &ffi_err), ffi_take(&ffi_err)));
+    err = (r = kafka_admin_Admin_delete_topics_with_options_err(
+        a->admin, topics, (kafka_admin_DeleteTopicsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
     ffi_unraisable((kafka_common_TopicCollection_destroy_err(topics, &ffi_err), ffi_take(&ffi_err)));
-    if (ffi_raise(o_err)) return NULL;
-    AdminJob* job = job_new(r, JOB_RESULT_DESTROY(DeleteTopics), assemble_keyed_errors);
-    if (job == NULL) { ffi_unraisable((kafka_admin_DeleteTopicsResult_destroy_err(r, &ffi_err), ffi_take(&ffi_err))); return NULL; }
-    if (by_ids) { kafka_Map_t * v_ = NULL; JOB_TRY(job, ffi_raise((v_ = kafka_admin_DeleteTopicsResult_topic_id_values_err(r, &ffi_err), ffi_take(&ffi_err))) ? -1 : job_add_map(job, v_, key_uuid, NULL, 0)); }
-    else { kafka_Map_t * v_ = NULL; JOB_TRY(job, ffi_raise((v_ = kafka_admin_DeleteTopicsResult_topic_name_values_err(r, &ffi_err), ffi_take(&ffi_err))) ? -1 : job_add_map(job, v_, key_str, NULL, 0)); }
-    return job_or_error(job, NULL);
+    return admin_rpc_return(&DeleteTopicsOptions_desc, o, err, r, &DeleteTopicsResult_desc);
 }
 
 // Admin_list_topics(h, options) -> AdminResult; its one future,
@@ -8769,41 +8813,80 @@ static PyObject* py_Admin_list_topics(PyObject* self, PyObject* args) {
     return admin_rpc_return(&ListTopicsOptions_desc, o, err, r, &ListTopicsResult_desc);
 }
 
-// Admin_describe_topics(h, [name|id], timeout_ms, include_authorized_operations,
-//                       partition_size_limit (-1: unset), by_ids) -> (job, err).
-// Payload: {name|id: (error, description5)}.
+// Admin_describe_topics(h, form, [name | id], options) -> AdminResult. `form`
+// picks the Java overload's entry point: 0 `describeTopics(Collection<String>)`
+// (`_with_topic_names_options`), 1 a `TopicNameCollection`, 2 a
+// `TopicIdCollection` (`_with_topics_options`). The futures deliver
+// (name, topic_id, is_internal, [partition_info], [acl_op] | None).
+ADMIN_OPT_TIMEOUT(DescribeTopics)
+ADMIN_OPT_BOOL(DescribeTopics, include_authorized_operations)
+ADMIN_OPT_I32(DescribeTopics, partition_size_limit_per_response)
+static const AdminOptionsDesc DescribeTopicsOptions_desc = {
+    "DescribeTopicsOptions", ADMIN_OPTIONS_NEW_FN(DescribeTopics), ADMIN_OPTIONS_DESTROY_FN(DescribeTopics),
+    {ADMIN_SETTER(DescribeTopics, timeout_ms), ADMIN_SETTER(DescribeTopics, include_authorized_operations),
+     ADMIN_SETTER(DescribeTopics, partition_size_limit_per_response), {NULL, NULL}},
+};
+static const AdminResultDesc DescribeTopicsResult_desc = {
+    "DescribeTopicsResult", ADMIN_RESULT_DESTROY_FN(DescribeTopics),
+    {ADMIN_ACC_MAP(DescribeTopics, topic_id_values, key_uuid, conv_topic_description),
+     ADMIN_ACC_MAP(DescribeTopics, topic_name_values, key_str, conv_topic_description),
+     {NULL}},
+};
+
 static PyObject* py_Admin_describe_topics(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long h; PyObject* names; long long timeout_ms; int include_ops, limit, by_ids;
-    if (!PyArg_ParseTuple(args, "KOLpip", &h, &names, &timeout_ms, &include_ops, &limit, &by_ids)) return NULL;
-    if (!admin_timeout_fits(timeout_ms)) return NULL;
+    unsigned long long h; int form; PyObject* names; PyObject* opts;
+    if (!PyArg_ParseTuple(args, "KiOO", &h, &form, &names, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
-    kafka_common_TopicCollection_t* topics; kafka_common_Error_t* err;
-    if (topic_collection_build(names, by_ids, &topics, &err) < 0) return err ? job_or_error(NULL, err) : NULL;
-    ADMIN_OPTIONS(DescribeTopics, o, timeout_ms);
-    FFI_STEP(o_err, (kafka_admin_DescribeTopicsOptions_set_include_authorized_operations_err(o, (int8_t)include_ops, &ffi_err), ffi_take(&ffi_err)));
-    if (limit >= 0) FFI_STEP(o_err, (kafka_admin_DescribeTopicsOptions_set_partition_size_limit_per_response_err(o, (int32_t)limit, &ffi_err), ffi_take(&ffi_err)));
     kafka_admin_DescribeTopicsResult_t* r = NULL;
-    FFI_STEP(o_err, (r = kafka_admin_Admin_describe_topics_with_topics_options_err(a->admin, topics, o, &ffi_err), ffi_take(&ffi_err)));
-    if (o) ffi_unraisable((kafka_admin_DescribeTopicsOptions_destroy_err(o, &ffi_err), ffi_take(&ffi_err)));
-    ffi_unraisable((kafka_common_TopicCollection_destroy_err(topics, &ffi_err), ffi_take(&ffi_err)));
-    if (ffi_raise(o_err)) return NULL;
-    AdminJob* job = job_new(r, JOB_RESULT_DESTROY(DescribeTopics), assemble_keyed_pairs);
-    if (job == NULL) { ffi_unraisable((kafka_admin_DescribeTopicsResult_destroy_err(r, &ffi_err), ffi_take(&ffi_err))); return NULL; }
-    if (by_ids) { kafka_Map_t * v_ = NULL; JOB_TRY(job, ffi_raise((v_ = kafka_admin_DescribeTopicsResult_topic_id_values_err(r, &ffi_err), ffi_take(&ffi_err))) ? -1 : job_add_map(job, v_, key_uuid, conv_topic_description, 0)); }
-    else { kafka_Map_t * v_ = NULL; JOB_TRY(job, ffi_raise((v_ = kafka_admin_DescribeTopicsResult_topic_name_values_err(r, &ffi_err), ffi_take(&ffi_err))) ? -1 : job_add_map(job, v_, key_str, conv_topic_description, 0)); }
-    return job_or_error(job, NULL);
+    kafka_common_Error_t* err = NULL;
+    void* o = NULL;
+    if (form == 0) {
+        str_list_t l;
+        if (str_list_build(names, &l) < 0) return NULL;
+        o = admin_options_build(&DescribeTopicsOptions_desc, opts);
+        if (o == NULL) { str_list_free(&l); return NULL; }
+        err = (r = kafka_admin_Admin_describe_topics_with_topic_names_options_err(
+            a->admin, l.list, (kafka_admin_DescribeTopicsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+        str_list_free(&l);
+    } else {
+        kafka_common_TopicCollection_t* topics;
+        if (topic_collection_build(names, form == 2, &topics, &err) < 0) {
+            ffi_raise(err);
+            return NULL;
+        }
+        o = admin_options_build(&DescribeTopicsOptions_desc, opts);
+        if (o == NULL) {
+            ffi_unraisable((kafka_common_TopicCollection_destroy_err(topics, &ffi_err), ffi_take(&ffi_err)));
+            return NULL;
+        }
+        err = (r = kafka_admin_Admin_describe_topics_with_topics_options_err(
+            a->admin, topics, (kafka_admin_DescribeTopicsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+        ffi_unraisable((kafka_common_TopicCollection_destroy_err(topics, &ffi_err), ffi_take(&ffi_err)));
+    }
+    return admin_rpc_return(&DescribeTopicsOptions_desc, o, err, r, &DescribeTopicsResult_desc);
 }
 
-// Admin_create_partitions(h, [(topic, total_count, [[broker]] | None)],
-//                         timeout_ms, validate_only, retry_on_quota_violation)
-// -> (job, err). Payload: {topic: error}. A None assignment is
-// increaseTo(int); a list -- even an empty one -- is increaseTo(int, List).
+// Admin_create_partitions(h, [(topic, total_count, [[broker]] | None)], options)
+// -> AdminResult. A None assignment is `increaseTo(int)`; a list -- even an
+// empty one -- is `increaseTo(int, List)`.
+ADMIN_OPT_TIMEOUT(CreatePartitions)
+ADMIN_OPT_BOOL(CreatePartitions, validate_only)
+ADMIN_OPT_BOOL(CreatePartitions, retry_on_quota_violation)
+static const AdminOptionsDesc CreatePartitionsOptions_desc = {
+    "CreatePartitionsOptions", ADMIN_OPTIONS_NEW_FN(CreatePartitions), ADMIN_OPTIONS_DESTROY_FN(CreatePartitions),
+    {ADMIN_SETTER(CreatePartitions, timeout_ms), ADMIN_SETTER(CreatePartitions, validate_only),
+     ADMIN_SETTER(CreatePartitions, retry_on_quota_violation), {NULL, NULL}},
+};
+static const AdminResultDesc CreatePartitionsResult_desc = {
+    "CreatePartitionsResult", ADMIN_RESULT_DESTROY_FN(CreatePartitions),
+    {ADMIN_ACC_MAP(CreatePartitions, values, key_str, NULL), ADMIN_ACC_ONE(CreatePartitions, all, NULL), {NULL}},
+};
+
 static PyObject* py_Admin_create_partitions(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long h; PyObject* spec; long long timeout_ms; int validate_only, retry;
-    if (!PyArg_ParseTuple(args, "KOLpp", &h, &spec, &timeout_ms, &validate_only, &retry)) return NULL;
-    if (!admin_timeout_fits(timeout_ms)) return NULL;
+    unsigned long long h; PyObject* spec; PyObject* opts;
+    if (!PyArg_ParseTuple(args, "KOO", &h, &spec, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     PyObject* fast = fast_rows(spec, "new_partitions must be a sequence");
     if (fast == NULL) return NULL;
@@ -8836,19 +8919,14 @@ static PyObject* py_Admin_create_partitions(PyObject* self, PyObject* args) {
         if (obj_map_put(&m, (void*)topic, np) < 0) goto fail;
     }
     {
-        ADMIN_OPTIONS(CreatePartitions, o, timeout_ms);
-        FFI_STEP(o_err, (kafka_admin_CreatePartitionsOptions_set_validate_only_err(o, (int8_t)validate_only, &ffi_err), ffi_take(&ffi_err)));
-        FFI_STEP(o_err, (kafka_admin_CreatePartitionsOptions_set_retry_on_quota_violation_err(o, (int8_t)retry, &ffi_err), ffi_take(&ffi_err)));
+        void* o = admin_options_build(&CreatePartitionsOptions_desc, opts);
+        if (o == NULL) goto fail;
         kafka_admin_CreatePartitionsResult_t* r = NULL;
-        FFI_STEP(o_err, (r = kafka_admin_Admin_create_partitions_with_options_err(a->admin, m.map, o, &ffi_err), ffi_take(&ffi_err)));
-        if (o) ffi_unraisable((kafka_admin_CreatePartitionsOptions_destroy_err(o, &ffi_err), ffi_take(&ffi_err)));
+        kafka_common_Error_t* err = (r = kafka_admin_Admin_create_partitions_with_options_err(
+            a->admin, m.map, (kafka_admin_CreatePartitionsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
         obj_map_free(&m);
         Py_DECREF(fast);
-        if (ffi_raise(o_err)) return NULL;
-        AdminJob* job = job_new(r, JOB_RESULT_DESTROY(CreatePartitions), assemble_keyed_errors);
-        if (job == NULL) { ffi_unraisable((kafka_admin_CreatePartitionsResult_destroy_err(r, &ffi_err), ffi_take(&ffi_err))); return NULL; }
-        { kafka_Map_t * v_ = NULL; JOB_TRY(job, ffi_raise((v_ = kafka_admin_CreatePartitionsResult_values_err(r, &ffi_err), ffi_take(&ffi_err))) ? -1 : job_add_map(job, v_, key_str, NULL, 0)); }
-        return job_or_error(job, NULL);
+        return admin_rpc_return(&CreatePartitionsOptions_desc, o, err, r, &CreatePartitionsResult_desc);
     }
 fail:
     obj_map_free(&m);
@@ -8856,13 +8934,23 @@ fail:
     return NULL;
 }
 
-// Admin_delete_records(h, [(topic, partition, before_offset)], timeout_ms)
-// -> (job, err). Payload: {(topic, partition): (error, low_watermark)}.
+// Admin_delete_records(h, [(topic, partition, before_offset)], options)
+// -> AdminResult; `low_watermarks` deliver the low watermark.
+ADMIN_OPT_TIMEOUT(DeleteRecords)
+static const AdminOptionsDesc DeleteRecordsOptions_desc = {
+    "DeleteRecordsOptions", ADMIN_OPTIONS_NEW_FN(DeleteRecords), ADMIN_OPTIONS_DESTROY_FN(DeleteRecords),
+    {ADMIN_SETTER(DeleteRecords, timeout_ms), {NULL, NULL}},
+};
+static const AdminResultDesc DeleteRecordsResult_desc = {
+    "DeleteRecordsResult", ADMIN_RESULT_DESTROY_FN(DeleteRecords),
+    {ADMIN_ACC_MAP(DeleteRecords, low_watermarks, key_tp, conv_deleted_records),
+     ADMIN_ACC_ONE(DeleteRecords, all, NULL), {NULL}},
+};
+
 static PyObject* py_Admin_delete_records(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long h; PyObject* spec; long long timeout_ms;
-    if (!PyArg_ParseTuple(args, "KOL", &h, &spec, &timeout_ms)) return NULL;
-    if (!admin_timeout_fits(timeout_ms)) return NULL;
+    unsigned long long h; PyObject* spec; PyObject* opts;
+    if (!PyArg_ParseTuple(args, "KOO", &h, &spec, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     PyObject* fast = fast_rows(spec, "records_to_delete must be a sequence");
     if (fast == NULL) return NULL;
@@ -8883,44 +8971,47 @@ static PyObject* py_Admin_delete_records(PyObject* self, PyObject* args) {
         if (obj_map_put(&m, tp, rd) < 0) { obj_map_free(&m); Py_DECREF(fast); return NULL; }
     }
     Py_DECREF(fast);
-    ADMIN_OPTIONS(DeleteRecords, o, timeout_ms);
+    void* o = admin_options_build(&DeleteRecordsOptions_desc, opts);
+    if (o == NULL) { obj_map_free(&m); return NULL; }
     kafka_admin_DeleteRecordsResult_t* r = NULL;
-    FFI_STEP(o_err, (r = kafka_admin_Admin_delete_records_with_options_err(a->admin, m.map, o, &ffi_err), ffi_take(&ffi_err)));
-    if (o) ffi_unraisable((kafka_admin_DeleteRecordsOptions_destroy_err(o, &ffi_err), ffi_take(&ffi_err)));
+    kafka_common_Error_t* err = (r = kafka_admin_Admin_delete_records_with_options_err(
+        a->admin, m.map, (kafka_admin_DeleteRecordsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
     obj_map_free(&m);
-    if (ffi_raise(o_err)) return NULL;
-    AdminJob* job = job_new(r, JOB_RESULT_DESTROY(DeleteRecords), assemble_keyed_pairs);
-    if (job == NULL) { ffi_unraisable((kafka_admin_DeleteRecordsResult_destroy_err(r, &ffi_err), ffi_take(&ffi_err))); return NULL; }
-    { kafka_Map_t * v_ = NULL; JOB_TRY(job, ffi_raise((v_ = kafka_admin_DeleteRecordsResult_low_watermarks_err(r, &ffi_err), ffi_take(&ffi_err))) ? -1 : job_add_map(job, v_, key_tp, conv_deleted_records, 0)); }
-    return job_or_error(job, NULL);
+    return admin_rpc_return(&DeleteRecordsOptions_desc, o, err, r, &DeleteRecordsResult_desc);
 }
 
 // ---- cluster and configs --------------------------------------------------------------
 
-// Admin_describe_cluster(h, timeout_ms, include_authorized_operations,
-//                        include_fenced_brokers) -> (job, err).
-// Payload: (error, (cluster_id, [node], controller, [op] | None)) -- Java's
-// four independent futures; the first failure wins.
+// Admin_describe_cluster(h, options) -> AdminResult: Java's four
+// independent futures, the nodes as (id, host, port, rack | None, is_fenced).
+ADMIN_OPT_TIMEOUT(DescribeCluster)
+ADMIN_OPT_BOOL(DescribeCluster, include_authorized_operations)
+ADMIN_OPT_BOOL(DescribeCluster, include_fenced_brokers)
+static const AdminOptionsDesc DescribeClusterOptions_desc = {
+    "DescribeClusterOptions", ADMIN_OPTIONS_NEW_FN(DescribeCluster), ADMIN_OPTIONS_DESTROY_FN(DescribeCluster),
+    {ADMIN_SETTER(DescribeCluster, timeout_ms), ADMIN_SETTER(DescribeCluster, include_authorized_operations),
+     ADMIN_SETTER(DescribeCluster, include_fenced_brokers), {NULL, NULL}},
+};
+static const AdminResultDesc DescribeClusterResult_desc = {
+    "DescribeClusterResult", ADMIN_RESULT_DESTROY_FN(DescribeCluster),
+    {ADMIN_ACC_ONE(DescribeCluster, nodes, conv_admin_node_list),
+     ADMIN_ACC_ONE(DescribeCluster, controller, conv_admin_node),
+     ADMIN_ACC_ONE(DescribeCluster, cluster_id, conv_str),
+     ADMIN_ACC_ONE(DescribeCluster, authorized_operations, conv_acl_operations),
+     {NULL}},
+};
+
 static PyObject* py_Admin_describe_cluster(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long h; long long timeout_ms; int include_ops, include_fenced;
-    if (!PyArg_ParseTuple(args, "KLpp", &h, &timeout_ms, &include_ops, &include_fenced)) return NULL;
-    if (!admin_timeout_fits(timeout_ms)) return NULL;
+    unsigned long long h; PyObject* opts;
+    if (!PyArg_ParseTuple(args, "KO", &h, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
-    ADMIN_OPTIONS(DescribeCluster, o, timeout_ms);
-    FFI_STEP(o_err, (kafka_admin_DescribeClusterOptions_set_include_authorized_operations_err(o, (int8_t)include_ops, &ffi_err), ffi_take(&ffi_err)));
-    FFI_STEP(o_err, (kafka_admin_DescribeClusterOptions_set_include_fenced_brokers_err(o, (int8_t)include_fenced, &ffi_err), ffi_take(&ffi_err)));
+    void* o = admin_options_build(&DescribeClusterOptions_desc, opts);
+    if (o == NULL) return NULL;
     kafka_admin_DescribeClusterResult_t* r = NULL;
-    FFI_STEP(o_err, (r = kafka_admin_Admin_describe_cluster_with_options_err(a->admin, o, &ffi_err), ffi_take(&ffi_err)));
-    if (o) ffi_unraisable((kafka_admin_DescribeClusterOptions_destroy_err(o, &ffi_err), ffi_take(&ffi_err)));
-    if (ffi_raise(o_err)) return NULL;
-    AdminJob* job = job_new(r, JOB_RESULT_DESTROY(DescribeCluster), assemble_multi);
-    if (job == NULL) { ffi_unraisable((kafka_admin_DescribeClusterResult_destroy_err(r, &ffi_err), ffi_take(&ffi_err))); return NULL; }
-    { kafka_common_KafkaFuture_t * v_ = NULL; JOB_TRY(job, ffi_raise((v_ = kafka_admin_DescribeClusterResult_cluster_id_err(r, &ffi_err), ffi_take(&ffi_err))) ? -1 : job_add_single(job, v_, 1, conv_str, 0)); }
-    { kafka_common_KafkaFuture_t * v_ = NULL; JOB_TRY(job, ffi_raise((v_ = kafka_admin_DescribeClusterResult_nodes_err(r, &ffi_err), ffi_take(&ffi_err))) ? -1 : job_add_single(job, v_, 1, conv_node_list, 1)); }
-    { kafka_common_KafkaFuture_t * v_ = NULL; JOB_TRY(job, ffi_raise((v_ = kafka_admin_DescribeClusterResult_controller_err(r, &ffi_err), ffi_take(&ffi_err))) ? -1 : job_add_single(job, v_, 1, conv_node, 2)); }
-    { kafka_common_KafkaFuture_t * v_ = NULL; JOB_TRY(job, ffi_raise((v_ = kafka_admin_DescribeClusterResult_authorized_operations_err(r, &ffi_err), ffi_take(&ffi_err))) ? -1 : job_add_single(job, v_, 1, conv_acl_operations, 3)); }
-    return job_or_error(job, NULL);
+    kafka_common_Error_t* err = (r = kafka_admin_Admin_describe_cluster_with_options_err(
+        a->admin, (kafka_admin_DescribeClusterOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+    return admin_rpc_return(&DescribeClusterOptions_desc, o, err, r, &DescribeClusterResult_desc);
 }
 
 // (type_id, name) rows -> owned ConfigResource handles. 0 / -1.
@@ -8950,29 +9041,122 @@ static int config_resource_list_build(PyObject* seq, obj_list_t* l) {
     return 0;
 }
 
-// Admin_describe_configs(h, [(type, name)], timeout_ms, include_synonyms,
-//                        include_documentation) -> (job, err).
-// Payload: {(type, name): (error, [entry9])}.
+// Admin_describe_configs(h, [(type, name)], options) -> AdminResult; the
+// futures deliver [entry9] (config_to_py) keyed by (type, name).
+ADMIN_OPT_TIMEOUT(DescribeConfigs)
+ADMIN_OPT_BOOL(DescribeConfigs, include_synonyms)
+ADMIN_OPT_BOOL(DescribeConfigs, include_documentation)
+static const AdminOptionsDesc DescribeConfigsOptions_desc = {
+    "DescribeConfigsOptions", ADMIN_OPTIONS_NEW_FN(DescribeConfigs), ADMIN_OPTIONS_DESTROY_FN(DescribeConfigs),
+    {ADMIN_SETTER(DescribeConfigs, timeout_ms), ADMIN_SETTER(DescribeConfigs, include_synonyms),
+     ADMIN_SETTER(DescribeConfigs, include_documentation), {NULL, NULL}},
+};
+static const AdminResultDesc DescribeConfigsResult_desc = {
+    "DescribeConfigsResult", ADMIN_RESULT_DESTROY_FN(DescribeConfigs),
+    {ADMIN_ACC_MAP(DescribeConfigs, values, key_config_resource, conv_config), {NULL}},
+};
+
 static PyObject* py_Admin_describe_configs(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long h; PyObject* spec; long long timeout_ms; int synonyms, documentation;
-    if (!PyArg_ParseTuple(args, "KOLpp", &h, &spec, &timeout_ms, &synonyms, &documentation)) return NULL;
-    if (!admin_timeout_fits(timeout_ms)) return NULL;
+    unsigned long long h; PyObject* spec; PyObject* opts;
+    if (!PyArg_ParseTuple(args, "KOO", &h, &spec, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     obj_list_t resources;
     if (config_resource_list_build(spec, &resources) < 0) return NULL;
-    ADMIN_OPTIONS(DescribeConfigs, o, timeout_ms);
-    FFI_STEP(o_err, (kafka_admin_DescribeConfigsOptions_set_include_synonyms_err(o, (int8_t)synonyms, &ffi_err), ffi_take(&ffi_err)));
-    FFI_STEP(o_err, (kafka_admin_DescribeConfigsOptions_set_include_documentation_err(o, (int8_t)documentation, &ffi_err), ffi_take(&ffi_err)));
+    void* o = admin_options_build(&DescribeConfigsOptions_desc, opts);
+    if (o == NULL) { obj_list_free(&resources); return NULL; }
     kafka_admin_DescribeConfigsResult_t* r = NULL;
-    FFI_STEP(o_err, (r = kafka_admin_Admin_describe_configs_with_options_err(a->admin, resources.list, o, &ffi_err), ffi_take(&ffi_err)));
-    if (o) ffi_unraisable((kafka_admin_DescribeConfigsOptions_destroy_err(o, &ffi_err), ffi_take(&ffi_err)));
+    kafka_common_Error_t* err = (r = kafka_admin_Admin_describe_configs_with_options_err(
+        a->admin, resources.list, (kafka_admin_DescribeConfigsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
     obj_list_free(&resources);
-    if (ffi_raise(o_err)) return NULL;
-    AdminJob* job = job_new(r, JOB_RESULT_DESTROY(DescribeConfigs), assemble_keyed_pairs);
-    if (job == NULL) { ffi_unraisable((kafka_admin_DescribeConfigsResult_destroy_err(r, &ffi_err), ffi_take(&ffi_err))); return NULL; }
-    { kafka_Map_t * v_ = NULL; JOB_TRY(job, ffi_raise((v_ = kafka_admin_DescribeConfigsResult_values_err(r, &ffi_err), ffi_take(&ffi_err))) ? -1 : job_add_map(job, v_, key_config_resource, conv_config_full, 0)); }
-    return job_or_error(job, NULL);
+    return admin_rpc_return(&DescribeConfigsOptions_desc, o, err, r, &DescribeConfigsResult_desc);
+}
+
+// ---- tests only: a Config future through a Result table's converter ----------------
+
+// The Results whose accessors deliver a Config.
+static const AdminResultDesc* const admin_config_results[] = {
+    &CreateTopicsResult_desc, &DescribeConfigsResult_desc,
+};
+
+static void admin_config_capsule_destroy(PyObject* capsule) {
+    kafka_common_Error_t *ffi_err = NULL;
+    kafka_admin_Config_t* c = (kafka_admin_Config_t*)PyCapsule_GetPointer(capsule, "confluent_kafka.admin.config");
+    if (c != NULL) ffi_unraisable((kafka_admin_Config_destroy_err(c, &ffi_err), ffi_take(&ffi_err)));
+}
+
+// The owned core Config of `new Config([new ConfigEntry(name, value), ...])`,
+// or NULL with a Python exception set.
+static kafka_admin_Config_t* admin_config_of_rows(PyObject* spec) {
+    kafka_common_Error_t *ffi_err = NULL;
+    PyObject* fast = fast_rows(spec, "entries must be a sequence");
+    if (fast == NULL) return NULL;
+    Py_ssize_t n = PySequence_Fast_GET_SIZE(fast);
+    kafka_admin_ConfigEntry_t** entries = (kafka_admin_ConfigEntry_t**)PyMem_Calloc(n > 0 ? (size_t)n : 1,
+                                                                                  sizeof(*entries));
+    if (entries == NULL) { Py_DECREF(fast); PyErr_NoMemory(); return NULL; }
+    kafka_List_t* list = NULL;
+    kafka_admin_Config_t* config = NULL;
+    int failed = ffi_raise((list = kafka_List_new_err(&ffi_err), ffi_take(&ffi_err)));
+    for (Py_ssize_t i = 0; !failed && i < n; i++) {
+        const char* name;
+        const char* value;
+        failed = !PyArg_ParseTuple(PySequence_Fast_GET_ITEM(fast, i), "sz", &name, &value)
+            || ffi_raise((entries[i] = kafka_admin_ConfigEntry_new_err(name, value, &ffi_err), ffi_take(&ffi_err)))
+            || ffi_raise((kafka_List_add_err(list, entries[i], &ffi_err), ffi_take(&ffi_err)));
+    }
+    if (!failed) ffi_raise((config = kafka_admin_Config_new_err(list, &ffi_err), ffi_take(&ffi_err)));  // copies
+    for (Py_ssize_t i = 0; i < n; i++) {
+        if (entries[i]) ffi_unraisable((kafka_admin_ConfigEntry_destroy_err(entries[i], &ffi_err), ffi_take(&ffi_err)));
+    }
+    if (list) ffi_unraisable((kafka_List_destroy_err(list, &ffi_err), ffi_take(&ffi_err)));
+    PyMem_Free(entries);
+    Py_DECREF(fast);
+    return config;
+}
+
+// Admin__config_future(result, accessor, entries, post) -> KafkaFuture. For the
+// tests only, no Java counterpart: a future already completed with the core
+// Config of `entries` [(name, value | None)] (`new ConfigEntry(name, value)`),
+// whose value goes through the converter the `result` table
+// ("CreateTopicsResult", "DescribeConfigsResult") gives `accessor`, then
+// `post`: the C half of that accessor's delivery, without a broker.
+static PyObject* py_Admin__config_future(PyObject* self, PyObject* args) {
+    kafka_common_Error_t *ffi_err = NULL;
+    const char* result_name;
+    const char* accessor;
+    PyObject* spec;
+    PyObject* post;
+    if (!PyArg_ParseTuple(args, "ssOO", &result_name, &accessor, &spec, &post)) return NULL;
+    const AdminResultDesc* desc = NULL;
+    for (size_t i = 0; i < sizeof(admin_config_results) / sizeof(admin_config_results[0]); i++) {
+        if (strcmp(admin_config_results[i]->name, result_name) == 0) desc = admin_config_results[i];
+    }
+    if (desc == NULL) {
+        PyErr_Format(PyExc_ValueError, "%s has no Config accessor", result_name);
+        return NULL;
+    }
+    const AdminAccessor* a = admin_desc_accessor(desc, accessor);
+    if (a == NULL) return NULL;
+    kafka_admin_Config_t* config = admin_config_of_rows(spec);
+    if (config == NULL) return NULL;
+    PyObject* capsule = PyCapsule_New(config, "confluent_kafka.admin.config", admin_config_capsule_destroy);
+    if (capsule == NULL) {
+        ffi_unraisable((kafka_admin_Config_destroy_err(config, &ffi_err), ffi_take(&ffi_err)));
+        return NULL;
+    }
+    kafka_common_KafkaFuture_t* f = NULL;
+    if (ffi_raise((f = kafka_common_KafkaFuture_completed_future_err(config, NULL, &ffi_err), ffi_take(&ffi_err)))) {
+        Py_DECREF(capsule);
+        return NULL;
+    }
+    KafkaFutureObject* future = (KafkaFutureObject*)KafkaFuture_wrap_owned(f, a->value, post == Py_None ? NULL : post);
+    if (future == NULL) {
+        Py_DECREF(capsule);
+        return NULL;
+    }
+    future->keep = capsule;  // the Config outlives the handle (destroyed first)
+    return (PyObject*)future;
 }
 
 static void alter_config_op_list_free(void* l, kafka_common_Error_t** out_err) {
@@ -8989,17 +9173,25 @@ static void alter_config_op_list_free(void* l, kafka_common_Error_t** out_err) {
     kafka_List_destroy_err(list, out_err);
 }
 
-// Admin_incremental_alter_configs(h, [(type, name, entry_name, value | None, op_type)],
-//                                 timeout_ms, validate_only) -> (job, err).
-// Payload: {(type, name): error}. Rows are one per operation, grouped by
-// resource (consecutive rows with the same (type, name) share one
-// ConfigResource key, as the Python side emits them).
+// Admin_incremental_alter_configs(h, [(type, name, [(entry_name, value | None, op_type_id)])],
+//                                 options) -> AdminResult: one row per resource
+// with its operations, an empty list included (Java sends the resource with
+// no config). An unknown op type id raises IllegalArgumentError.
+ADMIN_OPT_TIMEOUT(AlterConfigs)
+ADMIN_OPT_BOOL(AlterConfigs, validate_only)
+static const AdminOptionsDesc AlterConfigsOptions_desc = {
+    "AlterConfigsOptions", ADMIN_OPTIONS_NEW_FN(AlterConfigs), ADMIN_OPTIONS_DESTROY_FN(AlterConfigs),
+    {ADMIN_SETTER(AlterConfigs, timeout_ms), ADMIN_SETTER(AlterConfigs, validate_only), {NULL, NULL}},
+};
+static const AdminResultDesc AlterConfigsResult_desc = {
+    "AlterConfigsResult", ADMIN_RESULT_DESTROY_FN(AlterConfigs),
+    {ADMIN_ACC_MAP(AlterConfigs, values, key_config_resource, NULL), ADMIN_ACC_ONE(AlterConfigs, all, NULL), {NULL}},
+};
+
 static PyObject* py_Admin_incremental_alter_configs(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
-    (void)self;
-    unsigned long long h; PyObject* spec; long long timeout_ms; int validate_only;
-    if (!PyArg_ParseTuple(args, "KOLp", &h, &spec, &timeout_ms, &validate_only)) return NULL;
-    if (!admin_timeout_fits(timeout_ms)) return NULL;
+    unsigned long long h; PyObject* spec; PyObject* opts;
+    if (!PyArg_ParseTuple(args, "KOO", &h, &spec, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     PyObject* fast = fast_rows(spec, "configs must be a sequence of rows");
     if (fast == NULL) return NULL;
@@ -9008,58 +9200,56 @@ static PyObject* py_Admin_incremental_alter_configs(PyObject* self, PyObject* ar
     if (obj_map_init(&m, n, (handle_destroy_fn)kafka_common_config_ConfigResource_destroy_err, alter_config_op_list_free) < 0) {
         Py_DECREF(fast); return NULL;
     }
-    int last_type = -1; const char* last_name = NULL; kafka_List_t* ops = NULL;
     for (Py_ssize_t i = 0; i < n; i++) {
-        int type; const char *name, *entry_name, *value; int op;
-        if (!PyArg_ParseTuple(PySequence_Fast_GET_ITEM(fast, i), "isszi", &type, &name, &entry_name, &value, &op)) goto fail;
-        if (ops == NULL || type != last_type || strcmp(name, last_name) != 0) {
-            const kafka_common_config_ConfigResource_Type_t* rt = NULL;
-            if (ffi_raise((rt = kafka_common_config_ConfigResource_Type_for_id_err((int8_t)type, &ffi_err), ffi_take(&ffi_err)))) goto fail;
-            if (rt == NULL) { PyErr_Format(PyExc_ValueError, "unknown ConfigResource type id %d", type); goto fail; }
-            kafka_common_config_ConfigResource_t* resource = NULL;
-            ops = NULL;
-            if (ffi_raise((ops = kafka_List_new_err(&ffi_err), ffi_take(&ffi_err)))) goto fail;
-            if (ffi_raise((resource = kafka_common_config_ConfigResource_new_err(rt, name, &ffi_err), ffi_take(&ffi_err)))) {
-                ffi_unraisable((kafka_List_destroy_err(ops, &ffi_err), ffi_take(&ffi_err))); goto fail;
+        int type; const char* name; PyObject* op_rows;
+        if (!PyArg_ParseTuple(PySequence_Fast_GET_ITEM(fast, i), "isO", &type, &name, &op_rows)) goto fail;
+        const kafka_common_config_ConfigResource_Type_t* rt = NULL;
+        if (ffi_raise((rt = kafka_common_config_ConfigResource_Type_for_id_err((int8_t)type, &ffi_err), ffi_take(&ffi_err)))) goto fail;
+        if (rt == NULL) { PyErr_Format(PyExc_ValueError, "unknown ConfigResource type id %d", type); goto fail; }
+        kafka_List_t* ops = NULL;
+        if (ffi_raise((ops = kafka_List_new_err(&ffi_err), ffi_take(&ffi_err)))) goto fail;
+        kafka_common_config_ConfigResource_t* resource = NULL;
+        if (ffi_raise((resource = kafka_common_config_ConfigResource_new_err(rt, name, &ffi_err), ffi_take(&ffi_err)))) {
+            ffi_unraisable((kafka_List_destroy_err(ops, &ffi_err), ffi_take(&ffi_err))); goto fail;
+        }
+        if (obj_map_put(&m, resource, ops) < 0) goto fail;
+        PyObject* ofast = PySequence_Fast(op_rows, "the operations must be a sequence of rows");
+        if (ofast == NULL) goto fail;
+        for (Py_ssize_t j = 0; j < PySequence_Fast_GET_SIZE(ofast); j++) {
+            const char *entry_name, *value; int op;
+            if (!PyArg_ParseTuple(PySequence_Fast_GET_ITEM(ofast, j), "szi", &entry_name, &value, &op)) { Py_DECREF(ofast); goto fail; }
+            const kafka_admin_AlterConfigOp_OpType_t* op_type = NULL;
+            if (ffi_raise((op_type = kafka_admin_AlterConfigOp_OpType_for_id_err((int8_t)op, &ffi_err), ffi_take(&ffi_err)))) { Py_DECREF(ofast); goto fail; }
+            if (op_type == NULL) {
+                char msg[64];
+                snprintf(msg, sizeof msg, "Unknown opType id: %d", op);
+                ffi_raise(ffi_built(kafka_common_Error_local_illegal_argument_err(msg, &ffi_err), &ffi_err));
+                Py_DECREF(ofast);
+                goto fail;
             }
-            if (obj_map_put(&m, resource, ops) < 0) goto fail;
-            last_type = type; last_name = name;
+            kafka_admin_ConfigEntry_t* entry = NULL;
+            kafka_admin_AlterConfigOp_t* alter_op = NULL;
+            int failed = ffi_raise((entry = kafka_admin_ConfigEntry_new_err(entry_name, value, &ffi_err), ffi_take(&ffi_err)))
+                || ffi_raise((alter_op = kafka_admin_AlterConfigOp_new_err(entry, op_type, &ffi_err), ffi_take(&ffi_err)));
+            if (entry) ffi_unraisable((kafka_admin_ConfigEntry_destroy_err(entry, &ffi_err), ffi_take(&ffi_err)));   // copied by AlterConfigOp_new
+            if (failed) { Py_DECREF(ofast); goto fail; }
+            if (ffi_raise((kafka_List_add_err(ops, alter_op, &ffi_err), ffi_take(&ffi_err)))) {
+                ffi_unraisable((kafka_admin_AlterConfigOp_destroy_err(alter_op, &ffi_err), ffi_take(&ffi_err)));
+                Py_DECREF(ofast);
+                goto fail;
+            }
         }
-        const kafka_admin_AlterConfigOp_OpType_t* op_type = NULL;
-        if (ffi_raise((op_type = kafka_admin_AlterConfigOp_OpType_for_id_err((int8_t)op, &ffi_err), ffi_take(&ffi_err)))) goto fail;
-        if (op_type == NULL) {
-            // Reported through the error channel, as the call's KafkaError:
-            // Java's typed OpType cannot carry an unknown id, so this is the
-            // marshaling failure admin.py documents (the RPC is not submitted).
-            char msg[64];
-            snprintf(msg, sizeof msg, "unknown AlterConfigOp type id %d", op);
-            obj_map_free(&m);
-            Py_DECREF(fast);
-            return job_or_error(NULL, ffi_built(kafka_common_Error_local_illegal_argument_err(msg, &ffi_err), &ffi_err));
-        }
-        kafka_admin_ConfigEntry_t* entry = NULL;
-        kafka_admin_AlterConfigOp_t* alter_op = NULL;
-        int failed = ffi_raise((entry = kafka_admin_ConfigEntry_new_err(entry_name, value, &ffi_err), ffi_take(&ffi_err)))
-            || ffi_raise((alter_op = kafka_admin_AlterConfigOp_new_err(entry, op_type, &ffi_err), ffi_take(&ffi_err)));
-        if (entry) ffi_unraisable((kafka_admin_ConfigEntry_destroy_err(entry, &ffi_err), ffi_take(&ffi_err)));   // copied by AlterConfigOp_new
-        if (failed) goto fail;
-        if (ffi_raise((kafka_List_add_err(ops, alter_op, &ffi_err), ffi_take(&ffi_err)))) {
-            ffi_unraisable((kafka_admin_AlterConfigOp_destroy_err(alter_op, &ffi_err), ffi_take(&ffi_err))); goto fail;
-        }
+        Py_DECREF(ofast);
     }
     {
-        ADMIN_OPTIONS(AlterConfigs, o, timeout_ms);
-        FFI_STEP(o_err, (kafka_admin_AlterConfigsOptions_set_validate_only_err(o, (int8_t)validate_only, &ffi_err), ffi_take(&ffi_err)));
+        void* o = admin_options_build(&AlterConfigsOptions_desc, opts);
+        if (o == NULL) goto fail;
         kafka_admin_AlterConfigsResult_t* r = NULL;
-        FFI_STEP(o_err, (r = kafka_admin_Admin_incremental_alter_configs_with_options_err(a->admin, m.map, o, &ffi_err), ffi_take(&ffi_err)));
-        if (o) ffi_unraisable((kafka_admin_AlterConfigsOptions_destroy_err(o, &ffi_err), ffi_take(&ffi_err)));
+        kafka_common_Error_t* err = (r = kafka_admin_Admin_incremental_alter_configs_with_options_err(
+            a->admin, m.map, (kafka_admin_AlterConfigsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
         obj_map_free(&m);
         Py_DECREF(fast);
-        if (ffi_raise(o_err)) return NULL;
-        AdminJob* job = job_new(r, JOB_RESULT_DESTROY(AlterConfigs), assemble_keyed_errors);
-        if (job == NULL) { ffi_unraisable((kafka_admin_AlterConfigsResult_destroy_err(r, &ffi_err), ffi_take(&ffi_err))); return NULL; }
-        { kafka_Map_t * v_ = NULL; JOB_TRY(job, ffi_raise((v_ = kafka_admin_AlterConfigsResult_values_err(r, &ffi_err), ffi_take(&ffi_err))) ? -1 : job_add_map(job, v_, key_config_resource, NULL, 0)); }
-        return job_or_error(job, NULL);
+        return admin_rpc_return(&AlterConfigsOptions_desc, o, err, r, &AlterConfigsResult_desc);
     }
 fail:
     obj_map_free(&m);
@@ -9067,13 +9257,23 @@ fail:
     return NULL;
 }
 
-// Admin_list_config_resources(h, [type_id], timeout_ms) -> (job, err).
-// Payload: (error, [(type, name)]). An empty type list means every type.
+// Admin_list_config_resources(h, [type_id] | None, options) -> AdminResult;
+// `all` delivers [(type, name)]. None is Java's `listConfigResources()`
+// (every type), a list `listConfigResources(Set<Type>, options)`.
+ADMIN_OPT_TIMEOUT(ListConfigResources)
+static const AdminOptionsDesc ListConfigResourcesOptions_desc = {
+    "ListConfigResourcesOptions", ADMIN_OPTIONS_NEW_FN(ListConfigResources), ADMIN_OPTIONS_DESTROY_FN(ListConfigResources),
+    {ADMIN_SETTER(ListConfigResources, timeout_ms), {NULL, NULL}},
+};
+static const AdminResultDesc ListConfigResourcesResult_desc = {
+    "ListConfigResourcesResult", ADMIN_RESULT_DESTROY_FN(ListConfigResources),
+    {ADMIN_ACC_ONE(ListConfigResources, all, conv_config_resources), {NULL}},
+};
+
 static PyObject* py_Admin_list_config_resources(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long h; PyObject* types; long long timeout_ms;
-    if (!PyArg_ParseTuple(args, "KOL", &h, &types, &timeout_ms)) return NULL;
-    if (!admin_timeout_fits(timeout_ms)) return NULL;
+    unsigned long long h; PyObject* types; PyObject* opts;
+    if (!PyArg_ParseTuple(args, "KOO", &h, &types, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     PyObject* fast = fast_rows(types, "resource_types must be a sequence of int");
     if (fast == NULL) return NULL;
@@ -9096,135 +9296,171 @@ static PyObject* py_Admin_list_config_resources(PyObject* self, PyObject* args) 
         }
     }
     Py_DECREF(fast);
-    ADMIN_OPTIONS(ListConfigResources, o, timeout_ms);
+    void* o = admin_options_build(&ListConfigResourcesOptions_desc, opts);
+    if (o == NULL) { ffi_unraisable((kafka_List_destroy_err(list, &ffi_err), ffi_take(&ffi_err))); return NULL; }
     kafka_admin_ListConfigResourcesResult_t* r = NULL;
-    FFI_STEP(o_err, (r = kafka_admin_Admin_list_config_resources_with_options_err(a->admin, list, o, &ffi_err), ffi_take(&ffi_err)));
-    if (o) ffi_unraisable((kafka_admin_ListConfigResourcesOptions_destroy_err(o, &ffi_err), ffi_take(&ffi_err)));
+    kafka_common_Error_t* err = (r = kafka_admin_Admin_list_config_resources_with_options_err(
+        a->admin, list, (kafka_admin_ListConfigResourcesOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
     ffi_unraisable((kafka_List_destroy_err(list, &ffi_err), ffi_take(&ffi_err)));
-    if (ffi_raise(o_err)) return NULL;
-    AdminJob* job = job_new(r, JOB_RESULT_DESTROY(ListConfigResources), assemble_single);
-    if (job == NULL) { ffi_unraisable((kafka_admin_ListConfigResourcesResult_destroy_err(r, &ffi_err), ffi_take(&ffi_err))); return NULL; }
-    { kafka_common_KafkaFuture_t * v_ = NULL; JOB_TRY(job, ffi_raise((v_ = kafka_admin_ListConfigResourcesResult_all_err(r, &ffi_err), ffi_take(&ffi_err))) ? -1 : job_add_single(job, v_, 1, conv_config_resources, 0)); }
-    return job_or_error(job, NULL);
+    return admin_rpc_return(&ListConfigResourcesOptions_desc, o, err, r, &ListConfigResourcesResult_desc);
 }
 
 // ---- log dirs ------------------------------------------------------------------------
 
-// Admin_describe_log_dirs(h, [broker_id], timeout_ms) -> (job, err).
-// Payload: {broker_id: (error, {log_dir: description4})}.
+// Admin_describe_log_dirs(h, [broker_id], options) -> AdminResult; each
+// broker's future delivers {log_dir: description5} (log_dir_description_to_py).
+ADMIN_OPT_TIMEOUT(DescribeLogDirs)
+static const AdminOptionsDesc DescribeLogDirsOptions_desc = {
+    "DescribeLogDirsOptions", ADMIN_OPTIONS_NEW_FN(DescribeLogDirs), ADMIN_OPTIONS_DESTROY_FN(DescribeLogDirs),
+    {ADMIN_SETTER(DescribeLogDirs, timeout_ms), {NULL, NULL}},
+};
+static const AdminResultDesc DescribeLogDirsResult_desc = {
+    "DescribeLogDirsResult", ADMIN_RESULT_DESTROY_FN(DescribeLogDirs),
+    {ADMIN_ACC_MAP(DescribeLogDirs, descriptions, key_i32, conv_log_dir_descriptions), {NULL}},
+};
+
 static PyObject* py_Admin_describe_log_dirs(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long h; PyObject* brokers; long long timeout_ms;
-    if (!PyArg_ParseTuple(args, "KOL", &h, &brokers, &timeout_ms)) return NULL;
-    if (!admin_timeout_fits(timeout_ms)) return NULL;
+    unsigned long long h; PyObject* brokers; PyObject* opts;
+    if (!PyArg_ParseTuple(args, "KOO", &h, &brokers, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     i32_list_t ids;
     if (i32_list_build(brokers, &ids, "brokers must be a sequence of int") < 0) return NULL;
-    ADMIN_OPTIONS(DescribeLogDirs, o, timeout_ms);
+    void* o = admin_options_build(&DescribeLogDirsOptions_desc, opts);
+    if (o == NULL) { i32_list_free(&ids); return NULL; }
     kafka_admin_DescribeLogDirsResult_t* r = NULL;
-    FFI_STEP(o_err, (r = kafka_admin_Admin_describe_log_dirs_with_options_err(a->admin, ids.list, o, &ffi_err), ffi_take(&ffi_err)));
-    if (o) ffi_unraisable((kafka_admin_DescribeLogDirsOptions_destroy_err(o, &ffi_err), ffi_take(&ffi_err)));
+    kafka_common_Error_t* err = (r = kafka_admin_Admin_describe_log_dirs_with_options_err(
+        a->admin, ids.list, (kafka_admin_DescribeLogDirsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
     i32_list_free(&ids);
-    if (ffi_raise(o_err)) return NULL;
-    AdminJob* job = job_new(r, JOB_RESULT_DESTROY(DescribeLogDirs), assemble_keyed_pairs);
-    if (job == NULL) { ffi_unraisable((kafka_admin_DescribeLogDirsResult_destroy_err(r, &ffi_err), ffi_take(&ffi_err))); return NULL; }
-    { kafka_Map_t * v_ = NULL; JOB_TRY(job, ffi_raise((v_ = kafka_admin_DescribeLogDirsResult_descriptions_err(r, &ffi_err), ffi_take(&ffi_err))) ? -1 : job_add_map(job, v_, key_i32, conv_log_dir_descriptions, 0)); }
-    return job_or_error(job, NULL);
+    return admin_rpc_return(&DescribeLogDirsOptions_desc, o, err, r, &DescribeLogDirsResult_desc);
 }
 
-// Admin_alter_replica_log_dirs(h, [(topic, partition, broker_id, log_dir)], timeout_ms)
-// -> (job, err). Payload: {(topic, partition, broker_id): error}.
+// Admin_alter_replica_log_dirs(h, [(topic, partition, broker_id, log_dir)], options)
+// -> AdminResult, keyed by (topic, partition, broker_id).
+ADMIN_OPT_TIMEOUT(AlterReplicaLogDirs)
+static const AdminOptionsDesc AlterReplicaLogDirsOptions_desc = {
+    "AlterReplicaLogDirsOptions", ADMIN_OPTIONS_NEW_FN(AlterReplicaLogDirs), ADMIN_OPTIONS_DESTROY_FN(AlterReplicaLogDirs),
+    {ADMIN_SETTER(AlterReplicaLogDirs, timeout_ms), {NULL, NULL}},
+};
+static const AdminResultDesc AlterReplicaLogDirsResult_desc = {
+    "AlterReplicaLogDirsResult", ADMIN_RESULT_DESTROY_FN(AlterReplicaLogDirs),
+    {ADMIN_ACC_MAP(AlterReplicaLogDirs, values, key_tpr, NULL), ADMIN_ACC_ONE(AlterReplicaLogDirs, all, NULL), {NULL}},
+};
+
 static PyObject* py_Admin_alter_replica_log_dirs(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long h; PyObject* spec; long long timeout_ms;
-    if (!PyArg_ParseTuple(args, "KOL", &h, &spec, &timeout_ms)) return NULL;
-    if (!admin_timeout_fits(timeout_ms)) return NULL;
+    unsigned long long h; PyObject* spec; PyObject* opts;
+    if (!PyArg_ParseTuple(args, "KOO", &h, &spec, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     tpr_list_t replicas; PyObject* fast = NULL; const char** dirs = NULL;
     if (tpr_list_build(spec, &replicas, 1, &fast, &dirs) < 0) return NULL;
     kafka_Map_t* m = NULL;   // borrowed TPReplica* -> borrowed char* (owned by fast)
-    kafka_common_Error_t* m_err = (m = kafka_Map_new_err(&ffi_err), ffi_take(&ffi_err));
-    for (Py_ssize_t i = 0; m_err == NULL && i < replicas.n; i++) {
-        m_err = (kafka_Map_put_err(m, replicas.replicas[i], (void*)dirs[i], &ffi_err), ffi_take(&ffi_err));
+    kafka_common_Error_t* err = (m = kafka_Map_new_err(&ffi_err), ffi_take(&ffi_err));
+    for (Py_ssize_t i = 0; err == NULL && i < replicas.n; i++) {
+        err = (kafka_Map_put_err(m, replicas.replicas[i], (void*)dirs[i], &ffi_err), ffi_take(&ffi_err));
     }
-    ADMIN_OPTIONS(AlterReplicaLogDirs, o, timeout_ms);
-    // The map's error comes first and is the one raised.
-    if (m_err) { ffi_unraisable(o_err); o_err = m_err; }
+    void* o = NULL;
     kafka_admin_AlterReplicaLogDirsResult_t* r = NULL;
-    FFI_STEP(o_err, (r = kafka_admin_Admin_alter_replica_log_dirs_with_options_err(a->admin, m, o, &ffi_err), ffi_take(&ffi_err)));
-    if (o) ffi_unraisable((kafka_admin_AlterReplicaLogDirsOptions_destroy_err(o, &ffi_err), ffi_take(&ffi_err)));
+    if (err == NULL) {
+        o = admin_options_build(&AlterReplicaLogDirsOptions_desc, opts);
+        if (o != NULL) {
+            err = (r = kafka_admin_Admin_alter_replica_log_dirs_with_options_err(
+                a->admin, m, (kafka_admin_AlterReplicaLogDirsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+        }
+    }
     if (m) ffi_unraisable((kafka_Map_destroy_err(m, &ffi_err), ffi_take(&ffi_err)));
     tpr_list_free(&replicas);
     PyMem_Free(dirs);
     Py_XDECREF(fast);
-    if (ffi_raise(o_err)) return NULL;
-    AdminJob* job = job_new(r, JOB_RESULT_DESTROY(AlterReplicaLogDirs), assemble_keyed_errors);
-    if (job == NULL) { ffi_unraisable((kafka_admin_AlterReplicaLogDirsResult_destroy_err(r, &ffi_err), ffi_take(&ffi_err))); return NULL; }
-    { kafka_Map_t * v_ = NULL; JOB_TRY(job, ffi_raise((v_ = kafka_admin_AlterReplicaLogDirsResult_values_err(r, &ffi_err), ffi_take(&ffi_err))) ? -1 : job_add_map(job, v_, key_tpr, NULL, 0)); }
-    return job_or_error(job, NULL);
+    if (o == NULL && err == NULL) return NULL;   // the options raised
+    return admin_rpc_return(&AlterReplicaLogDirsOptions_desc, o, err, r, &AlterReplicaLogDirsResult_desc);
 }
 
-// Admin_describe_replica_log_dirs(h, [(topic, partition, broker_id)], timeout_ms)
-// -> (job, err). Payload: {(topic, partition, broker_id): (error, info4)}.
+// Admin_describe_replica_log_dirs(h, [(topic, partition, broker_id)], options)
+// -> AdminResult; the futures deliver
+// (current_dir | None, current_lag, future_dir | None, future_lag).
+ADMIN_OPT_TIMEOUT(DescribeReplicaLogDirs)
+static const AdminOptionsDesc DescribeReplicaLogDirsOptions_desc = {
+    "DescribeReplicaLogDirsOptions", ADMIN_OPTIONS_NEW_FN(DescribeReplicaLogDirs),
+    ADMIN_OPTIONS_DESTROY_FN(DescribeReplicaLogDirs),
+    {ADMIN_SETTER(DescribeReplicaLogDirs, timeout_ms), {NULL, NULL}},
+};
+static const AdminResultDesc DescribeReplicaLogDirsResult_desc = {
+    "DescribeReplicaLogDirsResult", ADMIN_RESULT_DESTROY_FN(DescribeReplicaLogDirs),
+    {ADMIN_ACC_MAP(DescribeReplicaLogDirs, values, key_tpr, conv_replica_log_dir_info), {NULL}},
+};
+
 static PyObject* py_Admin_describe_replica_log_dirs(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long h; PyObject* spec; long long timeout_ms;
-    if (!PyArg_ParseTuple(args, "KOL", &h, &spec, &timeout_ms)) return NULL;
-    if (!admin_timeout_fits(timeout_ms)) return NULL;
+    unsigned long long h; PyObject* spec; PyObject* opts;
+    if (!PyArg_ParseTuple(args, "KOO", &h, &spec, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     tpr_list_t replicas;
     if (tpr_list_build(spec, &replicas, 0, NULL, NULL) < 0) return NULL;
-    ADMIN_OPTIONS(DescribeReplicaLogDirs, o, timeout_ms);
+    void* o = admin_options_build(&DescribeReplicaLogDirsOptions_desc, opts);
+    if (o == NULL) { tpr_list_free(&replicas); return NULL; }
     kafka_admin_DescribeReplicaLogDirsResult_t* r = NULL;
-    FFI_STEP(o_err, (r = kafka_admin_Admin_describe_replica_log_dirs_with_options_err(a->admin, replicas.list, o, &ffi_err), ffi_take(&ffi_err)));
-    if (o) ffi_unraisable((kafka_admin_DescribeReplicaLogDirsOptions_destroy_err(o, &ffi_err), ffi_take(&ffi_err)));
+    kafka_common_Error_t* err = (r = kafka_admin_Admin_describe_replica_log_dirs_with_options_err(
+        a->admin, replicas.list, (kafka_admin_DescribeReplicaLogDirsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
     tpr_list_free(&replicas);
-    if (ffi_raise(o_err)) return NULL;
-    AdminJob* job = job_new(r, JOB_RESULT_DESTROY(DescribeReplicaLogDirs), assemble_keyed_pairs);
-    if (job == NULL) { ffi_unraisable((kafka_admin_DescribeReplicaLogDirsResult_destroy_err(r, &ffi_err), ffi_take(&ffi_err))); return NULL; }
-    { kafka_Map_t * v_ = NULL; JOB_TRY(job, ffi_raise((v_ = kafka_admin_DescribeReplicaLogDirsResult_values_err(r, &ffi_err), ffi_take(&ffi_err))) ? -1 : job_add_map(job, v_, key_tpr, conv_replica_log_dir_info, 0)); }
-    return job_or_error(job, NULL);
+    return admin_rpc_return(&DescribeReplicaLogDirsOptions_desc, o, err, r, &DescribeReplicaLogDirsResult_desc);
 }
 
 // ---- elections, reassignments, offsets --------------------------------------------------
 
-// Admin_elect_leaders(h, election_type, all_partitions, [(topic, partition)], timeout_ms)
-// -> (job, err). Payload: (error, {(topic, partition): error | None}).
-// `all_partitions` is Java's null Set (every partition in the cluster).
+// Admin_elect_leaders(h, election_type, [(topic, partition)] | None, options)
+// -> AdminResult; `partitions` delivers {(topic, partition): error4 | None}.
+// None is Java's null Set (every partition in the cluster).
+ADMIN_OPT_TIMEOUT(ElectLeaders)
+static const AdminOptionsDesc ElectLeadersOptions_desc = {
+    "ElectLeadersOptions", ADMIN_OPTIONS_NEW_FN(ElectLeaders), ADMIN_OPTIONS_DESTROY_FN(ElectLeaders),
+    {ADMIN_SETTER(ElectLeaders, timeout_ms), {NULL, NULL}},
+};
+static const AdminResultDesc ElectLeadersResult_desc = {
+    "ElectLeadersResult", ADMIN_RESULT_DESTROY_FN(ElectLeaders),
+    {ADMIN_ACC_ONE(ElectLeaders, partitions, conv_elect_leaders), {NULL}},
+};
+
 static PyObject* py_Admin_elect_leaders(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long h; int election_type, all_partitions; PyObject* spec; long long timeout_ms;
-    if (!PyArg_ParseTuple(args, "KipOL", &h, &election_type, &all_partitions, &spec, &timeout_ms)) return NULL;
-    if (!admin_timeout_fits(timeout_ms)) return NULL;
+    unsigned long long h; int election_type; PyObject* spec; PyObject* opts;
+    if (!PyArg_ParseTuple(args, "KiOO", &h, &election_type, &spec, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     const kafka_common_ElectionType_t* et = NULL;
-    kafka_common_Error_t* err = (et = kafka_common_ElectionType_value_of((int8_t)election_type, &ffi_err), ffi_take(&ffi_err));
-    if (err != NULL) return job_or_error(NULL, err);
+    if (ffi_raise((et = kafka_common_ElectionType_value_of((int8_t)election_type, &ffi_err), ffi_take(&ffi_err)))) return NULL;
     tp_list_t tps;
     memset(&tps, 0, sizeof(tps));
-    if (!all_partitions && tp_list_build(spec, &tps) < 0) return NULL;
-    ADMIN_OPTIONS(ElectLeaders, o, timeout_ms);
+    if (spec != Py_None && tp_list_build(spec, &tps) < 0) return NULL;
+    void* o = admin_options_build(&ElectLeadersOptions_desc, opts);
+    if (o == NULL) { tp_list_free(&tps); return NULL; }
     kafka_admin_ElectLeadersResult_t* r = NULL;
-    FFI_STEP(o_err, (r = kafka_admin_Admin_elect_leaders_with_options_err(
-        a->admin, et, all_partitions ? NULL : tps.list, o, &ffi_err), ffi_take(&ffi_err)));
-    if (o) ffi_unraisable((kafka_admin_ElectLeadersOptions_destroy_err(o, &ffi_err), ffi_take(&ffi_err)));
+    kafka_common_Error_t* err = (r = kafka_admin_Admin_elect_leaders_with_options_err(
+        a->admin, et, spec == Py_None ? NULL : tps.list, (kafka_admin_ElectLeadersOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
     tp_list_free(&tps);
-    if (ffi_raise(o_err)) return NULL;
-    AdminJob* job = job_new(r, JOB_RESULT_DESTROY(ElectLeaders), assemble_single);
-    if (job == NULL) { ffi_unraisable((kafka_admin_ElectLeadersResult_destroy_err(r, &ffi_err), ffi_take(&ffi_err))); return NULL; }
-    { kafka_common_KafkaFuture_t * v_ = NULL; JOB_TRY(job, ffi_raise((v_ = kafka_admin_ElectLeadersResult_partitions_err(r, &ffi_err), ffi_take(&ffi_err))) ? -1 : job_add_single(job, v_, 1, conv_elect_leaders, 0)); }
-    return job_or_error(job, NULL);
+    return admin_rpc_return(&ElectLeadersOptions_desc, o, err, r, &ElectLeadersResult_desc);
 }
 
-// Admin_alter_partition_reassignments(h, [(topic, partition, is_none, [replica])],
-//                                     timeout_ms, allow_replication_factor_change)
-// -> (job, err). Payload: {(topic, partition): error}. `is_none` is Java's
-// empty Optional (cancel the reassignment), which crosses as a NULL value.
+// Admin_alter_partition_reassignments(h, [(topic, partition, [replica] | None)], options)
+// -> AdminResult, keyed by (topic, partition). None is Java's empty Optional
+// (cancel the reassignment), which crosses as a NULL value.
+ADMIN_OPT_TIMEOUT(AlterPartitionReassignments)
+ADMIN_OPT_BOOL(AlterPartitionReassignments, allow_replication_factor_change)
+static const AdminOptionsDesc AlterPartitionReassignmentsOptions_desc = {
+    "AlterPartitionReassignmentsOptions", ADMIN_OPTIONS_NEW_FN(AlterPartitionReassignments),
+    ADMIN_OPTIONS_DESTROY_FN(AlterPartitionReassignments),
+    {ADMIN_SETTER(AlterPartitionReassignments, timeout_ms),
+     ADMIN_SETTER(AlterPartitionReassignments, allow_replication_factor_change), {NULL, NULL}},
+};
+static const AdminResultDesc AlterPartitionReassignmentsResult_desc = {
+    "AlterPartitionReassignmentsResult", ADMIN_RESULT_DESTROY_FN(AlterPartitionReassignments),
+    {ADMIN_ACC_MAP(AlterPartitionReassignments, values, key_tp, NULL),
+     ADMIN_ACC_ONE(AlterPartitionReassignments, all, NULL), {NULL}},
+};
+
 static PyObject* py_Admin_alter_partition_reassignments(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long h; PyObject* spec; long long timeout_ms; int allow_rf;
-    if (!PyArg_ParseTuple(args, "KOLp", &h, &spec, &timeout_ms, &allow_rf)) return NULL;
-    if (!admin_timeout_fits(timeout_ms)) return NULL;
+    unsigned long long h; PyObject* spec; PyObject* opts;
+    if (!PyArg_ParseTuple(args, "KOO", &h, &spec, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     PyObject* fast = fast_rows(spec, "reassignments must be a sequence");
     if (fast == NULL) return NULL;
@@ -9233,21 +9469,15 @@ static PyObject* py_Admin_alter_partition_reassignments(PyObject* self, PyObject
     if (obj_map_init(&m, n, (handle_destroy_fn)kafka_common_TopicPartition_destroy_err,
                      (handle_destroy_fn)kafka_admin_NewPartitionReassignment_destroy_err) < 0) { Py_DECREF(fast); return NULL; }
     for (Py_ssize_t i = 0; i < n; i++) {
-        const char* t; int p, is_none; PyObject* replicas;
-        if (!PyArg_ParseTuple(PySequence_Fast_GET_ITEM(fast, i), "sipO", &t, &p, &is_none, &replicas)) goto fail;
+        const char* t; int p; PyObject* replicas;
+        if (!PyArg_ParseTuple(PySequence_Fast_GET_ITEM(fast, i), "siO", &t, &p, &replicas)) goto fail;
         kafka_admin_NewPartitionReassignment_t* npr = NULL;
-        if (!is_none) {
+        if (replicas != Py_None) {
             kafka_List_t* list = i32_list_boxed(replicas, "target_replicas must be a sequence of int");
             if (list == NULL) goto fail;
             kafka_common_Error_t* err = (npr = kafka_admin_NewPartitionReassignment_new(list, &ffi_err), ffi_take(&ffi_err));
             ffi_unraisable(handle_destroy(i32_list_boxed_free, list));
-            if (err != NULL) {
-                char prefix[192];
-                snprintf(prefix, sizeof(prefix), "reassignment for %s-%d at index %zd", t, p, i);
-                err = prefixed_error(prefix, err);
-                obj_map_free(&m); Py_DECREF(fast);
-                return job_or_error(NULL, err);
-            }
+            if (ffi_raise(err)) goto fail;
         }
         kafka_common_TopicPartition_t* tp = NULL;
         if (ffi_raise((tp = kafka_common_TopicPartition_new_err(t, (int32_t)p, &ffi_err), ffi_take(&ffi_err)))) {
@@ -9257,18 +9487,15 @@ static PyObject* py_Admin_alter_partition_reassignments(PyObject* self, PyObject
         if (obj_map_put(&m, tp, npr) < 0) goto fail;
     }
     {
-        ADMIN_OPTIONS(AlterPartitionReassignments, o, timeout_ms);
-        FFI_STEP(o_err, (kafka_admin_AlterPartitionReassignmentsOptions_set_allow_replication_factor_change_err(o, (int8_t)allow_rf, &ffi_err), ffi_take(&ffi_err)));
+        void* o = admin_options_build(&AlterPartitionReassignmentsOptions_desc, opts);
+        if (o == NULL) goto fail;
         kafka_admin_AlterPartitionReassignmentsResult_t* r = NULL;
-        FFI_STEP(o_err, (r = kafka_admin_Admin_alter_partition_reassignments_with_options_err(a->admin, m.map, o, &ffi_err), ffi_take(&ffi_err)));
-        if (o) ffi_unraisable((kafka_admin_AlterPartitionReassignmentsOptions_destroy_err(o, &ffi_err), ffi_take(&ffi_err)));
+        kafka_common_Error_t* err = (r = kafka_admin_Admin_alter_partition_reassignments_with_options_err(
+            a->admin, m.map, (kafka_admin_AlterPartitionReassignmentsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
         obj_map_free(&m);
         Py_DECREF(fast);
-        if (ffi_raise(o_err)) return NULL;
-        AdminJob* job = job_new(r, JOB_RESULT_DESTROY(AlterPartitionReassignments), assemble_keyed_errors);
-        if (job == NULL) { ffi_unraisable((kafka_admin_AlterPartitionReassignmentsResult_destroy_err(r, &ffi_err), ffi_take(&ffi_err))); return NULL; }
-        { kafka_Map_t * v_ = NULL; JOB_TRY(job, ffi_raise((v_ = kafka_admin_AlterPartitionReassignmentsResult_values_err(r, &ffi_err), ffi_take(&ffi_err))) ? -1 : job_add_map(job, v_, key_tp, NULL, 0)); }
-        return job_or_error(job, NULL);
+        return admin_rpc_return(&AlterPartitionReassignmentsOptions_desc, o, err, r,
+                                &AlterPartitionReassignmentsResult_desc);
     }
 fail:
     obj_map_free(&m);
@@ -9276,36 +9503,47 @@ fail:
     return NULL;
 }
 
-// Admin_list_partition_reassignments(h, all_partitions, [(topic, partition)], timeout_ms)
-// -> (job, err). Payload: (error, {(topic, partition): (replicas, adding, removing)}).
+// Admin_list_partition_reassignments(h, [(topic, partition)] | None, options)
+// -> AdminResult; `reassignments` delivers {(topic, partition): (replicas,
+// adding, removing)}. None is Java's `listPartitionReassignments(options)`
+// (every reassignment), a list the `Set<TopicPartition>` overload.
+ADMIN_OPT_TIMEOUT(ListPartitionReassignments)
+static const AdminOptionsDesc ListPartitionReassignmentsOptions_desc = {
+    "ListPartitionReassignmentsOptions", ADMIN_OPTIONS_NEW_FN(ListPartitionReassignments),
+    ADMIN_OPTIONS_DESTROY_FN(ListPartitionReassignments),
+    {ADMIN_SETTER(ListPartitionReassignments, timeout_ms), {NULL, NULL}},
+};
+static const AdminResultDesc ListPartitionReassignmentsResult_desc = {
+    "ListPartitionReassignmentsResult", ADMIN_RESULT_DESTROY_FN(ListPartitionReassignments),
+    {ADMIN_ACC_ONE(ListPartitionReassignments, reassignments, conv_partition_reassignments), {NULL}},
+};
+
 static PyObject* py_Admin_list_partition_reassignments(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long h; int all_partitions; PyObject* spec; long long timeout_ms;
-    if (!PyArg_ParseTuple(args, "KpOL", &h, &all_partitions, &spec, &timeout_ms)) return NULL;
-    if (!admin_timeout_fits(timeout_ms)) return NULL;
+    unsigned long long h; PyObject* spec; PyObject* opts;
+    if (!PyArg_ParseTuple(args, "KOO", &h, &spec, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     tp_list_t tps;
     memset(&tps, 0, sizeof(tps));
-    if (!all_partitions && tp_list_build(spec, &tps) < 0) return NULL;
-    ADMIN_OPTIONS(ListPartitionReassignments, o, timeout_ms);
+    if (spec != Py_None && tp_list_build(spec, &tps) < 0) return NULL;
+    void* o = admin_options_build(&ListPartitionReassignmentsOptions_desc, opts);
+    if (o == NULL) { tp_list_free(&tps); return NULL; }
     kafka_admin_ListPartitionReassignmentsResult_t* r = NULL;
-    if (all_partitions) {
-        FFI_STEP(o_err, (r = kafka_admin_Admin_list_partition_reassignments_with_options_err(a->admin, o, &ffi_err), ffi_take(&ffi_err)));
+    kafka_common_Error_t* err;
+    if (spec == Py_None) {
+        err = (r = kafka_admin_Admin_list_partition_reassignments_with_options_err(
+            a->admin, (kafka_admin_ListPartitionReassignmentsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
     } else {
-        FFI_STEP(o_err, (r = kafka_admin_Admin_list_partition_reassignments_with_partitions_options_err(
-            a->admin, tps.list, o, &ffi_err), ffi_take(&ffi_err)));
+        err = (r = kafka_admin_Admin_list_partition_reassignments_with_partitions_options_err(
+            a->admin, tps.list, (kafka_admin_ListPartitionReassignmentsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
     }
-    if (o) ffi_unraisable((kafka_admin_ListPartitionReassignmentsOptions_destroy_err(o, &ffi_err), ffi_take(&ffi_err)));
     tp_list_free(&tps);
-    if (ffi_raise(o_err)) return NULL;
-    AdminJob* job = job_new(r, JOB_RESULT_DESTROY(ListPartitionReassignments), assemble_single);
-    if (job == NULL) { ffi_unraisable((kafka_admin_ListPartitionReassignmentsResult_destroy_err(r, &ffi_err), ffi_take(&ffi_err))); return NULL; }
-    { kafka_common_KafkaFuture_t * v_ = NULL; JOB_TRY(job, ffi_raise((v_ = kafka_admin_ListPartitionReassignmentsResult_reassignments_err(r, &ffi_err), ffi_take(&ffi_err))) ? -1 : job_add_single(job, v_, 1, conv_partition_reassignments, 0)); }
-    return job_or_error(job, NULL);
+    return admin_rpc_return(&ListPartitionReassignmentsOptions_desc, o, err, r,
+                            &ListPartitionReassignmentsResult_desc);
 }
 
-// The Python OffsetSpec sentinels (admin.OffsetSpec._LATEST ...), carried in
-// the `value` column of a non-timestamp row.
+// The Python OffsetSpec sentinels, carried in the `value` column of a
+// non-timestamp row (Java's ListOffsetsRequest timestamps).
 enum {
     OFFSET_SPEC_LATEST = -1, OFFSET_SPEC_EARLIEST = -2, OFFSET_SPEC_MAX_TIMESTAMP = -3,
     OFFSET_SPEC_EARLIEST_LOCAL = -4, OFFSET_SPEC_LATEST_TIERED = -5, OFFSET_SPEC_EARLIEST_PENDING_UPLOAD = -6,
@@ -9319,18 +9557,29 @@ static void offset_spec_destroy_if_owned(void* spec, kafka_common_Error_t** out_
     (void)out_err;
 }
 
-// Admin_list_offsets(h, [(topic, partition, is_timestamp, value)], timeout_ms,
-//                    isolation_level) -> (job, err).
-// Payload: {(topic, partition): (error, (offset, timestamp, leader_epoch))}.
+// Admin_list_offsets(h, [(topic, partition, is_timestamp, value)],
+//                    isolation_level_id, options) -> AdminResult; each
+// requested partition's future is the fallible `partition_result(tp)`,
+// delivering (offset, timestamp, leader_epoch | None). The options are Java's
+// `new ListOffsetsOptions(isolationLevel)`, then the setters that ran.
+ADMIN_OPT_TIMEOUT(ListOffsets)
+static const AdminOptionsDesc ListOffsetsOptions_desc = {
+    "ListOffsetsOptions", ADMIN_OPTIONS_NEW_FN(ListOffsets), ADMIN_OPTIONS_DESTROY_FN(ListOffsets),
+    {ADMIN_SETTER(ListOffsets, timeout_ms), {NULL, NULL}},
+};
+static const AdminResultDesc ListOffsetsResult_desc = {
+    "ListOffsetsResult", ADMIN_RESULT_DESTROY_FN(ListOffsets),
+    {ADMIN_ACC_TP_F(partition_result, kafka_admin_ListOffsetsResult_partition_result, conv_list_offsets_info),
+     {NULL}},
+};
+
 static PyObject* py_Admin_list_offsets(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long h; PyObject* spec; long long timeout_ms; int isolation_level;
-    if (!PyArg_ParseTuple(args, "KOLi", &h, &spec, &timeout_ms, &isolation_level)) return NULL;
-    if (!admin_timeout_fits(timeout_ms)) return NULL;
+    unsigned long long h; PyObject* spec; int isolation_level; PyObject* opts;
+    if (!PyArg_ParseTuple(args, "KOiO", &h, &spec, &isolation_level, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     const kafka_common_IsolationLevel_t* il = NULL;
-    kafka_common_Error_t* err = (il = kafka_common_IsolationLevel_for_id((int8_t)isolation_level, &ffi_err), ffi_take(&ffi_err));
-    if (err != NULL) return job_or_error(NULL, err);
+    if (ffi_raise((il = kafka_common_IsolationLevel_for_id((int8_t)isolation_level, &ffi_err), ffi_take(&ffi_err)))) return NULL;
     PyObject* fast = fast_rows(spec, "topic_partition_offsets must be a sequence");
     if (fast == NULL) return NULL;
     Py_ssize_t n = PySequence_Fast_GET_SIZE(fast);
@@ -9371,29 +9620,17 @@ static PyObject* py_Admin_list_offsets(PyObject* self, PyObject* args) {
     }
     {
         // ListOffsetsOptions(IsolationLevel): the owned constructor form.
-        kafka_admin_ListOffsetsOptions_t* o = NULL;
-        kafka_common_Error_t* o_err = (o = kafka_admin_ListOffsetsOptions_with_isolation_level_err(il, &ffi_err), ffi_take(&ffi_err));
-        ADMIN_SET_TIMEOUT(ListOffsets, o, timeout_ms, o_err);
+        kafka_admin_ListOffsetsOptions_t* lo = NULL;
+        if (ffi_raise((lo = kafka_admin_ListOffsetsOptions_with_isolation_level_err(il, &ffi_err), ffi_take(&ffi_err)))) goto fail;
+        void* o = admin_options_apply(&ListOffsetsOptions_desc, lo, opts);
+        if (o == NULL) goto fail;
         kafka_admin_ListOffsetsResult_t* r = NULL;
-        FFI_STEP(o_err, (r = kafka_admin_Admin_list_offsets_with_options_err(a->admin, m.map, o, &ffi_err), ffi_take(&ffi_err)));
-        if (o) ffi_unraisable((kafka_admin_ListOffsetsOptions_destroy_err(o, &ffi_err), ffi_take(&ffi_err)));
+        kafka_common_Error_t* err = (r = kafka_admin_Admin_list_offsets_with_options_err(
+            a->admin, m.map, (kafka_admin_ListOffsetsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
         obj_list_free(&owned);
-        Py_DECREF(fast);
-        if (ffi_raise(o_err)) { obj_map_free(&m); return NULL; }
-        AdminJob* job = job_new(r, JOB_RESULT_DESTROY(ListOffsets), assemble_keyed_pairs);
-        if (job == NULL) { obj_map_free(&m); ffi_unraisable((kafka_admin_ListOffsetsResult_destroy_err(r, &ffi_err), ffi_take(&ffi_err))); return NULL; }
-        // One owned per-partition future per requested partition, keyed by it.
-        for (Py_ssize_t i = 0; i < m.n; i++) {
-            const kafka_common_TopicPartition_t* tp = (const kafka_common_TopicPartition_t*)m.keys[i];
-            kafka_common_KafkaFuture_t* f = NULL;
-            kafka_common_Error_t* perr = (f = kafka_admin_ListOffsetsResult_partition_result(r, tp, &ffi_err), ffi_take(&ffi_err));
-            if (perr != NULL) { obj_map_free(&m); job_free(job); return job_or_error(NULL, perr); }
-            PyObject* key = tp_to_py(tp);
-            if (key == NULL) { ffi_unraisable((kafka_common_KafkaFuture_destroy_err(f, &ffi_err), ffi_take(&ffi_err))); obj_map_free(&m); job_free(job); return NULL; }
-            if (job_add_slot(job, f, 1, key, conv_list_offsets_info, NULL, 0) == NULL) { obj_map_free(&m); job_free(job); return NULL; }
-        }
         obj_map_free(&m);
-        return job_or_error(job, NULL);
+        Py_DECREF(fast);
+        return admin_rpc_return(&ListOffsetsOptions_desc, o, err, r, &ListOffsetsResult_desc);
     }
 fail:
     obj_list_free(&owned);
@@ -10707,23 +10944,30 @@ static PyObject* py_Admin_abort_transaction(PyObject* self, PyObject* args) {
     return job_or_error(job, NULL);
 }
 
-// Admin_unregister_controller(h, controller_id, timeout_ms) -> (job, err).
-// Payload: (error, None).
+// Admin_unregister_controller(h, controller_id, options) -> AdminResult (new
+// in 4.4: KAFKA-20395); `all` is a `Void` future.
+ADMIN_OPT_TIMEOUT(UnregisterController)
+static const AdminOptionsDesc UnregisterControllerOptions_desc = {
+    "UnregisterControllerOptions", ADMIN_OPTIONS_NEW_FN(UnregisterController),
+    ADMIN_OPTIONS_DESTROY_FN(UnregisterController),
+    {ADMIN_SETTER(UnregisterController, timeout_ms), {NULL, NULL}},
+};
+static const AdminResultDesc UnregisterControllerResult_desc = {
+    "UnregisterControllerResult", ADMIN_RESULT_DESTROY_FN(UnregisterController),
+    {ADMIN_ACC_ONE(UnregisterController, all, NULL), {NULL}},
+};
+
 static PyObject* py_Admin_unregister_controller(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long h; int controller_id; long long timeout_ms;
-    if (!PyArg_ParseTuple(args, "KiL", &h, &controller_id, &timeout_ms)) return NULL;
-    if (!admin_timeout_fits(timeout_ms)) return NULL;
+    unsigned long long h; int controller_id; PyObject* opts;
+    if (!PyArg_ParseTuple(args, "KiO", &h, &controller_id, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
-    ADMIN_OPTIONS(UnregisterController, o, timeout_ms);
+    void* o = admin_options_build(&UnregisterControllerOptions_desc, opts);
+    if (o == NULL) return NULL;
     kafka_admin_UnregisterControllerResult_t* r = NULL;
-    FFI_STEP(o_err, (r = kafka_admin_Admin_unregister_controller_with_options_err(a->admin, (int32_t)controller_id, o, &ffi_err), ffi_take(&ffi_err)));
-    if (o) ffi_unraisable((kafka_admin_UnregisterControllerOptions_destroy_err(o, &ffi_err), ffi_take(&ffi_err)));
-    if (ffi_raise(o_err)) return NULL;
-    AdminJob* job = job_new(r, JOB_RESULT_DESTROY(UnregisterController), assemble_single);
-    if (job == NULL) { ffi_unraisable((kafka_admin_UnregisterControllerResult_destroy_err(r, &ffi_err), ffi_take(&ffi_err))); return NULL; }
-    { kafka_common_KafkaFuture_t * v_ = NULL; JOB_TRY(job, ffi_raise((v_ = kafka_admin_UnregisterControllerResult_all_err(r, &ffi_err), ffi_take(&ffi_err))) ? -1 : job_add_single(job, v_, 1, NULL, 0)); }
-    return job_or_error(job, NULL);
+    kafka_common_Error_t* err = (r = kafka_admin_Admin_unregister_controller_with_options_err(
+        a->admin, (int32_t)controller_id, (kafka_admin_UnregisterControllerOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+    return admin_rpc_return(&UnregisterControllerOptions_desc, o, err, r, &UnregisterControllerResult_desc);
 }
 
 // Admin_force_terminate_transaction(h, transactional_id, timeout_ms) -> (job, err).
@@ -11068,27 +11312,28 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Admin_close", py_Admin_close, METH_VARARGS, "Admin_close(handle, timeout_ms): blocking close, GIL released; -1 = Java's no-timeout close() (the Python clients use Admin_close_cb)"},
     {"Admin_close_cb", py_Admin_close_cb, METH_VARARGS, "Admin_close_cb(handle, timeout_ms, cb): close twin; cb() queued on the callbacks vector when the close completed; -1 = Java's no-timeout close()"},
     {"Admin__set_callbacks_notify", py_Admin__set_callbacks_notify, METH_VARARGS, "Admin__set_callbacks_notify(handle, cb | None): cb() fires when the callback queue goes non-empty (schedule only)"},
+    {"Admin__config_future", py_Admin__config_future, METH_VARARGS, "Admin__config_future(result, accessor, [(name, value | None)], post) -> KafkaFuture: tests only, a completed Config future through the result table's converter"},
     {"Admin__execute_callbacks", py_Admin__execute_callbacks, METH_VARARGS, "Admin__execute_callbacks(handle) -> number of pending completion callbacks run on this thread"},
     {"Admin_resolve", py_Admin_resolve, METH_VARARGS, "Admin_resolve(job) -> payload: block on every future (GIL released), convert, free the job"},
     {"Admin_resolve_cb", py_Admin_resolve_cb, METH_VARARGS, "Admin_resolve_cb(job, cb): cb(payload, None) / cb(None, exc) once every future delivered"},
     {"Admin_job_discard", py_Admin_job_discard, METH_VARARGS, "Admin_job_discard(job): free an unresolved job"},
     {"Admin_create_topics", py_Admin_create_topics, METH_VARARGS, "Admin_create_topics(handle, topics, options) -> AdminResult"},
-    {"Admin_delete_topics", py_Admin_delete_topics, METH_VARARGS, "Admin_delete_topics(handle, ...) -> (job, error)"},
+    {"Admin_delete_topics", py_Admin_delete_topics, METH_VARARGS, "Admin_delete_topics(handle, names_or_ids, by_ids, options) -> AdminResult"},
     {"Admin_list_topics", py_Admin_list_topics, METH_VARARGS, "Admin_list_topics(handle, options) -> AdminResult"},
-    {"Admin_describe_topics", py_Admin_describe_topics, METH_VARARGS, "Admin_describe_topics(handle, ...) -> (job, error)"},
-    {"Admin_create_partitions", py_Admin_create_partitions, METH_VARARGS, "Admin_create_partitions(handle, ...) -> (job, error)"},
-    {"Admin_delete_records", py_Admin_delete_records, METH_VARARGS, "Admin_delete_records(handle, ...) -> (job, error)"},
-    {"Admin_describe_cluster", py_Admin_describe_cluster, METH_VARARGS, "Admin_describe_cluster(handle, ...) -> (job, error)"},
-    {"Admin_describe_configs", py_Admin_describe_configs, METH_VARARGS, "Admin_describe_configs(handle, ...) -> (job, error)"},
-    {"Admin_incremental_alter_configs", py_Admin_incremental_alter_configs, METH_VARARGS, "Admin_incremental_alter_configs(handle, ...) -> (job, error)"},
-    {"Admin_list_config_resources", py_Admin_list_config_resources, METH_VARARGS, "Admin_list_config_resources(handle, ...) -> (job, error)"},
-    {"Admin_describe_log_dirs", py_Admin_describe_log_dirs, METH_VARARGS, "Admin_describe_log_dirs(handle, ...) -> (job, error)"},
-    {"Admin_alter_replica_log_dirs", py_Admin_alter_replica_log_dirs, METH_VARARGS, "Admin_alter_replica_log_dirs(handle, ...) -> (job, error)"},
-    {"Admin_describe_replica_log_dirs", py_Admin_describe_replica_log_dirs, METH_VARARGS, "Admin_describe_replica_log_dirs(handle, ...) -> (job, error)"},
-    {"Admin_elect_leaders", py_Admin_elect_leaders, METH_VARARGS, "Admin_elect_leaders(handle, ...) -> (job, error)"},
-    {"Admin_alter_partition_reassignments", py_Admin_alter_partition_reassignments, METH_VARARGS, "Admin_alter_partition_reassignments(handle, ...) -> (job, error)"},
-    {"Admin_list_partition_reassignments", py_Admin_list_partition_reassignments, METH_VARARGS, "Admin_list_partition_reassignments(handle, ...) -> (job, error)"},
-    {"Admin_list_offsets", py_Admin_list_offsets, METH_VARARGS, "Admin_list_offsets(handle, ...) -> (job, error)"},
+    {"Admin_describe_topics", py_Admin_describe_topics, METH_VARARGS, "Admin_describe_topics(handle, form, names_or_ids, options) -> AdminResult"},
+    {"Admin_create_partitions", py_Admin_create_partitions, METH_VARARGS, "Admin_create_partitions(handle, rows, options) -> AdminResult"},
+    {"Admin_delete_records", py_Admin_delete_records, METH_VARARGS, "Admin_delete_records(handle, rows, options) -> AdminResult"},
+    {"Admin_describe_cluster", py_Admin_describe_cluster, METH_VARARGS, "Admin_describe_cluster(handle, options) -> AdminResult"},
+    {"Admin_describe_configs", py_Admin_describe_configs, METH_VARARGS, "Admin_describe_configs(handle, resources, options) -> AdminResult"},
+    {"Admin_incremental_alter_configs", py_Admin_incremental_alter_configs, METH_VARARGS, "Admin_incremental_alter_configs(handle, rows, options) -> AdminResult"},
+    {"Admin_list_config_resources", py_Admin_list_config_resources, METH_VARARGS, "Admin_list_config_resources(handle, type_ids, options) -> AdminResult"},
+    {"Admin_describe_log_dirs", py_Admin_describe_log_dirs, METH_VARARGS, "Admin_describe_log_dirs(handle, broker_ids, options) -> AdminResult"},
+    {"Admin_alter_replica_log_dirs", py_Admin_alter_replica_log_dirs, METH_VARARGS, "Admin_alter_replica_log_dirs(handle, rows, options) -> AdminResult"},
+    {"Admin_describe_replica_log_dirs", py_Admin_describe_replica_log_dirs, METH_VARARGS, "Admin_describe_replica_log_dirs(handle, replicas, options) -> AdminResult"},
+    {"Admin_elect_leaders", py_Admin_elect_leaders, METH_VARARGS, "Admin_elect_leaders(handle, election_type, partitions | None, options) -> AdminResult"},
+    {"Admin_alter_partition_reassignments", py_Admin_alter_partition_reassignments, METH_VARARGS, "Admin_alter_partition_reassignments(handle, rows, options) -> AdminResult"},
+    {"Admin_list_partition_reassignments", py_Admin_list_partition_reassignments, METH_VARARGS, "Admin_list_partition_reassignments(handle, partitions | None, options) -> AdminResult"},
+    {"Admin_list_offsets", py_Admin_list_offsets, METH_VARARGS, "Admin_list_offsets(handle, rows, isolation_level, options) -> AdminResult"},
     {"Admin_list_groups", py_Admin_list_groups, METH_VARARGS, "Admin_list_groups(handle, ...) -> (job, error)"},
     {"Admin_describe_consumer_groups", py_Admin_describe_consumer_groups, METH_VARARGS, "Admin_describe_consumer_groups(handle, ...) -> (job, error)"},
     {"Admin_describe_classic_groups", py_Admin_describe_classic_groups, METH_VARARGS, "Admin_describe_classic_groups(handle, ...) -> (job, error)"},
@@ -11115,7 +11360,7 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Admin_fence_producers", py_Admin_fence_producers, METH_VARARGS, "Admin_fence_producers(handle, ...) -> (job, error)"},
     {"Admin_list_transactions", py_Admin_list_transactions, METH_VARARGS, "Admin_list_transactions(handle, ...) -> (job, error)"},
     {"Admin_abort_transaction", py_Admin_abort_transaction, METH_VARARGS, "Admin_abort_transaction(handle, ...) -> (job, error)"},
-    {"Admin_unregister_controller", py_Admin_unregister_controller, METH_VARARGS, "Admin_unregister_controller(handle, ...) -> (job, error)"},
+    {"Admin_unregister_controller", py_Admin_unregister_controller, METH_VARARGS, "Admin_unregister_controller(handle, controller_id, options) -> AdminResult"},
     {"Admin_force_terminate_transaction", py_Admin_force_terminate_transaction, METH_VARARGS, "Admin_force_terminate_transaction(handle, ...) -> (job, error)"},
     {"MockAdminClient_timeout_next_request", py_MockAdminClient_timeout_next_request, METH_VARARGS, "Mock-only seeding; returns an owned error handle (0 = ok)"},
     {"MockAdminClient_set_using_raft_controller", py_MockAdminClient_set_using_raft_controller, METH_VARARGS, "Mock-only seeding; returns an owned error handle (0 = ok)"},

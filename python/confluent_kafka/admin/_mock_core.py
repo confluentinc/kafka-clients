@@ -163,6 +163,7 @@ if TYPE_CHECKING:
     from confluent_kafka.admin.partition_reassignment import PartitionReassignment
     from confluent_kafka.admin.records_to_delete import RecordsToDelete
     from confluent_kafka.admin.topic_description import TopicDescription
+    from confluent_kafka.admin.unregister_controller_result import UnregisterControllerResult
     from confluent_kafka.common import (
         AclBinding,
         AclBindingFilter,
@@ -1611,6 +1612,20 @@ class MockAdminClientCore:
                 _complete_with_error(future, error)
             results[feature] = future
         return UpdateFeaturesResult._new(futures=results, kind=self._kind)
+
+    def _unregister_controller(self, controller_id: int) -> UnregisterControllerResult[Any]:
+        """Java's ``unregisterController``: a completed future when the mock uses a
+        raft controller, else one failed with ``UnsupportedVersionError("")``. Not
+        synchronized in Java."""
+        from confluent_kafka.admin.unregister_controller_result import (
+            UnregisterControllerResult,
+        )
+
+        if self._using_raft_controller:
+            return UnregisterControllerResult._new(
+                future=self._kind._FUTURE.completed_future(value=None), kind=self._kind)
+        return UnregisterControllerResult._new(future=self._failed(_unsupported("")),
+                                               kind=self._kind)
 
     def _describe_producers(self, partitions: Iterable[TopicPartition]
                             ) -> DescribeProducersResult[Any]:

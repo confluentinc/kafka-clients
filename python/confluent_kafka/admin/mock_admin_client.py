@@ -27,7 +27,8 @@ setters, so it also takes one keyword per field. ``create()``
 hides ``Admin.create(configs=…)`` as Java's static does.
 
 As in Java, ``close()`` does nothing: the mock keeps answering after it. The
-results' futures are ``concurrent.futures.Future``\\ s, complete on return. Where
+results' futures are ``KafkaFuture``\\ s over the private ``_KafkaFutureImpl``
+(Java's ``KafkaFutureImpl``), most of them complete on return. Where
 Java's mock throws (``UnsupportedOperationException("Not implemented yet")``, a
 ``NullPointerException`` or ``IndexOutOfBoundsException`` of its own), this mock
 raises the matching error.
@@ -51,7 +52,6 @@ they serve (Class family): ``setMockMetrics``, ``disableTelemetry``,
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, overload
 
 from confluent_kafka._args import UNSET, Form, java_forms
@@ -66,6 +66,9 @@ from confluent_kafka.admin.renew_delegation_token_options import RenewDelegation
 from confluent_kafka.admin.update_features_options import UpdateFeaturesOptions
 
 if TYPE_CHECKING:
+    from confluent_kafka.common.kafka_future import KafkaFuture
+    from confluent_kafka.admin.unregister_controller_options import UnregisterControllerOptions
+    from confluent_kafka.admin.unregister_controller_result import UnregisterControllerResult
     from confluent_kafka import Duration
     from confluent_kafka.admin.abort_transaction_options import AbortTransactionOptions
     from confluent_kafka.admin.abort_transaction_result import AbortTransactionResult
@@ -600,6 +603,13 @@ class MockAdminClient(MockAdminClientCore, Admin):
             options = UpdateFeaturesOptions()
         return self._update_features(feature_updates, options.validate_only())
 
+    def unregister_controller(self, *, controller_id: int,
+                              options: UnregisterControllerOptions | None = None
+                              ) -> UnregisterControllerResult[Sync]:
+        """A completed future when the mock uses a raft controller, else one failed
+        with ``UnsupportedVersionError("")``, as Java's mock."""
+        return self._unregister_controller(controller_id)
+
     def describe_producers(self, *, partitions: Iterable[TopicPartition],
                            options: DescribeProducersOptions | None = None
                            ) -> DescribeProducersResult[Sync]:
@@ -661,6 +671,6 @@ class MockAdminClient(MockAdminClientCore, Admin):
     # (the others are inherited from _mock_core, typed the same on both classes)
 
     def handle_describe_topics_using_ids(
-            self, *, topic_ids: Iterable[Uuid]) -> dict[Uuid, Future[TopicDescription]]:
+            self, *, topic_ids: Iterable[Uuid]) -> dict[Uuid, KafkaFuture[TopicDescription]]:
         """The futures ``describe_topics`` gives for a ``TopicIdCollection``."""
         return self._handle_describe_topics_using_ids(topic_ids)  # type: ignore[return-value]

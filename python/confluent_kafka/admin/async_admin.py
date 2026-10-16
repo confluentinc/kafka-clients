@@ -105,6 +105,7 @@ from confluent_kafka.admin.list_topics_options import ListTopicsOptions
 from confluent_kafka.admin.list_transactions_options import ListTransactionsOptions
 from confluent_kafka.admin.renew_delegation_token_options import RenewDelegationTokenOptions
 from confluent_kafka.admin.terminate_transaction_options import TerminateTransactionOptions
+from confluent_kafka.admin.unregister_controller_options import UnregisterControllerOptions
 from confluent_kafka.admin.update_features_options import UpdateFeaturesOptions
 
 if TYPE_CHECKING:
@@ -181,6 +182,7 @@ if TYPE_CHECKING:
     )
     from confluent_kafka.admin.renew_delegation_token_result import RenewDelegationTokenResult
     from confluent_kafka.admin.terminate_transaction_result import TerminateTransactionResult
+    from confluent_kafka.admin.unregister_controller_result import UnregisterControllerResult
     from confluent_kafka.admin.update_features_result import UpdateFeaturesResult
     from confluent_kafka.admin.user_scram_credential_alteration import (
         UserScramCredentialAlteration,
@@ -392,29 +394,26 @@ class AsyncAdmin(_AdminState):
         return _conversions.create_topics_result(native, Async, self._binding.loop)
 
     @overload
-    async def delete_topics(self, *, topics: Iterable[str],
+    def delete_topics(self, *, topics: Iterable[str],
                             options: DeleteTopicsOptions | None = None
                             ) -> DeleteTopicsResult[Async]: ...
     @overload
-    async def delete_topics(self, *, topics: TopicCollection,
+    def delete_topics(self, *, topics: TopicCollection,
                             options: DeleteTopicsOptions | None = None
                             ) -> DeleteTopicsResult[Async]: ...
 
-    async def delete_topics(self, *, topics: Iterable[str] | TopicCollection,
+    def delete_topics(self, *, topics: Iterable[str] | TopicCollection,
                             options: DeleteTopicsOptions | None = None
                             ) -> DeleteTopicsResult[Async]:
         """See :meth:`Admin.delete_topics`; the result's futures are
-        ``asyncio.Future``\\ s."""
+        ``AsyncKafkaFuture``\\ s."""
+        self._check_not_closed()
         if options is None:
             options = DeleteTopicsOptions()
-        self._check_not_closed()
         by_ids, keys = _conversions.topic_collection_target(topics, "deleteTopics")
-        args = _conversions.delete_topics_args(by_ids, keys, options)
-        submit = (_lib.Admin_delete_topics_by_ids_async if by_ids
-                  else _lib.Admin_delete_topics_async)
-        payload = await self._await_for(lambda c_admin, cb: submit(c_admin, *args, cb),
-                                        _conversions.free_delete_topics)
-        return _conversions.delete_topics_result(by_ids, keys, payload, Async)
+        native = self._call(_lib.Admin_delete_topics, *_conversions.delete_topics_args(by_ids, keys),
+                            options._setters_ran())
+        return _conversions.delete_topics_result(native, by_ids, Async, self._binding.loop)
 
     def list_topics(self, *, options: ListTopicsOptions | None = None
                     ) -> ListTopicsResult[Async]:
@@ -425,45 +424,46 @@ class AsyncAdmin(_AdminState):
         return _conversions.list_topics_result(native, Async, self._binding.loop)
 
     @overload
-    async def describe_topics(self, *, topic_names: Iterable[str],
+    def describe_topics(self, *, topic_names: Iterable[str],
                               options: DescribeTopicsOptions | None = None
                               ) -> DescribeTopicsResult[Async]: ...
     @overload
-    async def describe_topics(self, *, topics: TopicCollection,
+    def describe_topics(self, *, topics: TopicCollection,
                               options: DescribeTopicsOptions | None = None
                               ) -> DescribeTopicsResult[Async]: ...
 
     @java_forms(Form("topic_names"), Form("topic_names", "options"),
                 Form("topics"), Form("topics", "options"))
-    async def describe_topics(self, *, topic_names: Iterable[str] | None = None,
+    def describe_topics(self, *, topic_names: Iterable[str] | None = None,
                               topics: TopicCollection | None = None,
                               options: DescribeTopicsOptions | None = None
                               ) -> DescribeTopicsResult[Async]:
         """See :meth:`Admin.describe_topics`; the result's futures are
-        ``asyncio.Future``\\ s."""
+        ``AsyncKafkaFuture``\\ s."""
+        self._check_not_closed()
         if options is None:
             options = DescribeTopicsOptions()
-        self._check_not_closed()
-        by_ids, keys = _conversions.topic_collection_target(
-            topic_names if topics is None else topics, "describeTopics")
-        args = _conversions.describe_topics_args(by_ids, keys, options)
-        submit = (_lib.Admin_describe_topics_by_ids_async if by_ids
-                  else _lib.Admin_describe_topics_async)
-        payload = await self._await_for(lambda c_admin, cb: submit(c_admin, *args, cb),
-                                        _conversions.free_describe_topics)
-        return _conversions.describe_topics_result(by_ids, keys, payload, Async)
+        if topics is None:
+            assert topic_names is not None
+            form, keys = _conversions.DESCRIBE_TOPIC_NAMES, list(topic_names)
+        else:
+            by_ids, keys = _conversions.topic_collection_target(topics, "describeTopics")
+            form = (_conversions.DESCRIBE_TOPIC_ID_COLLECTION if by_ids
+                    else _conversions.DESCRIBE_TOPIC_NAME_COLLECTION)
+        native = self._call(_lib.Admin_describe_topics, *_conversions.describe_topics_args(form, keys),
+                            options._setters_ran())
+        return _conversions.describe_topics_result(
+            native, form == _conversions.DESCRIBE_TOPIC_ID_COLLECTION, Async, self._binding.loop)
 
-    async def describe_cluster(self, *, options: DescribeClusterOptions | None = None
+    def describe_cluster(self, *, options: DescribeClusterOptions | None = None
                                ) -> DescribeClusterResult[Async]:
         """See :meth:`Admin.describe_cluster`; the result's futures are
-        ``asyncio.Future``\\ s."""
+        ``AsyncKafkaFuture``\\ s."""
+        self._check_not_closed()
         if options is None:
             options = DescribeClusterOptions()
-        args = _conversions.describe_cluster_args(options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_describe_cluster_async(c_admin, *args, cb),
-            _conversions.free_describe_cluster)
-        return _conversions.describe_cluster_result(payload, Async)
+        native = self._call(_lib.Admin_describe_cluster, options._setters_ran())
+        return _conversions.describe_cluster_result(native, Async, self._binding.loop)
 
     async def describe_acls(self, *, filter: AclBindingFilter,  # noqa: A002 - Java's name
                             options: DescribeAclsOptions | None = None) -> DescribeAclsResult[Async]:
@@ -480,7 +480,7 @@ class AsyncAdmin(_AdminState):
     async def create_acls(self, *, acls: Iterable[AclBinding],
                           options: CreateAclsOptions | None = None) -> CreateAclsResult[Async]:
         """See :meth:`Admin.create_acls`; the result's futures are
-        ``asyncio.Future``\\ s."""
+        ``AsyncKafkaFuture``\\ s."""
         if options is None:
             options = CreateAclsOptions()
         bindings = list(acls)
@@ -493,7 +493,7 @@ class AsyncAdmin(_AdminState):
     async def delete_acls(self, *, filters: Iterable[AclBindingFilter],
                           options: DeleteAclsOptions | None = None) -> DeleteAclsResult[Async]:
         """See :meth:`Admin.delete_acls`; the result's futures are
-        ``asyncio.Future``\\ s."""
+        ``AsyncKafkaFuture``\\ s."""
         if options is None:
             options = DeleteAclsOptions()
         acl_filters = list(filters)
@@ -503,105 +503,98 @@ class AsyncAdmin(_AdminState):
             _conversions.free_delete_acls)
         return _conversions.delete_acls_result(acl_filters, payload, Async)
 
-    async def describe_configs(self, *, resources: Iterable[ConfigResource],
+    def describe_configs(self, *, resources: Iterable[ConfigResource],
                                options: DescribeConfigsOptions | None = None
                                ) -> DescribeConfigsResult[Async]:
         """See :meth:`Admin.describe_configs`; the result's futures are
-        ``asyncio.Future``\\ s."""
+        ``AsyncKafkaFuture``\\ s."""
+        self._check_not_closed()
         if options is None:
             options = DescribeConfigsOptions()
-        targets = list(resources)
-        args = _conversions.describe_configs_args(targets, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_describe_configs_async(c_admin, *args, cb),
-            _conversions.free_describe_configs)
-        return _conversions.describe_configs_result(targets, payload, Async)
+        native = self._call(_lib.Admin_describe_configs,
+                            *_conversions.describe_configs_args(list(resources)),
+                            options._setters_ran())
+        return _conversions.describe_configs_result(native, Async, self._binding.loop)
 
-    async def incremental_alter_configs(
+    def incremental_alter_configs(
             self, *, configs: Mapping[ConfigResource, Iterable[AlterConfigOp]],
             options: AlterConfigsOptions | None = None) -> AlterConfigsResult[Async]:
         """See :meth:`Admin.incremental_alter_configs`; the result's futures are
-        ``asyncio.Future``\\ s."""
+        ``AsyncKafkaFuture``\\ s."""
+        self._check_not_closed()
         if options is None:
             options = AlterConfigsOptions()
-        resources = list(configs)
-        args = _conversions.incremental_alter_configs_args(configs, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_incremental_alter_configs_async(c_admin, *args, cb),
-            _conversions.free_incremental_alter_configs)
-        return _conversions.incremental_alter_configs_result(resources, payload, Async)
+        native = self._call(_lib.Admin_incremental_alter_configs,
+                            *_conversions.incremental_alter_configs_args(configs),
+                            options._setters_ran())
+        return _conversions.incremental_alter_configs_result(native, Async, self._binding.loop)
 
-    async def alter_replica_log_dirs(
+    def alter_replica_log_dirs(
             self, *, replica_assignment: Mapping[TopicPartitionReplica, str],
             options: AlterReplicaLogDirsOptions | None = None
             ) -> AlterReplicaLogDirsResult[Async]:
         """See :meth:`Admin.alter_replica_log_dirs`; the result's futures are
-        ``asyncio.Future``\\ s."""
+        ``AsyncKafkaFuture``\\ s."""
+        self._check_not_closed()
         if options is None:
             options = AlterReplicaLogDirsOptions()
-        replicas = list(replica_assignment)
-        args = _conversions.alter_replica_log_dirs_args(replica_assignment, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_alter_replica_log_dirs_async(c_admin, *args, cb),
-            _conversions.free_alter_replica_log_dirs)
-        return _conversions.alter_replica_log_dirs_result(replicas, payload, Async)
+        native = self._call(_lib.Admin_alter_replica_log_dirs,
+                            *_conversions.alter_replica_log_dirs_args(replica_assignment),
+                            options._setters_ran())
+        return _conversions.alter_replica_log_dirs_result(native, Async, self._binding.loop)
 
-    async def describe_log_dirs(self, *, brokers: Iterable[int],
+    def describe_log_dirs(self, *, brokers: Iterable[int],
                                 options: DescribeLogDirsOptions | None = None
                                 ) -> DescribeLogDirsResult[Async]:
         """See :meth:`Admin.describe_log_dirs`; the result's futures are
-        ``asyncio.Future``\\ s."""
+        ``AsyncKafkaFuture``\\ s."""
+        self._check_not_closed()
         if options is None:
             options = DescribeLogDirsOptions()
-        broker_ids = list(brokers)
-        args = _conversions.describe_log_dirs_args(broker_ids, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_describe_log_dirs_async(c_admin, *args, cb),
-            _conversions.free_describe_log_dirs)
-        return _conversions.describe_log_dirs_result(broker_ids, payload, Async)
+        native = self._call(_lib.Admin_describe_log_dirs,
+                            *_conversions.describe_log_dirs_args(list(brokers)),
+                            options._setters_ran())
+        return _conversions.describe_log_dirs_result(native, Async, self._binding.loop)
 
-    async def describe_replica_log_dirs(
+    def describe_replica_log_dirs(
             self, *, replicas: Iterable[TopicPartitionReplica],
             options: DescribeReplicaLogDirsOptions | None = None
             ) -> DescribeReplicaLogDirsResult[Async]:
         """See :meth:`Admin.describe_replica_log_dirs`; the result's futures are
-        ``asyncio.Future``\\ s."""
+        ``AsyncKafkaFuture``\\ s."""
+        self._check_not_closed()
         if options is None:
             options = DescribeReplicaLogDirsOptions()
-        targets = list(replicas)
-        args = _conversions.describe_replica_log_dirs_args(targets, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_describe_replica_log_dirs_async(c_admin, *args, cb),
-            _conversions.free_describe_replica_log_dirs)
-        return _conversions.describe_replica_log_dirs_result(targets, payload, Async)
+        native = self._call(_lib.Admin_describe_replica_log_dirs,
+                            *_conversions.describe_replica_log_dirs_args(list(replicas)),
+                            options._setters_ran())
+        return _conversions.describe_replica_log_dirs_result(native, Async, self._binding.loop)
 
-    async def create_partitions(self, *, new_partitions: Mapping[str, NewPartitions],
+    def create_partitions(self, *, new_partitions: Mapping[str, NewPartitions],
                                 options: CreatePartitionsOptions | None = None
                                 ) -> CreatePartitionsResult[Async]:
         """See :meth:`Admin.create_partitions`; the result's futures are
-        ``asyncio.Future``\\ s."""
+        ``AsyncKafkaFuture``\\ s."""
+        self._check_not_closed()
         if options is None:
             options = CreatePartitionsOptions()
-        topics = list(new_partitions)
-        args = _conversions.create_partitions_args(new_partitions, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_create_partitions_async(c_admin, *args, cb),
-            _conversions.free_create_partitions)
-        return _conversions.create_partitions_result(topics, payload, Async)
+        native = self._call(_lib.Admin_create_partitions,
+                            *_conversions.create_partitions_args(new_partitions),
+                            options._setters_ran())
+        return _conversions.create_partitions_result(native, Async, self._binding.loop)
 
-    async def delete_records(self, *, records_to_delete: Mapping[TopicPartition, RecordsToDelete],
+    def delete_records(self, *, records_to_delete: Mapping[TopicPartition, RecordsToDelete],
                              options: DeleteRecordsOptions | None = None
                              ) -> DeleteRecordsResult[Async]:
         """See :meth:`Admin.delete_records`; the result's futures are
-        ``asyncio.Future``\\ s."""
+        ``AsyncKafkaFuture``\\ s."""
+        self._check_not_closed()
         if options is None:
             options = DeleteRecordsOptions()
-        partitions = list(records_to_delete)
-        args = _conversions.delete_records_args(records_to_delete, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_delete_records_async(c_admin, *args, cb),
-            _conversions.free_delete_records)
-        return _conversions.delete_records_result(partitions, payload, Async)
+        native = self._call(_lib.Admin_delete_records,
+                            *_conversions.delete_records_args(records_to_delete),
+                            options._setters_ran())
+        return _conversions.delete_records_result(native, Async, self._binding.loop)
 
     async def create_delegation_token(self, *, options: CreateDelegationTokenOptions | None = None
                                       ) -> CreateDelegationTokenResult[Async]:
@@ -741,50 +734,47 @@ class AsyncAdmin(_AdminState):
             _conversions.free_list_groups)
         return _conversions.list_groups_result(payload, Async)
 
-    async def elect_leaders(self, *, election_type: ElectionType,
+    def elect_leaders(self, *, election_type: ElectionType,
                             partitions: Iterable[TopicPartition] | None,
                             options: ElectLeadersOptions | None = None
                             ) -> ElectLeadersResult[Async]:
         """See :meth:`Admin.elect_leaders`; the result's futures are
-        ``asyncio.Future``\\ s."""
+        ``AsyncKafkaFuture``\\ s."""
+        self._check_not_closed()
         if options is None:
             options = ElectLeadersOptions()
-        args = _conversions.elect_leaders_args(election_type, partitions, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_elect_leaders_async(c_admin, *args, cb),
-            _conversions.free_elect_leaders)
-        return _conversions.elect_leaders_result(payload, Async)
+        native = self._call(_lib.Admin_elect_leaders,
+                            *_conversions.elect_leaders_args(election_type, partitions),
+                            options._setters_ran())
+        return _conversions.elect_leaders_result(native, Async, self._binding.loop)
 
-    async def alter_partition_reassignments(
+    def alter_partition_reassignments(
             self, *, reassignments: Mapping[TopicPartition, NewPartitionReassignment | None],
             options: AlterPartitionReassignmentsOptions | None = None
             ) -> AlterPartitionReassignmentsResult[Async]:
         """See :meth:`Admin.alter_partition_reassignments`; the result's futures are
-        ``asyncio.Future``\\ s."""
+        ``AsyncKafkaFuture``\\ s."""
+        self._check_not_closed()
         if options is None:
             options = AlterPartitionReassignmentsOptions()
-        partitions = list(reassignments)
-        args = _conversions.alter_partition_reassignments_args(reassignments, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_alter_partition_reassignments_async(
-                c_admin, *args, cb),
-            _conversions.free_alter_partition_reassignments)
-        return _conversions.alter_partition_reassignments_result(partitions, payload, Async)
+        native = self._call(_lib.Admin_alter_partition_reassignments,
+                            *_conversions.alter_partition_reassignments_args(reassignments),
+                            options._setters_ran())
+        return _conversions.alter_partition_reassignments_result(native, Async, self._binding.loop)
 
-    async def list_partition_reassignments(
+    def list_partition_reassignments(
             self, *, partitions: Iterable[TopicPartition] | None = None,
             options: ListPartitionReassignmentsOptions | None = None
             ) -> ListPartitionReassignmentsResult[Async]:
         """See :meth:`Admin.list_partition_reassignments`; the result's futures are
-        ``asyncio.Future``\\ s."""
+        ``AsyncKafkaFuture``\\ s."""
+        self._check_not_closed()
         if options is None:
             options = ListPartitionReassignmentsOptions()
-        args = _conversions.list_partition_reassignments_args(partitions, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_list_partition_reassignments_async(
-                c_admin, *args, cb),
-            _conversions.free_list_partition_reassignments)
-        return _conversions.list_partition_reassignments_result(payload, Async)
+        native = self._call(_lib.Admin_list_partition_reassignments,
+                            *_conversions.list_partition_reassignments_args(partitions),
+                            options._setters_ran())
+        return _conversions.list_partition_reassignments_result(native, Async, self._binding.loop)
 
     async def remove_members_from_consumer_group(
         self, *, group_id: str, options: RemoveMembersFromConsumerGroupOptions
@@ -813,18 +803,18 @@ class AsyncAdmin(_AdminState):
             _conversions.free_alter_consumer_group_offsets)
         return _conversions.alter_consumer_group_offsets_result(payload, Async)
 
-    async def list_offsets(self, *, topic_partition_offsets: Mapping[TopicPartition, OffsetSpec],
+    def list_offsets(self, *, topic_partition_offsets: Mapping[TopicPartition, OffsetSpec],
                            options: ListOffsetsOptions | None = None) -> ListOffsetsResult[Async]:
         """See :meth:`Admin.list_offsets`; the result's futures are
-        ``asyncio.Future``\\ s."""
+        ``AsyncKafkaFuture``\\ s."""
+        self._check_not_closed()
         if options is None:
             options = ListOffsetsOptions()
         partitions = list(topic_partition_offsets)
-        args = _conversions.list_offsets_args(topic_partition_offsets, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_list_offsets_async(c_admin, *args, cb),
-            _conversions.free_list_offsets)
-        return _conversions.list_offsets_result(partitions, payload, Async)
+        native = self._call(_lib.Admin_list_offsets,
+                            *_conversions.list_offsets_args(topic_partition_offsets, options),
+                            options._setters_ran())
+        return _conversions.list_offsets_result(native, partitions, Async, self._binding.loop)
 
     async def describe_client_quotas(self, *, filter: ClientQuotaFilter,  # noqa: A002 - Java's name
                                      options: DescribeClientQuotasOptions | None = None
@@ -843,7 +833,7 @@ class AsyncAdmin(_AdminState):
                                   options: AlterClientQuotasOptions | None = None
                                   ) -> AlterClientQuotasResult[Async]:
         """See :meth:`Admin.alter_client_quotas`; the result's futures are
-        ``asyncio.Future``\\ s."""
+        ``AsyncKafkaFuture``\\ s."""
         if options is None:
             options = AlterClientQuotasOptions()
         alterations = list(entries)
@@ -885,7 +875,7 @@ class AsyncAdmin(_AdminState):
             options: AlterUserScramCredentialsOptions | None = None
     ) -> AlterUserScramCredentialsResult[Async]:
         """See :meth:`Admin.alter_user_scram_credentials`; the result's futures are
-        ``asyncio.Future``\\ s."""
+        ``AsyncKafkaFuture``\\ s."""
         if options is None:
             options = AlterUserScramCredentialsOptions()
         rows = list(alterations)
@@ -912,7 +902,7 @@ class AsyncAdmin(_AdminState):
                               options: UpdateFeaturesOptions | None = None
                               ) -> UpdateFeaturesResult[Async]:
         """See :meth:`Admin.update_features`; the result's futures are
-        ``asyncio.Future``\\ s."""
+        ``AsyncKafkaFuture``\\ s."""
         if options is None:
             options = UpdateFeaturesOptions()
         updates = dict(feature_updates)
@@ -922,11 +912,22 @@ class AsyncAdmin(_AdminState):
             _conversions.free_update_features)
         return _conversions.update_features_result(updates, payload, Async)
 
+    def unregister_controller(self, *, controller_id: int,
+                              options: UnregisterControllerOptions | None = None
+                              ) -> UnregisterControllerResult[Async]:
+        """See :meth:`Admin.unregister_controller`."""
+        self._check_not_closed()
+        if options is None:
+            options = UnregisterControllerOptions()
+        native = self._call(_lib.Admin_unregister_controller, controller_id,
+                            options._setters_ran())
+        return _conversions.unregister_controller_result(native, Async, self._binding.loop)
+
     async def describe_producers(self, *, partitions: Iterable[TopicPartition],
                                  options: DescribeProducersOptions | None = None
                                  ) -> DescribeProducersResult[Async]:
         """See :meth:`Admin.describe_producers`; the result's futures are
-        ``asyncio.Future``\\ s."""
+        ``AsyncKafkaFuture``\\ s."""
         if options is None:
             options = DescribeProducersOptions()
         topic_partitions = list(partitions)
@@ -940,7 +941,7 @@ class AsyncAdmin(_AdminState):
                                     options: DescribeTransactionsOptions | None = None
                                     ) -> DescribeTransactionsResult[Async]:
         """See :meth:`Admin.describe_transactions`; the result's futures are
-        ``asyncio.Future``\\ s."""
+        ``AsyncKafkaFuture``\\ s."""
         if options is None:
             options = DescribeTransactionsOptions()
         ids = list(transactional_ids)
@@ -966,7 +967,7 @@ class AsyncAdmin(_AdminState):
     async def list_transactions(self, *, options: ListTransactionsOptions | None = None
                                 ) -> ListTransactionsResult[Async]:
         """See :meth:`Admin.list_transactions`; the result's futures are
-        ``asyncio.Future``\\ s."""
+        ``AsyncKafkaFuture``\\ s."""
         if options is None:
             options = ListTransactionsOptions()
         args = _conversions.list_transactions_args(options)
@@ -979,7 +980,7 @@ class AsyncAdmin(_AdminState):
                               options: FenceProducersOptions | None = None
                               ) -> FenceProducersResult[Async]:
         """See :meth:`Admin.fence_producers`; the result's futures are
-        ``asyncio.Future``\\ s."""
+        ``AsyncKafkaFuture``\\ s."""
         if options is None:
             options = FenceProducersOptions()
         ids = list(transactional_ids)
@@ -990,28 +991,28 @@ class AsyncAdmin(_AdminState):
         return _conversions.fence_producers_result(ids, payload, Async)
 
     @overload
-    async def list_config_resources(self, *, config_resource_types: Iterable[ConfigResource.Type],
+    def list_config_resources(self, *, config_resource_types: Iterable[ConfigResource.Type],
                                     options: ListConfigResourcesOptions
                                     ) -> ListConfigResourcesResult[Async]: ...
     @overload
-    async def list_config_resources(self) -> ListConfigResourcesResult[Async]: ...
+    def list_config_resources(self) -> ListConfigResourcesResult[Async]: ...
 
     @java_forms(Form("config_resource_types", "options",
                      defaults={"config_resource_types": (), "options": None}),
                 Form())
-    async def list_config_resources(
+    def list_config_resources(
             self, *, config_resource_types: Iterable[ConfigResource.Type] = UNSET,
             options: ListConfigResourcesOptions | None = None
             ) -> ListConfigResourcesResult[Async]:
         """See :meth:`Admin.list_config_resources`; the result's futures are
-        ``asyncio.Future``\\ s."""
+        ``AsyncKafkaFuture``\\ s."""
+        self._check_not_closed()
         if options is None:
             options = ListConfigResourcesOptions()
-        args = _conversions.list_config_resources_args(config_resource_types, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_list_config_resources_async(c_admin, *args, cb),
-            _conversions.free_list_config_resources)
-        return _conversions.list_config_resources_result(payload, Async)
+        native = self._call(_lib.Admin_list_config_resources,
+                            *_conversions.list_config_resources_args(config_resource_types),
+                            options._setters_ran())
+        return _conversions.list_config_resources_result(native, Async, self._binding.loop)
 
     async def describe_classic_groups(self, *, group_ids: Iterable[str],
                                       options: DescribeClassicGroupsOptions | None = None

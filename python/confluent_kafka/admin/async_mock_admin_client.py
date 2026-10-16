@@ -17,25 +17,23 @@
 
 By rule 3, ``MockAdminClient``'s constructors and methods (CLAUDE.md, Python
 Binding Conventions, Class family), over the same private ``_mock_core``: the
-``Admin`` methods are ``async def`` where :class:`AsyncAdmin`'s are (all of
-them, and ``close``), the Java mock's own methods and ``create()`` plain ``def``,
-as none of them waits. The nested ``Builder`` is repeated with the swap (ruling
+``Admin`` methods are ``async def`` where :class:`AsyncAdmin`'s are (``close``),
+the RPCs, the Java mock's own methods and ``create()`` plain ``def``, as none of
+them waits. The nested ``Builder`` is repeated with the swap (ruling
 24): ``AsyncMockAdminClient.Builder.build()`` returns an ``AsyncMockAdminClient``.
 
 Like its sync peer, it leaves out the overloads ``Admin`` does not generate (see
 ``Admin``'s module docstring).
 
-A result's futures are ``asyncio.Future``\\ s of the running loop, complete on
-return, so a method, and ``handle_describe_topics_using_ids``, is called on a
-running event loop. Java's ``synchronized`` is the core's re-entrant lock, held
-for a body that never awaits: each method takes it, runs, and releases it before
-it returns to the awaiting task (Implementation over the FFI). As in Java,
-``close()`` does nothing.
+A result's futures are ``AsyncKafkaFuture``\\ s over the private
+``_KafkaFutureImpl`` (Java's ``KafkaFutureImpl``), most of them complete on return.
+Java's ``synchronized`` is the core's re-entrant lock, held for a body that never
+awaits: each method takes it, runs, and releases it before it returns
+(Implementation over the FFI). As in Java, ``close()`` does nothing.
 """
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, overload
 
@@ -58,6 +56,9 @@ from confluent_kafka.admin.renew_delegation_token_options import RenewDelegation
 from confluent_kafka.admin.update_features_options import UpdateFeaturesOptions
 
 if TYPE_CHECKING:
+    from confluent_kafka.common.kafka_future import AsyncKafkaFuture
+    from confluent_kafka.admin.unregister_controller_options import UnregisterControllerOptions
+    from confluent_kafka.admin.unregister_controller_result import UnregisterControllerResult
     from confluent_kafka import Duration
     from confluent_kafka.admin.abort_transaction_options import AbortTransactionOptions
     from confluent_kafka.admin.abort_transaction_result import AbortTransactionResult
@@ -285,15 +286,15 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
         return self._create_topics(new_topics)
 
     @overload
-    async def delete_topics(self, *, topics: Iterable[str],
+    def delete_topics(self, *, topics: Iterable[str],
                             options: DeleteTopicsOptions | None = None
                             ) -> DeleteTopicsResult[Async]: ...
     @overload
-    async def delete_topics(self, *, topics: TopicCollection,
+    def delete_topics(self, *, topics: TopicCollection,
                             options: DeleteTopicsOptions | None = None
                             ) -> DeleteTopicsResult[Async]: ...
 
-    async def delete_topics(self, *, topics: Iterable[str] | TopicCollection,
+    def delete_topics(self, *, topics: Iterable[str] | TopicCollection,
                             options: DeleteTopicsOptions | None = None
                             ) -> DeleteTopicsResult[Async]:
         """See :meth:`MockAdminClient.delete_topics`."""
@@ -305,23 +306,23 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
         return self._list_topics()
 
     @overload
-    async def describe_topics(self, *, topic_names: Iterable[str],
+    def describe_topics(self, *, topic_names: Iterable[str],
                               options: DescribeTopicsOptions | None = None
                               ) -> DescribeTopicsResult[Async]: ...
     @overload
-    async def describe_topics(self, *, topics: TopicCollection,
+    def describe_topics(self, *, topics: TopicCollection,
                               options: DescribeTopicsOptions | None = None
                               ) -> DescribeTopicsResult[Async]: ...
 
     @java_forms(*_DESCRIBE_TOPICS_FORMS)
-    async def describe_topics(self, *, topic_names: Iterable[str] | None = None,
+    def describe_topics(self, *, topic_names: Iterable[str] | None = None,
                               topics: TopicCollection | None = None,
                               options: DescribeTopicsOptions | None = None
                               ) -> DescribeTopicsResult[Async]:
         """See :meth:`MockAdminClient.describe_topics`."""
         return self._describe_topics(topic_names, topics)
 
-    async def describe_cluster(self, *, options: DescribeClusterOptions | None = None
+    def describe_cluster(self, *, options: DescribeClusterOptions | None = None
                                ) -> DescribeClusterResult[Async]:
         """See :meth:`MockAdminClient.describe_cluster`."""
         return self._describe_cluster()
@@ -342,44 +343,44 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
         """See :meth:`MockAdminClient.delete_acls`."""
         return self._delete_acls(filters)
 
-    async def describe_configs(self, *, resources: Iterable[ConfigResource],
+    def describe_configs(self, *, resources: Iterable[ConfigResource],
                                options: DescribeConfigsOptions | None = None
                                ) -> DescribeConfigsResult[Async]:
         """See :meth:`MockAdminClient.describe_configs`."""
         return self._describe_configs(resources)
 
-    async def incremental_alter_configs(
+    def incremental_alter_configs(
             self, *, configs: Mapping[ConfigResource, Iterable[AlterConfigOp]],
             options: AlterConfigsOptions | None = None) -> AlterConfigsResult[Async]:
         """See :meth:`MockAdminClient.incremental_alter_configs`."""
         return self._incremental_alter_configs(configs)
 
-    async def alter_replica_log_dirs(
+    def alter_replica_log_dirs(
         self, *, replica_assignment: Mapping[TopicPartitionReplica, str],
         options: AlterReplicaLogDirsOptions | None = None
     ) -> AlterReplicaLogDirsResult[Async]:
         """See :meth:`MockAdminClient.alter_replica_log_dirs`."""
         return self._alter_replica_log_dirs(replica_assignment)
 
-    async def describe_log_dirs(self, *, brokers: Iterable[int],
+    def describe_log_dirs(self, *, brokers: Iterable[int],
                                 options: DescribeLogDirsOptions | None = None
                                 ) -> DescribeLogDirsResult[Async]:
         """See :meth:`MockAdminClient.describe_log_dirs`."""
         return self._describe_log_dirs(brokers)
 
-    async def describe_replica_log_dirs(self, *, replicas: Iterable[TopicPartitionReplica],
+    def describe_replica_log_dirs(self, *, replicas: Iterable[TopicPartitionReplica],
                                         options: DescribeReplicaLogDirsOptions | None = None
                                         ) -> DescribeReplicaLogDirsResult[Async]:
         """See :meth:`MockAdminClient.describe_replica_log_dirs`."""
         return self._describe_replica_log_dirs(replicas)
 
-    async def create_partitions(self, *, new_partitions: Mapping[str, NewPartitions],
+    def create_partitions(self, *, new_partitions: Mapping[str, NewPartitions],
                                 options: CreatePartitionsOptions | None = None
                                 ) -> CreatePartitionsResult[Async]:
         """See :meth:`MockAdminClient.create_partitions`."""
         return self._create_partitions(new_partitions)
 
-    async def delete_records(self, *, records_to_delete: Mapping[TopicPartition, RecordsToDelete],
+    def delete_records(self, *, records_to_delete: Mapping[TopicPartition, RecordsToDelete],
                              options: DeleteRecordsOptions | None = None
                              ) -> DeleteRecordsResult[Async]:
         """See :meth:`MockAdminClient.delete_records`."""
@@ -459,21 +460,21 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
         """See :meth:`MockAdminClient.list_groups`."""
         return self._list_groups()
 
-    async def elect_leaders(self, *, election_type: ElectionType,
+    def elect_leaders(self, *, election_type: ElectionType,
                             partitions: Iterable[TopicPartition] | None,
                             options: ElectLeadersOptions | None = None
                             ) -> ElectLeadersResult[Async]:
         """See :meth:`MockAdminClient.elect_leaders`."""
         return self._elect_leaders(election_type, partitions)
 
-    async def alter_partition_reassignments(
+    def alter_partition_reassignments(
             self, *, reassignments: Mapping[TopicPartition, NewPartitionReassignment | None],
             options: AlterPartitionReassignmentsOptions | None = None
             ) -> AlterPartitionReassignmentsResult[Async]:
         """See :meth:`MockAdminClient.alter_partition_reassignments`."""
         return self._alter_partition_reassignments(reassignments)
 
-    async def list_partition_reassignments(
+    def list_partition_reassignments(
             self, *, partitions: Iterable[TopicPartition] | None = None,
             options: ListPartitionReassignmentsOptions | None = None
             ) -> ListPartitionReassignmentsResult[Async]:
@@ -493,7 +494,7 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
         """See :meth:`MockAdminClient.alter_consumer_group_offsets`."""
         return self._alter_consumer_group_offsets(group_id, offsets)
 
-    async def list_offsets(self, *, topic_partition_offsets: Mapping[TopicPartition, OffsetSpec],
+    def list_offsets(self, *, topic_partition_offsets: Mapping[TopicPartition, OffsetSpec],
                            options: ListOffsetsOptions | None = None) -> ListOffsetsResult[Async]:
         """See :meth:`MockAdminClient.list_offsets`."""
         return self._list_offsets(topic_partition_offsets)
@@ -547,6 +548,13 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
             options = UpdateFeaturesOptions()
         return self._update_features(feature_updates, options.validate_only())
 
+    def unregister_controller(self, *, controller_id: int,
+                              options: UnregisterControllerOptions | None = None
+                              ) -> UnregisterControllerResult[Async]:
+        """A completed future when the mock uses a raft controller, else one failed
+        with ``UnsupportedVersionError("")``, as Java's mock."""
+        return self._unregister_controller(controller_id)
+
     async def describe_producers(self, *, partitions: Iterable[TopicPartition],
                                  options: DescribeProducersOptions | None = None
                                  ) -> DescribeProducersResult[Async]:
@@ -577,14 +585,14 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
         return self._fence_producers(transactional_ids)
 
     @overload
-    async def list_config_resources(self, *, config_resource_types: Iterable[ConfigResource.Type],
+    def list_config_resources(self, *, config_resource_types: Iterable[ConfigResource.Type],
                                     options: ListConfigResourcesOptions
                                     ) -> ListConfigResourcesResult[Async]: ...
     @overload
-    async def list_config_resources(self) -> ListConfigResourcesResult[Async]: ...
+    def list_config_resources(self) -> ListConfigResourcesResult[Async]: ...
 
     @java_forms(*_LIST_CONFIG_RESOURCES_FORMS)
-    async def list_config_resources(self, *,
+    def list_config_resources(self, *,
                                     config_resource_types: Iterable[ConfigResource.Type] = UNSET,
                                     options: ListConfigResourcesOptions | None = None
                                     ) -> ListConfigResourcesResult[Async]:
@@ -607,7 +615,6 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
     # (the others are inherited from _mock_core, typed the same on both classes)
 
     def handle_describe_topics_using_ids(
-            self, *, topic_ids: Iterable[Uuid]) -> dict[Uuid, asyncio.Future[TopicDescription]]:
-        """The futures ``describe_topics`` gives for a ``TopicIdCollection``, on the
-        running event loop."""
+            self, *, topic_ids: Iterable[Uuid]) -> dict[Uuid, AsyncKafkaFuture[TopicDescription]]:
+        """The futures ``describe_topics`` gives for a ``TopicIdCollection``."""
         return self._handle_describe_topics_using_ids(topic_ids)  # type: ignore[return-value]

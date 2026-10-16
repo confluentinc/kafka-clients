@@ -89,6 +89,7 @@ if TYPE_CHECKING:
     )
     from confluent_kafka.admin.delete_consumer_groups_result import DeleteConsumerGroupsResult
     from confluent_kafka.admin.delete_records_result import DeleteRecordsResult
+    from confluent_kafka.admin.deleted_records import DeletedRecords
     from confluent_kafka.admin.delete_topics_result import DeleteTopicsResult
     from confluent_kafka.admin.describe_acls_result import DescribeAclsResult
     from confluent_kafka.admin.describe_classic_groups_result import DescribeClassicGroupsResult
@@ -123,6 +124,7 @@ if TYPE_CHECKING:
     )
     from confluent_kafka.admin.list_topics_result import ListTopicsResult
     from confluent_kafka.admin.list_transactions_result import ListTransactionsResult
+    from confluent_kafka.admin.log_dir_description import LogDirDescription
     from confluent_kafka.admin.member_assignment import MemberAssignment
     from confluent_kafka.admin.member_description import MemberDescription
     from confluent_kafka.admin.new_partition_reassignment import NewPartitionReassignment
@@ -141,6 +143,7 @@ if TYPE_CHECKING:
     from confluent_kafka.admin.terminate_transaction_result import TerminateTransactionResult
     from confluent_kafka.admin.topic_description import TopicDescription
     from confluent_kafka.admin.topic_listing import TopicListing
+    from confluent_kafka.admin.unregister_controller_result import UnregisterControllerResult
     from confluent_kafka.admin.update_features_result import UpdateFeaturesResult
     from confluent_kafka.admin.user_scram_credential_alteration import UserScramCredentialAlteration
     from confluent_kafka.common import (
@@ -165,9 +168,9 @@ if TYPE_CHECKING:
 __all__ = [
     "Kind",
     "Payload",
-    "linked",
-    "wrap",
-    "wrap_map",
+    "DESCRIBE_TOPIC_ID_COLLECTION",
+    "DESCRIBE_TOPIC_NAMES",
+    "DESCRIBE_TOPIC_NAME_COLLECTION",
     "abort_transaction_args",
     "abort_transaction_result",
     "acl_operations_from_codes",
@@ -208,7 +211,6 @@ __all__ = [
     "describe_classic_groups_result",
     "describe_client_quotas_args",
     "describe_client_quotas_result",
-    "describe_cluster_args",
     "describe_cluster_result",
     "describe_configs_args",
     "describe_configs_result",
@@ -243,41 +245,26 @@ __all__ = [
     "free_abort_transaction",
     "free_alter_client_quotas",
     "free_alter_consumer_group_offsets",
-    "free_alter_partition_reassignments",
-    "free_alter_replica_log_dirs",
     "free_alter_user_scram_credentials",
     "free_create_acls",
     "free_create_delegation_token",
-    "free_create_partitions",
     "free_delete_acls",
     "free_delete_consumer_group_offsets",
     "free_delete_consumer_groups",
-    "free_delete_records",
-    "free_delete_topics",
     "free_describe_acls",
     "free_describe_classic_groups",
     "free_describe_client_quotas",
-    "free_describe_cluster",
-    "free_describe_configs",
     "free_describe_consumer_groups",
     "free_describe_delegation_token",
     "free_describe_features",
-    "free_describe_log_dirs",
     "free_describe_producers",
-    "free_describe_replica_log_dirs",
-    "free_describe_topics",
     "free_describe_transactions",
     "free_describe_user_scram_credentials",
-    "free_elect_leaders",
     "free_expire_delegation_token",
     "free_fence_producers",
     "free_force_terminate_transaction",
-    "free_incremental_alter_configs",
-    "free_list_config_resources",
     "free_list_consumer_group_offsets",
     "free_list_groups",
-    "free_list_offsets",
-    "free_list_partition_reassignments",
     "free_list_transactions",
     "free_remove_members_from_consumer_group",
     "free_renew_delegation_token",
@@ -287,6 +274,7 @@ __all__ = [
     "future_of",
     "incremental_alter_configs_args",
     "incremental_alter_configs_result",
+    "linked",
     "list_config_resources_args",
     "list_config_resources_result",
     "list_consumer_group_offsets_args",
@@ -314,9 +302,12 @@ __all__ = [
     "timeout_ms",
     "topic_collection_target",
     "topic_partition_from_tuple",
+    "unregister_controller_result",
     "update_features_args",
     "update_features_result",
     "void_future",
+    "wrap",
+    "wrap_map",
 ]
 
 _T = TypeVar("_T")
@@ -347,8 +338,8 @@ def wrap(kind: Kind, loop: asyncio.AbstractEventLoop | None, native: Any
 
 
 def wrap_map(kind: Kind, loop: asyncio.AbstractEventLoop | None, natives: Mapping[Any, Any],
-             key: Callable[[Any], _T] | None = None
-             ) -> dict[_T, KafkaFuture[Any] | AsyncKafkaFuture[Any]]:
+             key: Callable[[Any], Any] | None = None
+             ) -> dict[Any, KafkaFuture[Any] | AsyncKafkaFuture[Any]]:
     """:func:`wrap` of each future of an ``AdminResult.futures`` map, its key
     turned into the Python key by ``key`` (as it is when ``None``)."""
     return {(raw if key is None else key(raw)): wrap(kind, loop, native)
@@ -607,30 +598,28 @@ def _uuid_key(raw: str) -> Any:
     return Uuid.from_string(str=raw)
 
 
-def delete_topics_args(by_ids: bool, keys: list[Any], options: Any) -> tuple[Any, ...]:
-    """``Admin_delete_topics_async(h, names, timeout_ms, retry_on_quota_violation, cb)``'s
-    arguments, or ``Admin_delete_topics_by_ids_async``'s with the ids as Java's
-    ``Uuid.toString()``."""
+def delete_topics_args(by_ids: bool, keys: list[Any]) -> tuple[Any, ...]:
+    """``Admin_delete_topics(h, names_or_ids, by_ids, options)``'s arguments: the
+    names, or the ids as Java's ``Uuid.toString()``."""
     targets = [str(key) for key in keys] if by_ids else keys
-    return (targets, timeout_ms(options), options.should_retry_on_quota_violation())
+    return (targets, by_ids)
 
 
-def delete_topics_result(by_ids: bool, keys: list[Any], payload: Payload,
-                         kind: Kind) -> DeleteTopicsResult[Any]:
-    """The ``DeleteTopicsResult`` of a ``delete_topics`` payload: keyed by topic id
-    for a ``TopicIdCollection``, else by name (Java's ``DeleteTopicsResult.ofTopicIds``
-    / ``ofTopicNames``)."""
+def delete_topics_result(native: Any, by_ids: bool, kind: Kind,
+                         loop: asyncio.AbstractEventLoop | None) -> DeleteTopicsResult[Any]:
+    """The ``DeleteTopicsResult`` over the C result: keyed by topic id for a
+    ``TopicIdCollection`` (``topicIdValues()``), else by name
+    (``topicNameValues()``), as Java's ``DeleteTopicsResult.ofTopicIds`` /
+    ``ofTopicNames``."""
     from confluent_kafka.admin.delete_topics_result import DeleteTopicsResult
 
     if by_ids:
-        futures = per_key_futures(keys, payload, _lib.DeleteTopicsResult_drain, error_only,
-                                  kind, key_of=_uuid_key)
-        return DeleteTopicsResult._new(topic_id_futures=futures, name_futures=None, kind=kind)
-    futures = per_key_futures(keys, payload, _lib.DeleteTopicsResult_drain, error_only, kind)
-    return DeleteTopicsResult._new(topic_id_futures=None, name_futures=futures, kind=kind)
-
-
-free_delete_topics = free_value_payload("DeleteTopicsResult_drain")
+        return DeleteTopicsResult._new(
+            topic_id_futures=wrap_map(kind, loop, native.futures("topic_id_values"), _uuid_key),
+            name_futures=None, kind=kind)
+    return DeleteTopicsResult._new(
+        topic_id_futures=None, name_futures=wrap_map(kind, loop, native.futures("topic_name_values")),
+        kind=kind)
 
 
 def _listings(rows: Mapping[str, tuple[str, str, int]]) -> dict[str, TopicListing]:
@@ -653,22 +642,12 @@ def list_topics_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop 
     return ListTopicsResult._new(future=future, kind=kind)
 
 
-def describe_topics_args(by_ids: bool, keys: list[Any], options: Any) -> tuple[Any, ...]:
-    """``Admin_describe_topics_async(h, names, timeout_ms, include_authorized_operations,
-    partition_size_limit_per_response, cb)``'s arguments, or
-    ``Admin_describe_topics_by_ids_async``'s with the ids as Java's
-    ``Uuid.toString()``."""
-    targets = [str(key) for key in keys] if by_ids else keys
-    return (targets, timeout_ms(options), options.include_authorized_operations(),
-            options.partition_size_limit_per_response())
-
-
 def _topic_partition_info(raw: tuple[Any, ...]) -> TopicPartitionInfo:
-    """A drained ``(partition, leader, replicas, isr, elr, last_known_elr)`` as Java's
-    ``new TopicPartitionInfo(partition, leader, replicas, isr, elr, lastKnownElr)``, or,
-    where the broker reported no ELR sets (``None``), as Java's four-argument
-    ``new TopicPartitionInfo(partition, leader, replicas, isr)``, whose ``elr()`` and
-    ``lastKnownElr()`` are ``null``."""
+    """The extension's ``(partition, leader, replicas, isr, elr, last_known_elr)`` as
+    Java's ``new TopicPartitionInfo(partition, leader, replicas, isr, elr,
+    lastKnownElr)``, or, where the broker reported no ELR sets (``None``), as Java's
+    four-argument ``new TopicPartitionInfo(partition, leader, replicas, isr)``, whose
+    ``elr()`` and ``lastKnownElr()`` are ``null``."""
     from confluent_kafka.common.topic_partition_info import TopicPartitionInfo
 
     partition, leader, replicas, isr, elr, last_known_elr = raw
@@ -684,75 +663,79 @@ def _topic_partition_info(raw: tuple[Any, ...]) -> TopicPartitionInfo:
         last_known_elr=[node_from_tuple(n) for n in last_known_elr])
 
 
-def _topic_description(raw: tuple[Any, Any]) -> tuple[BaseException | None, Any]:
-    """A drained ``(error, (name, topic_id, is_internal, partitions, operations))`` as
-    the key's ``(error, TopicDescription)``: Java's ``new TopicDescription(name,
-    isInternal, partitions, authorizedOperations, topicId)``."""
+def _topic_description(raw: tuple[Any, ...]) -> TopicDescription:
+    """The extension's ``(name, topic_id, is_internal, partitions, operations)`` as
+    Java's ``new TopicDescription(name, isInternal, partitions, authorizedOperations,
+    topicId)``."""
     from confluent_kafka.admin.topic_description import TopicDescription
     from confluent_kafka.common.uuid import Uuid
 
-    raw_error, description = raw
-    error = borrowed_error(raw_error)
-    if error is not None or description is None:
-        return error, None
-    name, topic_id, internal, partitions, operations = description
-    return None, TopicDescription(
+    name, topic_id, internal, partitions, operations = raw
+    return TopicDescription(
         name=name, internal=bool(internal),
         partitions=[_topic_partition_info(p) for p in partitions],
         authorized_operations=acl_operations_from_codes(operations),
         topic_id=Uuid.from_string(str=topic_id))
 
 
-def describe_topics_result(by_ids: bool, keys: list[Any], payload: Payload,
-                           kind: Kind) -> DescribeTopicsResult[Any]:
-    """The ``DescribeTopicsResult`` of a ``describe_topics`` payload: keyed by topic id
-    for a ``TopicIdCollection``, else by name (Java's ``DescribeTopicsResult.ofTopicIds``
-    / ``ofTopicNames``)."""
+#: ``Admin_describe_topics``' forms: Java's ``describeTopics(Collection<String>)``,
+#: and a ``TopicCollection`` of names or of ids.
+DESCRIBE_TOPIC_NAMES = 0
+DESCRIBE_TOPIC_NAME_COLLECTION = 1
+DESCRIBE_TOPIC_ID_COLLECTION = 2
+
+
+def describe_topics_args(form: int, keys: list[Any]) -> tuple[Any, ...]:
+    """``Admin_describe_topics(h, form, names_or_ids, options)``'s arguments, the ids
+    as Java's ``Uuid.toString()``."""
+    targets = [str(key) for key in keys] if form == DESCRIBE_TOPIC_ID_COLLECTION else keys
+    return (form, targets)
+
+
+def describe_topics_result(native: Any, by_ids: bool, kind: Kind,
+                           loop: asyncio.AbstractEventLoop | None) -> DescribeTopicsResult[Any]:
+    """The ``DescribeTopicsResult`` over the C result: keyed by topic id for a
+    ``TopicIdCollection``, else by name (Java's ``DescribeTopicsResult.ofTopicIds`` /
+    ``ofTopicNames``)."""
     from confluent_kafka.admin.describe_topics_result import DescribeTopicsResult
 
     if by_ids:
-        futures = per_key_futures(keys, payload, _lib.DescribeTopicsResult_drain,
-                                  _topic_description, kind, key_of=_uuid_key)
+        futures = wrap_map(kind, loop, native.futures("topic_id_values", _topic_description),
+                           _uuid_key)
         return DescribeTopicsResult._new(topic_id_futures=futures, name_futures=None, kind=kind)
-    futures = per_key_futures(keys, payload, _lib.DescribeTopicsResult_drain,
-                              _topic_description, kind)
+    futures = wrap_map(kind, loop, native.futures("topic_name_values", _topic_description))
     return DescribeTopicsResult._new(topic_id_futures=None, name_futures=futures, kind=kind)
 
 
-free_describe_topics = free_value_payload("DescribeTopicsResult_drain")
+def _cluster_node(raw: tuple[int, str, int, str | None, bool]) -> Node:
+    """describeCluster's ``(id, host, port, rack, is_fenced)`` as Java's ``new Node(id,
+    host, port, rack, isFenced)`` (``KafkaAdminClient.describeCluster``)."""
+    from confluent_kafka.common.node import Node
+
+    node_id, host, port, rack, is_fenced = raw
+    return Node(id=node_id, host=host, port=port, rack=rack, is_fenced=bool(is_fenced))
 
 
-def describe_cluster_args(options: Any) -> tuple[Any, ...]:
-    """``Admin_describe_cluster_async(h, timeout_ms, include_authorized_operations,
-    include_fenced_brokers, cb)``'s arguments."""
-    return (timeout_ms(options), options.include_authorized_operations(),
-            options.include_fenced_brokers())
+def _cluster_nodes(rows: list[tuple[int, str, int, str | None, bool]]) -> list[Node]:
+    return [_cluster_node(row) for row in rows]
 
 
-def describe_cluster_result(payload: Payload, kind: Kind) -> DescribeClusterResult[Any]:
-    """The ``DescribeClusterResult`` of a ``describe_cluster`` payload: its four futures
-    complete from the drained ``(cluster_id, nodes, controller, operations)``, or all
-    four fail with the whole-call error (Java's ``handleFailure``)."""
+def _cluster_controller(raw: tuple[int, str, int, str | None, bool] | None) -> Node | None:
+    return None if raw is None else _cluster_node(raw)
+
+
+def describe_cluster_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None
+                            ) -> DescribeClusterResult[Any]:
+    """The ``DescribeClusterResult`` over the C result's four futures."""
     from confluent_kafka.admin.describe_cluster_result import DescribeClusterResult
 
-    result_handle, error = payload
-    if error:
-        failure = from_ffi_error(error)
-        if result_handle:
-            _lib.DescribeClusterResult_drain(result_handle)
-        return DescribeClusterResult._new(
-            nodes=failed_future(kind, failure), controller=failed_future(kind, failure),
-            cluster_id=failed_future(kind, failure),
-            authorized_operations=failed_future(kind, failure), kind=kind)
-    cluster_id, nodes, controller, operations = _lib.DescribeClusterResult_drain(result_handle)
     return DescribeClusterResult._new(
-        nodes=future_of(kind, [node_from_tuple(n) for n in nodes]),
-        controller=future_of(kind, optional_node_from_tuple(controller)),
-        cluster_id=future_of(kind, cluster_id),
-        authorized_operations=future_of(kind, acl_operations_from_codes(operations)), kind=kind)
-
-
-free_describe_cluster = free_value_payload("DescribeClusterResult_drain")
+        nodes=wrap(kind, loop, native.future("nodes", None, _cluster_nodes)),
+        controller=wrap(kind, loop, native.future("controller", None, _cluster_controller)),
+        cluster_id=wrap(kind, loop, native.future("cluster_id")),
+        authorized_operations=wrap(kind, loop, native.future(
+            "authorized_operations", None, acl_operations_from_codes)),
+        kind=kind)
 
 
 def _acl_binding_args(binding: AclBinding) -> tuple[Any, ...]:
@@ -904,25 +887,23 @@ free_delete_acls = free_value_payload("DeleteAclsResult_drain")
 
 
 def config_resource_from_tuple(raw: tuple[int, str]) -> ConfigResource:
-    """A drained ``(Type.id(), name)`` as Java's ``new ConfigResource(type, name)``."""
+    """The extension's ``(Type.id(), name)`` as Java's ``new ConfigResource(type,
+    name)``."""
     from confluent_kafka.common.config.config_resource import ConfigResource
 
     type_id, name = raw
     return ConfigResource(type=ConfigResource.Type.for_id(id=type_id), name=name)
 
 
-def describe_configs_args(resources: list[ConfigResource], options: Any) -> tuple[Any, ...]:
-    """``Admin_describe_configs_async(h, spec, timeout_ms, include_synonyms,
-    include_documentation, cb)``'s arguments: each ``ConfigResource`` as
-    ``(Type.id(), name)``."""
-    spec = [(resource.type().id(), resource.name()) for resource in resources]
-    return (spec, timeout_ms(options), options.include_synonyms(),
-            options.include_documentation())
+def describe_configs_args(resources: list[ConfigResource]) -> tuple[Any, ...]:
+    """``Admin_describe_configs(h, resources, options)``'s arguments: each
+    ``ConfigResource`` as ``(Type.id(), name)``."""
+    return ([(resource.type().id(), resource.name()) for resource in resources],)
 
 
 def _config_entry(raw: tuple[Any, ...]) -> ConfigEntry:
-    """A drained ``(name, value, is_default, is_sensitive, is_read_only, source, type,
-    documentation, synonyms)`` as Java's ``new ConfigEntry(name, value, source,
+    """The extension's ``(name, value, is_default, is_sensitive, is_read_only, source,
+    type, documentation, synonyms)`` as Java's ``new ConfigEntry(name, value, source,
     isSensitive, readOnly, synonyms, type, documentation)``
     (``KafkaAdminClient.describeConfigs``); ``is_default`` is not a field, as Java
     derives ``isDefault()`` from the source."""
@@ -940,61 +921,42 @@ def _config_entry(raw: tuple[Any, ...]) -> ConfigEntry:
         type=ConfigEntry.ConfigType(config_type), documentation=documentation)
 
 
-def _described_config(raw: tuple[Any, Any]) -> tuple[BaseException | None, Any]:
-    """A drained ``(error, entries)`` as the key's ``(error, Config)``."""
-    from confluent_kafka.admin.config import Config
-
-    raw_error, entries = raw
-    error = borrowed_error(raw_error)
-    if error is not None or entries is None:
-        return error, None
-    return None, Config(entries=[_config_entry(entry) for entry in entries])
-
-
-def describe_configs_result(resources: list[ConfigResource], payload: Payload,
-                            kind: Kind) -> DescribeConfigsResult[Any]:
-    """The ``DescribeConfigsResult`` of a ``describe_configs`` payload."""
+def describe_configs_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None
+                            ) -> DescribeConfigsResult[Any]:
+    """The ``DescribeConfigsResult`` over the C result's ``values()``."""
     from confluent_kafka.admin.describe_configs_result import DescribeConfigsResult
 
-    futures = per_key_futures(resources, payload, _lib.DescribeConfigsResult_drain,
-                              _described_config, kind, key_of=config_resource_from_tuple)
+    futures = wrap_map(kind, loop, native.futures("values", config_from_rows),
+                       config_resource_from_tuple)
     return DescribeConfigsResult._new(futures=futures, kind=kind)
 
 
-free_describe_configs = free_value_payload("DescribeConfigsResult_drain")
-
-
-def incremental_alter_configs_args(configs: Mapping[ConfigResource, Iterable[AlterConfigOp]],
-                                   options: Any) -> tuple[Any, ...]:
-    """``Admin_incremental_alter_configs_async(h, spec, timeout_ms, validate_only, cb)``'s
-    arguments: one row per op, ``(Type.id(), resource name, configEntry().name(),
-    value() or None, opType().id())``. A resource with no op has no row, so it
-    reaches the core not at all and has no future (Java sends it with an empty
-    config list): the FFI's row form cannot carry it."""
+def incremental_alter_configs_args(configs: Mapping[ConfigResource, Iterable[AlterConfigOp]]
+                                   ) -> tuple[Any, ...]:
+    """``Admin_incremental_alter_configs(h, rows, options)``'s arguments: one row per
+    resource, ``(Type.id(), name, [(configEntry().name(), value() or None,
+    opType().id())])``, a resource with no op included (Java sends it with an empty
+    config list)."""
     spec = []
     for resource, ops in configs.items():
-        for op in ops:
-            entry = op.config_entry()
-            spec.append((resource.type().id(), resource.name(), entry.name(), entry.value(),
-                         op.op_type().id()))
-    return (spec, timeout_ms(options), options.should_validate_only())
+        spec.append((resource.type().id(), resource.name(),
+                     [(op.config_entry().name(), op.config_entry().value(), op.op_type().id())
+                      for op in ops]))
+    return (spec,)
 
 
-def incremental_alter_configs_result(resources: Iterable[ConfigResource], payload: Payload,
-                                     kind: Kind) -> AlterConfigsResult[Any]:
-    """The ``AlterConfigsResult`` of an ``incremental_alter_configs`` payload."""
+def incremental_alter_configs_result(native: Any, kind: Kind,
+                                     loop: asyncio.AbstractEventLoop | None
+                                     ) -> AlterConfigsResult[Any]:
+    """The ``AlterConfigsResult`` over the C result's ``values()``."""
     from confluent_kafka.admin.alter_configs_result import AlterConfigsResult
 
-    futures = per_key_futures(resources, payload, _lib.AlterConfigsResult_drain, error_only,
-                              kind, key_of=config_resource_from_tuple)
+    futures = wrap_map(kind, loop, native.futures("values"), config_resource_from_tuple)
     return AlterConfigsResult._new(futures=futures, kind=kind)
 
 
-free_incremental_alter_configs = free_value_payload("AlterConfigsResult_drain")
-
-
 def replica_from_tuple(raw: tuple[str, int, int]) -> TopicPartitionReplica:
-    """A drained ``(topic, partition, broker_id)`` as Java's
+    """The extension's ``(topic, partition, broker_id)`` as Java's
     ``new TopicPartitionReplica(topic, partition, brokerId)``."""
     from confluent_kafka.common.topic_partition_replica import TopicPartitionReplica
 
@@ -1002,175 +964,137 @@ def replica_from_tuple(raw: tuple[str, int, int]) -> TopicPartitionReplica:
     return TopicPartitionReplica(topic=topic, partition=partition, broker_id=broker_id)
 
 
-def alter_replica_log_dirs_args(replica_assignment: Mapping[TopicPartitionReplica, str],
-                                options: Any) -> tuple[Any, ...]:
-    """``Admin_alter_replica_log_dirs_async(h, spec, timeout_ms, cb)``'s arguments: each
-    entry as ``(topic, partition, broker_id, log_dir)``."""
-    spec = [(replica.topic(), replica.partition(), replica.broker_id(), log_dir)
-            for replica, log_dir in replica_assignment.items()]
-    return (spec, timeout_ms(options))
+def alter_replica_log_dirs_args(replica_assignment: Mapping[TopicPartitionReplica, str]
+                                ) -> tuple[Any, ...]:
+    """``Admin_alter_replica_log_dirs(h, rows, options)``'s arguments: each entry as
+    ``(topic, partition, broker_id, log_dir)``."""
+    return ([(replica.topic(), replica.partition(), replica.broker_id(), log_dir)
+             for replica, log_dir in replica_assignment.items()],)
 
 
-def alter_replica_log_dirs_result(replicas: Iterable[TopicPartitionReplica], payload: Payload,
-                                  kind: Kind) -> AlterReplicaLogDirsResult[Any]:
-    """The ``AlterReplicaLogDirsResult`` of an ``alter_replica_log_dirs`` payload."""
+def alter_replica_log_dirs_result(native: Any, kind: Kind,
+                                  loop: asyncio.AbstractEventLoop | None
+                                  ) -> AlterReplicaLogDirsResult[Any]:
+    """The ``AlterReplicaLogDirsResult`` over the C result's ``values()``."""
     from confluent_kafka.admin.alter_replica_log_dirs_result import AlterReplicaLogDirsResult
 
-    futures = per_key_futures(replicas, payload, _lib.AlterReplicaLogDirsResult_drain,
-                              error_only, kind, key_of=replica_from_tuple)
+    futures = wrap_map(kind, loop, native.futures("values"), replica_from_tuple)
     return AlterReplicaLogDirsResult._new(futures=futures, kind=kind)
 
 
-free_alter_replica_log_dirs = free_value_payload("AlterReplicaLogDirsResult_drain")
+def describe_log_dirs_args(brokers: list[int]) -> tuple[Any, ...]:
+    """``Admin_describe_log_dirs(h, brokers, options)``'s arguments."""
+    return (brokers,)
 
 
-def describe_log_dirs_args(brokers: list[int], options: Any) -> tuple[Any, ...]:
-    """``Admin_describe_log_dirs_async(h, brokers, timeout_ms, cb)``'s arguments."""
-    return (brokers, timeout_ms(options))
-
-
-def _log_dir_descriptions(raw: tuple[Any, Any]) -> tuple[BaseException | None, Any]:
-    """A drained ``(error, {log_dir: (error, total_bytes, usable_bytes, replicas)})`` as
-    the broker's ``(error, dict[str, LogDirDescription])``: Java's
-    ``new LogDirDescription(error, replicaInfos, totalBytes, usableBytes)``, ``-1``
-    the FFI's unknown volume size (``isCordoned`` has no accessor). A log dir
-    error that is not an ``ApiError`` fails the broker's future."""
+def _log_dir_descriptions(dirs: Mapping[str, tuple[Any, ...]]) -> dict[str, LogDirDescription]:
+    """The extension's ``{log_dir: (error, total_bytes, usable_bytes, replicas,
+    is_cordoned)}`` as the broker's ``dict[str, LogDirDescription]``: Java's
+    ``new LogDirDescription(error, replicaInfos, totalBytes, usableBytes,
+    isCordoned)`` (``KafkaAdminClient.java:3178``), ``-1`` the core's unknown volume
+    size. A log dir error that is not an ``ApiError`` fails the broker's future."""
     from confluent_kafka.admin.log_dir_description import LogDirDescription
     from confluent_kafka.admin.replica_info import ReplicaInfo
     from confluent_kafka.common.topic_partition import TopicPartition
 
-    raw_error, dirs = raw
-    error = borrowed_error(raw_error)
-    if error is not None or dirs is None:
-        return error, None
     descriptions = {}
-    for log_dir, (dir_error, total_bytes, usable_bytes, replicas) in dirs.items():
+    for log_dir, (dir_error, total_bytes, usable_bytes, replicas, is_cordoned) in dirs.items():
         embedded = borrowed_error(dir_error)
         if embedded is not None and not isinstance(embedded, ApiError):
-            return embedded, None
+            raise embedded
         descriptions[log_dir] = LogDirDescription(
             error=embedded,
             replica_infos={TopicPartition(topic=topic, partition=partition):
                            ReplicaInfo(size=size, offset_lag=offset_lag,
                                        is_future=bool(is_future))
                            for topic, partition, size, offset_lag, is_future in replicas},
-            total_bytes=total_bytes, usable_bytes=usable_bytes)
-    return None, descriptions
+            total_bytes=total_bytes, usable_bytes=usable_bytes, is_cordoned=bool(is_cordoned))
+    return descriptions
 
 
-def describe_log_dirs_result(brokers: list[int], payload: Payload,
-                             kind: Kind) -> DescribeLogDirsResult[Any]:
-    """The ``DescribeLogDirsResult`` of a ``describe_log_dirs`` payload, keyed by
+def describe_log_dirs_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None
+                             ) -> DescribeLogDirsResult[Any]:
+    """The ``DescribeLogDirsResult`` over the C result's ``descriptions()``, keyed by
     broker id."""
     from confluent_kafka.admin.describe_log_dirs_result import DescribeLogDirsResult
 
-    futures = per_key_futures(brokers, payload, _lib.DescribeLogDirsResult_drain,
-                              _log_dir_descriptions, kind)
+    futures = wrap_map(kind, loop, native.futures("descriptions", _log_dir_descriptions))
     return DescribeLogDirsResult._new(futures=futures, kind=kind)
 
 
-free_describe_log_dirs = free_value_payload("DescribeLogDirsResult_drain")
+def describe_replica_log_dirs_args(replicas: list[TopicPartitionReplica]) -> tuple[Any, ...]:
+    """``Admin_describe_replica_log_dirs(h, replicas, options)``'s arguments: each
+    replica as ``(topic, partition, broker_id)``."""
+    return ([(replica.topic(), replica.partition(), replica.broker_id())
+             for replica in replicas],)
 
 
-def describe_replica_log_dirs_args(replicas: list[TopicPartitionReplica],
-                                   options: Any) -> tuple[Any, ...]:
-    """``Admin_describe_replica_log_dirs_async(h, spec, timeout_ms, cb)``'s arguments:
-    each replica as ``(topic, partition, broker_id)``."""
-    spec = [(replica.topic(), replica.partition(), replica.broker_id()) for replica in replicas]
-    return (spec, timeout_ms(options))
-
-
-def _replica_log_dir_info(raw: tuple[Any, Any]) -> tuple[BaseException | None, Any]:
-    """A drained ``(error, (current_dir, current_lag, future_dir, future_lag))`` as the
-    replica's ``(error, ReplicaLogDirInfo)``: Java's ``new ReplicaLogDirInfo(
-    currentReplicaLogDir, currentReplicaOffsetLag, futureReplicaLogDir,
-    futureReplicaOffsetLag)``."""
+def _replica_log_dir_info(info: tuple[Any, ...]) -> Any:
+    """The extension's ``(current_dir, current_lag, future_dir, future_lag)`` as
+    Java's ``new ReplicaLogDirInfo(currentReplicaLogDir, currentReplicaOffsetLag,
+    futureReplicaLogDir, futureReplicaOffsetLag)``."""
     from confluent_kafka.admin.describe_replica_log_dirs_result import (
         DescribeReplicaLogDirsResult,
     )
 
-    raw_error, info = raw
-    error = borrowed_error(raw_error)
-    if error is not None or info is None:
-        return error, None
     current_dir, current_lag, future_dir, future_lag = info
-    return None, DescribeReplicaLogDirsResult.ReplicaLogDirInfo._new(
+    return DescribeReplicaLogDirsResult.ReplicaLogDirInfo._new(
         current_replica_log_dir=current_dir, current_replica_offset_lag=current_lag,
         future_replica_log_dir=future_dir, future_replica_offset_lag=future_lag)
 
 
-def describe_replica_log_dirs_result(replicas: list[TopicPartitionReplica], payload: Payload,
-                                     kind: Kind) -> DescribeReplicaLogDirsResult[Any]:
-    """The ``DescribeReplicaLogDirsResult`` of a ``describe_replica_log_dirs`` payload."""
+def describe_replica_log_dirs_result(native: Any, kind: Kind,
+                                     loop: asyncio.AbstractEventLoop | None
+                                     ) -> DescribeReplicaLogDirsResult[Any]:
+    """The ``DescribeReplicaLogDirsResult`` over the C result's ``values()``."""
     from confluent_kafka.admin.describe_replica_log_dirs_result import (
         DescribeReplicaLogDirsResult,
     )
 
-    futures = per_key_futures(replicas, payload, _lib.DescribeReplicaLogDirsResult_drain,
-                              _replica_log_dir_info, kind, key_of=replica_from_tuple)
+    futures = wrap_map(kind, loop, native.futures("values", _replica_log_dir_info),
+                       replica_from_tuple)
     return DescribeReplicaLogDirsResult._new(futures=futures, kind=kind)
 
 
-free_describe_replica_log_dirs = free_value_payload("DescribeReplicaLogDirsResult_drain")
-
-
-def create_partitions_args(new_partitions: Mapping[str, NewPartitions],
-                           options: Any) -> tuple[Any, ...]:
-    """``Admin_create_partitions_async(h, spec, timeout_ms, validate_only,
-    retry_on_quota_violation, cb)``'s arguments: each entry as ``(topic, totalCount(),
-    assignments() or None)`` (``build_new_partitions``; ``None`` is Java's
+def create_partitions_args(new_partitions: Mapping[str, NewPartitions]) -> tuple[Any, ...]:
+    """``Admin_create_partitions(h, rows, options)``'s arguments: each entry as
+    ``(topic, totalCount(), assignments() or None)`` (``None`` is Java's
     ``increaseTo(int)``, an empty list ``increaseTo(int, List.of())``)."""
-    spec = [(topic, partitions.total_count(), partitions.assignments())
-            for topic, partitions in new_partitions.items()]
-    return (spec, timeout_ms(options), options.validate_only(),
-            options.should_retry_on_quota_violation())
+    return ([(topic, partitions.total_count(), partitions.assignments())
+             for topic, partitions in new_partitions.items()],)
 
 
-def create_partitions_result(topics: Iterable[str], payload: Payload,
-                             kind: Kind) -> CreatePartitionsResult[Any]:
-    """The ``CreatePartitionsResult`` of a ``create_partitions`` payload."""
+def create_partitions_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None
+                             ) -> CreatePartitionsResult[Any]:
+    """The ``CreatePartitionsResult`` over the C result's ``values()``."""
     from confluent_kafka.admin.create_partitions_result import CreatePartitionsResult
 
-    futures = per_key_futures(topics, payload, _lib.CreatePartitionsResult_drain, error_only,
-                              kind)
-    return CreatePartitionsResult._new(values=futures, kind=kind)
+    return CreatePartitionsResult._new(values=wrap_map(kind, loop, native.futures("values")),
+                                       kind=kind)
 
 
-free_create_partitions = free_value_payload("CreatePartitionsResult_drain")
-
-
-def delete_records_args(records_to_delete: Mapping[TopicPartition, RecordsToDelete],
-                        options: Any) -> tuple[Any, ...]:
-    """``Admin_delete_records_async(h, spec, timeout_ms, cb)``'s arguments: each entry as
+def delete_records_args(records_to_delete: Mapping[TopicPartition, RecordsToDelete]
+                        ) -> tuple[Any, ...]:
+    """``Admin_delete_records(h, rows, options)``'s arguments: each entry as
     ``(topic, partition, beforeOffset())``."""
-    spec = [(partition.topic(), partition.partition(), records.before_offset())
-            for partition, records in records_to_delete.items()]
-    return (spec, timeout_ms(options))
+    return ([(partition.topic(), partition.partition(), records.before_offset())
+             for partition, records in records_to_delete.items()],)
 
 
-def _deleted_records(raw: tuple[Any, int]) -> tuple[BaseException | None, Any]:
-    """A drained ``(error, low_watermark)`` as the partition's ``(error,
-    DeletedRecords)``."""
+def _deleted_records(low_watermark: int) -> DeletedRecords:
     from confluent_kafka.admin.deleted_records import DeletedRecords
 
-    raw_error, low_watermark = raw
-    error = borrowed_error(raw_error)
-    if error is not None:
-        return error, None
-    return None, DeletedRecords(low_watermark=low_watermark)
+    return DeletedRecords(low_watermark=low_watermark)
 
 
-def delete_records_result(partitions: Iterable[TopicPartition], payload: Payload,
-                          kind: Kind) -> DeleteRecordsResult[Any]:
-    """The ``DeleteRecordsResult`` of a ``delete_records`` payload."""
+def delete_records_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None
+                          ) -> DeleteRecordsResult[Any]:
+    """The ``DeleteRecordsResult`` over the C result's ``lowWatermarks()``."""
     from confluent_kafka.admin.delete_records_result import DeleteRecordsResult
 
-    futures = per_key_futures(partitions, payload, _lib.DeleteRecordsResult_drain,
-                              _deleted_records, kind, key_of=topic_partition_from_tuple)
+    futures = wrap_map(kind, loop, native.futures("low_watermarks", _deleted_records),
+                       topic_partition_from_tuple)
     return DeleteRecordsResult._new(futures=futures, kind=kind)
-
-
-free_delete_records = free_value_payload("DeleteRecordsResult_drain")
 
 
 def _principal_args(principal: KafkaPrincipal) -> tuple[str, str]:
@@ -1582,99 +1506,84 @@ def partitions_spec(partitions: Iterable[TopicPartition]) -> list[tuple[str, int
     return [(partition.topic(), partition.partition()) for partition in partitions]
 
 
-def elect_leaders_args(election_type: ElectionType, partitions: Iterable[TopicPartition] | None,
-                       options: Any) -> tuple[Any, ...]:
-    """``Admin_elect_leaders_async(h, election_type, all_partitions, spec, timeout_ms,
-    cb)``'s arguments: ``ElectionType.value``; Java's ``null`` partitions (every
-    partition) as ``all_partitions``."""
-    if partitions is None:
-        return (election_type.value, True, [], timeout_ms(options))
-    return (election_type.value, False, partitions_spec(partitions), timeout_ms(options))
+def elect_leaders_args(election_type: ElectionType, partitions: Iterable[TopicPartition] | None
+                       ) -> tuple[Any, ...]:
+    """``Admin_elect_leaders(h, election_type, partitions, options)``'s arguments:
+    ``ElectionType.value``; Java's ``null`` partitions (every partition) as
+    ``None``."""
+    return (election_type.value, None if partitions is None else partitions_spec(partitions))
 
 
-def _elections(drained: Mapping[tuple[str, int], Any]
+def _elections(rows: Mapping[tuple[str, int], Any]
                ) -> dict[TopicPartition, BaseException | None]:
-    """The drained ``{(topic, partition): error or None}`` as Java's
+    """The extension's ``{(topic, partition): error or None}`` as Java's
     ``Map<TopicPartition, Optional<Throwable>>``."""
     return {topic_partition_from_tuple(key): borrowed_error(raw_error)
-            for key, raw_error in drained.items()}
+            for key, raw_error in rows.items()}
 
 
-def elect_leaders_result(payload: Payload, kind: Kind) -> ElectLeadersResult[Any]:
-    """The ``ElectLeadersResult`` of an ``elect_leaders`` payload: its one future."""
+def elect_leaders_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None
+                         ) -> ElectLeadersResult[Any]:
+    """The ``ElectLeadersResult`` over the C result's ``partitions()`` future."""
     from confluent_kafka.admin.elect_leaders_result import ElectLeadersResult
 
-    future = single_future(payload, _lib.ElectLeadersResult_drain, _elections, kind)
+    future = wrap(kind, loop, native.future("partitions", None, _elections))
     return ElectLeadersResult._new(election_future=future, kind=kind)
 
 
-free_elect_leaders = free_value_payload("ElectLeadersResult_drain")
-
-
 def alter_partition_reassignments_args(
-        reassignments: Mapping[TopicPartition, NewPartitionReassignment | None],
-        options: Any) -> tuple[Any, ...]:
-    """``Admin_alter_partition_reassignments_async(h, spec, timeout_ms,
-    allow_replication_factor_change, cb)``'s arguments: each entry as ``(topic,
-    partition, cancel, targetReplicas())``, ``cancel`` for Java's ``Optional.empty()``."""
-    spec = [(partition.topic(), partition.partition(), reassignment is None,
-             [] if reassignment is None else reassignment.target_replicas())
-            for partition, reassignment in reassignments.items()]
-    return (spec, timeout_ms(options), options.allow_replication_factor_change())
+        reassignments: Mapping[TopicPartition, NewPartitionReassignment | None]
+) -> tuple[Any, ...]:
+    """``Admin_alter_partition_reassignments(h, rows, options)``'s arguments: each
+    entry as ``(topic, partition, targetReplicas())``, ``None`` for Java's
+    ``Optional.empty()`` (cancel the reassignment)."""
+    return ([(partition.topic(), partition.partition(),
+              None if reassignment is None else list(reassignment.target_replicas()))
+             for partition, reassignment in reassignments.items()],)
 
 
-def alter_partition_reassignments_result(partitions: Iterable[TopicPartition], payload: Payload,
-                                         kind: Kind) -> AlterPartitionReassignmentsResult[Any]:
-    """The ``AlterPartitionReassignmentsResult`` of an ``alter_partition_reassignments``
-    payload."""
+def alter_partition_reassignments_result(native: Any, kind: Kind,
+                                         loop: asyncio.AbstractEventLoop | None
+                                         ) -> AlterPartitionReassignmentsResult[Any]:
+    """The ``AlterPartitionReassignmentsResult`` over the C result's ``values()``."""
     from confluent_kafka.admin.alter_partition_reassignments_result import (
         AlterPartitionReassignmentsResult,
     )
 
-    futures = per_key_futures(partitions, payload,
-                              _lib.AlterPartitionReassignmentsResult_drain, error_only, kind,
-                              key_of=topic_partition_from_tuple)
+    futures = wrap_map(kind, loop, native.futures("values"), topic_partition_from_tuple)
     return AlterPartitionReassignmentsResult._new(futures=futures, kind=kind)
 
 
-free_alter_partition_reassignments = free_value_payload("AlterPartitionReassignmentsResult_drain")
+def list_partition_reassignments_args(partitions: Iterable[TopicPartition] | None
+                                      ) -> tuple[Any, ...]:
+    """``Admin_list_partition_reassignments(h, partitions, options)``'s arguments:
+    ``None`` for Java's ``listPartitionReassignments(options)`` (every
+    reassignment)."""
+    return (None if partitions is None else partitions_spec(partitions),)
 
 
-def list_partition_reassignments_args(partitions: Iterable[TopicPartition] | None,
-                                      options: Any) -> tuple[Any, ...]:
-    """``Admin_list_partition_reassignments_async(h, all_partitions, spec, timeout_ms,
-    cb)``'s arguments: Java's ``Optional.empty()`` (every reassignment) as
-    ``all_partitions``."""
-    if partitions is None:
-        return (True, [], timeout_ms(options))
-    return (False, partitions_spec(partitions), timeout_ms(options))
-
-
-def _reassignments(drained: Mapping[tuple[str, int], tuple[list[int], list[int], list[int]]]
+def _reassignments(rows: Mapping[tuple[str, int], tuple[list[int], list[int], list[int]]]
                    ) -> dict[TopicPartition, PartitionReassignment]:
-    """The drained ``{(topic, partition): (replicas, adding, removing)}`` as Java's
-    ``Map<TopicPartition, PartitionReassignment>``."""
+    """The extension's ``{(topic, partition): (replicas, adding, removing)}`` as
+    Java's ``Map<TopicPartition, PartitionReassignment>``."""
     from confluent_kafka.admin.partition_reassignment import PartitionReassignment
 
     return {topic_partition_from_tuple(key): PartitionReassignment(
                 replicas=replicas, adding_replicas=adding, removing_replicas=removing)
-            for key, (replicas, adding, removing) in drained.items()}
+            for key, (replicas, adding, removing) in rows.items()}
 
 
-def list_partition_reassignments_result(payload: Payload,
-                                        kind: Kind) -> ListPartitionReassignmentsResult[Any]:
-    """The ``ListPartitionReassignmentsResult`` of a ``list_partition_reassignments``
-    payload: its one future."""
+def list_partition_reassignments_result(native: Any, kind: Kind,
+                                        loop: asyncio.AbstractEventLoop | None
+                                        ) -> ListPartitionReassignmentsResult[Any]:
+    """The ``ListPartitionReassignmentsResult`` over the C result's
+    ``reassignments()`` future."""
     from confluent_kafka.admin.list_partition_reassignments_result import (
         ListPartitionReassignmentsResult,
     )
 
-    future = single_future(payload, _lib.ListPartitionReassignmentsResult_drain,
-                           _reassignments, kind)
+    future = wrap(kind, loop, native.future("reassignments", None, _reassignments))
     return ListPartitionReassignmentsResult._new(reassignments=future, kind=kind)
-
-
-free_list_partition_reassignments = free_value_payload("ListPartitionReassignmentsResult_drain")
 
 
 def remove_members_from_consumer_group_args(group_id: str, options: Any) -> tuple[Any, ...]:
@@ -1765,6 +1674,11 @@ def alter_consumer_group_offsets_result(payload: Payload,
 free_alter_consumer_group_offsets = free_value_payload("AlterConsumerGroupOffsetsResult_drain")
 
 
+_MATCH_TYPE_EXACT = 0
+_MATCH_TYPE_DEFAULT = 1
+_MATCH_TYPE_SPECIFIED = 2
+
+
 def offset_spec_value(spec: OffsetSpec) -> tuple[bool, int]:
     """An ``OffsetSpec`` as the extension's ``(is_timestamp, value)``: the timestamp of
     a ``TimestampSpec``, else the wire sentinel of Java's
@@ -1789,45 +1703,36 @@ def offset_spec_value(spec: OffsetSpec) -> tuple[bool, int]:
 
 def list_offsets_args(topic_partition_offsets: Mapping[TopicPartition, OffsetSpec],
                       options: Any) -> tuple[Any, ...]:
-    """``Admin_list_offsets_async(h, spec, timeout_ms, isolation_level, cb)``'s
-    arguments: each entry as ``(topic, partition, is_timestamp, value)``;
-    ``isolationLevel().id()``."""
+    """``Admin_list_offsets(h, rows, isolation_level, options)``'s arguments: each
+    entry as ``(topic, partition, is_timestamp, value)``; the options'
+    ``isolationLevel().id()``, which Java's ``ListOffsetsOptions`` takes in its
+    constructor."""
     spec = [(partition.topic(), partition.partition(), *offset_spec_value(offset_spec))
             for partition, offset_spec in topic_partition_offsets.items()]
-    return (spec, timeout_ms(options), options.isolation_level().id())
+    return (spec, options.isolation_level().id())
 
 
-def _listed_offset(raw: tuple[Any, Any]) -> tuple[BaseException | None, Any]:
-    """A drained ``(error, (offset, timestamp, leader_epoch or None))`` as the
-    partition's ``(error, ListOffsetsResultInfo)``."""
+def _listed_offset(info: tuple[int, int, int | None]) -> Any:
+    """The extension's ``(offset, timestamp, leader_epoch or None)`` as Java's
+    ``ListOffsetsResultInfo``."""
     from confluent_kafka.admin.list_offsets_result import ListOffsetsResult
 
-    raw_error, info = raw
-    error = borrowed_error(raw_error)
-    if error is not None or info is None:
-        return error, None
     offset, timestamp, leader_epoch = info
-    return None, ListOffsetsResult.ListOffsetsResultInfo(
+    return ListOffsetsResult.ListOffsetsResultInfo(
         offset=offset, timestamp=timestamp, leader_epoch=leader_epoch)
 
 
-def list_offsets_result(partitions: Iterable[TopicPartition], payload: Payload,
-                        kind: Kind) -> ListOffsetsResult[Any]:
-    """The ``ListOffsetsResult`` of a ``list_offsets`` payload."""
+def list_offsets_result(native: Any, partitions: Iterable[TopicPartition], kind: Kind,
+                        loop: asyncio.AbstractEventLoop | None) -> ListOffsetsResult[Any]:
+    """The ``ListOffsetsResult`` over the C result: one future per requested
+    partition, the core's ``partitionResult(partition)``."""
     from confluent_kafka.admin.list_offsets_result import ListOffsetsResult
 
-    futures = per_key_futures(partitions, payload, _lib.ListOffsetsResult_drain,
-                              _listed_offset, kind, key_of=topic_partition_from_tuple)
+    futures = {partition: wrap(kind, loop, native.future(
+                   "partition_result", (partition.topic(), partition.partition()),
+                   _listed_offset))
+               for partition in partitions}
     return ListOffsetsResult._new(futures=futures, kind=kind)
-
-
-free_list_offsets = free_value_payload("ListOffsetsResult_drain")
-
-
-# ``DescribeClientQuotasRequest.MATCH_TYPE_EXACT`` / ``_DEFAULT`` / ``_SPECIFIED``.
-_MATCH_TYPE_EXACT = 0
-_MATCH_TYPE_DEFAULT = 1
-_MATCH_TYPE_SPECIFIED = 2
 
 
 def describe_client_quotas_args(quota_filter: ClientQuotaFilter,
@@ -2246,29 +2151,35 @@ def fence_producers_result(transactional_ids: Iterable[str], payload: Payload,
 free_fence_producers = free_value_payload("FenceProducersResult_drain")
 
 
-def list_config_resources_args(config_resource_types: Iterable[ConfigResource.Type],
-                               options: Any) -> tuple[Any, ...]:
-    """``Admin_list_config_resources_async(h, resource_types, timeout_ms, cb)``'s
-    arguments: each type's ``id()``; an empty set asks for every type."""
-    return ([resource_type.id() for resource_type in config_resource_types],
-            timeout_ms(options))
+def list_config_resources_args(config_resource_types: Iterable[ConfigResource.Type]
+                               ) -> tuple[Any, ...]:
+    """``Admin_list_config_resources(h, type_ids, options)``'s arguments: each type's
+    ``id()``; an empty set asks for every type."""
+    return ([resource_type.id() for resource_type in config_resource_types],)
 
 
-def _config_resources(drained: list[tuple[int, str]]) -> list[ConfigResource]:
-    return [config_resource_from_tuple(raw) for raw in drained]
+def _config_resources(rows: list[tuple[int, str]]) -> list[ConfigResource]:
+    return [config_resource_from_tuple(raw) for raw in rows]
 
 
-def list_config_resources_result(payload: Payload, kind: Kind) -> ListConfigResourcesResult[Any]:
-    """The ``ListConfigResourcesResult`` of a ``list_config_resources`` payload: its one
-    future."""
+def list_config_resources_result(native: Any, kind: Kind,
+                                 loop: asyncio.AbstractEventLoop | None
+                                 ) -> ListConfigResourcesResult[Any]:
+    """The ``ListConfigResourcesResult`` over the C result's ``all()`` future."""
     from confluent_kafka.admin.list_config_resources_result import ListConfigResourcesResult
 
-    future = single_future(payload, _lib.ListConfigResourcesResult_drain, _config_resources,
-                           kind)
+    future = wrap(kind, loop, native.future("all", None, _config_resources))
     return ListConfigResourcesResult._new(future=future, kind=kind)
 
 
-free_list_config_resources = free_value_payload("ListConfigResourcesResult_drain")
+def unregister_controller_result(native: Any, kind: Kind,
+                                 loop: asyncio.AbstractEventLoop | None
+                                 ) -> UnregisterControllerResult[Any]:
+    """The ``UnregisterControllerResult`` over the C result's ``all()`` future."""
+    from confluent_kafka.admin.unregister_controller_result import UnregisterControllerResult
+
+    return UnregisterControllerResult._new(future=wrap(kind, loop, native.future("all")),
+                                           kind=kind)
 
 
 def describe_classic_groups_args(group_ids: list[str], options: Any) -> tuple[Any, ...]:

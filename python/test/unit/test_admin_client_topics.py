@@ -40,6 +40,7 @@ import asyncio
 from collections.abc import Callable
 from typing import Any
 
+import _confluentkafka as _lib  # type: ignore[import-not-found]
 import pytest
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
@@ -463,6 +464,79 @@ def test_config_from_core_data() -> None:
         type=ConfigResource.Type.BROKER, name="1")
     assert _conversions.config_resource_from_tuple((99, "x")).type() is (
         ConfigResource.Type.UNKNOWN)
+
+
+#: ``new ConfigEntry(name, value)`` rows of a core ``Config`` (Admin__config_future).
+CORE_CONFIG = [("retention.ms", "4242"), ("cleanup.policy", None)]
+
+
+def _assert_core_config(config: Config) -> None:
+    """The entries of :data:`CORE_CONFIG` as Java's two-argument ``ConfigEntry``
+    holds them: source and type ``UNKNOWN``, no documentation, no synonyms."""
+    assert isinstance(config, Config)
+    assert sorted(entry.name() for entry in config.entries()) == [
+        "cleanup.policy", "retention.ms"]
+    entry = config.get(name="retention.ms")
+    assert entry is not None and entry.value() == "4242"
+    assert entry.source() is ConfigEntry.ConfigSource.UNKNOWN
+    assert entry.type() is ConfigEntry.ConfigType.UNKNOWN
+    assert entry.documentation() is None and entry.synonyms() == []
+    assert not entry.is_default() and not entry.is_sensitive() and not entry.is_read_only()
+    policy = config.get(name="cleanup.policy")
+    assert policy is not None and policy.value() is None
+
+
+class _ConfigNative:
+    """An extension ``AdminResult`` stand-in whose ``config`` / ``values`` futures
+    are completed core ``Config`` futures converted by the C converter the real
+    result's table names for that accessor (``Admin__config_future``); the other
+    futures are completed with ``None``."""
+
+    def __init__(self, result: str) -> None:
+        self._result = result
+
+    def futures(self, name: str, post: Any = None) -> dict[Any, Any]:
+        if self._result == "DescribeConfigsResult":
+            return {(2, "t"): _lib.Admin__config_future(self._result, name, CORE_CONFIG, post)}
+        return {"t": _lib.KafkaFuture.completed_future(None)}
+
+    def future(self, name: str, key: Any = None, post: Any = None) -> Any:
+        return _lib.Admin__config_future(self._result, name, CORE_CONFIG, post)
+
+
+@pytest.mark.parametrize("kind", [Sync, Async], ids=["sync", "async"])
+def test_create_topics_config_reads_the_rows_of_its_c_converter(kind: Any) -> None:
+    """``CreateTopicsResult.config(topic)`` through its real delivery: the converter
+    the C table gives the ``config`` accessor makes the rows its Python ``post``
+    reads (they once disagreed, five fields against nine, and every created topic's
+    ``config()`` failed with ``ValueError``)."""
+    async def read() -> Config:
+        result = _conversions.create_topics_result(
+            _ConfigNative("CreateTopicsResult"), kind, asyncio.get_running_loop())
+        config: Config = await result.config(topic="t").get(timeout=5)
+        return config
+
+    if kind is Sync:
+        result = _conversions.create_topics_result(_ConfigNative("CreateTopicsResult"), kind, None)
+        _assert_core_config(result.config(topic="t").get(timeout=5))
+    else:
+        _assert_core_config(asyncio.run(read()))
+
+
+def test_describe_configs_values_read_the_rows_of_their_c_converter() -> None:
+    """``DescribeConfigsResult.values()`` through its real delivery, as above."""
+    result = _conversions.describe_configs_result(
+        _ConfigNative("DescribeConfigsResult"), Sync, None)
+    resource = ConfigResource(type=ConfigResource.Type.TOPIC, name="t")
+    _assert_core_config(result.values()[resource].get(timeout=5))
+
+
+def test_config_future_hook_names_only_config_accessors() -> None:
+    """``Admin__config_future`` reads a Result table it knows, by accessor name."""
+    with pytest.raises(ValueError, match="ListTopicsResult has no Config accessor"):
+        _lib.Admin__config_future("ListTopicsResult", "names", [], None)
+    with pytest.raises(AttributeError, match="CreateTopicsResult has no accessor nope"):
+        _lib.Admin__config_future("CreateTopicsResult", "nope", [], None)
 
 
 def test_log_dirs_from_core_data() -> None:
