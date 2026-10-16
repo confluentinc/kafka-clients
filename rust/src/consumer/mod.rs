@@ -36,7 +36,7 @@ mod kafka_consumer;
 mod mock_consumer;
 mod offset_and_metadata;
 mod offset_and_timestamp;
-mod offset_commit_callback;
+pub mod offset_commit_callback;
 mod subscription_pattern;
 
 pub(crate) mod internals;

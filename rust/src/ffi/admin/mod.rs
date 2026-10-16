@@ -568,7 +568,7 @@ impl FutureCtx {
     /// A future resolving to a `String`, delivered as a `char *` owned by the
     /// future.
     pub(crate) fn string_future(&self, future: &KafkaFuture<String>) -> *mut kafka_common_KafkaFuture_t {
-        self.boxed(future.then_apply(|s| {
+        self.boxed(future.then_apply(|s: String| {
             // SAFETY: `into_c_string` returns an owned `char *` that `destroy_string_element`, its
             // paired destructor, frees exactly, and nothing else frees it. A C string has no
             // thread affinity: it may be freed from any thread and read from several at once.

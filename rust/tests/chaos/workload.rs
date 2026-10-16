@@ -42,7 +42,7 @@ use confluent_kafka::common::{Error, TopicPartition, Uuid};
 use confluent_kafka::consumer::{
     ConsumerHandle, ConsumerRebalanceListener, ConsumerRecord, OffsetAndMetadata, OffsetCommitCallback,
 };
-use confluent_kafka::producer::{Callback, Producer, ProducerRecord};
+use confluent_kafka::producer::{Callback, Producer, ProducerRecord, RecordMetadata};
 
 use super::common::backend_factory::{ConsumerBackendFactory, ProducerBackendFactory, RustNativeFactory};
 use super::verifier::{ConsumerOp, RebalanceCallback, Verifier, WorkloadEvent};
@@ -247,8 +247,8 @@ fn delivery_callback(
     topic_ids: TopicIds,
     producer_label: String,
     verifier: Arc<dyn Verifier>,
-) -> Callback {
-    Box::new(move |metadata, error| {
+) -> Box<dyn Callback> {
+    Box::new(move |metadata: Option<&RecordMetadata>, error: Option<&Error>| {
         // The client passes both metadata and an error on the pre-enqueue
         // failure path, so the error decides.
         let event = match (error, metadata) {
@@ -926,7 +926,7 @@ where
 #[cfg(test)]
 mod tests {
     use confluent_kafka::consumer::{Consumer, MockConsumer};
-    use confluent_kafka::producer::{MockProducer, RecordMetadata};
+    use confluent_kafka::producer::MockProducer;
 
     use super::*;
     use crate::common::callback_log::ProducerCallbackLog;
@@ -1303,7 +1303,7 @@ mod tests {
         verifier.note_expected_loss(ExpectedLossHint::DestroyedGeneration { id: old_id, deleted_at: Instant::now() });
 
         let meta = RecordMetadata::new(TopicPartition::new("t".to_string(), 3), 5, 0, 0, 8, 8);
-        callback(Some(&meta), None);
+        callback.on_completion(Some(&meta), None);
 
         let verdict = verifier.verdict(1);
         assert_eq!(verdict.unsettled_sends, 0, "the callback must settle the send: {verdict}");
@@ -1328,7 +1328,7 @@ mod tests {
         let callback = delivery_callback(4, "t".into(), ids, "p".into(), verifier.clone());
 
         let err = Error::timeout("Expiring 1 record(s) for t-0: 120000 ms has passed");
-        callback(None, Some(&err));
+        callback.on_completion(None, Some(&err));
 
         let verdict = verifier.verdict(0);
         assert_eq!(verdict.unsettled_sends, 0, "{verdict}");

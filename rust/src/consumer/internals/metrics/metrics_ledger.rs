@@ -114,7 +114,7 @@ impl MetricsLedger {
         &self,
         metric_name: MetricName,
         config: Option<Arc<MetricConfig>>,
-        metric_value_provider: MetricValueProvider,
+        metric_value_provider: Box<dyn MetricValueProvider>,
     ) {
         self.record_metric_name(&metric_name);
         self.metrics.add_metric_if_absent(metric_name, config, metric_value_provider);

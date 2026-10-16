@@ -1055,7 +1055,7 @@ mod tests {
         kafka_common_KafkaFuture_destroy, kafka_common_KafkaFuture_get, kafka_common_KafkaFuture_is_done,
         kafka_common_KafkaFuture_t,
     };
-    use crate::ffi::producer::callback::{kafka_producer_Callback_destroy, kafka_producer_Callback_new};
+    use crate::ffi::producer::callback::kafka_producer_Callback_new;
     use crate::ffi::producer::producer_record::{
         kafka_producer_ProducerRecord_destroy, kafka_producer_ProducerRecord_new, kafka_producer_ProducerRecord_value,
     };
@@ -1189,7 +1189,6 @@ mod tests {
             assert_eq!(c_str_to_string(kafka_common_Error_message(err)), "boom");
             kafka_common_Error_destroy(err);
 
-            kafka_producer_Callback_destroy(callback);
             kafka_producer_ProducerRecord_destroy(record);
             kafka_producer_MockProducer_destroy(mock);
             kafka_producer_MockProducer_destroy(std::ptr::null_mut());
@@ -1349,6 +1348,7 @@ mod tests {
 
                 // A record completing after the flush began registers after its mark: the flush
                 // runs its callback too, but does not wait for its report.
+                let callback = kafka_producer_Callback_new(&seen as *const Seen as *mut c_void, on_completion);
                 let second = kafka_producer_Producer_send_with_callback(view, record, callback, &raw mut err);
                 assert!(err.is_null());
                 assert_eq!(kafka_producer_MockProducer_complete_next(mock), 1);
@@ -1381,7 +1381,6 @@ mod tests {
                 kafka_common_KafkaFuture_destroy(second);
             });
             kafka_common_KafkaFuture_destroy(first);
-            kafka_producer_Callback_destroy(callback);
             kafka_producer_ProducerRecord_destroy(record);
             kafka_producer_MockProducer_destroy(mock);
         }
@@ -1406,7 +1405,6 @@ mod tests {
             assert!(err.is_null());
             assert_eq!(kafka_producer_Producer__execute_callbacks(view), 1);
             assert_eq!(kafka_common_KafkaFuture_is_done(future), 0);
-            kafka_producer_Callback_destroy(callback);
             kafka_producer_ProducerRecord_destroy(record);
 
             // Destroy completes the callback as if it had reported, so no future is left waiting.
@@ -1445,8 +1443,8 @@ mod tests {
     #[test]
     fn a_mock_flushes_and_closes_from_inside_a_delivery_callback() {
         let topic = CString::new("topic").unwrap();
-        // SAFETY: Test code: `err` is a valid slot pointing at null, `mock`, `record` and
-        // `callback` are live from their constructor to their single destroy below, `view` is used
+        // SAFETY: Test code: `err` is a valid slot pointing at null, `mock` and `record` are live
+        // from their constructor to their single destroy below, the send consumes `callback`, `view` is used
         // only before the mock is destroyed, and the future is destroyed once after its last use.
         unsafe {
             let mock = kafka_producer_MockProducer_with_auto_complete(1);
@@ -1460,7 +1458,6 @@ mod tests {
             assert_eq!(kafka_common_KafkaFuture_is_done(future), 1, "the callback reported");
             assert_eq!(kafka_producer_MockProducer_closed(mock), 1);
             kafka_common_KafkaFuture_destroy(future);
-            kafka_producer_Callback_destroy(callback);
             kafka_producer_ProducerRecord_destroy(record);
             kafka_producer_MockProducer_destroy(mock);
         }

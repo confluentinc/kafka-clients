@@ -506,7 +506,7 @@ mod tests {
             "kafka_common_resource_PatternType_code",
             "kafka_common_resource_ResourceType_code",
         ];
-        const EXPECTED: [(&str, &str); 72] = [
+        const EXPECTED: [(&str, &str); 71] = [
             ("kafka_admin_AlterConfigOp_OpType__enum", "kafka_admin_AlterConfigOp_OpType_SET"),
             (
                 "kafka_admin_ConfigEntry_ConfigSource__enum",
@@ -581,10 +581,6 @@ mod tests {
             (
                 "kafka_common_config_SslClientAuth__enum",
                 "kafka_common_config_SslClientAuth_REQUIRED",
-            ),
-            (
-                "kafka_common_metrics_MetricValueProvider__enum",
-                "kafka_common_metrics_MetricValueProvider_MEASURABLE",
             ),
             (
                 "kafka_common_metrics_Sensor_RecordingLevel__enum",

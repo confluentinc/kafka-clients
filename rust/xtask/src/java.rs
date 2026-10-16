@@ -130,8 +130,13 @@ pub struct JavaClass {
     pub is_test: bool,
     /// What it is declared as.
     pub kind: JavaKind,
+    /// Its access modifier, or the implicit one (`public` inside an
+    /// interface, else package-private).
+    pub visibility: Visibility,
     /// Whether it is declared `abstract`.
     pub is_abstract: bool,
+    /// Whether it is annotated `@FunctionalInterface`.
+    pub functional_interface: bool,
     /// The types it `extends` or `implements`, as written but without type
     /// arguments: `class A extends B<T> implements Outer.C` → `["B", "Outer.C"]`.
     pub supertypes: Vec<String>,
@@ -161,6 +166,8 @@ pub struct Overload {
     pub visibility: Visibility,
     /// Whether it is `static`.
     pub is_static: bool,
+    /// Whether it is a `default` method of an interface.
+    pub is_default: bool,
     /// The names of its parameters, in order.
     pub param_names: Vec<String>,
     /// Whether it returns its own class: a static one is a factory.
@@ -844,7 +851,9 @@ fn push_classes(package: &[String], source: &str, is_test: bool, out: &mut Vec<J
             deprecated: class.deprecated,
             is_test,
             kind: class.kind,
+            visibility: class.visibility,
             is_abstract: class.is_abstract,
+            functional_interface: class.functional_interface,
             supertypes: class.supertypes,
         });
     }
@@ -964,6 +973,7 @@ struct Scanned {
     deprecated: bool,
     kind: JavaKind,
     is_abstract: bool,
+    functional_interface: bool,
     supertypes: Vec<String>,
 }
 
@@ -974,6 +984,7 @@ struct Pending {
     keyword: String,
     access: Option<Visibility>,
     is_abstract: bool,
+    functional_interface: bool,
     supertypes: Vec<String>,
 }
 
@@ -1005,6 +1016,7 @@ impl Scanned {
                     deprecated: false,
                     visibility,
                     is_static,
+                    is_default: false,
                     param_names: Vec::new(),
                     returns_class: false,
                 });
@@ -1046,8 +1058,12 @@ fn scan(src: &str) -> Vec<Scanned> {
     let mut visibility: Option<Visibility> = None;
     // A `static` seen, waiting for the declaration it applies to.
     let mut is_static = false;
+    // A `default` seen, waiting for the interface method it applies to.
+    let mut is_default = false;
     // An `abstract` seen, waiting for the declaration it applies to.
     let mut is_abstract = false;
+    // A `@FunctionalInterface` seen, waiting for the declaration it annotates.
+    let mut functional = false;
     let mut i = 0;
     while i < toks.len() {
         let member_level = paren == 0 && stack.last().map_or(depth == 0, |o| depth == o.body);
@@ -1057,12 +1073,22 @@ fn scan(src: &str) -> Vec<Scanned> {
                 if member_level && name == "Deprecated" {
                     deprecated = true;
                 }
+                if member_level && name == "FunctionalInterface" {
+                    functional = true;
+                }
                 i = next;
                 continue;
             },
             Tok::Punct('{') => {
-                if let Some(Pending { name, deprecated: dep, keyword, access, is_abstract: abs, supertypes }) =
-                    pending.take()
+                if let Some(Pending {
+                    name,
+                    deprecated: dep,
+                    keyword,
+                    access,
+                    is_abstract: abs,
+                    functional_interface,
+                    supertypes,
+                }) = pending.take()
                 {
                     let parent = stack.last().map(|o| &out[o.idx]);
                     let mut path: Vec<String> = parent.map(|p| p.path.clone()).unwrap_or_default();
@@ -1089,6 +1115,7 @@ fn scan(src: &str) -> Vec<Scanned> {
                             _ => JavaKind::Class,
                         },
                         is_abstract: abs,
+                        functional_interface,
                         supertypes,
                     });
                     depth += 1;
@@ -1101,7 +1128,9 @@ fn scan(src: &str) -> Vec<Scanned> {
                     deprecated = false;
                     visibility = None;
                     is_static = false;
+                    is_default = false;
                     is_abstract = false;
+                    functional = false;
                 }
                 depth += 1;
             },
@@ -1113,13 +1142,17 @@ fn scan(src: &str) -> Vec<Scanned> {
                 deprecated = false;
                 visibility = None;
                 is_static = false;
+                is_default = false;
                 is_abstract = false;
+                functional = false;
             },
             Tok::Punct(';') if member_level => {
                 deprecated = false;
                 visibility = None;
                 is_static = false;
+                is_default = false;
                 is_abstract = false;
+                functional = false;
                 if let Some(o) = stack.last_mut() {
                     o.enum_constants = false;
                 }
@@ -1142,6 +1175,7 @@ fn scan(src: &str) -> Vec<Scanned> {
                         keyword: kw.clone(),
                         access: visibility.take(),
                         is_abstract: std::mem::take(&mut is_abstract),
+                        functional_interface: std::mem::take(&mut functional),
                         supertypes: supertypes(&toks, i + 2),
                     });
                     is_static = false;
@@ -1150,6 +1184,7 @@ fn scan(src: &str) -> Vec<Scanned> {
                 }
             },
             Tok::Ident(m) if member_level && m == "static" => is_static = true,
+            Tok::Ident(m) if member_level && m == "default" => is_default = true,
             Tok::Ident(m) if member_level && m == "abstract" => is_abstract = true,
             Tok::Ident(m) if member_level && matches!(m.as_str(), "public" | "protected" | "private") => {
                 visibility = Some(match m.as_str() {
@@ -1189,6 +1224,7 @@ fn scan(src: &str) -> Vec<Scanned> {
                             deprecated: std::mem::take(&mut deprecated),
                             visibility: visibility.take().unwrap_or(implicit),
                             is_static: std::mem::take(&mut is_static),
+                            is_default: std::mem::take(&mut is_default),
                             param_names,
                             returns_class,
                         });
@@ -1425,6 +1461,78 @@ mod tests {
         }
         let args: Vec<_> = command.get_args().collect();
         assert_eq!(args, ["-C", KAFKA_SUBMODULE]);
+    }
+
+    #[test]
+    fn scans_functional_interfaces_and_type_visibility() {
+        let src = r#"
+            package x;
+            @FunctionalInterface
+            public interface Callback { void onCompletion(RecordMetadata metadata, Exception exception); }
+            public abstract class KafkaFuture<T> {
+                @FunctionalInterface
+                public interface BaseFunction<A, B> { B apply(A a); }
+                @java.lang.FunctionalInterface interface Hidden { void run(); }
+                public interface Plain { void run(); }
+                @FunctionalInterface protected abstract void notAType();
+                private static class Impl { }
+            }
+            class After { }
+        "#;
+        let mut classes = Vec::new();
+        push_classes(&["clients".into(), "x".into()], src, false, &mut classes);
+        let find = |path: &[&str]| classes.iter().find(|c| c.path == path).unwrap();
+
+        let functional = |path: &[&str]| find(path).functional_interface;
+        assert!(functional(&["Callback"]));
+        assert!(functional(&["KafkaFuture", "BaseFunction"]));
+        assert!(functional(&["KafkaFuture", "Hidden"]));
+        assert!(!functional(&["KafkaFuture"]));
+        assert!(!functional(&["KafkaFuture", "Plain"]));
+        // An annotation on a method does not reach the next type.
+        assert!(!functional(&["KafkaFuture", "Impl"]));
+        assert!(!functional(&["After"]));
+
+        let visibility = |path: &[&str]| find(path).visibility;
+        assert_eq!(visibility(&["Callback"]), Visibility::Public);
+        assert_eq!(visibility(&["KafkaFuture", "BaseFunction"]), Visibility::Public);
+        assert_eq!(visibility(&["KafkaFuture", "Hidden"]), Visibility::Package);
+        assert_eq!(visibility(&["KafkaFuture", "Impl"]), Visibility::Private);
+        assert_eq!(visibility(&["After"]), Visibility::Package);
+    }
+
+    #[test]
+    fn scans_default_interface_methods() {
+        let src = r#"
+            package x;
+            public interface Deserializer<T> {
+                T deserialize(String topic, byte[] data);
+                default T deserialize(String topic, Headers headers, byte[] data) {
+                    switch (topic) { default: return deserialize(topic, data); }
+                }
+                @Deprecated default void close() { }
+                static Deserializer<String> string() { return null; }
+                void configure(Map<String, ?> configs);
+            }
+        "#;
+        let mut classes = Vec::new();
+        push_classes(&["clients".into(), "x".into()], src, false, &mut classes);
+        let defaults: Vec<(&str, usize, bool)> = classes[0]
+            .overloads
+            .iter()
+            .map(|o| (o.name.as_str(), o.params.len(), o.is_default))
+            .collect();
+        assert_eq!(
+            defaults,
+            [
+                ("deserialize", 2, false),
+                ("deserialize", 3, true),
+                ("close", 0, true),
+                ("string", 0, false),
+                // A `default:` label inside a method body does not reach the next member.
+                ("configure", 1, false),
+            ]
+        );
     }
 
     #[test]
@@ -1805,7 +1913,9 @@ mod tests {
             deprecated: false,
             is_test: false,
             kind: JavaKind::Class,
+            visibility: Visibility::Public,
             is_abstract: false,
+            functional_interface: false,
             supertypes: Vec::new(),
         };
         assert!(class.is_rust_name_of("send", "send", true));
@@ -1834,7 +1944,9 @@ mod tests {
             deprecated: false,
             is_test: false,
             kind: JavaKind::Class,
+            visibility: Visibility::Public,
             is_abstract: false,
+            functional_interface: false,
             supertypes: Vec::new(),
         };
         let oor = class(&["consumer"], "clients.consumer", "OffsetOutOfRangeException");

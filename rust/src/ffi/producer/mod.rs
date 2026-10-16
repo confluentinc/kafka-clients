@@ -229,7 +229,7 @@ use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::{
     block_on, box_future, box_report_future, kafka_common_KafkaFuture_t, map_future_handle,
 };
-use crate::ffi::producer::callback::{callback_registration, kafka_producer_Callback_t};
+use crate::ffi::producer::callback::{kafka_producer_Callback_t, take_callback};
 use crate::ffi::producer::producer_record::{GenericRecord, kafka_producer_ProducerRecord_t, producer_record_ref};
 use crate::ffi::producer::record_metadata::{box_record_metadata, kafka_producer_RecordMetadata_destroy};
 use crate::ffi::util::{GenericValue, box_list, c_str_to_string, kafka_List_t, kafka_Map_t, map_entries};
@@ -258,7 +258,7 @@ enum SubmitRequest {
     /// A `send_cb` to hand to the producer.
     Send {
         record: GenericRecord,
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
         /// The future `callback`'s report completes (see [`delivery_callback`]).
         completion: Option<KafkaFutureImpl<RecordMetadata>>,
         cb: kafka_producer_Producer_send_cb_t,
@@ -1517,7 +1517,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send(
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, `record` a live handle and
     // `out_err` a valid slot, and a null `callback` is allowed, which is what
     // `kafka_producer_Producer_send_with_callback`'s `# Safety` asks for.
-    unsafe { kafka_producer_Producer_send_with_callback(self_, record, std::ptr::null(), out_err) }
+    unsafe { kafka_producer_Producer_send_with_callback(self_, record, std::ptr::null_mut(), out_err) }
 }
 
 /// `Producer.send(ProducerRecord)`, completed through `cb` with the owned
@@ -1551,7 +1551,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_cb(
     // SAFETY: Per this function's `# Safety`, `self_` is a live view and `record` a live handle,
     // and a null `callback` is allowed, which is what
     // `kafka_producer_Producer_send_with_callback_cb`'s `# Safety` asks for.
-    unsafe { kafka_producer_Producer_send_with_callback_cb(self_, record, std::ptr::null(), cb, opaque) }
+    unsafe { kafka_producer_Producer_send_with_callback_cb(self_, record, std::ptr::null_mut(), cb, opaque) }
 }
 
 /// `Producer.send(ProducerRecord, Callback)`, blocking as
@@ -1581,14 +1581,14 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_cb(
 ///
 /// # Safety
 ///
-/// `self_` and `record` must be live handles, `callback` null or a live handle,
-/// `out_err` a valid slot pointing at null.
+/// `self_` and `record` must be live handles, `callback` null or a live handle
+/// (consumed), `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
     self_: *const kafka_producer_Producer_t,
     record: *const kafka_producer_ProducerRecord_t,
-    callback: *const kafka_producer_Callback_t,
+    callback: *mut kafka_producer_Callback_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
@@ -1635,7 +1635,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
 /// # Safety
 ///
 /// `self_` and `record` must be live handles, `callback` null or a live
-/// handle.
+/// handle (consumed).
 #[ffi_guard(on_panic = |err| {
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `completion_sink`
     // requires. The guard runs this only when the body did not return. Every path through the
@@ -1649,7 +1649,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
 pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback_cb(
     self_: *const kafka_producer_Producer_t,
     record: *const kafka_producer_ProducerRecord_t,
-    callback: *const kafka_producer_Callback_t,
+    callback: *mut kafka_producer_Callback_t,
     cb: kafka_producer_Producer_send_with_callback_cb_t,
     opaque: *mut c_void,
 ) {
@@ -1755,18 +1755,18 @@ unsafe fn complete_send_now(
 ///
 /// # Safety
 ///
-/// `callback` must be null or a live handle.
+/// `callback` must be null or a live handle, consumed here.
 unsafe fn delivery_callback(
     client: &Arc<Client>,
-    callback: *const kafka_producer_Callback_t,
-) -> Option<(Callback, KafkaFutureImpl<RecordMetadata>)> {
+    callback: *mut kafka_producer_Callback_t,
+) -> Option<(Box<dyn Callback>, KafkaFutureImpl<RecordMetadata>)> {
     if callback.is_null() {
         return None;
     }
     let completion = KafkaFutureImpl::new();
-    // SAFETY: Per this function's `# Safety`, `callback` is a live handle, since it is not null, as
-    // `callback_registration` requires; the registration is read only within this statement.
-    let callback = unsafe { callback_registration(callback) }.into_callback(
+    // SAFETY: Per this function's `# Safety`, `callback` is a live handle, since it is not null, which
+    // the caller does not use again, as `take_callback` requires.
+    let callback = unsafe { take_callback(callback) }.into_callback(
         Arc::clone(&client.queue),
         Arc::clone(&client.results),
         completion.clone(),
@@ -2337,7 +2337,7 @@ mod tests {
         kafka_common_KafkaFuture_destroy, kafka_common_KafkaFuture_get, kafka_common_KafkaFuture_get_cb,
         kafka_common_KafkaFuture_get_with_timeout, kafka_common_KafkaFuture_t,
     };
-    use crate::ffi::producer::callback::{kafka_producer_Callback_destroy, kafka_producer_Callback_new};
+    use crate::ffi::producer::callback::kafka_producer_Callback_new;
     use crate::ffi::producer::mock_producer::{
         kafka_producer_MockProducer__as_Producer, kafka_producer_MockProducer_closed,
         kafka_producer_MockProducer_destroy, kafka_producer_MockProducer_history, kafka_producer_MockProducer_t,
@@ -2633,13 +2633,14 @@ mod tests {
             let view = kafka_producer_MockProducer__as_Producer(mock);
             let record = kafka_producer_ProducerRecord_new(topic.as_ptr(), std::ptr::null());
             let mut err = std::ptr::null_mut();
-            let callback = kafka_producer_Callback_new(std::ptr::null_mut(), unreported);
             let future = Future(match with_callback {
-                true => kafka_producer_Producer_send_with_callback(view, record, callback, &mut err),
+                true => {
+                    let callback = kafka_producer_Callback_new(std::ptr::null_mut(), unreported);
+                    kafka_producer_Producer_send_with_callback(view, record, callback, &mut err)
+                },
                 false => kafka_producer_Producer_send(view, record, &mut err),
             });
             assert!(err.is_null());
-            kafka_producer_Callback_destroy(callback);
             let outcome = |error: *mut kafka_common_Error_t| {
                 assert!(!error.is_null(), "the record never completes");
                 // A non-null `error` is owned by the caller; freed once.

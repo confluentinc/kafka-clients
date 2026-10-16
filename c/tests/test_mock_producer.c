@@ -1245,7 +1245,6 @@ void test_callbacks_notify_fires_once_per_transition(void) {
         results[i].producer = f.producer;
         kafka_producer_Callback_t *callback = kafka_producer_Callback_new(&results[i], on_completion);
         ASSERT_OK(futures[i] = kafka_producer_Producer_send_with_callback(f.producer, record, callback, &err));
-        kafka_producer_Callback_destroy(callback);
         kafka_producer_ProducerRecord_destroy(record);
     }
     /* Nothing completed: no transition, nothing to run. */
@@ -2075,8 +2074,7 @@ void test_transaction_async_send_offsets_rejection_releases_guard(void) {
 // ---------------------------------------------------------------------------
 
 /* `send_with_callback` of one record whose completion lands in `result`; the
- * registration handle is destroyed right after the send (it is read during
- * the call). The caller owns the future, which completes once the callback
+ * send consumes the registration handle. The caller owns the future, which completes once the callback
  * reported. */
 static kafka_common_KafkaFuture_t *send_with_callback(const kafka_producer_Producer_t *producer,
                                                       const char *topic, int32_t partition,
@@ -2088,7 +2086,6 @@ static kafka_common_KafkaFuture_t *send_with_callback(const kafka_producer_Produ
     kafka_common_KafkaFuture_t *future = NULL;
     kafka_common_Error_t *err = NULL;
     future = kafka_producer_Producer_send_with_callback(producer, record, callback, &err);
-    kafka_producer_Callback_destroy(callback);
     kafka_producer_ProducerRecord_destroy(record);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(future);

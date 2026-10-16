@@ -70,6 +70,7 @@ fn rules(ctx: &Context) -> Vec<Box<dyn Rule>> {
     vec![
         Box::new(NoDataCarryingEnumVariants),
         Box::new(EnumTranslation::new(ctx)),
+        Box::new(FunctionalInterfaceTrait::new(ctx)),
         Box::new(NoPublicField),
         Box::new(NoFixedSizeArray),
         Box::new(JavaName::new(ctx)),
@@ -699,6 +700,295 @@ impl Rule for EnumTranslation {
             format!(
                 "no Java sources at `{}` (run `git submodule update --init kafka`)",
                 java::JAVA_MAIN_ROOT
+            )
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rule: check-functional-interface-trait
+// ---------------------------------------------------------------------------
+
+/// Checks that a public Java `@FunctionalInterface` is translated as a trait
+/// (CLAUDE.md §3, forward compatibility).
+///
+/// A functional interface has one abstract method today, but a minor Java
+/// release may add methods to it: `default` overloads of that method, as
+/// `Deserializer` gained in 2.1 and 3.6, or `default` helpers. A trait takes
+/// each as a default method, and the Rust name of an overload is derived as
+/// for any other method (CLAUDE.md §2). A closure type (`Box<dyn Fn ..>`, an
+/// `impl Fn` parameter), an enum or a struct has nowhere to put them, so the
+/// same Java change would break the Rust API.
+///
+/// Public: declared `public` (implicitly so inside an interface), and its
+/// top-level class may be public by CLAUDE.md §2 ([`audience_failures`]).
+/// Each such interface is a finding when:
+///   - a Rust item translating it (its class marker), of any visibility and
+///     outside the C FFI module, is not a trait: a type alias of a closure,
+///     an enum, a struct;
+///   - no Rust item translates it, yet a public Rust method translates
+///     a Java method taking it, so the interface was turned into a closure
+///     parameter. The Java method is the one the Rust method's
+///     `Class#method` marker names (an overload when the marker gives its
+///     parameters, else every overload of the name); it takes the interface
+///     when a parameter's type is the interface's simple name and the method
+///     is declared in the interface's package. The index records no imports,
+///     so a use from another package is not seen.
+///
+///   - the trait translating it lacks a factory: a public fn of the trait's
+///     module taking a function of the method's shape and returning
+///     `impl <Trait>` (CLAUDE.md §3). The abstract method's is `new`; each
+///     `default` overload of it gets `with_<params>`, named by the parameters
+///     it adds (CLAUDE.md §2). An interface declaring no abstract method uses
+///     the one it inherits from the first supertype the index resolves
+///     (`Gauge` from `MetricValueProvider`). A nested interface's factories
+///     live in the outer class's module, prefixed with its name
+///     (`kafka_future::BaseFunction_new`, CLAUDE.md §2).
+///
+/// Runs only when the `kafka` submodule and the Public list are present.
+struct FunctionalInterfaceTrait {
+    index: JavaIndex,
+    /// [`PUBLIC_AUDIENCE_LIST`].
+    public: BTreeSet<String>,
+    /// The dotted packages (below `org.apache.kafka`) carrying the
+    /// unsupported-API disclaimer.
+    unsupported: BTreeSet<String>,
+}
+
+impl FunctionalInterfaceTrait {
+    fn new(ctx: &Context) -> Self {
+        FunctionalInterfaceTrait {
+            index: (*ctx.java).clone(),
+            public: parse_public_list(&fs::read_to_string(PUBLIC_AUDIENCE_LIST).unwrap_or_default()),
+            unsupported: java::unsupported_packages_at_ref(java::AUDIENCE_REF).unwrap_or_default(),
+        }
+    }
+
+    /// Whether `class` is a public `@FunctionalInterface`.
+    fn is_public_functional(&self, class: &java::JavaClass) -> bool {
+        let top = format!("{}{}.{}", java::MARKER_PREFIX, class.package, class.path[0]);
+        class.functional_interface
+            && !class.is_test
+            && class.visibility == java::Visibility::Public
+            && audience_failures(&self.public, &self.unsupported, &top).is_empty()
+    }
+
+    /// Whether Java method `marker` (`Class#method`, or `Class#method(T1,T2)`)
+    /// takes `interface`, as the rule's docs define it.
+    fn takes(&self, marker: &str, interface: &java::JavaClass) -> bool {
+        let (Some(owner), Some(member)) = (self.index.resolve(marker), JavaIndex::marker_member(marker)) else {
+            return false;
+        };
+        owner.package == interface.package
+            && owner
+                .overloads
+                .iter()
+                .filter(|o| {
+                    if member.contains('(') {
+                        o.signature() == member
+                    } else {
+                        o.name == member
+                    }
+                })
+                .any(|o| o.params.iter().any(|p| p == interface.name()))
+    }
+
+    /// The interface declaring `class`'s functional method: `class` itself,
+    /// or the first supertype in the index that declares one (`Gauge`
+    /// inherits `MetricValueProvider.value`).
+    fn functional_owner<'a>(&'a self, class: &'a java::JavaClass) -> Option<&'a java::JavaClass> {
+        if class.overloads.iter().any(|o| !o.is_static && !o.is_default) {
+            return Some(class);
+        }
+        class.supertypes.iter().find_map(|s| {
+            let supertype = self.index.classes.iter().find(|c| {
+                let nested = c.path.join(".");
+                !c.is_test && ((c.package == class.package && nested == *s) || format!("{}.{nested}", c.package) == *s)
+            })?;
+            self.functional_owner(supertype)
+        })
+    }
+
+    /// The factories the module of the trait translating `interface` must
+    /// define, each with the Java method it stands for: `new` for the abstract
+    /// method, and `with_<params>` for each `default` overload of it, named by
+    /// the parameters it adds (CLAUDE.md §2), or by their types when it adds
+    /// none. A nested interface's carry its name as a prefix
+    /// (`BaseFunction_new`), as they live in the outer class's module.
+    fn expected_factories(&self, interface: &java::JavaClass) -> Vec<(String, String)> {
+        let prefix = if interface.path.len() > 1 {
+            format!("{}_", interface.name())
+        } else {
+            String::new()
+        };
+        let shown = |class: &java::JavaClass, member: String| {
+            format!("{}#{member}", class.marker().trim_start_matches(java::MARKER_PREFIX))
+        };
+        let owner = self.functional_owner(interface);
+        let functional = owner.and_then(|c| c.overloads.iter().find(|o| !o.is_static && !o.is_default));
+        let (Some(owner), Some(functional)) = (owner, functional) else {
+            let java = interface.marker().trim_start_matches(java::MARKER_PREFIX).to_string();
+            return vec![(format!("{prefix}new"), java)];
+        };
+        let mut out = vec![(format!("{prefix}new"), shown(owner, functional.signature()))];
+        for overload in owner
+            .overloads
+            .iter()
+            .filter(|o| !o.is_static && o.is_default && o.name == functional.name)
+        {
+            let mut added: Vec<String> = overload
+                .param_names
+                .iter()
+                .filter(|p| !functional.param_names.contains(p))
+                .map(|p| java::snake_case(p))
+                .collect();
+            if added.is_empty() {
+                added = overload
+                    .params
+                    .iter()
+                    .filter(|t| !functional.params.contains(t))
+                    .map(|t| java::snake_case(t))
+                    .collect();
+            }
+            let name = format!("{prefix}with_{}", added.join("_"));
+            if !out.iter().any(|(n, _)| *n == name) {
+                out.push((name, shown(owner, overload.signature())));
+            }
+        }
+        out
+    }
+}
+
+/// The public fns of `module` returning `impl <trait_name>[<..>]`.
+fn trait_factories(module: &Module, trait_name: &str) -> BTreeSet<String> {
+    module
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(f) if matches!(f.vis, syn::Visibility::Public(_)) => {
+                let syn::ReturnType::Type(_, ty) = &f.sig.output else {
+                    return None;
+                };
+                let syn::Type::ImplTrait(returned) = &**ty else {
+                    return None;
+                };
+                returned
+                    .bounds
+                    .iter()
+                    .any(|b| {
+                        matches!(b, syn::TypeParamBound::Trait(t)
+                            if t.path.segments.last().is_some_and(|s| s.ident == trait_name))
+                    })
+                    .then(|| f.sig.ident.to_string())
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+impl Rule for FunctionalInterfaceTrait {
+    fn name(&self) -> &'static str {
+        "check-functional-interface-trait"
+    }
+
+    fn check(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+        let items = public_items(krate);
+        // Every module-level item outside the C FFI module, with its file and kind.
+        let defs: Vec<(&Module, &'static str, String, Vec<syn::Attribute>)> = krate
+            .modules
+            .iter()
+            .filter(|(path, _)| path.first().is_none_or(|m| m != "ffi"))
+            .flat_map(|(_, module)| {
+                module.items.iter().filter_map(move |item| {
+                    let (name, attrs) = item_def(item)?;
+                    Some((module, item_kind(item), name, attrs))
+                })
+            })
+            .collect();
+        let mut checked = 0usize;
+        for interface in self.index.classes.iter().filter(|c| self.is_public_functional(c)) {
+            checked += 1;
+            let marker = interface.marker();
+            let shown = marker.trim_start_matches(java::MARKER_PREFIX);
+            let translations: Vec<_> = defs
+                .iter()
+                .filter(|(_, _, _, attrs)| {
+                    java_markers(attrs)
+                        .iter()
+                        .filter(|m| !m.contains('#'))
+                        .any(|m| self.index.resolve(m).is_some_and(|c| c.marker() == marker))
+                })
+                .collect();
+            for (module, kind, name, _) in &translations {
+                if *kind != "a trait" {
+                    findings.push(format!(
+                        "{}: `{name}` translates `{shown}`, a public `@FunctionalInterface`, as {kind}; it must be \
+                         a trait",
+                        module.file.display(),
+                    ));
+                    continue;
+                }
+                let present = trait_factories(module, name);
+                for (factory, java) in self.expected_factories(interface) {
+                    if !present.contains(&factory) {
+                        findings.push(format!(
+                            "{}: `{name}` translates `{shown}`, a public `@FunctionalInterface`, but its module has \
+                             no `pub fn {factory}(function) -> impl {name}` for `{java}`",
+                            module.file.display(),
+                        ));
+                    }
+                }
+            }
+            if !translations.is_empty() {
+                continue;
+            }
+            let taker = items.iter().find_map(|(file, item)| {
+                let method = java_markers(&item.attrs).into_iter().find(|m| self.takes(m, interface))?;
+                item.is_fn.then_some((file, item, method))
+            });
+            if let Some((file, item, method)) = taker {
+                let name = match &item.owner {
+                    Some(owner) => format!("{owner}::{}", item.name),
+                    None => item.name.clone(),
+                };
+                findings.push(format!(
+                    "{}: `{name}` translates `{}`, which takes `{shown}`, a public `@FunctionalInterface` that no \
+                     trait translates",
+                    file.display(),
+                    method.trim_start_matches(java::MARKER_PREFIX)
+                ));
+            }
+        }
+        checked
+    }
+
+    fn hint(&self) -> &'static str {
+        "   Translate the interface as a public trait marked with its class, its method a trait method, e.g.
+       #[doc(alias = \"org.apache.kafka.common.KafkaFuture$BaseFunction\")]
+       pub trait BaseFunction<A, B>: Send + Sync { fn apply(&self, a: A) -> B; }
+   and take it where Java does (`impl BaseFunction<A, B>`, or `Box<dyn ..>` when stored); a method
+   Java adds later becomes a default method. Its module defines a factory per function shape,
+   returning a private adapter that calls the function:
+       pub fn new<F: FnOnce(..) + Send + Sync>(function: F) -> impl Callback { .. }
+   `with_<params>` for each `default` overload of the method, and `<Inner>_new` in the outer
+   class's module for a nested interface (`kafka_future::BaseFunction_new`)."
+    }
+
+    fn skip_reason(&self) -> Option<String> {
+        if self.index.is_empty() {
+            return Some(format!(
+                "no Java sources at `{}` (run `git submodule update --init kafka`)",
+                java::JAVA_MAIN_ROOT
+            ));
+        }
+        if self.public.is_empty() {
+            return Some(format!("no Public list at `{PUBLIC_AUDIENCE_LIST}`"));
+        }
+        self.unsupported.is_empty().then(|| {
+            format!(
+                "no unsupported-API disclaimers at Kafka `{}`: the ref is not in the `kafka` submodule \
+                 (run `cargo xtask fetch-java-refs`)",
+                java::AUDIENCE_REF
             )
         })
     }
@@ -2032,22 +2322,9 @@ impl PublicAudience {
         PublicAudience { index, public, unsupported, cbindgen: PathBuf::from(CBINDGEN_TOML) }
     }
 
-    /// Why top-level Java class `fqn` (`org.apache.kafka.<package>.<Class>`)
-    /// may not be public, one reason per rule it fails; empty when it may.
+    /// Why top-level Java class `fqn` may not be public; see [`audience_failures`].
     fn audience_failures(&self, fqn: &str) -> Vec<String> {
-        let path = fqn.strip_prefix(java::MARKER_PREFIX).unwrap_or(fqn);
-        let (package, _) = path.rsplit_once('.').unwrap_or(("", path));
-        let mut reasons = Vec::new();
-        if package.split('.').any(|seg| seg.contains("internal")) {
-            reasons.push(format!("its package `{package}` is internal"));
-        }
-        if self.unsupported.contains(package) {
-            reasons.push(format!("its package `{package}` is not a supported Kafka API"));
-        }
-        if !self.public.contains(fqn) {
-            reasons.push(format!("it is not `@InterfaceAudience.Public` in Kafka {}", java::AUDIENCE_REF));
-        }
-        reasons
+        audience_failures(&self.public, &self.unsupported, fqn)
     }
 
     /// The Rust half: public items and the generated module. Each tag that lets
@@ -2305,6 +2582,26 @@ impl PublicAudience {
     }
 }
 
+/// Why top-level Java class `fqn` (`org.apache.kafka.<package>.<Class>`) may
+/// not be public by CLAUDE.md §2, one reason per rule it fails; empty when it
+/// may. `public` is the [`PUBLIC_AUDIENCE_LIST`], `unsupported` the dotted
+/// packages carrying the unsupported-API disclaimer.
+fn audience_failures(public: &BTreeSet<String>, unsupported: &BTreeSet<String>, fqn: &str) -> Vec<String> {
+    let path = fqn.strip_prefix(java::MARKER_PREFIX).unwrap_or(fqn);
+    let (package, _) = path.rsplit_once('.').unwrap_or(("", path));
+    let mut reasons = Vec::new();
+    if package.split('.').any(|seg| seg.contains("internal")) {
+        reasons.push(format!("its package `{package}` is internal"));
+    }
+    if unsupported.contains(package) {
+        reasons.push(format!("its package `{package}` is not a supported Kafka API"));
+    }
+    if !public.contains(fqn) {
+        reasons.push(format!("it is not `@InterfaceAudience.Public` in Kafka {}", java::AUDIENCE_REF));
+    }
+    reasons
+}
+
 /// The name a public item defines, and its attributes: a `pub` struct, enum,
 /// union, trait, type alias, fn, const or static, or an error macro's type
 /// (always `pub`).
@@ -2343,6 +2640,23 @@ fn item_def(item: &syn::Item) -> Option<(String, Vec<syn::Attribute>)> {
         _ => return None,
     };
     Some((ident.to_string(), attrs.clone()))
+}
+
+/// What `item` is declared as, with its article: `a struct`, `an enum`, `a
+/// trait`, `a type alias`, ... (an error macro's type is `an error type`).
+fn item_kind(item: &syn::Item) -> &'static str {
+    match item {
+        syn::Item::Struct(_) => "a struct",
+        syn::Item::Enum(_) => "an enum",
+        syn::Item::Union(_) => "a union",
+        syn::Item::Trait(_) => "a trait",
+        syn::Item::Type(_) => "a type alias",
+        syn::Item::Fn(_) => "a fn",
+        syn::Item::Const(_) => "a const",
+        syn::Item::Static(_) => "a static",
+        syn::Item::Macro(_) => "an error type",
+        _ => "an item",
+    }
 }
 
 /// The top-level class of a class marker: `…Outer$Nested` → `…Outer`.
@@ -3060,7 +3374,9 @@ mod tests {
             deprecated: false,
             is_test: false,
             kind: java::JavaKind::Class,
+            visibility: java::Visibility::Public,
             is_abstract: false,
+            functional_interface: false,
             supertypes: Vec::new(),
         }
     }
@@ -3844,7 +4160,9 @@ mod enum_translation_tests {
             deprecated: false,
             is_test: false,
             kind,
+            visibility: java::Visibility::Public,
             is_abstract,
+            functional_interface: false,
             supertypes: supertypes.iter().map(|s| s.to_string()).collect(),
         }
     }
@@ -3897,5 +4215,354 @@ mod enum_translation_tests {
         );
         // The six public enums with a class marker the index resolves.
         assert_eq!(checked, 6);
+    }
+}
+
+#[cfg(test)]
+mod functional_interface_trait_tests {
+    use super::*;
+
+    /// A crate exercising every outcome of `check-functional-interface-trait`.
+    const FIXTURE_LIB: &str = r#"
+        pub mod producer {
+            #[doc(alias = "org.apache.kafka.clients.producer.Callback")]
+            pub type Callback = Box<dyn FnOnce() + Send>;
+            #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer")]
+            pub struct KafkaProducer;
+            impl KafkaProducer {
+                #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#send")]
+                pub fn send(&self, callback: Callback) {}
+            }
+        }
+        pub mod consumer {
+            #[doc(alias = "org.apache.kafka.clients.consumer.OffsetCommitCallback")]
+            pub trait OffsetCommitCallback {}
+            pub fn new(function: fn()) -> impl OffsetCommitCallback {}
+        }
+        pub mod common {
+            #[doc(alias = "org.apache.kafka.common.KafkaFuture")]
+            pub struct KafkaFuture;
+            impl KafkaFuture {
+                #[doc(alias = "org.apache.kafka.common.KafkaFuture#thenApply")]
+                pub fn then_apply<F: Fn(u8) -> u8>(&self, function: F) {}
+                #[doc(alias = "org.apache.kafka.common.KafkaFuture#whenComplete(long)")]
+                pub fn when_complete_with_timeout(&self, timeout: i64) {}
+                #[doc(alias = "org.apache.kafka.common.KafkaFuture#hide")]
+                pub fn hide<F: Fn()>(&self, hidden: F) {}
+            }
+            #[doc(alias = "org.apache.kafka.common.Plain")]
+            pub type Plain = fn();
+            pub mod metrics {
+                mod metric_value_provider {
+                    #[doc(alias = "org.apache.kafka.common.metrics.MetricValueProvider")]
+                    pub enum MetricValueProvider { A }
+                }
+            }
+            pub mod utils {
+                #[doc(alias = "org.apache.kafka.common.utils.Utils$SwallowAction")]
+                pub type SwallowAction = fn();
+            }
+        }
+        mod ffi {
+            #[doc(alias = "org.apache.kafka.common.metrics.Gauge")]
+            pub struct kafka_common_metrics_Gauge_t;
+        }
+    "#;
+
+    fn overload(name: &str, params: &[&str]) -> java::Overload {
+        java::Overload {
+            name: name.to_string(),
+            params: params.iter().map(|s| s.to_string()).collect(),
+            deprecated: false,
+            visibility: java::Visibility::Public,
+            is_static: false,
+            is_default: false,
+            param_names: params.iter().map(|_| "p".to_string()).collect(),
+            returns_class: false,
+        }
+    }
+
+    fn class(package: &str, path: &[&str], functional: bool, overloads: Vec<java::Overload>) -> java::JavaClass {
+        java::JavaClass {
+            module: package.split('.').filter(|s| *s != "clients").map(str::to_string).collect(),
+            package: package.to_string(),
+            path: path.iter().map(|s| s.to_string()).collect(),
+            methods: overloads.iter().map(|o| o.name.clone()).collect(),
+            overloads,
+            fields: BTreeMap::new(),
+            field_visibility: BTreeMap::new(),
+            deprecated: false,
+            is_test: false,
+            kind: if functional {
+                java::JavaKind::Interface
+            } else {
+                java::JavaKind::Class
+            },
+            visibility: java::Visibility::Public,
+            is_abstract: false,
+            functional_interface: functional,
+            supertypes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_public_functional_interface_not_translated_as_a_trait_is_a_finding() {
+        let dir = std::env::temp_dir().join(format!("xtask-functional-interface-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lib.rs"), FIXTURE_LIB).unwrap();
+        let krate = Crate::load(&dir.join("lib.rs")).unwrap();
+        let mut hidden = class("common", &["KafkaFuture", "Hidden"], true, Vec::new());
+        hidden.visibility = java::Visibility::Package;
+        let mut plain = class("common", &["Plain"], false, Vec::new());
+        plain.kind = java::JavaKind::Interface;
+        let rule = FunctionalInterfaceTrait {
+            index: JavaIndex {
+                classes: vec![
+                    class("clients.producer", &["Callback"], true, Vec::new()),
+                    class(
+                        "clients.producer",
+                        &["KafkaProducer"],
+                        false,
+                        vec![overload("send", &["ProducerRecord", "Callback"])],
+                    ),
+                    class("clients.consumer", &["OffsetCommitCallback"], true, Vec::new()),
+                    class(
+                        "common",
+                        &["KafkaFuture"],
+                        false,
+                        vec![
+                            overload("thenApply", &["BaseFunction"]),
+                            overload("whenComplete", &["BiConsumer"]),
+                            overload("whenComplete", &["long"]),
+                            overload("hide", &["Hidden"]),
+                        ],
+                    ),
+                    class("common", &["KafkaFuture", "BaseFunction"], true, Vec::new()),
+                    // Taken only by the overload no Rust method translates.
+                    class("common", &["KafkaFuture", "BiConsumer"], true, Vec::new()),
+                    // Not `public`.
+                    hidden,
+                    // Not a functional interface.
+                    plain,
+                    class("common.metrics", &["MetricValueProvider"], true, Vec::new()),
+                    // Translated by the C FFI module only, and taken by nothing.
+                    class("common.metrics", &["Gauge"], true, Vec::new()),
+                    // `Utils` is not on the Public list.
+                    class("common.utils", &["Utils", "SwallowAction"], true, Vec::new()),
+                ],
+            },
+            public: [
+                "clients.producer.Callback",
+                "clients.producer.KafkaProducer",
+                "clients.consumer.OffsetCommitCallback",
+                "common.KafkaFuture",
+                "common.Plain",
+                "common.metrics.MetricValueProvider",
+                "common.metrics.Gauge",
+            ]
+            .iter()
+            .map(|c| format!("{}{c}", java::MARKER_PREFIX))
+            .collect(),
+            unsupported: BTreeSet::new(),
+        };
+        let mut findings = Vec::new();
+        let checked = rule.check(&krate, &mut findings);
+        fs::remove_dir_all(&dir).unwrap();
+        let file = dir.join("lib.rs").display().to_string();
+        assert_eq!(
+            findings,
+            [
+                format!(
+                    "{file}: `Callback` translates `clients.producer.Callback`, a public `@FunctionalInterface`, as a \
+                     type alias; it must be a trait"
+                ),
+                format!(
+                    "{file}: `KafkaFuture::then_apply` translates `common.KafkaFuture#thenApply`, which takes \
+                     `common.KafkaFuture$BaseFunction`, a public `@FunctionalInterface` that no trait translates"
+                ),
+                format!(
+                    "{file}: `MetricValueProvider` translates `common.metrics.MetricValueProvider`, a public \
+                     `@FunctionalInterface`, as an enum; it must be a trait"
+                ),
+            ]
+        );
+        // Callback, OffsetCommitCallback, BaseFunction, BiConsumer, MetricValueProvider and Gauge.
+        assert_eq!(checked, 6);
+    }
+
+    /// Traits for `check-functional-interface-trait`'s factory requirement.
+    const FACTORY_FIXTURE_LIB: &str = r#"
+        pub mod producer {
+            #[doc(alias = "org.apache.kafka.clients.producer.Callback")]
+            pub trait Callback {}
+        }
+        pub mod consumer {
+            #[doc(alias = "org.apache.kafka.clients.consumer.OffsetCommitCallback")]
+            pub trait OffsetCommitCallback {}
+            pub fn new<F: Fn()>(function: F) -> impl OffsetCommitCallback {}
+        }
+        pub mod common {
+            #[doc(alias = "org.apache.kafka.common.KafkaFuture")]
+            pub struct KafkaFuture;
+            #[doc(alias = "org.apache.kafka.common.KafkaFuture$BaseFunction")]
+            pub trait BaseFunction<A, B> {}
+            #[expect(non_snake_case)]
+            pub fn BaseFunction_new<F>(function: F) -> impl BaseFunction<u8, u8> {}
+            #[doc(alias = "org.apache.kafka.common.KafkaFuture$BiConsumer")]
+            pub trait BiConsumer<A, B> {}
+            pub fn new<F>(function: F) -> impl BiConsumer<u8, u8> {}
+            pub mod serialization {
+                #[doc(alias = "org.apache.kafka.common.serialization.Deserializer")]
+                pub trait Deserializer<T> {}
+                pub fn new<F>(function: F) -> impl Deserializer<u8> {}
+                fn with_headers<F>(function: F) -> impl Deserializer<u8> {}
+            }
+            pub mod metrics {
+                pub mod metric_value_provider {
+                    #[doc(alias = "org.apache.kafka.common.metrics.MetricValueProvider")]
+                    pub trait MetricValueProvider {}
+                    pub fn new<F>(function: F) -> impl MetricValueProvider {}
+                }
+                pub mod gauge {
+                    #[doc(alias = "org.apache.kafka.common.metrics.Gauge")]
+                    pub trait Gauge {}
+                    pub fn new<F>(function: F) -> Box<dyn Gauge> {}
+                }
+            }
+        }
+    "#;
+
+    fn method(name: &str, params: &[(&str, &str)], is_default: bool) -> java::Overload {
+        java::Overload {
+            params: params.iter().map(|(t, _)| t.to_string()).collect(),
+            param_names: params.iter().map(|(_, n)| n.to_string()).collect(),
+            is_default,
+            ..overload(name, &[])
+        }
+    }
+
+    #[test]
+    fn test_functional_interface_trait_without_its_factories_is_a_finding() {
+        let dir = std::env::temp_dir().join(format!("xtask-functional-factory-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lib.rs"), FACTORY_FIXTURE_LIB).unwrap();
+        let krate = Crate::load(&dir.join("lib.rs")).unwrap();
+        let mut static_deserialize = method("deserialize", &[("String", "topic")], false);
+        static_deserialize.is_static = true;
+        let mut gauge = class("common.metrics", &["Gauge"], true, Vec::new());
+        gauge.supertypes = vec!["MetricValueProvider".to_string()];
+        let rule = FunctionalInterfaceTrait {
+            index: JavaIndex {
+                classes: vec![
+                    class(
+                        "clients.producer",
+                        &["Callback"],
+                        true,
+                        vec![method(
+                            "onCompletion",
+                            &[("RecordMetadata", "metadata"), ("Exception", "exception")],
+                            false,
+                        )],
+                    ),
+                    class(
+                        "clients.consumer",
+                        &["OffsetCommitCallback"],
+                        true,
+                        vec![method(
+                            "onComplete",
+                            &[("Map", "offsets"), ("Exception", "exception")],
+                            false,
+                        )],
+                    ),
+                    class("common", &["KafkaFuture"], false, Vec::new()),
+                    class(
+                        "common",
+                        &["KafkaFuture", "BaseFunction"],
+                        true,
+                        vec![method("apply", &[("A", "a")], false)],
+                    ),
+                    class(
+                        "common",
+                        &["KafkaFuture", "BiConsumer"],
+                        true,
+                        vec![method("accept", &[("A", "a"), ("B", "b")], false)],
+                    ),
+                    class(
+                        "common.serialization",
+                        &["Deserializer"],
+                        true,
+                        vec![
+                            method("deserialize", &[("String", "topic"), ("byte[]", "data")], false),
+                            method(
+                                "deserialize",
+                                &[("String", "topic"), ("Headers", "headers"), ("byte[]", "data")],
+                                true,
+                            ),
+                            // The same added parameter: one factory serves both.
+                            method(
+                                "deserialize",
+                                &[("String", "topic"), ("Headers", "headers"), ("ByteBuffer", "data")],
+                                true,
+                            ),
+                            // A static or a default helper is no function shape.
+                            static_deserialize,
+                            method("close", &[], true),
+                        ],
+                    ),
+                    class(
+                        "common.metrics",
+                        &["MetricValueProvider"],
+                        true,
+                        vec![method("value", &[("MetricConfig", "config"), ("long", "now")], false)],
+                    ),
+                    gauge,
+                ],
+            },
+            public: [
+                "clients.producer.Callback",
+                "clients.consumer.OffsetCommitCallback",
+                "common.KafkaFuture",
+                "common.serialization.Deserializer",
+                "common.metrics.MetricValueProvider",
+                "common.metrics.Gauge",
+            ]
+            .iter()
+            .map(|c| format!("{}{c}", java::MARKER_PREFIX))
+            .collect(),
+            unsupported: BTreeSet::new(),
+        };
+        let mut findings = Vec::new();
+        let checked = rule.check(&krate, &mut findings);
+        fs::remove_dir_all(&dir).unwrap();
+        let file = dir.join("lib.rs").display().to_string();
+        assert_eq!(
+            findings,
+            [
+                format!(
+                    "{file}: `Callback` translates `clients.producer.Callback`, a public `@FunctionalInterface`, but \
+                     its module has no `pub fn new(function) -> impl Callback` for \
+                     `clients.producer.Callback#onCompletion(RecordMetadata,Exception)`"
+                ),
+                // A plain `new` does not serve a nested interface.
+                format!(
+                    "{file}: `BiConsumer` translates `common.KafkaFuture$BiConsumer`, a public \
+                     `@FunctionalInterface`, but its module has no `pub fn BiConsumer_new(function) -> impl \
+                     BiConsumer` for `common.KafkaFuture$BiConsumer#accept(A,B)`"
+                ),
+                // A private factory does not count.
+                format!(
+                    "{file}: `Deserializer` translates `common.serialization.Deserializer`, a public \
+                     `@FunctionalInterface`, but its module has no `pub fn with_headers(function) -> impl \
+                     Deserializer` for `common.serialization.Deserializer#deserialize(String,Headers,byte[])`"
+                ),
+                // Inherited from `MetricValueProvider`; a boxed return is not `impl Gauge`.
+                format!(
+                    "{file}: `Gauge` translates `common.metrics.Gauge`, a public `@FunctionalInterface`, but its \
+                     module has no `pub fn new(function) -> impl Gauge` for \
+                     `common.metrics.MetricValueProvider#value(MetricConfig,long)`"
+                ),
+            ]
+        );
+        assert_eq!(checked, 7);
     }
 }

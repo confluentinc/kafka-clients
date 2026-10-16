@@ -53,9 +53,11 @@ impl ElectLeadersResult {
     #[doc(alias = "org.apache.kafka.clients.admin.ElectLeadersResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         self.election_future
-            .then_apply(|topic_partitions| match topic_partitions.into_values().flatten().next() {
-                Some(error) => Err(error),
-                None => Ok(()),
+            .then_apply(|topic_partitions: HashMap<TopicPartition, Option<Error>>| {
+                match topic_partitions.into_values().flatten().next() {
+                    Some(error) => Err(error),
+                    None => Ok(()),
+                }
             })
     }
 }

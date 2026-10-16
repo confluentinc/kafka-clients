@@ -19,10 +19,10 @@ use crate::common::metrics::MetricConfig;
 
 /// A measurable quantity that can be registered as a metric.
 ///
-/// In Java this `extends MetricValueProvider<Double>` whose `value(...)`
-/// delegates to `measure(...)`; here the [`crate::common::metrics::MetricValueProvider`]
-/// enum performs that delegation, so a `Measurable` only needs to provide
-/// `measure`.
+/// In Java this `extends MetricValueProvider<Double>` whose default `value(...)`
+/// delegates to `measure(...)`; here a blanket impl makes every `Measurable` a
+/// [`crate::common::metrics::MetricValueProvider`] whose `value` is
+/// `measure`, so a `Measurable` only needs to provide `measure`.
 #[doc(alias = "org.apache.kafka.common.metrics.Measurable")]
 pub trait Measurable: Send + Sync {
     /// Measure this quantity and return the result as an `f64`.
@@ -48,10 +48,22 @@ pub trait Measurable: Send + Sync {
     }
 }
 
+/// A boxed measurable is a measurable, so `Box<dyn Measurable>` is a
+/// [`crate::common::metrics::MetricValueProvider`] too.
+impl<M: Measurable + ?Sized> Measurable for Box<M> {
+    fn measure(&self, config: &MetricConfig, now: i64) -> f64 {
+        (**self).measure(config, now)
+    }
+
+    fn type_name(&self) -> Option<&'static str> {
+        (**self).type_name()
+    }
+}
+
 /// A [`Measurable`] backed by a closure, mirroring Java's functional-interface
 /// usage of `Measurable` (e.g. `(config, now) -> TimeUnit.SECONDS.convert(...)`
 /// in `KafkaConsumerMetrics` / `HeartbeatMetricsManager`). The symmetric
-/// counterpart of [`crate::common::metrics::ClosureGauge`].
+/// counterpart of [`crate::common::metrics::gauge::new`].
 // a Measurable from a closure, standing in for a Java lambda
 #[doc(alias = "rust-only")]
 pub struct ClosureMeasurable<F>(F)
