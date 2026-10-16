@@ -14,10 +14,11 @@
 
 """Send-completion helpers shared by the producers (private).
 
-The C extension hands each record to the C API's non-blocking send
-(``kafka_producer_Producer_try_send_with_callback``, which queues the record
-on the core's submission task only when the producer cannot take it at once),
-or, for a sync producer's send() from any producer's delivery callback, to its
+The C extension hands each record to the C API's send
+(``kafka_producer_Producer_send_with_callback_cb``, which tries the producer
+on the calling thread and queues the record on the core's submission task only
+when the producer cannot take it at once), or, for a sync producer's send()
+from any producer's delivery callback, to its
 blocking send, with a delivery callback, which the producer's callback pump
 (``kafka_producer_Producer__execute_callbacks``)
 runs as ``on_completion(metadata, error, callback_id)``: the metadata's fields

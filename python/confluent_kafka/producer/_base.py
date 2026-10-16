@@ -17,7 +17,7 @@
 ``Producer`` / ``KafkaProducer`` and ``AsyncProducer`` / ``AsyncKafkaProducer``
 call the C FFI through the C extension (``_confluentkafka``). Every operation
 uses the C API's queued ``_cb`` form (CLAUDE.md §4, "Async variants of blocking
-methods"): a send is ``kafka_producer_Producer_try_send_with_callback``,
+methods"): a send is ``kafka_producer_Producer_send_with_callback_cb``,
 which hands the record to the producer on the calling thread when it can take
 it at once and otherwise queues it on the core's submission task, which gives a
 record it still cannot hand over a task of its own to wait on; a flush, close
@@ -34,8 +34,8 @@ where the user's callback runs (CLAUDE.md, Python Binding Conventions,
 Implementation over the FFI and Threads and callbacks).
 
 Backpressure is Java's: ``send()`` returns only once its record is with the
-producer, as Java's returns once ``doSend`` appended it. The producer's
-non-blocking ``try_send`` runs on the calling thread first and takes the
+producer, as Java's returns once ``doSend`` appended it. The C API's send
+runs the producer's ``try_send`` on the calling thread first and takes the
 record at once in the common case (its topic's metadata known, the buffer with
 room). Otherwise the record is queued for the submission task, which hands it
 to the producer on a task of its own, where the metadata wait and the wait for

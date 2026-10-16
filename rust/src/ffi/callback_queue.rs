@@ -249,8 +249,8 @@ impl CallbackQueue {
     /// The hook runs after the registration's lock is released: a hook that
     /// waits (the Python binding's takes the GIL) must not hold up a push by
     /// the thread it waits for, such as a delivery callback the core fires
-    /// inline in a non-blocking entry point
-    /// (`kafka_producer_Producer_try_send_with_callback`) that the binding
+    /// inline in an entry point that tries the producer on the calling thread
+    /// (`kafka_producer_Producer_send_with_callback_cb`) and that the binding
     /// calls with the GIL held. So two calls of the hook can overlap, when a
     /// drain runs between two pushes, and [`set_notify`](Self::set_notify)
     /// does not wait for a call in flight.

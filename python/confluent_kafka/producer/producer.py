@@ -136,7 +136,7 @@ class _Completion:
     thread, or the thread ``close()`` runs the callbacks still pending on), one
     at a time, with the GIL held; :meth:`resolve` runs there for a record that
     waited in the core, and on the sending thread, inside
-    ``Producer_try_send_cb``, for one the producer takes or refuses at once. It
+    ``Producer_send_cb``, for one the producer takes or refuses at once. It
     completes ``handed_over``, the internal future ``send()`` waits for, with
     the record's future, or with the error to rethrow. The delivery callback
     runs the user's callback before it completes the record's future, as in
@@ -184,7 +184,7 @@ class _Completion:
         Callback, before maybeAddPartition throws (KafkaProducer.java:1110-1120),
         so such a record completes with its batch; one rejected before the
         append never does. Runs on the sending thread, inside
-        Producer_try_send_cb, for a record the producer takes or refuses at
+        Producer_send_cb, for a record the producer takes or refuses at
         once, and on the pump for one that waited in the core for its topic's
         metadata or for buffer space."""
         if error:
@@ -496,7 +496,7 @@ class Producer(Generic[K, V], _ProducerState):
             # submission task only when the producer would have to wait for
             # it: cb.resolve runs inside the call for a record taken or refused
             # at once, on the completion thread otherwise.
-            raise_if_error(_lib.Producer_try_send_cb(c_producer, native, cb, cb.resolve))
+            raise_if_error(_lib.Producer_send_cb(c_producer, native, cb, cb.resolve))
         try:
             # A Ctrl+C is raised once the record is handed over.
             return result_sliced(handed_over)

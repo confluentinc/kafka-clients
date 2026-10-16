@@ -13,11 +13,11 @@
 # limitations under the License.
 
 """The send path of ``KafkaProducer`` and ``AsyncKafkaProducer`` around the
-answers of ``Producer_try_send_cb``, the C extension's non-blocking send, each
+answers of ``Producer_send_cb``, the C extension's send, each
 faked here without a broker (test/integration/test_kafka_producer_broker.py
 drives the same paths against one). The entry point's contract::
 
-    _lib.Producer_try_send_cb(handle, record, on_completion, resolve) -> owned_error_int
+    _lib.Producer_send_cb(handle, record, on_completion, resolve) -> owned_error_int
 
     taken at once     resolve(0) runs inside the call, on the calling thread;
                       on_completion runs later, from the completion thread
@@ -89,8 +89,8 @@ ACKNOWLEDGED: MetadataTuple = (TOPIC, 0, 7, 1234, 1, 1)
 Seen = list[tuple[int, bool, int, Exception | None]]
 
 
-class FakeTrySend:
-    """A fake of ``_lib.Producer_try_send_cb`` giving the answer the C extension
+class FakeSendCb:
+    """A fake of ``_lib.Producer_send_cb`` giving the answer the C extension
     gives for a record the producer takes at once, refuses at once (with
     ``refusal``, a class and a message), or queues, and for one the C API
     rejects (see the module docstring). ``calls`` keeps each record's
@@ -103,7 +103,7 @@ class FakeTrySend:
         self.refusal = refusal
         self.calls: list[dict[str, Any]] = []
         self.handles: list[int] = []
-        monkeypatch.setattr(_lib, "Producer_try_send_cb", self)
+        monkeypatch.setattr(_lib, "Producer_send_cb", self)
 
     def _error(self, cls: type, message: str) -> int:
         handle: int = _lib.KafkaError_new(cls._ffi_id, message)  # noqa: SLF001
@@ -166,7 +166,7 @@ def _producer_log(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
     return [r for r in caplog.records if r.name == "confluent_kafka.producer"]
 
 
-def _freed_once(freed: list[int], fake: FakeTrySend) -> bool:
+def _freed_once(freed: list[int], fake: FakeSendCb) -> bool:
     """Every error handle the fake made was freed, each exactly once."""
     return bool(fake.handles) and all(freed.count(handle) == 1 for handle in fake.handles)
 
@@ -182,10 +182,10 @@ def test_a_record_taken_at_once_is_returned_pending_and_completes_on_the_complet
     # Java's send() appends the record to its batch on the calling thread and
     # returns its future, which the I/O thread completes (KafkaProducer.java:
     # 1110-1111, Sender). The producer taking the record at once is the same
-    # shape: resolve(0) runs inside Producer_try_send_cb, send() returns the
+    # shape: resolve(0) runs inside Producer_send_cb, send() returns the
     # pending future, tracked for flush(), and the delivery callback runs on
     # the completion thread, before the future completes.
-    fake = FakeTrySend(monkeypatch, "taken")
+    fake = FakeSendCb(monkeypatch, "taken")
     seen: Seen = []
     returned: list[bool] = []
     p = KafkaProducer(configs=UNREACHABLE)
@@ -222,10 +222,10 @@ def test_a_record_refused_at_once_raises_inside_send_and_runs_no_callback(
     # closing metadata's KafkaException or the transaction manager's
     # IllegalStateException for a send outside a transaction, and the callback
     # does not run then (KafkaProducer.java:1143-1155). Refused as it is handed
-    # over, inside Producer_try_send_cb, the record leaves send() nothing to
+    # over, inside Producer_send_cb, the record leaves send() nothing to
     # wait for: send() raises inside the call, the future, which it does not
     # return, is not tracked for flush(), and nothing is logged.
-    fake = FakeTrySend(monkeypatch, "refused", refusal)
+    fake = FakeSendCb(monkeypatch, "refused", refusal)
     cls, message = refusal
     seen: Seen = []
     p = KafkaProducer(configs=configs)
@@ -252,7 +252,7 @@ def test_a_record_the_c_api_rejects_raises_and_calls_neither_callback(
         monkeypatch: pytest.MonkeyPatch, freed_errors: list[int]) -> None:
     # The C API's own refusal, before the record is queued or tried: the OWNED
     # error is returned, send() raises it, and neither callback runs.
-    fake = FakeTrySend(monkeypatch, "rejected")
+    fake = FakeSendCb(monkeypatch, "rejected")
     seen: Seen = []
     p = KafkaProducer(configs=UNREACHABLE)
     try:
@@ -276,7 +276,7 @@ async def test_an_async_record_taken_at_once_is_returned_pending_and_completes_o
         monkeypatch: pytest.MonkeyPatch, failed: bool) -> None:
     # As for KafkaProducer, with the callback run on the event loop (never on
     # the completion thread, which only hands the completion to the loop).
-    fake = FakeTrySend(monkeypatch, "taken")
+    fake = FakeSendCb(monkeypatch, "taken")
     seen: Seen = []
     returned: list[bool] = []
     p = AsyncKafkaProducer(configs=UNREACHABLE)
@@ -307,9 +307,9 @@ async def test_an_async_record_refused_at_once_raises_inside_send_without_a_hop_
         capfd: pytest.CaptureFixture[str], freed_errors: list[int],
         configs: dict[str, Any], refusal: tuple[type[Exception], str]) -> None:
     # As for KafkaProducer. The handover future is resolved on the loop
-    # directly, inside Producer_try_send_cb, and send() does not await a done
+    # directly, inside Producer_send_cb, and send() does not await a done
     # future: it raises before anything scheduled on the loop runs.
-    fake = FakeTrySend(monkeypatch, "refused", refusal)
+    fake = FakeSendCb(monkeypatch, "refused", refusal)
     cls, message = refusal
     seen: Seen = []
     hopped: list[int] = []
@@ -335,7 +335,7 @@ async def test_an_async_record_refused_at_once_raises_inside_send_without_a_hop_
 
 async def test_an_async_record_the_c_api_rejects_raises_and_calls_neither_callback(
         monkeypatch: pytest.MonkeyPatch, freed_errors: list[int]) -> None:
-    fake = FakeTrySend(monkeypatch, "rejected")
+    fake = FakeSendCb(monkeypatch, "rejected")
     seen: Seen = []
     p = AsyncKafkaProducer(configs=UNREACHABLE)
     try:
@@ -368,18 +368,17 @@ def _spied(monkeypatch: pytest.MonkeyPatch, name: str) -> list[int]:
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
-async def test_send_goes_through_the_non_blocking_entry_point_only(
+async def test_send_goes_through_producer_send_cb_only(
         monkeypatch: pytest.MonkeyPatch, asynchronous: bool) -> None:
-    # Both families send through Producer_try_send_cb; Producer_send_cb, the
-    # queued-only twin, serves the C binding and is never called from Python,
-    # and the blocking Producer_send only from a delivery callback (see
-    # test_producer_family.py, test_a_send_from_a_callback_calls_the_blocking_send).
+    # Both families send through Producer_send_cb, which tries the producer on
+    # the calling thread first; the blocking Producer_send is called only from
+    # a delivery callback (see test_producer_family.py,
+    # test_a_send_from_a_callback_calls_the_blocking_send).
     # Against an unreachable broker the record cannot be taken at once (its
     # topic's metadata is missing), so it is queued, and send() returns once
     # the core failed it after max.block.ms, as every other test here sees.
     send = _spied(monkeypatch, "Producer_send")
     send_cb = _spied(monkeypatch, "Producer_send_cb")
-    try_send_cb = _spied(monkeypatch, "Producer_try_send_cb")
     if asynchronous:
         ap = AsyncKafkaProducer(configs=UNREACHABLE)
         try:
@@ -390,4 +389,4 @@ async def test_send_goes_through_the_non_blocking_entry_point_only(
     else:
         with KafkaProducer(configs=UNREACHABLE) as p:
             assert type(p.send(record=RECORD).exception(timeout=30)) is KafkaTimeoutError
-    assert (len(send), len(send_cb), len(try_send_cb)) == (0, 0, 1)
+    assert (len(send), len(send_cb)) == (0, 1)

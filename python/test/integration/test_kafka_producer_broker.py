@@ -475,18 +475,18 @@ def test_async_commit_transaction_waits_for_an_async_def_callback(kafka_broker: 
 
 
 # ===========================================================================
-# The non-blocking send: a record taken on the calling thread, and a send
+# The send's fast path: a record taken on the calling thread, and a send
 # waiting on another thread
 # ===========================================================================
 
 
 def _handovers(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Where each record's handover completed, from the ``resolve`` of
-    ``Producer_try_send_cb``: ``"inline"`` inside the call, on the calling
+    ``Producer_send_cb``: ``"inline"`` inside the call, on the calling
     thread, for a record the producer took (or refused) at once; ``"queued"``
     later, from the callback pump, for one queued on the submission task."""
     handovers: list[str] = []
-    real = _lib.Producer_try_send_cb
+    real = _lib.Producer_send_cb
 
     def spy(c_producer: int, native: Any, on_completion: Any, resolve: Any) -> Any:
         caller = threading.get_ident()
@@ -501,7 +501,7 @@ def _handovers(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         finally:
             inside = False
 
-    monkeypatch.setattr(_lib, "Producer_try_send_cb", spy)
+    monkeypatch.setattr(_lib, "Producer_send_cb", spy)
     return handovers
 
 
@@ -597,13 +597,13 @@ def test_a_record_taken_at_once_is_not_held_behind_one_waiting_on_another_thread
     # for the partition on a task of its own, and its send() waits for that
     # handover; another thread's record, to a partition the producer can take
     # at once, is appended on that thread and reaches the broker while the
-    # first still waits (the C API's try_send tries the producer first,
+    # first still waits (the C API's send tries the producer first,
     # whatever the submission queue holds). Once the partition appears, the
     # first record is handed over and its send() returns.
     topic = _topic(kafka_broker)  # one partition
     handovers = _handovers(monkeypatch)
     tried = threading.Event()
-    spied = _lib.Producer_try_send_cb
+    spied = _lib.Producer_send_cb
 
     def signalling(*args: Any) -> Any:
         try:
@@ -611,7 +611,7 @@ def test_a_record_taken_at_once_is_not_held_behind_one_waiting_on_another_thread
         finally:
             tried.set()
 
-    monkeypatch.setattr(_lib, "Producer_try_send_cb", signalling)
+    monkeypatch.setattr(_lib, "Producer_send_cb", signalling)
     producer = KafkaProducer(configs={"bootstrap.servers": kafka_broker.external_bootstrap,
                                       "max.block.ms": 60000})
     try:

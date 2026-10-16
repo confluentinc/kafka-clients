@@ -647,12 +647,12 @@ def _fake_queued_send(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     passed are kept."""
     captured: dict[str, Any] = {}
 
-    def producer_try_send_cb(c_producer: int, native: Any, on_completion: Any, resolve: Any) -> int:
+    def producer_send_cb(c_producer: int, native: Any, on_completion: Any, resolve: Any) -> int:
         captured["on_completion"] = on_completion
         captured["resolve"] = resolve
         return 0
 
-    monkeypatch.setattr(_lib, "Producer_try_send_cb", producer_try_send_cb)
+    monkeypatch.setattr(_lib, "Producer_send_cb", producer_send_cb)
     return captured
 
 
@@ -1460,7 +1460,7 @@ def test_a_record_that_completes_before_send_tracks_it_is_not_kept(
     # can run on the C completion thread before send() tracks the future; then
     # send() finds the future done and does not keep it, so a later flush()
     # does not hold it for ever.
-    # Adapted to the branch C API: the send is Producer_try_send_cb, whose
+    # Adapted to the branch C API: the send is Producer_send_cb, whose
     # delivery callback takes (metadata, error, callback_id); 0 is success.
     # Updated for send() waiting for its handover: the record completes just
     # before it is handed over.
@@ -1469,7 +1469,7 @@ def test_a_record_that_completes_before_send_tracks_it_is_not_kept(
         resolve(0)
         return 0
 
-    monkeypatch.setattr(_lib, "Producer_try_send_cb", complete_at_once)
+    monkeypatch.setattr(_lib, "Producer_send_cb", complete_at_once)
     p = KafkaProducer(configs=UNREACHABLE)
     try:
         future = p.send(record=RECORD)
@@ -1492,7 +1492,7 @@ def test_the_completion_untracks_its_future_without_a_done_callback(
         resolve(0)  # handed over, its completion held
         return 0
 
-    monkeypatch.setattr(_lib, "Producer_try_send_cb", hold)
+    monkeypatch.setattr(_lib, "Producer_send_cb", hold)
     p = KafkaProducer(configs=UNREACHABLE)
     try:
         future = p.send(record=RECORD)
@@ -1515,7 +1515,7 @@ async def test_an_async_future_its_awaiter_cancelled_is_untracked_by_its_complet
         resolve(0)  # handed over, its completion held
         return 0
 
-    monkeypatch.setattr(_lib, "Producer_try_send_cb", hold)
+    monkeypatch.setattr(_lib, "Producer_send_cb", hold)
     p = AsyncKafkaProducer(configs=UNREACHABLE)
     try:
         future = await p.send(record=RECORD)
@@ -1550,7 +1550,7 @@ def _completing_send(monkeypatch: pytest.MonkeyPatch, seed: int) -> list[threadi
     thread would. Returns the completer threads, for the caller to join.
 
     Adapted to this branch's C API: the core never runs a delivery callback
-    inside ``Producer_try_send_cb`` (it queues it for the callback pump), and the
+    inside ``Producer_send_cb`` (it queues it for the callback pump), and the
     pump on an event loop runs a completion inline when nothing is queued
     before it there. So on a running loop the "at once" completion runs as
     that pump would, in a call the loop makes after send() returns.
@@ -1585,7 +1585,7 @@ def _completing_send(monkeypatch: pytest.MonkeyPatch, seed: int) -> list[threadi
             t.start()
         return 0
 
-    monkeypatch.setattr(_lib, "Producer_try_send_cb", producer_send)
+    monkeypatch.setattr(_lib, "Producer_send_cb", producer_send)
     return threads
 
 
@@ -1781,16 +1781,16 @@ def test_an_async_send_from_another_loop_is_refused_before_its_serializer() -> N
 
 
 def _count_submissions(monkeypatch: pytest.MonkeyPatch) -> list[int]:
-    """Count the calls of the real ``Producer_try_send_cb`` (one element each)."""
+    """Count the calls of the real ``Producer_send_cb`` (one element each)."""
     count: list[int] = []
-    real = _lib.Producer_try_send_cb
+    real = _lib.Producer_send_cb
 
     def send_cb(*args: Any) -> Any:
         result = real(*args)
         count.append(1)
         return result
 
-    monkeypatch.setattr(_lib, "Producer_try_send_cb", send_cb)
+    monkeypatch.setattr(_lib, "Producer_send_cb", send_cb)
     return count
 
 
@@ -2154,7 +2154,7 @@ def test_a_send_from_a_callback_calls_the_blocking_send(monkeypatch: pytest.Monk
 
         return entry
 
-    for name in ("Producer_send", "Producer_try_send_cb"):
+    for name in ("Producer_send", "Producer_send_cb"):
         monkeypatch.setattr(_lib, name, spy(name))
     p = KafkaProducer(configs=UNREACHABLE)
     errors: list[Exception | None] = []
@@ -2178,7 +2178,7 @@ def test_a_send_from_a_callback_calls_the_blocking_send(monkeypatch: pytest.Monk
         (g,) = inner
         for future in (f, g):
             assert isinstance(future.exception(timeout=30), KafkaTimeoutError)
-        assert entry_points == ["Producer_try_send_cb", "Producer_send"]
+        assert entry_points == ["Producer_send_cb", "Producer_send"]
         assert len(errors) == 2
         assert all(isinstance(e, KafkaTimeoutError) for e in errors)
     finally:
@@ -2205,7 +2205,7 @@ def test_sends_between_two_producers_callbacks_call_the_blocking_send(
 
         return entry
 
-    for name in ("Producer_send", "Producer_try_send_cb"):
+    for name in ("Producer_send", "Producer_send_cb"):
         monkeypatch.setattr(_lib, name, spy(name))
     a = KafkaProducer(configs=UNREACHABLE)
     b = KafkaProducer(configs=UNREACHABLE)
@@ -2234,7 +2234,7 @@ def test_sends_between_two_producers_callbacks_call_the_blocking_send(
         assert (len(outer), len(inner)) == (2, 2)
         for future in outer + inner:
             assert isinstance(future.exception(timeout=30), KafkaTimeoutError)
-        assert sorted(entry_points) == ["Producer_send"] * 2 + ["Producer_try_send_cb"] * 2
+        assert sorted(entry_points) == ["Producer_send"] * 2 + ["Producer_send_cb"] * 2
     finally:
         a.close(timeout=0)
         b.close(timeout=0)
@@ -2608,7 +2608,7 @@ def _run_without_memory(body: str) -> None:
 def test_send_without_memory_for_a_new_batch_raises_memory_error() -> None:
     # The first record of a fresh producer needs a new batch node. Its
     # allocation was unchecked, so a failure crashed on a NULL dereference.
-    # Updated for the branch C API: the send is Producer_try_send_cb, whose
+    # Updated for the branch C API: the send is Producer_send_cb, whose
     # first allocation is the context it hands the C API.
     _run_without_memory("""
 from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
@@ -2616,7 +2616,7 @@ p = KafkaProducer(configs=UNREACHABLE)
 record = p._native_parts(ProducerRecord(topic="t", value=b"v"))[0]
 resolve = lambda error: None
 refs = sys.getrefcount(record), sys.getrefcount(on_complete), sys.getrefcount(resolve)
-outcome = without_memory(_lib.Producer_try_send_cb, p._c_producer, record, on_complete, resolve)
+outcome = without_memory(_lib.Producer_send_cb, p._c_producer, record, on_complete, resolve)
 assert isinstance(outcome, MemoryError), outcome
 # Not queued: every reference taken for the queue was given back...
 assert (sys.getrefcount(record), sys.getrefcount(on_complete), sys.getrefcount(resolve)) == refs

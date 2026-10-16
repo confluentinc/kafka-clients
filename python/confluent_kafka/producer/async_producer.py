@@ -193,7 +193,7 @@ class _AsyncCompletion:
     the callback pump (the loop's thread, or a helper once the loop closed),
     which hands the completion to the producer's event loop (see
     AsyncProducer._deliver), once, and :meth:`resolve` at its handover, called
-    by the pump too, or on the loop's thread inside ``Producer_try_send_cb``
+    by the pump too, or on the loop's thread inside ``Producer_send_cb``
     for a record the producer takes or refuses at once, which completes
     ``handed_over``, the internal future ``send()`` awaits, with the record's
     future, or with the error to rethrow. One object rather than
@@ -557,7 +557,7 @@ class AsyncProducer(Generic[K, V], _ProducerState):
             # it: cb.resolve runs inside the call for a record taken or refused
             # at once (handed_over is then done before it is awaited), from the
             # pump otherwise.
-            raise_if_error(_lib.Producer_try_send_cb(c_producer, native, cb, cb.resolve))
+            raise_if_error(_lib.Producer_send_cb(c_producer, native, cb, cb.resolve))
         try:
             return await await_to_end(handed_over)
         finally:
