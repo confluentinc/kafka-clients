@@ -465,43 +465,35 @@ class AsyncAdmin(_AdminState):
         native = self._call(_lib.Admin_describe_cluster, options._setters_ran())
         return _conversions.describe_cluster_result(native, Async, self._binding.loop)
 
-    async def describe_acls(self, *, filter: AclBindingFilter,  # noqa: A002 - Java's name
-                            options: DescribeAclsOptions | None = None) -> DescribeAclsResult[Async]:
+    def describe_acls(self, *, filter: AclBindingFilter,  # noqa: A002 - Java's name
+                      options: DescribeAclsOptions | None = None) -> DescribeAclsResult[Async]:
         """See :meth:`Admin.describe_acls`; the result's future is an
-        ``asyncio.Future``."""
+        ``AsyncKafkaFuture``."""
         if options is None:
             options = DescribeAclsOptions()
-        args = _conversions.describe_acls_args(filter, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_describe_acls_async(c_admin, *args, cb),
-            _conversions.free_describe_acls)
-        return _conversions.describe_acls_result(payload, Async)
+        native = self._call(_lib.Admin_describe_acls, *_conversions.describe_acls_args(filter),
+                            options._setters_ran())
+        return _conversions.describe_acls_result(native, Async, self._binding.loop)
 
-    async def create_acls(self, *, acls: Iterable[AclBinding],
-                          options: CreateAclsOptions | None = None) -> CreateAclsResult[Async]:
+    def create_acls(self, *, acls: Iterable[AclBinding],
+                    options: CreateAclsOptions | None = None) -> CreateAclsResult[Async]:
         """See :meth:`Admin.create_acls`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         if options is None:
             options = CreateAclsOptions()
-        bindings = list(acls)
-        args = _conversions.create_acls_args(bindings, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_create_acls_async(c_admin, *args, cb),
-            _conversions.free_create_acls)
-        return _conversions.create_acls_result(bindings, payload, Async)
+        native = self._call(_lib.Admin_create_acls, *_conversions.create_acls_args(acls),
+                            options._setters_ran())
+        return _conversions.create_acls_result(native, Async, self._binding.loop)
 
-    async def delete_acls(self, *, filters: Iterable[AclBindingFilter],
-                          options: DeleteAclsOptions | None = None) -> DeleteAclsResult[Async]:
+    def delete_acls(self, *, filters: Iterable[AclBindingFilter],
+                    options: DeleteAclsOptions | None = None) -> DeleteAclsResult[Async]:
         """See :meth:`Admin.delete_acls`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         if options is None:
             options = DeleteAclsOptions()
-        acl_filters = list(filters)
-        args = _conversions.delete_acls_args(acl_filters, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_delete_acls_async(c_admin, *args, cb),
-            _conversions.free_delete_acls)
-        return _conversions.delete_acls_result(acl_filters, payload, Async)
+        native = self._call(_lib.Admin_delete_acls, *_conversions.delete_acls_args(filters),
+                            options._setters_ran())
+        return _conversions.delete_acls_result(native, Async, self._binding.loop)
 
     def describe_configs(self, *, resources: Iterable[ConfigResource],
                                options: DescribeConfigsOptions | None = None
@@ -596,56 +588,46 @@ class AsyncAdmin(_AdminState):
                             options._setters_ran())
         return _conversions.delete_records_result(native, Async, self._binding.loop)
 
-    async def create_delegation_token(self, *, options: CreateDelegationTokenOptions | None = None
-                                      ) -> CreateDelegationTokenResult[Async]:
+    def create_delegation_token(self, *, options: CreateDelegationTokenOptions | None = None
+                                ) -> CreateDelegationTokenResult[Async]:
         """See :meth:`Admin.create_delegation_token`; the result's future is an
-        ``asyncio.Future``."""
+        ``AsyncKafkaFuture``."""
         if options is None:
             options = CreateDelegationTokenOptions()
-        args = _conversions.create_delegation_token_args(options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_create_delegation_token_async(c_admin, *args, cb),
-            _conversions.free_create_delegation_token)
-        return _conversions.create_delegation_token_result(payload, Async)
+        native = self._call(_lib.Admin_create_delegation_token,
+                            _conversions.create_delegation_token_options(options))
+        return _conversions.create_delegation_token_result(native, Async, self._binding.loop)
 
-    async def renew_delegation_token(self, *, hmac: bytes,
-                                     options: RenewDelegationTokenOptions | None = None
-                                     ) -> RenewDelegationTokenResult[Async]:
+    def renew_delegation_token(self, *, hmac: bytes,
+                               options: RenewDelegationTokenOptions | None = None
+                               ) -> RenewDelegationTokenResult[Async]:
         """See :meth:`Admin.renew_delegation_token`; the result's future is an
-        ``asyncio.Future``."""
+        ``AsyncKafkaFuture``."""
         if options is None:
             options = RenewDelegationTokenOptions()
-        args = _conversions.renew_delegation_token_args(hmac, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_renew_delegation_token_async(c_admin, *args, cb),
-            _conversions.free_renew_delegation_token)
-        return _conversions.renew_delegation_token_result(payload, Async)
+        native = self._call(_lib.Admin_renew_delegation_token, hmac, options._setters_ran())
+        return _conversions.renew_delegation_token_result(native, Async, self._binding.loop)
 
-    async def expire_delegation_token(self, *, hmac: bytes,
-                                      options: ExpireDelegationTokenOptions | None = None
-                                      ) -> ExpireDelegationTokenResult[Async]:
+    def expire_delegation_token(self, *, hmac: bytes,
+                                options: ExpireDelegationTokenOptions | None = None
+                                ) -> ExpireDelegationTokenResult[Async]:
         """See :meth:`Admin.expire_delegation_token`; the result's future is an
-        ``asyncio.Future``."""
+        ``AsyncKafkaFuture``."""
         if options is None:
             options = ExpireDelegationTokenOptions()
-        args = _conversions.expire_delegation_token_args(hmac, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_expire_delegation_token_async(c_admin, *args, cb),
-            _conversions.free_expire_delegation_token)
-        return _conversions.expire_delegation_token_result(payload, Async)
+        native = self._call(_lib.Admin_expire_delegation_token, hmac, options._setters_ran())
+        return _conversions.expire_delegation_token_result(native, Async, self._binding.loop)
 
-    async def describe_delegation_token(self, *,
-                                        options: DescribeDelegationTokenOptions | None = None
-                                        ) -> DescribeDelegationTokenResult[Async]:
+    def describe_delegation_token(self, *,
+                                  options: DescribeDelegationTokenOptions | None = None
+                                  ) -> DescribeDelegationTokenResult[Async]:
         """See :meth:`Admin.describe_delegation_token`; the result's future is an
-        ``asyncio.Future``."""
+        ``AsyncKafkaFuture``."""
         if options is None:
             options = DescribeDelegationTokenOptions()
-        args = _conversions.describe_delegation_token_args(options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_describe_delegation_token_async(c_admin, *args, cb),
-            _conversions.free_describe_delegation_token)
-        return _conversions.describe_delegation_token_result(payload, Async)
+        native = self._call(_lib.Admin_describe_delegation_token,
+                            _conversions.describe_delegation_token_options(options))
+        return _conversions.describe_delegation_token_result(native, Async, self._binding.loop)
 
     async def describe_consumer_groups(self, *, group_ids: Iterable[str],
                                        options: DescribeConsumerGroupsOptions | None = None
@@ -816,61 +798,57 @@ class AsyncAdmin(_AdminState):
                             options._setters_ran())
         return _conversions.list_offsets_result(native, partitions, Async, self._binding.loop)
 
-    async def describe_client_quotas(self, *, filter: ClientQuotaFilter,  # noqa: A002 - Java's name
-                                     options: DescribeClientQuotasOptions | None = None
-                                     ) -> DescribeClientQuotasResult[Async]:
+    def describe_client_quotas(self, *, filter: ClientQuotaFilter,  # noqa: A002 - Java's name
+                               options: DescribeClientQuotasOptions | None = None
+                               ) -> DescribeClientQuotasResult[Async]:
         """See :meth:`Admin.describe_client_quotas`; the result's future is an
-        ``asyncio.Future``."""
+        ``AsyncKafkaFuture``."""
         if options is None:
             options = DescribeClientQuotasOptions()
-        args = _conversions.describe_client_quotas_args(filter, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_describe_client_quotas_async(c_admin, *args, cb),
-            _conversions.free_describe_client_quotas)
-        return _conversions.describe_client_quotas_result(payload, Async)
+        native = self._call(_lib.Admin_describe_client_quotas,
+                            *_conversions.describe_client_quotas_args(filter),
+                            options._setters_ran())
+        return _conversions.describe_client_quotas_result(native, Async, self._binding.loop)
 
-    async def alter_client_quotas(self, *, entries: Iterable[ClientQuotaAlteration],
-                                  options: AlterClientQuotasOptions | None = None
-                                  ) -> AlterClientQuotasResult[Async]:
+    def alter_client_quotas(self, *, entries: Iterable[ClientQuotaAlteration],
+                            options: AlterClientQuotasOptions | None = None
+                            ) -> AlterClientQuotasResult[Async]:
         """See :meth:`Admin.alter_client_quotas`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         if options is None:
             options = AlterClientQuotasOptions()
-        alterations = list(entries)
-        args = _conversions.alter_client_quotas_args(alterations, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_alter_client_quotas_async(c_admin, *args, cb),
-            _conversions.free_alter_client_quotas)
-        return _conversions.alter_client_quotas_result(alterations, payload, Async)
+        native = self._call(_lib.Admin_alter_client_quotas,
+                            *_conversions.alter_client_quotas_args(entries),
+                            options._setters_ran())
+        return _conversions.alter_client_quotas_result(native, Async, self._binding.loop)
 
     @overload
-    async def describe_user_scram_credentials(self, *, users: Sequence[str] | None = None
-                                              ) -> DescribeUserScramCredentialsResult[Async]: ...
+    def describe_user_scram_credentials(self, *, users: Sequence[str] | None = None
+                                        ) -> DescribeUserScramCredentialsResult[Async]: ...
     @overload
-    async def describe_user_scram_credentials(
+    def describe_user_scram_credentials(
             self, *, users: Sequence[str] | None,
             options: DescribeUserScramCredentialsOptions
     ) -> DescribeUserScramCredentialsResult[Async]: ...
 
     @java_forms(Form(), Form("users"), Form("users", "options"))
-    async def describe_user_scram_credentials(
+    def describe_user_scram_credentials(
             self, *, users: Sequence[str] | None = UNSET,
             options: DescribeUserScramCredentialsOptions | None = None
     ) -> DescribeUserScramCredentialsResult[Async]:
         """See :meth:`Admin.describe_user_scram_credentials`; the result's futures
-        are ``asyncio.Future``\\ s."""
-        if users is UNSET:
-            users = None
+        are ``AsyncKafkaFuture``\\ s."""
         if options is None:
             options = DescribeUserScramCredentialsOptions()
-        args = _conversions.describe_user_scram_credentials_args(users, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_describe_user_scram_credentials_async(
-                c_admin, *args, cb),
-            _conversions.free_describe_user_scram_credentials)
-        return _conversions.describe_user_scram_credentials_result(payload, Async)
+        if users is UNSET:
+            users = None
+        native = self._call(_lib.Admin_describe_user_scram_credentials,
+                            *_conversions.describe_user_scram_credentials_args(users),
+                            options._setters_ran())
+        return _conversions.describe_user_scram_credentials_result(
+            native, Async, self._binding.loop)
 
-    async def alter_user_scram_credentials(
+    def alter_user_scram_credentials(
             self, *, alterations: Sequence[UserScramCredentialAlteration],
             options: AlterUserScramCredentialsOptions | None = None
     ) -> AlterUserScramCredentialsResult[Async]:
@@ -878,39 +856,31 @@ class AsyncAdmin(_AdminState):
         ``AsyncKafkaFuture``\\ s."""
         if options is None:
             options = AlterUserScramCredentialsOptions()
-        rows = list(alterations)
-        args = _conversions.alter_user_scram_credentials_args(rows, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_alter_user_scram_credentials_async(
-                c_admin, *args, cb),
-            _conversions.free_alter_user_scram_credentials)
-        return _conversions.alter_user_scram_credentials_result(rows, payload, Async)
+        native = self._call(_lib.Admin_alter_user_scram_credentials,
+                            *_conversions.alter_user_scram_credentials_args(alterations),
+                            options._setters_ran())
+        return _conversions.alter_user_scram_credentials_result(native, Async, self._binding.loop)
 
-    async def describe_features(self, *, options: DescribeFeaturesOptions | None = None
-                                ) -> DescribeFeaturesResult[Async]:
+    def describe_features(self, *, options: DescribeFeaturesOptions | None = None
+                          ) -> DescribeFeaturesResult[Async]:
         """See :meth:`Admin.describe_features`; the result's future is an
-        ``asyncio.Future``."""
+        ``AsyncKafkaFuture``."""
         if options is None:
             options = DescribeFeaturesOptions()
-        args = _conversions.describe_features_args(options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_describe_features_async(c_admin, *args, cb),
-            _conversions.free_describe_features)
-        return _conversions.describe_features_result(payload, Async)
+        native = self._call(_lib.Admin_describe_features, options._setters_ran())
+        return _conversions.describe_features_result(native, Async, self._binding.loop)
 
-    async def update_features(self, *, feature_updates: Mapping[str, FeatureUpdate],
-                              options: UpdateFeaturesOptions | None = None
-                              ) -> UpdateFeaturesResult[Async]:
+    def update_features(self, *, feature_updates: Mapping[str, FeatureUpdate],
+                        options: UpdateFeaturesOptions | None = None
+                        ) -> UpdateFeaturesResult[Async]:
         """See :meth:`Admin.update_features`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         if options is None:
             options = UpdateFeaturesOptions()
-        updates = dict(feature_updates)
-        args = _conversions.update_features_args(updates, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_update_features_async(c_admin, *args, cb),
-            _conversions.free_update_features)
-        return _conversions.update_features_result(updates, payload, Async)
+        native = self._call(_lib.Admin_update_features,
+                            *_conversions.update_features_args(feature_updates),
+                            options._setters_ran())
+        return _conversions.update_features_result(native, Async, self._binding.loop)
 
     def unregister_controller(self, *, controller_id: int,
                               options: UnregisterControllerOptions | None = None
@@ -923,72 +893,62 @@ class AsyncAdmin(_AdminState):
                             options._setters_ran())
         return _conversions.unregister_controller_result(native, Async, self._binding.loop)
 
-    async def describe_producers(self, *, partitions: Iterable[TopicPartition],
-                                 options: DescribeProducersOptions | None = None
-                                 ) -> DescribeProducersResult[Async]:
+    def describe_producers(self, *, partitions: Iterable[TopicPartition],
+                           options: DescribeProducersOptions | None = None
+                           ) -> DescribeProducersResult[Async]:
         """See :meth:`Admin.describe_producers`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         if options is None:
             options = DescribeProducersOptions()
-        topic_partitions = list(partitions)
-        args = _conversions.describe_producers_args(topic_partitions, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_describe_producers_async(c_admin, *args, cb),
-            _conversions.free_describe_producers)
-        return _conversions.describe_producers_result(topic_partitions, payload, Async)
+        targets = list(partitions)
+        native = self._call(_lib.Admin_describe_producers,
+                            *_conversions.describe_producers_args(targets), options._setters_ran())
+        return _conversions.describe_producers_result(native, Async, self._binding.loop, targets)
 
-    async def describe_transactions(self, *, transactional_ids: Iterable[str],
-                                    options: DescribeTransactionsOptions | None = None
-                                    ) -> DescribeTransactionsResult[Async]:
+    def describe_transactions(self, *, transactional_ids: Iterable[str],
+                              options: DescribeTransactionsOptions | None = None
+                              ) -> DescribeTransactionsResult[Async]:
         """See :meth:`Admin.describe_transactions`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         if options is None:
             options = DescribeTransactionsOptions()
         ids = list(transactional_ids)
-        args = _conversions.describe_transactions_args(ids, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_describe_transactions_async(c_admin, *args, cb),
-            _conversions.free_describe_transactions)
-        return _conversions.describe_transactions_result(ids, payload, Async)
+        native = self._call(_lib.Admin_describe_transactions,
+                            *_conversions.describe_transactions_args(ids), options._setters_ran())
+        return _conversions.describe_transactions_result(native, Async, self._binding.loop, ids)
 
-    async def abort_transaction(self, *, spec: AbortTransactionSpec,
-                                options: AbortTransactionOptions | None = None
-                                ) -> AbortTransactionResult[Async]:
+    def abort_transaction(self, *, spec: AbortTransactionSpec,
+                          options: AbortTransactionOptions | None = None
+                          ) -> AbortTransactionResult[Async]:
         """See :meth:`Admin.abort_transaction`; the result's future is an
-        ``asyncio.Future``."""
+        ``AsyncKafkaFuture``."""
         if options is None:
             options = AbortTransactionOptions()
-        args = _conversions.abort_transaction_args(spec, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_abort_transaction_async(c_admin, *args, cb),
-            _conversions.free_abort_transaction)
-        return _conversions.abort_transaction_result(spec, payload, Async)
+        native = self._call(_lib.Admin_abort_transaction, *_conversions.abort_transaction_args(spec),
+                            options._setters_ran())
+        return _conversions.abort_transaction_result(native, Async, self._binding.loop, spec)
 
-    async def list_transactions(self, *, options: ListTransactionsOptions | None = None
-                                ) -> ListTransactionsResult[Async]:
+    def list_transactions(self, *, options: ListTransactionsOptions | None = None
+                          ) -> ListTransactionsResult[Async]:
         """See :meth:`Admin.list_transactions`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         if options is None:
             options = ListTransactionsOptions()
-        args = _conversions.list_transactions_args(options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_list_transactions_async(c_admin, *args, cb),
-            _conversions.free_list_transactions)
-        return _conversions.list_transactions_result(payload, Async)
+        native = self._call(_lib.Admin_list_transactions,
+                            _conversions.list_transactions_options(options))
+        return _conversions.list_transactions_result(native, Async, self._binding.loop)
 
-    async def fence_producers(self, *, transactional_ids: Iterable[str],
-                              options: FenceProducersOptions | None = None
-                              ) -> FenceProducersResult[Async]:
+    def fence_producers(self, *, transactional_ids: Iterable[str],
+                        options: FenceProducersOptions | None = None
+                        ) -> FenceProducersResult[Async]:
         """See :meth:`Admin.fence_producers`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         if options is None:
             options = FenceProducersOptions()
         ids = list(transactional_ids)
-        args = _conversions.fence_producers_args(ids, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_fence_producers_async(c_admin, *args, cb),
-            _conversions.free_fence_producers)
-        return _conversions.fence_producers_result(ids, payload, Async)
+        native = self._call(_lib.Admin_fence_producers, *_conversions.fence_producers_args(ids),
+                            options._setters_ran())
+        return _conversions.fence_producers_result(native, Async, self._binding.loop, ids)
 
     @overload
     def list_config_resources(self, *, config_resource_types: Iterable[ConfigResource.Type],
@@ -1028,16 +988,13 @@ class AsyncAdmin(_AdminState):
             _conversions.free_describe_classic_groups)
         return _conversions.describe_classic_groups_result(ids, payload, Async)
 
-    async def force_terminate_transaction(self, *, transactional_id: str,
-                                          options: TerminateTransactionOptions | None = None
-                                          ) -> TerminateTransactionResult[Async]:
+    def force_terminate_transaction(self, *, transactional_id: str,
+                                    options: TerminateTransactionOptions | None = None
+                                    ) -> TerminateTransactionResult[Async]:
         """See :meth:`Admin.force_terminate_transaction`; the result's future is an
-        ``asyncio.Future``."""
+        ``AsyncKafkaFuture``."""
         if options is None:
             options = TerminateTransactionOptions()
-        args = _conversions.force_terminate_transaction_args(transactional_id, options)
-        payload = await self._await_for(
-            lambda c_admin, cb: _lib.Admin_force_terminate_transaction_async(
-                c_admin, *args, cb),
-            _conversions.free_force_terminate_transaction)
-        return _conversions.force_terminate_transaction_result(payload, Async)
+        native = self._call(_lib.Admin_force_terminate_transaction, transactional_id,
+                            options._setters_ran())
+        return _conversions.force_terminate_transaction_result(native, Async, self._binding.loop)

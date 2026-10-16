@@ -16,7 +16,7 @@
 transaction RPCs (``describe_acls`` … ``force_terminate_transaction``), sync and
 async, without a broker.
 
-``KafkaAdminClientTest.java`` (Apache Kafka 4.3.1): the tests of these RPCs that need
+``KafkaAdminClientTest.java`` (Apache Kafka 4.4.0): the tests of these RPCs that need
 no scripted broker are ``testUpdateFeaturesShouldFailRequestForEmptyUpdates``,
 ``testUpdateFeaturesShouldFailRequestForInvalidFeatureName`` and
 ``testUpdateFeaturesShouldFailRequestInClientWhenDowngradeFlagIsNotSetDuringDeletion``,
@@ -37,28 +37,22 @@ names in snake_case (``test_describe_acls``, …, ``test_fence_producers``;
 ``testUpdateFeaturesHandleNotControllerException``).
 
 Here, per RPC: keyword-only calls, the ``java_forms`` message of
-``describe_user_scram_credentials``, the options and arguments as they are handed to
-the extension, the call failing with Java's timeout message against an unreachable
-bootstrap, the closed check, and the results' value classes built from the drains'
-shapes (the success branch needs a broker).
+``describe_user_scram_credentials``, the plain arguments and options handed to the
+extension, the call returning its result at once (Java's RPCs do) and its futures
+failing later with Java's timeout message against an unreachable bootstrap, the closed
+check, and the results' value classes built from the plain values the futures'
+deliveries convert (the success branch needs a broker).
 """
 
 from __future__ import annotations
 
-import asyncio
-import os
-import signal
-import threading
 import time
 from collections.abc import Callable
-from pathlib import Path
-from types import FrameType
 from typing import Any
 
 import pytest
 
-import _confluentkafka as _lib  # type: ignore[import-not-found]
-from confluent_kafka import IllegalArgumentError, IllegalStateError
+from confluent_kafka import ExecutionError, IllegalArgumentError, IllegalStateError
 from confluent_kafka.admin import (
     AbortTransactionOptions,
     AbortTransactionSpec,
@@ -78,6 +72,7 @@ from confluent_kafka.admin import (
     DescribeProducersResult,
     DescribeTransactionsOptions,
     DescribeUserScramCredentialsOptions,
+    DescribeUserScramCredentialsResult,
     ExpireDelegationTokenOptions,
     FeatureUpdate,
     FenceProducersOptions,
@@ -95,8 +90,8 @@ from confluent_kafka.admin import (
     UserScramCredentialUpsertion,
 )
 from confluent_kafka.admin import _conversions
-from confluent_kafka.admin._futures import Async, Sync
-from confluent_kafka.admin._internals import _CoordinatorKey, _ProducerIdAndEpoch
+from confluent_kafka.admin._futures import Sync
+from confluent_kafka.admin._internals import _CoordinatorKey
 from confluent_kafka.common import (
     AccessControlEntry,
     AccessControlEntryFilter,
@@ -104,10 +99,12 @@ from confluent_kafka.common import (
     AclBindingFilter,
     AclOperation,
     AclPermissionType,
+    AsyncKafkaFuture,
     ClientQuotaAlteration,
     ClientQuotaEntity,
     ClientQuotaFilter,
     ClientQuotaFilterComponent,
+    KafkaFuture,
     KafkaPrincipal,
     PatternType,
     ResourcePattern,
@@ -119,13 +116,15 @@ from confluent_kafka.common.errors import (
     ClusterAuthorizationError,
     InvalidRequestError,
     ResourceNotFoundError,
-    UnknownServerError,
 )
 from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
+from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 
 UNREACHABLE = {"bootstrap.servers": "localhost:1"}
 CLOSED = "Cannot accept new calls when AdminClient is closing."
 SHORT = 300
+# How long a test waits for a future the client completes later.
+WAIT = 10.0
 
 
 def _timed_out(call: str) -> str:
@@ -148,11 +147,27 @@ UPGRADE = FeatureUpdate.UpgradeType.UPGRADE
 
 
 def _raw_error(cls: type[BaseException], message: str) -> tuple[Any, ...]:
-    """A per-key error in the drains' borrowed form (``borrowed_error_to_py``)."""
+    """A core error in the extension's borrowed form (``borrowed_error_to_py``)."""
     return (getattr(cls, "_ffi_id"), message, 0, 0, None, 1, None)
 
 
-# ---- each RPC: (name, sync call, its futures, Java's call name) ---------------
+def _cause(future: Any, timeout: float = WAIT) -> BaseException:
+    """``get()`` on a failed ``KafkaFuture``: Java's ``ExecutionException``, the
+    stored error as its cause."""
+    with pytest.raises(ExecutionError) as info:
+        future.get(timeout=timeout)
+    assert info.value.__cause__ is not None
+    return info.value.__cause__
+
+
+async def _async_cause(future: Any, timeout: float = WAIT) -> BaseException:
+    with pytest.raises(ExecutionError) as info:
+        await future.get(timeout=timeout)
+    assert info.value.__cause__ is not None
+    return info.value.__cause__
+
+
+# ---- each RPC: (name, call, its futures, Java's call name) --------------------
 
 Call = Callable[[Any], Any]
 
@@ -267,31 +282,33 @@ def admin() -> Any:
 def test_rpc_futures_fail_with_the_call_timeout(admin: Admin, name: str, call: Call,
                                                 futures: Callable[[Any], list[Any]],
                                                 java_call: str) -> None:
-    """Every future of the result is complete when the call returns, failed with
-    Java's message for a call that found no node (``Call`` / ``AdminApiDriver``)."""
-    for future in futures(call(admin)):
-        assert future.done()
-        with pytest.raises(KafkaTimeoutError) as info:
-            future.result()
-        assert str(info.value) == _timed_out(java_call)
+    """The call returns its result at once, as Java's does; every future of it is a
+    ``KafkaFuture`` that fails later with Java's message for a call that found no
+    node (``Call`` / ``AdminApiDriver``), raised by ``get()`` as the cause of an
+    ``ExecutionError``."""
+    started = time.monotonic()
+    result = call(admin)
+    assert time.monotonic() - started < SHORT / 1000
+    for future in futures(result):
+        assert isinstance(future, KafkaFuture)
+        cause = _cause(future)
+        assert type(cause) is KafkaTimeoutError
+        assert str(cause) == _timed_out(java_call)
 
 
 @pytest.mark.parametrize(("name", "call", "futures", "java_call"), RPCS, ids=IDS)
 async def test_async_rpc_futures_fail_with_the_call_timeout(
         name: str, call: Call, futures: Callable[[Any], list[Any]], java_call: str) -> None:
-    """The async peer: the same calls awaited; the futures are ``asyncio.Future``\\ s
-    of this loop, every one complete."""
+    """The async peer: the RPC is a plain ``def`` returning its result at once; the
+    futures are ``AsyncKafkaFuture``\\ s, awaited through ``get()``."""
     async_admin = AsyncAdmin.create(configs=UNREACHABLE)
     try:
-        result = await call(async_admin)
+        result = call(async_admin)
         for future in futures(result):
-            if not isinstance(future, asyncio.Future):
-                # by_broker_id()'s map holds the per-broker futures; the top one failed.
-                raise AssertionError(f"{name}: not an asyncio.Future: {future!r}")
-            assert future.done()
-            with pytest.raises(KafkaTimeoutError) as info:
-                await future
-            assert str(info.value) == _timed_out(java_call)
+            assert isinstance(future, AsyncKafkaFuture)
+            cause = await _async_cause(future)
+            assert type(cause) is KafkaTimeoutError
+            assert str(cause) == _timed_out(java_call)
     finally:
         await async_admin.close(timeout=0)
 
@@ -313,7 +330,7 @@ async def test_async_rpc_after_close_raises(name: str, call: Call, futures: Any,
     client = AsyncAdmin.create(configs=UNREACHABLE)
     await client.close()
     with pytest.raises(IllegalStateError) as info:
-        await call(client)
+        call(client)
     assert str(info.value) == CLOSED
 
 
@@ -353,7 +370,7 @@ async def test_async_positional_calls_raise_type_error(name: str,
     client = AsyncAdmin.create(configs=UNREACHABLE)
     try:
         with pytest.raises(TypeError):
-            await getattr(client, name)(*args)
+            getattr(client, name)(*args)
     finally:
         await client.close(timeout=0)
 
@@ -380,9 +397,9 @@ def test_describe_user_scram_credentials_forms() -> None:
                        client.describe_user_scram_credentials(users=["u"]),
                        client.describe_user_scram_credentials(users=None, options=options),
                        client.describe_user_scram_credentials(users=[], options=options)):
-            with pytest.raises(KafkaTimeoutError) as timed_out:
-                result.users().result()
-            assert str(timed_out.value) == SCRAM_TIMED_OUT
+            cause = _cause(result.users())
+            assert type(cause) is KafkaTimeoutError
+            assert str(cause) == SCRAM_TIMED_OUT
 
 
 async def test_async_describe_user_scram_credentials_forms() -> None:
@@ -390,22 +407,20 @@ async def test_async_describe_user_scram_credentials_forms() -> None:
     try:
         options = DescribeUserScramCredentialsOptions(timeout_ms=SHORT)
         with pytest.raises(IllegalArgumentError) as info:
-            await client.describe_user_scram_credentials(options=options)
+            client.describe_user_scram_credentials(options=options)
         assert str(info.value) == SCRAM_FORMS
-        result = await client.describe_user_scram_credentials(users=None, options=options)
-        with pytest.raises(KafkaTimeoutError):
-            await result.all()
+        result = client.describe_user_scram_credentials(users=None, options=options)
+        cause = await _async_cause(result.all())
+        assert type(cause) is KafkaTimeoutError
     finally:
         await client.close(timeout=0)
 
 
 def test_describe_user_scram_credentials_null_users_is_every_user() -> None:
-    """Java's ``null`` (``describeUserScramCredentials()``) and an empty list both
-    describe every user: the extension gets an empty list."""
-    options = DescribeUserScramCredentialsOptions(timeout_ms=5)
-    assert _conversions.describe_user_scram_credentials_args(None, options) == ([], 5)
-    assert _conversions.describe_user_scram_credentials_args(("a", "b"), options) == (
-        ["a", "b"], 5)
+    """Java's ``null`` (``describeUserScramCredentials()``) crosses as ``None`` (the C
+    API's ``NULL`` list: every user, as an empty list is)."""
+    assert _conversions.describe_user_scram_credentials_args(None) == (None,)
+    assert _conversions.describe_user_scram_credentials_args(("a", "b")) == (["a", "b"],)
 
 
 # ---- update_features: the core's argument check is raised, as Java throws ----
@@ -416,10 +431,10 @@ async def test_async_update_features_should_fail_request_for_empty_updates() -> 
     client = AsyncAdmin.create(configs=UNREACHABLE)
     try:
         with pytest.raises(IllegalArgumentError) as info:
-            await client.update_features(feature_updates={})
+            client.update_features(feature_updates={})
         assert str(info.value) == "Feature updates can not be null or empty."
         with pytest.raises(IllegalArgumentError) as info:
-            await client.update_features(feature_updates={
+            client.update_features(feature_updates={
                 "feature": FeatureUpdate(max_version_level=2, upgrade_type=UPGRADE),
                 "": FeatureUpdate(max_version_level=2, upgrade_type=UPGRADE)})
         assert str(info.value) == "Provided feature can not be empty."
@@ -444,10 +459,9 @@ def test_describe_acls_unknown_filter_fails_the_future(admin: Admin) -> None:
         pattern_filter=ResourcePatternFilter(resource_type=ResourceType.UNKNOWN, name=None,
                                              pattern_type=PatternType.ANY),
         entry_filter=AccessControlEntryFilter.ANY)
-    future = admin.describe_acls(filter=unknown).values()
-    with pytest.raises(InvalidRequestError) as info:
-        future.result()
-    assert str(info.value) == "The AclBindingFilter must not contain UNKNOWN elements."
+    cause = _cause(admin.describe_acls(filter=unknown).values())
+    assert type(cause) is InvalidRequestError
+    assert str(cause) == "The AclBindingFilter must not contain UNKNOWN elements."
 
 
 def test_alter_user_scram_credentials_call_failure_fails_every_user(admin: Admin) -> None:
@@ -469,50 +483,63 @@ def test_alter_user_scram_credentials_call_failure_fails_every_user(admin: Admin
     values = result.values()
     assert set(values) == {"user0", "user1", "user2"}
     for future in [*values.values(), result.all()]:
-        with pytest.raises(KafkaTimeoutError) as info:
-            future.result()
-        assert str(info.value) == _timed_out("alterUserScramCredentials")
+        cause = _cause(future)
+        assert type(cause) is KafkaTimeoutError
+        assert str(cause) == _timed_out("alterUserScramCredentials")
 
 
-# ---- the arguments handed to the extension -----------------------------------
+def test_fence_producers_unknown_id_raises(admin: Admin) -> None:
+    """Java's ``FenceProducersResult.producerId`` / ``epochId`` throw
+    ``IllegalArgumentException`` for an id not in the request."""
+    result = admin.fence_producers(transactional_ids=["x"],
+                                   options=FenceProducersOptions(timeout_ms=SHORT))
+    for accessor in (result.producer_id, result.epoch_id):
+        with pytest.raises(IllegalArgumentError) as info:
+            accessor(transactional_id="y")
+        assert str(info.value) == "TransactionalId `y` was not included in the request"
+
+
+# ---- the arguments and options handed to the extension ------------------------
 
 
 def test_acl_arguments() -> None:
     """``AclBinding`` / ``AclBindingFilter`` as the seven-tuple, enums as codes and a
-    filter's ``null`` strings ``None``; ``describe_acls`` takes it flat."""
+    filter's ``null`` strings ``None``."""
     binding = _binding("orders")
-    assert _conversions.create_acls_args([binding], CreateAclsOptions(timeout_ms=9)) == (
-        [(2, "orders", 3, "User:a", "*", 3, 3)], 9)
-    any_filter = AclBindingFilter.ANY
-    assert _conversions.delete_acls_args([any_filter], DeleteAclsOptions()) == (
-        [(1, None, 1, None, None, 1, 1)], -1)
-    assert _conversions.describe_acls_args(binding.to_filter(), DescribeAclsOptions()) == (
-        2, "orders", 3, "User:a", "*", 3, 3, -1)
+    assert _conversions.create_acls_args([binding]) == ([(2, "orders", 3, "User:a", "*", 3, 3)],)
+    assert _conversions.delete_acls_args([AclBindingFilter.ANY]) == (
+        [(1, None, 1, None, None, 1, 1)],)
+    assert _conversions.describe_acls_args(binding.to_filter()) == (
+        (2, "orders", 3, "User:a", "*", 3, 3),)
 
 
-def test_delegation_token_arguments() -> None:
-    """Every option field is sent with its Java starting value: no renewers,
-    no owner (two ``None``\\ s), ``-1`` lifetimes and periods; ``owners() != null`` is
-    the describe flag."""
+def test_delegation_token_options() -> None:
+    """Only the setters that ran cross, each with its value read back from the
+    options: the renewers and the owner as ``(principal_type, name)``, a ``None`` owner
+    as Java's ``null``; the owners of the describe options, ``None`` for Java's
+    ``null`` (every owner)."""
     renewer = KafkaPrincipal(principal_type="User", name="r")
     owner = KafkaPrincipal(principal_type="User", name="o")
-    assert _conversions.create_delegation_token_args(CreateDelegationTokenOptions()) == (
-        [], None, None, -1, -1)
-    assert _conversions.create_delegation_token_args(CreateDelegationTokenOptions(
-        timeout_ms=3, max_lifetime_ms=60000, renewers=[renewer], owner=owner)) == (
-        [("User", "r")], "User", "o", 60000, 3)
-    assert _conversions.renew_delegation_token_args(
-        b"h", RenewDelegationTokenOptions()) == (b"h", -1, -1)
-    assert _conversions.renew_delegation_token_args(
-        b"h", RenewDelegationTokenOptions(renew_time_period_ms=10)) == (b"h", 10, -1)
-    assert _conversions.expire_delegation_token_args(
-        b"h", ExpireDelegationTokenOptions(expiry_time_period_ms=0)) == (b"h", 0, -1)
-    assert _conversions.describe_delegation_token_args(
-        DescribeDelegationTokenOptions()) == (False, None, -1)
-    assert _conversions.describe_delegation_token_args(
-        DescribeDelegationTokenOptions(owners=[owner])) == (True, [("User", "o")], -1)
-    assert _conversions.describe_delegation_token_args(
-        DescribeDelegationTokenOptions(owners=[])) == (True, [], -1)
+    assert _conversions.create_delegation_token_options(CreateDelegationTokenOptions()) == []
+    options = (CreateDelegationTokenOptions(timeout_ms=3)
+               .renewers(renewers=iter([renewer])).owner(owner=owner)
+               .max_lifetime_ms(max_lifetime_ms=60000))
+    assert _conversions.create_delegation_token_options(options) == [
+        ("timeout_ms", 3), ("renewers", [("User", "r")]), ("owner", ("User", "o")),
+        ("max_lifetime_ms", 60000)]
+    assert _conversions.create_delegation_token_options(
+        CreateDelegationTokenOptions().owner(owner=None)) == [("owner", None)]
+    assert RenewDelegationTokenOptions().renew_time_period_ms(
+        renew_time_period_ms=10)._setters_ran() == [("renew_time_period_ms", 10)]
+    assert ExpireDelegationTokenOptions().expiry_time_period_ms(
+        expiry_time_period_ms=0)._setters_ran() == [("expiry_time_period_ms", 0)]
+    assert _conversions.describe_delegation_token_options(
+        DescribeDelegationTokenOptions()) == []
+    assert _conversions.describe_delegation_token_options(
+        DescribeDelegationTokenOptions().owners(owners=[owner])) == [
+        ("owners", [("User", "o")])]
+    assert _conversions.describe_delegation_token_options(
+        DescribeDelegationTokenOptions().owners(owners=None)) == [("owners", None)]
 
 
 def test_client_quota_arguments() -> None:
@@ -524,20 +551,18 @@ def test_client_quota_arguments() -> None:
         ClientQuotaFilterComponent.of_entity(entity_type="user", entity_name="u"),
         ClientQuotaFilterComponent.of_default_entity(entity_type="client-id"),
         ClientQuotaFilterComponent.of_entity_type(entity_type="ip")])
-    assert _conversions.describe_client_quotas_args(
-        quota_filter, DescribeClientQuotasOptions(timeout_ms=1)) == (
-        [("user", 0, "u"), ("client-id", 1, None), ("ip", 2, None)], True, 1)
+    assert _conversions.describe_client_quotas_args(quota_filter) == (
+        [("user", 0, "u"), ("client-id", 1, None), ("ip", 2, None)], True)
     alteration = ClientQuotaAlteration(entity=ENTITY, ops=[
         ClientQuotaAlteration.Op(key="a", value=2.5), ClientQuotaAlteration.Op(key="b",
                                                                                value=None)])
-    rows, timeout, validate_only = _conversions.alter_client_quotas_args(
-        [alteration], AlterClientQuotasOptions(validate_only=True))
-    assert (timeout, validate_only) == (-1, True)
+    (rows,) = _conversions.alter_client_quotas_args([alteration])
     [(pairs, ops)] = rows
     assert sorted(pairs, key=str) == sorted([("user", "u"), ("client-id", None)], key=str)
     assert ops == [("a", 2.5), ("b", None)]
-    assert _conversions.alter_client_quotas_args([], AlterClientQuotasOptions()) == (
-        [], -1, False)
+    assert _conversions.alter_client_quotas_args([]) == ([],)
+    assert AlterClientQuotasOptions(validate_only=True)._setters_ran() == [
+        ("validate_only", True)]
 
 
 def test_scram_alteration_rows() -> None:
@@ -552,9 +577,8 @@ def test_scram_alteration_rows() -> None:
     random_salt = UserScramCredentialUpsertion(
         user="r", credential_info=ScramCredentialInfo(mechanism=ScramMechanism.SCRAM_SHA_256,
                                                       iterations=8192), password="pw")
-    rows, timeout = _conversions.alter_user_scram_credentials_args(
-        [deletion, upsertion, random_salt], AlterUserScramCredentialsOptions(timeout_ms=4))
-    assert timeout == 4
+    (rows,) = _conversions.alter_user_scram_credentials_args(
+        [deletion, upsertion, random_salt])
     assert rows[0] == ("d", True, 2, 0, None, None)
     assert rows[1] == ("u", False, 1, 4096, b"pw", b"")
     assert rows[2][:5] == ("r", False, 1, 8192, b"pw")
@@ -562,63 +586,52 @@ def test_scram_alteration_rows() -> None:
 
 
 def test_feature_arguments() -> None:
-    """``OptionalInt nodeId()`` as a flag and an ``int``; each update as ``(feature,
-    max_version_level, upgrade_type code)``; ``validate_only`` starts ``False``."""
-    assert _conversions.describe_features_args(DescribeFeaturesOptions()) == (False, 0, -1)
-    assert _conversions.describe_features_args(DescribeFeaturesOptions(node_id=3)) == (
-        True, 3, -1)
+    """Each update as ``(feature, max_version_level, upgrade_type code)``; the
+    ``nodeId`` and ``validate_only`` setters cross only when they ran."""
     downgrade = FeatureUpdate(max_version_level=0,
                               upgrade_type=FeatureUpdate.UpgradeType.SAFE_DOWNGRADE)
     assert _conversions.update_features_args(
-        {"f": FeatureUpdate(max_version_level=2, upgrade_type=UPGRADE), "g": downgrade},
-        UpdateFeaturesOptions()) == ([("f", 2, 1), ("g", 0, 2)], -1, False)
-    assert _conversions.update_features_args({}, UpdateFeaturesOptions(
-        validate_only=True, timeout_ms=7)) == ([], 7, True)
+        {"f": FeatureUpdate(max_version_level=2, upgrade_type=UPGRADE), "g": downgrade}) == (
+        [("f", 2, 1), ("g", 0, 2)],)
+    assert _conversions.update_features_args({}) == ([],)
+    assert DescribeFeaturesOptions()._setters_ran() == []
+    assert DescribeFeaturesOptions().node_id(node_id=3)._setters_ran() == [("node_id", 3)]
+    assert UpdateFeaturesOptions(validate_only=True, timeout_ms=7)._setters_ran() == [
+        ("timeout_ms", 7), ("validate_only", True)]
 
 
 def test_producer_and_transaction_arguments() -> None:
-    """Partitions as ``(topic, partition)``, ``brokerId()`` as a flag and an
-    ``int``; the spec's fields flat; the listing filters as names, ids, the
-    duration and a ``None`` pattern for Java's ``null``."""
-    assert _conversions.describe_producers_args([TP], DescribeProducersOptions()) == (
-        [("t", 0)], False, 0, -1)
-    assert _conversions.describe_producers_args([TP], DescribeProducersOptions(
-        broker_id=5)) == ([("t", 0)], True, 5, -1)
-    assert _conversions.describe_transactions_args(
-        ("a", "b"), DescribeTransactionsOptions()) == (["a", "b"], -1)
-    assert _conversions.abort_transaction_args(SPEC, AbortTransactionOptions()) == (
-        "t", 0, 7, 1, 2, -1)
-    assert _conversions.list_transactions_args(ListTransactionsOptions()) == (
-        [], [], -1, None, -1)
+    """Distinct partitions as ``(topic, partition)``; distinct ids; the spec's fields
+    as one tuple; the listing filters as state names and producer ids read back from
+    the options (a one-shot iterable given to a setter is not read twice)."""
+    assert _conversions.describe_producers_args([TP, TP]) == ([("t", 0)],)
+    assert DescribeProducersOptions().broker_id(broker_id=5)._setters_ran() == [
+        ("broker_id", 5)]
+    assert _conversions.describe_transactions_args(("a", "b", "a")) == (["a", "b"],)
+    assert _conversions.abort_transaction_args(SPEC) == (("t", 0, 7, 1, 2),)
+    assert _conversions.list_transactions_options(ListTransactionsOptions()) == []
     options = (ListTransactionsOptions(timeout_ms=1)
-               .filter_states(states=[TransactionState.ONGOING])
-               .filter_producer_ids(producer_id_filters=[9])
+               .filter_states(states=(s for s in [TransactionState.ONGOING]))
+               .filter_producer_ids(producer_id_filters=iter([9]))
                .filter_on_duration(duration_ms=100)
                .filter_on_transactional_id_pattern(pattern="tx-.*"))
-    assert _conversions.list_transactions_args(options) == (
-        ["Ongoing"], [9], 100, "tx-.*", 1)
-    assert _conversions.fence_producers_args(["x"], FenceProducersOptions()) == (["x"], -1)
-    assert _conversions.force_terminate_transaction_args(
-        "x", TerminateTransactionOptions(timeout_ms=2)) == ("x", 2)
+    assert _conversions.list_transactions_options(options) == [
+        ("timeout_ms", 1), ("filter_states", ["Ongoing"]), ("filter_producer_ids", [9]),
+        ("filter_on_duration", 100), ("filter_on_transactional_id_pattern", "tx-.*")]
+    assert _conversions.fence_producers_args(["x", "x"]) == (["x"],)
 
 
-def test_negative_timeout_is_sent_as_zero() -> None:
-    """Java's ``calcDeadlineMs`` takes ``Math.max(0, timeoutMs)`` (decision log 56)."""
-    assert _conversions.fence_producers_args(
-        ["x"], FenceProducersOptions(timeout_ms=-5)) == (["x"], 0)
+# ---- the result values, from the plain values the deliveries convert ----------
 
 
-# ---- the result values, from the drains' shapes -------------------------------
-
-
-def test_acl_values_from_the_drains() -> None:
+def test_acl_values() -> None:
     raw = (2, "orders", 3, "User:a", "*", 3, 3)
     assert _conversions._to_acl_binding(raw) == _binding("orders")
+    assert _conversions._acl_bindings([raw]) == [_binding("orders")]
     assert _conversions._to_acl_binding_filter(
         (1, None, 1, None, None, 1, 1)) == AclBindingFilter.ANY
-    error, results = _conversions._filter_results(
-        (None, [(None, raw), (_raw_error(ClusterAuthorizationError, "denied"), None)]))
-    assert error is None
+    results = _conversions._filter_results(
+        [(None, raw), (_raw_error(ClusterAuthorizationError, "denied"), None)])
     assert isinstance(results, DeleteAclsResult.FilterResults)
     first, second = results.values()
     assert first.binding() == _binding("orders") and first.exception() is None
@@ -626,41 +639,12 @@ def test_acl_values_from_the_drains() -> None:
     assert isinstance(second.exception(), ClusterAuthorizationError)
     assert str(second.exception()) == "denied"
     # A matched ACL's error that is no ApiError fails the filter (decision log 53).
-    error, results = _conversions._filter_results(
-        (None, [((-1, "core", 0, 0, None, 0, None), None)]))
-    assert results is None and str(error) == "core"
+    with pytest.raises(Exception) as info:
+        _conversions._filter_results([((-1, "core", 0, 0, None, 0, None), None)])
+    assert str(info.value) == "core"
 
 
-def test_delete_acls_drain_rows_are_error_first(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A matched ACL's row is the C drain's ``error_value_pair(e, b)``: error first,
-    binding second, like every other drained pair. Read the other way round, the
-    seven-field binding was taken for the seven-field error tuple and its
-    ``permission_type`` int for the cause, so every successful ``delete_acls``
-    raised ``TypeError: cannot unpack non-iterable int object``. No broker-free call
-    reaches a non-empty ``DeleteAclsResult``, so the order is pinned to the drain's
-    source and the result path is driven over a drain of that shape."""
-    source = (Path(__file__).resolve().parents[2] / "_confluentkafka.c").read_text()
-    drain = source[source.index("static PyObject* py_DeleteAclsResult_drain("):]
-    drain = drain[:drain.index("\n}\n")]
-    assert "PyObject* row = error_value_pair(e, b);" in drain
-    assert "PyObject* value = error_value_pair(err, results);" in drain
-
-    raw_filter = (1, None, 1, None, None, 1, 1)
-    raw_binding = (2, "orders", 3, "User:a", "*", 3, 3)
-    denied = _raw_error(ClusterAuthorizationError, "denied")
-    drained = {raw_filter: (None, [(None, raw_binding), (denied, None)])}
-    monkeypatch.setattr(_lib, "DeleteAclsResult_drain", lambda handle: drained)
-    result = _conversions.delete_acls_result([AclBindingFilter.ANY], (1, 0), Sync)
-    first, second = result.values()[AclBindingFilter.ANY].result().values()
-    assert first.binding() == _binding("orders") and first.exception() is None
-    assert second.binding() is None
-    assert isinstance(second.exception(), ClusterAuthorizationError)
-    # Java's all() rethrows a matched ACL's own error.
-    with pytest.raises(ClusterAuthorizationError, match="^denied$"):
-        result.all().result()
-
-
-def test_delegation_token_from_the_drain() -> None:
+def test_delegation_token_values() -> None:
     owner = ("User", "o", False)
     raw = ("id1", owner, ("User", "req", True), [("User", "r", False)], 10, 20, 30,
            b"\x00\x01", "AAE=")
@@ -674,53 +658,51 @@ def test_delegation_token_from_the_drain() -> None:
         10, 20, 30)
     assert token.hmac() == b"\x00\x01"
     assert token.hmac_as_base64_string() == "AAE="
+    assert _conversions._delegation_tokens([raw]) == [token]
 
 
-def test_scram_descriptions_from_the_drain() -> None:
-    """The drain's per-user rows become the response data the result reads: a user
-    error as its code and message, which Java's ``Errors.forCode(code)
-    .exception(message)`` turns back into the class. The two drains are the FFI's
-    two shapes (``compose_scram_description_outcomes``): every row carries the
-    user's own ``description(user)`` outcome, a RESOURCE_NOT_FOUND user its error."""
-    not_found = _raw_error(ResourceNotFoundError, "no nobody")
-    # all() succeeded: the described users in response order, then the not-found one.
-    result = _new_scram_result(_conversions._scram_response_data({
-        "a": (None, [(1, 4096), (2, 8192)]),
-        "nobody": (not_found, [])}))
-    # Java's all() keeps a RESOURCE_NOT_FOUND user, with no credentials;
-    # users() leaves it out; description() raises it with the broker's message.
-    described = result.all().result()
+def test_client_quota_values() -> None:
+    entities = _conversions._quota_entities({(("user", "u"), ("client-id", None)): [
+        ("producer_byte_rate", 1024.0)]})
+    assert entities == {ENTITY: {"producer_byte_rate": 1024.0}}
+
+
+def test_scram_values() -> None:
+    """``all()``'s map and ``description(user)``'s rows become
+    ``UserScramCredentialsDescription``\\ s; a user with no credential (Java's
+    ``RESOURCE_NOT_FOUND`` user in ``all()``) has none."""
+    described = _conversions._scram_descriptions({"a": [(1, 4096), (2, 8192)], "nobody": []})
     assert list(described) == ["a", "nobody"]
-    assert described["nobody"].credential_infos() == []
-    assert result.users().result() == ["a"]
-    with pytest.raises(ResourceNotFoundError) as info:
-        result.description(user_name="nobody").result()
-    assert str(info.value) == "no nobody"
-    assert result.description(user_name="a").result().credential_infos() == [
+    assert described["a"].name() == "a"
+    assert described["a"].credential_infos() == [
         ScramCredentialInfo(mechanism=ScramMechanism.SCRAM_SHA_256, iterations=4096),
         ScramCredentialInfo(mechanism=ScramMechanism.SCRAM_SHA_512, iterations=8192)]
-    # all() failed: the listed users, then the requested not-found one.
-    failed = _new_scram_result(_conversions._scram_response_data({
-        "a": (None, [(1, 4096)]),
-        "c": (_raw_error(ClusterAuthorizationError, "denied c"), []),
-        "nobody": (not_found, [])}))
-    with pytest.raises(ClusterAuthorizationError) as denied:
-        failed.all().result()
-    assert str(denied.value) == "denied c"
-    assert failed.users().result() == ["a", "c"]
-    with pytest.raises(ResourceNotFoundError) as info:
-        failed.description(user_name="nobody").result()
-    assert str(info.value) == "no nobody"
+    assert described["nobody"].credential_infos() == []
 
 
-def _new_scram_result(data: Any) -> Any:
-    from confluent_kafka.admin import DescribeUserScramCredentialsResult
+def test_scram_result_of_the_client_reads_the_core_futures() -> None:
+    """The client's ``DescribeUserScramCredentialsResult``: ``all()``, ``users()`` and
+    ``description(user_name)`` are the core's own futures, asked for at each call."""
+    asked: list[tuple[str, str | None]] = []
 
-    return DescribeUserScramCredentialsResult._new(
-        data_future=_conversions.future_of(Sync, data), kind=Sync)
+    def future(accessor: str, user: str | None) -> KafkaFuture[Any]:
+        asked.append((accessor, user))
+        impl: _KafkaFutureImpl[Any] = _KafkaFutureImpl()
+        if accessor == "description":
+            impl.complete_with_error(ResourceNotFoundError(message="no nobody"))
+        else:
+            impl.complete({"all": {}, "users": ["a"]}[accessor])
+        return KafkaFuture._of_impl(impl)
+
+    result = DescribeUserScramCredentialsResult._of_client(future=future, kind=Sync)
+    assert result.all().get() == {}
+    assert result.users().get() == ["a"]
+    cause = _cause(result.description(user_name="nobody"))
+    assert type(cause) is ResourceNotFoundError and str(cause) == "no nobody"
+    assert asked == [("all", None), ("users", None), ("description", "nobody")]
 
 
-def test_feature_metadata_from_the_drain() -> None:
+def test_feature_metadata_values() -> None:
     metadata = _conversions._to_feature_metadata(
         ([("metadata.version", 1, 7)], 42, [("metadata.version", 1, 21)]))
     assert metadata.finalized_features_epoch() == 42
@@ -731,120 +713,22 @@ def test_feature_metadata_from_the_drain() -> None:
     assert _conversions._to_feature_metadata(([], None, [])).finalized_features_epoch() is None
 
 
-def test_producer_and_transaction_values_from_the_drains() -> None:
-    error, state = _conversions._partition_producer_state(
-        (None, [(5, 1, 9, 100, None, 7), (6, 2, 3, 200, 4, None)]))
-    assert error is None
+def test_producer_and_transaction_values() -> None:
+    state = _conversions._partition_producer_state(
+        [(5, 1, 9, 100, None, 7), (6, 2, 3, 200, 4, None)])
     assert isinstance(state, DescribeProducersResult.PartitionProducerState)
     assert state.active_producers() == [
         ProducerState(producer_id=5, producer_epoch=1, last_sequence=9, last_timestamp=100,
                       coordinator_epoch=None, current_transaction_start_offset=7),
         ProducerState(producer_id=6, producer_epoch=2, last_sequence=3, last_timestamp=200,
                       coordinator_epoch=4, current_transaction_start_offset=None)]
-    error, description = _conversions._transaction_description(
-        (None, (1, "Ongoing", 5, 0, 60000, None, [("t", 0)])))
-    assert error is None
+    description = _conversions._transaction_description(
+        (1, "Ongoing", 5, 0, 60000, None, [("t", 0)]))
     assert description == TransactionDescription(
         coordinator_id=1, state=TransactionState.ONGOING, producer_id=5, producer_epoch=0,
         transaction_timeout_ms=60000, transaction_start_time_ms=None, topic_partitions=[TP])
-    error, _ = _conversions._transaction_description(
-        (_raw_error(UnknownServerError, "x"), None))
-    assert isinstance(error, UnknownServerError)
-    error, pid = _conversions._producer_id_and_epoch((None, (11, 3)))
-    assert error is None and pid == _ProducerIdAndEpoch(producer_id=11, epoch=3)
+    assert _conversions._transaction_listings([("x", 5, "Empty")]) == [
+        TransactionListing(transactional_id="x", producer_id=5,
+                           transaction_state=TransactionState.EMPTY)]
     assert _conversions._transactional_id_key("x") == _CoordinatorKey.by_transactional_id(
         transactional_id="x")
-
-
-def test_listings_by_broker(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``list_transactions``' value: one future per broker, failed with that broker's
-    error, the top-level future failing only on a whole-call error."""
-    listing = TransactionListing(transactional_id="x", producer_id=5,
-                                 transaction_state=TransactionState.EMPTY)
-    payload_value = {1: (None, [("x", 5, "Empty")]),
-                     2: (_raw_error(ClusterAuthorizationError, "no"), [])}
-    monkeypatch.setattr(_lib, "ListTransactionsResult_drain", lambda handle: payload_value)
-    result = _conversions.list_transactions_result((1, 0), Sync)
-    by_broker = result.by_broker_id().result()
-    assert by_broker[1].result() == [listing]
-    with pytest.raises(ClusterAuthorizationError):
-        by_broker[2].result()
-    with pytest.raises(ClusterAuthorizationError):
-        result.all().result()
-
-
-# ---- Ctrl+C and cancellation free the late payload --------------------------
-
-
-def test_ctrl_c_frees_a_late_void_payload(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ctrl+C during ``abort_transaction`` (a ``void`` call) re-raises at once; its late
-    ``(error_int,)`` payload is freed with ``free_void_payload`` when it arrives."""
-    freed: list[tuple[Any, ...]] = []
-    real = _conversions.free_abort_transaction
-
-    def counting(payload: tuple[Any, ...]) -> None:
-        freed.append(payload)
-        real(payload)
-
-    monkeypatch.setattr(_conversions, "free_abort_transaction", counting)
-    client = Admin.create(configs=UNREACHABLE)
-    armed = True
-
-    def on_sigint(signum: int, frame: FrameType | None) -> None:
-        if armed:
-            raise KeyboardInterrupt
-
-    previous = signal.signal(signal.SIGINT, on_sigint)
-    timer = threading.Timer(0.2, lambda: os.kill(os.getpid(), signal.SIGINT))
-    started = time.monotonic()
-    try:
-        timer.start()
-        with pytest.raises(KeyboardInterrupt):
-            client.abort_transaction(spec=SPEC, options=AbortTransactionOptions(timeout_ms=1500))
-    finally:
-        timer.cancel()
-        timer.join()
-        armed = False
-        time.sleep(0.05)
-        signal.signal(signal.SIGINT, previous)
-    assert time.monotonic() - started < 1.5
-    assert freed == []
-    client.close(timeout=0)  # returns once the aborted call has called back
-    assert len(freed) == 1 and len(freed[0]) == 1
-
-
-async def test_async_cancellation_frees_a_late_payload(monkeypatch: pytest.MonkeyPatch) -> None:
-    freed: list[tuple[Any, ...]] = []
-    real = _conversions.free_describe_acls
-
-    def counting(payload: tuple[Any, ...]) -> None:
-        freed.append(payload)
-        real(payload)
-
-    monkeypatch.setattr(_conversions, "free_describe_acls", counting)
-    client = AsyncAdmin.create(configs=UNREACHABLE)
-    task = asyncio.ensure_future(client.describe_acls(
-        filter=AclBindingFilter.ANY, options=DescribeAclsOptions(timeout_ms=1500)))
-    await asyncio.sleep(0.2)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    await client.close(timeout=0)
-    for _ in range(300):
-        if freed:
-            break
-        await asyncio.sleep(0.01)
-    assert len(freed) == 1 and len(freed[0]) == 2
-
-
-def test_async_kind_of_results() -> None:
-    """The result builders bind the kind they are given (``Sync`` / ``Async``)."""
-    assert _conversions.force_terminate_transaction_result((0,), Sync).result().result() is None
-    loop = asyncio.new_event_loop()
-    try:
-        async def build() -> Any:
-            return _conversions.abort_transaction_result(SPEC, (0,), Async)
-        result = loop.run_until_complete(build())
-        assert isinstance(result.all(), asyncio.Future)
-    finally:
-        loop.close()

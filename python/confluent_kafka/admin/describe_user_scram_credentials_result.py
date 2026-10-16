@@ -24,19 +24,28 @@ Python Binding Conventions, Class family); its ``Objects.requireNonNull(dataFutu
 raises ``NullPointerError()``. The private static ``getScramCredentialInfosFor`` is
 ``_get_scram_credential_infos_for``. Java collects the users into a ``List``, so
 ``users()`` is a ``list[str]``.
+
+The admin client builds it with the private ``_of_client``: its ``all()``, ``users()``
+and ``description(user_name)`` are then the core's own futures, each the core's
+translation of Java's dependant of the response data, as the C result hands out no
+response data. ``all()`` is not composed from ``users()`` and the per-user futures:
+Java's ``all()`` also maps a requested user the broker reports as not found
+(``RESOURCE_NOT_FOUND``) to an empty description, while ``users()`` leaves such a user
+out.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Generic
 
 from confluent_kafka._java import java_str
 from confluent_kafka.admin._futures import Async, KindT, Sync
-from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 from confluent_kafka.admin._internals import (
     _DescribeUserScramCredentialsResponseData,
     _errors_for_code,
 )
+from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 from confluent_kafka.null_pointer_error import NullPointerError
 
 if TYPE_CHECKING:
@@ -61,7 +70,7 @@ class DescribeUserScramCredentialsResult(Generic[KindT]):
     Java: ``org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult``.
     """
 
-    __slots__ = ("_data_future", "_kind")
+    __slots__ = ("_client", "_data_future", "_kind")
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         raise TypeError(
@@ -78,6 +87,18 @@ class DescribeUserScramCredentialsResult(Generic[KindT]):
         result = cls.__new__(cls)
         result._data_future = data_future
         result._kind = kind
+        result._client = None
+        return result
+
+    @classmethod
+    def _of_client(cls, *, future: Callable[[str, str | None], Any],
+                   kind: type[Sync] | type[Async]) -> DescribeUserScramCredentialsResult[Any]:
+        """The admin client's result: ``future(accessor, user_name)`` is the core's own
+        future of ``all()``, ``users()`` or ``description(user_name)``."""
+        result = cls.__new__(cls)
+        result._data_future = None
+        result._kind = kind
+        result._client = future
         return result
 
     def all(self) -> KafkaFuture[dict[str, UserScramCredentialsDescription]] | AsyncKafkaFuture[dict[str, UserScramCredentialsDescription]]:
@@ -85,6 +106,8 @@ class DescribeUserScramCredentialsResult(Generic[KindT]):
         being consistent with the contents of the list returned by ``users()``. The future
         will complete successfully only if all such user descriptions complete
         successfully."""
+        if self._client is not None:
+            return self._client("all", None)  # type: ignore[no-any-return]
         from confluent_kafka.admin.user_scram_credentials_description import (
             UserScramCredentialsDescription,
         )
@@ -120,6 +143,7 @@ class DescribeUserScramCredentialsResult(Generic[KindT]):
                         credential_infos=self._get_scram_credential_infos_for(user_result))
                 retval.complete(retval_map)
 
+        assert self._data_future is not None
         self._data_future.when_complete(action=action)
         return self._kind._FUTURE._of_impl(retval)
 
@@ -134,6 +158,8 @@ class DescribeUserScramCredentialsResult(Generic[KindT]):
         credential, will result in a future that returns an empty list being returned
         here. A returned list will include users that have a credential but that could
         not be described."""
+        if self._client is not None:
+            return self._client("users", None)  # type: ignore[no-any-return]
         retval: _KafkaFutureImpl[list[str]] = _KafkaFutureImpl()
 
         def action(data: _DescribeUserScramCredentialsResponseData | None,
@@ -145,6 +171,7 @@ class DescribeUserScramCredentialsResult(Generic[KindT]):
                 retval.complete([result.user() for result in data.results()
                                    if result.error_code() != _RESOURCE_NOT_FOUND_CODE])
 
+        assert self._data_future is not None
         self._data_future.when_complete(action=action)
         return self._kind._FUTURE._of_impl(retval)
 
@@ -155,6 +182,8 @@ class DescribeUserScramCredentialsResult(Generic[KindT]):
         exceptionally. Note that if the given user does not exist in the list of described
         users then the returned future will complete exceptionally with
         ``ResourceNotFoundError``."""
+        if self._client is not None:
+            return self._client("description", user_name)  # type: ignore[no-any-return]
         from confluent_kafka.admin.user_scram_credentials_description import (
             UserScramCredentialsDescription,
         )
@@ -187,6 +216,7 @@ class DescribeUserScramCredentialsResult(Generic[KindT]):
                     name=user_result.user(),
                     credential_infos=self._get_scram_credential_infos_for(user_result)))
 
+        assert self._data_future is not None
         self._data_future.when_complete(action=action)
         return self._kind._FUTURE._of_impl(retval)
 

@@ -908,6 +908,17 @@ def test_positional_calls_are_type_errors_on_the_mock() -> None:
 
 # ---- features (Rust: admin_with_features, update_one, mock_*_features_*) -----
 
+def cause_of(future: Any) -> BaseException:
+    """``get()`` on a failed future: Java's ``ExecutionException``, the stored error
+    its cause."""
+    from confluent_kafka import ExecutionError
+
+    with pytest.raises(ExecutionError) as info:
+        future.get()
+    assert info.value.__cause__ is not None
+    return info.value.__cause__
+
+
 def admin_with_features() -> MockAdminClient:
     # The Rust helper set_feature_levels has no Java counterpart: the
     # Builder's three feature-level setters seed the same maps.
@@ -927,11 +938,11 @@ def update_one(mock: MockAdminClient, next_: int,
 
 def finalized(mock: MockAdminClient) -> FinalizedVersionRange:
     metadata = mock.describe_features(options=DescribeFeaturesOptions()).feature_metadata()
-    return metadata.result().finalized_features()["feature"]
+    return metadata.get().finalized_features()["feature"]
 
 
 def test_mock_describe_features_returns_seeded_ranges() -> None:
-    metadata = admin_with_features().describe_features().feature_metadata().result()
+    metadata = admin_with_features().describe_features().feature_metadata().get()
     assert metadata.finalized_features_epoch() == 123
     assert metadata.finalized_features()["feature"] == FinalizedVersionRange(
         min_version_level=3, max_version_level=3)
@@ -941,7 +952,7 @@ def test_mock_describe_features_returns_seeded_ranges() -> None:
 
 def test_mock_update_features_upgrade_succeeds_and_mutates_level() -> None:
     mock = admin_with_features()
-    assert update_one(mock, 4, FeatureUpdate.UpgradeType.UPGRADE).result() is None
+    assert update_one(mock, 4, FeatureUpdate.UpgradeType.UPGRADE).get() is None
     # The finalized level is now 4.
     assert finalized(mock) == FinalizedVersionRange(min_version_level=4, max_version_level=4)
 
@@ -952,7 +963,7 @@ def test_mock_update_features_validate_only_does_not_mutate() -> None:
                                         upgrade_type=FeatureUpdate.UpgradeType.UPGRADE)}
     result = mock.update_features(feature_updates=updates,
                                   options=UpdateFeaturesOptions(validate_only=True))
-    assert result.values()["feature"].result() is None
+    assert result.values()["feature"].get() is None
     # Level unchanged because validate_only was set.
     assert finalized(mock) == FinalizedVersionRange(min_version_level=3, max_version_level=3)
 
@@ -970,7 +981,7 @@ def test_mock_update_features_validate_only_does_not_mutate() -> None:
 def test_mock_update_features_rejects(next_: int, upgrade_type: FeatureUpdate.UpgradeType,
                                       message: str) -> None:
     # The five Rust mock_update_features_rejects_* tests.
-    error = error_of(update_one(admin_with_features(), next_, upgrade_type))
+    error = cause_of(update_one(admin_with_features(), next_, upgrade_type))
     assert type(error) is InvalidRequestError
     assert str(error) == f"Invalid update version {next_} for feature feature. {message}"
 
@@ -979,7 +990,7 @@ def test_mock_update_features_unsafe_downgrade_succeeds() -> None:
     mock = admin_with_features()
     # cur = 3, next = 2, UNSAFE_DOWNGRADE: allowed (the mock's even-level guard is
     # dead code, mirroring Java).
-    assert update_one(mock, 2, FeatureUpdate.UpgradeType.UNSAFE_DOWNGRADE).result() is None
+    assert update_one(mock, 2, FeatureUpdate.UpgradeType.UNSAFE_DOWNGRADE).get() is None
     assert finalized(mock) == FinalizedVersionRange(min_version_level=2, max_version_level=2)
 
 
@@ -993,11 +1004,11 @@ def test_update_features_first_failure_fails_every_future_and_sets_nothing() -> 
     result = mock.update_features(feature_updates={
         "a": FeatureUpdate(max_version_level=2, upgrade_type=upgrade),
         "b": FeatureUpdate(max_version_level=3, upgrade_type=upgrade)})
-    errors = [error_of(result.values()[f]) for f in ("a", "b")]
+    errors = [cause_of(result.values()[f]) for f in ("a", "b")]
     assert errors[0] is errors[1]
     assert str(errors[0]) == "Invalid update version 3 for feature b. Can't upgrade above 2"
-    assert type(error_of(result.all())) is InvalidRequestError
-    metadata = mock.describe_features().feature_metadata().result()
+    assert type(cause_of(result.all())) is InvalidRequestError
+    metadata = mock.describe_features().feature_metadata().get()
     assert metadata.finalized_features()["a"].max_version_level() == 1
 
 
@@ -1019,13 +1030,13 @@ def all_tokens(client: MockAdminClient) -> list[DelegationToken]:
     # Java's describeDelegationToken() with the default options dereferences the
     # null owners: an empty owners list lists every token.
     options = DescribeDelegationTokenOptions(owners=[])
-    return client.describe_delegation_token(options=options).delegation_tokens().result()
+    return client.describe_delegation_token(options=options).delegation_tokens().get()
 
 
 def test_create_delegation_token_rejects_non_user_renewer() -> None:
     options = CreateDelegationTokenOptions(
         renewers=[KafkaPrincipal(principal_type="Group", name="admins")])
-    error = error_of(admin().create_delegation_token(options=options).delegation_token())
+    error = cause_of(admin().create_delegation_token(options=options).delegation_token())
     assert type(error) is InvalidPrincipalTypeError
     assert str(error) == ""
 
@@ -1047,7 +1058,7 @@ def test_create_delegation_token_without_a_renewer_reports_an_error() -> None:
 def test_create_then_describe_lists_token() -> None:
     client = admin()
     options = CreateDelegationTokenOptions(renewers=[user("alice")], max_lifetime_ms=1000)
-    token = client.create_delegation_token(options=options).delegation_token().result()
+    token = client.create_delegation_token(options=options).delegation_token().get()
     assert token.token_info().owner() == user("alice")
     assert token.token_info().renewers() == [user("alice")]
     assert token.token_info().max_timestamp() == 1000
@@ -1058,23 +1069,23 @@ def test_create_then_describe_lists_token() -> None:
 
 def test_renew_delegation_token_found_and_not_found() -> None:
     client = admin()
-    unknown = error_of(client.renew_delegation_token(
+    unknown = cause_of(client.renew_delegation_token(
         hmac=b"nope",
         options=RenewDelegationTokenOptions(renew_time_period_ms=10)).expiry_timestamp())
     assert type(unknown) is DelegationTokenNotFoundError
     assert str(unknown) == ""
 
     token = client.create_delegation_token(
-        options=CreateDelegationTokenOptions(renewers=[user("alice")])).delegation_token().result()
+        options=CreateDelegationTokenOptions(renewers=[user("alice")])).delegation_token().get()
     expiry = client.renew_delegation_token(
         hmac=token.hmac(),
         options=RenewDelegationTokenOptions(renew_time_period_ms=4242)).expiry_timestamp()
-    assert expiry.result() == 4242
+    assert expiry.get() == 4242
     assert token.token_info().expiry_timestamp() == 4242
 
 
 def test_expire_delegation_token_not_found() -> None:
-    error = error_of(admin().expire_delegation_token(
+    error = cause_of(admin().expire_delegation_token(
         hmac=b"nope", options=ExpireDelegationTokenOptions()).expiry_timestamp())
     assert type(error) is DelegationTokenNotFoundError
     assert str(error) == ""
@@ -1083,12 +1094,12 @@ def test_expire_delegation_token_not_found() -> None:
 def test_expire_delegation_token_negative_one_removes_token() -> None:
     client = admin()
     token = client.create_delegation_token(
-        options=CreateDelegationTokenOptions(renewers=[user("alice")])).delegation_token().result()
+        options=CreateDelegationTokenOptions(renewers=[user("alice")])).delegation_token().get()
     listed = all_tokens(client)
     expiry = client.expire_delegation_token(
         hmac=token.hmac(),
         options=ExpireDelegationTokenOptions(expiry_time_period_ms=-1)).expiry_timestamp()
-    assert expiry.result() == -1
+    assert expiry.get() == -1
     assert all_tokens(client) == []
     # Java completes describe with its live list, which removeAll then empties.
     assert listed == []
@@ -1097,24 +1108,24 @@ def test_expire_delegation_token_negative_one_removes_token() -> None:
 def test_expire_delegation_token_in_the_future_keeps_token() -> None:
     client = admin()
     token = client.create_delegation_token(
-        options=CreateDelegationTokenOptions(renewers=[user("alice")])).delegation_token().result()
+        options=CreateDelegationTokenOptions(renewers=[user("alice")])).delegation_token().get()
     later = 2 ** 62
     expiry = client.expire_delegation_token(
         hmac=token.hmac(),
         options=ExpireDelegationTokenOptions(expiry_time_period_ms=later)).expiry_timestamp()
-    assert expiry.result() == later
+    assert expiry.get() == later
     assert all_tokens(client) == [token]
 
 
 def test_describe_delegation_token_owners_filter() -> None:
     client = admin()
     token_alice = client.create_delegation_token(
-        options=CreateDelegationTokenOptions(renewers=[user("alice")])).delegation_token().result()
+        options=CreateDelegationTokenOptions(renewers=[user("alice")])).delegation_token().get()
     client.create_delegation_token(
-        options=CreateDelegationTokenOptions(renewers=[user("bob")])).delegation_token().result()
+        options=CreateDelegationTokenOptions(renewers=[user("bob")])).delegation_token().get()
     listed = client.describe_delegation_token(
         options=DescribeDelegationTokenOptions(owners=[user("alice")])).delegation_tokens()
-    assert listed.result() == [token_alice]
+    assert listed.get() == [token_alice]
 
 
 def test_describe_delegation_token_default_owners_is_null_pointer() -> None:

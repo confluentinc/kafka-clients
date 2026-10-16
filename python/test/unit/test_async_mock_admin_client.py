@@ -58,6 +58,7 @@ from confluent_kafka.common.errors.invalid_request_error import InvalidRequestEr
 from confluent_kafka.common.errors.timeout_error import TimeoutError as KafkaTimeoutError
 from confluent_kafka.common.errors.topic_exists_error import TopicExistsError
 from confluent_kafka.common.errors.unsupported_version_error import UnsupportedVersionError
+from confluent_kafka.execution_error import ExecutionError
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 from confluent_kafka.illegal_state_error import IllegalStateError
 from confluent_kafka.null_pointer_error import NullPointerError
@@ -209,18 +210,18 @@ async def test_consumer_group_offsets() -> None:
 async def test_delegation_tokens() -> None:
     client = admin()
     alice = KafkaPrincipal(principal_type=KafkaPrincipal.USER_TYPE, name="alice")
-    created = await client.create_delegation_token(
+    created = client.create_delegation_token(
         options=CreateDelegationTokenOptions(renewers=[alice]))
-    token = await created.delegation_token()
-    renewed = await client.renew_delegation_token(hmac=token.hmac())
-    assert await renewed.expiry_timestamp() == -1
-    described = await client.describe_delegation_token(
+    token = await created.delegation_token().get()
+    renewed = client.renew_delegation_token(hmac=token.hmac())
+    assert await renewed.expiry_timestamp().get() == -1
+    described = client.describe_delegation_token(
         options=DescribeDelegationTokenOptions(owners=[alice]))
-    assert await described.delegation_tokens() == [token]
+    assert await described.delegation_tokens().get() == [token]
     with pytest.raises(NullPointerError):  # Java's default null owners
-        await client.describe_delegation_token()
-    expired = await client.expire_delegation_token(hmac=token.hmac())
-    assert await expired.expiry_timestamp() == -1
+        client.describe_delegation_token()
+    expired = client.expire_delegation_token(hmac=token.hmac())
+    assert await expired.expiry_timestamp().get() == -1
 
 
 async def test_features() -> None:
@@ -229,32 +230,34 @@ async def test_features() -> None:
               .min_supported_feature_levels(min_supported_feature_levels={"f": 1})
               .max_supported_feature_levels(max_supported_feature_levels={"f": 5})
               .build())
-    updated = await client.update_features(feature_updates={"f": FeatureUpdate(
+    updated = client.update_features(feature_updates={"f": FeatureUpdate(
         max_version_level=4, upgrade_type=FeatureUpdate.UpgradeType.UPGRADE)})
-    await updated.all()
-    metadata = await (await client.describe_features()).feature_metadata()
+    await updated.all().get()
+    metadata = await client.describe_features().feature_metadata().get()
     assert metadata.finalized_features()["f"] == FinalizedVersionRange(
         min_version_level=4, max_version_level=4)
-    rejected = await client.update_features(feature_updates={"f": FeatureUpdate(
+    rejected = client.update_features(feature_updates={"f": FeatureUpdate(
         max_version_level=6, upgrade_type=FeatureUpdate.UpgradeType.UPGRADE)})
-    with pytest.raises(InvalidRequestError) as e:
-        await rejected.all()
-    assert str(e.value) == "Invalid update version 6 for feature f. Can't upgrade above 5"
+    with pytest.raises(ExecutionError) as e:
+        await rejected.all().get()
+    assert type(e.value.__cause__) is InvalidRequestError
+    assert str(e.value.__cause__) == (
+        "Invalid update version 6 for feature f. Can't upgrade above 5")
 
 
 async def test_unimplemented_groups_raise_java_messages() -> None:
     client = admin()
     with pytest.raises(UnsupportedVersionError) as e:
-        await client.describe_acls(filter=AclBindingFilter.ANY)
+        client.describe_acls(filter=AclBindingFilter.ANY)
     assert str(e.value) == "Not implemented yet"
     with pytest.raises(UnsupportedVersionError) as e:
-        await client.alter_client_quotas(entries=[])
+        client.alter_client_quotas(entries=[])
     assert str(e.value) == "Not implement yet"
     with pytest.raises(UnsupportedVersionError) as e:
-        await client.describe_user_scram_credentials()
+        client.describe_user_scram_credentials()
     assert str(e.value) == "Not implemented yet"
     with pytest.raises(UnsupportedVersionError) as e:
-        await client.list_transactions()
+        client.list_transactions()
     assert str(e.value) == "Not implemented yet"
 
 

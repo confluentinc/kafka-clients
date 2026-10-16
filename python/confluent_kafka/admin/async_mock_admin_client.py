@@ -327,19 +327,19 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
         """See :meth:`MockAdminClient.describe_cluster`."""
         return self._describe_cluster()
 
-    async def describe_acls(self, *, filter: AclBindingFilter,  # noqa: A002 - Java's name
-                            options: DescribeAclsOptions | None = None
-                            ) -> DescribeAclsResult[Async]:
+    def describe_acls(self, *, filter: AclBindingFilter,  # noqa: A002 - Java's name
+                      options: DescribeAclsOptions | None = None
+                      ) -> DescribeAclsResult[Async]:
         """See :meth:`MockAdminClient.describe_acls`."""
         return self._describe_acls(filter)
 
-    async def create_acls(self, *, acls: Iterable[AclBinding],
-                          options: CreateAclsOptions | None = None) -> CreateAclsResult[Async]:
+    def create_acls(self, *, acls: Iterable[AclBinding],
+                    options: CreateAclsOptions | None = None) -> CreateAclsResult[Async]:
         """See :meth:`MockAdminClient.create_acls`."""
         return self._create_acls(acls)
 
-    async def delete_acls(self, *, filters: Iterable[AclBindingFilter],
-                          options: DeleteAclsOptions | None = None) -> DeleteAclsResult[Async]:
+    def delete_acls(self, *, filters: Iterable[AclBindingFilter],
+                    options: DeleteAclsOptions | None = None) -> DeleteAclsResult[Async]:
         """See :meth:`MockAdminClient.delete_acls`."""
         return self._delete_acls(filters)
 
@@ -386,29 +386,29 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
         """See :meth:`MockAdminClient.delete_records`."""
         return self._delete_records(records_to_delete)
 
-    async def create_delegation_token(self, *, options: CreateDelegationTokenOptions | None = None
-                                      ) -> CreateDelegationTokenResult[Async]:
+    def create_delegation_token(self, *, options: CreateDelegationTokenOptions | None = None
+                                ) -> CreateDelegationTokenResult[Async]:
         """See :meth:`MockAdminClient.create_delegation_token`."""
         return self._create_delegation_token(
             options if options is not None else CreateDelegationTokenOptions())
 
-    async def renew_delegation_token(self, *, hmac: bytes,
-                                     options: RenewDelegationTokenOptions | None = None
-                                     ) -> RenewDelegationTokenResult[Async]:
+    def renew_delegation_token(self, *, hmac: bytes,
+                               options: RenewDelegationTokenOptions | None = None
+                               ) -> RenewDelegationTokenResult[Async]:
         """See :meth:`MockAdminClient.renew_delegation_token`."""
         return self._renew_delegation_token(
             hmac, options if options is not None else RenewDelegationTokenOptions())
 
-    async def expire_delegation_token(self, *, hmac: bytes,
-                                      options: ExpireDelegationTokenOptions | None = None
-                                      ) -> ExpireDelegationTokenResult[Async]:
+    def expire_delegation_token(self, *, hmac: bytes,
+                                options: ExpireDelegationTokenOptions | None = None
+                                ) -> ExpireDelegationTokenResult[Async]:
         """See :meth:`MockAdminClient.expire_delegation_token`."""
         return self._expire_delegation_token(
             hmac, options if options is not None else ExpireDelegationTokenOptions())
 
-    async def describe_delegation_token(self, *,
-                                        options: DescribeDelegationTokenOptions | None = None
-                                        ) -> DescribeDelegationTokenResult[Async]:
+    def describe_delegation_token(self, *,
+                                  options: DescribeDelegationTokenOptions | None = None
+                                  ) -> DescribeDelegationTokenResult[Async]:
         """See :meth:`MockAdminClient.describe_delegation_token`."""
         return self._describe_delegation_token(
             options if options is not None else DescribeDelegationTokenOptions())
@@ -499,50 +499,50 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
         """See :meth:`MockAdminClient.list_offsets`."""
         return self._list_offsets(topic_partition_offsets)
 
-    async def describe_client_quotas(self, *, filter: ClientQuotaFilter,  # noqa: A002 - Java's name
-                                     options: DescribeClientQuotasOptions | None = None
-                                     ) -> DescribeClientQuotasResult[Async]:
+    def describe_client_quotas(self, *, filter: ClientQuotaFilter,  # noqa: A002 - Java's name
+                               options: DescribeClientQuotasOptions | None = None
+                               ) -> DescribeClientQuotasResult[Async]:
         """See :meth:`MockAdminClient.describe_client_quotas`."""
         return self._describe_client_quotas(filter)
 
-    async def alter_client_quotas(self, *, entries: Iterable[ClientQuotaAlteration],
-                                  options: AlterClientQuotasOptions | None = None
-                                  ) -> AlterClientQuotasResult[Async]:
+    def alter_client_quotas(self, *, entries: Iterable[ClientQuotaAlteration],
+                            options: AlterClientQuotasOptions | None = None
+                            ) -> AlterClientQuotasResult[Async]:
         """See :meth:`MockAdminClient.alter_client_quotas`."""
         return self._alter_client_quotas(entries)
 
     @overload
-    async def describe_user_scram_credentials(self, *, users: Sequence[str] | None = None
-                                              ) -> DescribeUserScramCredentialsResult[Async]: ...
+    def describe_user_scram_credentials(self, *, users: Sequence[str] | None = None
+                                        ) -> DescribeUserScramCredentialsResult[Async]: ...
     @overload
-    async def describe_user_scram_credentials(
+    def describe_user_scram_credentials(
             self, *, users: Sequence[str] | None,
             options: DescribeUserScramCredentialsOptions
     ) -> DescribeUserScramCredentialsResult[Async]: ...
 
     @java_forms(*_DESCRIBE_USER_SCRAM_CREDENTIALS_FORMS)
-    async def describe_user_scram_credentials(
+    def describe_user_scram_credentials(
             self, *, users: Sequence[str] | None = UNSET,
             options: DescribeUserScramCredentialsOptions | None = None
     ) -> DescribeUserScramCredentialsResult[Async]:
         """See :meth:`MockAdminClient.describe_user_scram_credentials`."""
         return self._describe_user_scram_credentials(None if users is UNSET else users)
 
-    async def alter_user_scram_credentials(
+    def alter_user_scram_credentials(
             self, *, alterations: Sequence[UserScramCredentialAlteration],
             options: AlterUserScramCredentialsOptions | None = None
     ) -> AlterUserScramCredentialsResult[Async]:
         """See :meth:`MockAdminClient.alter_user_scram_credentials`."""
         return self._alter_user_scram_credentials(alterations)
 
-    async def describe_features(self, *, options: DescribeFeaturesOptions | None = None
-                                ) -> DescribeFeaturesResult[Async]:
+    def describe_features(self, *, options: DescribeFeaturesOptions | None = None
+                          ) -> DescribeFeaturesResult[Async]:
         """See :meth:`MockAdminClient.describe_features`."""
         return self._describe_features()
 
-    async def update_features(self, *, feature_updates: Mapping[str, FeatureUpdate],
-                              options: UpdateFeaturesOptions | None = None
-                              ) -> UpdateFeaturesResult[Async]:
+    def update_features(self, *, feature_updates: Mapping[str, FeatureUpdate],
+                        options: UpdateFeaturesOptions | None = None
+                        ) -> UpdateFeaturesResult[Async]:
         """See :meth:`MockAdminClient.update_features`."""
         if options is None:
             options = UpdateFeaturesOptions()
@@ -555,32 +555,32 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
         with ``UnsupportedVersionError("")``, as Java's mock."""
         return self._unregister_controller(controller_id)
 
-    async def describe_producers(self, *, partitions: Iterable[TopicPartition],
-                                 options: DescribeProducersOptions | None = None
-                                 ) -> DescribeProducersResult[Async]:
+    def describe_producers(self, *, partitions: Iterable[TopicPartition],
+                           options: DescribeProducersOptions | None = None
+                           ) -> DescribeProducersResult[Async]:
         """See :meth:`MockAdminClient.describe_producers`."""
         return self._describe_producers(partitions)
 
-    async def describe_transactions(self, *, transactional_ids: Iterable[str],
-                                    options: DescribeTransactionsOptions | None = None
-                                    ) -> DescribeTransactionsResult[Async]:
+    def describe_transactions(self, *, transactional_ids: Iterable[str],
+                              options: DescribeTransactionsOptions | None = None
+                              ) -> DescribeTransactionsResult[Async]:
         """See :meth:`MockAdminClient.describe_transactions`."""
         return self._describe_transactions(transactional_ids)
 
-    async def abort_transaction(self, *, spec: AbortTransactionSpec,
-                                options: AbortTransactionOptions | None = None
-                                ) -> AbortTransactionResult[Async]:
+    def abort_transaction(self, *, spec: AbortTransactionSpec,
+                          options: AbortTransactionOptions | None = None
+                          ) -> AbortTransactionResult[Async]:
         """See :meth:`MockAdminClient.abort_transaction`."""
         return self._abort_transaction(spec)
 
-    async def list_transactions(self, *, options: ListTransactionsOptions | None = None
-                                ) -> ListTransactionsResult[Async]:
+    def list_transactions(self, *, options: ListTransactionsOptions | None = None
+                          ) -> ListTransactionsResult[Async]:
         """See :meth:`MockAdminClient.list_transactions`."""
         return self._list_transactions()
 
-    async def fence_producers(self, *, transactional_ids: Iterable[str],
-                              options: FenceProducersOptions | None = None
-                              ) -> FenceProducersResult[Async]:
+    def fence_producers(self, *, transactional_ids: Iterable[str],
+                        options: FenceProducersOptions | None = None
+                        ) -> FenceProducersResult[Async]:
         """See :meth:`MockAdminClient.fence_producers`."""
         return self._fence_producers(transactional_ids)
 
@@ -605,9 +605,9 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
         """See :meth:`MockAdminClient.describe_classic_groups`."""
         return self._describe_classic_groups(group_ids)
 
-    async def force_terminate_transaction(self, *, transactional_id: str,
-                                          options: TerminateTransactionOptions | None = None
-                                          ) -> TerminateTransactionResult[Async]:
+    def force_terminate_transaction(self, *, transactional_id: str,
+                                    options: TerminateTransactionOptions | None = None
+                                    ) -> TerminateTransactionResult[Async]:
         """See :meth:`MockAdminClient.force_terminate_transaction`."""
         return self._force_terminate_transaction(transactional_id)
 

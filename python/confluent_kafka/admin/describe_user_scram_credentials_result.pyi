@@ -14,7 +14,8 @@
 
 # Stub for confluent_kafka.admin.DescribeUserScramCredentialsResult.
 
-from typing import Generic, overload
+from collections.abc import Callable
+from typing import Any, Generic, overload
 
 from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.admin._internals import _DescribeUserScramCredentialsResponseData
@@ -32,6 +33,9 @@ class DescribeUserScramCredentialsResult(Generic[KindT]):
     @classmethod
     def _new(cls, *, data_future: KafkaFuture[_DescribeUserScramCredentialsResponseData] | AsyncKafkaFuture[_DescribeUserScramCredentialsResponseData],
              kind: type[KindT]) -> DescribeUserScramCredentialsResult[KindT]: ...
+    @classmethod
+    def _of_client(cls, *, future: Callable[[str, str | None], Any],
+                   kind: type[KindT]) -> DescribeUserScramCredentialsResult[KindT]: ...
     @overload
     def all(self: DescribeUserScramCredentialsResult[Sync]
             ) -> KafkaFuture[dict[str, UserScramCredentialsDescription]]: ...

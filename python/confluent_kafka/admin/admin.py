@@ -703,16 +703,13 @@ class Admin(_AdminState):
 
         ``filter``: the filter to use; ``options``: the options to use when listing the
         ACLs (Java's ``describeAcls(filter)`` passes ``new DescribeAclsOptions()``).
-        Returns the ``DescribeAclsResult``, its future complete *(deviation: see
-        ``create_topics``)*.
+        Returns the ``DescribeAclsResult``.
         """
         if options is None:
             options = DescribeAclsOptions()
-        args = _conversions.describe_acls_args(filter, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_describe_acls_async(c_admin, *args, cb),
-            _conversions.free_describe_acls)
-        return _conversions.describe_acls_result(payload, Sync)
+        native = self._call(_lib.Admin_describe_acls, *_conversions.describe_acls_args(filter),
+                            options._setters_ran())
+        return _conversions.describe_acls_result(native, Sync, None)
 
     def create_acls(self, *, acls: Iterable[AclBinding],
                     options: CreateAclsOptions | None = None) -> CreateAclsResult[Sync]:
@@ -728,17 +725,13 @@ class Admin(_AdminState):
 
         ``acls``: the ACLs to create; ``options``: the options to use when creating the
         ACLs (Java's ``createAcls(acls)`` passes ``new CreateAclsOptions()``). Returns
-        the ``CreateAclsResult``, every future of which is complete *(deviation: see
-        ``create_topics``)*.
+        the ``CreateAclsResult``.
         """
         if options is None:
             options = CreateAclsOptions()
-        bindings = list(acls)
-        args = _conversions.create_acls_args(bindings, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_create_acls_async(c_admin, *args, cb),
-            _conversions.free_create_acls)
-        return _conversions.create_acls_result(bindings, payload, Sync)
+        native = self._call(_lib.Admin_create_acls, *_conversions.create_acls_args(acls),
+                            options._setters_ran())
+        return _conversions.create_acls_result(native, Sync, None)
 
     def delete_acls(self, *, filters: Iterable[AclBindingFilter],
                     options: DeleteAclsOptions | None = None) -> DeleteAclsResult[Sync]:
@@ -751,17 +744,13 @@ class Admin(_AdminState):
 
         ``filters``: the filters to use; ``options``: the options to use when deleting
         the ACLs (Java's ``deleteAcls(filters)`` passes ``new DeleteAclsOptions()``).
-        Returns the ``DeleteAclsResult``, every future of which is complete *(deviation:
-        see ``create_topics``)*.
+        Returns the ``DeleteAclsResult``.
         """
         if options is None:
             options = DeleteAclsOptions()
-        acl_filters = list(filters)
-        args = _conversions.delete_acls_args(acl_filters, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_delete_acls_async(c_admin, *args, cb),
-            _conversions.free_delete_acls)
-        return _conversions.delete_acls_result(acl_filters, payload, Sync)
+        native = self._call(_lib.Admin_delete_acls, *_conversions.delete_acls_args(filters),
+                            options._setters_ran())
+        return _conversions.delete_acls_result(native, Sync, None)
 
     def describe_configs(self, *, resources: Iterable[ConfigResource],
                          options: DescribeConfigsOptions | None = None
@@ -987,7 +976,7 @@ class Admin(_AdminState):
 
         This operation is supported by brokers with version 1.1.0 or higher.
 
-        The following errors can be anticipated when calling ``result()`` on the future
+        The following errors can be anticipated when calling ``get()`` on the future
         obtained from the ``delegation_token()`` method of the returned
         ``CreateDelegationTokenResult``:
 
@@ -1001,16 +990,13 @@ class Admin(_AdminState):
 
         ``options``: the options to use when creating delegation token (Java's
         ``createDelegationToken()`` passes ``new CreateDelegationTokenOptions()``).
-        Returns the ``CreateDelegationTokenResult``, its future complete *(deviation:
-        see ``create_topics``)*.
+        Returns the ``CreateDelegationTokenResult``.
         """
         if options is None:
             options = CreateDelegationTokenOptions()
-        args = _conversions.create_delegation_token_args(options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_create_delegation_token_async(c_admin, *args, cb),
-            _conversions.free_create_delegation_token)
-        return _conversions.create_delegation_token_result(payload, Sync)
+        native = self._call(_lib.Admin_create_delegation_token,
+                            _conversions.create_delegation_token_options(options))
+        return _conversions.create_delegation_token_result(native, Sync, None)
 
     def renew_delegation_token(self, *, hmac: bytes,
                                options: RenewDelegationTokenOptions | None = None
@@ -1019,7 +1005,7 @@ class Admin(_AdminState):
 
         This operation is supported by brokers with version 1.1.0 or higher.
 
-        The following errors can be anticipated when calling ``result()`` on the future
+        The following errors can be anticipated when calling ``get()`` on the future
         obtained from the ``expiry_timestamp()`` method of the returned
         ``RenewDelegationTokenResult``:
 
@@ -1037,15 +1023,12 @@ class Admin(_AdminState):
         ``hmac``: HMAC of the Delegation token; ``options``: the options to use when
         renewing delegation token (Java's ``renewDelegationToken(hmac)`` passes ``new
         RenewDelegationTokenOptions()``). Returns the ``RenewDelegationTokenResult``,
-        its future complete *(deviation: see ``create_topics``)*.
+.
         """
         if options is None:
             options = RenewDelegationTokenOptions()
-        args = _conversions.renew_delegation_token_args(hmac, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_renew_delegation_token_async(c_admin, *args, cb),
-            _conversions.free_renew_delegation_token)
-        return _conversions.renew_delegation_token_result(payload, Sync)
+        native = self._call(_lib.Admin_renew_delegation_token, hmac, options._setters_ran())
+        return _conversions.renew_delegation_token_result(native, Sync, None)
 
     def expire_delegation_token(self, *, hmac: bytes,
                                 options: ExpireDelegationTokenOptions | None = None
@@ -1055,7 +1038,7 @@ class Admin(_AdminState):
         This operation is supported by brokers with version 1.1.0 or higher. Without
         ``options`` it expires the token immediately.
 
-        The following errors can be anticipated when calling ``result()`` on the future
+        The following errors can be anticipated when calling ``get()`` on the future
         obtained from the ``expiry_timestamp()`` method of the returned
         ``ExpireDelegationTokenResult``:
 
@@ -1073,15 +1056,12 @@ class Admin(_AdminState):
         ``hmac``: HMAC of the Delegation token; ``options``: the options to use when
         expiring delegation token (Java's ``expireDelegationToken(hmac)`` passes ``new
         ExpireDelegationTokenOptions()``). Returns the ``ExpireDelegationTokenResult``,
-        its future complete *(deviation: see ``create_topics``)*.
+.
         """
         if options is None:
             options = ExpireDelegationTokenOptions()
-        args = _conversions.expire_delegation_token_args(hmac, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_expire_delegation_token_async(c_admin, *args, cb),
-            _conversions.free_expire_delegation_token)
-        return _conversions.expire_delegation_token_result(payload, Sync)
+        native = self._call(_lib.Admin_expire_delegation_token, hmac, options._setters_ran())
+        return _conversions.expire_delegation_token_result(native, Sync, None)
 
     def describe_delegation_token(self, *,
                                   options: DescribeDelegationTokenOptions | None = None
@@ -1092,7 +1072,7 @@ class Admin(_AdminState):
         ``options`` it returns all the user owned tokens and tokens where user have
         Describe permission.
 
-        The following errors can be anticipated when calling ``result()`` on the future
+        The following errors can be anticipated when calling ``get()`` on the future
         obtained from the ``delegation_tokens()`` method of the returned
         ``DescribeDelegationTokenResult``:
 
@@ -1104,16 +1084,13 @@ class Admin(_AdminState):
 
         ``options``: the options to use when describing delegation tokens (Java's
         ``describeDelegationToken()`` passes ``new DescribeDelegationTokenOptions()``).
-        Returns the ``DescribeDelegationTokenResult``, its future complete *(deviation:
-        see ``create_topics``)*.
+        Returns the ``DescribeDelegationTokenResult``.
         """
         if options is None:
             options = DescribeDelegationTokenOptions()
-        args = _conversions.describe_delegation_token_args(options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_describe_delegation_token_async(c_admin, *args, cb),
-            _conversions.free_describe_delegation_token)
-        return _conversions.describe_delegation_token_result(payload, Sync)
+        native = self._call(_lib.Admin_describe_delegation_token,
+                            _conversions.describe_delegation_token_options(options))
+        return _conversions.describe_delegation_token_result(native, Sync, None)
 
     def describe_consumer_groups(self, *, group_ids: Iterable[str],
                                  options: DescribeConsumerGroupsOptions | None = None
@@ -1432,7 +1409,7 @@ class Admin(_AdminState):
         """Describes all entities matching the provided filter that have at least one
         client quota configuration value defined.
 
-        The following errors can be anticipated when calling ``result()`` on the future
+        The following errors can be anticipated when calling ``get()`` on the future
         from the returned ``DescribeClientQuotasResult``:
 
         - ``ClusterAuthorizationError``: if the authenticated user didn't have describe
@@ -1446,16 +1423,14 @@ class Admin(_AdminState):
         ``filter``: the filter to apply to match entities; ``options``: the options to
         use (Java's ``describeClientQuotas(filter)`` passes ``new
         DescribeClientQuotasOptions()``). Returns the ``DescribeClientQuotasResult``
-        containing the result, its future complete *(deviation: see
-        ``create_topics``)*.
+        containing the result.
         """
         if options is None:
             options = DescribeClientQuotasOptions()
-        args = _conversions.describe_client_quotas_args(filter, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_describe_client_quotas_async(c_admin, *args, cb),
-            _conversions.free_describe_client_quotas)
-        return _conversions.describe_client_quotas_result(payload, Sync)
+        native = self._call(_lib.Admin_describe_client_quotas,
+                            *_conversions.describe_client_quotas_args(filter),
+                            options._setters_ran())
+        return _conversions.describe_client_quotas_result(native, Sync, None)
 
     def alter_client_quotas(self, *, entries: Iterable[ClientQuotaAlteration],
                             options: AlterClientQuotasOptions | None = None
@@ -1466,7 +1441,7 @@ class Admin(_AdminState):
         guaranteed. The resulting per-entity error code should be evaluated to resolve
         the success or failure of all updates.
 
-        The following errors can be anticipated when calling ``result()`` on the
+        The following errors can be anticipated when calling ``get()`` on the
         futures obtained from the returned ``AlterClientQuotasResult``:
 
         - ``ClusterAuthorizationError``: if the authenticated user didn't have alter
@@ -1480,17 +1455,14 @@ class Admin(_AdminState):
 
         ``entries``: the alterations to perform; ``options``: the options to use (Java's
         ``alterClientQuotas(entries)`` passes ``new AlterClientQuotasOptions()``).
-        Returns the ``AlterClientQuotasResult`` containing the result, every future of
-        which is complete *(deviation: see ``create_topics``)*.
+        Returns the ``AlterClientQuotasResult`` containing the result.
         """
         if options is None:
             options = AlterClientQuotasOptions()
-        alterations = list(entries)
-        args = _conversions.alter_client_quotas_args(alterations, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_alter_client_quotas_async(c_admin, *args, cb),
-            _conversions.free_alter_client_quotas)
-        return _conversions.alter_client_quotas_result(alterations, payload, Sync)
+        native = self._call(_lib.Admin_alter_client_quotas,
+                            *_conversions.alter_client_quotas_args(entries),
+                            options._setters_ran())
+        return _conversions.alter_client_quotas_result(native, Sync, None)
 
     @overload
     def describe_user_scram_credentials(self, *, users: Sequence[str] | None = None
@@ -1508,7 +1480,7 @@ class Admin(_AdminState):
     ) -> DescribeUserScramCredentialsResult[Sync]:
         """Describe SASL/SCRAM credentials.
 
-        The following errors can be anticipated when calling ``result()`` on the
+        The following errors can be anticipated when calling ``get()`` on the
         futures from the returned ``DescribeUserScramCredentialsResult``:
 
         - ``ClusterAuthorizationError``: if the authenticated user didn't have describe
@@ -1526,19 +1498,16 @@ class Admin(_AdminState):
         ``describeUserScramCredentials()`` passes ``null``); ``options``: the options to
         use when describing the credentials (Java's short forms pass ``new
         DescribeUserScramCredentialsOptions()``). Java has no form taking ``options``
-        alone. Returns the ``DescribeUserScramCredentialsResult``, its futures complete
-        *(deviation: see ``create_topics``)*.
+        alone. Returns the ``DescribeUserScramCredentialsResult``.
         """
-        if users is UNSET:
-            users = None
         if options is None:
             options = DescribeUserScramCredentialsOptions()
-        args = _conversions.describe_user_scram_credentials_args(users, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_describe_user_scram_credentials_async(
-                c_admin, *args, cb),
-            _conversions.free_describe_user_scram_credentials)
-        return _conversions.describe_user_scram_credentials_result(payload, Sync)
+        if users is UNSET:
+            users = None
+        native = self._call(_lib.Admin_describe_user_scram_credentials,
+                            *_conversions.describe_user_scram_credentials_args(users),
+                            options._setters_ran())
+        return _conversions.describe_user_scram_credentials_result(native, Sync, None)
 
     def alter_user_scram_credentials(
             self, *, alterations: Sequence[UserScramCredentialAlteration],
@@ -1546,7 +1515,7 @@ class Admin(_AdminState):
     ) -> AlterUserScramCredentialsResult[Sync]:
         """Alter SASL/SCRAM credentials.
 
-        The following errors can be anticipated when calling ``result()`` on any of the
+        The following errors can be anticipated when calling ``get()`` on any of the
         futures from the returned ``AlterUserScramCredentialsResult``:
 
         - ``NotControllerError``: if the request is not sent to the Controller broker.
@@ -1565,25 +1534,21 @@ class Admin(_AdminState):
         ``alterations``: the alterations to be applied; ``options``: the options to use
         when altering the credentials (Java's ``alterUserScramCredentials(alterations)``
         passes ``new AlterUserScramCredentialsOptions()``). Returns the
-        ``AlterUserScramCredentialsResult``, every future of which is complete
-        *(deviation: see ``create_topics``)*.
+        ``AlterUserScramCredentialsResult``.
         """
         if options is None:
             options = AlterUserScramCredentialsOptions()
-        rows = list(alterations)
-        args = _conversions.alter_user_scram_credentials_args(rows, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_alter_user_scram_credentials_async(
-                c_admin, *args, cb),
-            _conversions.free_alter_user_scram_credentials)
-        return _conversions.alter_user_scram_credentials_result(rows, payload, Sync)
+        native = self._call(_lib.Admin_alter_user_scram_credentials,
+                            *_conversions.alter_user_scram_credentials_args(alterations),
+                            options._setters_ran())
+        return _conversions.alter_user_scram_credentials_result(native, Sync, None)
 
     def describe_features(self, *, options: DescribeFeaturesOptions | None = None
                           ) -> DescribeFeaturesResult[Sync]:
         """Describes finalized as well as supported features. The request is issued to
         any random broker.
 
-        The following errors can be anticipated when calling ``result()`` on the future
+        The following errors can be anticipated when calling ``get()`` on the future
         from the returned ``DescribeFeaturesResult``:
 
         - ``TimeoutError``: if the request timed out before the describe operation could
@@ -1591,15 +1556,12 @@ class Admin(_AdminState):
 
         ``options``: the options to use (Java's ``describeFeatures()`` passes ``new
         DescribeFeaturesOptions()``). Returns the ``DescribeFeaturesResult`` containing
-        the result, its future complete *(deviation: see ``create_topics``)*.
+        the result.
         """
         if options is None:
             options = DescribeFeaturesOptions()
-        args = _conversions.describe_features_args(options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_describe_features_async(c_admin, *args, cb),
-            _conversions.free_describe_features)
-        return _conversions.describe_features_result(payload, Sync)
+        native = self._call(_lib.Admin_describe_features, options._setters_ran())
+        return _conversions.describe_features_result(native, Sync, None)
 
     def update_features(self, *, feature_updates: Mapping[str, FeatureUpdate],
                         options: UpdateFeaturesOptions | None = None
@@ -1629,7 +1591,7 @@ class Admin(_AdminState):
         - The ``UPGRADE`` type cannot be used when the ``max_version_level`` is zero.
           Attempting to do so will result in an ``IllegalArgumentError``.
 
-        The following errors can be anticipated when calling ``result()`` on the futures
+        The following errors can be anticipated when calling ``get()`` on the futures
         obtained from the returned ``UpdateFeaturesResult``:
 
         - ``ClusterAuthorizationError``: if the authenticated user didn't have alter
@@ -1653,17 +1615,14 @@ class Admin(_AdminState):
         ``feature_updates``: the map of finalized feature name to ``FeatureUpdate``;
         ``options``: the options to use (Java's ``updateFeatures(featureUpdates)``
         passes ``new UpdateFeaturesOptions()``). Returns the ``UpdateFeaturesResult``
-        containing the result, every future of which is complete *(deviation: see
-        ``create_topics``)*.
+        containing the result.
         """
         if options is None:
             options = UpdateFeaturesOptions()
-        updates = dict(feature_updates)
-        args = _conversions.update_features_args(updates, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_update_features_async(c_admin, *args, cb),
-            _conversions.free_update_features)
-        return _conversions.update_features_result(updates, payload, Sync)
+        native = self._call(_lib.Admin_update_features,
+                            *_conversions.update_features_args(feature_updates),
+                            options._setters_ran())
+        return _conversions.update_features_result(native, Sync, None)
 
     def unregister_controller(self, *, controller_id: int,
                               options: UnregisterControllerOptions | None = None
@@ -1705,17 +1664,14 @@ class Admin(_AdminState):
 
         ``partitions``: the set of partitions to query; ``options``: options to control
         the method behavior (Java's ``describeProducers(partitions)`` passes ``new
-        DescribeProducersOptions()``). Returns the result, every future of which is
-        complete *(deviation: see ``create_topics``)*.
+        DescribeProducersOptions()``). Returns the result.
         """
         if options is None:
             options = DescribeProducersOptions()
-        topic_partitions = list(partitions)
-        args = _conversions.describe_producers_args(topic_partitions, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_describe_producers_async(c_admin, *args, cb),
-            _conversions.free_describe_producers)
-        return _conversions.describe_producers_result(topic_partitions, payload, Sync)
+        targets = list(partitions)
+        native = self._call(_lib.Admin_describe_producers,
+                            *_conversions.describe_producers_args(targets), options._setters_ran())
+        return _conversions.describe_producers_result(native, Sync, None, targets)
 
     def describe_transactions(self, *, transactional_ids: Iterable[str],
                               options: DescribeTransactionsOptions | None = None
@@ -1726,17 +1682,14 @@ class Admin(_AdminState):
         ``transactional_ids``: the set of transactional IDs to query; ``options``:
         options to control the method behavior (Java's
         ``describeTransactions(transactionalIds)`` passes ``new
-        DescribeTransactionsOptions()``). Returns the result, every future of which is
-        complete *(deviation: see ``create_topics``)*.
+        DescribeTransactionsOptions()``). Returns the result.
         """
         if options is None:
             options = DescribeTransactionsOptions()
         ids = list(transactional_ids)
-        args = _conversions.describe_transactions_args(ids, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_describe_transactions_async(c_admin, *args, cb),
-            _conversions.free_describe_transactions)
-        return _conversions.describe_transactions_result(ids, payload, Sync)
+        native = self._call(_lib.Admin_describe_transactions,
+                            *_conversions.describe_transactions_args(ids), options._setters_ran())
+        return _conversions.describe_transactions_result(native, Sync, None, ids)
 
     def abort_transaction(self, *, spec: AbortTransactionSpec,
                           options: AbortTransactionOptions | None = None
@@ -1748,16 +1701,13 @@ class Admin(_AdminState):
         ``spec``: the transaction specification including topic partition and producer
         details; ``options``: options to control the method behavior (including
         filters) (Java's ``abortTransaction(spec)`` passes ``new
-        AbortTransactionOptions()``). Returns the result, its future complete
-        *(deviation: see ``create_topics``)*.
+        AbortTransactionOptions()``). Returns the result.
         """
         if options is None:
             options = AbortTransactionOptions()
-        args = _conversions.abort_transaction_args(spec, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_abort_transaction_async(c_admin, *args, cb),
-            _conversions.free_abort_transaction)
-        return _conversions.abort_transaction_result(spec, payload, Sync)
+        native = self._call(_lib.Admin_abort_transaction, *_conversions.abort_transaction_args(spec),
+                            options._setters_ran())
+        return _conversions.abort_transaction_result(native, Sync, None, spec)
 
     def list_transactions(self, *, options: ListTransactionsOptions | None = None
                           ) -> ListTransactionsResult[Sync]:
@@ -1770,15 +1720,13 @@ class Admin(_AdminState):
 
         ``options``: options to control the method behavior (including filters) (Java's
         ``listTransactions()`` passes ``new ListTransactionsOptions()``). Returns the
-        result, its futures complete *(deviation: see ``create_topics``)*.
+        result.
         """
         if options is None:
             options = ListTransactionsOptions()
-        args = _conversions.list_transactions_args(options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_list_transactions_async(c_admin, *args, cb),
-            _conversions.free_list_transactions)
-        return _conversions.list_transactions_result(payload, Sync)
+        native = self._call(_lib.Admin_list_transactions,
+                            _conversions.list_transactions_options(options))
+        return _conversions.list_transactions_result(native, Sync, None)
 
     def fence_producers(self, *, transactional_ids: Iterable[str],
                         options: FenceProducersOptions | None = None
@@ -1789,17 +1737,14 @@ class Admin(_AdminState):
         ``transactional_ids``: the IDs of the producers to fence; ``options``: the
         options to use when fencing the producers (Java's
         ``fenceProducers(transactionalIds)`` passes ``new FenceProducersOptions()``).
-        Returns the ``FenceProducersResult``, every future of which is complete
-        *(deviation: see ``create_topics``)*.
+        Returns the ``FenceProducersResult``.
         """
         if options is None:
             options = FenceProducersOptions()
         ids = list(transactional_ids)
-        args = _conversions.fence_producers_args(ids, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_fence_producers_async(c_admin, *args, cb),
-            _conversions.free_fence_producers)
-        return _conversions.fence_producers_result(ids, payload, Sync)
+        native = self._call(_lib.Admin_fence_producers, *_conversions.fence_producers_args(ids),
+                            options._setters_ran())
+        return _conversions.fence_producers_result(native, Sync, None, ids)
 
     @overload
     def list_config_resources(self, *, config_resource_types: Iterable[ConfigResource.Type],
@@ -1865,14 +1810,10 @@ class Admin(_AdminState):
         ``transactional_id``: the ID of the transaction to terminate; ``options``: the
         options to use when terminating the transaction (Java's
         ``forceTerminateTransaction(transactionalId)`` passes ``new
-        TerminateTransactionOptions()``). Returns the ``TerminateTransactionResult``, its
-        future complete *(deviation: see ``create_topics``)*.
+        TerminateTransactionOptions()``). Returns the ``TerminateTransactionResult``.
         """
         if options is None:
             options = TerminateTransactionOptions()
-        args = _conversions.force_terminate_transaction_args(transactional_id, options)
-        payload = self._wait_for(
-            lambda c_admin, cb: _lib.Admin_force_terminate_transaction_async(
-                c_admin, *args, cb),
-            _conversions.free_force_terminate_transaction)
-        return _conversions.force_terminate_transaction_result(payload, Sync)
+        native = self._call(_lib.Admin_force_terminate_transaction, transactional_id,
+                            options._setters_ran())
+        return _conversions.force_terminate_transaction_result(native, Sync, None)

@@ -794,9 +794,6 @@ def _admin_security_rpc_types(c: object = None) -> None:
     executed at runtime."""
     if c is None:
         return
-    import asyncio
-    import concurrent.futures
-
     from confluent_kafka.admin import (
         AbortTransactionSpec,
         Admin,
@@ -814,76 +811,78 @@ def _admin_security_rpc_types(c: object = None) -> None:
     from confluent_kafka.common import (
         AclBinding,
         AclBindingFilter,
+        AsyncKafkaFuture,
         ClientQuotaAlteration,
         ClientQuotaEntity,
         ClientQuotaFilter,
         DelegationToken,
+        KafkaFuture,
     )
 
     admin = Admin.create(configs={"bootstrap.servers": "b:9092"})
     tp = TopicPartition(topic="t", partition=0)
     assert_type(admin.describe_acls(filter=AclBindingFilter.ANY).values(),
-                "concurrent.futures.Future[list[AclBinding]]")
+                "KafkaFuture[list[AclBinding]]")
     created = admin.create_acls(acls=[])
-    assert_type(created.all(), "concurrent.futures.Future[None]")
+    assert_type(created.all(), "KafkaFuture[None]")
     assert_type(admin.delete_acls(filters=[AclBindingFilter.ANY]).all(),
-                "concurrent.futures.Future[list[AclBinding]]")
+                "KafkaFuture[list[AclBinding]]")
     assert_type(admin.create_delegation_token().delegation_token(),
-                "concurrent.futures.Future[DelegationToken]")
+                "KafkaFuture[DelegationToken]")
     assert_type(admin.renew_delegation_token(hmac=b"h").expiry_timestamp(),
-                "concurrent.futures.Future[int]")
+                "KafkaFuture[int]")
     assert_type(admin.expire_delegation_token(hmac=b"h").expiry_timestamp(),
-                "concurrent.futures.Future[int]")
+                "KafkaFuture[int]")
     assert_type(admin.describe_delegation_token().delegation_tokens(),
-                "concurrent.futures.Future[list[DelegationToken]]")
+                "KafkaFuture[list[DelegationToken]]")
     assert_type(admin.describe_client_quotas(filter=ClientQuotaFilter.all()).entities(),
-                "concurrent.futures.Future[dict[ClientQuotaEntity, dict[str, float]]]")
+                "KafkaFuture[dict[ClientQuotaEntity, dict[str, float]]]")
     altered = admin.alter_client_quotas(entries=[ClientQuotaAlteration(
         entity=ClientQuotaEntity(entries={"user": "u"}), ops=[])])
-    assert_type(altered.all(), "concurrent.futures.Future[None]")
+    assert_type(altered.all(), "KafkaFuture[None]")
     assert_type(admin.describe_user_scram_credentials().all(),
-                "concurrent.futures.Future[dict[str, UserScramCredentialsDescription]]")
+                "KafkaFuture[dict[str, UserScramCredentialsDescription]]")
     assert_type(admin.describe_user_scram_credentials(users=["u"]).users(),
-                "concurrent.futures.Future[list[str]]")
+                "KafkaFuture[list[str]]")
     assert_type(admin.describe_user_scram_credentials(
         users=None, options=DescribeUserScramCredentialsOptions()).description(user_name="u"),
-        "concurrent.futures.Future[UserScramCredentialsDescription]")
+        "KafkaFuture[UserScramCredentialsDescription]")
     assert_type(admin.alter_user_scram_credentials(alterations=[UserScramCredentialDeletion(
         user="u", mechanism=ScramMechanism.SCRAM_SHA_256)]).all(),
-        "concurrent.futures.Future[None]")
+        "KafkaFuture[None]")
     assert_type(admin.describe_features().feature_metadata(),
-                "concurrent.futures.Future[FeatureMetadata]")
+                "KafkaFuture[FeatureMetadata]")
     assert_type(admin.update_features(feature_updates={"f": FeatureUpdate(
         max_version_level=1, upgrade_type=FeatureUpdate.UpgradeType.UPGRADE)}).all(),
-        "concurrent.futures.Future[None]")
+        "KafkaFuture[None]")
     assert_type(admin.describe_producers(partitions=[tp]).partition_result(partition=tp),
-                "concurrent.futures.Future[DescribeProducersResult.PartitionProducerState]")
+                "KafkaFuture[DescribeProducersResult.PartitionProducerState]")
     assert_type(admin.describe_transactions(transactional_ids=["x"]).description(
-        transactional_id="x"), "concurrent.futures.Future[TransactionDescription]")
+        transactional_id="x"), "KafkaFuture[TransactionDescription]")
     assert_type(admin.abort_transaction(spec=AbortTransactionSpec(
         topic_partition=tp, producer_id=1, producer_epoch=0, coordinator_epoch=0)).all(),
-        "concurrent.futures.Future[None]")
+        "KafkaFuture[None]")
     assert_type(admin.list_transactions().all(),
-                "concurrent.futures.Future[list[TransactionListing]]")
+                "KafkaFuture[list[TransactionListing]]")
     assert_type(admin.fence_producers(transactional_ids=["x"]).producer_id(
-        transactional_id="x"), "concurrent.futures.Future[int]")
+        transactional_id="x"), "KafkaFuture[int]")
     assert_type(admin.force_terminate_transaction(transactional_id="x").result(),
-                "concurrent.futures.Future[None]")
+                "KafkaFuture[None]")
 
     async def _async() -> None:
         async_admin = AsyncAdmin.create(configs={"bootstrap.servers": "b:9092"})
-        acls = await async_admin.describe_acls(filter=AclBindingFilter.ANY)
-        assert_type(acls.values(), "asyncio.Future[list[AclBinding]]")
-        scram = await async_admin.describe_user_scram_credentials(users=["u"])
-        assert_type(await scram.users(), list[str])
-        features = await async_admin.describe_features()
-        assert_type(await features.feature_metadata(), FeatureMetadata)
-        listed = await async_admin.list_transactions()
-        assert_type(listed.all(), "asyncio.Future[list[TransactionListing]]")
-        terminated = await async_admin.force_terminate_transaction(transactional_id="x")
-        assert_type(terminated.result(), "asyncio.Future[None]")
+        acls = async_admin.describe_acls(filter=AclBindingFilter.ANY)
+        assert_type(acls.values(), "AsyncKafkaFuture[list[AclBinding]]")
+        scram = async_admin.describe_user_scram_credentials(users=["u"])
+        assert_type(await scram.users().get(), list[str])
+        features = async_admin.describe_features()
+        assert_type(await features.feature_metadata().get(), FeatureMetadata)
+        listed = async_admin.list_transactions()
+        assert_type(listed.all(), "AsyncKafkaFuture[list[TransactionListing]]")
+        terminated = async_admin.force_terminate_transaction(transactional_id="x")
+        assert_type(terminated.result(), "AsyncKafkaFuture[None]")
 
-    del _async, asyncio, concurrent
+    del _async
 
 
 def test_admin_security_rpc_typing_imports() -> None:
