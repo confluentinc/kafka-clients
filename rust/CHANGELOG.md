@@ -22,6 +22,13 @@ breaking changes.
   `Producer`. Replace `Box<dyn Consumer<K, V>>` with
   `Box<dyn DynConsumer<K, V>>`; with only `Consumer` imported, method calls on
   it keep working unchanged.
+- **Breaking (C API):** `KafkaConsumer` has a class handle, as `MockConsumer`
+  and `KafkaProducer` do. `kafka_consumer_KafkaConsumer_new` returns an owned
+  `kafka_consumer_KafkaConsumer_t *`, freed with
+  `kafka_consumer_KafkaConsumer_destroy`; the `kafka_consumer_Consumer_*`
+  operations take its borrowed `kafka_consumer_KafkaConsumer__as_Consumer`
+  view. `kafka_consumer_Consumer_destroy` is removed, since no
+  `kafka_consumer_Consumer_t` is owned any more.
 
 ## [0.1.1] - 2026-10-01
 

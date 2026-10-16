@@ -1029,7 +1029,7 @@ The module is gated on the `ffi` feature, which also turns on the `cbindgen`
 build-dependency that emits `rust/target/include/confluent_kafka.h` (33.9K
 lines). Only crate types that are public have bindings (CLAUDE.md §4). The
 layout mirrors the crate: one file per Java class under `src/ffi/common/`,
-`producer/`, `consumer/` and `admin/` (269 files, 2353 exported symbols),
+`producer/`, `consumer/` and `admin/` (269 files, 2354 exported symbols),
 plus the package-less helpers:
 
 | File / directory | Exported symbols | What it holds |
@@ -1040,7 +1040,7 @@ plus the package-less helpers:
 | `kafka_future.rs` | 12 | the one generic `kafka_common_KafkaFuture_t` (`get`, `get_cb`, `is_done`, `all_of`, `then_apply` through a `BaseFunction_t` interface, `completed_future`) |
 | `callback_queue.rs` | 0 | `CallbackQueue`: the per-client callbacks vector behind `__execute_callbacks` / `__set_callbacks_notify` |
 | `producer/` (9 files) | 132 | `kafka_producer_Producer_t` interface, `KafkaProducer_t` / `MockProducer_t` with `__as_Producer`, `Callback_t` (the `callback_id` protocol), `Partitioner_t`, `ProducerConfig_t`, records and metadata |
-| `consumer/` (16 files) | 305 | `kafka_consumer_Consumer_t`, `MockConsumer_t` with `__as_Consumer`, `ConsumerRebalanceListener_t` / `OffsetCommitCallback_t` (the `callback_id` protocol), `Deserializer_t`, `ConsumerHandle_t`, `ConsumerConfig_t`, records |
+| `consumer/` (16 files) | 306 | `kafka_consumer_Consumer_t` interface, `KafkaConsumer_t` / `MockConsumer_t` with `__as_Consumer`, `ConsumerRebalanceListener_t` / `OffsetCommitCallback_t` (the `callback_id` protocol), `Deserializer_t`, `ConsumerHandle_t`, `ConsumerConfig_t`, records |
 | `admin/` (132 files; `options/` 46, `rpc.rs` 96 invokers) | 857 | `kafka_admin_Admin_t`, `AdminClient_create`, `MockAdminClient_t` with `__as_Admin`, one `<Rpc>Options_t` per Java options class, one `<Rpc>Result_t` per Java result class with per-key `KafkaFuture_t`s, every admin data class |
 
 The conventions, each enforced by `cargo xtask lint-custom check-ffi-translation`

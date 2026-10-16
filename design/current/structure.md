@@ -354,7 +354,7 @@ pipeline over a single owned buffer — read them in that order.*
 ## ffi/ and bindings
 
 ```
-rust/src/ffi/           # feature-gated: --features ffi; 269 files, 2353 exported symbols
+rust/src/ffi/           # feature-gated: --features ffi; 269 files, 2354 exported symbols
 ├── mod.rs              # module docs: the C conventions as implemented
 ├── common.rs           # kafka_common_Error_t, kafka_common_Error_e, init_default_logger
 ├── error_predicates.rs # generated: 172 kafka_common_Error_is_*_error predicates
@@ -365,8 +365,9 @@ rust/src/ffi/           # feature-gated: --features ffi; 269 files, 2353 exporte
 │                       # security/, serialization/, metrics/, ...)
 ├── producer/           # 9 files, 129 symbols: Producer_t, KafkaProducer_t, MockProducer_t,
 │                       # Callback_t, Partitioner_t, ProducerConfig_t, ProducerRecord_t, ...
-├── consumer/           # 16 files, 297 symbols: Consumer_t, MockConsumer_t, ConsumerHandle_t,
-│                       # ConsumerRebalanceListener_t, OffsetCommitCallback_t, ...
+├── consumer/           # 16 files, 298 symbols: Consumer_t, KafkaConsumer_t, MockConsumer_t,
+│                       # ConsumerHandle_t, ConsumerRebalanceListener_t,
+│                       # OffsetCommitCallback_t, ...
 └── admin/              # 130 files, 844 symbols: Admin_t, MockAdminClient_t, rpc.rs (94 RPC
     ├── options/        #   invokers), one <Rpc>Result_t and one <Rpc>Options_t per Java class
     └── ...

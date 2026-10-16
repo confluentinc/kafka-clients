@@ -214,8 +214,8 @@ public surface does not change.
     not, prefers the concrete type or a generic `C: Consumer<K, V> + ?Sized`.
   - With both traits imported, a method call on a concrete consumer is
     ambiguous (both apply). Import one; where both names are needed, refer to
-    `DynConsumer` by path in type positions (as `rust/src/ffi/consumer.rs`
-    does).
+    `DynConsumer` by path in type positions (as
+    `rust/tests/consumer/async_kafka_consumer_test.rs` does).
   - Every returned future is `Send` (the trait says so); non-`Send` futures
     cannot cross task boundaries, which the tokio multi-thread runtime needs.
 

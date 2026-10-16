@@ -108,8 +108,8 @@ static inline void callback_pump_install(callback_pump_t *pump,
 }
 
 /* The consumer twin of `callback_pump_install`: `consumer` is any
- * `kafka_consumer_Consumer_t` (an owned one from `KafkaConsumer_new` or a
- * mock's `__as_Consumer` view). */
+ * `kafka_consumer_Consumer_t` (a KafkaConsumer's or a mock's `__as_Consumer`
+ * view). */
 static inline void consumer_callback_pump_install(callback_pump_t *pump,
                                                   const kafka_consumer_Consumer_t *consumer) {
     callback_pump_init(pump, consumer, callback_pump_execute_consumer);

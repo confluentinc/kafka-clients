@@ -3739,7 +3739,8 @@ typedef struct PinnedBytes {
 typedef struct {
     int is_mock;
     kafka_consumer_MockConsumer_t* mc;     // owned when is_mock
-    kafka_consumer_Consumer_t* consumer;   // borrowed __as_Consumer view (mock) or owned (KafkaConsumer_new)
+    kafka_consumer_KafkaConsumer_t* kc;    // owned when !is_mock
+    kafka_consumer_Consumer_t* consumer;   // borrowed __as_Consumer view of mc or kc
     PyObject* notify_cb;                   // asyncio pump scheduler, or NULL
     ListenerCtx* listener;                 // the registered listener's `self`, or NULL
     CommitCbCtx* orphans;                  // see CommitCbCtx
@@ -4074,11 +4075,11 @@ static PyObject* py_Consumer_KafkaConsumer_new(PyObject* self, PyObject* args) {
     kafka_consumer_ConsumerConfig_t* config = NULL;
     kafka_common_Error_t* err = (config = kafka_consumer_ConsumerConfig_new(props, &ffi_err), ffi_take(&ffi_err));
     ffi_unraisable((kafka_Map_destroy_err(props, &ffi_err), ffi_take(&ffi_err)));
-    kafka_consumer_Consumer_t* consumer = NULL;
+    kafka_consumer_KafkaConsumer_t* kc = NULL;
     if (err == NULL) {
         kafka_common_Error_t* destroy_err;
         Py_BEGIN_ALLOW_THREADS
-        err = (consumer = kafka_consumer_KafkaConsumer_new(config, NULL, NULL, &ffi_err), ffi_take(&ffi_err));  // config copied
+        err = (kc = kafka_consumer_KafkaConsumer_new(config, NULL, NULL, &ffi_err), ffi_take(&ffi_err));  // config copied
         Py_END_ALLOW_THREADS
         destroy_err = (kafka_consumer_ConsumerConfig_destroy_err(config, &ffi_err), ffi_take(&ffi_err));
         ffi_unraisable(destroy_err);
@@ -4090,15 +4091,16 @@ static PyObject* py_Consumer_KafkaConsumer_new(PyObject* self, PyObject* args) {
     }
     Consumer* c = consumer_alloc();
     if (c != NULL) {
-        c->consumer = consumer;  // owned
-        if (ffi_raise((kafka_consumer_Consumer__set_callbacks_notify_err(c->consumer, consumer_callbacks_notify, c, &ffi_err), ffi_take(&ffi_err)))) {
+        c->kc = kc;  // owned
+        if (ffi_raise((c->consumer = kafka_consumer_KafkaConsumer__as_Consumer_err(c->kc, &ffi_err), ffi_take(&ffi_err)))  // borrowed view
+            || ffi_raise((kafka_consumer_Consumer__set_callbacks_notify_err(c->consumer, consumer_callbacks_notify, c, &ffi_err), ffi_take(&ffi_err)))) {
             PyMem_Free(c);
             c = NULL;
         }
     }
     if (c == NULL) {
         Py_BEGIN_ALLOW_THREADS
-        err = (kafka_consumer_Consumer_destroy_err(consumer, &ffi_err), ffi_take(&ffi_err));
+        err = (kafka_consumer_KafkaConsumer_destroy_err(kc, &ffi_err), ffi_take(&ffi_err));
         Py_END_ALLOW_THREADS
         ffi_unraisable(err);
         return NULL;
@@ -4117,7 +4119,7 @@ static PyObject* py_Consumer_destroy(PyObject* self, PyObject* args) {
     kafka_common_Error_t* err;
     Py_BEGIN_ALLOW_THREADS
     if (c->is_mock) err = (kafka_consumer_MockConsumer_destroy_err(c->mc, &ffi_err), ffi_take(&ffi_err));
-    else err = (kafka_consumer_Consumer_destroy_err(c->consumer, &ffi_err), ffi_take(&ffi_err));
+    else err = (kafka_consumer_KafkaConsumer_destroy_err(c->kc, &ffi_err), ffi_take(&ffi_err));
     Py_END_ALLOW_THREADS
     // The handle is freed even after a panic: report it, release the C side.
     ffi_unraisable(err);
