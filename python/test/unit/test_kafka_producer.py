@@ -99,20 +99,21 @@ import os
 import signal
 import threading
 import time
-from concurrent.futures import Future
 from types import FrameType
 from typing import Any
 
 import pytest
 
 from confluent_kafka import IllegalArgumentError, IllegalStateError, NullPointerError
-from confluent_kafka.common import KafkaError, TopicPartition
+from confluent_kafka.common import KafkaError, KafkaFuture, TopicPartition
 from confluent_kafka.common.config import ConfigError
 from confluent_kafka.common.errors import BootstrapResolutionError
 from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
 from confluent_kafka.common.serialization import bytes_serializer, string_serializer
 from confluent_kafka.consumer import ConsumerGroupMetadata, KafkaConsumer, OffsetAndMetadata
 from confluent_kafka.producer import KafkaProducer, ProducerRecord, RecordMetadata
+
+from .producer_futures import failure
 
 INIT_TXN_TIMEOUT_MSG = ("InitTransactions timed out - did not complete coordinator discovery or "
                         "receive the InitProducerId response within max.block.ms.")
@@ -202,7 +203,7 @@ def test_should_close_properly_and_throw_if_interrupted() -> None:
                "max.block.ms": 60000}
     producer = KafkaProducer(configs=configs, key_serializer=string_serializer(),
                              value_serializer=string_serializer())
-    outcome: list[BaseException | Future[RecordMetadata]] = []
+    outcome: list[BaseException | KafkaFuture[RecordMetadata]] = []
 
     def send() -> None:
         try:
@@ -248,8 +249,8 @@ def test_should_close_properly_and_throw_if_interrupted() -> None:
     if isinstance(result, BaseException):
         assert isinstance(result, KafkaError), result
     else:
-        assert result.done()
-        assert isinstance(result.exception(), KafkaError)
+        assert result.is_done()
+        assert isinstance(failure(result), KafkaError)
     with pytest.raises(IllegalStateError) as err:
         producer.send(record=ProducerRecord(topic="topic", key="key", value="value"))
     assert str(err.value) == "Cannot perform operation after producer has been closed"

@@ -388,8 +388,10 @@ class MockConsumerCore(Generic[K, V]):
         with self._lock:
             _no_coroutine(self._commit_async_body(offsets, callback), "OffsetCommitCallback")
 
-    def _c_commit(self, offsets: Mapping[TopicPartition, OffsetAndMetadata] | None) -> None:
-        """Java's ``commitSync()`` / ``commitSync(Map)``."""
+    def _c_commit(self, offsets: Mapping[TopicPartition, OffsetAndMetadata] | None,
+                  timeout: Duration | None = None) -> None:
+        """Java's ``commitSync()`` / ``commitSync(Map)``; its ``Duration``
+        overloads ignore the ``timeout``, as Java's mock does."""
         with self._lock:
             self._c_commit_async(self._subscriptions.all_consumed() if offsets is None else offsets,
                                None)
@@ -413,17 +415,20 @@ class MockConsumerCore(Generic[K, V]):
             assert offset is not None
             self._subscriptions.seek(partition, offset)
 
-    def _c_committed(self, partitions: Iterable[TopicPartition]
-                           ) -> dict[TopicPartition, OffsetAndMetadata | None]:
+    def _c_committed(self, partitions: Iterable[TopicPartition],
+                     timeout: Duration | None = None
+                     ) -> dict[TopicPartition, OffsetAndMetadata | None]:
         """Java's ``committed(Set)``: only the partitions with a committed offset;
-        an unassigned one reports offset 0."""
+        an unassigned one reports offset 0. The ``Duration`` overload ignores
+        the ``timeout``, as Java's mock does (and so the other overloads
+        below)."""
         with self._lock:
             self._ensure_not_closed()
             return {tp: (self._committed_offsets[tp] if self._subscriptions.is_assigned(tp)
                          else OffsetAndMetadata(offset=0))
                     for tp in partitions if tp in self._committed_offsets}
 
-    def _c_position(self, partition: TopicPartition) -> int:
+    def _c_position(self, partition: TopicPartition, timeout: Duration | None = None) -> int:
         with self._lock:
             self._ensure_not_closed()
             if not self._subscriptions.is_assigned(partition):
@@ -453,12 +458,13 @@ class MockConsumerCore(Generic[K, V]):
             self._ensure_not_closed()
             return {}
 
-    def _c_partitions_for(self, topic: str) -> list[PartitionInfo]:
+    def _c_partitions_for(self, topic: str, timeout: Duration | None = None
+                          ) -> list[PartitionInfo]:
         with self._lock:
             self._ensure_not_closed()
             return list(self._partitions.get(topic, []))
 
-    def _c_list_topics(self) -> dict[str, list[PartitionInfo]]:
+    def _c_list_topics(self, timeout: Duration | None = None) -> dict[str, list[PartitionInfo]]:
         with self._lock:
             self._ensure_not_closed()
             return {topic: list(partitions) for topic, partitions in self._partitions.items()}
@@ -479,8 +485,9 @@ class MockConsumerCore(Generic[K, V]):
                 self._subscriptions.resume(partition)
                 self._paused_partitions.discard(partition)
 
-    def _c_offsets_for_times(self, timestamps_to_search: Mapping[TopicPartition, int]
-                           ) -> dict[TopicPartition, OffsetAndTimestamp | None]:
+    def _c_offsets_for_times(self, timestamps_to_search: Mapping[TopicPartition, int],
+                             timeout: Duration | None = None
+                             ) -> dict[TopicPartition, OffsetAndTimestamp | None]:
         # Java's mock throws UnsupportedOperationException("Not implemented
         # yet.") (MockConsumer.java:611), inside its synchronized body.
         with self._lock:
@@ -501,10 +508,12 @@ class MockConsumerCore(Generic[K, V]):
                 result[tp] = offset
             return result
 
-    def _c_beginning_offsets(self, partitions: Iterable[TopicPartition]) -> dict[TopicPartition, int]:
+    def _c_beginning_offsets(self, partitions: Iterable[TopicPartition],
+                             timeout: Duration | None = None) -> dict[TopicPartition, int]:
         return self._offsets_of(partitions, self._beginning_offsets, "a beginning")
 
-    def _c_end_offsets(self, partitions: Iterable[TopicPartition]) -> dict[TopicPartition, int]:
+    def _c_end_offsets(self, partitions: Iterable[TopicPartition],
+                       timeout: Duration | None = None) -> dict[TopicPartition, int]:
         return self._offsets_of(partitions, self._end_offsets, "an end")
 
     def _c_current_lag(self, topic_partition: TopicPartition) -> int | None:
@@ -549,8 +558,9 @@ class MockConsumerCore(Generic[K, V]):
     async def _a_poll(self, timeout: Duration) -> ConsumerRecords[K, V]:
         return self._c_poll(timeout)
 
-    async def _a_commit(self, offsets: Mapping[TopicPartition, OffsetAndMetadata] | None) -> None:
-        self._c_commit(offsets)
+    async def _a_commit(self, offsets: Mapping[TopicPartition, OffsetAndMetadata] | None,
+                        timeout: Duration | None = None) -> None:
+        self._c_commit(offsets, timeout)
 
     async def _a_seek(self, partition: TopicPartition, offset: int | None,
                       offset_and_metadata: OffsetAndMetadata | None) -> None:
@@ -562,18 +572,22 @@ class MockConsumerCore(Generic[K, V]):
     async def _a_seek_to_end(self, partitions: Iterable[TopicPartition]) -> None:
         self._c_seek_to_end(partitions)
 
-    async def _a_position(self, partition: TopicPartition) -> int:
-        return self._c_position(partition)
+    async def _a_position(self, partition: TopicPartition,
+                          timeout: Duration | None = None) -> int:
+        return self._c_position(partition, timeout)
 
-    async def _a_committed(self, partitions: Iterable[TopicPartition]
+    async def _a_committed(self, partitions: Iterable[TopicPartition],
+                           timeout: Duration | None = None
                            ) -> dict[TopicPartition, OffsetAndMetadata | None]:
-        return self._c_committed(partitions)
+        return self._c_committed(partitions, timeout)
 
-    async def _a_partitions_for(self, topic: str) -> list[PartitionInfo]:
-        return self._c_partitions_for(topic)
+    async def _a_partitions_for(self, topic: str, timeout: Duration | None = None
+                                ) -> list[PartitionInfo]:
+        return self._c_partitions_for(topic, timeout)
 
-    async def _a_list_topics(self) -> dict[str, list[PartitionInfo]]:
-        return self._c_list_topics()
+    async def _a_list_topics(self, timeout: Duration | None = None
+                             ) -> dict[str, list[PartitionInfo]]:
+        return self._c_list_topics(timeout)
 
     async def _a_pause(self, partitions: Iterable[TopicPartition]) -> None:
         self._c_pause(partitions)
@@ -581,17 +595,20 @@ class MockConsumerCore(Generic[K, V]):
     async def _a_resume(self, partitions: Iterable[TopicPartition]) -> None:
         self._c_resume(partitions)
 
-    async def _a_offsets_for_times(self, timestamps_to_search: Mapping[TopicPartition, int]
+    async def _a_offsets_for_times(self, timestamps_to_search: Mapping[TopicPartition, int],
+                                   timeout: Duration | None = None
                                    ) -> dict[TopicPartition, OffsetAndTimestamp | None]:
-        return self._c_offsets_for_times(timestamps_to_search)
+        return self._c_offsets_for_times(timestamps_to_search, timeout)
 
-    async def _a_beginning_offsets(self, partitions: Iterable[TopicPartition]
+    async def _a_beginning_offsets(self, partitions: Iterable[TopicPartition],
+                                   timeout: Duration | None = None
                                    ) -> dict[TopicPartition, int]:
-        return self._c_beginning_offsets(partitions)
+        return self._c_beginning_offsets(partitions, timeout)
 
-    async def _a_end_offsets(self, partitions: Iterable[TopicPartition]
+    async def _a_end_offsets(self, partitions: Iterable[TopicPartition],
+                             timeout: Duration | None = None
                              ) -> dict[TopicPartition, int]:
-        return self._c_end_offsets(partitions)
+        return self._c_end_offsets(partitions, timeout)
 
     async def _a_commit_nowait(self, offsets: Mapping[TopicPartition, OffsetAndMetadata] | None,
                                callback: Callable[..., object] | None) -> None:

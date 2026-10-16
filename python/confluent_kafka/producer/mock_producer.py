@@ -35,18 +35,26 @@ cluster alone or ``auto_complete`` alone matches none of them. ``()`` passes
 from __future__ import annotations
 
 from collections.abc import Mapping
-from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, TypeVar, overload
 
 from confluent_kafka._args import UNSET, Form, java_forms
+from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 
 from ._mock_core import MockProducerCore
+from ._record_future import RecordFuture
+from ._send import reject_coroutine_callback
 from .producer import Producer
 from .record_metadata import RecordMetadata
 
 if TYPE_CHECKING:
     from confluent_kafka import Duration
-    from confluent_kafka.common import Cluster, MetricName, PartitionInfo, TopicPartition
+    from confluent_kafka.common import (
+        Cluster,
+        KafkaFuture,
+        MetricName,
+        PartitionInfo,
+        TopicPartition,
+    )
     from confluent_kafka.common.metric import Metric
     from confluent_kafka.common.serialization import Serializer
     from confluent_kafka.consumer import ConsumerGroupMetadata, OffsetAndMetadata
@@ -150,16 +158,20 @@ class MockProducer(MockProducerCore[K, V], Producer[K, V]):
         self._abort_transaction()
 
     def send(self, *, record: ProducerRecord[K, V],
-             callback: Callback | None = UNSET) -> Future[RecordMetadata]:
+             callback: Callback | None = UNSET) -> KafkaFuture[RecordMetadata]:
         """Adds the record to the list of sent records (``history()``). With
         ``auto_complete`` the returned future is complete, and the callback has
-        run, when this returns. The future cannot be cancelled, as Java's."""
+        run, when this returns. ``cancel()`` on the future returns ``False``,
+        as Java's; its ``then_apply`` functions and ``when_complete`` actions run
+        in the call that completes the record. A coroutine function given as
+        ``callback`` raises ``TypeError`` (``AsyncMockProducer`` awaits it)."""
         if callback is UNSET:
             callback = None  # Java's send(record) passes null
-        future: Future[RecordMetadata] = Future()
-        future.set_running_or_notify_cancel()
-        result: Future[RecordMetadata] = self._send(record, callback, future)
-        return result
+        if callback is not None:
+            reject_coroutine_callback(callback)
+        future: _KafkaFutureImpl[RecordMetadata] = _KafkaFutureImpl()
+        self._send(record, callback, future)
+        return RecordFuture._of_impl(future)
 
     def flush(self) -> None:
         self._flush()

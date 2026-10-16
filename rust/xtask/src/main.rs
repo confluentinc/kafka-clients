@@ -27,6 +27,7 @@ use std::process::{exit, Command};
 
 use anyhow::Context as _;
 
+mod admin_gen;
 mod chaos_matrix;
 
 fn main() -> anyhow::Result<()> {
@@ -38,6 +39,8 @@ fn main() -> anyhow::Result<()> {
         Some("check-generated") => check_generated()?,
         Some("generate-error-codes") => generate_error_codes()?,
         Some("generate-error-predicates") => error_predicates::generate_error_predicates()?,
+        Some("generate-admin-options") => admin_gen::options::generate(Path::new(REPO_ROOT))?,
+        Some("generate-admin-results") => admin_gen::results::generate(Path::new(REPO_ROOT))?,
         Some("java-deprecated") => java_deprecated()?,
         Some("fetch-java-refs") => fetch_java_refs()?,
         Some("lint-custom") => lint_custom::lint_custom(&env::args().skip(2).collect::<Vec<_>>())?,
@@ -99,6 +102,8 @@ fn check_generated() -> anyhow::Result<()> {
     check_message_specs_in_sync()?;
     check_error_codes_up_to_date()?;
     error_predicates::check_error_predicates_up_to_date()?;
+    check_admin_options_up_to_date()?;
+    check_admin_results_up_to_date()?;
 
     println!("🔍 Checking generated code formatting...");
 
@@ -523,6 +528,36 @@ fn generate_error_codes() -> anyhow::Result<()> {
     // And the ConfigDef type of every producer / consumer config key.
     println!("🔧 Generating the Python config key types from the Java sources...");
     config_types::generate(Path::new(REPO_ROOT))?;
+    Ok(())
+}
+
+/// Fail when a generated admin `*Options` module no longer matches the Java
+/// sources (`cargo xtask generate-admin-options`).
+fn check_admin_options_up_to_date() -> anyhow::Result<()> {
+    println!("🔍 Checking generated admin Options modules...");
+    let stale = admin_gen::options::check_up_to_date(Path::new(REPO_ROOT))?;
+    if !stale.is_empty() {
+        let files: Vec<String> = stale.iter().map(|p| p.display().to_string()).collect();
+        eprintln!("\n❌ Stale generated admin Options: {}", files.join(", "));
+        eprintln!("   Run: cargo xtask generate-admin-options");
+        exit(1);
+    }
+    println!("✅ Generated admin Options modules are up to date");
+    Ok(())
+}
+
+/// Fail when a generated admin `*Result` module no longer matches the Java
+/// sources (`cargo xtask generate-admin-results`).
+fn check_admin_results_up_to_date() -> anyhow::Result<()> {
+    println!("🔍 Checking generated admin Result modules...");
+    let stale = admin_gen::results::check_up_to_date(Path::new(REPO_ROOT))?;
+    if !stale.is_empty() {
+        let files: Vec<String> = stale.iter().map(|p| p.display().to_string()).collect();
+        eprintln!("\n❌ Stale generated admin Results: {}", files.join(", "));
+        eprintln!("   Run: cargo xtask generate-admin-results");
+        exit(1);
+    }
+    println!("✅ Generated admin Result modules are up to date");
     Ok(())
 }
 
@@ -2030,10 +2065,10 @@ fn java_deprecated() -> anyhow::Result<()> {
 /// reads those refs and fails without them.
 fn fetch_java_refs() -> anyhow::Result<()> {
     let refs = java::lint_refs();
-    let mut args = vec!["-C", java::KAFKA_SUBMODULE, "fetch", "--depth=1", "--no-tags", "origin"];
+    let mut args = vec!["fetch", "--depth=1", "--no-tags", "origin"];
     let specs: Vec<String> = refs.iter().map(|r| format!("+refs/tags/{r}:refs/tags/{r}")).collect();
     args.extend(specs.iter().map(String::as_str));
-    let status = Command::new("git").args(&args).status()?;
+    let status = java::submodule_git().args(&args).status()?;
     if !status.success() {
         anyhow::bail!("fetching {} into `{}` failed", refs.join(", "), java::KAFKA_SUBMODULE);
     }
@@ -2050,6 +2085,8 @@ fn print_help() {
 
   generate-error-codes  Regenerate the error-code constants for the multilanguage test harness
   generate-error-predicates  Regenerate the C exports of Error's predicates (src/ffi/error_predicates.rs)
+  generate-admin-options  Regenerate the admin *Options Python classes from the Java sources
+  generate-admin-results  Regenerate the admin *Result Python classes from the Java sources
   java-deprecated List the Java client's @Deprecated API in ../design/current/java-deprecated.txt
   fetch-java-refs Fetch the Kafka tags lint-custom reads into the kafka submodule
   lint-custom     Run the source-level rules clippy cannot express
