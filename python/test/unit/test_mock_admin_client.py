@@ -56,6 +56,8 @@ from typing import Any
 
 import pytest
 
+from confluent_kafka import ExecutionError
+
 from confluent_kafka.admin import (
     AbortTransactionSpec,
     AlterConfigOp,
@@ -118,6 +120,8 @@ from confluent_kafka.consumer import OffsetAndMetadata
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 from confluent_kafka.null_pointer_error import NullPointerError
 
+from .admin_futures import WAIT, assert_future_throws, failure
+
 
 def admin(num_brokers: int = 3) -> MockAdminClient:
     return MockAdminClient.create().num_brokers(num_brokers=num_brokers).build()
@@ -128,9 +132,20 @@ def new_topic(name: str, partitions: int, replication_factor: int) -> NewTopic:
 
 
 def error_of(future: Any) -> BaseException:
-    error: BaseException | None = future.exception()
+    """The error the future failed with (the cause of ``get()``'s
+    ``ExecutionError``)."""
+    error = failure(future)
     assert error is not None
     return error
+
+
+def value_of(future: Any) -> Any:
+    """The future's value; its failure raised as it is (``get()``'s cause)."""
+    try:
+        return future.get(timeout=WAIT)
+    except ExecutionError as error:
+        assert error.__cause__ is not None
+        raise error.__cause__ from None
 
 
 def seeded_broker(id_: int) -> Node:
@@ -167,8 +182,8 @@ def test_create_rejects_a_negative_broker_count() -> None:
 def test_controller_is_always_one_of_the_seeded_nodes() -> None:
     for num_brokers in range(1, 4):
         described = admin(num_brokers).describe_cluster()
-        nodes = described.nodes().result()
-        controller = described.controller().result()
+        nodes = value_of(described.nodes())
+        controller = value_of(described.controller())
         assert controller in nodes
         assert controller.id() == 0
         assert len(nodes) == num_brokers
@@ -179,19 +194,19 @@ def test_controller_is_always_one_of_the_seeded_nodes() -> None:
 def test_create_then_list_and_describe() -> None:
     client = admin()
     result = client.create_topics(new_topics=[new_topic("t", 2, 2)])
-    assert result.all().result() is None
-    assert result.num_partitions(topic="t").result() == 2
-    assert result.replication_factor(topic="t").result() == 2
-    assert "t" in client.list_topics().names().result()
+    assert value_of(result.all()) is None
+    assert value_of(result.num_partitions(topic="t")) == 2
+    assert value_of(result.replication_factor(topic="t")) == 2
+    assert "t" in value_of(client.list_topics().names())
     described = client.describe_topics(
         topics=TopicCollection.of_topic_names(topics=["t"])).all_topic_names()
     assert described is not None
-    assert len(described.result()["t"].partitions()) == 2
+    assert len(value_of(described)["t"].partitions()) == 2
 
 
 def test_create_existing_topic_fails_with_topic_exists() -> None:
     client = admin()
-    client.create_topics(new_topics=[new_topic("t", 1, 1)]).all().result()
+    value_of(client.create_topics(new_topics=[new_topic("t", 1, 1)]).all())
     result = client.create_topics(new_topics=[new_topic("t", 1, 1)])
     error = error_of(result.values()["t"])
     assert isinstance(error, TopicExistsError)
@@ -228,9 +243,9 @@ def test_describe_nonexistent_topic_is_unknown_topic() -> None:
 
 def test_delete_then_gone() -> None:
     client = admin()
-    client.create_topics(new_topics=[new_topic("t", 1, 1)]).all().result()
-    client.delete_topics(topics=TopicCollection.of_topic_names(topics=["t"])).all().result()
-    assert "t" not in client.list_topics().names().result()
+    value_of(client.create_topics(new_topics=[new_topic("t", 1, 1)]).all())
+    value_of(client.delete_topics(topics=TopicCollection.of_topic_names(topics=["t"])).all())
+    assert "t" not in value_of(client.list_topics().names())
 
 
 def test_delete_missing_topic_fails() -> None:
@@ -248,17 +263,17 @@ def test_timeout_next_request_times_out_create() -> None:
     result = client.create_topics(new_topics=[new_topic("t", 1, 1)])
     assert isinstance(error_of(result.values()["t"]), KafkaTimeoutError)
     # Next request succeeds.
-    client.create_topics(new_topics=[new_topic("t2", 1, 1)]).all().result()
+    value_of(client.create_topics(new_topics=[new_topic("t2", 1, 1)]).all())
 
 
 # ---- Cluster ------------------------------------------------------------------
 
 def test_describe_cluster_returns_brokers_and_controller() -> None:
     result = admin().describe_cluster()
-    assert len(result.nodes().result()) == 3
-    assert result.controller().result().id() == 0
-    assert result.cluster_id().result() == MockAdminClient.DEFAULT_CLUSTER_ID
-    assert result.authorized_operations().result() == set()
+    assert len(value_of(result.nodes())) == 3
+    assert value_of(result.controller()).id() == 0
+    assert value_of(result.cluster_id()) == MockAdminClient.DEFAULT_CLUSTER_ID
+    assert value_of(result.authorized_operations()) == set()
 
 
 def test_describe_cluster_timeout_recovers_on_next_call() -> None:
@@ -269,7 +284,7 @@ def test_describe_cluster_timeout_recovers_on_next_call() -> None:
     assert isinstance(error_of(timed_out.controller()), KafkaTimeoutError)
     assert isinstance(error_of(timed_out.cluster_id()), KafkaTimeoutError)
     # The counter is decremented, so the next call succeeds.
-    assert len(client.describe_cluster().nodes().result()) == 3
+    assert len(value_of(client.describe_cluster().nodes())) == 3
 
 
 # ---- Configs ------------------------------------------------------------------
@@ -281,16 +296,16 @@ def topic_resource(name: str) -> ConfigResource:
 def test_describe_configs_topic_returns_stored_configs() -> None:
     client = admin()
     topic = new_topic("t", 1, 1).configs(configs={"retention.ms": "1000"})
-    client.create_topics(new_topics=[topic]).all().result()
+    value_of(client.create_topics(new_topics=[topic]).all())
     resource = topic_resource("t")
-    config = client.describe_configs(resources=[resource]).values()[resource].result()
+    config = value_of(client.describe_configs(resources=[resource]).values()[resource])
     entry = config.get(name="retention.ms")
     assert entry is not None and entry.value() == "1000"
 
 
 def test_describe_configs_broker_returns_default_replication_factor() -> None:
     resource = ConfigResource(type=ConfigResource.Type.BROKER, name="0")
-    config = admin().describe_configs(resources=[resource]).values()[resource].result()
+    config = value_of(admin().describe_configs(resources=[resource]).values()[resource])
     entry = config.get(name="default.replication.factor")
     assert entry is not None and entry.value() == "3"
 
@@ -315,7 +330,7 @@ def test_describe_configs_timeout_recovers_on_next_call() -> None:
     resource = ConfigResource(type=ConfigResource.Type.BROKER, name="0")
     timed_out = client.describe_configs(resources=[resource])
     assert isinstance(error_of(timed_out.values()[resource]), KafkaTimeoutError)
-    client.describe_configs(resources=[resource]).values()[resource].result()
+    value_of(client.describe_configs(resources=[resource]).values()[resource])
 
 
 def set_op(name: str, value: str | None) -> AlterConfigOp:
@@ -325,19 +340,18 @@ def set_op(name: str, value: str | None) -> AlterConfigOp:
 
 def test_incremental_alter_configs_topic_set_and_delete() -> None:
     client = admin()
-    client.create_topics(new_topics=[new_topic("t", 1, 1)]).all().result()
+    value_of(client.create_topics(new_topics=[new_topic("t", 1, 1)]).all())
     resource = topic_resource("t")
     # SET.
-    client.incremental_alter_configs(configs={resource: [set_op("retention.ms", "42")]}) \
-        .all().result()
-    config = client.describe_configs(resources=[resource]).values()[resource].result()
+    value_of(client.incremental_alter_configs(configs={resource: [set_op("retention.ms", "42")]}).all())
+    config = value_of(client.describe_configs(resources=[resource]).values()[resource])
     entry = config.get(name="retention.ms")
     assert entry is not None and entry.value() == "42"
     # DELETE.
     delete_op = AlterConfigOp(config_entry=ConfigEntry(name="retention.ms", value=None),
                               operation_type=AlterConfigOp.OpType.DELETE)
-    client.incremental_alter_configs(configs={resource: [delete_op]}).all().result()
-    config = client.describe_configs(resources=[resource]).values()[resource].result()
+    value_of(client.incremental_alter_configs(configs={resource: [delete_op]}).all())
+    config = value_of(client.describe_configs(resources=[resource]).values()[resource])
     assert config.get(name="retention.ms") is None
 
 
@@ -352,12 +366,11 @@ def test_incremental_alter_configs_unknown_topic_is_unknown_topic_error() -> Non
 def test_incremental_alter_configs_client_metrics_creates_resource() -> None:
     client = admin()
     resource = ConfigResource(type=ConfigResource.Type.CLIENT_METRICS, name="cm")
-    client.incremental_alter_configs(configs={resource: [set_op("interval.ms", "5000")]}) \
-        .all().result()
+    value_of(client.incremental_alter_configs(configs={resource: [set_op("interval.ms", "5000")]}).all())
     # The new client-metrics resource now shows up in list_config_resources.
-    listed = client.list_config_resources(
+    listed = value_of(client.list_config_resources(
         config_resource_types={ConfigResource.Type.CLIENT_METRICS},
-        options=ListConfigResourcesOptions()).all().result()
+        options=ListConfigResourcesOptions()).all())
     assert resource in listed
 
 
@@ -371,9 +384,9 @@ def test_incremental_alter_configs_empty_client_metrics_name_is_invalid_request(
 
 def test_list_config_resources_all_types_when_empty() -> None:
     client = admin()
-    client.create_topics(new_topics=[new_topic("t", 1, 1)]).all().result()
-    listed = set(client.list_config_resources(
-        config_resource_types=set(), options=ListConfigResourcesOptions()).all().result())
+    value_of(client.create_topics(new_topics=[new_topic("t", 1, 1)]).all())
+    listed = set(value_of(client.list_config_resources(
+        config_resource_types=set(), options=ListConfigResourcesOptions()).all()))
     assert topic_resource("t") in listed
     # 3 brokers -> broker 0..2 and broker-logger 0..2.
     for i in range(3):
@@ -383,10 +396,10 @@ def test_list_config_resources_all_types_when_empty() -> None:
 
 def test_list_config_resources_filters_by_type() -> None:
     client = admin()
-    client.create_topics(new_topics=[new_topic("t", 1, 1)]).all().result()
-    listed = client.list_config_resources(
+    value_of(client.create_topics(new_topics=[new_topic("t", 1, 1)]).all())
+    listed = value_of(client.list_config_resources(
         config_resource_types={ConfigResource.Type.TOPIC},
-        options=ListConfigResourcesOptions()).all().result()
+        options=ListConfigResourcesOptions()).all())
     assert list(listed) == [topic_resource("t")]
 
 
@@ -395,16 +408,16 @@ def test_list_config_resources_filters_by_type() -> None:
 def admin_with_reassignment() -> tuple[MockAdminClient, TopicPartition]:
     """Seeds one topic and reassigns its only partition."""
     client = admin()
-    client.create_topics(new_topics=[new_topic("rt", 1, 3)]).all().result()
+    value_of(client.create_topics(new_topics=[new_topic("rt", 1, 3)]).all())
     tp = TopicPartition(topic="rt", partition=0)
     target = NewPartitionReassignment(target_replicas=[1, 2])
-    client.alter_partition_reassignments(reassignments={tp: target}).all().result()
+    value_of(client.alter_partition_reassignments(reassignments={tp: target}).all())
     return client, tp
 
 
 def test_alter_then_list_partition_reassignments_reports_adding_and_removing() -> None:
     client, tp = admin_with_reassignment()
-    listed = client.list_partition_reassignments().reassignments().result()
+    listed = value_of(client.list_partition_reassignments().reassignments())
     reassignment = listed[tp]
     # The mock seeds every partition with all three brokers as replicas, so
     # targeting {1, 2} removes broker 0 and adds nothing.
@@ -412,8 +425,8 @@ def test_alter_then_list_partition_reassignments_reports_adding_and_removing() -
     assert reassignment.adding_replicas() == []
     assert reassignment.removing_replicas() == [0]
     # None (Java's empty Optional) cancels (MockAdminClient.java:1160-1162).
-    client.alter_partition_reassignments(reassignments={tp: None}).all().result()
-    assert client.list_partition_reassignments().reassignments().result() == {}
+    value_of(client.alter_partition_reassignments(reassignments={tp: None}).all())
+    assert value_of(client.list_partition_reassignments().reassignments()) == {}
 
 
 def test_list_partition_reassignments_after_topic_deletion_fails_the_future() -> None:
@@ -421,7 +434,7 @@ def test_list_partition_reassignments_after_topic_deletion_fails_the_future() ->
     # findPartitionReassignment then throws its RuntimeException out of the call
     # (the Rust mock fails the future instead).
     client, _tp = admin_with_reassignment()
-    client.delete_topics(topics=TopicCollection.of_topic_names(topics=["rt"])).all().result()
+    value_of(client.delete_topics(topics=TopicCollection.of_topic_names(topics=["rt"])).all())
     with pytest.raises(RuntimeError) as e:
         client.list_partition_reassignments()
     assert str(e.value) == (
@@ -434,12 +447,12 @@ def test_list_partition_reassignments_after_topic_shrink_fails_the_future() -> N
     # recreated one-partition topic (its "no TopicPartitionInfo" branch is dead; the
     # Rust mock reports that message instead).
     client = admin()
-    client.create_topics(new_topics=[new_topic("rt2", 2, 3)]).all().result()
+    value_of(client.create_topics(new_topics=[new_topic("rt2", 2, 3)]).all())
     tp = TopicPartition(topic="rt2", partition=1)
     target = NewPartitionReassignment(target_replicas=[1, 2])
-    client.alter_partition_reassignments(reassignments={tp: target}).all().result()
-    client.delete_topics(topics=TopicCollection.of_topic_names(topics=["rt2"])).all().result()
-    client.create_topics(new_topics=[new_topic("rt2", 1, 3)]).all().result()
+    value_of(client.alter_partition_reassignments(reassignments={tp: target}).all())
+    value_of(client.delete_topics(topics=TopicCollection.of_topic_names(topics=["rt2"])).all())
+    value_of(client.create_topics(new_topics=[new_topic("rt2", 1, 3)]).all())
     with pytest.raises(IndexError) as e:
         client.list_partition_reassignments()
     assert str(e.value) == "Index 1 out of bounds for length 1"
@@ -477,7 +490,7 @@ def test_mock_add_topic_rejects_an_unknown_leader() -> None:
         mock.add_topic(internal=False, name="other", partitions=leaderless, configs={})
     assert str(e.value) == "Leader broker unknown"
     # Neither rejected topic was recorded.
-    assert mock.list_topics().names().result() == set()
+    assert value_of(mock.list_topics().names()) == set()
 
 
 def test_mock_add_topic_rejects_unknown_brokers_in_the_replica_list() -> None:
@@ -517,14 +530,14 @@ def test_builder_defaults_match_java() -> None:
     builder = MockAdminClient.Builder()
     client = builder.build()
     assert client.brokers() == [seeded_broker(0)]
-    assert client.describe_cluster().controller().result() == seeded_broker(0)
-    assert client.describe_cluster().cluster_id().result() == "I4ZmrWqfT2e-upky_4fdPA"
+    assert value_of(client.describe_cluster().controller()) == seeded_broker(0)
+    assert value_of(client.describe_cluster().cluster_id()) == "I4ZmrWqfT2e-upky_4fdPA"
     assert MockAdminClient.DEFAULT_LOG_DIRS == ("/tmp/kafka-logs",)
     # One partition, min(brokers, 3) replicas.
     result = client.create_topics(new_topics=[NewTopic(name="t", num_partitions=None,
                                                        replication_factor=None)])
-    assert result.num_partitions(topic="t").result() == 1
-    assert result.replication_factor(topic="t").result() == 1
+    assert value_of(result.num_partitions(topic="t")) == 1
+    assert value_of(result.replication_factor(topic="t")) == 1
 
 
 def test_builder_keywords_equal_the_setters() -> None:
@@ -537,13 +550,13 @@ def test_builder_keywords_equal_the_setters() -> None:
                   .default_replication_factor(default_replication_factor=2).build())
     for client in (by_keyword, by_setters):
         cluster = client.describe_cluster()
-        assert cluster.cluster_id().result() == "c"
-        assert cluster.controller().result() == seeded_broker(2)
+        assert value_of(cluster.cluster_id()) == "c"
+        assert value_of(cluster.controller()) == seeded_broker(2)
         assert client.brokers() == brokers
         result = client.create_topics(new_topics=[NewTopic(name="t", num_partitions=None,
                                                            replication_factor=None)])
-        assert result.num_partitions(topic="t").result() == 4
-        assert result.replication_factor(topic="t").result() == 2
+        assert value_of(result.num_partitions(topic="t")) == 4
+        assert value_of(result.replication_factor(topic="t")) == 2
 
 
 def test_builder_runs_controller_after_brokers() -> None:
@@ -551,7 +564,7 @@ def test_builder_runs_controller_after_brokers() -> None:
     # fail with the one default broker.
     brokers = [seeded_broker(0), seeded_broker(1)]
     client = MockAdminClient.Builder(controller=1, brokers=brokers).build()
-    assert client.describe_cluster().controller().result() == seeded_broker(1)
+    assert value_of(client.describe_cluster().controller()) == seeded_broker(1)
 
 
 def test_builder_runs_broker_log_dirs_after_brokers() -> None:
@@ -559,9 +572,9 @@ def test_builder_runs_broker_log_dirs_after_brokers() -> None:
     # survive because broker_log_dirs runs after it.
     brokers = [seeded_broker(0), seeded_broker(1)]
     client = MockAdminClient.Builder(broker_log_dirs=[["/a"], ["/b"]], brokers=brokers).build()
-    client.create_topics(new_topics=[new_topic("t", 1, 1)]).all().result()
+    value_of(client.create_topics(new_topics=[new_topic("t", 1, 1)]).all())
     replica = TopicPartitionReplica(topic="t", partition=0, broker_id=0)
-    info = client.describe_replica_log_dirs(replicas=[replica]).values()[replica].result()
+    info = value_of(client.describe_replica_log_dirs(replicas=[replica]).values()[replica])
     assert info.current_replica_log_dir() == "/a"
 
 
@@ -582,7 +595,7 @@ def test_builder_default_replication_factor_is_short_value() -> None:
     # Java's build() passes defaultReplicationFactor.shortValue().
     client = MockAdminClient.Builder(default_replication_factor=65538).build()
     resource = ConfigResource(type=ConfigResource.Type.BROKER, name="0")
-    config = client.describe_configs(resources=[resource]).values()[resource].result()
+    config = value_of(client.describe_configs(resources=[resource]).values()[resource])
     entry = config.get(name="default.replication.factor")
     assert entry is not None and entry.value() == "2"
 
@@ -607,7 +620,7 @@ def test_builder_keyword_none_calls_the_setter() -> None:
 def test_no_argument_constructor_has_one_no_node_broker() -> None:
     client = MockAdminClient()
     assert client.brokers() == [Node.no_node()]
-    assert client.describe_cluster().controller().result() == Node.no_node()
+    assert value_of(client.describe_cluster().controller()) == Node.no_node()
 
 
 def test_brokers_controller_constructor() -> None:
@@ -617,7 +630,7 @@ def test_brokers_controller_constructor() -> None:
     # MockAdminClient(brokers, controller) uses brokers.size() as replication factor.
     result = client.create_topics(new_topics=[NewTopic(name="t", num_partitions=None,
                                                        replication_factor=None)])
-    assert result.replication_factor(topic="t").result() == 2
+    assert value_of(result.replication_factor(topic="t")) == 2
 
 
 def test_constructor_forms() -> None:
@@ -635,7 +648,7 @@ def test_close_does_nothing_and_the_mock_keeps_answering() -> None:
     with admin() as client:
         client.close()
         client.close(timeout=-1.0)
-    assert len(client.describe_cluster().nodes().result()) == 3
+    assert len(value_of(client.describe_cluster().nodes())) == 3
 
 
 def test_create_hides_admin_create() -> None:
@@ -647,10 +660,10 @@ def test_create_hides_admin_create() -> None:
 def test_describe_and_delete_topics_by_id() -> None:
     client = admin()
     result = client.create_topics(new_topics=[new_topic("t", 1, 1)])
-    topic_id = result.topic_id(topic="t").result()
+    topic_id = value_of(result.topic_id(topic="t"))
     by_id = client.describe_topics(topics=TopicCollection.of_topic_ids(topics=[topic_id]))
     values = by_id.topic_id_values()
-    assert values is not None and values[topic_id].result().name() == "t"
+    assert values is not None and value_of(values[topic_id]).name() == "t"
     missing = Uuid.random_uuid()
     error = error_of(client.handle_describe_topics_using_ids(topic_ids=[missing])[missing])
     assert isinstance(error, UnknownTopicIdError)
@@ -658,15 +671,15 @@ def test_describe_and_delete_topics_by_id() -> None:
     deleted = client.delete_topics(topics=TopicCollection.of_topic_ids(topics=[topic_id, missing]))
     id_values = deleted.topic_id_values()
     assert id_values is not None
-    assert id_values[topic_id].result() is None
+    assert value_of(id_values[topic_id]) is None
     assert str(error_of(id_values[missing])) == f"Topic {missing} does not exist."
 
 
 def test_delete_topics_by_names_iterable() -> None:
     client = admin()
-    client.create_topics(new_topics=[new_topic("t", 1, 1)]).all().result()
-    client.delete_topics(topics=["t"]).all().result()
-    assert client.list_topics().names().result() == set()
+    value_of(client.create_topics(new_topics=[new_topic("t", 1, 1)]).all())
+    value_of(client.delete_topics(topics=["t"]).all())
+    assert value_of(client.list_topics().names()) == set()
 
 
 def test_describe_topics_forms() -> None:
@@ -682,10 +695,10 @@ def test_describe_topics_forms() -> None:
 
 def test_marked_for_deletion_and_fetches_until_visible() -> None:
     client = admin()
-    client.create_topics(new_topics=[new_topic("t", 1, 1)]).all().result()
+    value_of(client.create_topics(new_topics=[new_topic("t", 1, 1)]).all())
     client.set_fetches_remaining_until_visible(topic_name="t", fetches_remaining_until_visible=1)
-    assert client.list_topics().names().result() == set()
-    assert client.list_topics().names().result() == {"t"}
+    assert value_of(client.list_topics().names()) == set()
+    assert value_of(client.list_topics().names()) == {"t"}
     client.mark_topic_for_deletion(name="t")
     values = client.describe_topics(topic_names=["t"]).topic_name_values()
     assert values is not None and isinstance(error_of(values["t"]), UnknownTopicOrPartitionError)
@@ -716,7 +729,7 @@ def test_describe_configs_other_resources() -> None:
     error = error_of(values[bad_broker])
     assert isinstance(error, IllegalArgumentError) and str(error) == 'For input string: "x"'
     assert isinstance(error_of(values[unknown_metrics]), NullPointerError)
-    entry = values[group].result().get(name="g.k")
+    entry = value_of(values[group]).get(name="g.k")
     assert entry is not None and entry.value() == "d"
     error = error_of(values[logger])
     assert isinstance(error, UnsupportedVersionError) and str(error) == "Not implemented yet"
@@ -737,13 +750,13 @@ def test_incremental_alter_configs_unsupported_op_and_type() -> None:
 
 def test_replica_log_dirs() -> None:
     client = MockAdminClient.Builder(broker_log_dirs=[["/a", "/b"]]).build()
-    client.create_topics(new_topics=[new_topic("t", 1, 1)]).all().result()
+    value_of(client.create_topics(new_topics=[new_topic("t", 1, 1)]).all())
     replica = TopicPartitionReplica(topic="t", partition=0, broker_id=0)
     beyond = TopicPartitionReplica(topic="t", partition=5, broker_id=0)
     unknown = TopicPartitionReplica(topic="u", partition=0, broker_id=0)
     values = client.alter_replica_log_dirs(
         replica_assignment={replica: "/b", beyond: "/b"}).values()
-    assert values[replica].result() is None
+    assert value_of(values[replica]) is None
     error = error_of(values[beyond])
     assert isinstance(error, ReplicaNotAvailableError) and str(error) == "Can't find t-5-0"
     offline = client.alter_replica_log_dirs(replica_assignment={replica: "/c"}).values()
@@ -751,9 +764,9 @@ def test_replica_log_dirs() -> None:
     assert isinstance(error, KafkaStorageError) and str(error) == "Log directory /c is offline"
     infos = client.describe_replica_log_dirs(replicas=[replica, beyond, unknown]).values()
     assert unknown not in infos
-    moved = infos[replica].result()
+    moved = value_of(infos[replica])
     assert (moved.current_replica_log_dir(), moved.future_replica_log_dir()) == ("/a", "/b")
-    none = infos[beyond].result()
+    none = value_of(infos[beyond])
     assert (none.current_replica_log_dir(), none.current_replica_offset_lag()) == (None, -1)
     with pytest.raises(IndexError):
         client.alter_replica_log_dirs(
@@ -762,12 +775,12 @@ def test_replica_log_dirs() -> None:
 
 def test_describe_log_dirs() -> None:
     client = admin()
-    client.create_topics(new_topics=[new_topic("t", 1, 2)]).all().result()
+    value_of(client.create_topics(new_topics=[new_topic("t", 1, 2)]).all())
     values = client.describe_log_dirs(brokers=[0, 1, 2]).descriptions()
-    description = values[0].result()["/tmp/kafka-logs"]
+    description = value_of(values[0])["/tmp/kafka-logs"]
     assert list(description.replica_infos()) == [TopicPartition(topic="t", partition=0)]
     assert description.total_bytes() is None
-    assert values[2].result() == {}
+    assert value_of(values[2]) == {}
     # A replica on a broker not asked for: Java's NullPointerException.
     with pytest.raises(NullPointerError):
         client.describe_log_dirs(brokers=[0])
@@ -794,9 +807,9 @@ def test_list_offsets() -> None:
     client.update_beginning_offsets(new_offsets={tp: 3})
     client.update_end_offsets(new_offsets={tp: 9})
     earliest = client.list_offsets(topic_partition_offsets={tp: OffsetSpec.earliest()})
-    assert earliest.partition_result(partition=tp).result().offset() == 3
+    assert value_of(earliest.partition_result(partition=tp)).offset() == 3
     latest = client.list_offsets(topic_partition_offsets={tp: OffsetSpec.latest()})
-    assert latest.partition_result(partition=tp).result().offset() == 9
+    assert value_of(latest.partition_result(partition=tp)).offset() == 9
     with pytest.raises(UnsupportedVersionError) as e:
         client.list_offsets(topic_partition_offsets={tp: OffsetSpec.for_timestamp(timestamp=1)})
     assert str(e.value) == "Not implement yet"
@@ -807,14 +820,30 @@ def test_list_offsets() -> None:
 
 def test_list_config_resources_forms() -> None:
     client = admin()
-    assert len(client.list_config_resources().all().result()) == 6
+    assert len(value_of(client.list_config_resources().all())) == 6
     with pytest.raises(IllegalArgumentError) as e:
         client.list_config_resources(  # type: ignore[call-overload]
             config_resource_types={ConfigResource.Type.TOPIC})
     assert str(e.value) == ("list_config_resources() takes one of (config_resource_types, "
                             "options), (); got (config_resource_types)")
     # Java's mock completes with a HashSet; the result's future holds a list.
-    assert isinstance(client.list_config_resources().all().result(), list)
+    assert isinstance(value_of(client.list_config_resources().all()), list)
+
+
+def test_unregister_controller_without_a_raft_controller_is_unsupported() -> None:
+    """``MockAdminClient.unregisterController`` (``MockAdminClient.java:1372-1380``):
+    without ``usingRaftController`` the future fails with
+    ``new UnsupportedVersionException("")``."""
+    result = admin().unregister_controller(controller_id=1)
+    cause = assert_future_throws(result.all(), UnsupportedVersionError)
+    assert str(cause) == ""
+
+
+def test_unregister_controller_with_a_raft_controller_completes() -> None:
+    """Java's other branch: with ``usingRaftController(true)``, a future completed
+    with ``null``."""
+    client = MockAdminClient.Builder().using_raft_controller(using_raft_controller=True).build()
+    assert client.unregister_controller(controller_id=1).all().get(timeout=WAIT) is None
 
 
 def test_create_topics_negative_counts_are_illegal_capacity() -> None:
@@ -827,7 +856,7 @@ def test_create_topics_negative_counts_are_illegal_capacity() -> None:
     with pytest.raises(IllegalArgumentError) as e:
         client.create_topics(new_topics=[new_topic("u", -2, 1)])
     assert str(e.value) == "Illegal Capacity: -2"
-    assert client.list_topics().names().result() == {"a"}
+    assert value_of(client.list_topics().names()) == {"a"}
     defaults = MockAdminClient.Builder(default_partitions=-3).build()
     with pytest.raises(IllegalArgumentError) as e:
         defaults.create_topics(new_topics=[NewTopic(name="t", num_partitions=None,
@@ -903,7 +932,7 @@ def test_positional_calls_are_type_errors_on_the_mock() -> None:
         with pytest.raises(TypeError):
             method(*args)
     # Nothing a rejected call would have done happened.
-    assert client.list_topics().names().result() == set()
+    assert value_of(client.list_topics().names()) == set()
 
 
 # ---- features (Rust: admin_with_features, update_one, mock_*_features_*) -----
