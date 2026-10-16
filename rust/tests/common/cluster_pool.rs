@@ -87,8 +87,11 @@ static CLEANUP_REGISTERED: Once = Once::new();
 /// in the pool when the process exits.
 ///
 /// Rust does not run destructors for `LazyLock` statics at process exit,
-/// so `ContainerAsync`'s `Drop` never fires. This hook uses `docker rm -f`
+/// so `ContainerAsync`'s `Drop` never fires. This hook uses `docker rm -f -v`
 /// as a synchronous fallback that works even after the tokio runtime is gone.
+/// `-v` matters: the Kafka image declares three anonymous volumes, and without
+/// it every broker left them behind — tens of thousands of dangling volumes
+/// make Docker Desktop's volume scan hold container-start replies for minutes.
 fn register_cleanup_hook() {
     CLEANUP_REGISTERED.call_once(|| {
         unsafe extern "C" {
@@ -121,7 +124,7 @@ fn register_cleanup_hook() {
 ///
 /// [`KafkaCluster`] has no `Drop` impl, so dropping the `Arc` alone frees the
 /// Rust value but leaves the containers running — eviction must tear them
-/// down explicitly. Uses the same `docker rm -f` calls as the atexit hook so
+/// down explicitly. Uses the same `docker rm -f -v` calls as the atexit hook so
 /// there is exactly one teardown path.
 ///
 /// Every container attached to `cluster.network_name()` must already be gone
@@ -135,7 +138,7 @@ fn register_cleanup_hook() {
 /// [`super::test_context::TestContext`]'s `Drop`.
 pub(super) fn teardown(cluster: &KafkaCluster) {
     for id in cluster.container_ids() {
-        let _ = std::process::Command::new("docker").args(["rm", "-f", id]).output();
+        let _ = std::process::Command::new("docker").args(["rm", "-f", "-v", id]).output();
     }
     match std::process::Command::new("docker")
         .args(["network", "rm", cluster.network_name()])
