@@ -16,13 +16,15 @@
 the clients run before the core sees ``configs``.
 
 ``configs`` is a ``dict`` of Java's dotted keys (CLAUDE.md, Python Binding
-Conventions, Configuration):
+Conventions, Configuration, and Implementation over the FFI, exception 2):
 
 - a key that is not a ``str`` raises ``ConfigError`` (``Utils.castToStringObjectMap``);
-- a value of a key the client's ``ConfigDef`` defines is coerced to the key's
-  type as ``ConfigDef.parseType`` does (``"true"`` equals ``True``,
-  ``"1000"`` equals ``1000``), and a bad value raises ``ConfigError`` with
-  Java's message;
+- a value of a key the client's ``ConfigDef`` defines is checked against the
+  key's type as ``ConfigDef.parseType`` checks the object's type (a wrong Python
+  type raises ``ConfigError`` with Java's message) and converted to the string
+  the FFI takes (``True`` is ``"true"``, a list is joined with commas, ``None``
+  is left out); the core checks the value itself (ranges, enums, boolean and
+  number text, trimming);
 - the serializer keys of the client's own role stay with the binding: a
   producer's ``key.serializer``, ``value.serializer``, ``serializer.encoding``,
   ``key.serializer.encoding`` and ``value.serializer.encoding``, a consumer's
@@ -38,16 +40,16 @@ The keys and types are generated from Java's ``ProducerConfig`` /
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Collection, Mapping
 from datetime import timedelta
 from typing import Any, Literal
 
 from confluent_kafka import _config_types
-from confluent_kafka._java import java_str, java_trim, parse_double, parse_int, parse_long_string
+from confluent_kafka._java import java_str
 from confluent_kafka.common.config.config_error import ConfigError
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
-__all__ = ["coerce", "convert_to_string", "duration_to_ms", "prepare"]
+__all__ = ["check_type", "convert_to_string", "duration_to_ms", "prepare"]
 
 Client = Literal["producer", "consumer", "admin"]
 
@@ -70,7 +72,6 @@ _SERDE_KEYS: dict[str, frozenset[str]] = {
     # The admin client has no serdes.
     "admin": frozenset(),
 }
-_INT_BITS = {"INT": 32, "SHORT": 16, "LONG": 64}
 _INT_LABELS = {"INT": "a 32-bit integer", "SHORT": "a 16-bit integer (short)",
                "LONG": "a 64-bit integer (long)"}
 
@@ -82,84 +83,51 @@ def _type_name(value: object) -> str:
     return f"{cls.__module__}.{cls.__qualname__}"
 
 
-def _parse_number(name: str, value: object, parse: Callable[[Any], Any], type_name: str) -> Any:
-    """``parse`` the value, a ``NumberFormatException`` reported as
-    ``ConfigDef.parseType`` reports it: a new ``ConfigException`` with no
-    cause."""
-    try:
-        return parse(java_trim(value) if isinstance(value, str) else value)
-    except IllegalArgumentError:
-        raise ConfigError(name=name, value=value,
-                          message=f"Not a number of type {type_name}") from None
-
-
-def _fits(bits: int) -> Callable[[int], int]:
-    def check(value: int) -> int:
-        if not -(1 << (bits - 1)) <= value < (1 << (bits - 1)):
-            raise IllegalArgumentError(message=f"{value} is out of range")
+def check_type(name: str, value: object, type_name: str) -> object:
+    """The Python-type half of ``ConfigDef.parseType(name, value, type)``:
+    ``value`` unchanged when its Python type is one the key's ``ConfigDef``
+    type takes, else ``ConfigError`` with Java's message. A ``str`` is accepted
+    for every type, since the core parses and range-checks the text. ``None``
+    is Java's ``null``."""
+    if value is None or isinstance(value, str) and type_name != "STRING" and type_name != "PASSWORD":
         return value
-    return check
-
-
-def coerce(name: str, value: object, type_name: str) -> object:
-    """``ConfigDef.parseType(name, value, type)``: ``value`` as the key's
-    ``ConfigDef`` type, or ``ConfigError`` with Java's message. ``None`` is
-    Java's ``null``."""
-    if value is None:
-        return None
     if type_name == "BOOLEAN":
-        if isinstance(value, str):
-            trimmed = java_trim(value).lower()
-            if trimmed in ("true", "false"):
-                return trimmed == "true"
-        elif isinstance(value, bool):
+        if isinstance(value, bool):
             return value
         raise ConfigError(name=name, value=value,
                           message="Expected value to be either true or false")
     if type_name in ("STRING", "PASSWORD"):
         if isinstance(value, str):
-            return java_trim(value)
+            return value
         raise ConfigError(name=name, value=value,
                           message=f"Expected value to be a string, but it was a {_type_name(value)}")
-    if type_name in _INT_BITS:
-        bits = _INT_BITS[type_name]
+    if type_name in _INT_LABELS:
         if isinstance(value, int) and not isinstance(value, bool):
-            return _parse_number(name, value, _fits(bits), type_name)
-        if isinstance(value, str):
-            if bits == 64:
-                return _parse_number(name, value, parse_long_string, type_name)
-            return _parse_number(name, value, lambda s: parse_int(s, bits), type_name)
+            return value
         raise ConfigError(
             name=name, value=value,
             message=f"Expected value to be {_INT_LABELS[type_name]}, but it was a {_type_name(value)}")
     if type_name == "DOUBLE":
         if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return float(value)
-        if isinstance(value, str):
-            return _parse_number(name, value, parse_double, type_name)
+            return value
         raise ConfigError(name=name, value=value,
                           message=f"Expected value to be a double, but it was a {_type_name(value)}")
     if type_name == "LIST":
         if isinstance(value, (list, tuple)):
             return list(value)
-        if isinstance(value, str):
-            trimmed = java_trim(value)
-            return [] if not trimmed else [java_trim(part) for part in trimmed.split(",")]
         raise ConfigError(name=name, value=value, message="Expected a comma separated list.")
     if type_name == "CLASS":
         # A class is loaded where it is used (the serde keys, by ``_supply``);
         # the core resolves the Java class names of the other class keys.
         if isinstance(value, type):
             return value
-        if isinstance(value, str):
-            return java_trim(value)
         raise ConfigError(name=name, value=value,
                           message="Expected a Class instance or class name.")
     raise ConfigError(name=name, value=value, message=f"Unknown type {type_name}")
 
 
 def convert_to_string(value: object, type_name: str | None) -> str | None:
-    """``ConfigDef.convertToString(parsedValue, type)``: a parsed value as the
+    """``ConfigDef.convertToString(value, type)``: a type-checked value as the
     text the core parses (a password as its value, since the core needs it)."""
     if value is None:
         return None
@@ -196,7 +164,7 @@ def prepare(configs: Mapping[str, Any], *, client: Client,
         if key in given_serdes:
             continue
         type_name = types.get(key)
-        parsed = coerce(key, value, type_name) if type_name is not None else value
+        parsed = check_type(key, value, type_name) if type_name is not None else value
         text = convert_to_string(parsed, type_name)
         if key in serde_keys or text is None:
             continue

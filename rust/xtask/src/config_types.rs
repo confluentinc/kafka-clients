@@ -15,7 +15,7 @@
 //! The `ConfigDef` type of every producer, consumer and admin config key, read
 //! from the Java sources.
 //!
-//! The Python clients coerce a `str`, `int`, `float` or `bool` config value to
+//! The Python clients check a config value's Python type against
 //! its key's `ConfigDef` type before the core sees it (CLAUDE.md, Python Binding
 //! Conventions, Configuration). The key sets and types are those of Java's `ProducerConfig`,
 //! `ConsumerConfig` and `AdminClientConfig`: every `define(name, Type.X, …)` /
@@ -364,8 +364,8 @@ fn render(tables: &[(&str, BTreeMap<String, String>)]) -> String {
          \n\
          Java's ``ProducerConfig`` / ``ConsumerConfig`` / ``AdminClientConfig`` define\n\
          these keys, with ``withClientSslSupport()`` / ``withClientSaslSupport()``;\n\
-         ``_config`` coerces a value to its key's type and passes every other key to\n\
-         the core as given.\n\
+         ``_config`` checks a value's Python type against its key's type and passes\n\
+         every other key to the core as given.\n\
          \"\"\"\n\
          \n\
          from __future__ import annotations\n\

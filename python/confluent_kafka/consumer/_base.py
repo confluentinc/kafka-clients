@@ -180,6 +180,11 @@ CLOSE_FAILED_MESSAGE = "Failed to close kafka consumer"
 # without the Duration.
 _NO_TIMEOUT = -1
 
+# The core's message for a negative timeout given to a `_with_timeout` entry
+# point (the FFI's `ms`, `Error::local_illegal_argument`), used where Java's
+# Duration overload makes no negative check of its own (overload_timeout_ms).
+TIMEOUT_NEGATIVE_MESSAGE = "Timeout must not be negative"
+
 # The ids of the consumers whose callback this context is delivering. A
 # ContextVar rather than a thread-local: the listener of an async consumer is
 # awaited inside the task that delivers it, and another task on the same loop
@@ -245,22 +250,51 @@ class _ListenerAdapter:
         return state._run_listener(self._listener, method, partitions, callback_id)
 
 
-def poll_timeout_ms(timeout: Duration) -> int:
-    """``poll(Duration)``'s timeout in whole milliseconds, rounded down as Java's
+def _duration_millis(timeout: Duration) -> int:
+    """A ``Duration`` in whole milliseconds, rounded down as Java's
     ``Duration.toMillis()``: a ``timedelta`` exactly, from its integer fields, a
-    number through ``float()``. A negative one raises Java's ``Timer`` message,
-    ``Invalid negative timeout -N``; one that does not fit a signed 64-bit
+    number through ``float()``. One that does not fit a signed 64-bit
     millisecond count raises ``OverflowError``, infinity included, and ``NaN``
-    ``ValueError`` (see ``duration_to_ms``)."""
+    ``ValueError`` (see ``duration_to_ms``); a negative one is returned."""
     if isinstance(timeout, timedelta):
         millis = ((timeout.days * 86_400 + timeout.seconds) * 1_000
                   + timeout.microseconds // 1_000)
     else:
         millis = math.floor(float(timeout) * 1000.0)
-    if millis < 0:
-        raise IllegalArgumentError(message=f"Invalid negative timeout {millis}")
     if millis > _LONG_MAX:
         raise OverflowError(f"timeout of {millis} ms does not fit a signed 64-bit integer")
+    return millis
+
+
+def poll_timeout_ms(timeout: Duration) -> int:
+    """``poll(Duration)``'s timeout in whole milliseconds (``_duration_millis``).
+    A negative one raises Java's ``Timer`` message, ``Invalid negative timeout
+    -N``."""
+    millis = _duration_millis(timeout)
+    if millis < 0:
+        raise IllegalArgumentError(message=f"Invalid negative timeout {millis}")
+    return millis
+
+
+def overload_timeout_ms(timeout: Duration | None, *, timer: bool) -> int:
+    """The ``timeout`` of a ``Duration`` overload in whole milliseconds
+    (``_duration_millis``), for its ``_with_timeout`` entry point; ``None``
+    (not given) is ``_NO_TIMEOUT``, the overload without it.
+
+    A negative one cannot cross the C extension, where a negative count selects
+    the overload without the timeout (CLAUDE.md, Python Binding Conventions,
+    Implementation over the FFI, exception 1), so it raises
+    ``IllegalArgumentError`` here: with Java's ``Timer`` message (``Invalid
+    negative timeout -N``) where Java builds a ``Timer`` from it (``timer``:
+    ``commitSync``, ``position``), else with the message of the core's
+    ``_with_timeout`` entry points, ``TIMEOUT_NEGATIVE_MESSAGE``, as Java's
+    method makes no negative check of its own."""
+    if timeout is None:
+        return _NO_TIMEOUT
+    millis = _duration_millis(timeout)
+    if millis < 0:
+        raise IllegalArgumentError(message=f"Invalid negative timeout {millis}" if timer
+                                   else TIMEOUT_NEGATIVE_MESSAGE)
     return millis
 
 
@@ -1256,9 +1290,10 @@ class _ConsumerState:
         return self._void_spec(_lib.Consumer_seek_cb, partition.topic(),
                                partition.partition(), offset)
 
-    def _commit_spec(self, offsets: Any) -> tuple[Any, Any, Any, bool]:
+    def _commit_spec(self, offsets: Any, timeout_ms: int = _NO_TIMEOUT
+                     ) -> tuple[Any, Any, Any, bool]:
         spec = None if offsets is None else offsets_to_spec(offsets)
-        return self._void_spec(_lib.Consumer_commit_sync_cb, spec, _NO_TIMEOUT, wakeable=True)
+        return self._void_spec(_lib.Consumer_commit_sync_cb, spec, timeout_ms, wakeable=True)
 
     def _commit_nowait_spec(self, spec: Any, adapter: Any) -> tuple[Any, Any, Any, bool]:
         # Not wakeable: Java's commitAsync waits for its offsets through
@@ -1266,11 +1301,13 @@ class _ConsumerState:
         # (AsyncKafkaConsumer.java:1126-1140), so it never throws WakeupException.
         return self._void_spec(_lib.Consumer_commit_async_cb, spec, adapter)
 
-    def _position_spec(self, partition: TopicPartition) -> tuple[Any, Any, Any, bool]:
+    def _position_spec(self, partition: TopicPartition, timeout_ms: int = _NO_TIMEOUT
+                       ) -> tuple[Any, Any, Any, bool]:
         return self._value_spec(_lib.Consumer_position_cb, int, partition.topic(),
-                                partition.partition(), _NO_TIMEOUT, wakeable=True)
+                                partition.partition(), timeout_ms, wakeable=True)
 
-    def _committed_spec(self, partitions: list[TopicPartition]) -> tuple[Any, Any, Any, bool]:
+    def _committed_spec(self, partitions: list[TopicPartition], timeout_ms: int = _NO_TIMEOUT
+                        ) -> tuple[Any, Any, Any, bool]:
         def convert(raw: Any) -> dict[TopicPartition, OffsetAndMetadata | None]:
             result = to_offset_map(raw or {})
             # Java maps a partition without a committed offset to null.
@@ -1279,10 +1316,10 @@ class _ConsumerState:
             return result
 
         return self._value_spec(_lib.Consumer_committed_cb, convert, tp_to_spec(partitions),
-                                _NO_TIMEOUT, wakeable=True)
+                                timeout_ms, wakeable=True)
 
-    def _offsets_for_times_spec(self, timestamps_to_search: dict[TopicPartition, int]
-                                ) -> tuple[Any, Any, Any, bool]:
+    def _offsets_for_times_spec(self, timestamps_to_search: dict[TopicPartition, int],
+                                timeout_ms: int = _NO_TIMEOUT) -> tuple[Any, Any, Any, bool]:
         def convert(raw: Any) -> dict[TopicPartition, OffsetAndTimestamp | None]:
             result = to_offset_and_timestamp_map(raw or {})
             # Java maps a partition without an offset for its timestamp to null.
@@ -1291,21 +1328,22 @@ class _ConsumerState:
             return result
 
         return self._value_spec(_lib.Consumer_offsets_for_times_cb, convert,
-                                timestamps_to_spec(timestamps_to_search), _NO_TIMEOUT)
+                                timestamps_to_spec(timestamps_to_search), timeout_ms)
 
-    def _long_offsets_spec(self, fn: Callable[..., None], partitions: list[TopicPartition]
-                           ) -> tuple[Any, Any, Any, bool]:
+    def _long_offsets_spec(self, fn: Callable[..., None], partitions: list[TopicPartition],
+                           timeout_ms: int = _NO_TIMEOUT) -> tuple[Any, Any, Any, bool]:
         return self._value_spec(fn, lambda raw: to_long_map(raw or {}), tp_to_spec(partitions),
-                                _NO_TIMEOUT)
+                                timeout_ms)
 
-    def _partitions_for_spec(self, topic: str) -> tuple[Any, Any, Any, bool]:
+    def _partitions_for_spec(self, topic: str, timeout_ms: int = _NO_TIMEOUT
+                             ) -> tuple[Any, Any, Any, bool]:
         return self._value_spec(_lib.Consumer_partitions_for_cb,
-                                lambda raw: to_partition_info_list(raw or []), topic, _NO_TIMEOUT,
+                                lambda raw: to_partition_info_list(raw or []), topic, timeout_ms,
                                 wakeable=True)
 
-    def _list_topics_spec(self) -> tuple[Any, Any, Any, bool]:
+    def _list_topics_spec(self, timeout_ms: int = _NO_TIMEOUT) -> tuple[Any, Any, Any, bool]:
         return self._value_spec(_lib.Consumer_list_topics_cb,
-                                lambda raw: to_topics_map(raw or {}), _NO_TIMEOUT, wakeable=True)
+                                lambda raw: to_topics_map(raw or {}), timeout_ms, wakeable=True)
 
     def _close_spec(self, timeout_ms: int, operation_code: int) -> tuple[Any, Any, Any, bool]:
         def resolve(payload: tuple[Any, ...]) -> None:
@@ -1367,6 +1405,15 @@ class _ConsumerState:
                 raise IllegalArgumentError(
                     message="Topic partitions collection to assign to cannot be null")
         return blank_null_topic_partitions(partitions)
+
+    def _timeout_ms(self, timeout: Duration | None, *, timer: bool = False) -> int:
+        """``overload_timeout_ms`` after the closed check, which comes first
+        (CLAUDE.md, Python Binding Conventions, Implementation over the FFI,
+        Order); ``_NO_TIMEOUT`` when ``timeout`` is not given."""
+        if timeout is None:
+            return _NO_TIMEOUT
+        self._check_open()
+        return overload_timeout_ms(timeout, timer=timer)
 
     def _check_not_null(self, op: str, value: object) -> None:
         """Java's null check of ``op``'s argument (``_NULL_ARGUMENT``), after
@@ -1457,7 +1504,15 @@ class _ConsumerState:
         """Run ``op`` through the guard-free ConsumerHandle. Its plain forms
         are called here, inside the drain that runs the callback: they wait on
         the consumer's background task, which keeps running while a callback
-        is pending (``consumer-threading.md`` §31)."""
+        is pending (``consumer-threading.md`` §31).
+
+        Of the ``Duration`` overloads the handle has only ``position``'s
+        (``kafka_consumer_ConsumerHandle_position_with_timeout``); the others
+        (``commit``, ``committed``, ``offsets_for_times``,
+        ``beginning_offsets``, ``end_offsets``) go through its form without a
+        timeout, bounded by ``default.api.timeout.ms``, their ``timeout``
+        checked but not passed (``partitions_for`` and ``list_topics`` have no
+        handle form and are refused inside a callback)."""
         handle = self._handle()
         if op == "commit":
             (offsets,) = args
@@ -1485,12 +1540,12 @@ class _ConsumerState:
             raise_if_error(getattr(_lib, "ConsumerHandle_" + op)(handle, tp_to_spec(partitions)))
             return None
         if op == "position":
-            (partition,) = args
+            partition, timeout_ms = args
             position, error = _lib.ConsumerHandle_position(
-                handle, partition.topic(), partition.partition(), _NO_TIMEOUT)
+                handle, partition.topic(), partition.partition(), timeout_ms)
             while self._own_wake_raised(error):
                 position, error = _lib.ConsumerHandle_position(
-                    handle, partition.topic(), partition.partition(), _NO_TIMEOUT)
+                    handle, partition.topic(), partition.partition(), timeout_ms)
             raise_if_error(error)
             return int(position)
         if op == "committed":

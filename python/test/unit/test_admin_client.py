@@ -194,14 +194,17 @@ def test_config_key_must_be_a_string() -> None:
         Admin.create(configs={**UNREACHABLE, 1: "x"})  # type: ignore[dict-item]
 
 
-def test_config_values_coerced_by_admin_client_config() -> None:
-    """``AdminClientConfig``'s ``ConfigDef`` types: a bad ``INT`` raises Java's
-    message; a ``LIST`` may be given as a list; ``bootstrap.controllers`` is an admin
+def test_config_values_checked_by_admin_client_config() -> None:
+    """``AdminClientConfig``'s ``ConfigDef`` types: a wrong Python type for an
+    ``INT`` raises Java's message (a bad ``INT`` text is the core's, reached by a
+    real client as in ``test_config.py::test_bad_number_text_reaches_the_core``;
+    ``Admin`` is not importable until its FFI rewrite, so it is not repeated here); a ``LIST`` may be given as a list; ``bootstrap.controllers`` is an admin
     key; a ``None`` value is not set."""
     with pytest.raises(ConfigError) as info:
-        _admin(**{"request.timeout.ms": "abc"})
+        _admin(**{"request.timeout.ms": 1.5})
     assert str(info.value) == (
-        "Invalid value abc for configuration request.timeout.ms: Not a number of type INT")
+        "Invalid value 1.5 for configuration request.timeout.ms: "
+        "Expected value to be a 32-bit integer, but it was a builtins.float")
     with pytest.raises(ConfigError) as info:
         Admin.create(configs={"bootstrap.servers": "localhost:1",
                               "retries": True})

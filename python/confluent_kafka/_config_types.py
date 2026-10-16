@@ -19,8 +19,8 @@
 
 Java's ``ProducerConfig`` / ``ConsumerConfig`` / ``AdminClientConfig`` define
 these keys, with ``withClientSslSupport()`` / ``withClientSaslSupport()``;
-``_config`` coerces a value to its key's type and passes every other key to
-the core as given.
+``_config`` checks a value's Python type against its key's type and passes
+every other key to the core as given.
 """
 
 from __future__ import annotations
