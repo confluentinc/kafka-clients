@@ -28,18 +28,21 @@ pub struct AlterConsumerGroupOffsetsOptions {
 
 impl AlterConsumerGroupOffsetsOptions {
     /// Creates default options.
+    #[doc(alias = "org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsOptions#AlterConsumerGroupOffsetsOptions")]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Set the operation timeout in milliseconds (or `None` for the default).
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
     }
 
     /// The operation timeout in milliseconds, or `None` for the default.
+    #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }

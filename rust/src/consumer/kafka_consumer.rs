@@ -18,7 +18,8 @@
 
 use crate::common::Error;
 use crate::common::serialization::Deserializer;
-use crate::consumer::{AsyncKafkaConsumer, Consumer, ConsumerConfig, GroupProtocol};
+use crate::consumer::internals::AsyncKafkaConsumer;
+use crate::consumer::{Consumer, ConsumerConfig, GroupProtocol};
 
 /// The public entry point for constructing a [`Consumer`].
 ///

@@ -42,6 +42,7 @@ impl AclBindingFilter {
     }
 
     /// A filter which matches any ACL binding.
+    #[doc(alias = "org.apache.kafka.common.acl.AclBindingFilter#ANY")]
     pub fn any() -> AclBindingFilter {
         AclBindingFilter::new(ResourcePatternFilter::any(), AccessControlEntryFilter::any())
     }

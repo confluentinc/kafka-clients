@@ -50,7 +50,7 @@ class SaslAuthenticationError(AuthenticationError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 58  # kafka_common_ErrorCode_SASL_AUTHENTICATION_FAILED
+    _ffi_id: ClassVar[int] = 58  # kafka_common_Error_SASL_AUTHENTICATION_FAILED
 
     def __init__(
         self,

@@ -43,7 +43,7 @@ class InvalidTopicError(InvalidConfigurationError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 17  # kafka_common_ErrorCode_INVALID_TOPIC_ERROR
+    _ffi_id: ClassVar[int] = 17  # kafka_common_Error_INVALID_TOPIC_ERROR
 
     @java_forms(
         Form(),

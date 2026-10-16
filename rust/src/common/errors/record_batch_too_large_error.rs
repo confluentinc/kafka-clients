@@ -33,5 +33,6 @@ kafka_error_type! {
         is_kafka_error,
         is_api_error,
         is_invalid_configuration_error,
+        is_record_batch_too_large_error,
     ],
 }

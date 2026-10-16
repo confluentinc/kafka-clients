@@ -37,7 +37,7 @@ class InvalidShareSessionEpochError(RetriableError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 123  # kafka_common_ErrorCode_INVALID_SHARE_SESSION_EPOCH
+    _ffi_id: ClassVar[int] = 123  # kafka_common_Error_INVALID_SHARE_SESSION_EPOCH
 
     def __init__(
         self,

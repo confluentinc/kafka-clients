@@ -29,6 +29,7 @@ pub struct DescribeConfigsOptions {
 
 impl DescribeConfigsOptions {
     /// Creates default options.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeConfigsOptions#DescribeConfigsOptions")]
     pub fn new() -> Self {
         Self::default()
     }
@@ -36,6 +37,7 @@ impl DescribeConfigsOptions {
     /// Set the timeout in milliseconds for this operation, or `None` to use the
     /// default API timeout for the `AdminClient`.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeConfigsOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
@@ -43,30 +45,35 @@ impl DescribeConfigsOptions {
 
     /// The timeout in milliseconds for this operation, or `None` if the default
     /// API timeout should be used.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeConfigsOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
 
     /// Set whether to return configuration synonyms in the response.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeConfigsOptions#includeSynonyms")]
     pub fn set_include_synonyms(mut self, include_synonyms: bool) -> Self {
         self.include_synonyms = include_synonyms;
         self
     }
 
     /// Whether to return configuration synonyms in the response.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeConfigsOptions#includeSynonyms")]
     pub fn include_synonyms(&self) -> bool {
         self.include_synonyms
     }
 
     /// Set whether to return configuration documentation in the response.
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeConfigsOptions#includeDocumentation")]
     pub fn set_include_documentation(mut self, include_documentation: bool) -> Self {
         self.include_documentation = include_documentation;
         self
     }
 
     /// Whether to return configuration documentation in the response.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeConfigsOptions#includeDocumentation")]
     pub fn include_documentation(&self) -> bool {
         self.include_documentation
     }

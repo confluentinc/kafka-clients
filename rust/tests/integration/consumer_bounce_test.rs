@@ -811,24 +811,20 @@ async fn test_async_consumer_seek_and_commit_with_broker_failures() {
 /// Java's `receiveExactRecords(poller, numRecords, timeoutMs)` (line 778):
 /// wait until the poller has received exactly `num_records` records.
 async fn receive_exact_records(poller: &ConsumerAssignmentPoller, num_records: usize, timeout_ms: u64) {
-    test_utils::wait_until_true_with_timeout(
+    test_utils::wait_for_condition_with_timeout(
         || {
             let received = poller.received_messages() == num_records;
             async move { received }
         },
-        &format!("Consumer did not receive expected {num_records}."),
         timeout_ms,
-        100,
+        || {
+            format!(
+                "Consumer did not receive expected {num_records}. It received {}",
+                poller.received_messages()
+            )
+        },
     )
     .await;
-    // Java's lazy message also reports the count; the helper takes a fixed
-    // message, so report it here (the wait above already passed).
-    assert_eq!(
-        poller.received_messages(),
-        num_records,
-        "Consumer did not receive expected {num_records}. It received {}",
-        poller.received_messages()
-    );
 }
 
 /// Translates `testAsyncSubscribeWhenTopicUnavailable`
@@ -950,7 +946,7 @@ async fn close_and_validate(
     const CLOSE_GRACE_TIME_MS: u64 = 2000;
     let start = std::time::Instant::now();
     eprintln!("Closing consumer with timeout {close_timeout_ms} ms.");
-    let close = consumer.close_with_options(CloseOptions::new_timeout(Duration::from_millis(close_timeout_ms)));
+    let close = consumer.close_with_options(CloseOptions::new_with_timeout(Duration::from_millis(close_timeout_ms)));
     let result = match max_close_time_ms {
         Some(ms) => tokio::time::timeout(Duration::from_millis(ms + CLOSE_GRACE_TIME_MS), close)
             .await

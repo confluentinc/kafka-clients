@@ -25,7 +25,7 @@
 # public yet, so on a host that cannot clone it, the sources arrive by scp.
 #
 # Ordering is mandatory. `pip install -e python` compiles the C
-# extension against rust/target/include/confluent_kafka.h and links
+# extension against rust/target/include/confluent_kafka_bindings.h and links
 # libconfluent_kafka from CONFLUENT_KAFKA_LIB_DIR, so cargo must run first.
 # This mirrors the repo's `make build-python` / python/Makefile.
 
@@ -148,8 +148,8 @@ fi
 # 2. Build the Rust client with the FFI feature
 #
 # Produces rust/target/<profile>/libconfluent_kafka.{so,dylib,a} and
-# rust/target/include/confluent_kafka.h (the cbindgen header the C extension
-# includes).
+# rust/target/include/confluent_kafka_bindings.h (the cbindgen header of `_err`
+# twins the C extension includes).
 # ---------------------------------------------------------------------------
 CARGO_ARGS=(build --features ffi)
 [[ "$PROFILE" == "release" ]] && CARGO_ARGS+=(--release)
@@ -162,8 +162,8 @@ if ! ls "$LIB_DIR"/libconfluent_kafka.* >/dev/null 2>&1; then
     echo "ERROR: no libconfluent_kafka.* in $LIB_DIR after the cargo build" >&2
     exit 1
 fi
-if [[ ! -f "$ROOT/rust/target/include/confluent_kafka.h" ]]; then
-    echo "ERROR: rust/target/include/confluent_kafka.h missing after the cargo build" >&2
+if [[ ! -f "$ROOT/rust/target/include/confluent_kafka_bindings.h" ]]; then
+    echo "ERROR: rust/target/include/confluent_kafka_bindings.h missing after the cargo build" >&2
     exit 1
 fi
 

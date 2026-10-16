@@ -39,11 +39,13 @@ pub enum TimestampType {
 
 impl TimestampType {
     /// Returns the numeric ID for this timestamp type.
+    #[doc(alias = "org.apache.kafka.common.record.TimestampType#id")]
     pub fn id(self) -> i32 {
         self as i32
     }
 
     /// Returns the name of this timestamp type.
+    #[doc(alias = "org.apache.kafka.common.record.TimestampType#name")]
     pub fn name(self) -> &'static str {
         match self {
             Self::NoTimestampType => "NoTimestampType",

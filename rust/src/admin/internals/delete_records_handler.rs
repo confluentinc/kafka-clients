@@ -241,7 +241,7 @@ mod tests {
     fn records_to_delete() -> HashMap<TopicPartition, RecordsToDelete> {
         [tp(0), tp(1), tp(2), tp(3)]
             .into_iter()
-            .map(|k| (k, RecordsToDelete::before_offset_with_offset(10)))
+            .map(|k| (k, RecordsToDelete::with_offset(10)))
             .collect()
     }
 

@@ -34,7 +34,7 @@ class InvalidGroupIdError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 24  # kafka_common_ErrorCode_INVALID_GROUP_ID
+    _ffi_id: ClassVar[int] = 24  # kafka_common_Error_INVALID_GROUP_ID
 
     def __init__(
         self,

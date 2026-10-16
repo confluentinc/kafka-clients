@@ -27,5 +27,7 @@ message_only_error! {
     /// by `KafkaConsumer.acquire()` ("KafkaConsumer is not safe for
     /// multi-threaded access"). A plain `RuntimeException`, so no predicate
     /// holds for it.
+    // translates java.util.ConcurrentModificationException, a JDK runtime exception (CLAUDE.md §2)
+    #[doc(alias = "rust-only")]
     LocalConcurrentModificationError
 }

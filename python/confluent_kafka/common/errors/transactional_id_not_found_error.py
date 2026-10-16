@@ -34,7 +34,7 @@ class TransactionalIdNotFoundError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 105  # kafka_common_ErrorCode_TRANSACTIONAL_ID_NOT_FOUND
+    _ffi_id: ClassVar[int] = 105  # kafka_common_Error_TRANSACTIONAL_ID_NOT_FOUND
 
     def __init__(
         self,

@@ -34,7 +34,7 @@ class InvalidUpdateVersionError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 95  # kafka_common_ErrorCode_INVALID_UPDATE_VERSION
+    _ffi_id: ClassVar[int] = 95  # kafka_common_Error_INVALID_UPDATE_VERSION
 
     def __init__(
         self,

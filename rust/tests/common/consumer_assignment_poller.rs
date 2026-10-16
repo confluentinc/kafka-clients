@@ -136,7 +136,13 @@ impl ConsumerAssignmentPoller {
                         // Java: `catch (WakeupException e) { // ignore for shutdown }`.
                         Err(Error::Wakeup(_)) => {},
                         Err(e) => {
-                            // Java: `thrownException = Optional.of(e); throw e;`.
+                            // Java: `thrownException = Optional.of(e); throw e;`,
+                            // which `ShutdownableThread.run` catches and, unless
+                            // a shutdown was requested, logs: `log.error("Error
+                            // due to", e)`.
+                            if !shutdown_requested.load(Ordering::SeqCst) {
+                                log::error!("Error due to {e:?}");
+                            }
                             *thrown_error.lock().expect("thrown error mutex poisoned") = Some(e);
                             break;
                         },

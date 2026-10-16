@@ -1007,7 +1007,7 @@ mod tests {
         }
 
         pub(super) fn buffer_exhausted_total(&self) -> f64 {
-            let name = self.metrics.metric_name_description_tags(
+            let name = self.metrics.metric_name_with_description_tags(
                 "buffer-exhausted-total",
                 "producer-metrics",
                 "",

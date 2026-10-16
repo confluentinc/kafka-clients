@@ -38,7 +38,7 @@ class TelemetryTooLargeError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 118  # kafka_common_ErrorCode_TELEMETRY_TOO_LARGE
+    _ffi_id: ClassVar[int] = 118  # kafka_common_Error_TELEMETRY_TOO_LARGE
 
     def __init__(
         self,

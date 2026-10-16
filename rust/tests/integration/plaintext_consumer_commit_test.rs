@@ -406,7 +406,11 @@ impl CountConsumerCommitCallback {
 
 #[async_trait]
 impl OffsetCommitCallback for CountConsumerCommitCallback {
-    async fn on_complete(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
+    async fn on_complete(
+        &self,
+        _offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+        error: Option<&Error>,
+    ) -> Result<(), Error> {
         match error {
             None => {
                 self.success_count.fetch_add(1, Ordering::SeqCst);
@@ -416,6 +420,7 @@ impl OffsetCommitCallback for CountConsumerCommitCallback {
                 *self.last_error.lock().expect("last_error mutex poisoned") = Some(err.clone());
             },
         }
+        Ok(())
     }
 }
 
@@ -1180,7 +1185,9 @@ async fn test_commit_async_fails_when_coordinator_unavailable_during_close() {
 
     let start = Instant::now();
     consumer
-        .close_with_options(confluent_kafka::consumer::CloseOptions::new_timeout(Duration::from_millis(500)))
+        .close_with_options(confluent_kafka::consumer::CloseOptions::new_with_timeout(
+            Duration::from_millis(500),
+        ))
         .await
         .expect("close should complete");
     let close_duration = start.elapsed();

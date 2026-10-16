@@ -34,7 +34,7 @@ class FetchSessionIdNotFoundError(RetriableError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 70  # kafka_common_ErrorCode_FETCH_SESSION_ID_NOT_FOUND
+    _ffi_id: ClassVar[int] = 70  # kafka_common_Error_FETCH_SESSION_ID_NOT_FOUND
 
     def __init__(
         self,

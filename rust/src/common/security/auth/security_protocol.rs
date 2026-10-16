@@ -51,6 +51,7 @@ impl SecurityProtocol {
     /// Returns the permanent and immutable numeric ID for this security protocol.
     ///
     /// This value matches `kafka.cluster.SecurityProtocol` and must never change.
+    #[doc(alias = "org.apache.kafka.common.security.auth.SecurityProtocol#id")]
     pub fn id(self) -> i16 {
         match self {
             SecurityProtocol::Plaintext => 0,
@@ -61,6 +62,7 @@ impl SecurityProtocol {
     }
 
     /// Returns the protocol name as used in configuration (e.g. `"PLAINTEXT"`, `"SASL_SSL"`).
+    #[doc(alias = "org.apache.kafka.common.security.auth.SecurityProtocol#name")]
     pub fn name(self) -> &'static str {
         match self {
             SecurityProtocol::Plaintext => "PLAINTEXT",

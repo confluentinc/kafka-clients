@@ -43,7 +43,7 @@ class RetriableCommitFailedError(RetriableError):
 
     __module__ = "confluent_kafka.consumer"
 
-    _ffi_id: ClassVar[int] = -23  # kafka_common_ErrorCode_CONSUMER_RETRIABLE_COMMIT_FAILED
+    _ffi_id: ClassVar[int] = -23  # kafka_common_Error_CONSUMER_RETRIABLE_COMMIT_FAILED
 
     @java_forms(
         Form("cause"),
