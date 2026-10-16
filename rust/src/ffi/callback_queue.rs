@@ -245,17 +245,31 @@ impl CallbackQueue {
 
     /// Fires the notify hook when the vector has just gone from empty to
     /// non-empty.
+    ///
+    /// The hook runs after the registration's lock is released: a hook that
+    /// waits (the Python binding's takes the GIL) must not hold up a push by
+    /// the thread it waits for, such as a delivery callback the core fires
+    /// inline in a non-blocking entry point
+    /// (`kafka_producer_Producer_try_send_with_callback`) that the binding
+    /// calls with the GIL held. So two calls of the hook can overlap, when a
+    /// drain runs between two pushes, and [`set_notify`](Self::set_notify)
+    /// does not wait for a call in flight.
     fn notify_if(&self, was_empty: bool) {
-        if was_empty && let Some((notify, opaque)) = *lock(&self.notify) {
+        if !was_empty {
+            return;
+        }
+        let registered = *lock(&self.notify);
+        if let Some((notify, opaque)) = registered {
             // SAFETY: the hook and its opaque pointer were registered together
-            // by the C caller, who keeps the opaque alive until it replaces the
-            // hook or destroys the client.
+            // by the C caller, who keeps the opaque alive until it destroys the
+            // client; replacing the hook does not wait for this call.
             unsafe { notify(opaque.0) };
         }
     }
 
     /// Registers the hook fired on every empty-to-non-empty transition, or
-    /// clears it with `None`.
+    /// clears it with `None`. A call of the previous hook in flight runs to
+    /// its end (see [`notify_if`](Self::notify_if)).
     pub(crate) fn set_notify(&self, notify: Option<NotifyFn>, opaque: *mut c_void) {
         *lock(&self.notify) = notify.map(|f| (f, SendPtr(opaque)));
     }

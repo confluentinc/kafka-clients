@@ -554,8 +554,10 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_destroy(self_: *mut kafka_
 #[cfg(test)]
 mod tests {
     use std::ffi::CString;
+    use std::time::{Duration, Instant};
 
     use super::*;
+    use crate::ffi::common::fail_point;
     use crate::ffi::common::{kafka_common_Error_destroy, kafka_common_Error_message};
     use crate::ffi::kafka_future::kafka_common_KafkaFuture_destroy;
     use crate::ffi::producer::producer_config::{
@@ -565,9 +567,10 @@ mod tests {
         kafka_producer_ProducerRecord_destroy, kafka_producer_ProducerRecord_new,
     };
     use crate::ffi::producer::{
-        kafka_producer_Producer__execute_callbacks, kafka_producer_Producer_close_cb,
-        kafka_producer_Producer_close_with_timeout, kafka_producer_Producer_close_with_timeout_cb,
-        kafka_producer_Producer_send_cb,
+        client_ref, kafka_producer_Producer__execute_callbacks, kafka_producer_Producer_close,
+        kafka_producer_Producer_close_cb, kafka_producer_Producer_close_with_timeout,
+        kafka_producer_Producer_close_with_timeout_cb, kafka_producer_Producer_flush, kafka_producer_Producer_send_cb,
+        kafka_producer_Producer_try_send,
     };
     use crate::ffi::util::{box_string_map, c_str_to_string, kafka_Map_destroy};
 
@@ -597,9 +600,9 @@ mod tests {
     }
 
     /// A `KafkaProducer` that can never fetch metadata, so a send waits out
-    /// `max.block.ms` (60 s) for it.
-    fn unreachable_producer() -> *mut kafka_producer_KafkaProducer_t {
-        let props = box_string_map([("bootstrap.servers", "127.0.0.1:1"), ("max.block.ms", "60000")]);
+    /// `max.block.ms` (`max_block_ms`, in milliseconds) for it.
+    fn unreachable_producer(max_block_ms: &str) -> *mut kafka_producer_KafkaProducer_t {
+        let props = box_string_map([("bootstrap.servers", "127.0.0.1:1"), ("max.block.ms", max_block_ms)]);
         // SAFETY: Test code: `err` is a valid slot pointing at null for each call (no call fails),
         // `props` and `config` are live from their constructor to their single destroy below; the
         // producer is handed to the caller, who destroys it.
@@ -660,10 +663,11 @@ mod tests {
 
     /// Java's `close(Duration)` bounds the caller's whole wait
     /// (`KafkaProducer.java` `close(Duration, boolean)`), so a timed close
-    /// behind a `send_cb` waiting out `max.block.ms` for metadata returns
-    /// within its timeout, drain included: the record being handed over fails
-    /// with the close, and the ones queued behind it as sent after close.
-    /// Both forms.
+    /// behind `send_cb` records the submission task has not reached yet
+    /// returns within its timeout, drain included, and the records then fail
+    /// as sent after close. Both forms. The test parks the submission task
+    /// (`Client::submission_gate`): no record it reached could hold it up, one
+    /// that has to wait for metadata waiting on a task of its own.
     #[test]
     fn a_timed_close_bounds_the_drain_of_the_queued_sends() {
         let topic = CString::new("topic").unwrap();
@@ -672,13 +676,16 @@ mod tests {
             let sends = std::sync::Mutex::new(Vec::<Option<String>>::new());
             let sends_opaque = &sends as *const std::sync::Mutex<Vec<Option<String>>> as *mut c_void;
             // SAFETY: Test code: the producer and `record` are live from their constructor to their
-            // single destroy below, `view` is used only before the producer is destroyed, and
+            // single destroy below, `view` is used only before the producer is destroyed, the gate
+            // guard borrows the test's own `client` clone and is dropped before the destroy, and
             // `sends` and `closed` outlive the callback runs that write them.
             unsafe {
-                let producer = unreachable_producer();
+                let producer = unreachable_producer("60000");
                 let view = kafka_producer_KafkaProducer__as_Producer(producer);
+                let client = Arc::clone(client_ref(view));
                 let record =
                     kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
+                let gate = client.submission_gate.try_lock().expect("the gate is free");
                 for _ in 0..3 {
                     kafka_producer_Producer_send_cb(view, record, record_send, sends_opaque);
                 }
@@ -692,6 +699,7 @@ mod tests {
                         &closed as *const std::sync::Mutex<Vec<Option<String>>> as *mut c_void,
                     );
                     while closed.lock().unwrap().is_empty() {
+                        assert!(start.elapsed() < std::time::Duration::from_secs(10), "{:?}", start.elapsed());
                         kafka_producer_Producer__execute_callbacks(view);
                         std::thread::sleep(std::time::Duration::from_millis(5));
                     }
@@ -701,33 +709,208 @@ mod tests {
                     kafka_producer_Producer_close_with_timeout(view, 500, &raw mut err);
                     assert!(err.is_null());
                 }
-                assert!(start.elapsed() < std::time::Duration::from_secs(10), "{:?}", start.elapsed());
+                let elapsed = start.elapsed();
+                assert!(
+                    elapsed >= std::time::Duration::from_millis(500),
+                    "the drain gave up early: {elapsed:?}"
+                );
+                assert!(elapsed < std::time::Duration::from_secs(10), "{elapsed:?}");
+                assert!(sends.lock().unwrap().is_empty(), "the task has not reached the records");
+
+                drop(gate);
                 while sends.lock().unwrap().len() < 3 {
                     assert!(start.elapsed() < std::time::Duration::from_secs(10), "{:?}", start.elapsed());
                     kafka_producer_Producer__execute_callbacks(view);
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
-                let sends = sends.lock().unwrap().clone();
-                assert_eq!(sends[0].as_deref(), Some("Producer closed while send in progress"));
-                for later in &sends[1..] {
-                    assert_eq!(
-                        later.as_deref(),
-                        Some("Cannot perform operation after producer has been closed")
-                    );
-                }
+                let closed = Some("Cannot perform operation after producer has been closed".to_string());
+                assert_eq!(*sends.lock().unwrap(), [closed.clone(), closed.clone(), closed]);
                 kafka_producer_KafkaProducer_destroy(producer);
                 kafka_producer_ProducerRecord_destroy(record);
             }
         }
     }
 
+    /// Whether `message` is the refusal of a record that waited inside the
+    /// producer when it closed: "Producer closed while send in progress" when
+    /// the close woke its wait, or Java's closed-producer refusal when its
+    /// task reached the producer only after the close.
+    fn is_closed_producer_refusal(message: &str) -> bool {
+        message == "Producer closed while send in progress"
+            || message == "Cannot perform operation after producer has been closed"
+    }
+
+    /// The tasks the producer behind `view` registered and that have not
+    /// ended: its `_cb` tasks and the waiters of the records the submission
+    /// task left waiting (`ffi::producer::send_waiter`).
+    ///
+    /// # Safety
+    ///
+    /// `view` must be a live view.
+    unsafe fn live_tasks(view: *const kafka_producer_Producer_t) -> usize {
+        // SAFETY: Per this function's `# Safety`, `view` is a live view, as `client_ref` requires;
+        // the reference is used only within this call.
+        let client = unsafe { client_ref(view) };
+        client.tasks.lock().unwrap().iter().filter(|task| !task.is_finished()).count()
+    }
+
+    /// Waits until `done` holds, failing after ten seconds with `what`.
+    fn wait_until(what: &str, done: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(Instant::now() < deadline, "{what}");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Records that have to wait for metadata wait side by side, as Java
+    /// threads blocked in `send` do, not one after another on the submission
+    /// task: two `send_cb` records, each waiting out a `max.block.ms` of
+    /// 1000 ms, are both done after about one such wait. The metadata timeout
+    /// is an `ApiException`, so each `cb` gets the future, failed with it, as
+    /// Java's `send` returns one.
+    #[test]
+    fn records_waiting_for_metadata_wait_side_by_side() {
+        let topic = CString::new("topic").unwrap();
+        let bytes = kafka_Bytes_t::from_slice(b"v");
+        let sends = std::sync::Mutex::new(Vec::<Option<String>>::new());
+        // SAFETY: Test code: `err` is a valid slot pointing at null, the producer and `record` are
+        // live from their constructor to their single destroy below, `view` is used only before
+        // the producer is destroyed, and `sends` outlives the callback runs that write it.
+        unsafe {
+            let producer = unreachable_producer("1000");
+            let view = kafka_producer_KafkaProducer__as_Producer(producer);
+            let record =
+                kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
+            let started = Instant::now();
+            for _ in 0..2 {
+                kafka_producer_Producer_send_cb(view, record, record_send, &sends as *const _ as *mut c_void);
+            }
+            while sends.lock().unwrap().len() < 2 {
+                assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+                kafka_producer_Producer__execute_callbacks(view);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed >= Duration::from_millis(1000),
+                "each waited out max.block.ms: {elapsed:?}"
+            );
+            assert!(
+                elapsed < Duration::from_millis(1900),
+                "two waits of max.block.ms=1000 overlap, not stack: {elapsed:?}"
+            );
+            assert_eq!(*sends.lock().unwrap(), [None, None], "each got its future");
+
+            let mut err = std::ptr::null_mut();
+            kafka_producer_Producer_close(view, &raw mut err);
+            assert!(err.is_null());
+            kafka_producer_KafkaProducer_destroy(producer);
+            kafka_producer_ProducerRecord_destroy(record);
+        }
+    }
+
+    /// `flush`, and every transaction-control operation, which shares its
+    /// drain, does not wait for a record waiting inside the producer on a
+    /// task of its own: that is a `send` still in progress, which Java's
+    /// `flush()` does not wait for either. `close` then fails the record, as
+    /// Java's does, rather than leave it waiting out `max.block.ms`.
+    #[test]
+    fn a_flush_does_not_wait_for_a_record_waiting_for_metadata() {
+        let topic = CString::new("topic").unwrap();
+        let bytes = kafka_Bytes_t::from_slice(b"v");
+        let sends = std::sync::Mutex::new(Vec::<Option<String>>::new());
+        // SAFETY: Test code: `err` is a valid slot pointing at null before each call, the producer
+        // and `record` are live from their constructor to their single destroy below, `view` is
+        // used only before the producer is destroyed, and `sends` outlives the callback runs that
+        // write it.
+        unsafe {
+            let producer = unreachable_producer("60000");
+            let view = kafka_producer_KafkaProducer__as_Producer(producer);
+            let record =
+                kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
+            kafka_producer_Producer_send_cb(view, record, record_send, &sends as *const _ as *mut c_void);
+            wait_until("the record waits on a task of its own", || live_tasks(view) == 1);
+            // Inside its `send`, waiting for the topic's metadata.
+            std::thread::sleep(Duration::from_millis(100));
+
+            let started = Instant::now();
+            let mut err = std::ptr::null_mut();
+            kafka_producer_Producer_flush(view, &raw mut err);
+            assert!(err.is_null());
+            let elapsed = started.elapsed();
+            assert!(elapsed < Duration::from_secs(5), "flush waited for the record: {elapsed:?}");
+            assert!(sends.lock().unwrap().is_empty(), "the record is still waiting");
+            assert_eq!(live_tasks(view), 1);
+
+            kafka_producer_Producer_close(view, &raw mut err);
+            assert!(err.is_null());
+            wait_until("the close failed the record", || {
+                kafka_producer_Producer__execute_callbacks(view);
+                !sends.lock().unwrap().is_empty()
+            });
+            assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+            let sends = sends.lock().unwrap().clone();
+            assert_eq!(sends.len(), 1);
+            let message = sends[0].clone().expect("the close refused the record");
+            assert!(is_closed_producer_refusal(&message), "{message}");
+            wait_until("the waiter ended", || live_tasks(view) == 0);
+            kafka_producer_KafkaProducer_destroy(producer);
+            kafka_producer_ProducerRecord_destroy(record);
+        }
+    }
+
+    /// `_destroy` waits for the records the submission task leaves waiting on
+    /// tasks of their own while it hands over the last ones queued, after
+    /// `_destroy` stopped it, so each still reports, once. The task is parked
+    /// (`Client::submission_gate`) when `_destroy` starts, so the record
+    /// reaches the producer only once the queue is closed: without that last
+    /// wait the runtime's shutdown would drop its task and `cb` never fired.
+    #[test]
+    fn destroy_waits_for_a_record_left_waiting_as_the_submission_task_stops() {
+        let topic = CString::new("topic").unwrap();
+        let bytes = kafka_Bytes_t::from_slice(b"v");
+        let sends = std::sync::Mutex::new(Vec::<Option<String>>::new());
+        // SAFETY: Test code: the producer and `record` are live from their constructor to their
+        // single destroy below, on the helper thread, which is joined before `record` is
+        // destroyed; `view` is used only before that destroy starts; the gate guard borrows the
+        // test's own `client` clone, which keeps the client alive; and `sends` outlives the
+        // destroy that runs its callback.
+        unsafe {
+            let producer = unreachable_producer("500");
+            let view = kafka_producer_KafkaProducer__as_Producer(producer);
+            let client = Arc::clone(client_ref(view));
+            let record =
+                kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
+            let gate = client.submission_gate.try_lock().expect("the gate is free");
+            kafka_producer_Producer_send_cb(view, record, record_send, &sends as *const _ as *mut c_void);
+            let handle = producer as usize;
+            std::thread::scope(|scope| {
+                let destroy = scope.spawn(move || kafka_producer_KafkaProducer_destroy(handle as *mut _));
+                // `_destroy` found no task to wait for and joins the parked submission task.
+                std::thread::sleep(Duration::from_millis(100));
+                assert!(!destroy.is_finished());
+                drop(gate);
+                destroy.join().unwrap();
+            });
+            assert_eq!(
+                *sends.lock().unwrap(),
+                [None],
+                "`cb` fired once, with the future failed on the metadata timeout"
+            );
+            kafka_producer_ProducerRecord_destroy(record);
+        }
+    }
+
     /// A forced `close_with_timeout_cb(0)` queued behind an untimed
     /// `close_cb`, with `_destroy` right after it (what Python's cancelled
-    /// async `close()` does), closes the producer: the record the untimed
-    /// close waits for fails at once and `_destroy` returns promptly, each
-    /// completion firing once. `_destroy` used to close the submission queue
-    /// first, which failed the forced close's drain before it closed the
-    /// producer, so `_destroy` waited out `max.block.ms` (60 s here).
+    /// async `close()` does): the record waiting for metadata fails with the
+    /// close and `_destroy` returns promptly, each completion firing once.
+    /// `_destroy` used to close the submission queue first, which failed the
+    /// forced close's drain before it closed the producer, so while the
+    /// untimed close waited for that record's handover, `_destroy` waited out
+    /// `max.block.ms` (60 s here). The record now waits on a task of its own,
+    /// which neither close waits for.
     #[test]
     fn destroy_right_after_a_forced_close_behind_an_untimed_one_returns_promptly() {
         let topic = CString::new("topic").unwrap();
@@ -738,13 +921,13 @@ mod tests {
         // single destroy below, `view` is used only before the producer is destroyed, and `sends`
         // and `closes` outlive the destroy that runs their callbacks.
         unsafe {
-            let producer = unreachable_producer();
+            let producer = unreachable_producer("60000");
             let view = kafka_producer_KafkaProducer__as_Producer(producer);
             let record =
                 kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
             kafka_producer_Producer_send_cb(view, record, record_send, &sends as *const _ as *mut c_void);
             kafka_producer_Producer_close_cb(view, record_void, &closes as *const _ as *mut c_void);
-            // The send is in flight, waiting for the topic's metadata.
+            // The send waits for the topic's metadata, on a task of its own.
             std::thread::sleep(std::time::Duration::from_millis(100));
             let start = std::time::Instant::now();
             kafka_producer_Producer_close_with_timeout_cb(view, 0, record_void, &closes as *const _ as *mut c_void);
@@ -955,6 +1138,112 @@ mod tests {
             assert_eq!(kafka_producer_Producer__execute_callbacks(view), 0);
             kafka_producer_KafkaProducer_destroy(producer);
             kafka_producer_KafkaProducer_destroy(std::ptr::null_mut());
+        }
+    }
+
+    /// `try_send` on a producer that would have to wait — here on metadata
+    /// it can never fetch — returns at once with `NULL` and no error: the
+    /// record was queued, and `cb` fires later with the future `send` would
+    /// have returned (failed on the metadata timeout, as `send_cb`'s is).
+    #[test]
+    fn try_send_queues_a_record_the_producer_cannot_take_at_once() {
+        let topic = CString::new("topic").unwrap();
+        let bytes = kafka_Bytes_t::from_slice(b"v");
+        let seen = std::sync::Mutex::new(Vec::new());
+        // SAFETY: Test code: `err` is a valid slot pointing at null before each call, `record` and
+        // the producer are live from their constructor to their single destroy below, `view` is
+        // used only before the producer is destroyed, `bytes` outlives the callback that reads the
+        // record, and `seen` outlives the callback run that writes it.
+        unsafe {
+            let producer = unreachable_producer("1000");
+            let view = kafka_producer_KafkaProducer__as_Producer(producer);
+            let record =
+                kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
+            let mut err = std::ptr::null_mut();
+            let started = Instant::now();
+            let future = kafka_producer_Producer_try_send(
+                view,
+                record,
+                record_send,
+                &seen as *const std::sync::Mutex<Vec<Option<String>>> as *mut c_void,
+                &raw mut err,
+            );
+            let elapsed = started.elapsed();
+            assert!(future.is_null(), "queued: no future comes back");
+            assert!(err.is_null(), "queued: no error either");
+            assert!(elapsed < Duration::from_millis(500), "did not wait on metadata: {elapsed:?}");
+            // The submission task tries it again and, the metadata still
+            // missing, leaves it waiting on a task of its own.
+            wait_until("the record waits on a task of its own", || live_tasks(view) == 1);
+
+            // That task's `send` waits out `max.block.ms`, then delivers `cb`
+            // a future failed on the metadata timeout.
+            while seen.lock().unwrap().is_empty() {
+                kafka_producer_Producer__execute_callbacks(view);
+                std::thread::yield_now();
+            }
+            assert_eq!(*seen.lock().unwrap(), [None]);
+            wait_until("the waiter ended", || live_tasks(view) == 0);
+            kafka_producer_ProducerRecord_destroy(record);
+
+            kafka_producer_Producer_close(view, &raw mut err);
+            assert!(err.is_null());
+            kafka_producer_KafkaProducer_destroy(producer);
+            assert_eq!(seen.lock().unwrap().len(), 1, "`cb` fired once");
+        }
+    }
+
+    /// A panic in a `try_send` body before the hand-off is reported through
+    /// `*out_err`, as from any fallible function, and never through `cb`: the
+    /// completion has not been handed over, so there is nothing to fire later,
+    /// and nothing was queued, so a `flush` has nothing of it to drain.
+    #[test]
+    fn a_panicking_try_send_body_reports_through_out_err_not_the_completion() {
+        let topic = CString::new("topic").unwrap();
+        let bytes = kafka_Bytes_t::from_slice(b"v");
+        let seen = std::sync::Mutex::new(Vec::new());
+        // SAFETY: Test code: `err` is a valid slot pointing at null before each call (reset after
+        // the error is destroyed), `record` and the producer are live from their constructor to
+        // their single destroy below, `view` is used only before the producer is destroyed, and
+        // `seen` outlives every callback run.
+        unsafe {
+            let producer = unreachable_producer("1000");
+            let view = kafka_producer_KafkaProducer__as_Producer(producer);
+            let record =
+                kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
+            let mut err = std::ptr::null_mut();
+            fail_point::arm();
+            let future = kafka_producer_Producer_try_send(
+                view,
+                record,
+                record_send,
+                &seen as *const std::sync::Mutex<Vec<Option<String>>> as *mut c_void,
+                &raw mut err,
+            );
+            assert!(future.is_null());
+            assert!(!err.is_null(), "the panic is in `*out_err`");
+            assert_eq!(
+                c_str_to_string(kafka_common_Error_message(err)),
+                format!(
+                    "Rust panic caught at the FFI boundary in kafka_producer_Producer_try_send_with_callback: {}",
+                    fail_point::MESSAGE
+                )
+            );
+            kafka_common_Error_destroy(err);
+            err = std::ptr::null_mut();
+
+            // Never queued, so a flush has nothing of it to drain, and
+            // nothing fires: not now, not on destroy.
+            kafka_producer_Producer_flush(view, &raw mut err);
+            assert!(err.is_null());
+            assert_eq!(kafka_producer_Producer__execute_callbacks(view), 0, "`cb` never fires");
+            assert!(seen.lock().unwrap().is_empty());
+            kafka_producer_ProducerRecord_destroy(record);
+
+            kafka_producer_Producer_close(view, &raw mut err);
+            assert!(err.is_null());
+            kafka_producer_KafkaProducer_destroy(producer);
+            assert!(seen.lock().unwrap().is_empty(), "not even on destroy");
         }
     }
 }
