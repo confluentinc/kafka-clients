@@ -320,23 +320,31 @@ trait.
 
 ## 11. Bindings (C FFI / Python)
 
-The Admin client has a C FFI, `rust/src/ffi/admin.rs`, with sync and `*_async` forms over the shared
-dispatcher in `rust/src/ffi/common.rs` (`CompletionJob`, `spawn_dispatcher`,
-`enqueue_or_run_inline`).
+The Admin client's C FFI is `rust/src/ffi/admin/`, one file per Java class. Every RPC returns its
+`*Result` handle at once, as Java's methods do; the Result hands out one
+`kafka_common_KafkaFuture_t` per key (or one for the whole call), and each waiting entry point
+(`close`) has a `_cb` twin whose completion is queued on the client and run by
+`kafka_admin_Admin__execute_callbacks`. The Options objects are C handles built with
+`<X>Options_new` and their `set_*` functions.
 
-Its Python binding is generated from CLAUDE.md's `## Python Binding Conventions`, like the producer
-and consumer: the package `confluent_kafka.admin`: `Admin`, `KafkaAdminClient` and their asyncio peers, built on
-the async C bindings; `MockAdminClient`, its asyncio peer and the Options, Result and value classes,
-pure-Python translations of their Java sources. The conventions cover the admin client's specifics (the entry-point list for the
-admin FFI's names, `KafkaFuture` as Python's futures, the keyword constructors of the Options
-classes, the pure-Python `MockAdminClient`).
+Its Python binding is the package `confluent_kafka.admin`, generated from CLAUDE.md's
+`## Python Binding Conventions` over that FFI, like the producer and consumer: `Admin`,
+`KafkaAdminClient` and their asyncio peers call the FFI; the Options, Result and value classes and
+`MockAdminClient` with its asyncio peer are pure-Python translations of their Java sources. The
+conventions cover the admin client's specifics: `KafkaFuture` / `AsyncKafkaFuture` over the C
+futures (Futures), the sync client's pump thread (Threads and callbacks), the Options objects
+built through `set_*` (Signatures), and the pure-Python `MockAdminClient` (Implementation over the
+FFI).
 
 **How to apply:**
 
   - Generate and change the binding only through the conventions; do not hand-edit generated code.
+  - A new Admin RPC is generated like any other once its FFI is in the header:
+    `unregister_controller` (KAFKA-20395, Kafka 4.4) is one, with
+    `MockAdminClient.Builder.using_raft_controller`, which Java's mock reads for it.
   - The old binding `python/admin.py` and its private shim `confluent_kafka/_legacy_compat.py` are
-    removed; the gRPC admin translation, the soak client and the admin tests use `confluent_kafka.admin`.
+    gone; the gRPC admin translation, the soak client and the admin tests use
+    `confluent_kafka.admin`.
 
-(This section used to record the Python admin binding as paused: `admin.py` predated the
-conventions and kept a flat `KafkaError` and positional value types through `_legacy_compat.py`.
-The admin-client generation ports it to the conventions.)
+(This section used to record the Python admin binding as paused, over a synchronous
+`rust/src/ffi/admin.rs` and the shared completion dispatcher; both were replaced.)
