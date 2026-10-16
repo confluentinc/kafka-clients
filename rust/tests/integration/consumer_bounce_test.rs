@@ -809,26 +809,29 @@ async fn test_async_consumer_seek_and_commit_with_broker_failures() {
 }
 
 /// Java's `receiveExactRecords(poller, numRecords, timeoutMs)` (line 778):
-/// wait until the poller has received exactly `num_records` records.
+/// wait until the poller has received exactly `num_records` records, polling
+/// every 100 ms (`TestUtils.waitForCondition`'s default).
+///
+/// The failure message is Java's lazy one, with the count received. It also
+/// names the error that stopped the poller, if one did: Java's
+/// `ShutdownableThread` logs the exception that ends `doWork`, while the Rust
+/// poller only stores it ([`ConsumerAssignmentPoller::thrown_error`]).
 async fn receive_exact_records(poller: &ConsumerAssignmentPoller, num_records: usize, timeout_ms: u64) {
-    test_utils::wait_until_true_with_timeout(
-        || {
-            let received = poller.received_messages() == num_records;
-            async move { received }
-        },
-        &format!("Consumer did not receive expected {num_records}."),
-        timeout_ms,
-        100,
-    )
-    .await;
-    // Java's lazy message also reports the count; the helper takes a fixed
-    // message, so report it here (the wait above already passed).
-    assert_eq!(
-        poller.received_messages(),
-        num_records,
-        "Consumer did not receive expected {num_records}. It received {}",
-        poller.received_messages()
-    );
+    let start = std::time::Instant::now();
+    loop {
+        let received = poller.received_messages();
+        if received == num_records {
+            return;
+        }
+        if start.elapsed() > Duration::from_millis(timeout_ms) {
+            let stopped = poller
+                .thrown_error()
+                .map(|e| format!("; the poller stopped on {e:?}"))
+                .unwrap_or_default();
+            panic!("Consumer did not receive expected {num_records}. It received {received}{stopped}");
+        }
+        tokio::time::sleep(Duration::from_millis(timeout_ms.min(100))).await;
+    }
 }
 
 /// Translates `testAsyncSubscribeWhenTopicUnavailable`
