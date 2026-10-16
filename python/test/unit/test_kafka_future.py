@@ -118,13 +118,13 @@ class AsyncKind(Kind):
         return AsyncKafkaFuture._of_impl(impl)
 
     def run(self, coro: Coroutine[Any, Any, Any]) -> Any:
-        return self.loop.run_until_complete(coro)
+        return _outcome(self.loop.run_until_complete(_capture(coro)))
 
     def get(self, future: Any, timeout: float | None = None) -> Any:
         return self.run(future.get() if timeout is None else future.get(timeout=timeout))
 
     def get_in_thread(self, future: Any) -> Any:
-        return asyncio.run(future.get())
+        return _outcome(asyncio.run(_capture(future.get())))
 
     @property
     def cls(self) -> Any:
@@ -132,6 +132,26 @@ class AsyncKind(Kind):
 
     def close(self) -> None:
         self.loop.close()
+
+
+async def _capture(coro: Coroutine[Any, Any, Any]) -> tuple[bool, Any]:
+    """Run ``coro`` and keep what it raised as the very object it raised.
+
+    On Python 3.10 a ``CancelledError`` that leaves a task is replaced at the
+    task boundary by a fresh one without its message (bpo-45390, fixed in
+    3.11), so an error is caught inside the coroutine, where the user's code
+    sees it, and raised again outside the loop by :func:`_outcome`."""
+    try:
+        return True, await coro
+    except BaseException as error:  # noqa: BLE001 - raised again by _outcome
+        return False, error
+
+
+def _outcome(result: tuple[bool, Any]) -> Any:
+    ok, value = result
+    if ok:
+        return value
+    raise value
 
 
 @pytest.fixture(params=["sync", "async"])
