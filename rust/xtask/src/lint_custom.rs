@@ -203,7 +203,7 @@ struct Module {
     is_pub: bool,
     /// Whether the module sits under a `pub` inline-module chain within its file
     /// (the file itself counts as `pub`). This is the reachability notion
-    /// [`NoDataCarryingEnumVariants`] has always used.
+    /// [`EnumTranslation`] uses.
     file_public_path: bool,
     /// The module's items, excluding `#[cfg(test)]` modules.
     items: Vec<syn::Item>,
@@ -551,15 +551,28 @@ fn cfg_implies_test(pred: &syn::Meta) -> bool {
 /// matches the Java source: a data-carrying enum translates a Java class
 /// hierarchy (a Java enum cannot give its constants per-constant shapes), so
 /// one named type per variant is the faithful shape. That the Java type is a
-/// hierarchy is [`EnumTranslation`]'s check, not this one's: a newtype variant
-/// passes here whatever it wraps.
+/// hierarchy is [`EnumTranslation`]'s check, not this one's.
+///
+/// The wrapped type must be one this crate defines — a struct, an enum, a trait
+/// (`Box<dyn Gauge>`) or an error macro's type — possibly behind `Box`, `Arc`
+/// or `Rc`, or one of the enum's own type parameters. A type from `std` or
+/// another crate (`TopicIds(Vec<Uuid>)`, `Timestamp(i64)`) cannot carry the
+/// variant's forward compatibility: the field the Java subclass keeps private
+/// is the payload itself, constructed and destructured by any caller, so the
+/// field a later Kafka version adds to the subclass has nowhere to go. A
+/// `rust-only` enum stands for no Java hierarchy — it is a value wrapper, such
+/// as `MetricValue::Double(f64)` for the `Object` Java's `metricValue()`
+/// returns — so its newtype variants may wrap any type; the inline-fields
+/// check still applies to it.
 ///
 /// Marking the *variant* `#[non_exhaustive]` is deliberately not the rule: on a
 /// tuple variant that attribute makes the variant wholly private to other crates
 /// (E0603) — not merely unconstructable but *unmatchable*, so
 /// `match err { Error::Api(e) => .. }` stops compiling downstream.
 ///
-/// Scope: every `pub enum` not under a non-`pub` inline module of its file.
+/// Scope: every `pub enum` another crate can reach, through a `pub` module
+/// chain or a `pub use` ([`Crate::public_names`]). An enum of a `pub(crate)`
+/// module, such as `compress::CompressingWriter`, owes no forward compatibility.
 struct NoDataCarryingEnumVariants;
 
 impl Rule for NoDataCarryingEnumVariants {
@@ -568,35 +581,58 @@ impl Rule for NoDataCarryingEnumVariants {
     }
 
     fn check(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+        // The types the crate defines, whatever their visibility or module:
+        // a wrapped type the crate owns can be given private fields or
+        // `#[non_exhaustive]`; one it does not own cannot.
+        let defined: BTreeSet<String> = krate
+            .modules
+            .values()
+            .flat_map(|m| m.items.iter())
+            .filter_map(|item| match item {
+                syn::Item::Struct(s) => Some(s.ident.to_string()),
+                syn::Item::Enum(e) => Some(e.ident.to_string()),
+                syn::Item::Trait(t) => Some(t.ident.to_string()),
+                syn::Item::Macro(m) => error_macro_type_def(m).map(|def| def.name),
+                // A type alias is transparent: it hides nothing.
+                _ => None,
+            })
+            .collect();
+        let pub_enum = |item: &syn::Item| match item {
+            syn::Item::Enum(e) if matches!(e.vis, syn::Visibility::Public(_)) => Some(e.ident.to_string()),
+            _ => None,
+        };
         let mut checked = 0usize;
-        for module in krate.modules.values() {
-            if !module.file_public_path {
+        for (path, name) in krate.public_names(pub_enum) {
+            let module = &krate.modules[&path];
+            let Some(syn::Item::Enum(e)) = module.items.iter().find(|item| pub_enum(item).as_deref() == Some(&name))
+            else {
                 continue;
-            }
-            for item in &module.items {
-                let syn::Item::Enum(e) = item else { continue };
-                if !matches!(e.vis, syn::Visibility::Public(_)) {
-                    continue;
-                }
-                for v in &e.variants {
-                    checked += 1;
-                    let shape = match &v.fields {
-                        // Carries nothing.
-                        syn::Fields::Unit => continue,
-                        // A newtype delegates forward compatibility to the type
-                        // it wraps; two or more fields have nothing to delegate
-                        // to and can be destructured positionally downstream.
-                        syn::Fields::Unnamed(f) if f.unnamed.len() == 1 => continue,
-                        syn::Fields::Unnamed(f) => format!("{} unnamed fields", f.unnamed.len()),
-                        syn::Fields::Named(_) => "inline named fields".to_string(),
-                    };
-                    findings.push(format!(
-                        "{}: `{}::{}` holds data inline ({shape})",
-                        module.file.display(),
-                        e.ident,
-                        v.ident
-                    ));
-                }
+            };
+            let value_wrapper = has_tag(&e.attrs, RUST_ONLY);
+            for v in &e.variants {
+                checked += 1;
+                let why = match &v.fields {
+                    // Carries nothing.
+                    syn::Fields::Unit => continue,
+                    // A newtype delegates forward compatibility to the type it
+                    // wraps, which must therefore be the crate's own — unless
+                    // the enum translates no Java hierarchy.
+                    syn::Fields::Unnamed(f) if f.unnamed.len() == 1 => {
+                        let ty = &f.unnamed[0].ty;
+                        let owned = wrapped_type_name(ty).is_some_and(|name| {
+                            defined.contains(&name) || e.generics.type_params().any(|p| p.ident == name)
+                        });
+                        if owned || value_wrapper {
+                            continue;
+                        }
+                        format!("wraps `{}`, a type the crate does not define", compact(ty))
+                    },
+                    // Two or more fields have nothing to delegate to and can
+                    // be destructured positionally downstream.
+                    syn::Fields::Unnamed(f) => format!("holds data inline ({} unnamed fields)", f.unnamed.len()),
+                    syn::Fields::Named(_) => "holds data inline (inline named fields)".to_string(),
+                };
+                findings.push(format!("{}: `{}::{}` {why}", module.file.display(), e.ident, v.ident));
             }
         }
         checked
@@ -606,8 +642,39 @@ impl Rule for NoDataCarryingEnumVariants {
         "   Move the fields into their own struct and wrap it, e.g.:
        pub struct GzipCompression { level: i32 }
        Gzip(GzipCompression),   // instead of Gzip { level: i32 }
+   A newtype must wrap a type this crate defines, as Java's subclass does:
+       pub struct TimestampSpec { timestamp: i64 }
+       Timestamp(TimestampSpec), // instead of Timestamp(i64)
    The struct then carries forward compatibility (private fields, or
    #[non_exhaustive]); do NOT mark the variant itself."
+    }
+}
+
+/// The type a newtype variant delegates to: `ty` with `Box` / `Arc` / `Rc`
+/// peeled, named by its last path segment (`dyn Trait` by the trait). `None`
+/// for a shape that names no type (a tuple, a slice, a reference, a pointer).
+fn wrapped_type_name(ty: &syn::Type) -> Option<String> {
+    match ty {
+        syn::Type::Path(p) => {
+            let last = p.path.segments.last()?;
+            let ident = last.ident.to_string();
+            if matches!(ident.as_str(), "Box" | "Arc" | "Rc") {
+                let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                    return None;
+                };
+                return match args.args.first()? {
+                    syn::GenericArgument::Type(inner) => wrapped_type_name(inner),
+                    _ => None,
+                };
+            }
+            Some(ident)
+        },
+        syn::Type::TraitObject(t) => t.bounds.iter().find_map(|b| match b {
+            syn::TypeParamBound::Trait(t) => t.path.segments.last().map(|s| s.ident.to_string()),
+            _ => None,
+        }),
+        syn::Type::Paren(p) => wrapped_type_name(&p.elem),
+        _ => None,
     }
 }
 
@@ -4108,6 +4175,81 @@ mod error_predicate_tests {
                 "{finding}\n  does not end with\n{expected}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod no_data_carrying_enum_variants_tests {
+    use super::*;
+
+    /// A crate whose public enums exercise every outcome of
+    /// `check-no-data-carrying-enum-variants`: the newtype variants of
+    /// `Wrapped` each delegate to a type the crate owns, those of `Leaky` do
+    /// not or carry several fields, `Value` is a `rust-only` value wrapper,
+    /// and `Reexported` is reached only through a `pub use`.
+    const FIXTURE_LIB: &str = r#"
+        pub struct Payload { level: i32 }
+        pub trait Provider {}
+        message_only_error! { QuotaViolationError code: 1 }
+        pub enum Wrapped<T> {
+            Unit,
+            Struct(Payload),
+            Boxed(Box<Payload>),
+            Shared(std::sync::Arc<Payload>),
+            Interface(Box<dyn Provider + Send>),
+            Macro(Box<QuotaViolationError>),
+            Param(T),
+        }
+        pub enum Leaky {
+            Ids(Vec<u8>),
+            Stamp(i64),
+            Tuple((u8, u8)),
+            Pair(u8, u8),
+            Named { x: u8 },
+        }
+        #[doc(alias = "rust-only")]
+        pub enum Value {
+            Double(f64),
+            Pair(u8, u8),
+        }
+        mod reexported {
+            pub enum Reexported { Raw(i64) }
+        }
+        pub use reexported::Reexported;
+        pub(crate) enum CratePrivate { A(i64) }
+        mod hidden {
+            pub enum Unreachable { A(i64) }
+        }
+    "#;
+
+    #[test]
+    fn test_newtype_must_wrap_a_type_the_crate_defines() {
+        let dir = std::env::temp_dir().join(format!("xtask-no-data-carrying-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lib.rs"), FIXTURE_LIB).unwrap();
+        let krate = Crate::load(&dir.join("lib.rs")).unwrap();
+        let mut findings = Vec::new();
+        let checked = NoDataCarryingEnumVariants.check(&krate, &mut findings);
+        fs::remove_dir_all(&dir).unwrap();
+        let file = dir.join("lib.rs").display().to_string();
+        findings.sort();
+        let mut expected = [
+            format!("{file}: `Leaky::Ids` wraps `Vec<u8>`, a type the crate does not define"),
+            format!("{file}: `Leaky::Stamp` wraps `i64`, a type the crate does not define"),
+            format!("{file}: `Leaky::Tuple` wraps `(u8, u8)`, a type the crate does not define"),
+            format!("{file}: `Leaky::Pair` holds data inline (2 unnamed fields)"),
+            format!("{file}: `Leaky::Named` holds data inline (inline named fields)"),
+            // A `rust-only` value wrapper may wrap `f64`, but not hold fields inline.
+            format!("{file}: `Value::Pair` holds data inline (2 unnamed fields)"),
+            // Reached through `pub use` from a private module.
+            format!("{file}: `Reexported::Raw` wraps `i64`, a type the crate does not define"),
+        ];
+        expected.sort();
+        assert_eq!(findings, expected);
+        // The fifteen variants of the four reachable `pub` enums; the
+        // `pub(crate)` enum and the one under a private module nothing
+        // re-exports are out of scope.
+        assert_eq!(checked, 15);
     }
 }
 

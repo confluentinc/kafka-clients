@@ -89,6 +89,53 @@ impl FencedProducer {
     }
 }
 
+/// The offset specification [`AdminBackend::list_offsets`] takes for each
+/// partition: Java's `OffsetSpec`, as the arguments of its static factories.
+///
+/// The production [`OffsetSpec`] cannot cross this trait as it is. Java's
+/// `OffsetSpec.TimestampSpec` keeps its constructor and `timestamp()`
+/// package-private (`OffsetSpec.java`) and the translation keeps them
+/// `pub(crate)` (`src/admin/offset_spec.rs`), so an `Admin` implementation
+/// outside the crate — the gRPC arm, like a Java `Admin` outside
+/// `org.apache.kafka.clients.admin` — cannot read the timestamp back out of
+/// `OffsetSpec::Timestamp`. The backend therefore takes what the factory was
+/// called with, one variant per factory, and each arm builds its own value:
+/// the native arm through the factory ([`Self::to_offset_spec`]), the gRPC arm
+/// as the proto's named kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OffsetSpecArg {
+    /// `OffsetSpec.earliest()`.
+    Earliest,
+    /// `OffsetSpec.latest()`.
+    Latest,
+    /// `OffsetSpec.maxTimestamp()`.
+    MaxTimestamp,
+    /// `OffsetSpec.earliestLocal()`.
+    EarliestLocal,
+    /// `OffsetSpec.latestTiered()`.
+    LatestTiered,
+    /// `OffsetSpec.earliestPendingUpload()`.
+    EarliestPendingUpload,
+    /// `OffsetSpec.forTimestamp(long)`, the timestamp in milliseconds.
+    ForTimestamp(i64),
+}
+
+impl OffsetSpecArg {
+    /// The production value, built through the public `OffsetSpec` factory
+    /// this variant stands for.
+    pub fn to_offset_spec(self) -> OffsetSpec {
+        match self {
+            Self::Earliest => OffsetSpec::earliest(),
+            Self::Latest => OffsetSpec::latest(),
+            Self::MaxTimestamp => OffsetSpec::max_timestamp(),
+            Self::EarliestLocal => OffsetSpec::earliest_local(),
+            Self::LatestTiered => OffsetSpec::latest_tiered(),
+            Self::EarliestPendingUpload => OffsetSpec::earliest_pending_upload(),
+            Self::ForTimestamp(timestamp) => OffsetSpec::for_timestamp(timestamp),
+        }
+    }
+}
+
 /// The admin surface the multilanguage scenarios are written against.
 ///
 /// # Why this is not the production [`Admin`] trait
@@ -348,7 +395,9 @@ pub trait AdminBackend {
         options: ListPartitionReassignmentsOptions,
     ) -> Result<HashMap<TopicPartition, PartitionReassignment>, Error>;
 
-    /// Look up one offset per partition, each selected by an [`OffsetSpec`].
+    /// Look up one offset per partition, each selected by an [`OffsetSpecArg`]
+    /// (Java's `OffsetSpec`; that type says why the production enum does not
+    /// cross here).
     ///
     /// The only G3 RPC that reaches the broker through the `AdminApiDriver` /
     /// `PartitionLeaderStrategy` multi-step engine (a partition-leader lookup
@@ -356,7 +405,7 @@ pub trait AdminBackend {
     /// `.claude/rules/admin-client.md` §2.
     async fn list_offsets(
         &self,
-        topic_partition_offsets: &HashMap<TopicPartition, OffsetSpec>,
+        topic_partition_offsets: &HashMap<TopicPartition, OffsetSpecArg>,
         options: ListOffsetsOptions,
     ) -> Result<Outcomes<TopicPartition, ListOffsetsResultInfo>, Error>;
 
@@ -1374,10 +1423,14 @@ impl AdminBackend for RustNativeAdmin {
 
     async fn list_offsets(
         &self,
-        topic_partition_offsets: &HashMap<TopicPartition, OffsetSpec>,
+        topic_partition_offsets: &HashMap<TopicPartition, OffsetSpecArg>,
         options: ListOffsetsOptions,
     ) -> Result<Outcomes<TopicPartition, ListOffsetsResultInfo>, Error> {
-        let result = self.admin.list_offsets_with_options(topic_partition_offsets, options);
+        let specs: HashMap<TopicPartition, OffsetSpec> = topic_partition_offsets
+            .iter()
+            .map(|(tp, spec)| (tp.clone(), spec.to_offset_spec()))
+            .collect();
+        let result = self.admin.list_offsets_with_options(&specs, options);
         // `ListOffsetsResult` exposes its futures through `partitionResult(tp)`
         // rather than as a map, so the *requested* keys drive the collection —
         // and a key the call did not attempt is a whole-call `Err`, not a

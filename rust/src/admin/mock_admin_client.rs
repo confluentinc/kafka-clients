@@ -1347,9 +1347,9 @@ impl Admin for MockAdminClient {
     fn delete_topics_with_options(&self, topics: TopicCollection, _options: DeleteTopicsOptions) -> DeleteTopicsResult {
         let mut state = self.state.lock().unwrap();
         match topics {
-            TopicCollection::TopicNames(names) => {
+            TopicCollection::TopicNames(collection) => {
                 let mut result = HashMap::new();
-                for name in names {
+                for name in collection.topic_names().iter().cloned() {
                     let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
                     if state.timeout_next_requests > 0 {
                         handle.complete_with_error(timeout_error());
@@ -1371,9 +1371,9 @@ impl Admin for MockAdminClient {
                 }
                 DeleteTopicsResult::of_topic_names(result)
             },
-            TopicCollection::TopicIds(ids) => {
+            TopicCollection::TopicIds(collection) => {
                 let mut result = HashMap::new();
-                for id in ids {
+                for id in collection.topic_ids().iter().copied() {
                     let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
                     if state.timeout_next_requests > 0 {
                         handle.complete_with_error(timeout_error());
@@ -1434,10 +1434,10 @@ impl Admin for MockAdminClient {
     ) -> DescribeTopicsResult {
         let mut state = self.state.lock().unwrap();
         match topics {
-            TopicCollection::TopicNames(names) => {
+            TopicCollection::TopicNames(collection) => {
                 let mut result = HashMap::new();
                 let timing_out = state.timeout_next_requests > 0;
-                for requested in &names {
+                for requested in collection.topic_names() {
                     let handle: KafkaFutureImpl<TopicDescription> = KafkaFutureImpl::new();
                     if timing_out {
                         handle.complete_with_error(timeout_error());
@@ -1485,10 +1485,10 @@ impl Admin for MockAdminClient {
                 }
                 DescribeTopicsResult::of_topic_names(result)
             },
-            TopicCollection::TopicIds(ids) => {
+            TopicCollection::TopicIds(collection) => {
                 let mut result = HashMap::new();
                 let timing_out = state.timeout_next_requests > 0;
-                for requested in &ids {
+                for requested in collection.topic_ids() {
                     let handle: KafkaFutureImpl<TopicDescription> = KafkaFutureImpl::new();
                     if timing_out {
                         handle.complete_with_error(timeout_error());

@@ -47,7 +47,7 @@ use confluent_kafka::admin::{
     GroupOffsets, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec,
     ListGroupsOptions, ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions,
     ListTransactionsOptions, LogDirDescription, MemberAssignment, MemberDescription, NewPartitionReassignment,
-    NewPartitions, NewTopic, OffsetSpec, PartitionProducerState, PartitionReassignment, ProducerState, RecordsToDelete,
+    NewPartitions, NewTopic, PartitionProducerState, PartitionReassignment, ProducerState, RecordsToDelete,
     RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions, ReplicaInfo, ScramCredentialInfo,
     ScramMechanism, SupportedVersionRange, TerminateTransactionOptions, TopicDescription, TopicListing,
     TopicMetadataAndConfig, TransactionDescription, TransactionListing, TransactionState, UnregisterControllerOptions,
@@ -74,7 +74,7 @@ use tonic::transport::Channel;
 
 use crate::common::admin_backend::{
     AdminBackend, ClusterDescription, ConfigEntryView, ConfigSynonymView, ConfigView, FeatureMetadataView,
-    FencedProducer, FilterResultView, FilterResultsView, Listings, Outcomes, ReplicaLogDirInfoView,
+    FencedProducer, FilterResultView, FilterResultsView, Listings, OffsetSpecArg, Outcomes, ReplicaLogDirInfoView,
 };
 use crate::common::multilanguage_producer::{kafka_error_from_proto, status_to_kafka_error};
 
@@ -1097,27 +1097,25 @@ fn optional_partitions_to_proto(partitions: Option<HashSet<TopicPartition>>) -> 
     partitions.map(|set| proto::TopicPartitionList { partitions: set.iter().map(tp_to_proto).collect() })
 }
 
-/// Encodes an [`OffsetSpec`] as the wire's named kind plus, for
+/// Encodes an [`OffsetSpecArg`] as the wire's named kind plus, for
 /// `forTimestamp`, its timestamp.
 ///
 /// The kind is deliberately *not* the `ListOffsets` sentinel the C boundary
 /// takes; see `admin_service.proto`'s `OffsetSpec` for why naming the variant
 /// makes each server's own sentinel table differential instead of merely
 /// forwarding one written here.
-fn offset_spec_to_proto(spec: OffsetSpec) -> proto::OffsetSpec {
+fn offset_spec_to_proto(spec: OffsetSpecArg) -> proto::OffsetSpec {
+    // `OffsetSpecArg` is the harness's own enum, so the match is exhaustive: a
+    // factory Java adds gets its variant here and its `Kind` in
+    // `admin_service.proto` together, or the harness does not build.
     let (kind, timestamp) = match spec {
-        OffsetSpec::Earliest => (proto::offset_spec::Kind::Earliest, None),
-        OffsetSpec::Latest => (proto::offset_spec::Kind::Latest, None),
-        OffsetSpec::MaxTimestamp => (proto::offset_spec::Kind::MaxTimestamp, None),
-        OffsetSpec::EarliestLocal => (proto::offset_spec::Kind::EarliestLocal, None),
-        OffsetSpec::LatestTiered => (proto::offset_spec::Kind::LatestTiered, None),
-        OffsetSpec::EarliestPendingUpload => (proto::offset_spec::Kind::EarliestPendingUpload, None),
-        OffsetSpec::Timestamp(ts) => (proto::offset_spec::Kind::ForTimestamp, Some(ts)),
-        // `OffsetSpec` is `#[non_exhaustive]`, so this external crate needs a
-        // wildcard arm. `admin_service.proto`'s `OffsetSpec.Kind` has a fixed
-        // variant set, so a spec added upstream cannot be encoded — failing
-        // here beats sending a wrong kind to the C and Python servers.
-        _ => panic!("offset_spec_to_proto has no proto::offset_spec::Kind for {spec:?}"),
+        OffsetSpecArg::Earliest => (proto::offset_spec::Kind::Earliest, None),
+        OffsetSpecArg::Latest => (proto::offset_spec::Kind::Latest, None),
+        OffsetSpecArg::MaxTimestamp => (proto::offset_spec::Kind::MaxTimestamp, None),
+        OffsetSpecArg::EarliestLocal => (proto::offset_spec::Kind::EarliestLocal, None),
+        OffsetSpecArg::LatestTiered => (proto::offset_spec::Kind::LatestTiered, None),
+        OffsetSpecArg::EarliestPendingUpload => (proto::offset_spec::Kind::EarliestPendingUpload, None),
+        OffsetSpecArg::ForTimestamp(ts) => (proto::offset_spec::Kind::ForTimestamp, Some(ts)),
     };
     proto::OffsetSpec { kind: kind as i32, timestamp }
 }
@@ -1766,7 +1764,7 @@ impl AdminBackend for MultilanguageAdmin {
 
     async fn list_offsets(
         &self,
-        topic_partition_offsets: &HashMap<TopicPartition, OffsetSpec>,
+        topic_partition_offsets: &HashMap<TopicPartition, OffsetSpecArg>,
         options: ListOffsetsOptions,
     ) -> Result<Outcomes<TopicPartition, ListOffsetsResultInfo>, Error> {
         let request = proto::ListOffsetsRequest {
