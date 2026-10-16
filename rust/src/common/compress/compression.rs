@@ -198,9 +198,9 @@ impl Compression {
     /// `ChunkedBytesStream` copies the codec's output into, 16 KiB for gzip and
     /// zstd and 2 KiB for snappy and lz4 (`GzipCompression.java:80-83`,
     /// `ZstdCompression.java:106-109`, `SnappyCompression.java:67-72`,
-    /// `Lz4Compression.java:67-72`). A reader gives it to the [`io::BufReader`]
-    /// it wraps [`Self::wrap_for_input`]'s reader in, that type standing in for
-    /// `ChunkedBytesStream`.
+    /// `Lz4Compression.java:67-72`). The consumer reads
+    /// [`Self::wrap_for_input`]'s stream through a `ChunkedBytesStream` with a
+    /// buffer of this size, as Java's `wrapForInput` does.
     ///
     /// # Errors
     ///

@@ -92,8 +92,6 @@
 //! rather than the branch: "rare" was asserted about a *client* behaviour
 //! without checking what the client actually does.
 
-#![expect(dead_code)]
-
 use std::collections::BinaryHeap;
 use std::io::{self, BufRead, Read};
 use std::sync::{Arc, Mutex};
@@ -120,6 +118,7 @@ use crate::common::record::internal::{
 use crate::common::serialization::Deserializer;
 use crate::common::utils::internals::BufferSupplier;
 use crate::common::utils::internals::ByteUtils;
+use crate::common::utils::internals::ChunkedBytesStream;
 use crate::consumer::internals::FetchConfig;
 use crate::consumer::internals::FetchMetricsAggregator;
 use crate::consumer::internals::SubscriptionState;
@@ -203,12 +202,9 @@ pub(crate) struct CompletedFetch {
 
     /// Subscription state used for `move_partition_to_end` on drain.
     subscriptions: Option<Arc<Mutex<SubscriptionState>>>,
-    /// Decompression buffer pool (used by compressed-batch iteration in a
-    /// future revision — current iteration uses the existing
-    /// `DefaultRecordBatch::iter_records` path which handles decompression
-    /// internally without a `BufferSupplier`; the field is retained for
-    /// Java parity and forward compatibility).
-    decompression_buffer_supplier: Option<Arc<BufferSupplier>>,
+    /// The pool compressed batches' read buffers come from and go back to:
+    /// Java's `decompressionBufferSupplier` (`CompletedFetch.java:66,94,226`).
+    decompression_buffer_supplier: Arc<BufferSupplier>,
 
     /// In-progress batch iteration state. Lazily initialized on first
     /// `fetch_records` call so that empty fetches incur no setup cost.
@@ -368,11 +364,13 @@ enum PendingRecordSource {
 /// per partition and from compacted topics, and a poll can return hundreds of
 /// them.
 ///
-/// The stream is read through a buffer of the size Java gives the codec's
-/// `ChunkedBytesStream` ([`Compression::decompression_output_size`]), the
-/// standard library's [`io::BufReader`] standing in for that class: a record's
-/// size field is read a byte at a time, and a small record a few bytes at a
-/// time, and each such read would otherwise go to the codec.
+/// The stream is read through the codec's [`ChunkedBytesStream`], as Java
+/// reads it, with the buffer size Java gives it
+/// ([`Compression::decompression_output_size`]): a record's size field is read
+/// a byte at a time, and a small record a few bytes at a time, and each such
+/// read would otherwise go to the codec. The buffer comes from the fetch's
+/// pool and goes back to it when the batch is done, so the batches of a fetch
+/// share one buffer, as they do in Java (`CompletedFetch.java:226`).
 ///
 /// So a compressed batch takes the codec's own state, the read buffer and one
 /// record, whatever its decompressed size. The whole batch is never
@@ -389,8 +387,9 @@ enum PendingRecordSource {
 /// whole chunk alive for as long as any one of them was held.
 struct RecordStream {
     /// The decompression stream over the batch's records section, read
-    /// through a buffer of the codec's size.
-    reader: io::BufReader<DecompressingReader<io::Cursor<bytes::Bytes>>>,
+    /// through a buffer of the codec's size taken from the fetch's pool, which
+    /// gets it back when the stream is dropped.
+    reader: ChunkedBytesStream<DecompressingReader<io::Cursor<bytes::Bytes>>>,
     /// The record last read, its size field first, less what
     /// [`Self::consume`] dropped: the whole record, or as much of it as the
     /// stream held.
@@ -403,17 +402,28 @@ struct RecordStream {
 }
 
 impl RecordStream {
-    /// Opens the decompression stream over a batch's `records` section. Reads
-    /// nothing yet, except what the codec reads to set itself up (a gzip
-    /// header).
-    fn open(records: bytes::Bytes, compression_type: CompressionType, magic: i8) -> io::Result<Self> {
+    /// Opens the decompression stream over a batch's `records` section, its
+    /// read buffer taken from `buffer_supplier`. Reads nothing yet, except
+    /// what the codec reads to set itself up (a gzip header).
+    fn open(
+        records: bytes::Bytes,
+        compression_type: CompressionType,
+        magic: i8,
+        buffer_supplier: Arc<BufferSupplier>,
+    ) -> io::Result<Self> {
         let compression = Compression::of(compression_type).build();
         // Defined for every codec; an uncompressed batch's records are borrowed
         // in place and never reach here.
         let buffer_size = compression.decompression_output_size().map_err(io::Error::other)?;
         let reader = compression.wrap_for_input(io::Cursor::new(records), magic)?;
+        // Java's `wrapForInput` returns the codec's stream already wrapped
+        // (`GzipCompression.java:70-73`, `SnappyCompression.java:57-60`,
+        // `ZstdCompression.java:68-71`, `Lz4Compression.java:58-60`), lz4 alone
+        // skipping through its own stream. `wrap_for_input` is public and
+        // `ChunkedBytesStream` crate-private, so the stream is wrapped here.
+        let delegate_skip_to_source_stream = compression_type == CompressionType::Lz4;
         Ok(Self {
-            reader: io::BufReader::with_capacity(buffer_size, reader),
+            reader: ChunkedBytesStream::new(reader, buffer_supplier, buffer_size, delegate_skip_to_source_stream),
             record: bytes::Bytes::new(),
             eof: false,
             error: None,
@@ -564,18 +574,17 @@ impl RecordStream {
         if self.eof || self.error.is_some() {
             return None;
         }
-        let byte = match self.reader.fill_buf() {
-            Ok(buffered) => buffered.first().copied(),
+        match self.reader.read() {
+            Ok(Some(byte)) => Some(byte),
+            Ok(None) => {
+                self.eof = true;
+                None
+            },
             Err(e) => {
                 self.error = Some(e);
-                return None;
+                None
             },
-        };
-        match byte {
-            Some(_) => self.reader.consume(1),
-            None => self.eof = true,
         }
-        byte
     }
 }
 
@@ -614,7 +623,7 @@ impl CompletedFetch {
             topic_arc,
             partition_data,
             subscriptions: Some(subscriptions),
-            decompression_buffer_supplier: Some(decompression_buffer_supplier),
+            decompression_buffer_supplier,
             cursor: None,
             aborted_producer_ids: FxHashSet::default(),
             aborted_transactions,
@@ -636,8 +645,10 @@ impl CompletedFetch {
     }
 
     /// Lightweight constructor used by tests / [`FetchBuffer`] when the
-    /// subscription state and buffer supplier are not yet wired.
+    /// subscription state is not yet wired. The fetch gets a buffer pool of
+    /// its own.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#CompletedFetch")]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn new(partition: TopicPartition, partition_data: PartitionData) -> Self {
         let aborted_transactions = build_aborted_transactions(&partition_data);
         let topic_arc: Arc<str> = Arc::from(partition.topic());
@@ -646,7 +657,7 @@ impl CompletedFetch {
             topic_arc,
             partition_data,
             subscriptions: None,
-            decompression_buffer_supplier: None,
+            decompression_buffer_supplier: Arc::new(BufferSupplier::create()),
             cursor: None,
             aborted_producer_ids: FxHashSet::default(),
             aborted_transactions,
@@ -1104,12 +1115,14 @@ impl CompletedFetch {
     }
 
     /// Releases the current batch's record bytes once the batch is exhausted:
-    /// Java's `maybeCloseRecordStream()` (`CompletedFetch.java:175-180`), which
-    /// `nextFetchedRecord` calls before it takes the next batch (`:185`).
+    /// Java's `maybeCloseRecordStream()` (`CompletedFetch.java:180-185`), which
+    /// `nextFetchedRecord` calls before it takes the next batch (`:190`).
     ///
     /// For a compressed batch this drops the batch's [`RecordStream`] — its
     /// decompressor, read buffer and last record — before the next batch's
-    /// stream is opened, so a fetch holds one stream at a time, not two.
+    /// stream is opened, so a fetch holds one stream at a time, not two. The
+    /// read buffer goes back to the fetch's pool, for the next batch to take,
+    /// as Java's `records.close()` releases it.
     /// Records a zero-copy deserializer sliced from their buffers keep their
     /// own reference, so each such buffer lives on until its record is dropped.
     /// `drain()`, Java's other caller, drops the whole cursor instead.
@@ -1466,14 +1479,18 @@ impl CompletedFetch {
         // list (`DefaultRecordBatch.java:331-335`). They are read one at a time
         // here, and only what the marker needs — the first record's control
         // type — is kept, so a large control batch takes no more memory than a
-        // data batch does (see [`RecordStream`]).
-        let mut stream = RecordStream::open(records.clone(), compression_type, batch.magic).map_err(|e| {
-            invalid_batch_error(
-                &self.partition,
-                batch.base_offset,
-                DefaultRecordBatch::decompression_error(&e).message(),
-            )
-        })?;
+        // data batch does (see [`RecordStream`]). Java's `iterator()` reads
+        // through a buffer of its own (`BufferSupplier.NO_CACHING`), not one
+        // from the fetch's pool.
+        let no_caching = Arc::new(BufferSupplier::no_caching());
+        let mut stream =
+            RecordStream::open(records.clone(), compression_type, batch.magic, no_caching).map_err(|e| {
+                invalid_batch_error(
+                    &self.partition,
+                    batch.base_offset,
+                    DefaultRecordBatch::decompression_error(&e).message(),
+                )
+            })?;
         let mut first_is_abort_marker = None;
         for _ in 0..records_count {
             let records_bytes = stream
@@ -1729,13 +1746,15 @@ impl CompletedFetch {
             let source = match source {
                 PendingRecordSource::Borrowed(range) => RecordSource::Borrowed(range),
                 PendingRecordSource::Compressed { records, compression_type } => {
-                    let stream = RecordStream::open(records, compression_type, batch_meta.magic).map_err(|e| {
-                        invalid_batch_error(
-                            &self.partition,
-                            batch_meta.base_offset,
-                            DefaultRecordBatch::decompression_error(&e).message(),
-                        )
-                    })?;
+                    let buffer_supplier = Arc::clone(&self.decompression_buffer_supplier);
+                    let stream = RecordStream::open(records, compression_type, batch_meta.magic, buffer_supplier)
+                        .map_err(|e| {
+                            invalid_batch_error(
+                                &self.partition,
+                                batch_meta.base_offset,
+                                DefaultRecordBatch::decompression_error(&e).message(),
+                            )
+                        })?;
                     RecordSource::Stream(Box::new(stream))
                 },
             };
@@ -2177,11 +2196,26 @@ mod tests {
     }
 
     fn new_completed_fetch(fetch_offset: i64, records_bytes: Vec<u8>) -> CompletedFetch {
+        new_completed_fetch_with_pool(fetch_offset, records_bytes, Arc::new(BufferSupplier::create()))
+    }
+
+    /// A pool that keeps nothing, Java's `BufferSupplier.NO_CACHING`: a
+    /// compressed batch's read buffer is freed with its stream.
+    fn no_caching() -> Arc<BufferSupplier> {
+        Arc::new(BufferSupplier::no_caching())
+    }
+
+    /// A fetch whose compressed batches take their read buffers from `pool`.
+    fn new_completed_fetch_with_pool(
+        fetch_offset: i64,
+        records_bytes: Vec<u8>,
+        pool: Arc<BufferSupplier>,
+    ) -> CompletedFetch {
         let mut partition_data = PartitionData::new();
         partition_data.set_records(Some(bytes::Bytes::from(records_bytes)));
         CompletedFetch::with_full(
             make_subscriptions(),
-            Arc::new(BufferSupplier::create()),
+            pool,
             tp("test", 0),
             partition_data,
             test_aggregator(),
@@ -4154,7 +4188,9 @@ mod tests {
     /// capacity, and what it keeps is measured once the fetch has dropped the
     /// stream, so the codec's own buffers, which it frees, are not in the
     /// figure (lz4 reads through block buffers of the frame's block size, 4 MiB
-    /// for a frame written in one piece).
+    /// for a frame written in one piece). Nor is the stream's read buffer: the
+    /// fetch's pool keeps nothing, so the buffer is freed with the stream
+    /// rather than kept for the fetch's next batch.
     #[test]
     fn test_compressed_record_bigger_than_the_preallocation_keeps_a_buffer_of_its_size() {
         const VALUE_SIZE: usize = 1024 * 1024 + 1;
@@ -4167,7 +4203,7 @@ mod tests {
         let deserializer = crate::common::serialization::BytesDeserializer::new();
         let config = make_fetch_config(IsolationLevel::ReadUncommitted, true);
         for compression in codecs() {
-            let mut cf = new_completed_fetch(0, compressed_by_record(&batch, &compression));
+            let mut cf = new_completed_fetch_with_pool(0, compressed_by_record(&batch, &compression), no_caching());
             cf.ensure_cursor();
             let (records, kept) = {
                 let _guard = crate::AllocTrackingGuard::new();
@@ -4278,9 +4314,13 @@ mod tests {
             writer.write_all(&size).expect("the size compresses");
             writer.write_all(&body).expect("the body compresses");
             writer.finish().expect("the stream closes");
-            let mut stream =
-                RecordStream::open(compressed.into(), compression.compression_type(), RecordBatch::MAGIC_VALUE_V2)
-                    .expect("the stream opens");
+            let mut stream = RecordStream::open(
+                compressed.into(),
+                compression.compression_type(),
+                RecordBatch::MAGIC_VALUE_V2,
+                no_caching(),
+            )
+            .expect("the stream opens");
             let record = stream.next_record().expect("the size is read");
             assert!(
                 record == &size[..],
@@ -4313,7 +4353,7 @@ mod tests {
     /// compared byte for byte once the fetch is done, so a record read from the
     /// wrong place, or a buffer changed after its record was handed out, would
     /// show. What the records keep is measured once the fetch has dropped the
-    /// stream, as in
+    /// stream, its pool keeping nothing, as in
     /// [`test_compressed_record_bigger_than_the_preallocation_keeps_a_buffer_of_its_size`].
     #[test]
     fn test_compressed_records_bigger_than_the_read_buffer_keep_their_bytes() {
@@ -4346,7 +4386,7 @@ mod tests {
                     compression.decompression_output_size().expect("a codec has a buffer size") < total,
                     "{compression:?}: the record is bigger than the read buffer"
                 );
-                let mut cf = new_completed_fetch(0, compressed_by_record(&batch, &compression));
+                let mut cf = new_completed_fetch_with_pool(0, compressed_by_record(&batch, &compression), no_caching());
                 cf.ensure_cursor();
                 let (read, kept) = {
                     let _guard = crate::AllocTrackingGuard::new();
@@ -4418,8 +4458,9 @@ mod tests {
     /// against the same batch uncompressed, whose records slice the fetch
     /// buffer, so the records vector and the records themselves cancel out, and
     /// once the fetch has dropped the stream, so the codec's own buffers, which
-    /// it frees, are not in the figure. The shapes below measured their
-    /// records' size exactly, or up to 24 bytes a record over it: the
+    /// it frees, are not in the figure, nor the stream's read buffer, which the
+    /// fetch's pool, keeping nothing, frees with it. The shapes below measured
+    /// their records' size exactly, or up to 24 bytes a record over it: the
     /// uncompressed batch's own reference count, allocated when its fetch
     /// buffer is first sliced, cancels one of the compressed batch's.
     #[test]
@@ -4455,7 +4496,7 @@ mod tests {
             // record and drops the stream.
             let max_records = values.len() as i32 + 1;
             let fetch_keeping = |buf: Vec<u8>| {
-                let mut cf = new_completed_fetch(0, buf);
+                let mut cf = new_completed_fetch_with_pool(0, buf, no_caching());
                 cf.ensure_cursor();
                 let guard = crate::AllocTrackingGuard::new();
                 let records = cf
@@ -4719,8 +4760,10 @@ mod tests {
     /// record beyond an uncompressed batch's, the buffer the record is read
     /// into, as Java allocates one per record
     /// (`DefaultRecord.readFrom(InputStream, ...)`), and nothing else per
-    /// record — the decompressor, its block buffers and the read buffer are
-    /// allocated once per batch ([`RecordStream`]). This is one more per record
+    /// record — the decompressor and its block buffers are allocated once per
+    /// batch, and the read buffer once per fetch, by its first compressed
+    /// batch, which gives it back to the fetch's pool for the next
+    /// ([`RecordStream`]). This is one more per record
     /// than `consumer-threading.md` §27 budgets for the receive path, which
     /// allows only the deserializer's output. Mirrors
     /// [`test_per_record_loop_is_pure_counter_no_sensor_record`]: the same
@@ -4733,7 +4776,8 @@ mod tests {
     fn test_compressed_per_record_allocation_budget() {
         const RECORD_COUNT: i32 = 2000;
         /// The stream's own allocations: the decompressor, its block buffers,
-        /// the read buffer and the box the stream is held in.
+        /// the read buffer, which the fetch's pool does not hold yet, and the
+        /// box the stream is held in.
         const STREAM_BUDGET: usize = 64;
         let batch = batch_of_values(RECORD_COUNT, 100);
         let fetch_config = make_fetch_config(IsolationLevel::ReadUncommitted, true);
@@ -4761,6 +4805,39 @@ mod tests {
                 "{compression:?}: {compressed} allocations for {RECORD_COUNT} compressed records, {plain} for them \
                  uncompressed (budget {budget})"
             );
+        }
+    }
+
+    /// A fetch's compressed batches read through one buffer: each batch's
+    /// stream takes it from the fetch's pool and gives it back once the batch
+    /// is done, as Java's `ChunkedBytesStream` takes its buffer from the
+    /// fetch's `decompressionBufferSupplier` (`CompletedFetch.java:226`) and
+    /// releases it on close. Once the fetch is dropped the pool holds that one
+    /// buffer: the next buffer of its size is taken without an allocation, and
+    /// the one after it is allocated.
+    #[test]
+    fn test_compressed_batches_reuse_one_read_buffer_from_the_fetch_pool() {
+        for compression in codecs() {
+            let size = compression.decompression_output_size().expect("a codec has a buffer size");
+            let pool = Arc::new(BufferSupplier::create());
+            let buf = new_multi_batch_records(0, 3, 5, compression.clone());
+            let mut cf = new_completed_fetch_with_pool(0, buf, Arc::clone(&pool));
+            assert_eq!(15, fetch_all_lengths(&mut cf, 4).len(), "{compression:?}");
+            drop(cf);
+            let _guard = crate::AllocTrackingGuard::new();
+            let reused = pool.get(size);
+            assert_eq!(
+                0,
+                crate::AllocTrackingGuard::count(),
+                "{compression:?}: the batches' buffer went back to the pool"
+            );
+            let fresh = pool.get(size);
+            assert_eq!(
+                1,
+                crate::AllocTrackingGuard::count(),
+                "{compression:?}: the pool held one buffer, not one per batch"
+            );
+            drop((reused, fresh));
         }
     }
 
