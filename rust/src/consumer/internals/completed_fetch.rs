@@ -114,7 +114,7 @@ use crate::common::header::RecordHeaders;
 use crate::common::protocol::Errors;
 use crate::common::record::TimestampType;
 use crate::common::record::internal::{
-    ByteBufferLogInputStream, CompressionType, ControlRecordType, DefaultRecord, DefaultRecordBatch,
+    AbstractRecords, ByteBufferLogInputStream, CompressionType, ControlRecordType, DefaultRecord, DefaultRecordBatch,
     DefaultRecordBatchRef, DefaultRecordRef, MemoryRecords, RecordBatch, RecordVersion,
 };
 use crate::common::serialization::Deserializer;
@@ -484,9 +484,10 @@ impl RecordStream {
     /// `DefaultRecord.readFrom(InputStream, ...)` does
     /// (`DefaultRecord.java:286-310`): the size field a byte at a time, then
     /// the body. The size field is kept in front of the body, so the record is
-    /// parsed as an uncompressed batch's records are. A size that is malformed
-    /// or negative is left to the parser, which has Java's text for each; no
-    /// more of the stream would change what it makes of them.
+    /// parsed as an uncompressed batch's records are. A size that is
+    /// malformed, negative or above Java's maximum is left to the parser,
+    /// which has Java's text for each, and the body is not read; no more of
+    /// the stream would change what it makes of them.
     ///
     /// The buffer is allocated once, at the record's size, up to
     /// [`MAX_RECORD_PREALLOCATION`]; a bigger record's buffer grows only as its
@@ -513,6 +514,9 @@ impl RecordStream {
         let size_bytes = &size_bytes[..size_length];
         let size = ByteUtils::read_varint(size_bytes)
             .ok()
+            .filter(|&(size, _)| {
+                DefaultRecord::check_record_body_size(size, AbstractRecords::SOFT_MAX_ARRAY_LENGTH).is_ok()
+            })
             .and_then(|(size, _)| usize::try_from(size).ok());
         let Some(size) = size else {
             self.record = bytes::Bytes::copy_from_slice(size_bytes);
@@ -1881,6 +1885,10 @@ fn ends_inside_record_size(records: &[u8]) -> bool {
 /// (`DefaultRecord.java:328-331`), the stream reader's when `from_stream`
 /// (`DefaultRecord.java:304-306`). A stream's records end early only where the
 /// stream does, as [`RecordStream::next_record`] reads each record whole first.
+/// Java's stream reader also refuses a size above
+/// [`AbstractRecords::SOFT_MAX_ARRAY_LENGTH`] before reading the body
+/// (`DefaultRecord.java:295-301`). [`RecordStream::next_record`] leaves such a
+/// record's body unread, and it fails here with Java's text.
 fn read_record<'a>(
     batch: &BatchMetadata,
     records: &'a [u8],
@@ -1898,12 +1906,16 @@ fn read_record<'a>(
         // Checked only once parsing has failed, so a record read whole costs
         // nothing more.
         match ByteUtils::read_varint(records) {
-            Ok((size, size_length))
-                if from_stream && usize::try_from(size).is_ok_and(|size| records.len() - size_length < size) =>
-            {
-                InvalidRecordError::new(format!(
-                    "Invalid record size: expected {size} bytes in record payload, but the record payload reached EOF."
-                ))
+            Ok((size, size_length)) if from_stream => {
+                match DefaultRecord::check_record_body_size(size, AbstractRecords::SOFT_MAX_ARRAY_LENGTH) {
+                    Err(too_big) => too_big,
+                    Ok(()) if usize::try_from(size).is_ok_and(|size| records.len() - size_length < size) => {
+                        InvalidRecordError::new(format!(
+                            "Invalid record size: expected {size} bytes in record payload, but the record payload reached EOF."
+                        ))
+                    },
+                    Ok(()) => e,
+                }
             },
             _ => e,
         }
@@ -3668,6 +3680,50 @@ mod tests {
                     fault.message(),
                     "{compression} check.crcs={check_crcs}"
                 );
+            }
+        }
+    }
+
+    /// A compressed batch's record declaring a body bigger than
+    /// `SOFT_MAX_ARRAY_LENGTH` is refused before its body is read, with the
+    /// text of Java's stream reader (`DefaultRecord.java:295-301`), after the
+    /// records before it are returned. A body of exactly that size is read, so
+    /// it fails where the stream ends.
+    #[test]
+    fn test_compressed_record_above_the_maximum_size_is_invalid() {
+        let max = AbstractRecords::SOFT_MAX_ARRAY_LENGTH;
+        let too_big =
+            |size: i32| format!("Invalid record size: {size} exceeds the configured maximum record size of {max}.");
+        let cases = [
+            (max + 1, too_big(max + 1)),
+            (i32::MAX, too_big(i32::MAX)),
+            (
+                max,
+                format!(
+                    "Invalid record size: expected {max} bytes in record payload, but the record payload reached EOF."
+                ),
+            ),
+        ];
+        let batch = batch_with_overridden_record_count(0, 1, 2);
+        for (size, cause) in &cases {
+            // One whole record, then a second record's size and a few bytes of
+            // its body.
+            let mut second = Vec::new();
+            ByteUtils::write_varint(*size, &mut second).expect("the size is written");
+            second.extend_from_slice(b"body");
+            let records = [&batch[RecordBatch::RECORD_BATCH_OVERHEAD..], &second[..]];
+            for compression in codecs() {
+                let buf = compressed_batch_with_records(&batch, &records, &compression);
+                for check_crcs in [false, true] {
+                    let (offsets, fault) = records_then_fault(&buf, check_crcs);
+                    assert_eq!(vec![0], offsets, "{compression:?}");
+                    assert!(matches!(fault, Error::InvalidRecord(_)), "{fault:?}");
+                    assert_eq!(
+                        format!("Record batch for partition test-0 at offset 0 is invalid, cause: {cause}"),
+                        fault.message(),
+                        "{compression:?} size={size} check.crcs={check_crcs}"
+                    );
+                }
             }
         }
     }
