@@ -3594,13 +3594,12 @@ async def test_a_payload_delivered_just_before_a_cancellation_is_freed(
     from confluent_kafka.producer import async_producer
 
     freed: list[tuple[Any, ...]] = []
-    monkeypatch.setattr(async_producer, "free_payload",
-                        lambda payload, partitions: freed.append(payload))
+    monkeypatch.setattr(async_producer, "free_error_payload", freed.append)
     p = AsyncKafkaProducer(configs=UNREACHABLE)
     try:
         captured: dict[str, Any] = {}
         task = asyncio.ensure_future(
-            p._await_payload(lambda cb: captured.__setitem__("cb", cb), False))
+            p._await_payload(lambda handle, cb: captured.__setitem__("cb", cb)))
         await asyncio.sleep(0)  # the task now awaits its future
         captured["cb"](0)  # the completion: its delivery is scheduled on the loop
         await asyncio.sleep(0)  # the delivery fills the future; the task is not run yet
