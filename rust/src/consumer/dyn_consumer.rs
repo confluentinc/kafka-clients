@@ -79,6 +79,8 @@ where
 /// ];
 /// assert_eq!(2, consumers.len());
 /// ```
+// the dyn-compatible companion of the `Consumer` trait (CLAUDE.md §3)
+#[doc(alias = "rust-only")]
 pub trait DynConsumer<K, V>: private::Sealed<K, V> + Send + 'static
 where
     K: Send + 'static,

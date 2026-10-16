@@ -116,7 +116,7 @@ def test_padding_grows_source_buffer_beyond_default():
 
 
 def test_deserialize_accepts_memoryview():
-    # `record.value` is a zero-copy memoryview over the fetch batch.
+    # `record.value` is bytes, but any bytes-like payload must parse.
     payload = SoakRecord(5, send_time_ms=1765432100123).serialize()
     parsed = SoakRecord.deserialize(memoryview(payload))
     assert parsed.msgid == 5

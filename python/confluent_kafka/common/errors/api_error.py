@@ -38,7 +38,7 @@ class ApiError(KafkaError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = -6  # kafka_common_ErrorCode_API
+    _ffi_id: ClassVar[int] = -6  # kafka_common_Error_API
 
     def __init__(
         self,

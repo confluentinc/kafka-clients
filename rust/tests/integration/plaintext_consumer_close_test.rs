@@ -185,7 +185,9 @@ async fn calculate_consumer_close_delay(ctx: &mut TestContext, close_operation: 
     // fail the test, so the Rust result is asserted Ok as well.
     match close_operation {
         CloseOperation::Default => consumer.close().await,
-        CloseOperation::WithTimeout(timeout) => consumer.close_with_options(CloseOptions::new_timeout(timeout)).await,
+        CloseOperation::WithTimeout(timeout) => {
+            consumer.close_with_options(CloseOptions::new_with_timeout(timeout)).await
+        },
     }
     .expect("close should succeed");
     let close_ms = start.elapsed().as_millis();

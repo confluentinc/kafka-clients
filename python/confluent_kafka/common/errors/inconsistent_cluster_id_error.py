@@ -34,7 +34,7 @@ class InconsistentClusterIdError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 104  # kafka_common_ErrorCode_INCONSISTENT_CLUSTER_ID
+    _ffi_id: ClassVar[int] = 104  # kafka_common_Error_INCONSISTENT_CLUSTER_ID
 
     def __init__(
         self,

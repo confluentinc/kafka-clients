@@ -156,8 +156,8 @@ Implementations:
   - `AsyncKafkaConsumer<K, V>` — KIP-848 consumer. It lives in
     `consumer.internals`, so it is `pub(crate)`: users reach it only through
     `KafkaConsumer`. `ConsumerHandle` (§31, §41), declared in the same file, is
-    a Rust-only type with no Java class; it stays public through an entry in
-    `rust/xtask/public-audience-allowlist.txt`, because listeners need it for
+    a Rust-only type with no Java class; it stays public through its
+    `#[doc(alias = "rust-only")]` tag (`cargo xtask lint-custom`), because listeners need it for
     in-callback reentrancy.
   - `MockConsumer<K, V>` — user-facing test helper, mirrors Java's
     `MockConsumer`. Exposes mock-specific configuration methods
@@ -165,12 +165,11 @@ Implementations:
     type, not on the `Consumer` trait. In tests, hold a `MockConsumer`
     directly and pass `&mut consumer` where a `C: Consumer<K, V>` or a
     `&mut dyn DynConsumer<K, V>` is expected.
-  - `DynConsumer<K, V>` — Rust-only (no Java class), public through
-    `rust/xtask/public-audience-allowlist.txt`. It restores what a Java
-    interface gives for free: holding different implementations behind one
-    type (`Vec<Box<dyn DynConsumer<K, V>>>`), as the C FFI does for its
-    handle, which holds either a directly built `AsyncKafkaConsumer` or a
-    `MockConsumer`.
+  - `DynConsumer<K, V>` — Rust-only (no Java class), public through its
+    `#[doc(alias = "rust-only")]` tag (`cargo xtask lint-custom`). It restores
+    what a Java interface gives for free: holding different implementations
+    behind one type (`Vec<Box<dyn DynConsumer<K, V>>>`), as the C FFI does for
+    its handle, which holds either a `KafkaConsumer` or a `MockConsumer`.
 
 When the classic protocol is added, `KafkaConsumer`'s field becomes a private
 enum over the two delegates and `KafkaConsumer::new` gains a new arm; the

@@ -285,7 +285,7 @@ async fn list_groups_shows_live_group<F: AdminBackendFactory>(ctx: &mut TestCont
             .unwrap_or_else(|e| panic!("{backend} backend: list groups reported a per-broker error: {e}"));
         if let Some(g) = listed.valid.iter().find(|g| g.group_id() == group_id) {
             assert_eq!(
-                g.group_type(),
+                g.r#type(),
                 Some(GroupType::Consumer),
                 "{backend} backend: live group should be a KIP-848 consumer group"
             );
@@ -480,7 +480,7 @@ async fn describe_consumer_groups_live_group<F: AdminBackendFactory>(ctx: &mut T
             .clone();
         assert_eq!(desc.group_id(), group_id);
         assert_eq!(
-            desc.group_type(),
+            desc.r#type(),
             GroupType::Consumer,
             "{backend} backend: a KIP-848 group describes as Consumer"
         );
@@ -959,10 +959,10 @@ async fn describe_a_simple_classic_group<F: AdminBackendFactory>(ctx: &mut TestC
             panic!("{backend} backend: the classic fallback must describe a simple classic group, got: {e}")
         });
     assert_eq!(
-        consumer.group_type(),
+        consumer.r#type(),
         GroupType::Classic,
         "{backend} backend: the fallback path reports GroupType.CLASSIC, got {:?}",
-        consumer.group_type()
+        consumer.r#type()
     );
     assert_eq!(
         consumer.group_state(),
@@ -1009,7 +1009,7 @@ async fn describe_a_simple_classic_group<F: AdminBackendFactory>(ctx: &mut TestC
         )
     });
     assert_eq!(
-        listing.group_type(),
+        listing.r#type(),
         Some(GroupType::Classic),
         "{backend} backend: the listing's own type"
     );
@@ -1157,8 +1157,8 @@ async fn remove_one_member_from_consumer_group<F: AdminBackendFactory>(ctx: &mut
     member_one.close().await.expect("close m1");
 
     // Remove instance-1 by its group.instance.id.
-    let options =
-        RemoveMembersFromConsumerGroupOptions::new([MemberToRemove::new("instance-1")]).expect("non-empty members");
+    let options = RemoveMembersFromConsumerGroupOptions::with_members([MemberToRemove::new("instance-1")])
+        .expect("non-empty members");
     assert!(
         !options.remove_all(),
         "{backend} backend: options built from a non-empty member set are not removeAll"
@@ -1317,7 +1317,7 @@ async fn remove_members_rejects_an_explicitly_empty_selection<F: AdminBackendFac
     // selection is unrepresentable as an options object in the first place. That
     // is the assertion: every backend's binding must refuse it the same way,
     // rather than one of them defaulting to the destructive removeAll form.
-    let rejected = RemoveMembersFromConsumerGroupOptions::new(Vec::<MemberToRemove>::new());
+    let rejected = RemoveMembersFromConsumerGroupOptions::with_members(Vec::<MemberToRemove>::new());
     let err = rejected.expect_err(&format!(
         "{backend} backend: an empty member collection must be rejected, not silently treated as removeAll"
     ));

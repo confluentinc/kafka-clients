@@ -160,7 +160,9 @@ def _bridge() -> dict[str, str]:
 
 
 def _ffi_enum() -> dict[str, int]:
-    """``kafka_common_ErrorCode_t``, from its generated Rust mirror."""
+    """The FFI enum ``kafka_common_Error_e`` (``rust/src/ffi/common.rs``),
+    from its generated Rust mirror, which ``cargo xtask check-generated``
+    keeps in step with it."""
     text = (_REPO_ROOT / "rust/tests/common/error_code.rs").read_text()
     return {n: int(v) for n, v in re.findall(r"pub const (\w+): i32 = (-?\d+);", text)}
 
@@ -763,8 +765,6 @@ _PAYLOADS: list[tuple[type[BaseException], dict[str, Any], str, Any]] = [
     (ThrottlingQuotaExceededError, {"throttle_time_ms": 250}, "throttle_time_ms", 250),
     (DuplicateResourceError, {"resource": "r1"}, "resource", "r1"),
     (ResourceNotFoundError, {"resource": None}, "resource", None),
-    (CorrelationIdMismatchError, {"request_correlation_id": 7, "response_correlation_id": 8},
-     "response_correlation_id", 8),
     (RecordTooLargeError, {"record_too_large_partitions": {("t", 0): 99}},
      "record_too_large_partitions", {_TP: 99}),
     (RecordTooLargeError, {"record_too_large_partitions": None},
@@ -812,6 +812,19 @@ def test_from_ffi_error_keeps_the_message_when_java_needs_more(
     assert type(clone) is RecordDeserializationError and str(clone) == "bad record"
 
 
+def test_a_core_correlation_id_mismatch_reads_unknown_ids(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # The core reports no payload for it (no C accessor, CLAUDE.md §4): the
+    # error is still built through its constructor, with -1 for both ids.
+    monkeypatch.setattr(errmod, "_lib", _fake_lib(CorrelationIdMismatchError._ffi_id,
+                                                  "mismatch"))
+    err = from_ffi_error(0)
+    assert type(err) is CorrelationIdMismatchError and str(err) == "mismatch"
+    assert (err.request_correlation_id(), err.response_correlation_id()) == (-1, -1)
+    clone = pickle.loads(pickle.dumps(err))
+    assert (clone.request_correlation_id(), clone.response_correlation_id()) == (-1, -1)
+
+
 def test_real_native_plain_error_has_no_payload() -> None:
     lib = pytest.importorskip("_confluentkafka")
     handle = lib.KafkaError_new(-1, "boom")
@@ -826,6 +839,18 @@ def test_real_native_round_trip() -> None:
     err = from_ffi_error(lib.KafkaError_new(TopicAuthorizationError._ffi_id, "no access"))
     assert type(err) is TopicAuthorizationError
     assert str(err) == "no access"
+
+
+def test_real_native_payload_is_read_through_the_sub_handle() -> None:
+    # Java's TopicAuthorizationException(String message) passes emptySet().
+    lib = pytest.importorskip("_confluentkafka")
+    handle = lib.KafkaError_new(TopicAuthorizationError._ffi_id, "no access")
+    try:
+        assert lib.KafkaError_payload(handle) == {"unauthorized_topics": []}
+    finally:
+        lib.KafkaError_destroy(handle)
+    err = from_ffi_error(lib.KafkaError_new(TopicAuthorizationError._ffi_id, "no access"))
+    assert isinstance(err, TopicAuthorizationError) and err.unauthorized_topics() == set()
 
 
 # ----------------------------------------------------------------------------

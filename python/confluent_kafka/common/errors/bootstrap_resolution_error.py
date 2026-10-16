@@ -48,7 +48,7 @@ class BootstrapResolutionError(KafkaError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = -29  # kafka_common_ErrorCode_BOOTSTRAP_RESOLUTION
+    _ffi_id: ClassVar[int] = -29  # kafka_common_Error_BOOTSTRAP_RESOLUTION
 
     def __init__(
         self,

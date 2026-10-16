@@ -465,7 +465,11 @@ impl CountConsumerCommitCallbackHandles {
 
 #[async_trait]
 impl OffsetCommitCallback for CountConsumerCommitCallback {
-    async fn on_complete(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
+    async fn on_complete(
+        &self,
+        _offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+        error: Option<&Error>,
+    ) -> Result<(), Error> {
         match error {
             None => {
                 self.success_count.fetch_add(1, Ordering::SeqCst);
@@ -479,6 +483,7 @@ impl OffsetCommitCallback for CountConsumerCommitCallback {
                 *guard = Some(err.clone());
             },
         }
+        Ok(())
     }
 }
 

@@ -23,10 +23,10 @@ use std::time::Duration;
 use crate::common::metrics::KafkaMetric;
 use crate::common::serialization::Deserializer;
 use crate::common::{Error, MetricName, PartitionInfo, TopicPartition};
+use crate::consumer::internals::AsyncKafkaConsumer;
 use crate::consumer::{
-    AsyncKafkaConsumer, CloseOptions, Consumer, ConsumerConfig, ConsumerGroupMetadata, ConsumerHandle,
-    ConsumerRebalanceListener, ConsumerRecords, GroupProtocol, OffsetAndMetadata, OffsetAndTimestamp,
-    OffsetCommitCallback, SubscriptionPattern,
+    CloseOptions, Consumer, ConsumerConfig, ConsumerGroupMetadata, ConsumerHandle, ConsumerRebalanceListener,
+    ConsumerRecords, GroupProtocol, OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback, SubscriptionPattern,
 };
 
 /// A client that consumes records from a Kafka cluster.

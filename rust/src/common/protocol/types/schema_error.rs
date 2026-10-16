@@ -46,6 +46,7 @@ kafka_error_type! {
     SchemaError,
     extends: [
         is_kafka_error,
+        is_schema_error,
     ],
 }
 

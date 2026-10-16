@@ -34,7 +34,7 @@ class TopicDeletionDisabledError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 73  # kafka_common_ErrorCode_TOPIC_DELETION_DISABLED
+    _ffi_id: ClassVar[int] = 73  # kafka_common_Error_TOPIC_DELETION_DISABLED
 
     def __init__(
         self,

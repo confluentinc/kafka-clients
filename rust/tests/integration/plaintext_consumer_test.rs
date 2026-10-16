@@ -478,9 +478,15 @@ async fn test_async_consumer_headers() {
     // then `record.headers().add(...)` thrice. Java relies on producer-driven
     // auto-create; the record lands at offset 0 (empty topic).
     let mut headers = RecordHeaders::new();
-    headers.add_key_value("headerKey", Some(b"headerValue")).expect("add header");
-    headers.add_key_value("headerKey2", Some(b"headerValue2")).expect("add header");
-    headers.add_key_value("headerKey3", Some(b"headerValue3")).expect("add header");
+    headers
+        .add_with_key_value("headerKey", Some(b"headerValue"))
+        .expect("add header");
+    headers
+        .add_with_key_value("headerKey2", Some(b"headerValue2"))
+        .expect("add header");
+    headers
+        .add_with_key_value("headerKey3", Some(b"headerValue3"))
+        .expect("add header");
     let record = ProducerRecord::with_partition_key_headers(
         topic.clone(),
         Some(0),
@@ -1367,7 +1373,11 @@ struct RetryCommitCallback {
 
 #[async_trait]
 impl OffsetCommitCallback for RetryCommitCallback {
-    async fn on_complete(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
+    async fn on_complete(
+        &self,
+        _offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+        error: Option<&Error>,
+    ) -> Result<(), Error> {
         match error {
             Some(Error::ConsumerRetriableCommitFailed(_)) => {
                 self.retriable.fetch_add(1, Ordering::SeqCst);
@@ -1377,6 +1387,7 @@ impl OffsetCommitCallback for RetryCommitCallback {
                 self.is_complete.fetch_add(1, Ordering::SeqCst);
             },
         }
+        Ok(())
     }
 }
 
@@ -1645,9 +1656,7 @@ async fn test_async_static_member_close_with_leave_group_triggers_rebalance() {
 
     // Consumer 1 closes with LEAVE_GROUP - this should trigger a rebalance
     consumer1
-        .close_with_options(CloseOptions::new_group_membership_operation(
-            GroupMembershipOperation::LeaveGroup,
-        ))
+        .close_with_options(CloseOptions::with_operation(GroupMembershipOperation::LeaveGroup))
         .await
         .expect("consumer1 close with LEAVE_GROUP");
     await_rebalance(consumer2.as_mut(), &listener2).await;

@@ -958,7 +958,9 @@ async fn process_compression_test<F: ProducerBackendFactory>(ctx: &mut TestConte
     // "This consumer close very slowly, which may cause the entire test to time
     // out, and we can't wait for it to auto close" (`ProducerCompressionTest.java:109-111`).
     let _ = consumer
-        .close_with_options(confluent_kafka::consumer::CloseOptions::new_timeout(Duration::from_secs(1)))
+        .close_with_options(confluent_kafka::consumer::CloseOptions::new_with_timeout(Duration::from_secs(
+            1,
+        )))
         .await;
 }
 
@@ -3033,9 +3035,9 @@ async fn test_borrowed_send_delivers_the_record_headers() {
     )
     .expect("Failed to create producer");
     let mut headers = RecordHeaders::new();
-    headers.add_key_value("trace", Some(b"abc")).expect("add header");
-    headers.add_key_value("empty", Some(b"")).expect("add header");
-    headers.add_key_value("null", None).expect("add header");
+    headers.add_with_key_value("trace", Some(b"abc")).expect("add header");
+    headers.add_with_key_value("empty", Some(b"")).expect("add header");
+    headers.add_with_key_value("null", None).expect("add header");
     let record = ProducerRecord::with_partition_key_headers(
         topic.clone(),
         Some(0),

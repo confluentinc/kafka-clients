@@ -67,7 +67,7 @@ import admin_service_pb2 as apb  # noqa: E402  (generated)
 
 # Error codes formerly imported from the generated ``_error_code.py`` module
 # (retired in P6). The proto's ``KafkaError.code`` is the FFI error code
-# (``kafka_common_ErrorCode_t``), so a synthetic server-side error stamps the
+# (``kafka_common_Error_e``), so a synthetic server-side error stamps the
 # code by reading the typed error class' private ``_ffi_id`` — the same value
 # the generator wrote into ``_error_code.py``. These are the only codes the
 # servers manufacture (LOCAL_ILLEGAL_ARGUMENT / LOCAL_ILLEGAL_STATE /
@@ -140,7 +140,7 @@ def _kafka_error_to_proto(err):
     proto KafkaError.
 
     `code` is the only discriminator the proto carries, and that is enough:
-    it is the FFI error code (kafka_common_ErrorCode_t), which is injective
+    it is the FFI error code (kafka_common_Error_e), which is injective
     over the client's error classes, so the Rust client derives the class from
     it. This is what retired `_guess_variant`, which substring-matched the
     message text to recover a class the code could not carry back when several
@@ -1466,7 +1466,9 @@ def _admin_members_to_remove(request):
 #   - describe_user_scram_credentials is per-user, and a user the broker reports
 #     as having *no* credential is a success with an empty credential_infos —
 #     never an error. That is Java's `all()` treating RESOURCE_NOT_FOUND as a
-#     success, which admin.py already implements.
+#     success; the extension's `assemble_scram` (`_confluentkafka.c`) reads
+#     `all()` first and falls back to `users()` + `description(user)` only
+#     when `all()` fails, as the Rust and C backends do.
 #   - update_features raises for an empty map against a real client (Java's
 #     IllegalArgumentException) while a mock yields an empty result. Both are
 #     faithful; the raise becomes the top-level error.
@@ -1714,8 +1716,9 @@ def _admin_describe_user_scram_credentials_response(outcomes):
 
     A user with an *empty* credential_infos is a successful description ("the
     broker reports no credential"), not an error — Java's `all()` treats
-    RESOURCE_NOT_FOUND that way. The broker never returns the salted password or
-    the salt, so neither has a field to carry.
+    RESOURCE_NOT_FOUND that way, and admin.py's result comes from `all()` when
+    it succeeds (`assemble_scram` in `_confluentkafka.c`). The broker never
+    returns the salted password or the salt, so neither has a field to carry.
     """
     entries = []
     for user, outcome in outcomes.items():

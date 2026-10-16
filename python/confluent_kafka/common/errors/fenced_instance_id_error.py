@@ -34,7 +34,7 @@ class FencedInstanceIdError(ApplicationRecoverableError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 82  # kafka_common_ErrorCode_FENCED_INSTANCE_ID
+    _ffi_id: ClassVar[int] = 82  # kafka_common_Error_FENCED_INSTANCE_ID
 
     def __init__(
         self,

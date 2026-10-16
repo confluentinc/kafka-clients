@@ -38,7 +38,7 @@ class InvalidRecordStateError(ApiError):
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 121  # kafka_common_ErrorCode_INVALID_RECORD_STATE
+    _ffi_id: ClassVar[int] = 121  # kafka_common_Error_INVALID_RECORD_STATE
 
     def __init__(
         self,

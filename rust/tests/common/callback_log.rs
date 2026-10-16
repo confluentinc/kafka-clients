@@ -155,7 +155,11 @@ struct LoggingCommitCallback {
 
 #[async_trait]
 impl OffsetCommitCallback for LoggingCommitCallback {
-    async fn on_complete(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
+    async fn on_complete(
+        &self,
+        offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+        error: Option<&Error>,
+    ) -> Result<(), Error> {
         let mut entry = CallbackLogEntry {
             kind: KIND_COMMIT.to_string(),
             partitions: Vec::with_capacity(offsets.len()),
@@ -169,6 +173,7 @@ impl OffsetCommitCallback for LoggingCommitCallback {
                 .insert(CallbackLogEntry::offset_key(tp.topic(), tp.partition()), oam.offset());
         }
         push(&self.log, entry);
+        Ok(())
     }
 }
 

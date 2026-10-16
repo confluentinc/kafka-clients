@@ -101,12 +101,14 @@ rust/build.rs           # invokes the generator before compilation; writes the
                         # C header to rust/target/include/confluent_kafka.h
 rust/xtask/             # format, format-check, check-generated,
                         # generate-error-codes, java-deprecated, lint,
-                        # lint-custom, doc-hygiene, lint-fix,
+                        # lint-custom, ffi-baseline, doc-hygiene, lint-fix,
                         # coverage{,-lcov,-all}, test-multilanguage,
-                        # producer-perf-test; public-audience-allowlist.txt
+                        # producer-perf-test; ffi-baseline.txt is the
+                        # check-ffi-translation burn-down list
 rust/tests/             # integration + multilanguage tests (see below)
 rust/examples/          # transactional examples (txn_*)
 rust/consumer-perf/     # consumer benchmark harness (workspace member)
+rust/ffi-macros/        # proc-macro crate: #[ffi_guard], the panic guard on every C export
 rust/multilanguage-test-server/  # gRPC protos + server backing the
                                  # multilanguage tests of every language
 rust/tools/verifiable-clients/   # Rust verifiable producer/consumer
@@ -152,10 +154,13 @@ In practice:
   `Consumer` method to it.
 - `Errors` (the wire enum) is `pub(crate)`, so `Error` has no public
   `error()` / `code()`. Callers classify by variant and `is_*_error()`, and C
-  callers use `kafka_common_ErrorCode_t`.
-- Exceptions (Rust-only types, test helpers such as `MockAdminClient`, JDK
-  translations such as `TimeUnit`, C helper handles) are listed, each with its
-  reason, in `rust/xtask/public-audience-allowlist.txt`.
+  callers use `kafka_common_Error_e`.
+- Exceptions are tagged in the code, each under a `//` comment giving the
+  reason: `#[doc(alias = "rust-only")]` for an item translating no Java API
+  (Rust-only types, JDK translations such as `TimeUnit`, C helper handles,
+  Rust-only public methods), `#[doc(alias = "public-in-rust")]` for Java API the
+  audience rules keep non-public (test helpers such as `MockAdminClient`). A
+  tag that lets nothing through is a lint finding.
 
 ![Layered network stack](img/network-stack.svg)
 
@@ -349,23 +354,31 @@ pipeline over a single owned buffer — read them in that order.*
 ## ffi/ and bindings
 
 ```
-rust/src/ffi/           # feature-gated: --features ffi
-├── mod.rs
-├── common.rs           # kafka_common_Error_t & co. (58 exported symbols)
-│                       # + the callback dispatcher: CompletionJob,
-│                       # spawn_dispatcher, enqueue_or_run_inline
-├── producer.rs         # 65 exported symbols (13 of them *_async)
-├── consumer.rs         # 180 exported symbols (30 of them *_async), incl.
-│                       # the caller-thread callback queue
-├── consumer_handle.rs  # 23 exported symbols (1 of them *_async): the reentrant
-│                       # ConsumerHandle a rebalance listener calls back through
-└── admin.rs            # 490 exported symbols (47 of them *_async)
+rust/src/ffi/           # feature-gated: --features ffi; 269 files, 2353 exported symbols
+├── mod.rs              # module docs: the C conventions as implemented
+├── common.rs           # kafka_common_Error_t, kafka_common_Error_e, init_default_logger
+├── error_predicates.rs # generated: 172 kafka_common_Error_is_*_error predicates
+├── util.rs             # kafka_List_t, kafka_Map_t, kafka_Bytes_t, kafka_string_destroy (14)
+├── kafka_future.rs     # kafka_common_KafkaFuture_t (13)
+├── callback_queue.rs   # CallbackQueue behind <Client>__execute_callbacks / __set_callbacks_notify
+├── common/             # 104 files, 835 symbols: one file per Java class (acl/, config/,
+│                       # security/, serialization/, metrics/, ...)
+├── producer/           # 9 files, 129 symbols: Producer_t, KafkaProducer_t, MockProducer_t,
+│                       # Callback_t, Partitioner_t, ProducerConfig_t, ProducerRecord_t, ...
+├── consumer/           # 16 files, 297 symbols: Consumer_t, MockConsumer_t, ConsumerHandle_t,
+│                       # ConsumerRebalanceListener_t, OffsetCommitCallback_t, ...
+└── admin/              # 130 files, 844 symbols: Admin_t, MockAdminClient_t, rpc.rs (94 RPC
+    ├── options/        #   invokers), one <Rpc>Result_t and one <Rpc>Options_t per Java class
+    └── ...
+
+rust/xtask/ffi-baseline.txt   # burn-down baseline of check-ffi-translation (5 by-design lines)
 
 c/
 ├── CMakeLists.txt, Makefile, Dockerfile.grpc, README.md
 ├── tests/{test_kafka_producer,test_kafka_consumer,test_kafka_admin,
 │          test_mock_producer,test_mock_consumer,test_mock_admin,
-│          test_consumer_callbacks,producer_perf_test}.c + unity/ (submodule)
+│          test_consumer_callbacks,test_kafka_future,test_serialization,
+│          producer_perf_test}.c + unity/ (submodule)
 └── grpc_server/        # C backend for the multilanguage tests
 
 python/
@@ -376,33 +389,40 @@ python/
 │   │                          # serialization/, config/, …
 │   └── *_error.py             # Java built-in exceptions at the root
 ├── admin.py            # older admin binding, paused (not in the package)
+├── _sync_wait.py       # SyncWaiter: admin.py's pump thread + sliced wait over _cb calls
 ├── _confluentkafka.c   # hand-written C extension
 ├── tinycthread.{c,h}, c11threads_compat.h   # C11 threads shim (macOS)
-├── grpc_server.py, grpc_server_async.py, grpc_translate.py
+├── grpc_server.py, grpc_server_async.py, grpc_translate.py, grpc_chaos.py
 ├── Dockerfile.grpc, Dockerfile.grpc.async, requirements-grpc{,-tools}.txt
 ├── examples/
 ├── test/{unit,integration,static,performance}/, soak/, tools/
 └── setup.py, pyproject.toml, Makefile, README.md
 ```
 
-Symbol counts are `#[unsafe(no_mangle)]` occurrences per file (2026-10-05).
+Symbol counts are `#[unsafe(no_mangle)]` occurrences per directory (2026-10-08).
 
 Both bindings link the library cargo builds under `rust/target/<profile>/` and
 compile against `rust/target/include/confluent_kafka.h`: `c/CMakeLists.txt`
 defaults `RUST_PROJECT_ROOT` to `../rust`, and `python/setup.py` resolves
 `../rust` (overridable with `CONFLUENT_KAFKA_LIB_DIR`).
 
-The bindings expose each operation twice: a synchronous entry point that
-`block_on`s the async API on the runtime the handle owns, and an `*_async`
-one that takes a `*_callback_t` + `user_data`, spawns the future and delivers
-the result through a dispatcher thread (`spawn_dispatcher` /
-`enqueue_or_run_inline` in `rust/src/ffi/common.rs`). The rest of the exported
-symbols are the sync forms, the accessors and the destructors.
+The C surface mirrors the Rust surface one-to-one (CLAUDE.md §4, enforced by
+`cargo xtask lint-custom check-ffi-translation`): every public Rust method is
+one C function with the Rust name, a fallible one returns
+`kafka_common_Error_t *` and fills a trailing `out_` parameter, and every Rust
+`async fn` additionally has a `_cb` twin whose completion is queued on the
+client's `CallbackQueue` and run by `<Client>__execute_callbacks()` on the
+caller's thread (`<Client>__set_callbacks_notify` only signals). Traits C can
+implement are `<Interface>_new(void *self, fn_t...)` interfaces; Rust classes
+implementing them expose borrowed `<Class>__as_<Interface>()` views. The rest
+of the exported symbols are accessors, enum singletons and destructors.
 
 ![Bindings layering](img/bindings-layering.svg)
 
 *Python and C both reach the Rust API through the same header and the same
-two entry-point shapes; neither binding adds a runtime of its own.*
+blocking / `_cb` entry-point shapes. Neither the C binding nor the Python
+extension adds a thread of its own; the Python producer runs its completions on
+one Python completion thread per producer.*
 
 ## tests/
 
@@ -424,6 +444,8 @@ rust/tests/                  # 59 .rs files across 4 cargo test targets
 │                       # mock_consumer_test.rs, trait_surface_check.rs,
 │                       # consumer_config_test.rs, consumer_record(s)_test.rs,
 │                       # offset_and_metadata_test.rs, close_options_test.rs
+├── chaos/              # target `chaos`: fault-injection harness, run with
+│                       # `cargo xtask chaos` (chaos-fault-injection-harness.md)
 ├── performance/        # target `performance`, `test = false` in Cargo.toml —
 │                       # excluded from plain `cargo test`; run explicitly
 └── integration/        # 27 test files + main.rs, Docker required

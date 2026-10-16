@@ -36,6 +36,17 @@ pub struct RemoveMembersFromConsumerGroupOptions {
 }
 
 impl RemoveMembersFromConsumerGroupOptions {
+    /// Creates options that remove every member of the group.
+    ///
+    /// Mirrors Java's no-argument `RemoveMembersFromConsumerGroupOptions()`,
+    /// after which `removeAll()` is `true`.
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions#RemoveMembersFromConsumerGroupOptions"
+    )]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// Creates options for removing the given members.
     ///
     /// Mirrors Java's `RemoveMembersFromConsumerGroupOptions(Collection<MemberToRemove>)`.
@@ -43,8 +54,11 @@ impl RemoveMembersFromConsumerGroupOptions {
     /// # Errors
     ///
     /// Returns an error (Java's `IllegalArgumentException`) if `members` is
-    /// empty. Use [`Default::default`] to remove all members instead.
-    pub fn new(members: impl IntoIterator<Item = MemberToRemove>) -> Result<Self, Error> {
+    /// empty. Use [`Self::new`] to remove all members instead.
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions#RemoveMembersFromConsumerGroupOptions"
+    )]
+    pub fn with_members(members: impl IntoIterator<Item = MemberToRemove>) -> Result<Self, Error> {
         let members: HashSet<MemberToRemove> = members.into_iter().collect();
         if members.is_empty() {
             return Err(Error::local_illegal_argument("Invalid empty members has been provided"));
@@ -55,12 +69,14 @@ impl RemoveMembersFromConsumerGroupOptions {
     /// Sets an optional reason.
     ///
     /// Mirrors Java's `reason(String)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions#reason")]
     pub fn set_reason(&mut self, reason: impl Into<String>) {
         self.reason = Some(reason.into());
     }
 
     /// Set the operation timeout in milliseconds (or `None` for the default).
     #[must_use]
+    #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
@@ -69,6 +85,7 @@ impl RemoveMembersFromConsumerGroupOptions {
     /// The members to remove.
     ///
     /// Mirrors Java's `members()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions#members")]
     pub fn members(&self) -> &HashSet<MemberToRemove> {
         &self.members
     }
@@ -76,6 +93,7 @@ impl RemoveMembersFromConsumerGroupOptions {
     /// The optional reason.
     ///
     /// Mirrors Java's `reason()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions#reason")]
     pub fn reason(&self) -> Option<&str> {
         self.reason.as_deref()
     }
@@ -84,11 +102,13 @@ impl RemoveMembersFromConsumerGroupOptions {
     /// provided).
     ///
     /// Mirrors Java's `removeAll()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions#removeAll")]
     pub fn remove_all(&self) -> bool {
         self.members.is_empty()
     }
 
     /// The operation timeout in milliseconds, or `None` for the default.
+    #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
@@ -101,20 +121,20 @@ mod tests {
     /// Translated from `RemoveMembersFromConsumerGroupOptionsTest.testConstructor`.
     #[test]
     fn test_constructor() {
-        let options = RemoveMembersFromConsumerGroupOptions::new([MemberToRemove::new("instance-1")]).unwrap();
+        let options = RemoveMembersFromConsumerGroupOptions::with_members([MemberToRemove::new("instance-1")]).unwrap();
         assert_eq!(options.members(), &HashSet::from([MemberToRemove::new("instance-1")]));
         assert!(!options.remove_all());
 
         // Construct will fail if illegal empty members provided.
         assert!(matches!(
-            RemoveMembersFromConsumerGroupOptions::new([]),
+            RemoveMembersFromConsumerGroupOptions::with_members([]),
             Err(Error::LocalIllegalArgument(_))
         ));
     }
 
     #[test]
     fn default_is_remove_all() {
-        let options = RemoveMembersFromConsumerGroupOptions::default();
+        let options = RemoveMembersFromConsumerGroupOptions::new();
         assert!(options.remove_all());
         assert_eq!(options.reason(), None);
         assert_eq!(options.timeout_ms(), None);
@@ -122,7 +142,7 @@ mod tests {
 
     #[test]
     fn reason_and_timeout_setters() {
-        let mut options = RemoveMembersFromConsumerGroupOptions::new([MemberToRemove::new("i")]).unwrap();
+        let mut options = RemoveMembersFromConsumerGroupOptions::with_members([MemberToRemove::new("i")]).unwrap();
         options.set_reason("because");
         let options = options.set_timeout_ms(Some(50));
         assert_eq!(options.reason(), Some("because"));
