@@ -190,30 +190,33 @@ def test_serializer_close() -> None:
 
 def test_should_close_properly_and_throw_if_interrupted() -> None:
     # Java interrupts the thread blocked in close() and expects an
-    # InterruptException after the close force-closed the sender
-    # (KafkaProducer.close(Duration, boolean), :1506-1524). The Python analog of
-    # the interrupt is Ctrl+C: SIGINT, which only the main thread receives, so
-    # close() runs here and a timer sends the signal. Java's MockClient holds
-    # the send in flight; here an unreachable broker keeps the record waiting
-    # for metadata (max.block.ms 60 s), so close() cannot end on its own sooner.
-    # That send() waits for the metadata as Java's does, so it runs on a thread
-    # of its own; the forced close ends its wait.
+    # InterruptException once the close force-closed the sender and joined its
+    # I/O thread again (KafkaProducer.close(Duration, boolean), :1514-1525).
+    # The Python analog of the interrupt is Ctrl+C: SIGINT, which only the main
+    # thread receives, so close() runs here and a timer sends the signal.
+    # Java's MockClient holds the send in flight, which the binding cannot
+    # inject; here what close() waits for is a record's callback, made to
+    # block: another thread's send fails its metadata wait (max.block.ms
+    # 100 ms against an unreachable broker), and its callback waits for the
+    # test. The wait after the forced close waits for that callback, as Java's
+    # join waits for the I/O thread running one, so close() raises
+    # KeyboardInterrupt only once the callback is released.
     configs = {"bootstrap.servers": "localhost:9999", "batch.size": "1",
-               "max.block.ms": 60000}
+               "max.block.ms": 100}
     producer = KafkaProducer(configs=configs, key_serializer=string_serializer(),
                              value_serializer=string_serializer())
-    outcome: list[BaseException | Future[RecordMetadata]] = []
+    entered = threading.Event()
+    release = threading.Event()
+    futures: list[Future[RecordMetadata]] = []
 
-    def send() -> None:
-        try:
-            outcome.append(producer.send(
-                record=ProducerRecord(topic="topic", key="key", value="value")))
-        except BaseException as e:  # noqa: BLE001 - checked below
-            outcome.append(e)
+    def callback(md: RecordMetadata, e: Exception | None) -> None:
+        entered.set()
+        release.wait(30)
 
-    sender = threading.Thread(target=send, daemon=True)
+    sender = threading.Thread(target=lambda: futures.append(producer.send(
+        record=ProducerRecord(topic="topic", key="key", value="value"), callback=callback)))
     sender.start()
-    time.sleep(0.05)  # the record is with the submission task
+    assert entered.wait(30)
 
     armed = True
 
@@ -222,34 +225,34 @@ def test_should_close_properly_and_throw_if_interrupted() -> None:
             raise KeyboardInterrupt
 
     previous = signal.signal(signal.SIGINT, on_sigint)
-    timer = threading.Timer(0.1, os.kill, (os.getpid(), signal.SIGINT))
+    interrupt = threading.Timer(0.1, os.kill, (os.getpid(), signal.SIGINT))
+    releaser = threading.Timer(0.4, release.set)
     start = time.monotonic()
     try:
-        timer.start()
+        interrupt.start()
+        releaser.start()
         with pytest.raises(KeyboardInterrupt):
             producer.close()
             pytest.fail("Close should block and throw.")
         elapsed = time.monotonic() - start
     finally:
-        timer.cancel()
-        timer.join()
+        interrupt.cancel()
+        interrupt.join()
+        release.set()
+        releaser.cancel()
+        releaser.join()
         armed = False
         time.sleep(0.05)  # a signal still pending runs the disarmed handler
         signal.signal(signal.SIGINT, previous)
-
-    # Close did not complete without waiting for the send, and the interrupt
-    # surfaced once the close was forced, not after max.block.ms.
-    assert 0.1 <= elapsed < 10, elapsed
-    # Closed properly: the pending record failed (its send() raising, or its
-    # future failing), and the producer is closed.
-    sender.join(10)
+    sender.join(30)
     assert not sender.is_alive()
-    (result,) = outcome
-    if isinstance(result, BaseException):
-        assert isinstance(result, KafkaError), result
-    else:
-        assert result.done()
-        assert isinstance(result.exception(), KafkaError)
+
+    # Close did not complete without waiting for the callback, and the
+    # interrupt surfaced once the callback ended.
+    assert 0.4 <= elapsed < 10, elapsed
+    # Closed properly: the record failed, and the producer is closed.
+    (future,) = futures
+    assert isinstance(future.exception(timeout=0), KafkaTimeoutError)
     with pytest.raises(IllegalStateError) as err:
         producer.send(record=ProducerRecord(topic="topic", key="key", value="value"))
     assert str(err.value) == "Cannot perform operation after producer has been closed"
