@@ -7,6 +7,25 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
 
 Newest first.
 
+- **Milestone 17 / Phase 4 — ".NET: merge master #219, #228 and #244": DONE (2026-10-16); not pushed. No N (done directly, without the Actor / Critic loop). Mode A.** Branch `prashah_dev_dotnet_binding`, base `230d891c`. Two commits:
+  - `4955b71e` — merge of master `ebfdc43a` (#219, #228, #244; merge base `c8cb77db`). No C ABI change: no exported function is added, removed or changed. The commit message lists the conflict resolutions, and the clashes with our #201 types (the `Option<String>` cluster id and config values) that merged without a marker.
+    - #219 (admin Java-parity fixes): `describeTopics` by name now sends the paged DescribeTopicPartitions request (KIP-966) with `ResponsePartitionLimit`, and falls back to Metadata on an older broker. MockAdminClient gets Java's `Builder`, `create()` and `DEFAULT_CLUSTER_ID` (`"I4ZmrWqfT2e-upky_4fdPA"`).
+    - #228: the by-id not-found message is now Java's `"Topic id" + id + " not found."`, with no space after "id".
+    - #244: the Python producer only.
+    - .NET, tests and docs only: the mock cluster id in `PublicAdminP14DifferentialTests`, `PublicAdminClusterConfigResourcesTests` and `Interop/AdminP3ResultMarshalTests`; the not-found message in `PublicAdminP14DifferentialTests`; and `DescribeTopicsOptions.PartitionSizeLimitPerResponse`'s doc plus the matching comment in `NativeAdminClient.DescribeTopics`, which no longer say the value has no effect.
+  - This commit — this entry, and the supersession notes on the older G1-2 / G1-3 lines.
+  - **Closed: G1-2.** The core now sends DescribeTopicPartitions and honours `partition_size_limit_per_response` (#219). G1-3's doc is updated to match.
+  - **Gates.**
+    - `make verify`'s steps on the merged tree: format, generated code and lint clean; Rust lib tests 5159; C 7/7; Python (`mypy --strict` clean, 1160 + 45 + 25 + 160); `check-bindings` 25. .NET unit tests 3807 on net8.0 and net10.0; soak 165.
+    - Rust integration suite: 327/327 at `--test-threads=6`. The pre-commit hook (`make verify-sandbox`) passed on the merge with `RUST_TEST_THREADS=6`: integration 312, lib integration tests 35, C 7.
+    - Native .NET gRPC arms on `4955b71e` (`make test-integration-dotnet-native`, `MULTILANG_BACKEND_MODE=native`, `RUST_TEST_THREADS=6`, with `DOTNET_GRPC_SKIPS`): **250 passed; 0 failed** — `__grpc_dotnet` 125 and `__grpc_dotnet_async` 125, including #219's new `test_describe_topics_by_name_reports_elr_and_pages` on both.
+    - ⚠ **Local Docker memory.** At the default 18 test threads, `test_transactional_records_are_visible_only_after_commit__rust` fails, because Docker's OOM killer stops a broker of its pooled cluster (`docker events` shows `oom`; the Docker VM has about 7.7 GiB). The pre-merge commit `230d891c` fails the same way, and a Docker restart did not help, so this is not from the merge. Run the suites with `RUST_TEST_THREADS=6`, or give Docker more memory.
+  - **For the user:**
+    1. FU-5 now has a Rust precedent: #219 made public the four Rust Result constructors Java declares `public` (`DeleteRecordsResult`, `DescribeConsumerGroupsResult`, `DescribeClassicGroupsResult`, `ListOffsetsResult`), and kept the two Java `protected` ones crate-private. The .NET ones stay internal (Q3).
+    2. The new MockAdminClient `Builder` options (#219, #228) are not exposed at the C ABI, so .NET's `MockAdminClient` does not get them.
+  - **Next unused dotnet N stays 96.**
+  - **Not pushed.** The user pushes with `git push-external`.
+
 - **Milestone 17 / Phase 3 — ".NET: merge master #232 (Apache Kafka 4.4), then `LosePartitions` and the Uuid dash rule": DONE (2026-10-14); not pushed. No N (done directly, without the Actor / Critic loop). Mode A.** Branch `prashah_dev_dotnet_binding`, base `daf58aec` (= `origin/prashah_dev_dotnet_binding`, PR #196). Three commits:
   - `6870fa6e` — merge of master `6ecca154` (#232). #232's C ABI change is additive only (6 functions, 1 callback typedef, error codes 134/135/136 and -29); no function the binding imports changed. The commit message lists the conflict resolutions and two clashes that merged without a marker (a duplicate `Utils::is_blank`, and a `node.rs` test that expected the old `Node` Display text).
   - `b50d487d` — `MockConsumer.LosePartitions` / `AsyncMockConsumer.LosePartitions`, Java 4.4's `MockConsumer.losePartitions` (KAFKA-20575), over the existing `kafka_consumer_MockConsumer_lose_partitions`. The broker-free driver for `OnPartitionsLost`. Java's five `MockConsumerTest` tests are translated, plus async-mock, dedup, listener-throws, `ConsumerRebalanceListenerBase` default and null-argument tests. The stale "the mock never fires lost" comments are updated.
@@ -224,6 +243,7 @@ Newest first.
     5. A null *element* in G1-10's name collection reports `ParamName "topics"` (from `OfTopicNames`), not `topicNames` — left with the X10 family.
     6. P13.4 PM-1's six stale "borrowed error" docs remain as recorded there.
   - **Out of scope, carried:** G1-2, G1-4, G2-2, G2-3, G3-9, G5-5, G7-6, G4-7, G6-5 (core or ABI work); PR #219; the X10 null-input per-key family; X1, X4, X7, G5-4, G7-5, G6-8, G4-8; every Python half.
+    ⚠ **Superseded in part by M17/P4:** PR #219 is merged (`4955b71e`), and it closes G1-2: the core now sends DescribeTopicPartitions with `ResponsePartitionLimit`. See the M17/P4 entry above.
   - **Next unused dotnet N = 91.**
   - **Not pushed.** `origin/prashah_dev_dotnet_binding` is at this phase's base `21458241` (fetched 2026-10-02), so the earlier `274523ec..21458241` range is already on the remote. This phase's commits, `f308d137` through this close, are local only.
 
@@ -311,6 +331,7 @@ Newest first.
     - **G2-8 (D5)** — `ToString` on `ConfigResource`, `AlterConfigOp`, `ConfigEntry` and `ConfigSynonym` prints Java's constant names (`TOPIC`, `SET`, `STATIC_BROKER_CONFIG`) and `null`.
     - **Docs only:**
       - G1-3: `PartitionSizeLimitPerResponse` currently has no effect on any request, because the core sends no DescribeTopicPartitions (G1-2).
+        ⚠ **Superseded by M17/P4:** the core now sends the value as DescribeTopicPartitions' `ResponsePartitionLimit` (#219), and the doc says so.
       - G1-8: the synchronous throw for a null topic name is recorded as stricter than Java (D1).
       - G2-6: `DescribeCluster` has three nullable results, not two.
       - G1-5: the stale "per-key timing independence is not preserved" paragraph is deleted from **20** result types. The user widened D8 from 13 to 20; the plan header records the supersession.
@@ -332,6 +353,7 @@ Newest first.
   - **Out of scope, carried:**
     - the Python halves of every finding;
     - G1-2, a Rust-core dependency;
+      ⚠ **Superseded by M17/P4:** closed by master #219 (`4955b71e`).
     - the NUL gap in the admin, producer and consumer construction config, as one cross-client follow-up (D3);
     - X10's other members, which throw synchronously for a null where Java fails per key (D1);
       ⚠ **Superseded in part by M15/P13.5 (F3):** G4-3 and G6-9 were listed as X10 members but are not — Java skips a null SCRAM user and throws synchronously for a null feature name — so P13.5 fixed both without reversing D1. See the P13.5 entry above.
