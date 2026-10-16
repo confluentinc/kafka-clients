@@ -63,11 +63,10 @@ public sealed class DescribeTopicsOptions
     /// (<c>KafkaAdminClient.java:2239</c>).
     /// </para>
     /// <para>
-    /// ⚠ <b>It currently has no effect on any request.</b> The core does not yet send
-    /// DescribeTopicPartitions — a by-name describe goes through Metadata — so the value is
-    /// carried to the core and then not used. This is a core gap, not a binding choice, and
-    /// the word "currently" is deliberate: this paragraph goes stale when the core starts
-    /// sending the request.
+    /// The core does the same: a by-name describe sends the paginated
+    /// DescribeTopicPartitions request with this value as its <c>ResponsePartitionLimit</c>,
+    /// and falls back to Metadata, where the value is not used, on a broker that does not
+    /// support it. A by-id describe always goes through Metadata, as in Java.
     /// </para>
     /// <para>
     /// Must not be negative — <b>stricter than Java</b>, which accepts any <c>int</c>.

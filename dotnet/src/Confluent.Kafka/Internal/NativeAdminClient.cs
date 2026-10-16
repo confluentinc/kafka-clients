@@ -1295,8 +1295,8 @@ internal sealed class NativeAdminClient : IDisposable
                 // The ABI reads a negative as "keep Java's 2000 default"
                 // (describe_topics_options in rust/src/ffi/admin.rs), so a negative would be
                 // silently reinterpreted as that default. See
-                // DescribeTopicsOptions.PartitionSizeLimitPerResponse for why the value
-                // currently has no effect on any request.
+                // DescribeTopicsOptions.PartitionSizeLimitPerResponse for which request
+                // carries the value.
                 throw new ArgumentOutOfRangeException(
                     nameof(options),
                     options.PartitionSizeLimitPerResponse,

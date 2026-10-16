@@ -157,6 +157,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::admin::KafkaAdminClient;
 use crate::admin::config_entry::{ConfigSource, ConfigType};
+use crate::admin::mock_admin_client::Builder;
 use crate::admin::{
     AbortTransactionOptions, AbortTransactionSpec, Admin, AdminClientConfig, AlterClientQuotasOptions, AlterConfigOp,
     AlterConfigsOptions, AlterConsumerGroupOffsetsOptions, AlterConsumerGroupOffsetsResult,
@@ -666,15 +667,17 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_new(
 /// here is that throw expressed in the FFI's idiom — a Rust panic must not
 /// unwind across the C boundary (CLAUDE.md §12.1).
 ///
-/// The rejection itself lives in [`MockAdminClient::create`], which returns
-/// `Err` for `num_brokers < 1`; this entry point only maps that `Err` to null,
-/// so there is one source of truth for the bound rather than a check here that
-/// could drift from the core's.
+/// The mock is built as Java's `MockAdminClient.create().numBrokers(n).build()`
+/// is, through [`MockAdminClient::create`] and its [`Builder`], and the rejection lives
+/// there: `set_num_brokers` fails for a negative count and `build` fails for
+/// zero brokers. This entry point only maps that `Err` to null, so there is one
+/// source of truth for the bound rather than a check here that could drift from
+/// the core's.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_MockAdminClient_new(num_brokers: i32) -> *mut kafka_admin_AdminClient_t {
     init_default_logger();
-    let mock = match MockAdminClient::create(num_brokers) {
+    let mock = match MockAdminClient::create().set_num_brokers(num_brokers).and_then(Builder::build) {
         Ok(mock) => mock,
         Err(_) => return std::ptr::null_mut(),
     };
@@ -31038,11 +31041,12 @@ mod tests {
 
     // -- MockAdminClient_new ------------------------------------------------
 
-    /// Java's `MockAdminClient.Builder.build()` reads `brokers.get(0)` for the
-    /// controller (`MockAdminClient.java:210`), so a zero or negative broker
-    /// count throws rather than yielding a mock. Here that throw is a null
-    /// handle, and it must come from [`MockAdminClient::create`]'s `Err` — a
-    /// panic would unwind out of `extern "C"` and abort the process.
+    /// Java's `MockAdminClient.Builder` throws for a zero broker count
+    /// (`build()` reads `brokers.get(0)`, `MockAdminClient.java:212`) and for a
+    /// negative one (`numBrokers` calls `brokers.subList(0, n)`, `:154`), rather
+    /// than yielding a mock. Here that throw is a null handle, and it must come
+    /// from the [`Builder`]'s `Err`: a panic would unwind out of `extern "C"`
+    /// and abort the process.
     #[test]
     fn mock_admin_client_new_returns_null_for_a_non_positive_broker_count() {
         assert!(kafka_admin_MockAdminClient_new(0).is_null());
@@ -36481,7 +36485,11 @@ mod tests {
     fn list_transactions_async_delivers_discovery_then_each_broker_independently() {
         use crate::common::internals::KafkaFutureImpl;
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+        let admin = build_admin_handle(
+            AdminKind::Mock(Box::new(MockAdminClient::create().build().unwrap())),
+            runtime,
+            true,
+        );
 
         let top: KafkaFutureImpl<HashMap<i32, KafkaFuture<Vec<TransactionListing>>>> = KafkaFutureImpl::new();
         let slow: KafkaFutureImpl<Vec<TransactionListing>> = KafkaFutureImpl::new();
@@ -36535,7 +36543,11 @@ mod tests {
     #[test]
     fn list_transactions_async_reports_a_discovery_failure_once() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+        let admin = build_admin_handle(
+            AdminKind::Mock(Box::new(MockAdminClient::create().build().unwrap())),
+            runtime,
+            true,
+        );
         let (tx, rx) = std::sync::mpsc::channel::<ListTransactionsEvent>();
         let tx_ptr = &tx as *const std::sync::mpsc::Sender<ListTransactionsEvent> as *mut c_void;
         // SAFETY: Test code: `admin` is the live handle created above, every array argument is a
@@ -36650,7 +36662,11 @@ mod tests {
         let slow_future = slow.future();
 
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+        let admin = build_admin_handle(
+            AdminKind::Mock(Box::new(MockAdminClient::create().build().unwrap())),
+            runtime,
+            true,
+        );
 
         let (tx, rx) = std::sync::mpsc::channel::<(String, Result<i32, Error>)>();
         // SAFETY: Test code: `admin` is the live handle built above and is destroyed only after the
@@ -36723,7 +36739,11 @@ mod tests {
         let slow_future = slow.future();
 
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+        let admin = build_admin_handle(
+            AdminKind::Mock(Box::new(MockAdminClient::create().build().unwrap())),
+            runtime,
+            true,
+        );
 
         let (tx, rx) = std::sync::mpsc::channel::<(ConfigResource, Result<Config, Error>)>();
         let entries = vec![(topic_a.clone(), fast.future()), (topic_b.clone(), slow_future)];
@@ -36962,7 +36982,11 @@ mod tests {
         let entries = vec![("present".to_string(), present.future())];
 
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+        let admin = build_admin_handle(
+            AdminKind::Mock(Box::new(MockAdminClient::create().build().unwrap())),
+            runtime,
+            true,
+        );
 
         let (tx, rx) = std::sync::mpsc::channel::<(String, Result<i32, Error>)>();
         // SAFETY: Test code: `admin` is the live handle built above and is destroyed only after the
@@ -37020,7 +37044,11 @@ mod tests {
         ];
 
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+        let admin = build_admin_handle(
+            AdminKind::Mock(Box::new(MockAdminClient::create().build().unwrap())),
+            runtime,
+            true,
+        );
 
         let (tx, rx) = std::sync::mpsc::channel::<(String, Result<i32, Error>)>();
         // SAFETY: Test code: `admin` is the live handle built above and is destroyed only after the
@@ -37059,7 +37087,11 @@ mod tests {
     #[test]
     fn admin_async_per_key_op_fans_a_submission_failure_out_once_per_distinct_key() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+        let admin = build_admin_handle(
+            AdminKind::Mock(Box::new(MockAdminClient::create().build().unwrap())),
+            runtime,
+            true,
+        );
         let (tx, rx) = std::sync::mpsc::channel::<String>();
         // SAFETY: Test code: `admin` is the live handle built above and is destroyed only after the
         // helper's callbacks have fired; the null `user_data` is never dereferenced by the Rust
@@ -37096,7 +37128,11 @@ mod tests {
         present.complete(7);
         let entries = vec![("present".to_string(), present.future())];
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+        let admin = build_admin_handle(
+            AdminKind::Mock(Box::new(MockAdminClient::create().build().unwrap())),
+            runtime,
+            true,
+        );
         let (tx, rx) = std::sync::mpsc::channel::<(String, Option<Result<i32, Error>>)>();
         // SAFETY: Test code: `admin` is the live handle built above and is destroyed only after the
         // helper's callbacks have fired; the null `user_data` is never dereferenced by the Rust
@@ -37293,7 +37329,11 @@ mod tests {
     #[test]
     fn admin_async_per_key_op_reports_a_submit_panic_once_per_distinct_key() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+        let admin = build_admin_handle(
+            AdminKind::Mock(Box::new(MockAdminClient::create().build().unwrap())),
+            runtime,
+            true,
+        );
         let (tx, rx) = std::sync::mpsc::channel::<(String, Error)>();
         // SAFETY: Test code: `admin` is the live handle built above and is destroyed only
         // after the helper's callbacks have fired; the null `user_data` is never dereferenced
@@ -37330,7 +37370,11 @@ mod tests {
     #[test]
     fn admin_async_per_key_op_reports_a_caught_panic_without_submitting() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+        let admin = build_admin_handle(
+            AdminKind::Mock(Box::new(MockAdminClient::create().build().unwrap())),
+            runtime,
+            true,
+        );
         let (tx, rx) = std::sync::mpsc::channel::<(String, String)>();
         // SAFETY: Test code: `admin` is the live handle built above and is destroyed only
         // after the helper's callbacks have fired; the null `user_data` is never dereferenced
@@ -37406,7 +37450,11 @@ mod tests {
         let slow_future = slow.future();
 
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+        let admin = build_admin_handle(
+            AdminKind::Mock(Box::new(MockAdminClient::create().build().unwrap())),
+            runtime,
+            true,
+        );
 
         let (tx, rx) = std::sync::mpsc::channel::<(i32, Result<HashMap<String, LogDirDescription>, Error>)>();
         let entries = vec![(0i32, fast.future()), (1i32, slow_future)];
@@ -37712,7 +37760,11 @@ mod tests {
         let slow_future = slow.future();
 
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+        let admin = build_admin_handle(
+            AdminKind::Mock(Box::new(MockAdminClient::create().build().unwrap())),
+            runtime,
+            true,
+        );
 
         let (tx, rx) = std::sync::mpsc::channel::<(TopicPartition, Result<(), Error>)>();
         let entries = vec![(fast_tp.clone(), fast.future()), (slow_tp.clone(), slow_future)];
@@ -37778,7 +37830,11 @@ mod tests {
         let slow_future = slow.future();
 
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+        let admin = build_admin_handle(
+            AdminKind::Mock(Box::new(MockAdminClient::create().build().unwrap())),
+            runtime,
+            true,
+        );
 
         let (tx, rx) = std::sync::mpsc::channel::<(TopicPartition, Result<ListOffsetsResultInfo, Error>)>();
         let entries = vec![(fast_tp.clone(), fast.future()), (slow_tp.clone(), slow_future)];
@@ -38086,7 +38142,11 @@ mod tests {
         let slow_future = slow.future();
 
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+        let admin = build_admin_handle(
+            AdminKind::Mock(Box::new(MockAdminClient::create().build().unwrap())),
+            runtime,
+            true,
+        );
 
         let (tx, rx) = std::sync::mpsc::channel::<(String, Result<ConsumerGroupDescription, Error>)>();
         let entries = vec![
@@ -38149,7 +38209,11 @@ mod tests {
         let slow_future = slow.future();
 
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+        let admin = build_admin_handle(
+            AdminKind::Mock(Box::new(MockAdminClient::create().build().unwrap())),
+            runtime,
+            true,
+        );
 
         let (tx, rx) = std::sync::mpsc::channel::<(String, Result<(), Error>)>();
         let entries = vec![
@@ -39121,7 +39185,11 @@ mod tests {
         let slow_future = slow.future();
 
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+        let admin = build_admin_handle(
+            AdminKind::Mock(Box::new(MockAdminClient::create().build().unwrap())),
+            runtime,
+            true,
+        );
 
         let (tx, rx) = std::sync::mpsc::channel::<(AclBindingKey, Result<(), Error>)>();
         let entries = vec![(key_a.clone(), fast.future()), (key_b.clone(), slow_future)];
@@ -39179,7 +39247,11 @@ mod tests {
         let slow_future = slow.future();
 
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+        let admin = build_admin_handle(
+            AdminKind::Mock(Box::new(MockAdminClient::create().build().unwrap())),
+            runtime,
+            true,
+        );
 
         let (tx, rx) = std::sync::mpsc::channel::<(AclBindingFilter, Result<FilterResults, Error>)>();
         let entries = vec![(filter_a.clone(), fast.future()), (filter_b.clone(), slow_future)];
@@ -40667,7 +40739,11 @@ mod tests {
         let slow_future = slow.future();
 
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+        let admin = build_admin_handle(
+            AdminKind::Mock(Box::new(MockAdminClient::create().build().unwrap())),
+            runtime,
+            true,
+        );
 
         let (tx, rx) = std::sync::mpsc::channel::<(TopicPartition, Result<i64, Error>)>();
         let entries = vec![(tp_fast.clone(), fast.future()), (tp_slow.clone(), slow_future)];

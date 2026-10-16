@@ -33,7 +33,7 @@ public sealed class PublicAdminClusterConfigResourcesTests
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
     /// <summary>The mock's <c>DEFAULT_CLUSTER_ID</c> (Java's <c>MockAdminClient</c> value).</summary>
-    private const string MockClusterId = "4A5xz_QZTB2CtL4wc0X0Jw";
+    private const string MockClusterId = "I4ZmrWqfT2e-upky_4fdPA";
 
     /// <summary>
     /// <c>describeCluster</c> reports the mock's nodes, its controller and its cluster id,

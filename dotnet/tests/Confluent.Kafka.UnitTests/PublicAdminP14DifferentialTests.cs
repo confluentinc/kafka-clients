@@ -307,7 +307,7 @@ public sealed class PublicAdminP14DifferentialTests
         Assert.Equal("diff-e", described.Name);
         Assert.Equal(syncId, described.TopicId);
 
-        string notFound = "Topic id " + s_missingId + " not found.";
+        string notFound = "Topic id" + s_missingId + " not found.";
         AssertKafka(
             UnknownTopicIdCode,
             notFound,
@@ -473,7 +473,7 @@ public sealed class PublicAdminP14DifferentialTests
         Assert.Equal(0, controller.Id);
 
         Assert.Equal(
-            (object)"4A5xz_QZTB2CtL4wc0X0Jw",
+            (object)"I4ZmrWqfT2e-upky_4fdPA",
             await Agree(FutureProbe.Of(syncResult.ClusterId()), FutureProbe.Of(asyncResult.ClusterId())));
 
         IReadOnlyCollection<AclOperation> operations = Assert.IsAssignableFrom<IReadOnlyCollection<AclOperation>>(
