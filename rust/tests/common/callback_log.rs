@@ -51,7 +51,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use confluent_kafka::common::{Error, TopicPartition};
-use confluent_kafka::consumer::{Consumer, ConsumerRebalanceListener, OffsetAndMetadata, OffsetCommitCallback};
+use confluent_kafka::consumer::{ConsumerRebalanceListener, DynConsumer, OffsetAndMetadata, OffsetCommitCallback};
 use confluent_kafka::producer::{Producer, ProducerRecord, RecordMetadata};
 
 /// `kind` value for `ConsumerRebalanceListener::on_partitions_assigned`.
@@ -196,7 +196,7 @@ fn delivery_entry(metadata: Option<&RecordMetadata>, error: Option<&Error>) -> C
 /// Obtained from [`crate::common::backend_factory::ConsumerBackendFactory::create_with_callback_log`]
 /// (the factory is the only place that has both the in-process pieces the native
 /// backend needs and the channel + server-side id the gRPC backends need —
-/// `Box<dyn Consumer>` erases all of it).
+/// `Box<dyn DynConsumer>` erases all of it).
 pub enum ConsumerCallbackLog {
     /// In-process log written by real Rust callbacks.
     Native(SharedLog),
@@ -225,7 +225,7 @@ impl ConsumerCallbackLog {
     /// releases it.
     pub async fn subscribe_with_logging_listener(
         &self,
-        consumer: &mut Box<dyn Consumer<Vec<u8>, Vec<u8>>>,
+        consumer: &mut Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>,
         topics: Vec<String>,
     ) -> Result<(), Error> {
         match self {
@@ -242,7 +242,7 @@ impl ConsumerCallbackLog {
     /// completion callback that appends a `"commit"` entry to this log.
     pub async fn commit_async_with_logging_callback(
         &self,
-        consumer: &mut Box<dyn Consumer<Vec<u8>, Vec<u8>>>,
+        consumer: &mut Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>,
     ) -> Result<(), Error> {
         match self {
             ConsumerCallbackLog::Native(log) => {

@@ -31,7 +31,7 @@ use confluent_kafka::admin::{Admin, AdminClient, AdminClientConfig, DescribeTopi
 use confluent_kafka::common::TopicCollection;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::{ByteArrayDeserializer, ByteArraySerializer};
-use confluent_kafka::consumer::{ConsumerConfig, KafkaConsumer};
+use confluent_kafka::consumer::{Consumer, ConsumerConfig, KafkaConsumer};
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
 
 use crate::common::cluster_config::{ClusterConfig, Type};
@@ -110,7 +110,7 @@ async fn consume_all(bootstrap: &str, topic: &str, expected: usize) -> Vec<(i64,
         ("client.id".to_string(), "cluster-lifecycle-test-consumer".to_string()),
         ("enable.auto.commit".to_string(), "false".to_string()),
     ]);
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         ConsumerConfig::new(&props).expect("valid consumer config"),
         Box::new(ByteArrayDeserializer::default()),
         Box::new(ByteArrayDeserializer::default()),

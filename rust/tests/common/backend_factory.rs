@@ -27,8 +27,8 @@ use std::collections::HashMap;
 
 use confluent_kafka::common::Error;
 use confluent_kafka::common::serialization::{ByteArrayDeserializer, ByteArraySerializer};
-use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
+use confluent_kafka::consumer::DynConsumer;
 use confluent_kafka::consumer::KafkaConsumer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
@@ -76,29 +76,29 @@ pub trait AdminBackendFactory {
     }
 }
 
-/// Abstraction over a `Box<dyn Consumer<Vec<u8>, Vec<u8>>>` source.
+/// Abstraction over a `Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>` source.
 ///
 /// Unlike [`ProducerBackendFactory`] (which uses an associated type for static
-/// dispatch), the consumer trait is dispatched dynamically as
-/// `Box<dyn Consumer>` everywhere (see `consumer-threading.md` §2), so every
+/// dispatch), consumers are held dynamically as
+/// `Box<dyn DynConsumer>` everywhere (see `consumer-threading.md` §2), so every
 /// backend simply yields a boxed consumer. Test bodies are written generically
 /// over `<F: ConsumerBackendFactory>` and triplicated by
 /// [`crate::multilanguage_consumer_test`].
 pub trait ConsumerBackendFactory {
     /// Construct a consumer from the given config properties.
-    async fn create(&self, config: HashMap<String, String>) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, Error>;
+    async fn create(&self, config: HashMap<String, String>) -> Result<Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, Error>;
 
     /// Construct a consumer together with its [`ConsumerCallbackLog`], for
     /// tests that exercise the rebalance listener / offset-commit callback.
     ///
     /// Separate from [`Self::create`] because the log needs backend-private
-    /// state that `Box<dyn Consumer>` erases: the in-process `Arc<Mutex<..>>`
+    /// state that `Box<dyn DynConsumer>` erases: the in-process `Arc<Mutex<..>>`
     /// for the native backend, the gRPC channel plus the server-local consumer
     /// id for the remote ones.
     async fn create_with_callback_log(
         &self,
         config: HashMap<String, String>,
-    ) -> Result<(Box<dyn Consumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), Error>;
+    ) -> Result<(Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), Error>;
 
     /// Short backend label used in test names and log messages.
     fn name(&self) -> &'static str;
@@ -206,19 +206,19 @@ impl AdminBackendFactory for RustNativeFactory {
 }
 
 impl ConsumerBackendFactory for RustNativeFactory {
-    async fn create(&self, config: HashMap<String, String>) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, Error> {
+    async fn create(&self, config: HashMap<String, String>) -> Result<Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, Error> {
         let consumer_config = ConsumerConfig::new(&config)?;
-        KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+        Ok(Box::new(KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
             consumer_config,
             Box::new(ByteArrayDeserializer::default()),
             Box::new(ByteArrayDeserializer::default()),
-        )
+        )?))
     }
 
     async fn create_with_callback_log(
         &self,
         config: HashMap<String, String>,
-    ) -> Result<(Box<dyn Consumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), Error> {
+    ) -> Result<(Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), Error> {
         Ok((
             ConsumerBackendFactory::create(self, config).await?,
             ConsumerCallbackLog::native(),
@@ -259,7 +259,7 @@ mod grpc_backends {
         channel: &Channel,
         config: HashMap<String, String>,
         backend: &'static str,
-    ) -> Result<(Box<dyn Consumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), Error> {
+    ) -> Result<(Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), Error> {
         let consumer = MultilanguageConsumer::new(channel.clone(), config, backend).await?;
         let log = ConsumerCallbackLog::Grpc(ConsumerLog::new(channel.clone(), consumer.consumer_id(), backend));
         Ok((Box::new(consumer), log))
@@ -304,7 +304,10 @@ mod grpc_backends {
     }
 
     impl ConsumerBackendFactory for PythonGrpcFactory {
-        async fn create(&self, config: HashMap<String, String>) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, Error> {
+        async fn create(
+            &self,
+            config: HashMap<String, String>,
+        ) -> Result<Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, Error> {
             Ok(Box::new(
                 MultilanguageConsumer::new(self.channel.clone(), config, "python").await?,
             ))
@@ -313,7 +316,7 @@ mod grpc_backends {
         async fn create_with_callback_log(
             &self,
             config: HashMap<String, String>,
-        ) -> Result<(Box<dyn Consumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), Error> {
+        ) -> Result<(Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), Error> {
             consumer_with_log(&self.channel, config, "python").await
         }
 
@@ -385,7 +388,10 @@ mod grpc_backends {
     }
 
     impl ConsumerBackendFactory for PythonAsyncGrpcFactory {
-        async fn create(&self, config: HashMap<String, String>) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, Error> {
+        async fn create(
+            &self,
+            config: HashMap<String, String>,
+        ) -> Result<Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, Error> {
             Ok(Box::new(
                 MultilanguageConsumer::new(self.channel.clone(), config, "python_async").await?,
             ))
@@ -394,7 +400,7 @@ mod grpc_backends {
         async fn create_with_callback_log(
             &self,
             config: HashMap<String, String>,
-        ) -> Result<(Box<dyn Consumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), Error> {
+        ) -> Result<(Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), Error> {
             consumer_with_log(&self.channel, config, "python_async").await
         }
 
@@ -464,14 +470,17 @@ mod grpc_backends {
     }
 
     impl ConsumerBackendFactory for CGrpcFactory {
-        async fn create(&self, config: HashMap<String, String>) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, Error> {
+        async fn create(
+            &self,
+            config: HashMap<String, String>,
+        ) -> Result<Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, Error> {
             Ok(Box::new(MultilanguageConsumer::new(self.channel.clone(), config, "c").await?))
         }
 
         async fn create_with_callback_log(
             &self,
             config: HashMap<String, String>,
-        ) -> Result<(Box<dyn Consumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), Error> {
+        ) -> Result<(Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), Error> {
             consumer_with_log(&self.channel, config, "c").await
         }
 

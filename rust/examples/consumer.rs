@@ -62,12 +62,12 @@ async fn run() -> Result<(), Error> {
         handle.wakeup();
     });
 
-    let result = consume_loop(&mut *consumer).await;
+    let result = consume_loop(&mut consumer).await;
     let close_result = consumer.close().await;
     result.and(close_result)
 }
 
-async fn consume_loop(consumer: &mut dyn Consumer<String, String>) -> Result<(), Error> {
+async fn consume_loop<C: Consumer<String, String>>(consumer: &mut C) -> Result<(), Error> {
     loop {
         let records = match consumer.poll(Duration::from_secs(30)).await {
             Ok(records) => records,
@@ -122,7 +122,7 @@ fn bootstrap_servers() -> String {
     std::env::var("KAFKA_BOOTSTRAP_SERVERS").unwrap_or_else(|_| "localhost:9092".to_string())
 }
 
-fn create_kafka_consumer() -> Result<Box<dyn Consumer<String, String>>, Error> {
+fn create_kafka_consumer() -> Result<KafkaConsumer<String, String>, Error> {
     let props = HashMap::from([
         (ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(), bootstrap_servers()),
         (ConsumerConfig::GROUP_ID_CONFIG.to_string(), GROUP_ID.to_string()),

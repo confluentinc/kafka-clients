@@ -186,12 +186,14 @@ fn create_consumer(ctx: &TestContext, configs: &HashMap<String, String>) -> Byte
         ("group.id".to_string(), default_group),
     ]);
     props.extend(configs.iter().map(|(k, v)| (k.clone(), v.clone())));
-    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        ConsumerConfig::new(&props).expect("valid consumer config"),
-        Box::new(ByteArrayDeserializer::default()),
-        Box::new(ByteArrayDeserializer::default()),
+    Box::new(
+        KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
+            ConsumerConfig::new(&props).expect("valid consumer config"),
+            Box::new(ByteArrayDeserializer::default()),
+            Box::new(ByteArrayDeserializer::default()),
+        )
+        .expect("KafkaConsumer::new should succeed"),
     )
-    .expect("KafkaConsumer::new should succeed")
 }
 
 /// `clusterInstance.producer()`: byte-array serializers, producer defaults.
