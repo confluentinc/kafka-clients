@@ -25,7 +25,6 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from concurrent.futures import Future
 
 import pytest
 
@@ -38,12 +37,28 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 import grpc_server  # noqa: E402
 import grpc_server_async  # noqa: E402
 import grpc_translate as tr  # noqa: E402
+from confluent_kafka import ExecutionError  # noqa: E402
 from confluent_kafka import admin as ka  # noqa: E402
+from confluent_kafka.admin import DeleteAclsResult  # noqa: E402
+from confluent_kafka.common import AsyncKafkaFuture, KafkaFuture  # noqa: E402
+from confluent_kafka.common.kafka_future import _KafkaFutureImpl  # noqa: E402
 from confluent_kafka.common import Node, TopicPartition  # noqa: E402
 from confluent_kafka.common.errors import (  # noqa: E402
+    ResourceNotFoundError,
     TopicExistsError,
     UnsupportedVersionError,
 )
+
+
+def _done(value=None, error=None, asynchronous=False):
+    """A completed ``KafkaFuture`` (``AsyncKafkaFuture``): holding ``value``, or
+    failed with ``error``, as a client's future the facade drives with ``get()``."""
+    impl = _KafkaFutureImpl()
+    if error is not None:
+        impl.complete_with_error(error)
+    else:
+        impl.complete(value)
+    return (AsyncKafkaFuture if asynchronous else KafkaFuture)._of_impl(impl)
 
 
 @pytest.fixture()
@@ -220,8 +235,8 @@ def test_jdk_analog_error_keeps_its_own_code():
 
 
 class _FakeAsyncAdmin:
-    """Stands in for ``AsyncAdmin`` (whose calls are ``async def`` and whose
-    results hold ``asyncio.Future``\\ s) until its mock exists."""
+    """Stands in for ``AsyncAdmin``: its calls return a ``*Result`` at once, its
+    futures are ``AsyncKafkaFuture``\\ s."""
 
     class _Result:
         def __init__(self, futures):
@@ -233,20 +248,15 @@ class _FakeAsyncAdmin:
         def values(self):
             return self._futures["values"]
 
-    async def list_topics(self, *, options):
-        loop = asyncio.get_running_loop()
-        listings = loop.create_future()
-        listings.set_result({"t": ka.TopicListing(
-            name="t", topic_id=tr.Uuid.random_uuid(), internal=False)})
-        return self._Result({"listings": listings})
+    def list_topics(self, *, options):
+        listing = ka.TopicListing(name="t", topic_id=tr.Uuid.random_uuid(), internal=False)
+        return self._Result({"listings": _done({"t": listing}, asynchronous=True)})
 
-    async def delete_topics(self, *, topics, options):
-        loop = asyncio.get_running_loop()
-        ok, bad = loop.create_future(), loop.create_future()
-        ok.set_result(None)
-        bad.set_exception(TopicExistsError(message="boom"))
+    def delete_topics(self, *, topics, options):
         result = self._Result({})
-        result.topic_name_values = lambda: {"ok": ok, "bad": bad}
+        result.topic_name_values = lambda: {
+            "ok": _done(None, asynchronous=True),
+            "bad": _done(error=TopicExistsError(message="boom"), asynchronous=True)}
         return result
 
     async def close(self, *, timeout=None):
@@ -282,14 +292,30 @@ def test_async_service_answers_with_the_per_key_envelope():
 
 def test_sync_driver_passes_thrown_errors_into_the_rpc():
     def rpc():
-        future = Future()
-        future.set_exception(TopicExistsError(message="e"))
         try:
-            yield future
+            yield _done(error=TopicExistsError(message="e"))
         except TopicExistsError as e:
             return f"caught {e}"
 
+    # get() raises ExecutionError; the RPC sees its cause.
     assert tr._drive_sync(rpc()) == "caught e"
+
+
+def test_async_driver_passes_the_cause_into_the_rpc():
+    def rpc():
+        try:
+            yield _done(error=TopicExistsError(message="e"), asynchronous=True)
+        except TopicExistsError as e:
+            return f"caught {e}"
+
+    assert asyncio.run(tr._drive_async(rpc())) == "caught e"
+
+
+def test_a_failed_get_is_an_execution_error_the_driver_unwraps():
+    future = _done(error=TopicExistsError(message="e"))
+    with pytest.raises(ExecutionError) as info:
+        future.get()
+    assert isinstance(tr._unwrapped(info.value), TopicExistsError)
 
 
 def test_mock_brokers_are_numbered_from_zero():
@@ -325,9 +351,7 @@ def test_per_partition_failure_stays_per_key():
     good, bad = TopicPartition(topic="t", partition=0), TopicPartition(topic="t", partition=1)
 
     def done(error=None):
-        f = Future()
-        f.set_exception(error) if error else f.set_result(None)
-        return f
+        return _done(None, error)
 
     class _Res:
         def partition_result(self, *, partition):
@@ -363,24 +387,26 @@ def test_per_partition_failure_stays_per_key():
 # ---- the three verify-run failures (V-fix1) ---------------------------------
 
 
-def test_delete_acls_answers_each_matched_acl(monkeypatch):
-    """DeleteAcls over the client's real ``delete_acls_result``, the drain stubbed
-    to the C drain's shape (each matched ACL ``(error, binding)``). It raised
-    ``TypeError: cannot unpack non-iterable int object`` for every match."""
-    import _confluentkafka as _lib
-    from confluent_kafka.admin import _conversions
-    from confluent_kafka.admin._futures import Sync
+def test_delete_acls_answers_each_matched_acl():
+    """DeleteAcls over the Java result shape: a filter's future holds
+    ``FilterResults``, each matched ACL a ``FilterResult`` with its binding or its
+    own error. The facade answers the matched ACLs, not the future."""
+    proto = apb.AclBinding(resource_type=2, resource_name="orders", pattern_type=3,
+                           principal="User:a", host="*", operation=3, permission_type=3)
+    (binding,) = tr._admin_acl_bindings([proto])
+    results = DeleteAclsResult.FilterResults._new(values=[
+        DeleteAclsResult.FilterResult._new(binding=binding, exception=None)])
 
-    raw_filter = (1, None, 1, None, None, 1, 1)
-    raw_binding = (2, "orders", 3, "User:a", "*", 3, 3)
-    monkeypatch.setattr(_lib, "DeleteAclsResult_drain",
-                        lambda handle: {raw_filter: (None, [(None, raw_binding)])})
+    class _Res:
+        def __init__(self, filters):
+            self._filters = filters
+
+        def values(self):
+            return {f: _done(results) for f in self._filters}
 
     class _Admin:
         def delete_acls(self, *, filters, options):
-            filters = list(filters)
-            _conversions.delete_acls_args(filters, options)
-            return _conversions.delete_acls_result(filters, (1, 0), Sync)
+            return _Res(list(filters))
 
     svc = grpc_server.AdminService()
     svc._admins[1] = tr.SyncAdminFacade(_Admin())
@@ -390,27 +416,24 @@ def test_delete_acls_answers_each_matched_acl(monkeypatch):
     (entry,) = resp.entries
     (deleted,) = entry.value.values
     assert not deleted.HasField("exception")
-    assert deleted.binding == apb.AclBinding(
-        resource_type=2, resource_name="orders", pattern_type=3, principal="User:a",
-        host="*", operation=3, permission_type=3)
+    assert deleted.binding == proto
 
 
-def test_list_config_resources_passes_types_not_codes(monkeypatch):
-    """ListConfigResources hands the client ``ConfigResource.Type`` members, which
-    its conversion reads through ``id()``; the raw wire ints raised
-    ``AttributeError: 'int' object has no attribute 'id'``."""
-    import _confluentkafka as _lib
-    from confluent_kafka.admin import _conversions
-    from confluent_kafka.admin._futures import Sync
+def test_list_config_resources_passes_types_not_codes():
+    """ListConfigResources hands the client ``ConfigResource.Type`` members; the
+    raw wire ints would fail on ``id()``."""
     from confluent_kafka.common.config import ConfigResource
 
-    monkeypatch.setattr(_lib, "ListConfigResourcesResult_drain", lambda handle: [(2, "t1")])
     seen = []
+
+    class _Res:
+        def all(self):
+            return _done([ConfigResource(type=ConfigResource.Type.TOPIC, name="t1")])
 
     class _Admin:
         def list_config_resources(self, *, config_resource_types, options):
-            seen.append(_conversions.list_config_resources_args(config_resource_types, options))
-            return _conversions.list_config_resources_result((1, 0), Sync)
+            seen.append([t.id() for t in config_resource_types])
+            return _Res()
 
     svc = grpc_server.AdminService()
     svc._admins[1] = tr.SyncAdminFacade(_Admin())
@@ -419,7 +442,7 @@ def test_list_config_resources_passes_types_not_codes(monkeypatch):
     assert not resp.HasField("error"), resp.error
     assert [(r.resource_type, r.name) for r in resp.resources] == [(2, "t1")]
     # An unknown code is UNKNOWN (Java's Type.forId), sent as its id 0.
-    assert seen == [([2, 4, 0], -1)]
+    assert seen == [[2, 4, 0]]
     assert tr._admin_config_resource_types([2, 77]) == [
         ConfigResource.Type.TOPIC, ConfigResource.Type.UNKNOWN]
 
@@ -486,14 +509,103 @@ def test_real_client_describe_delegation_token_keeps_the_unset_filter():
     class _Admin:
         def describe_delegation_token(self, *, options):
             seen.append(options.owners())
-            future = Future()
-            future.set_result([])
-
             class _Res:
                 def delegation_tokens(self):
-                    return future
+                    return _done([])
             return _Res()
 
     assert tr.SyncAdminFacade(_Admin()).describe_delegation_token(owners=None) == []
     assert tr.SyncAdminFacade(_Admin(), mock=True).describe_delegation_token(owners=None) == []
     assert seen == [None, []]
+
+
+# -- unregisterController and describeUserScramCredentials ------------------------
+
+
+def test_unregister_controller_over_the_mock_is_a_whole_call_status():
+    """Java's `MockAdminClient.unregisterController` fails with
+    `UnsupportedVersionException` unless the mock uses a raft controller."""
+    svc = grpc_server.AdminService()
+    aid = svc.CreateAdmin(apb.CreateAdminRequest(num_brokers=1), None).admin_id
+    resp = svc.UnregisterController(apb.UnregisterControllerRequest(
+        admin_id=aid, controller_id=3), None)
+    assert resp.error.code == UnsupportedVersionError._ffi_id
+
+
+def test_unregister_controller_succeeds_and_fails_through_all():
+    from confluent_kafka.common.errors import ControllerIdNotRegisteredError
+
+    class _Res:
+        def __init__(self, error):
+            self._error = error
+
+        def all(self):
+            return _done(None, self._error)
+
+    class _Admin:
+        error = None
+
+        def unregister_controller(self, *, controller_id, options):
+            return _Res(self.error)
+
+    admin = _Admin()
+    svc = grpc_server.AdminService()
+    svc._admins[1] = tr.SyncAdminFacade(admin)
+    request = apb.UnregisterControllerRequest(admin_id=1, controller_id=7)
+    assert not svc.UnregisterController(request, None).HasField("error")
+    admin.error = ControllerIdNotRegisteredError(message="not registered")
+    resp = svc.UnregisterController(request, None)
+    assert resp.error.code == ControllerIdNotRegisteredError._ffi_id
+
+
+def _scram_admin(all_error, descriptions):
+    """A client whose `all()` fails with `all_error` (or succeeds with every
+    description) and whose `users()` lists the non-RESOURCE_NOT_FOUND users."""
+
+    class _Res:
+        def all(self):
+            if all_error is None:
+                return _done({d.name(): d for d in descriptions.values()
+                              if not isinstance(d, BaseException)})
+            return _done(error=all_error)
+
+        def users(self):
+            return _done([u for u, d in descriptions.items()
+                          if not isinstance(d, ResourceNotFoundError)])
+
+        def description(self, *, user_name):
+            d = descriptions[user_name]
+            return _done(error=d) if isinstance(d, BaseException) else _done(d)
+
+    class _Admin:
+        def describe_user_scram_credentials(self, *, options, users=None):
+            return _Res()
+
+    return _Admin()
+
+
+def test_scram_failed_all_leaves_a_requested_resource_not_found_user_out():
+    from confluent_kafka.common.errors import UnknownServerError
+
+    good = ka.UserScramCredentialsDescription(name="a", credential_infos=[])
+    bad = UnknownServerError(message="boom")
+    missing = ResourceNotFoundError(message="no creds")
+    admin = _scram_admin(bad, {"a": good, "b": bad, "c": missing})
+    out = tr.SyncAdminFacade(admin).describe_user_scram_credentials(users=["a", "b", "c"])
+    assert out == {"a": good, "b": bad}
+
+
+def test_scram_successful_all_answers_every_user():
+    good = ka.UserScramCredentialsDescription(name="a", credential_infos=[])
+    out = tr.SyncAdminFacade(_scram_admin(None, {"a": good})).describe_user_scram_credentials(
+        users=["a"])
+    assert out == {"a": good}
+
+
+def test_scram_empty_composition_raises_the_all_error():
+    from confluent_kafka.common.errors import UnknownServerError
+
+    all_error = UnknownServerError(message="whole")
+    admin = _scram_admin(all_error, {"c": ResourceNotFoundError(message="x")})
+    with pytest.raises(UnknownServerError):
+        tr.SyncAdminFacade(admin).describe_user_scram_credentials(users=["c"])

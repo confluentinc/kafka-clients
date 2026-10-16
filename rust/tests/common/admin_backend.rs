@@ -521,7 +521,7 @@ pub trait AdminBackend {
     /// response data and exposes three views (`all()` / `users()` /
     /// `description(user)`); this is the per-user shape that subsumes all three,
     /// composed the same way by the C gRPC server (`c/grpc_server/server.cc`)
-    /// and the Python extension's `assemble_scram` (`python/_confluentkafka.c`),
+    /// and the Python facade's `g_describe_user_scram_credentials` (`python/grpc_translate.py`),
     /// so every backend answers with the same key set.
     ///
     /// The broker never returns the salted password or the salt, so the value
@@ -1596,8 +1596,8 @@ impl AdminBackend for RustNativeAdmin {
     ) -> Result<Outcomes<String, UserScramCredentialsDescription>, Error> {
         let result = self.admin.describe_user_scram_credentials_with_users_options(users, options);
         // Java's three views composed into the per-user shape, as the C gRPC
-        // server (`c/grpc_server/server.cc`) and the Python extension's
-        // `assemble_scram` (`python/_confluentkafka.c`) also compose them — so
+        // server (`c/grpc_server/server.cc`) and the Python facade's
+        // `g_describe_user_scram_credentials` (`python/grpc_translate.py`) also compose them — so
         // every backend answers with the same key set and the same errors.
         //
         //   - `all()` succeeds only when every user's error code is NONE or
@@ -1606,10 +1606,8 @@ impl AdminBackend for RustNativeAdmin {
         //   - when it fails, `users()` still lists every user whose error is not
         //     RESOURCE_NOT_FOUND — necessarily including the one that failed
         //     `all()` — and `description(user)` yields that user's own error.
-        //     A requested RESOURCE_NOT_FOUND user is left out here, while the C and
-        //     Python backends answer it with an empty description (the FFI's row
-        //     carries its RESOURCE_NOT_FOUND error). No integration test reaches
-        //     this case.
+        //     A requested RESOURCE_NOT_FOUND user is left out here, as in the C and
+        //     Python backends. No integration test reaches this case.
         //   - if the response future itself failed, all three fail with the same
         //     error and it becomes the whole-call `Err`; and if the composition
         //     yields no rows at all, the `all()` error is returned rather than

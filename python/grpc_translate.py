@@ -54,8 +54,8 @@ from confluent_kafka.consumer import (  # noqa: E402
 from confluent_kafka.producer import ProducerRecord  # noqa: E402
 # The admin client is the new ``confluent_kafka.admin`` package: keyword-only
 # value types with method accessors, typed errors, results that hold futures.
-import concurrent.futures as _cf  # noqa: E402
-import inspect as _inspect  # noqa: E402
+from confluent_kafka import ExecutionError  # noqa: E402
+from confluent_kafka.common import AsyncKafkaFuture, KafkaFuture  # noqa: E402
 import types as _types  # noqa: E402
 from confluent_kafka import admin as ka  # noqa: E402  (NewTopic / NewPartitions / ...)
 from confluent_kafka.common import (  # noqa: E402
@@ -84,7 +84,6 @@ from confluent_kafka.common import (  # noqa: E402
     Uuid,
 )
 from confluent_kafka.common.config import ConfigResource  # noqa: E402
-from confluent_kafka.common.errors import ResourceNotFoundError  # noqa: E402
 import producer_service_pb2 as pb  # noqa: E402  (generated)
 import consumer_service_pb2 as cpb  # noqa: E402  (generated)
 import admin_service_pb2 as apb  # noqa: E402  (generated)
@@ -1494,7 +1493,9 @@ def _admin_members_to_remove(request):
 #   - describe_user_scram_credentials is per-user, and a user the broker reports
 #     as having *no* credential is a success with an empty credential_infos —
 #     never an error. That is Java's `all()` treating RESOURCE_NOT_FOUND as a
-#     success, which the admin facade already implements.
+#     success; the facade composes the views as the C and native backends do
+#     (`all()`, then `users()` + `description(user)` when it fails), so once
+#     `all()` has failed a requested RESOURCE_NOT_FOUND user is left out.
 #   - update_features raises for an empty map against a real client (Java's
 #     IllegalArgumentException) while a mock yields an empty result. Both are
 #     faithful; the raise becomes the top-level error.
@@ -1751,8 +1752,8 @@ def _admin_describe_user_scram_credentials_response(outcomes):
 
     A user with an *empty* credential_infos is a successful description ("the
     broker reports no credential"), not an error — Java's `all()` treats
-    RESOURCE_NOT_FOUND that way, and admin.py's result comes from `all()` when
-    it succeeds (`assemble_scram` in `_confluentkafka.c`). The broker never
+    RESOURCE_NOT_FOUND that way, and the facade answers from `all()` when it
+    succeeds (`g_describe_user_scram_credentials`). The broker never
     returns the salted password or the salt, so neither has a field to carry.
     """
     entries = []
@@ -2065,10 +2066,12 @@ def _admin_abort_transaction_spec(request):
 # ``{key: value | error}``. This facade does that resolving once, for both
 # servers.
 #
-# Each RPC is written once, as a generator that ``yield``s the admin call (async
-# only: a coroutine) and each future, and gets the value back (or has the error
-# thrown in). ``_drive_sync`` resolves the yielded futures with ``.result()``,
-# ``_drive_async`` with ``await``, so the sync and the async server share every
+# Each RPC is written once, as a generator that ``yield``s each future and gets
+# the value back (or has the error thrown in). ``_drive_sync`` resolves a
+# yielded future with ``get()``, ``_drive_async`` with ``await get()``; the
+# ``ExecutionError`` a failed ``get()`` raises, as Java's ``Future.get()`` does,
+# is unwrapped to its ``__cause__`` before it is thrown into the RPC, so the RPC
+# and the proto error shapes see the error the broker or the client raised. So the sync and the async server share every
 # line of the RPC logic.
 #
 # Outcome shapes (what the ``_admin_*_response`` builders above read):
@@ -2419,22 +2422,28 @@ class _AdminOps:
         options = _opts(ka.DescribeUserScramCredentialsOptions, timeout)
         if users:
             res = yield self._a.describe_user_scram_credentials(users=list(users), options=options)
-            names = list(users)
         else:
             # Java's no-argument overload: every user.
             res = yield self._a.describe_user_scram_credentials(options=options)
-            names = yield res.users()
-        out = {}
-        for name in names:
-            try:
-                out[name] = yield res.description(user_name=name)
-            except ResourceNotFoundError:
-                # A user the broker reports as having no credential is a success
-                # with an empty credential list (Java's all() does the same).
-                out[name] = ka.UserScramCredentialsDescription(name=name, credential_infos=[])
-            except Exception as e:  # noqa: BLE001
-                out[name] = e
-        return out
+        # Java's three views, composed as #251's contract does for every backend
+        # (admin_service.proto, describeUserScramCredentials): `all()` first;
+        # when it fails, `users()` plus `description(user)`. `all()` treats a
+        # user the broker reports as having no credential (RESOURCE_NOT_FOUND)
+        # as a success, so it is never an error here; once `all()` has failed,
+        # `users()` leaves such a requested user out, and so does the answer.
+        try:
+            return dict((yield res.all()))
+        except Exception as all_error:  # noqa: BLE001
+            names = yield res.users()  # raises when the response itself failed
+            out = {}
+            for name in names:
+                try:
+                    out[name] = yield res.description(user_name=name)
+                except Exception as e:  # noqa: BLE001
+                    out[name] = e
+            if not out:
+                raise all_error
+            return out
 
     def g_alter_user_scram_credentials(self, alterations, timeout=None):
         res = yield self._a.alter_user_scram_credentials(
@@ -2521,6 +2530,12 @@ class _AdminOps:
             options=_opts(ka.TerminateTransactionOptions, timeout))
         yield res.result()
 
+    def g_unregister_controller(self, controller_id, timeout=None):
+        res = yield self._a.unregister_controller(
+            controller_id=controller_id,
+            options=_opts(ka.UnregisterControllerOptions, timeout))
+        yield res.all()
+
     def g_list_transactions(self, states=None, producer_ids=None, duration_ms=-1,
                             transactional_id_pattern=None, timeout=None):
         options = _opts(ka.ListTransactionsOptions, timeout,
@@ -2550,20 +2565,28 @@ class _AdminOps:
         return out
 
 
+def _unwrapped(error):
+    """The error behind a ``get()`` failure: Java's ``ExecutionException`` wraps
+    the cause the future failed with."""
+    if isinstance(error, ExecutionError) and error.__cause__ is not None:
+        return error.__cause__
+    return error
+
+
 def _drive_sync(gen):
-    """Run a `_AdminOps` generator. A yielded ``concurrent.futures.Future`` (the
-    sync ``Admin``'s futures) is resolved with `.result()`; anything else (the
-    result object a blocking call already returned) is passed back as is."""
+    """Run a `_AdminOps` generator. A yielded ``KafkaFuture`` (the sync
+    ``Admin``'s futures) is resolved with `get()`, an ``ExecutionError`` becoming
+    its cause; anything else (the ``*Result`` a call returned) is passed back as is."""
     try:
         item = next(gen)
     except StopIteration as done:
         return done.value
     while True:
         try:
-            value = item.result() if isinstance(item, _cf.Future) else item
+            value = item.get() if isinstance(item, KafkaFuture) else item
         except BaseException as e:  # noqa: BLE001  (thrown into the RPC, which decides)
             try:
-                item = gen.throw(e)
+                item = gen.throw(_unwrapped(e))
             except StopIteration as done:
                 return done.value
         else:
@@ -2574,18 +2597,18 @@ def _drive_sync(gen):
 
 
 async def _drive_async(gen):
-    """As `_drive_sync` for ``AsyncAdmin``: an awaitable (the ``async def`` call
-    itself, or an ``asyncio.Future``) is awaited, anything else passed back."""
+    """As `_drive_sync` for ``AsyncAdmin``: an ``AsyncKafkaFuture`` is resolved
+    with ``await get()``, anything else passed back."""
     try:
         item = next(gen)
     except StopIteration as done:
         return done.value
     while True:
         try:
-            value = await item if _inspect.isawaitable(item) else item
+            value = await item.get() if isinstance(item, AsyncKafkaFuture) else item
         except Exception as e:  # noqa: BLE001
             try:
-                item = gen.throw(e)
+                item = gen.throw(_unwrapped(e))
             except StopIteration as done:
                 return done.value
         else:
