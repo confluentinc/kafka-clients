@@ -687,9 +687,12 @@ static PyTypeObject ConsumerGroupMetadataType = {
 // logic. Both Python producer families drive the `_cb` twins of the
 // blocking-in-Java operations (`send_with_callback_cb`, `flush_cb`,
 // `partitions_for_cb`, `close_cb` / `close_with_timeout_cb`, the
-// transaction-control `_cb` ops); the blocking entry points (`Producer_send`,
-// `Producer_flush`, ...) stay exported for completeness but neither family
-// calls them.
+// transaction-control `_cb` ops); the blocking entry points (`Producer_flush`,
+// ...) stay exported for completeness but neither family calls them. The
+// blocking send has no entry point here: a record's outcome reaches Python
+// only through its delivery callback, so the extension hands out no record
+// future over a C handle (whose C `get` would run the producer's queued
+// callbacks on the calling thread).
 // Delivery callbacks and `_cb` completions are QUEUED by Rust on the
 // producer's callback vector and only run when this extension calls
 // `kafka_producer_Producer__execute_callbacks_err` (Producer_poll /
@@ -1217,8 +1220,8 @@ static PyObject* py_Producer_poll(PyObject* self, PyObject* args) {
 // handle is destroyed: `rust/src/ffi/kafka_future.rs`, module docs), so it is
 // converted while this object is alive, by the converter the creator chose:
 //   * a C converter id (KAFKA_FUTURE_CONV_*): VOID (a `Void` future, value ->
-//     None), RECORD_METADATA (the producer's metadata tuple), PYOBJECT (the
-//     value is a PyObject* this object keeps alive: `completed_future`);
+//     None), PYOBJECT (the value is a PyObject* this object keeps alive:
+//     `completed_future`);
 //   * or a Python callable, `conv(address)`, called with the value's address
 //     during the delivery, which reads it through the extension.
 // The handle is destroyed in tp_dealloc; a pending `get_cb` holds a reference
@@ -1226,8 +1229,7 @@ static PyObject* py_Producer_poll(PyObject* self, PyObject* args) {
 
 enum {
     KAFKA_FUTURE_CONV_VOID = 0,
-    KAFKA_FUTURE_CONV_RECORD_METADATA = 1,
-    KAFKA_FUTURE_CONV_PYOBJECT = 2,
+    KAFKA_FUTURE_CONV_PYOBJECT = 1,
 };
 
 typedef struct {
@@ -1262,9 +1264,6 @@ static PyObject* kafka_future_convert(KafkaFutureObject* self, void* value) {
         return out;
     }
     switch (self->conv_id) {
-    case KAFKA_FUTURE_CONV_RECORD_METADATA:
-        if (value == NULL) Py_RETURN_NONE;
-        return metadata_to_py((const kafka_producer_RecordMetadata_t*)value);
     case KAFKA_FUTURE_CONV_PYOBJECT: {
         PyObject* obj = value ? (PyObject*)value : Py_None;
         Py_INCREF(obj);
@@ -1523,62 +1522,6 @@ static kafka_producer_ProducerRecord_t* producer_record_to_c(ProducerRecordObjec
         return NULL;
     }
     return out;
-}
-
-// ---- send (blocking) -------------------------------------------------------
-
-// Producer_send(handle, record, on_completion) -> (KafkaFuture | None, error_int)
-// Blocks (GIL released) until the record is registered, as Java's send(). The
-// on_completion callable is registered as a kafka_producer_Callback_t and is
-// run by Producer_poll / Producer__execute_callbacks / Producer_destroy, at
-// most once; it receives (meta_tuple | None, borrowed_error_int, callback_id)
-// and reports as producer_on_completion describes (returning None, raising, or
-// returning True to report later through Producer__set_callback_result). After
-// an error return it still runs if the record had reached the accumulator (see
-// Producer_send_cb). The error is OWNED by the caller. Neither Python producer
-// calls this.
-static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
-    kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long ptr;
-    PyObject* rec_obj;
-    PyObject* callable;
-    if (!PyArg_ParseTuple(args, "KO!O", &ptr, &ProducerRecordType, &rec_obj, &callable)) return NULL;
-    Producer* p = producer_from_handle(ptr);
-
-    kafka_common_Error_t* err = NULL;
-    kafka_producer_ProducerRecord_t* rec =
-        producer_record_to_c((ProducerRecordObject*)rec_obj, &err);
-    if (rec == NULL) return Py_BuildValue("(ON)", Py_None, error_handle_to_py(err));
-
-    DeliveryCtx* ctx = delivery_ctx_new(callable, p->producer);
-    if (ctx == NULL) { ffi_unraisable((kafka_producer_ProducerRecord_destroy_err(rec, &ffi_err), ffi_take(&ffi_err))); return NULL; }
-    kafka_producer_Callback_t* cb = NULL;
-    err = (cb = kafka_producer_Callback_new_err(ctx, producer_on_completion, &ffi_err), ffi_take(&ffi_err));
-    if (err != NULL) {
-        // Never registered: no callback can fire.
-        delivery_ctx_free(ctx);
-        ffi_unraisable((kafka_producer_ProducerRecord_destroy_err(rec, &ffi_err), ffi_take(&ffi_err)));
-        return Py_BuildValue("(ON)", Py_None, error_handle_to_py(err));
-    }
-
-    kafka_common_KafkaFuture_t* fut = NULL;
-    Py_BEGIN_ALLOW_THREADS
-    err = (fut = kafka_producer_Producer_send_with_callback(p->producer, rec, cb, &ffi_err), ffi_take(&ffi_err));
-    Py_END_ALLOW_THREADS
-    // Both are read during the call only (the record was cloned -- its key and
-    // value bytes were read during the call -- and the callback registration
-    // copied into the Rust closure).
-    ffi_unraisable((kafka_producer_Callback_destroy_err(cb, &ffi_err), ffi_take(&ffi_err)));
-    ffi_unraisable((kafka_producer_ProducerRecord_destroy_err(rec, &ffi_err), ffi_take(&ffi_err)));
-
-    if (err != NULL) {
-        producer_orphan_delivery(p, ctx);
-        return Py_BuildValue("(ON)", Py_None, error_handle_to_py(err));
-    }
-    delivery_ctx_release(ctx);
-    PyObject* py_fut = KafkaFuture_wrap(fut, KAFKA_FUTURE_CONV_RECORD_METADATA, NULL);
-    if (py_fut == NULL) return NULL;
-    return Py_BuildValue("(Ni)", py_fut, 0);
 }
 
 // ---- send (queued) ---------------------------------------------------------
@@ -10488,8 +10431,6 @@ static PyMethodDef ProducerNativeMethods[] = {
      "MockProducer_new(auto_complete, notify_cb=None) -> handle"},
     {"KafkaProducer_new", py_KafkaProducer_new, METH_VARARGS,
      "KafkaProducer_new(config_dict, notify_cb) -> (handle, 0) or (0, owned_error_int)"},
-    {"Producer_send", py_Producer_send, METH_VARARGS,
-     "Blocking send(handle, record, on_completion) -> (KafkaFuture | None, owned_error_int); on_completion(meta | None, borrowed_error_int, callback_id) -> None | True"},
     {"Producer_send_cb", py_Producer_send_cb, METH_VARARGS,
      "Queued send(handle, record, on_completion, resolve) -> owned_error_int; resolve(owned_error_int) once handed to the producer"},
     {"Producer_poll", py_Producer_poll, METH_VARARGS,
@@ -10806,7 +10747,6 @@ PyMODINIT_FUNC PyInit__confluentkafka(void) {
         return NULL;
     }
     if (PyModule_AddIntConstant(m, "KAFKA_FUTURE_CONV_VOID", KAFKA_FUTURE_CONV_VOID) < 0
-        || PyModule_AddIntConstant(m, "KAFKA_FUTURE_CONV_RECORD_METADATA", KAFKA_FUTURE_CONV_RECORD_METADATA) < 0
         || PyModule_AddIntConstant(m, "KAFKA_FUTURE_CONV_PYOBJECT", KAFKA_FUTURE_CONV_PYOBJECT) < 0) {
         Py_DECREF(m);
         return NULL;

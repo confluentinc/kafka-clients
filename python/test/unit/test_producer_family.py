@@ -2176,11 +2176,20 @@ def test_begin_transaction_waits_for_earlier_sends(transactional: bool) -> None:
 # 2942d0921): every blocking-in-Java operation is submitted through its _cb
 # twin and waited for in Python in 100 ms slices, so Ctrl+C is honoured.
 _BLOCKING_ENTRY_POINTS = (
-    "Producer_send", "Producer_flush", "Producer_partitions_for",
+    "Producer_flush", "Producer_partitions_for",
     "Producer_init_transactions", "Producer_begin_transaction",
     "Producer_send_offsets_to_transaction",
     "Producer_commit_transaction", "Producer_abort_transaction", "Producer_close",
 )
+
+
+def test_the_extension_has_no_blocking_send() -> None:
+    # No producer hands out a record future over a C handle, whose C get would
+    # run the producer's queued callbacks on the calling thread: the record's
+    # outcome reaches Python only through its delivery callback
+    # (Producer_send_cb), and the blocking send has no entry point.
+    assert not hasattr(_lib, "Producer_send")
+    assert not hasattr(_lib, "KAFKA_FUTURE_CONV_RECORD_METADATA")
 
 
 def _forbid_blocking_entry_points(monkeypatch: pytest.MonkeyPatch) -> None:
