@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The result of `Admin::delete_topics`.
+//! The result of `Admin::delete_topics_with_topic_collection`.
 //!
 //! Corresponds to `org.apache.kafka.clients.admin.DeleteTopicsResult`.
 
@@ -20,7 +20,7 @@ use std::collections::HashMap;
 
 use crate::common::{KafkaFuture, Uuid};
 
-/// The result of `Admin::delete_topics`.
+/// The result of `Admin::delete_topics_with_topic_collection`.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DeleteTopicsResult`. Java
 /// carries two nullable maps and rejects both-null / both-set in the

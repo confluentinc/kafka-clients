@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Options for `Admin::delete_topics`.
+//! Options for `Admin::delete_topics_with_topic_collection`.
 //!
 //! Corresponds to `org.apache.kafka.clients.admin.DeleteTopicsOptions`.
 
-/// Options for `Admin::delete_topics`.
+/// Options for `Admin::delete_topics_with_topic_collection`.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DeleteTopicsOptions`.
 #[derive(Clone, Debug, PartialEq, Eq)]

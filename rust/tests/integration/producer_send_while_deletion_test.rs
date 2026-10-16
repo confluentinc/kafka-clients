@@ -197,7 +197,7 @@ async fn reassign(admin: &dyn Admin, topic: &str, partitions: &[i32], target_rep
 /// `admin.deleteTopics(List.of(topic)).all().get()`.
 async fn delete_topic(admin: &dyn Admin, topic: &str) {
     admin
-        .delete_topics(TopicCollection::of_topic_names(vec![topic.to_string()]))
+        .delete_topics_with_topic_collection(TopicCollection::of_topic_names(vec![topic.to_string()]))
         .all()
         .get()
         .await
@@ -435,7 +435,7 @@ async fn test_send_while_topic_get_recreated() {
                     let names = admin.list_topics().names().get().await?;
                     if names.contains(&topic) {
                         admin
-                            .delete_topics(TopicCollection::of_topic_names(vec![topic.clone()]))
+                            .delete_topics_with_topic_collection(TopicCollection::of_topic_names(vec![topic.clone()]))
                             .all()
                             .get()
                             .await?;

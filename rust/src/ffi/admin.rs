@@ -4188,7 +4188,7 @@ fn submit_delete_topics_by_names(
     names: Vec<String>,
     options: DeleteTopicsOptions,
 ) -> Result<KafkaFuture<DeleteTopicsOutcomes<String>>, Error> {
-    let result = admin.delete_topics_with_options(TopicCollection::of_topic_names(names), options);
+    let result = admin.delete_topics_with_topic_collection_options(TopicCollection::of_topic_names(names), options);
     let values = result
         .topic_name_values()
         .ok_or_else(|| Error::local_illegal_state("deleteTopics(ofTopicNames) did not return name-keyed futures"))?;
@@ -4202,7 +4202,7 @@ fn submit_delete_topics_by_ids(
     ids: Vec<Uuid>,
     options: DeleteTopicsOptions,
 ) -> Result<KafkaFuture<DeleteTopicsOutcomes<Uuid>>, Error> {
-    let result = admin.delete_topics_with_options(TopicCollection::of_topic_ids(ids), options);
+    let result = admin.delete_topics_with_topic_collection_options(TopicCollection::of_topic_ids(ids), options);
     let values = result
         .topic_id_values()
         .ok_or_else(|| Error::local_illegal_state("deleteTopics(ofTopicIds) did not return id-keyed futures"))?;

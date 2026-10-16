@@ -1156,7 +1156,7 @@ impl AdminBackend for RustNativeAdmin {
     ) -> Result<Outcomes<String, ()>, Error> {
         let result = self
             .admin
-            .delete_topics_with_options(TopicCollection::of_topic_names(names.to_vec()), options);
+            .delete_topics_with_topic_collection_options(TopicCollection::of_topic_names(names.to_vec()), options);
         let values = result.topic_name_values().ok_or_else(|| {
             Error::local_illegal_state("deleteTopics(ofTopicNames) did not return name-keyed futures")
         })?;
@@ -1170,7 +1170,7 @@ impl AdminBackend for RustNativeAdmin {
     ) -> Result<Outcomes<Uuid, ()>, Error> {
         let result = self
             .admin
-            .delete_topics_with_options(TopicCollection::of_topic_ids(topic_ids.to_vec()), options);
+            .delete_topics_with_topic_collection_options(TopicCollection::of_topic_ids(topic_ids.to_vec()), options);
         let values = result
             .topic_id_values()
             .ok_or_else(|| Error::local_illegal_state("deleteTopics(ofTopicIds) did not return id-keyed futures"))?;
