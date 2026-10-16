@@ -59,8 +59,8 @@ use crate::common::serialization::Deserializer;
 /// every type that touches the fetch path — would propagate two type
 /// parameters through `Fetcher`, `FetchCollector`, `CompletedFetch`,
 /// `ApplicationEventProcessor`, and ultimately
-/// `AsyncKafkaConsumer<K, V, KD, VD>`, defeating the
-/// `Box<dyn Consumer<K, V>>` factory return.
+/// `AsyncKafkaConsumer<K, V, KD, VD>`, and from there into the public
+/// `KafkaConsumer<K, V>`, whose only type parameters are the record types.
 ///
 /// Note: deliberately NOT `Clone`. Sharing happens at the outer
 /// `Arc<Deserializers<K, V>>` boundary, not on this struct.

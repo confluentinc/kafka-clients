@@ -5,6 +5,31 @@ All notable changes to the `confluent-kafka` crate are documented in this file.
 Before 1.0 the public API is not stable, and any minor release may contain
 breaking changes.
 
+## [Unreleased]
+
+### Consumer
+
+- **Breaking:** `KafkaConsumer` is now a concrete type, `KafkaConsumer<K, V>`,
+  and `KafkaConsumer::new` returns it instead of a `Box<dyn Consumer<K, V>>`.
+  Calling a `Consumer` method on it, or through generic code taking
+  `C: Consumer<K, V>`, no longer boxes the returned future. `KafkaConsumer` is
+  `Send` and `Sync`; its methods still take `&mut self` for blocking calls.
+- **Breaking:** the asynchronous methods of the `Consumer` trait return
+  `impl Future + Send` instead of using `#[async_trait]`, so the trait is no
+  longer dyn-compatible. Implementations can still be written with `async fn`.
+- New `DynConsumer` trait for dynamic dispatch (`Box<dyn DynConsumer<K, V>>`),
+  implemented automatically for every `Consumer`, as `DynProducer` is for
+  `Producer`. Replace `Box<dyn Consumer<K, V>>` with
+  `Box<dyn DynConsumer<K, V>>`; with only `Consumer` imported, method calls on
+  it keep working unchanged.
+- **Breaking (C API):** `KafkaConsumer` has a class handle, as `MockConsumer`
+  and `KafkaProducer` do. `kafka_consumer_KafkaConsumer_new` returns an owned
+  `kafka_consumer_KafkaConsumer_t *`, freed with
+  `kafka_consumer_KafkaConsumer_destroy`; the `kafka_consumer_Consumer_*`
+  operations take its borrowed `kafka_consumer_KafkaConsumer__as_Consumer`
+  view. `kafka_consumer_Consumer_destroy` is removed, since no
+  `kafka_consumer_Consumer_t` is owned any more.
+
 ## [0.1.1] - 2026-10-01
 
 First preview release of the Rust Kafka client: a translation of the Apache
