@@ -43,7 +43,7 @@ from confluent_kafka._async import await_to_end
 from confluent_kafka.concurrent_modification_error import ConcurrentModificationError
 
 from ._base import (
-    _AT_CLOSE, _AT_POLL, _ConsumerState, blank_null_topics, close_args,
+    _AT_CLOSE, _AT_POLL, _ConsumerState, abandoned_call_wait_s, blank_null_topics, close_args,
     poll_timeout_ms,
 )
 from ._conversions import offsets_to_spec, tp_to_spec
@@ -445,8 +445,20 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         # kafka consumer", a KeyboardInterrupt as it is (_raise_at). It is the
         # first exception, so it wins over a failure of the close itself.
         deferred = None if self._in_callback() else self._take_deferred_error()
-        # A call left on a closed event loop does not hold the consumer.
-        self._release_abandoned()
+        # A call left on a closed event loop does not hold the consumer. A
+        # coroutine callback it delivered is reported failed (it can never
+        # end); the core then ends the call and releases its guard before it
+        # queues the completion and fires the notify, which close() waits for,
+        # within its own timeout (abandoned_call_wait_s), so the core does not
+        # refuse the close as a call in flight. A call that goes on waiting
+        # after the callback (a poll), or one the wait does not see end, keeps
+        # the guard, and close() is refused as for any call in flight.
+        self._pending_event.clear()
+        if self._release_abandoned():
+            wait_s = abandoned_call_wait_s(timeout_ms)
+            if wait_s > 0:
+                await asyncio.get_running_loop().run_in_executor(
+                    None, self._pending_event.wait, wait_s)
         try:
             began = self._begin_close()
         except BaseException:
@@ -525,6 +537,10 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
             if interrupted is not None:
                 raise interrupted
 
+        if not report_now:
+            # Reported by the task, or, if its loop closes first, by
+            # _release_abandoned.
+            self._unacked[callback_id] = loop
         task = loop.create_task(run())
         self._listener_tasks.add(task)
         task.add_done_callback(self._listener_tasks.discard)
@@ -550,6 +566,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         while True:
             try:
                 with self._lifecycle:
+                    self._unacked.pop(callback_id, None)
                     if self._h:
                         _lib.Consumer__set_callback_result(self._h, callback_id, error)
                 return interrupted

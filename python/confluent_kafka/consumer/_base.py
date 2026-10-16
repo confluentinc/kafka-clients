@@ -195,6 +195,17 @@ TIMEOUT_NEGATIVE_MESSAGE = "Timeout must not be negative"
 _IN_CALLBACK: contextvars.ContextVar[frozenset[int]] = contextvars.ContextVar(
     "confluent_kafka_consumer_in_callback", default=frozenset())
 
+# How often a close() waiting for the uses in flight looks for an awaiting
+# call whose event loop has closed meanwhile (_finish_close).
+_ABANDONED_RECHECK_S = 0.1
+
+# How long close() waits at most, once it reported a coroutine callback left on
+# a closed loop, for the core to end the call that delivered it
+# (AsyncConsumer._a_close, abandoned_call_wait_s, capped by the close's own
+# timeout): the core completes that call once it has the report, and releases
+# its guard before it queues the completion.
+ABANDONED_CALL_END_S = 5.0
+
 _OPEN = "open"
 _CLOSING = "closing"
 _CLOSED = "closed"
@@ -336,6 +347,17 @@ def blank_null_topic_partitions(partitions: Iterable[TopicPartition]) -> list[To
             for tp in partitions]
 
 
+def abandoned_call_wait_s(close_timeout_ms: int) -> float:
+    """How long ``close()`` waits for the core to end a call whose coroutine
+    callback it reported for a closed loop (``AsyncConsumer._a_close``):
+    ``ABANDONED_CALL_END_S``, capped by the close's own timeout
+    (``close_args``' milliseconds, ``-1`` for the default close timeout, which
+    is longer), so ``close(timeout=0)`` does not wait."""
+    if close_timeout_ms < 0:
+        return ABANDONED_CALL_END_S
+    return min(ABANDONED_CALL_END_S, close_timeout_ms / 1000.0)
+
+
 def close_args(option: CloseOptions | None) -> tuple[int, int]:
     """``(timeout_ms, group-membership-operation code)`` for
     ``kafka_consumer_Consumer_close_with_options``: ``close(CloseOptions)``
@@ -375,6 +397,10 @@ class _Use:
             if state._state == _CLOSING and state._closing_thread != thread:
                 # Java's close() holds the consumer's lock (acquire()).
                 raise ConcurrentModificationError(message=CONCURRENT_MESSAGE)
+            if any(user != thread for user in state._use_threads):
+                # An awaiting call left on a closed event loop can never end
+                # its use: end it first, so it does not hold the consumer.
+                state._release_abandoned()
             if any(user != thread for user in state._use_threads):
                 # Java's acquire(): another thread is inside the consumer.
                 raise ConcurrentModificationError(message=CONCURRENT_MESSAGE)
@@ -422,8 +448,9 @@ class _ConsumerState:
     is inside the consumer, the consumer stays open, as in Java). Once closed, it
     waits for the uses still counted before it frees the handle. A waiting call is
     one use, covering its submission, its wait and its callbacks; an awaiting call
-    whose event loop has closed can never resume, so its use is ended at the start
-    of the next awaiting call and in ``close()`` (``_release_abandoned``).
+    whose event loop has closed can never resume, so its use is ended by the next
+    call that meets it, by the next awaiting call and in ``close()``
+    (``_release_abandoned``).
     """
 
     def __init__(self) -> None:
@@ -463,6 +490,10 @@ class _ConsumerState:
         # AsyncConsumer: the tasks awaiting a coroutine listener method, which
         # the delivering call waits for before it returns.
         self._listener_tasks: set[asyncio.Task[None]] = set()
+        # AsyncConsumer: the coroutine callbacks deferred to a task and not yet
+        # reported to the core, by callback id, with the task's loop. One whose
+        # loop has closed can never report: _release_abandoned reports it.
+        self._unacked: dict[int, asyncio.AbstractEventLoop] = {}
         # AsyncConsumer: a coroutine commit callback's exception a poll could
         # not raise without losing its records, raised by the next awaited call
         # (_keep_error, _raise_deferred_error).
@@ -586,6 +617,9 @@ class _ConsumerState:
                     return False
                 raise ConcurrentModificationError(message=CONCURRENT_MESSAGE)
             if any(user != thread for user in self._use_threads):
+                # A call left on a closed event loop does not hold the consumer.
+                self._release_abandoned()
+            if any(user != thread for user in self._use_threads):
                 raise ConcurrentModificationError(message=CONCURRENT_MESSAGE)
             self._state = _CLOSING
             self._closing_thread = thread
@@ -606,7 +640,10 @@ class _ConsumerState:
             self._state = _CLOSED
             self._release_abandoned()
             while self._uses:
-                self._lifecycle.wait()
+                # An awaiting call whose loop closes while this waits can never
+                # end its use: look for one again at each short wait.
+                self._lifecycle.wait(_ABANDONED_RECHECK_S)
+                self._release_abandoned()
             handle, self._h = self._h, 0
             reentrant, self._reentrant_handle = self._reentrant_handle, 0
         # What is left for an event loop that has closed is freed.
@@ -620,16 +657,40 @@ class _ConsumerState:
         close_if_defined(self._key_deserializer)
         close_if_defined(self._value_deserializer)
 
-    def _release_abandoned(self) -> None:
+    def _release_abandoned(self) -> bool:
         """End the use of every awaiting call whose event loop has closed: its
         task can never resume, so its use would never end and ``close()`` would
         wait for it for good. Its result is freed through ``_undelivered``, or
         on arrival if it has not arrived. While its native call still runs, the
         core refuses a close (``ConcurrentModificationError``), so the handle is
-        not freed under it."""
+        not freed under it.
+
+        A coroutine callback deferred to a task on such a loop (``_unacked``)
+        can never report either, and the core waits for its report before it
+        completes the call that delivered it, refusing ``close()`` meanwhile:
+        it is reported failed with ``CancelledError``, as ``asyncio.run``'s
+        shutdown would have cancelled its task.
+
+        Called by the guard of every call when another thread holds a use
+        (``_Use``), by every awaiting call, by ``close()`` before it begins and
+        while it waits for the uses in flight. Whether it reported a callback."""
         for waiter, use in list(self._async_waiters.items()):
             if waiter[0].is_closed() and self._async_waiters.pop(waiter, None) is use:
                 use.release()
+        # Its task never ends either: the calls on other loops must not wait
+        # for it (_wait_on_loop).
+        for task in [t for t in self._listener_tasks if t.get_loop().is_closed()]:
+            self._listener_tasks.discard(task)
+        reported = False
+        for callback_id, loop in list(self._unacked.items()):
+            if loop.is_closed() and self._unacked.pop(callback_id, None) is loop:
+                with self._lifecycle:
+                    if self._h:
+                        _lib.Consumer__set_callback_result(
+                            self._h, callback_id,
+                            asyncio.CancelledError("the event loop awaiting the callback closed"))
+                        reported = True
+        return reported
 
     # ---- callbacks: the caller-thread window ------------------------------
     def _in_callback(self) -> bool:

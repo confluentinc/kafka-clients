@@ -2541,6 +2541,211 @@ def test_close_does_not_wait_for_a_call_left_on_a_closed_loop(
     assert freed_errors == [error]
 
 
+def test_a_call_left_on_a_closed_loop_does_not_hold_the_consumer_for_other_threads(
+        hold_completion: Any, stopped_loop: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Gap 39: an awaiting call left on another thread's loop, which closes,
+    # holds its use of the consumer for that thread. A call that does not wait
+    # (assignment(), subscription(), paused(), current_lag(), metrics(), …)
+    # from this thread used to raise ConcurrentModificationError until a
+    # waiting call or close() ended that use; the guard every call passes
+    # (_Use) now ends it first, as _run_async and close() do.
+    consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
+    held = hold_completion("Consumer_position_cb")
+
+    def leave_a_call() -> None:
+        _start_without_draining(monkeypatch, stopped_loop, consumer.position(partition=TP0))
+        held.release.set()
+        stopped_loop.loop.close()
+        _await_queued_completion(consumer)
+
+    caller = threading.Thread(target=leave_a_call)
+    caller.start()
+    caller.join(WAIT)
+    assert held.submitted.is_set() and stopped_loop.loop.is_closed()
+    assert consumer.assignment() == set()
+    assert consumer.subscription() == set()
+    assert consumer.paused() == set()
+    _close_bounded(consumer, stopped_loop)
+
+
+def test_a_sync_close_does_not_wait_for_a_call_left_on_a_closed_loop(
+        hold_completion: Any, stopped_loop: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Gap 39's guard also covers close() entered from a thread outside any
+    # event loop: _begin_close ends the abandoned use before it checks for
+    # another thread inside the consumer.
+    consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
+    held = hold_completion("Consumer_position_cb")
+
+    def leave_a_call() -> None:
+        _start_without_draining(monkeypatch, stopped_loop, consumer.position(partition=TP0))
+        held.release.set()
+        stopped_loop.loop.close()
+        _await_queued_completion(consumer)
+
+    caller = threading.Thread(target=leave_a_call)
+    caller.start()
+    caller.join(WAIT)
+    assert consumer._begin_close()  # noqa: SLF001
+    consumer._abort_close()  # noqa: SLF001
+    _close_bounded(consumer, stopped_loop)
+
+
+def test_a_close_already_waiting_ends_a_call_its_loop_leaves_meanwhile(
+        hold_completion: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Gap 40: close() waits in _finish_close for the uses in flight. An
+    # awaiting call whose loop closes only after that wait began can never end
+    # its use; the wait now re-checks for such calls, so close() returns.
+    consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
+    held = hold_completion("Consumer_position_cb")
+    loop = asyncio.new_event_loop()
+    task = loop.create_task(consumer.position(partition=TP0))
+    loop.run_until_complete(asyncio.sleep(0))
+    assert held.submitted.wait(WAIT)
+    # close() from another thread: the guard refuses it while the call runs
+    # (Java's acquire()), so the closing state is entered as the call's own
+    # thread would, and the wait for the uses starts with the call in flight.
+    assert consumer._begin_close()  # noqa: SLF001
+    finished = threading.Event()
+
+    def finish() -> None:
+        consumer._finish_close()  # noqa: SLF001
+        finished.set()
+
+    closer = threading.Thread(target=finish)
+    closer.start()
+    try:
+        assert not finished.wait(0.3), "close() did not wait for the call in flight"
+        held.release.set()
+        loop.close()
+        assert finished.wait(WAIT), "close() waited for a call whose event loop had closed"
+    finally:
+        held.release.set()
+        if not loop.is_closed():
+            loop.close()
+        closer.join(WAIT)
+        task._log_destroy_pending = False  # noqa: SLF001
+        task.get_coro().close()
+    assert consumer._is_closed()  # noqa: SLF001
+
+
+class _StrandedCallback:
+    """A consumer whose call delivered a coroutine commit callback, awaited in
+    a task on a loop that then closed with the task pending: the callback
+    never ends and never reports. ``discard()`` closes what is left."""
+
+    def __init__(self) -> None:
+        self.consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
+        self.loop = asyncio.new_event_loop()
+        started = asyncio.Event()
+        never = asyncio.Event()
+        consumer = self.consumer
+
+        async def stuck(offsets: Any, exception: Any) -> None:
+            started.set()
+            await never.wait()
+
+        async def commit_twice() -> None:
+            await consumer.assign(partitions=[TP0])
+            await consumer.commit_nowait(offsets={}, callback=stuck)
+            # The second commit delivers the first one's callback.
+            await consumer.commit_nowait(offsets={}, callback=None)
+
+        self._tasks = {self.loop.create_task(commit_twice())}
+        deadline = time.monotonic() + WAIT
+        while not started.is_set():
+            assert time.monotonic() < deadline, "the commit callback was not delivered"
+            self.loop.run_until_complete(asyncio.sleep(0.01))
+        self._tasks |= set(consumer._listener_tasks)  # noqa: SLF001
+        self.loop.close()
+
+    def close_on_another_thread(self, option: CloseOptions) -> BaseException | None:
+        """``close(option)`` from a fresh loop, bounded by WAIT; what it raised."""
+        outcome: list[BaseException | None] = []
+
+        def close() -> None:
+            try:
+                asyncio.run(self.consumer.close(option=option))
+                outcome.append(None)
+            except BaseException as exc:  # noqa: BLE001 - returned
+                outcome.append(exc)
+
+        closer = threading.Thread(target=close, daemon=True)
+        closer.start()
+        closer.join(WAIT)
+        assert outcome, "close() waited for a callback whose loop had closed"
+        return outcome[0]
+
+    def discard(self) -> None:
+        if not self.consumer._is_closed():  # noqa: SLF001
+            asyncio.run(self.consumer.close(option=CloseOptions.timeout(1.0)))
+        for pending in self._tasks:
+            pending._log_destroy_pending = False  # noqa: SLF001
+            pending.get_coro().close()
+
+
+def test_a_coroutine_commit_callback_left_on_a_closed_loop_does_not_block_close(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # Gap 41: a call delivers a coroutine commit callback and awaits it in a
+    # task on its loop; the core waits for that callback's report before it
+    # completes the call, and refuses close() meanwhile. The loop closes with
+    # the task pending, so the callback never ends and never reports. The
+    # consumer now reports it, failed with CancelledError (what asyncio.run's
+    # shutdown would deliver to the task), once it finds its loop closed, so
+    # close() from a fresh loop returns.
+    stranded = _StrandedCallback()
+    reported: list[tuple[int, BaseException | None]] = []
+    real_report = _lib.Consumer__set_callback_result
+
+    def report(handle: int, callback_id: int, error: BaseException | None) -> None:
+        reported.append((callback_id, error))
+        real_report(handle, callback_id, error)
+
+    try:
+        monkeypatch.setattr(_lib, "Consumer__set_callback_result", report)
+        assert stranded.close_on_another_thread(CloseOptions.timeout(1.0)) is None
+        ((_, error),) = reported
+        assert isinstance(error, asyncio.CancelledError)
+        assert stranded.consumer._is_closed()  # noqa: SLF001
+    finally:
+        stranded.discard()
+
+
+class _RecordingEvent(threading.Event):
+    """The consumer's pending-callback event, recording the timeouts it is
+    waited with."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.waits: list[float | None] = []
+
+    def wait(self, timeout: float | None = None) -> bool:
+        self.waits.append(timeout)
+        return super().wait(timeout)
+
+
+@pytest.mark.parametrize("timeout, waited", [(0, []), (0.3, [0.3]), (None, [5.0])],
+                         ids=["zero", "short", "default"])
+def test_close_waits_for_a_stranded_callback_s_call_within_its_own_timeout(
+        timeout: float | None, waited: list[float]) -> None:
+    # Critic 79 issue 4: once close() reported a stranded coroutine callback,
+    # it waits for the core to end the call that delivered it at most
+    # ABANDONED_CALL_END_S, capped by the close's own timeout: not at all for
+    # close(timeout=0), which may then be refused as a call in flight is.
+    stranded = _StrandedCallback()
+    event = _RecordingEvent()
+    stranded.consumer._pending_event = event  # noqa: SLF001
+    try:
+        option = CloseOptions.timeout(timeout)
+        started = time.monotonic()
+        outcome = stranded.close_on_another_thread(option)
+        assert outcome is None or isinstance(outcome, ConcurrentModificationError)
+        assert event.waits == waited
+        if timeout == 0:
+            assert time.monotonic() - started < 1.0
+    finally:
+        stranded.discard()
+
+
 def _start_without_draining(monkeypatch: pytest.MonkeyPatch, stopped_loop: Any,
                             call: Any) -> None:
     """``stopped_loop.start(call)`` with the consumer's drain gated off, so the
