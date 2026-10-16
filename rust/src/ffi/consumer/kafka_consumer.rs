@@ -12,14 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! C binding for `org.apache.kafka.clients.consumer.KafkaConsumer`'s
-//! constructor (CLAUDE.md §4).
+//! C bindings for `org.apache.kafka.clients.consumer.KafkaConsumer`
+//! (CLAUDE.md §4).
 //!
-//! `KafkaConsumer::new` returns the delegate it chose as `Box<dyn Consumer>`,
-//! so the C constructor delivers an owned `kafka_consumer_Consumer_t` and
-//! there is no `kafka_consumer_KafkaConsumer_t`. Keys and values are
-//! `void *` (rule 6): what the deserializers produce, or `kafka_Bytes_t *`
-//! owned by the records when a deserializer is `NULL`.
+//! `kafka_consumer_KafkaConsumer_t` is a class handle, owned by the caller
+//! and freed with [`kafka_consumer_KafkaConsumer_destroy`];
+//! [`kafka_consumer_KafkaConsumer__as_Consumer`] is its borrowed `Consumer`
+//! view (rule 3), through which every `kafka_consumer_Consumer_*` function
+//! applies. Keys and values are `void *` (rule 6): what the deserializers
+//! produce, or `kafka_Bytes_t *` owned by the records when a deserializer is
+//! `NULL`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -39,6 +41,12 @@ use crate::ffi::consumer::consumer_config::{consumer_config_ref, kafka_consumer_
 use crate::ffi::consumer::{ConsumerClassHandle, ConsumerKind, Owns, kafka_consumer_Consumer_t};
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{GenericValue, box_bytes};
+
+/// Opaque handle to a [`KafkaConsumer`] over `void *` key and value.
+#[repr(C)]
+pub struct kafka_consumer_KafkaConsumer_t {
+    _private: [u8; 0],
+}
 
 /// The deserializer standing for a `NULL` one: the record's `void *` is an
 /// owned `kafka_Bytes_t *` over the fetched bytes, sliced from the fetch
@@ -133,10 +141,9 @@ unsafe fn deserializer_from(
 }
 
 /// `KafkaConsumer(ConsumerConfig config, Deserializer<K> keyDeserializer,
-/// Deserializer<V> valueDeserializer)`: returns the owned
-/// `kafka_consumer_Consumer_t` the constructor returns (`Box<dyn Consumer>` in
-/// Rust), freed with `kafka_consumer_Consumer_destroy`, or stores the owned
-/// error in `*out_err` and returns `NULL`. The config is copied; each
+/// Deserializer<V> valueDeserializer)`: returns the owned class handle, freed
+/// with [`kafka_consumer_KafkaConsumer_destroy`], or stores the owned error in
+/// `*out_err` and returns `NULL`. The config is copied; each
 /// deserializer handle is consumed (its `self` stays the caller's until the
 /// consumer is destroyed, CLAUDE.md §4 rule 3), and `NULL` means the record's
 /// `void *` on that side is a `kafka_Bytes_t *` owned by the records (rule 6).
@@ -152,7 +159,7 @@ pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
     key_deserializer: *mut kafka_common_serialization_Deserializer_t,
     value_deserializer: *mut kafka_common_serialization_Deserializer_t,
     out_err: *mut *mut kafka_common_Error_t,
-) -> *mut kafka_consumer_Consumer_t {
+) -> *mut kafka_consumer_KafkaConsumer_t {
     // SAFETY: Per this function's `# Safety`, `config` is a live handle; no setter can run on it
     // meanwhile, since the setters' `# Safety` excludes any other call using the handle at the same
     // time, so `consumer_config_ref`'s requirement holds for this statement, the only use of the
@@ -165,15 +172,67 @@ pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
     // used afterwards, as `deserializer_from` requires.
     let (value, owns_value) = unsafe { deserializer_from(value_deserializer) };
     let result = ConsumerClassHandle::new(Owns { key: owns_key, value: owns_value }, || {
-        KafkaConsumer::new(config, key, value).map(ConsumerKind::Async)
+        KafkaConsumer::new(config, key, value).map(|consumer| ConsumerKind::Async(Box::new(consumer)))
     });
     // SAFETY: Per this function's `# Safety`, `out_err` is a valid slot, as `deliver_value` requires;
     // the handle written is the fresh box the caller owns, freed with
-    // `kafka_consumer_Consumer_destroy`.
+    // `kafka_consumer_KafkaConsumer_destroy`.
     unsafe {
         deliver_value(result, out_err, |handle| {
-            Box::into_raw(handle) as *mut kafka_consumer_Consumer_t
+            Box::into_raw(handle) as *mut kafka_consumer_KafkaConsumer_t
         })
+    }
+}
+
+/// The class as a `Consumer`: a borrowed view valid until the class handle
+/// is destroyed, never destroyed itself (CLAUDE.md §4 rule 3). `*mut`
+/// because `poll` and the other operations take `&mut self`.
+///
+/// # Safety
+///
+/// `self_` must be a live handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_KafkaConsumer__as_Consumer(
+    self_: *mut kafka_consumer_KafkaConsumer_t,
+) -> *mut kafka_consumer_Consumer_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, i.e. a
+    // `Box<ConsumerClassHandle>` from `kafka_consumer_KafkaConsumer_new` not yet destroyed, alive
+    // for this expression, the only use of the reference; `as_consumer` only takes its address.
+    unsafe { &*(self_ as *const ConsumerClassHandle) }.as_consumer()
+}
+
+/// Frees a handle returned by [`kafka_consumer_KafkaConsumer_new`]: awaits the
+/// `_cb` operations in flight, runs every pending callback (so each fires
+/// exactly once), drops the consumer (which closes it if `close` was never
+/// called, as Java's finalizer-less contract expects the caller to do) and
+/// shuts its runtime down. Never called on the `__as_Consumer` view; a null
+/// pointer is a no-op. It first wakes the operation still waiting, which
+/// fails with `kafka_common_Error_is_wakeup_error`, so a long `poll_cb` does
+/// not hold it up. Called inside a tokio runtime (on a worker thread, or
+/// inside a `block_on`), where it cannot wait, it returns at once and all of
+/// this happens on a new thread, the pending callbacks included; if that
+/// thread cannot be started, the handle is leaked and an error logged.
+///
+/// # Safety
+///
+/// `self_` must be null or an owned handle from
+/// [`kafka_consumer_KafkaConsumer_new`] not yet destroyed, that no other call
+/// uses at the same time; the callbacks this call runs may use its
+/// `__as_Consumer` view only to report through
+/// `kafka_consumer_Consumer__set_callback_result`, and neither is used once
+/// this call returned.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_destroy(self_: *mut kafka_consumer_KafkaConsumer_t) {
+    if !self_.is_null() {
+        // SAFETY: Per this function's `# Safety`, `self_` (non-null, checked above) is an owned
+        // handle not yet destroyed, i.e. the `Box::into_raw` of the `Box<ConsumerClassHandle>`
+        // `kafka_consumer_KafkaConsumer_new` delivered, that no other call uses at the same time
+        // except the reports of the callbacks this call runs, as `ConsumerClassHandle::destroy`
+        // requires; it frees the handle exactly once, after awaiting the tasks still holding the
+        // client.
+        unsafe { ConsumerClassHandle::destroy(self_ as *mut ConsumerClassHandle) };
     }
 }
 
@@ -224,7 +283,7 @@ mod tests {
                 Box::new(BytesPassthroughDeserializer),
                 Box::new(BytesPassthroughDeserializer),
             )
-            .map(ConsumerKind::Async)
+            .map(|consumer| ConsumerKind::Async(Box::new(consumer)))
         });
         assert!(result.is_err());
     }
@@ -274,8 +333,7 @@ mod tests {
             kafka_consumer_ConsumerConfig_destroy, kafka_consumer_ConsumerConfig_new,
         };
         use crate::ffi::consumer::{
-            kafka_consumer_Consumer__execute_callbacks, kafka_consumer_Consumer_assign,
-            kafka_consumer_Consumer_destroy, kafka_consumer_Consumer_poll_cb,
+            kafka_consumer_Consumer__execute_callbacks, kafka_consumer_Consumer_assign, kafka_consumer_Consumer_poll_cb,
         };
         use crate::ffi::util::{
             kafka_List_add, kafka_List_destroy, kafka_List_new, kafka_Map_destroy, kafka_Map_new, kafka_Map_put,
@@ -300,10 +358,10 @@ mod tests {
             let config = kafka_consumer_ConsumerConfig_new(props, &mut err);
             assert!(err.is_null());
             kafka_Map_destroy(props);
-            let consumer =
-                kafka_consumer_KafkaConsumer_new(config, std::ptr::null_mut(), std::ptr::null_mut(), &mut err);
+            let class = kafka_consumer_KafkaConsumer_new(config, std::ptr::null_mut(), std::ptr::null_mut(), &mut err);
             assert!(err.is_null());
             kafka_consumer_ConsumerConfig_destroy(config);
+            let consumer = kafka_consumer_KafkaConsumer__as_Consumer(class);
 
             let partitions = kafka_List_new();
             let tp = kafka_common_TopicPartition_new(c"t".as_ptr(), 0);
@@ -325,7 +383,7 @@ mod tests {
             assert!(fired.lock().unwrap().is_empty(), "still polling");
 
             let started = std::time::Instant::now();
-            kafka_consumer_Consumer_destroy(consumer);
+            kafka_consumer_KafkaConsumer_destroy(class);
             let elapsed = started.elapsed();
             assert!(elapsed < std::time::Duration::from_secs(10), "destroy took {elapsed:?}");
             assert_eq!(*fired.lock().unwrap(), [Some((1, "WakeupTrigger fired".to_string()))]);

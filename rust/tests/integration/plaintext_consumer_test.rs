@@ -142,7 +142,7 @@ use crate::common::test_utils::with_timeout;
 
 // Type alias matching the bytes-typed `Consumer` trait object returned by
 // `KafkaConsumer::new::<Vec<u8>, Vec<u8>>` (mirrors Java's `Consumer<byte[], byte[]>`).
-type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
+type BytesConsumer = dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>;
 
 // ── Cluster configs ───────────────────────────────────────────────────
 
@@ -228,12 +228,14 @@ fn build_producer(ctx: &TestContext) -> KafkaProducer<Vec<u8>, Vec<u8>> {
 }
 
 fn make_consumer(ctx: &TestContext, group_id: &str, overrides: &[(&str, &str)]) -> Box<BytesConsumer> {
-    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_consumer_config(ctx, group_id, overrides),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+    Box::new(
+        KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
+            make_consumer_config(ctx, group_id, overrides),
+            Box::new(ByteArrayDeserializer),
+            Box::new(ByteArrayDeserializer),
+        )
+        .expect("KafkaConsumer::new should succeed"),
     )
-    .expect("KafkaConsumer::new should succeed")
 }
 
 // ── Producer helpers ─────────────────────────────────────────────────
@@ -1037,19 +1039,19 @@ async fn test_async_consumer_consuming_with_null_group_id() {
     let producer = build_producer(&ctx);
     // consumer1: groupless, earliest. consumer2: groupless, latest.
     // consumer3: groupless, explicit seek.
-    let mut consumer1 = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer1 = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_groupless_consumer_config(&ctx, &[("auto.offset.reset", "earliest"), ("client.id", "consumer1")]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
     .expect("consumer1");
-    let mut consumer2 = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer2 = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_groupless_consumer_config(&ctx, &[("auto.offset.reset", "latest"), ("client.id", "consumer2")]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
     .expect("consumer2");
-    let mut consumer3 = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer3 = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_groupless_consumer_config(&ctx, &[("auto.offset.reset", "earliest"), ("client.id", "consumer3")]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
@@ -1082,7 +1084,7 @@ async fn test_async_consumer_consuming_with_null_group_id() {
     // the 3 records (offsets 0, 1, 2).
     consumer3.seek_with_offset(tp.clone(), 1).await.expect("seek c3");
 
-    let num_records1 = poll_count(consumer1.as_mut(), 3, Duration::from_secs(15)).await;
+    let num_records1 = poll_count(&mut consumer1, 3, Duration::from_secs(15)).await;
     // Java: commitSync / committed raise InvalidGroupId for groupless.
     let c1_commit = consumer1.commit_sync().await.expect_err("groupless commit_sync should fail");
     assert!(matches!(c1_commit, Error::InvalidGroupId(_)), "got {c1_commit:?}");
@@ -1092,8 +1094,8 @@ async fn test_async_consumer_consuming_with_null_group_id() {
         .expect_err("groupless committed should fail");
     assert!(matches!(c2_committed, Error::InvalidGroupId(_)), "got {c2_committed:?}");
 
-    let num_records2 = poll_count(consumer2.as_mut(), 0, Duration::from_secs(5)).await;
-    let num_records3 = poll_count(consumer3.as_mut(), 2, Duration::from_secs(15)).await;
+    let num_records2 = poll_count(&mut consumer2, 0, Duration::from_secs(5)).await;
+    let num_records3 = poll_count(&mut consumer3, 2, Duration::from_secs(15)).await;
 
     consumer1.unsubscribe().await.expect("unsubscribe c1");
     consumer2.unsubscribe().await.expect("unsubscribe c2");
@@ -1120,7 +1122,7 @@ async fn test_async_consumer_null_group_id_not_supported_if_committing() {
     let topic = ctx.topic("topic");
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_groupless_consumer_config(&ctx, &[("auto.offset.reset", "earliest"), ("client.id", "consumer1")]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
@@ -1217,7 +1219,7 @@ async fn test_async_consumer_position_with_error_connection_respects_wakeup() {
         ("enable.auto.commit".to_string(), "false".to_string()),
         ("group.id".to_string(), "g_position_err_wakeup".to_string()),
     ]);
-    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         ConsumerConfig::new(&props).expect("invalid test config"),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),

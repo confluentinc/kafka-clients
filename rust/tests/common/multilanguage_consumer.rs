@@ -53,7 +53,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use confluent_kafka::common::header::{RecordHeader, RecordHeaders};
 use confluent_kafka::common::metrics::{ClosureGauge, KafkaMetric, MetricValueProvider, Metrics};
 use confluent_kafka::common::record::TimestampType;
@@ -399,7 +398,6 @@ enum TpListOp {
     Resume,
 }
 
-#[async_trait]
 impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
     // ── non-blocking state reads (sync in the trait) ──
     fn assignment(&self) -> HashSet<TopicPartition> {

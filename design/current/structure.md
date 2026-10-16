@@ -149,8 +149,9 @@ In practice:
   generated wire modules are `pub(crate)`. Tests that need them live inside the
   crate: the message and protocol tests sit under `rust/src/common/`, and the
   raw-socket integration suites under `rust/src/integration_tests/`.
-- `consumer::AsyncKafkaConsumer` is `pub(crate)`; `KafkaConsumer::new`
-  constructs it and returns it as `Box<dyn Consumer<K, V>>`.
+- `consumer::AsyncKafkaConsumer` is `pub(crate)`; the public
+  `KafkaConsumer<K, V>` holds it as its delegate and forwards every
+  `Consumer` method to it.
 - `Errors` (the wire enum) is `pub(crate)`, so `Error` has no public
   `error()` / `code()`. Callers classify by variant and `is_*_error()`, and C
   callers use `kafka_common_Error_e`.
@@ -275,7 +276,8 @@ Sender-confined fields live on `sender.rs`, not in the manager.*
 ```
 rust/src/consumer/               # 22 files + 45 internals + 10 metrics + 9 events (each incl. mod.rs)
 ├── mod.rs                  # Consumer<K, V> trait
-├── kafka_consumer.rs       # KafkaConsumer::new -> Box<dyn Consumer<K, V>>
+├── kafka_consumer.rs       # KafkaConsumer<K, V>, wrapping the AsyncKafkaConsumer delegate
+├── dyn_consumer.rs         # DynConsumer<K, V>, the dyn-compatible view of Consumer
 ├── async_kafka_consumer.rs # AsyncKafkaConsumer<K, V> (pub(crate))
 │                           # + ConsumerHandle (pub)
 ├── mock_consumer.rs        # MockConsumer<K, V>
@@ -352,7 +354,7 @@ pipeline over a single owned buffer — read them in that order.*
 ## ffi/ and bindings
 
 ```
-rust/src/ffi/           # feature-gated: --features ffi; 269 files, 2353 exported symbols
+rust/src/ffi/           # feature-gated: --features ffi; 269 files, 2354 exported symbols
 ├── mod.rs              # module docs: the C conventions as implemented
 ├── common.rs           # kafka_common_Error_t, kafka_common_Error_e, init_default_logger
 ├── error_predicates.rs # generated: 172 kafka_common_Error_is_*_error predicates
@@ -363,8 +365,9 @@ rust/src/ffi/           # feature-gated: --features ffi; 269 files, 2353 exporte
 │                       # security/, serialization/, metrics/, ...)
 ├── producer/           # 9 files, 129 symbols: Producer_t, KafkaProducer_t, MockProducer_t,
 │                       # Callback_t, Partitioner_t, ProducerConfig_t, ProducerRecord_t, ...
-├── consumer/           # 16 files, 297 symbols: Consumer_t, MockConsumer_t, ConsumerHandle_t,
-│                       # ConsumerRebalanceListener_t, OffsetCommitCallback_t, ...
+├── consumer/           # 16 files, 298 symbols: Consumer_t, KafkaConsumer_t, MockConsumer_t,
+│                       # ConsumerHandle_t, ConsumerRebalanceListener_t,
+│                       # OffsetCommitCallback_t, ...
 └── admin/              # 130 files, 844 symbols: Admin_t, MockAdminClient_t, rpc.rs (94 RPC
     ├── options/        #   invokers), one <Rpc>Result_t and one <Rpc>Options_t per Java class
     └── ...
