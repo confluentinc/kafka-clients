@@ -878,3 +878,49 @@ def _admin_security_rpc_types(c: object = None) -> None:
 def test_admin_security_rpc_typing_imports() -> None:
     """Runtime smoke check of the security RPCs' typing function."""
     _admin_security_rpc_types()
+
+
+# ---------------------------------------------------------------------------
+# KafkaFuture / AsyncKafkaFuture (CLAUDE.md, Futures)
+# ---------------------------------------------------------------------------
+
+
+def _kafka_future_types() -> None:
+    import concurrent.futures
+
+    from confluent_kafka.common import KafkaFuture
+
+    f = KafkaFuture.completed_future(value=1)
+    assert_type(f, KafkaFuture[int])
+    assert_type(f.get(), int)
+    assert_type(f.get(timeout=1.0), int)
+    assert_type(f.get(timeout=timedelta(seconds=1)), int)
+    assert_type(f.get_now(value_if_absent=0), int)
+    assert_type(f.then_apply(function=str), KafkaFuture[str])
+    assert_type(f.when_complete(action=lambda value, error: None), KafkaFuture[int])
+    assert_type(KafkaFuture.all_of(futures=(f, f.then_apply(function=str))), KafkaFuture[None])
+    assert_type(f.to_completion_stage(), concurrent.futures.Future[int])
+    assert_type(f.cancel(may_interrupt_if_running=False), bool)
+    assert_type(f.is_done(), bool)
+
+
+async def _async_kafka_future_types() -> None:
+    import asyncio
+
+    from confluent_kafka.common import AsyncKafkaFuture
+
+    a = AsyncKafkaFuture.completed_future(value="x")
+    assert_type(a, AsyncKafkaFuture[str])
+    assert_type(await a.get(), str)
+    assert_type(await a.get(timeout=0.5), str)
+    assert_type(a.get_now(value_if_absent="y"), str)
+    assert_type(a.then_apply(function=len), AsyncKafkaFuture[int])
+    assert_type(AsyncKafkaFuture.all_of(futures=(a,)), AsyncKafkaFuture[None])
+    assert_type(a.to_completion_stage(), asyncio.Future[str])
+
+
+def test_kafka_future_typing() -> None:
+    import asyncio
+
+    _kafka_future_types()
+    asyncio.run(_async_kafka_future_types())
