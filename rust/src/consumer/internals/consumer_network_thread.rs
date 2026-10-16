@@ -445,10 +445,12 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             //     `CommitRequestManager.poll(currentTimeMs)`
             //     (`CommitRequestManager.java:181-209`). Drains
             //     `unsent_offset_commits` and `unsent_offset_fetches`
-            //     into `UnsentRequest`s, fires the auto-commit timer
-            //     via `maybe_auto_commit_async`, and handles
+            //     into `UnsentRequest`s and handles
             //     `closing && coordinator unknown` by failing pending
-            //     commits with `CommitFailedException`. Without this
+            //     commits with `CommitFailedException`. It never starts
+            //     an auto-commit: as in Java, only the application's
+            //     `poll()` / `assign()` events do, through
+            //     `update_timer_and_maybe_commit`. Without this
             //     call `commit_sync()`/`committed()` hang forever
             //     (Phase-12 Critic Issue 1).
             //   * `membership.reconcile(now, false)` — driven in
@@ -2790,5 +2792,309 @@ mod tests {
         time.sleep(500);
         thread.run_once().await;
         assert_eq!(retry_backoff_ms, cached_max_time_to_wait_ms.load(Ordering::Acquire));
+    }
+
+    /// Audit finding C4-01, through the real `run_once`: the background loop
+    /// never starts the interval auto-commit on its own (Java's
+    /// `CommitRequestManager.poll` only drains queued requests), so records
+    /// the application is still processing are not committed behind its back.
+    /// The fix must not swing the other way either:
+    ///   - with the timer expired, the bound published to the application
+    ///     task (`cachedMaximumTimeToWait`) is 0, so a long `poll()` with no
+    ///     new records wakes and submits an `AsyncPollEvent`;
+    ///   - that event (`ApplicationEventProcessor.process(AsyncPollEvent)` →
+    ///     `updateTimerAndMaybeCommit`) starts exactly one auto-commit, which
+    ///     the following iterations send and do not duplicate.
+    #[tokio::test]
+    async fn run_once_auto_commits_only_on_the_application_poll_event() {
+        use crate::common::TopicPartition;
+        use crate::common::protocol::ApiKeys;
+
+        let mut config = make_config();
+        config.group_id = Some("g".to_string());
+        config.enable_auto_commit = true;
+        config.auto_commit_interval_ms = 300;
+        let retry_backoff_ms = config.retry_backoff_ms();
+
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let tp = TopicPartition::new("t".to_string(), 0);
+        {
+            let mut s = subs.lock().unwrap();
+            s.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+            s.seek(&tp, 10).expect("seek");
+        }
+        let metadata = make_metadata(&config, subs.clone());
+        let time: Arc<MockTime> = Arc::new(mock_time(1_000));
+        let coordinator = Arc::new(crate::consumer::internals::CoordinatorRequestManager::new(
+            retry_backoff_ms,
+            config.retry_backoff_max_ms(),
+            "g",
+        ));
+        coordinator.set_coordinator_for_test(Node::new(1, "localhost".to_string(), 9092));
+        let commit = Arc::new(crate::consumer::internals::CommitRequestManager::new(
+            &config,
+            metadata.clone(),
+            subs.clone(),
+            "g",
+            None,
+            time.clone() as Arc<dyn Time>,
+            time.milliseconds(),
+        ));
+        commit.set_coordinator(Arc::clone(&coordinator));
+        let request_managers = Arc::new(Mutex::new(RequestManagers::new(
+            Some(Arc::clone(&coordinator)),
+            None,
+            Some(Arc::clone(&commit)),
+            None,
+            None,
+            Some(make_offsets_manager(&config, subs.clone(), metadata.clone())),
+            None,
+        )));
+        let delegate = Arc::new(AsyncMutex::new(make_delegate(&config, metadata.clone())));
+        let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
+        let processor = ApplicationEventProcessor::new(
+            request_managers.clone(),
+            metadata.clone(),
+            subs.clone(),
+            reaper.clone(),
+            time.clone(),
+        );
+        let (tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
+        let cached_max_time_to_wait_ms = Arc::new(AtomicI64::new(NetThread::MAX_POLL_TIMEOUT_MS));
+        let mut thread = ConsumerNetworkThread::new(
+            time.clone() as Arc<dyn Time>,
+            rx,
+            reaper,
+            processor,
+            delegate.clone(),
+            request_managers,
+            None,
+            WakeupTrigger::new(),
+            Arc::clone(&cached_max_time_to_wait_ms),
+        );
+        // OffsetCommit requests handed to the network layer so far: still
+        // unsent in the delegate, or already sent to the mock client (which
+        // never answers them).
+        let offset_commits_staged = || async {
+            let guard = delegate.lock().await;
+            let unsent = guard
+                .unsent_requests()
+                .iter()
+                .filter(|r| r.request_builder().is_some_and(|b| b.api_key() == &ApiKeys::OFFSET_COMMIT))
+                .count();
+            let sent = guard
+                .client_for_test_ref()
+                .requests()
+                .iter()
+                .filter(|r| r.api_key() == &ApiKeys::OFFSET_COMMIT)
+                .count();
+            unsent + sent
+        };
+
+        thread.run_once().await;
+        assert_eq!(300, cached_max_time_to_wait_ms.load(Ordering::Acquire));
+
+        // The interval expires while the application is still processing the
+        // records of its last poll(): the background loop keeps running, but
+        // must not commit.
+        time.sleep(400);
+        for _ in 0..3 {
+            thread.run_once().await;
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            0,
+            offset_commits_staged().await,
+            "Java: the background loop never starts an auto-commit; only the application's poll()/assign() does"
+        );
+        assert_eq!(
+            0,
+            cached_max_time_to_wait_ms.load(Ordering::Acquire),
+            "the expired auto-commit timer must bound the application task's wait, so a long poll() wakes up"
+        );
+
+        // The application's poll loop submits an AsyncPollEvent.
+        let now_ms = time.milliseconds();
+        let event = ApplicationEvent::AsyncPoll {
+            deadline_ms: now_ms + 60_000,
+            poll_time_ms: now_ms,
+            state: Arc::new(AsyncPollState::new()),
+        };
+        tx.send(ApplicationEventEnvelope { event, enqueued_ms: now_ms })
+            .expect("send ok");
+        // The event's processing runs on a spawned task; the auto-commit it
+        // enqueues is sent by a following iteration.
+        for _ in 0..16 {
+            thread.run_once().await;
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            1,
+            offset_commits_staged().await,
+            "the application poll event must start exactly one auto-commit"
+        );
+        assert_eq!(
+            300,
+            cached_max_time_to_wait_ms.load(Ordering::Acquire),
+            "starting the auto-commit resets the interval timer"
+        );
+    }
+
+    /// Audit finding C4-01 follow-up: in Java the network thread processes an
+    /// `AsyncPollEvent` (which starts the interval auto-commit through
+    /// `updateTimerAndMaybeCommit`) and then polls the request managers in the
+    /// same `runOnce`, so the OffsetCommit is sent immediately. In Rust the
+    /// event's work runs on a spawned task that can enqueue the auto-commit
+    /// after the bg loop already polled the commit manager; the commit manager
+    /// must then wake the loop, or the commit waits until something else ends
+    /// the network poll (up to `MAX_POLL_TIMEOUT_MS`).
+    ///
+    /// The network poll here never returns on its own (a socket wait with no
+    /// data, idle otherwise), and the commit manager is given the client's
+    /// wakeup handle exactly as the production constructor does, so only that
+    /// wake can get the commit out. The deadline is far below the 5 s max poll
+    /// timeout.
+    #[tokio::test]
+    async fn auto_commit_from_application_poll_event_is_sent_promptly() {
+        use crate::common::TopicPartition;
+        use crate::common::protocol::ApiKeys;
+
+        let mut config = make_config();
+        config.group_id = Some("g".to_string());
+        config.enable_auto_commit = true;
+        config.auto_commit_interval_ms = 300;
+        let retry_backoff_ms = config.retry_backoff_ms();
+
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let tp = TopicPartition::new("t".to_string(), 0);
+        {
+            let mut s = subs.lock().unwrap();
+            s.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+            s.seek(&tp, 10).expect("seek");
+        }
+        let metadata = make_metadata(&config, subs.clone());
+        let time: Arc<MockTime> = Arc::new(mock_time(1_000));
+        let coordinator = Arc::new(crate::consumer::internals::CoordinatorRequestManager::new(
+            retry_backoff_ms,
+            config.retry_backoff_max_ms(),
+            "g",
+        ));
+        coordinator.set_coordinator_for_test(Node::new(1, "localhost".to_string(), 9092));
+        let commit = Arc::new(crate::consumer::internals::CommitRequestManager::new(
+            &config,
+            metadata.clone(),
+            subs.clone(),
+            "g",
+            None,
+            time.clone() as Arc<dyn Time>,
+            time.milliseconds(),
+        ));
+        commit.set_coordinator(Arc::clone(&coordinator));
+        let counting_delegate = make_counting_delegate(&config, metadata.clone());
+        // The network poll blocks until woken, emulating an idle socket wait.
+        counting_delegate
+            .client_for_test_ref()
+            .poll_block()
+            .store(true, Ordering::SeqCst);
+        // The one wakeup primitive, taken from the delegate and installed in
+        // the commit manager exactly as the production constructor does.
+        let event_notify = counting_delegate.wakeup_handle();
+        commit.set_completion_notify(Arc::clone(&event_notify));
+        let request_managers = Arc::new(Mutex::new(RequestManagers::new(
+            Some(Arc::clone(&coordinator)),
+            None,
+            Some(Arc::clone(&commit)),
+            None,
+            None,
+            Some(make_offsets_manager(&config, subs.clone(), metadata.clone())),
+            None,
+        )));
+        let delegate = Arc::new(AsyncMutex::new(counting_delegate));
+        let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
+        let processor = ApplicationEventProcessor::new(
+            request_managers.clone(),
+            metadata.clone(),
+            subs.clone(),
+            reaper.clone(),
+            time.clone(),
+        );
+        let (tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
+        let mut thread = ConsumerNetworkThread::new(
+            time.clone() as Arc<dyn Time>,
+            rx,
+            reaper,
+            processor,
+            delegate.clone(),
+            request_managers,
+            None,
+            WakeupTrigger::new(),
+            Arc::new(AtomicI64::new(NetThread::MAX_POLL_TIMEOUT_MS)),
+        );
+
+        // The interval has expired; the application calls poll(), whose
+        // `ApplicationEventHandler::add` enqueues the AsyncPoll event and pokes
+        // the wakeup handle.
+        time.sleep(400);
+        let now_ms = time.milliseconds();
+        let event = ApplicationEvent::AsyncPoll {
+            deadline_ms: now_ms + 60_000,
+            poll_time_ms: now_ms,
+            state: Arc::new(AsyncPollState::new()),
+        };
+        tx.send(ApplicationEventEnvelope { event, enqueued_ms: now_ms })
+            .expect("send ok");
+        event_notify.notify_one();
+
+        // Drive the bg loop until the commit manager has handed the
+        // auto-commit to the network layer: the event reset the timer (so the
+        // wait bound is the full interval again) and nothing is left unsent in
+        // the commit manager. Then stop the loop between iterations — releasing
+        // the blocked poll with the wakeup handle, as `close()` does — rather
+        // than cancelling `run_once` mid-poll.
+        let stop = AtomicBool::new(false);
+        let mut handed_over = false;
+        // No yield between iterations: on this current-thread runtime the
+        // event's spawned task then runs only once the loop has polled the
+        // commit manager and parked in the network poll — the ordering in
+        // which the auto-commit is enqueued too late for this iteration.
+        let driver = async {
+            while !stop.load(Ordering::SeqCst) {
+                thread.run_once().await;
+            }
+        };
+        let watcher = async {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            while tokio::time::Instant::now() < deadline {
+                let now_ms = time.milliseconds();
+                if commit.maximum_time_to_wait(now_ms) == 300 && commit.unsent_offset_commits_len_for_test() == 0 {
+                    handed_over = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            stop.store(true, Ordering::SeqCst);
+            event_notify.notify_one();
+        };
+        tokio::join!(driver, watcher);
+
+        assert!(
+            handed_over,
+            "Java sends the auto-commit in the same runOnce that processes the AsyncPollEvent; \
+             the bg loop must be woken to send it instead of waiting out the network poll"
+        );
+        let guard = delegate.lock().await;
+        let staged = guard
+            .unsent_requests()
+            .iter()
+            .filter(|r| r.request_builder().is_some_and(|b| b.api_key() == &ApiKeys::OFFSET_COMMIT))
+            .count()
+            + guard
+                .client_for_test_ref()
+                .inner
+                .requests()
+                .iter()
+                .filter(|r| r.api_key() == &ApiKeys::OFFSET_COMMIT)
+                .count();
+        assert_eq!(1, staged, "the application poll event must start exactly one auto-commit");
     }
 }

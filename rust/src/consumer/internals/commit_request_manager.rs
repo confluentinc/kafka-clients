@@ -577,7 +577,9 @@ struct CommitRequestManagerInner {
     /// poked whenever a spawned retry driver ([`fetch_offsets_with_retries`],
     /// [`commit_sync_with_retries`],
     /// [`auto_commit_sync_before_rebalance_with_retries`]) re-enqueues an
-    /// `OffsetFetch` / `OffsetCommit` retry.
+    /// `OffsetFetch` / `OffsetCommit` retry, and whenever
+    /// `maybe_auto_commit_async` enqueues an interval auto-commit (it may run
+    /// on the spawned `AsyncPoll` task, after the bg loop polled this manager).
     ///
     /// Java retries inside the `whenComplete` continuation, which runs on the
     /// network thread itself, so the retry is visible to the very next
@@ -805,8 +807,11 @@ impl CommitRequestManager {
     /// pass-through to the existing `maybe_auto_commit_async` driver.
     ///
     /// Used by `ApplicationEventProcessor` for `AsyncPoll` and
-    /// `AssignmentChange` events so the auto-commit interval is honoured at
-    /// event-dispatch time rather than only inside the bg-task `poll`.
+    /// `AssignmentChange` events. As in Java, this is the ONLY place the
+    /// interval auto-commit is started: the bg-task `poll_with_coordinator`
+    /// only drains requests already queued, so offsets are auto-committed
+    /// only when the application calls `poll()` / `assign()`, never while it
+    /// is still processing the records the previous `poll()` returned.
     /// Takes `&self` (not `&mut self`) because all mutation flows through
     /// the interior `Arc<CommitRequestManagerInner>` `Mutex` slots. The
     /// shape change is required for Phase-12 production wire-up where the
@@ -1485,8 +1490,18 @@ impl CommitRequestManager {
             return self.drain_pending_offset_commit_requests();
         }
 
-        // Auto-commit firing — drain timer.
-        self.maybe_auto_commit_async(current_time_ms);
+        // No auto-commit is started here. Java's `poll` only drains requests
+        // that are already queued; the interval auto-commit is started solely
+        // by `updateTimerAndMaybeCommit` (`Self::update_timer_and_maybe_commit`),
+        // which runs when the application calls `poll()` (`AsyncPollEvent`)
+        // or `assign()` (`AssignmentChangeEvent`). Starting it from this
+        // background-loop poll would commit the positions of records the
+        // application has been handed by `poll()` but may still be
+        // processing, turning auto-commit into at-most-once delivery. A long
+        // `poll()` with no new records still auto-commits on the interval:
+        // `maximum_time_to_wait` bounds the application task's wait by the
+        // auto-commit timer, so its poll loop submits a fresh
+        // `AsyncPollEvent` when the timer expires.
 
         let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
         if !guard.pending.has_unsent_requests() {
@@ -1631,6 +1646,17 @@ impl CommitRequestManager {
             let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
             guard.pending.unsent_offset_commits.push_back(request);
         }
+        // Wake the bg loop so its next iteration sends the commit. Java's
+        // network thread processes the `AsyncPollEvent` and then polls the
+        // request managers in the same `runOnce`, so the OffsetCommit goes out
+        // at once. In Rust the `AsyncPoll` work runs on a spawned task and can
+        // enqueue this request after the bg loop already polled the commit
+        // manager for this iteration; without the wake it would wait until
+        // something else ended the network poll (up to its ~5 s timeout).
+        // Called on the bg task itself (`AssignmentChange`), the stored
+        // `Notify` permit costs one extra loop iteration. Only a non-empty
+        // auto-commit reaches here, so it is at most one wake per interval.
+        wake_background_task(&self.inner);
         // Java: `maybeResetTimerWithBackoff` — on a retriable failure
         // reset the auto-commit timer with `retry_backoff_ms`. Also
         // clears the `inflightCommitStatus` flag regardless of outcome
@@ -2576,7 +2602,8 @@ async fn auto_commit_sync_before_rebalance_with_retries(
 /// Wakes the bg task's network poll after a spawned retry driver
 /// ([`fetch_offsets_with_retries`], [`commit_sync_with_retries`],
 /// [`auto_commit_sync_before_rebalance_with_retries`]) re-enqueues a retry, so the next `poll` sees the retry and
-/// sleeps only for its backoff. See
+/// sleeps only for its backoff, and after `maybe_auto_commit_async` enqueues
+/// an interval auto-commit (possibly from the spawned `AsyncPoll` task). See
 /// `CommitRequestManagerInner::completion_notify` for why Java needs no
 /// equivalent (its retry is enqueued on the network thread itself). The guard
 /// on `inner.state` MUST already be dropped (the poke is lock-free anyway).
@@ -3620,6 +3647,119 @@ mod tests {
         // remains `i64::MAX` since no auto-commit timer exists.
         manager.update_timer_and_maybe_commit(5_000);
         assert_eq!(manager.maximum_time_to_wait(5_000), i64::MAX);
+    }
+
+    /// Audit finding C4-01 follow-up: the interval auto-commit is started only
+    /// by `update_timer_and_maybe_commit`, which for `AsyncPoll` runs on a
+    /// spawned task — possibly after the bg loop already polled this manager
+    /// in the current iteration. Java's network thread processes the
+    /// `AsyncPollEvent` and then polls the request managers in the same
+    /// `runOnce`, so the OffsetCommit goes out at once; to match that, the
+    /// Rust manager must wake the bg loop exactly when it enqueues an
+    /// auto-commit — and not otherwise, or the loop would spin.
+    ///
+    /// The `Notify` is installed through `set_completion_notify`, the same
+    /// path the production constructor uses for the consumer's selector
+    /// wakeup handle.
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_commit_wakes_background_task_only_when_it_enqueues_a_commit() {
+        use futures_util::FutureExt;
+        let (manager, subs) = make_manager_with_subs(0, true); // interval 1000
+        manager.set_coordinator(Arc::new(coordinator_with_node()));
+        let notify = Arc::new(tokio::sync::Notify::new());
+        manager.set_completion_notify(Arc::clone(&notify));
+        // `notify_one` with nobody parked stores one permit, which a fresh
+        // `notified()` consumes immediately; no permit means it stays pending.
+        let woken = || notify.notified().now_or_never().is_some();
+
+        // Interval expired, but nothing consumed: the timer is reset and no
+        // request is enqueued, so there is nothing to wake the loop for.
+        manager.update_timer_and_maybe_commit(2_000);
+        assert_eq!(0, manager.unsent_offset_commits_len_for_test());
+        assert!(!woken(), "no auto-commit was enqueued, so the bg loop must not be woken");
+
+        let tp = topic_partition("t", 0);
+        {
+            let mut s = subs.lock().unwrap();
+            s.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+            s.seek(&tp, 10).expect("seek");
+        }
+        // Offsets consumed, but the interval (reset at 2000) has not expired.
+        manager.update_timer_and_maybe_commit(2_500);
+        assert_eq!(0, manager.unsent_offset_commits_len_for_test());
+        assert!(!woken(), "the interval has not expired, so the bg loop must not be woken");
+
+        // Interval expired with consumed offsets: one auto-commit is enqueued
+        // and the bg loop is woken (one permit) so it sends it right away.
+        manager.update_timer_and_maybe_commit(3_000);
+        assert_eq!(
+            1,
+            manager.unsent_offset_commits_len_for_test(),
+            "the expired interval must enqueue exactly one auto-commit"
+        );
+        assert!(
+            woken(),
+            "enqueueing the auto-commit must wake the bg loop so it is sent promptly"
+        );
+        assert!(!woken(), "a single auto-commit must wake the bg loop exactly once");
+
+        // Interval expired again, but the previous auto-commit is still in
+        // flight: Java's `maybeAutoCommitAsync` skips it, so nothing is
+        // enqueued and nothing is woken.
+        manager.update_timer_and_maybe_commit(4_000);
+        assert_eq!(1, manager.unsent_offset_commits_len_for_test());
+        assert!(!woken(), "no new auto-commit was enqueued, so the bg loop must not be woken");
+    }
+
+    /// Audit finding C4-01: `CommitRequestManager.poll()`
+    /// (`CommitRequestManager.java:181-209`) only drains requests that are
+    /// already queued and never starts an auto-commit; only
+    /// `updateTimerAndMaybeCommit` (driven by the application's `poll()` /
+    /// `assign()` events) does. A background-loop poll after the interval
+    /// expired must therefore send nothing — otherwise it would commit the
+    /// positions of records the application is still processing. The next
+    /// application poll event then sends exactly one auto-commit.
+    #[tokio::test(flavor = "current_thread")]
+    async fn background_poll_does_not_auto_commit() {
+        let (manager, subs) = make_manager_with_subs(0, true); // interval 1000
+        let coordinator = coordinator_with_node();
+        manager.set_coordinator(Arc::new(coordinator_with_node()));
+        let tp = topic_partition("t", 0);
+        {
+            let mut s = subs.lock().unwrap();
+            s.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+            s.seek(&tp, 10).expect("seek");
+        }
+        // The interval has expired, but the application has not called
+        // poll() again: only the background loop runs.
+        let sent = manager.poll_with_coordinator(&coordinator, 2_000).unsent_requests.len();
+        assert_eq!(
+            sent, 0,
+            "Java: CommitRequestManager.poll() never fires an auto-commit; only \
+             updateTimerAndMaybeCommit (application poll()/assign()) does"
+        );
+        // The timer is still expired, so the application task is told not to
+        // wait: its poll loop submits the event that starts the auto-commit.
+        assert_eq!(
+            0,
+            manager.maximum_time_to_wait(2_000),
+            "the expired auto-commit timer bounds the app's wait"
+        );
+
+        // The application's poll event starts exactly one auto-commit, which
+        // the next background poll sends.
+        manager.update_timer_and_maybe_commit(2_000);
+        let unsent = manager.poll_with_coordinator(&coordinator, 2_000).unsent_requests;
+        assert_eq!(1, unsent.len(), "the application poll event must start exactly one auto-commit");
+        assert_eq!(
+            &ApiKeys::OFFSET_COMMIT,
+            unsent[0].request_builder().expect("builder present").api_key()
+        );
+        assert_eq!(
+            0,
+            manager.poll_with_coordinator(&coordinator, 2_000).unsent_requests.len(),
+            "a further background poll must not start a second auto-commit"
+        );
     }
 
     /// Phase 10 wire-prereq #8:
@@ -4714,11 +4854,11 @@ mod tests {
     /// STALE_MEMBER_EPOCH and increasing epochs.
     #[tokio::test(flavor = "current_thread")]
     async fn last_epoch_sent_on_commit() {
-        // Auto-commit enabled, very long interval (avoid interval auto-commits).
-        let manager = make_manager(0, true);
+        // Auto-commit enabled, very long interval (avoid interval auto-commits):
+        // Java's `create(true, Integer.MAX_VALUE)`.
+        let (manager, subs) = make_manager_with_subs_interval(0, true, i64::from(i32::MAX));
         let coordinator = Arc::new(coordinator_with_node());
         manager.set_coordinator(Arc::clone(&coordinator));
-        let subs = manager_subscriptions(&manager);
         let tp = topic_partition("topic", 1);
         {
             let mut s = subs.lock().unwrap();
@@ -4754,6 +4894,22 @@ mod tests {
             .handler()
             .on_complete(offset_commit_response_single(&tp, Errors::StaleMemberEpoch));
         assert_eq!(manager.last_epoch_sent_on_commit(), Some(initial_epoch + 1));
+        // Java completes the response future synchronously, so the retry is
+        // re-enqueued (its stale-epoch gate seeing the still-valid epoch 2)
+        // before `onMemberEpochUpdated(Optional.empty())` runs. The Rust
+        // retry driver is a spawned task: let it re-enqueue first, as Java's
+        // ordering does.
+        for _ in 0..64 {
+            if manager.unsent_offset_commits_len_for_test() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            1,
+            manager.unsent_offset_commits_len_for_test(),
+            "the stale-epoch retry must be re-enqueued"
+        );
 
         // Receive empty epoch. Next sent request carries no epoch.
         manager.on_member_epoch_updated(None, member_id);
