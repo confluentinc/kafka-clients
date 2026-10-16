@@ -684,13 +684,19 @@ def test_topics_partitions_and_log_dirs() -> None:
     ld = LogDirDescription(error=None, replica_infos={}, total_bytes=100, usable_bytes=-1)
     assert (ld.total_bytes(), ld.usable_bytes()) == (100, None)
     assert str(ld) == ("LogDirDescription(replicaInfos={}, error=null, "
-                       "totalBytes=OptionalLong[100], usableBytes=OptionalLong.empty)")
-    assert not hasattr(ld, "is_cordoned")
+                       "totalBytes=OptionalLong[100], usableBytes=OptionalLong.empty, "
+                       "isCordoned=false)")
+    assert ld.is_cordoned() is False
+    ld = LogDirDescription(error=None, replica_infos={}, total_bytes=1, usable_bytes=2,
+                           is_cordoned=True)
+    assert ld.is_cordoned() is True
+    assert str(ld).endswith("isCordoned=true)")
     with pytest.raises(IllegalArgumentError) as e:
         LogDirDescription(error=None, replica_infos={}, total_bytes=1)  # type: ignore[call-overload]
     assert str(e.value) == (
         "LogDirDescription() takes one of (error, replica_infos), (error, replica_infos, "
-        "total_bytes, usable_bytes); got (error, replica_infos, total_bytes)")
+        "total_bytes, usable_bytes), (error, replica_infos, total_bytes, usable_bytes, "
+        "is_cordoned); got (error, replica_infos, total_bytes)")
 
 
 def test_groups() -> None:

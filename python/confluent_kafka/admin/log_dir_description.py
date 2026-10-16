@@ -19,13 +19,6 @@ totalBytes, usableBytes)`` are one keyword-only constructor matched by
 ``java_forms``: the shorter passes ``UNKNOWN_VOLUME_BYTES`` (``-1``) for both
 sizes, which, like Java, are then empty (``None``).
 
-Not generated, because the FFI has no accessor for the field:
-``isCordoned()``, and the constructor form that sets it, ``(error,
-replicaInfos, totalBytes, usableBytes, isCordoned)``. ``__str__`` leaves out
-Java's ``isCordoned=`` part for the same reason: the value is not known for a
-description the client builds from core data. Add all three when the FFI
-provides the accessor.
-
 Java declares no ``equals`` / ``hashCode``, so equality is identity.
 """
 
@@ -57,7 +50,7 @@ class LogDirDescription:
     Java: ``org.apache.kafka.clients.admin.LogDirDescription``.
     """
 
-    __slots__ = ("_replica_infos", "_error", "_total_bytes", "_usable_bytes")
+    __slots__ = ("_replica_infos", "_error", "_total_bytes", "_usable_bytes", "_is_cordoned")
 
     @overload
     def __init__(self, *, error: ApiError | None,
@@ -66,18 +59,26 @@ class LogDirDescription:
     def __init__(self, *, error: ApiError | None,
                  replica_infos: Mapping[TopicPartition, ReplicaInfo], total_bytes: int,
                  usable_bytes: int) -> None: ...
+    @overload
+    def __init__(self, *, error: ApiError | None,
+                 replica_infos: Mapping[TopicPartition, ReplicaInfo], total_bytes: int,
+                 usable_bytes: int, is_cordoned: bool) -> None: ...
 
     @java_forms(Form("error", "replica_infos"),
-                Form("error", "replica_infos", "total_bytes", "usable_bytes",
+                Form("error", "replica_infos", "total_bytes", "usable_bytes"),
+                Form("error", "replica_infos", "total_bytes", "usable_bytes", "is_cordoned",
                      defaults={"total_bytes": _UNKNOWN_VOLUME_BYTES,
-                               "usable_bytes": _UNKNOWN_VOLUME_BYTES}))
+                               "usable_bytes": _UNKNOWN_VOLUME_BYTES,
+                               "is_cordoned": False}))
     def __init__(self, *, error: ApiError | None,
                  replica_infos: Mapping[TopicPartition, ReplicaInfo],
-                 total_bytes: int = UNSET, usable_bytes: int = UNSET) -> None:
+                 total_bytes: int = UNSET, usable_bytes: int = UNSET,
+                 is_cordoned: bool = UNSET) -> None:
         self._error = error
         self._replica_infos = dict(replica_infos)
         self._total_bytes = None if total_bytes == _UNKNOWN_VOLUME_BYTES else total_bytes
         self._usable_bytes = None if usable_bytes == _UNKNOWN_VOLUME_BYTES else usable_bytes
+        self._is_cordoned = is_cordoned
 
     def error(self) -> ApiError | None:
         """Returns ``ApiError`` if the log directory is offline or an error
@@ -108,8 +109,14 @@ class LogDirDescription:
         include the size of data stored in remote storage."""
         return self._usable_bytes
 
+    def is_cordoned(self) -> bool:
+        """Whether this log directory is cordoned (KIP-1066): the broker does
+        not place new replicas on it."""
+        return self._is_cordoned
+
     def __str__(self) -> str:
         return ("LogDirDescription(replicaInfos=" + java_str(self._replica_infos)
                 + ", error=" + java_str(self._error)
                 + ", totalBytes=" + optional_str(self._total_bytes, "OptionalLong")
-                + ", usableBytes=" + optional_str(self._usable_bytes, "OptionalLong") + ")")
+                + ", usableBytes=" + optional_str(self._usable_bytes, "OptionalLong")
+                + ", isCordoned=" + java_str(self._is_cordoned) + ")")

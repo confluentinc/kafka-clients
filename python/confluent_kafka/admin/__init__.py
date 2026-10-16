@@ -197,6 +197,9 @@ from .renew_delegation_token_options import (
 from .terminate_transaction_options import (
     TerminateTransactionOptions as TerminateTransactionOptions,
 )
+from .unregister_controller_options import (
+    UnregisterControllerOptions as UnregisterControllerOptions,
+)
 from .update_features_options import UpdateFeaturesOptions as UpdateFeaturesOptions
 
 __all__ += [
@@ -244,6 +247,7 @@ __all__ += [
     "RemoveMembersFromConsumerGroupOptions",
     "RenewDelegationTokenOptions",
     "TerminateTransactionOptions",
+    "UnregisterControllerOptions",
     "UpdateFeaturesOptions",
 ]
 # END OPTIONS
@@ -320,6 +324,7 @@ from .remove_members_from_consumer_group_result import (
 )
 from .renew_delegation_token_result import RenewDelegationTokenResult as RenewDelegationTokenResult
 from .terminate_transaction_result import TerminateTransactionResult as TerminateTransactionResult
+from .unregister_controller_result import UnregisterControllerResult as UnregisterControllerResult
 from .update_features_result import UpdateFeaturesResult as UpdateFeaturesResult
 
 __all__ += [
@@ -366,6 +371,7 @@ __all__ += [
     "RemoveMembersFromConsumerGroupResult",
     "RenewDelegationTokenResult",
     "TerminateTransactionResult",
+    "UnregisterControllerResult",
     "UpdateFeaturesResult",
 ]
 # END RESULTS

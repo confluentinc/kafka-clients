@@ -47,10 +47,10 @@ use super::{
 };
 
 /// The generated classes: `AbstractOptions` plus the Options class of each of
-/// the 44 FFI-backed `Admin` RPCs (admin inventory I1; `incrementalAlterConfigs`
+/// the 45 `Admin` RPCs the Python client covers (admin inventory I1; `incrementalAlterConfigs`
 /// takes `AlterConfigsOptions`, `forceTerminateTransaction`
 /// `TerminateTransactionOptions`).
-pub const CLASSES: [&str; 45] = [
+pub const CLASSES: [&str; 46] = [
     "AbortTransactionOptions",
     "AbstractOptions",
     "AlterClientQuotasOptions",
@@ -95,6 +95,7 @@ pub const CLASSES: [&str; 45] = [
     "RemoveMembersFromConsumerGroupOptions",
     "RenewDelegationTokenOptions",
     "TerminateTransactionOptions",
+    "UnregisterControllerOptions",
     "UpdateFeaturesOptions",
 ];
 

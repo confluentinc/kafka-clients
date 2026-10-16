@@ -64,8 +64,8 @@ use super::{
     WIDTH,
 };
 
-/// The Result class of each of the 44 FFI-backed `Admin` RPCs.
-pub const CLASSES: [&str; 44] = [
+/// The Result class of each of the 45 `Admin` RPCs the Python client covers.
+pub const CLASSES: [&str; 45] = [
     "AbortTransactionResult",
     "AlterClientQuotasResult",
     "AlterConfigsResult",
@@ -109,6 +109,7 @@ pub const CLASSES: [&str; 44] = [
     "RemoveMembersFromConsumerGroupResult",
     "RenewDelegationTokenResult",
     "TerminateTransactionResult",
+    "UnregisterControllerResult",
     "UpdateFeaturesResult",
 ];
 
@@ -2888,7 +2889,7 @@ mod tests {
         assert_eq!(a.init_section, b.init_section);
     }
 
-    /// Every class outside [`HAND_WRITTEN`] is generated: 34 of 44.
+    /// Every class outside [`HAND_WRITTEN`] is generated: 35 of 45.
     #[test]
     fn test_no_generated_class_stops() {
         let g = render_all(&repo_root()).unwrap();
