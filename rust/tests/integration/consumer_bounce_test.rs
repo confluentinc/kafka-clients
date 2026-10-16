@@ -840,10 +840,17 @@ async fn test_async_subscribe_when_topic_unavailable() {
     let new_topic_partition = TopicPartition::new(new_topic.clone(), 0);
     let num_records: usize = 1000;
 
+    // Java sets `max.poll.interval.ms` to 6000, which outlasts its in-process
+    // broker restart below: nothing polls while the brokers are down. Restarting
+    // the Docker brokers one by one takes far longer (about 45 s on CI). With 6000
+    // the member goes stale when the brokers return, loses its partitions and
+    // rejoins. If phase 1 ended before its first auto-commit, it then resets to
+    // offset 0 and receives 2000 records instead of 1000. 120000 covers the
+    // restart, so the consumer survives the outage as Java's does.
     let mut consumer = create_consumer(
         &ctx,
         &HashMap::from([
-            ("max.poll.interval.ms".to_string(), "6000".to_string()),
+            ("max.poll.interval.ms".to_string(), "120000".to_string()),
             ("metadata.max.age.ms".to_string(), "100".to_string()),
         ]),
     );
