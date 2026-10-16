@@ -14,7 +14,7 @@
 
 //! Producer types (org.apache.kafka.clients.producer)
 
-mod callback;
+pub mod callback;
 mod dyn_producer;
 pub(crate) mod internals;
 mod kafka_producer;

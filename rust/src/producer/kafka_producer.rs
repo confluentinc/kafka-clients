@@ -1910,7 +1910,7 @@ impl<K, V> KafkaProducer<K, V> {
     async fn do_send(
         &self,
         record: ProducerRecord<K, V>,
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
     ) -> Result<KafkaFuture<RecordMetadata>, Error> {
         self.ensure_not_closed()?;
 
@@ -2082,7 +2082,7 @@ impl<K, V> KafkaProducer<K, V> {
         key: Option<&[u8]>,
         value: Option<&[u8]>,
         headers: &[RecordHeader],
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
         now_ms: i64,
         remaining_wait_ms: i64,
         cluster: &Cluster,
@@ -2320,14 +2320,14 @@ impl<K, V> KafkaProducer<K, V> {
         error: Error,
         topic: &str,
         partition: i32,
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
     ) -> Result<KafkaFuture<RecordMetadata>, Error> {
         kafka_debug!(self.log_context, "Error occurred during message send: {}", error);
         self.maybe_transition_to_error_state(&error);
         if let Some(cb) = callback {
             let tp = TopicPartition::new(topic.to_string(), partition);
             let null_metadata = RecordMetadata::new(tp, -1, -1, RecordBatch::NO_TIMESTAMP, -1, -1);
-            cb(Some(&null_metadata), Some(&error));
+            cb.on_completion(Some(&null_metadata), Some(&error));
         }
         let tp = TopicPartition::new(topic.to_string(), partition);
         Ok(KafkaFuture::new(Arc::new(FutureRecordMetadata::failed(tp, error))))
@@ -2682,7 +2682,7 @@ impl KafkaProducer<Vec<u8>, Vec<u8>> {
     pub async fn send(
         &self,
         record: ProducerRecord<&[u8], &[u8]>,
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
     ) -> Result<KafkaFuture<RecordMetadata>, Error> {
         self.ensure_not_closed()?;
 
@@ -2777,7 +2777,7 @@ where
     async fn send_with_callback(
         &self,
         record: ProducerRecord<K, V>,
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
     ) -> Result<KafkaFuture<RecordMetadata>, Error> {
         self.do_send(record, callback).await
     }
@@ -3087,7 +3087,7 @@ mod tests {
 
         let callback_error: Arc<Mutex<Option<Error>>> = Arc::new(Mutex::new(None));
         let sink = Arc::clone(&callback_error);
-        let callback: Callback = Box::new(move |_metadata, error| {
+        let callback: Box<dyn Callback> = Box::new(move |_metadata: Option<&RecordMetadata>, error: Option<&Error>| {
             *sink.lock().unwrap() = error.cloned();
         });
 
@@ -3119,9 +3119,9 @@ mod tests {
     async fn a_pre_append_api_error_reports_the_record_partition() {
         use crate::common::serialization::ByteArraySerializer;
 
-        fn recording_callback(slot: &Arc<Mutex<Option<(String, i32)>>>) -> Callback {
+        fn recording_callback(slot: &Arc<Mutex<Option<(String, i32)>>>) -> Box<dyn Callback> {
             let slot = Arc::clone(slot);
-            Box::new(move |metadata, error| {
+            Box::new(move |metadata: Option<&RecordMetadata>, error: Option<&Error>| {
                 assert!(error.is_some(), "the callback is handed the error");
                 let metadata = metadata.expect("Java passes a non-null RecordMetadata here");
                 *slot.lock().unwrap() = Some((metadata.topic().to_string(), metadata.partition()));
@@ -3609,7 +3609,7 @@ mod tests {
         // `BufferExhaustedException`.
         let invocations: Arc<Mutex<Vec<(i64, i32, String)>>> = Arc::new(Mutex::new(Vec::new()));
         let recorder = Arc::clone(&invocations);
-        let callback: Callback = Box::new(move |metadata, error| {
+        let callback: Box<dyn Callback> = Box::new(move |metadata: Option<&RecordMetadata>, error: Option<&Error>| {
             let metadata = metadata.expect("Java passes a non-null RecordMetadata here");
             let error = error.expect("Java passes the exception here");
             recorder
@@ -3627,7 +3627,7 @@ mod tests {
             .await
             .expect("an ApiException becomes a failed future, not an Err");
 
-        // The callback fired exactly once. `Callback` is a `Box<dyn FnOnce>`, so
+        // The callback fired exactly once. `on_completion` consumes its `Box<dyn Callback>`, so
         // "at most once" is a type-level guarantee; this pins "at least once".
         // The guard is cloned out and dropped before the `await` below (CLAUDE.md §11.6).
         let invocations = invocations.lock().unwrap().clone();
@@ -3667,7 +3667,8 @@ mod tests {
 
         let invoked = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&invoked);
-        let callback: Callback = Box::new(move |_, _| flag.store(true, Ordering::SeqCst));
+        let callback: Box<dyn Callback> =
+            Box::new(move |_: Option<&RecordMetadata>, _: Option<&Error>| flag.store(true, Ordering::SeqCst));
 
         let error = producer
             .do_send(
@@ -4600,9 +4601,10 @@ mod tests {
 
         let callback_called = Arc::new(AtomicBool::new(false));
         let callback_called_clone = Arc::clone(&callback_called);
-        let callback: Callback = Box::new(move |_metadata, _error| {
-            callback_called_clone.store(true, Ordering::SeqCst);
-        });
+        let callback: Box<dyn Callback> =
+            Box::new(move |_metadata: Option<&RecordMetadata>, _error: Option<&Error>| {
+                callback_called_clone.store(true, Ordering::SeqCst);
+            });
 
         let record = ProducerRecord::with_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
         let result = producer.send_with_callback(record, Some(callback)).await;
@@ -4648,15 +4650,16 @@ mod tests {
         let mt = Arc::clone(&metadata_topic);
         let mo = Arc::clone(&metadata_offset);
 
-        let callback: Callback = Box::new(move |record_metadata, error| {
-            inv.store(true, Ordering::SeqCst);
-            *err.lock().unwrap() = error.is_some();
-            if let Some(rm) = record_metadata {
-                *meta.lock().unwrap() = true;
-                *mt.lock().unwrap() = rm.topic().to_string();
-                *mo.lock().unwrap() = rm.offset();
-            }
-        });
+        let callback: Box<dyn Callback> =
+            Box::new(move |record_metadata: Option<&RecordMetadata>, error: Option<&Error>| {
+                inv.store(true, Ordering::SeqCst);
+                *err.lock().unwrap() = error.is_some();
+                if let Some(rm) = record_metadata {
+                    *meta.lock().unwrap() = true;
+                    *mt.lock().unwrap() = rm.topic().to_string();
+                    *mo.lock().unwrap() = rm.offset();
+                }
+            });
 
         // Send a record that exceeds max_request_size
         let large_value = "a".repeat(100);
@@ -4738,12 +4741,13 @@ mod tests {
         let inv = Arc::clone(&invoked);
         let err_slot = Arc::clone(&saw_error);
         let meta_slot = Arc::clone(&saw_metadata);
-        let callback: Callback = Box::new(move |record_metadata, exception| {
-            inv.fetch_add(1, Ordering::SeqCst);
-            *err_slot.lock().unwrap() = exception.map(|e| e.to_string());
-            *meta_slot.lock().unwrap() =
-                record_metadata.map(|rm| (rm.topic().to_string(), rm.partition(), rm.offset()));
-        });
+        let callback: Box<dyn Callback> =
+            Box::new(move |record_metadata: Option<&RecordMetadata>, exception: Option<&Error>| {
+                inv.fetch_add(1, Ordering::SeqCst);
+                *err_slot.lock().unwrap() = exception.map(|e| e.to_string());
+                *meta_slot.lock().unwrap() =
+                    record_metadata.map(|rm| (rm.topic().to_string(), rm.partition(), rm.offset()));
+            });
 
         let second: ProducerRecord<String, String> =
             ProducerRecord::with_partition_key(TOPIC.to_string(), Some(1), None, Some("value".to_string())).unwrap();
@@ -4803,7 +4807,7 @@ mod tests {
 
         let invoked = Arc::new(std::sync::atomic::AtomicI32::new(0));
         let inv = Arc::clone(&invoked);
-        let callback: Callback = Box::new(move |_, _| {
+        let callback: Box<dyn Callback> = Box::new(move |_: Option<&RecordMetadata>, _: Option<&Error>| {
             inv.fetch_add(1, Ordering::SeqCst);
         });
 
@@ -5092,7 +5096,7 @@ mod tests {
         let inv = Arc::clone(&callback_invoked);
         let err = Arc::clone(&got_error);
 
-        let callback: Callback = Box::new(move |_metadata, error| {
+        let callback: Box<dyn Callback> = Box::new(move |_metadata: Option<&RecordMetadata>, error: Option<&Error>| {
             inv.store(true, Ordering::SeqCst);
             err.store(error.is_some(), Ordering::SeqCst);
         });
@@ -6405,9 +6409,10 @@ mod tests {
 
             let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let cb_count = Arc::clone(&count);
-            let callback: Callback = Box::new(move |_metadata, _error| {
-                cb_count.fetch_add(1, Ordering::SeqCst);
-            });
+            let callback: Box<dyn Callback> =
+                Box::new(move |_metadata: Option<&RecordMetadata>, _error: Option<&Error>| {
+                    cb_count.fetch_add(1, Ordering::SeqCst);
+                });
 
             // The append succeeds; `maybeAddPartition` then raises `ProducerFenced`,
             // taking the `handle_api_error(.., None)` arm.

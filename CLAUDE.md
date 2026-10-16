@@ -42,7 +42,7 @@ Suggestions for changes are possible through the process highlighted in [agent-r
    - Nullable `string`/`bytes` fields in the Kafka message specs without an explicit `"default": "null"` must default to empty (`Some(String::new())` / `Some(Vec::new())`), not `None`. Only use `None` when the spec explicitly sets `"default": "null"`
    - Java interfaces become traits in Rust, except those translated to std traits or to functions, default method implementation on an interface become a default trait function implementation in Rust
     If a Java class implements multiple interfaces and that have a function in common with same signature, implement the function on the struct and delegate to it in both implementations.
-    Constants that should be associated to the trait are exported through the module containing the trait, also nested structs, enums or static methods
+    Constants that should be associated to the trait are exported through the module containing the trait, also nested structs, enums or static methods. Is there's an inner interface that is nested and it needs static methods the name would be `outer_class::InnerInterface_(static_method|new|with_<parameters>)` 
    - The configuration MUST NOT take classes as values or "class" in the property name. A class is Java terminology and we don't use reflection here, every time there's a property with a class the corresponding value needs to be set in the properties struct through a setter and the value must be a trait.
    - When generating wire protocol code, always use per-field `flexibleVersions` overrides via `field_flexible_versions(field, msg_flex)` in the generator — never the raw message-level value. Some fields (e.g. `ClientId` in `RequestHeader`) override to `"none"` and must always use length-prefixed encoding
    - Overloaded methods: make sure there's:
@@ -70,6 +70,7 @@ Suggestions for changes are possible through the process highlighted in [agent-r
     - Rust public enums and struct MUST be "#[non_exhaustive]" in case new values are added to Java ones
     - There should be no public field in public structures: getter, setters or builders are used depending on what's also used in Java client
     - Traits must be dyn-compatible: in Java we can put objects of different types in collections with an interface as generic argument. Exception are made for performance oriented trait such as the `Producer` but they must have a corresponding dyn trait such as `DynProducer` so they pay the cost only when needed
+    - a public FunctionalInterface in Java MUST be translated to a trait, as it can gain overloaded methods. The trait module should have static function `new()` or `with_<additional_parameter>` following the overloaded method rules, taking a function with that shape and returning an implementation of the given trait that calls that function
     - classes that are translated from Java MUST have the same name as Java, considering the translation rules, except when there are other rules changing their name
     - methods that are translated from Java methods must not be public if they're not public in Java implementation
     - package names must be compatible with Java: in case two classes with same name are added to the Java clients, they must not collide in the same Rust package

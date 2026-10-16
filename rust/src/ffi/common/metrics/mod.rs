@@ -45,7 +45,6 @@ use crate::ffi::common::metrics::kafka_metric::{box_kafka_metric, destroy_kafka_
 use crate::ffi::util::{box_map, kafka_Map_t, owned_c_string};
 
 pub(crate) mod compound_stat;
-pub(crate) mod gauge;
 pub(crate) mod kafka_metric;
 pub(crate) mod measurable;
 pub(crate) mod measurable_stat;

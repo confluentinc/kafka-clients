@@ -964,17 +964,14 @@ class ProducerServiceImpl final : public ProducerService::Service {
     // with_callback => register a *real* delivery callback through the FFI, so
     // the Rust harness can assert (via GetCallbackLog) on what the binding's own
     // callback saw. The blocking future path below is unchanged: the FFI gives us
-    // both, exactly like Java's send(record, callback). The registration is
-    // copied into the Rust closure during the call, so the Callback_t handle is
-    // destroyed right after send returned; its `self` (the LogState) lives for
-    // the whole session.
+    // both, exactly like Java's send(record, callback). The send consumes the
+    // Callback_t handle; its `self` (the LogState) lives for the whole session.
     kafka_common_Error_t* send_err = nullptr;
     kafka_common_KafkaFuture_t* future = nullptr;
     if (req->with_callback()) {
       LogState* state = log_state_for(req->producer_id());
       kafka_producer_Callback_t* callback = kafka_producer_Callback_new(state, log_delivery);
       future = kafka_producer_Producer_send_with_callback(producer, record, callback, &send_err);
-      kafka_producer_Callback_destroy(callback);
     } else {
       future = kafka_producer_Producer_send(producer, record, &send_err);
     }
@@ -6112,8 +6109,8 @@ class ChaosWorkloadServiceImpl final : public ChaosWorkloadService::Service {
         // only live for the call. The delivered future is destroyed unawaited
         // -- the outcome arrives through chaos_on_delivery -- which is what
         // lets the client batch and pipeline instead of carrying one record per
-        // round trip. The callback registration is read during the call too,
-        // and is per record because its `self` is the record's cookie.
+        // round trip. The send consumes the callback handle, which is per
+        // record because its `self` is the record's cookie.
         kafka_producer_ProducerRecord_t* record =
             kafka_producer_ProducerRecord_with_key(topic.c_str(), &key_bytes, &value_bytes);
         kafka_producer_Callback_t* callback =
@@ -6121,7 +6118,6 @@ class ChaosWorkloadServiceImpl final : public ChaosWorkloadService::Service {
         kafka_common_Error_t* send_err = nullptr;
         kafka_common_KafkaFuture_t* future =
             kafka_producer_Producer_send_with_callback(producer, record, callback, &send_err);
-        kafka_producer_Callback_destroy(callback);
         kafka_producer_ProducerRecord_destroy(record);
         if (send_err == nullptr) {
           kafka_common_KafkaFuture_destroy(future);

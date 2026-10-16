@@ -148,7 +148,7 @@ pub trait DynProducer<K, V>: private::Sealed<K, V> + Send + Sync {
     fn send_with_callback<'a>(
         &'a self,
         record: ProducerRecord<K, V>,
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
     ) -> BoxFuture<'a, Result<KafkaFuture<RecordMetadata>, Error>>
     where
         K: 'a,
@@ -250,7 +250,7 @@ impl<K, V, P: Producer<K, V>> DynProducer<K, V> for P {
     fn send_with_callback<'a>(
         &'a self,
         record: ProducerRecord<K, V>,
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
     ) -> BoxFuture<'a, Result<KafkaFuture<RecordMetadata>, Error>>
     where
         K: 'a,
@@ -337,7 +337,7 @@ impl<K, V> Producer<K, V> for dyn DynProducer<K, V> + '_ {
     fn send_with_callback(
         &self,
         record: ProducerRecord<K, V>,
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
     ) -> impl Future<Output = Result<KafkaFuture<RecordMetadata>, Error>> + Send {
         DynProducer::send_with_callback(self, record, callback)
     }

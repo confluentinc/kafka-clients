@@ -159,7 +159,7 @@ pub trait Producer<K, V>: Send + Sync {
     fn send_with_callback(
         &self,
         record: ProducerRecord<K, V>,
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
     ) -> impl Future<Output = Result<KafkaFuture<RecordMetadata>, Error>> + Send;
 
     /// Invoking this method makes all buffered records immediately available to send

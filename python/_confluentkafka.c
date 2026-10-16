@@ -1512,10 +1512,8 @@ static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
     Py_BEGIN_ALLOW_THREADS
     err = (fut = kafka_producer_Producer_send_with_callback(p->producer, rec, cb, &ffi_err), ffi_take(&ffi_err));
     Py_END_ALLOW_THREADS
-    // Both are read during the call only (the record was cloned -- its key and
-    // value bytes were read during the call -- and the callback registration
-    // copied into the Rust closure).
-    ffi_unraisable((kafka_producer_Callback_destroy_err(cb, &ffi_err), ffi_take(&ffi_err)));
+    // The send consumed the callback handle. The record is read during the call
+    // only (it was cloned -- its key and value bytes were read during the call).
     ffi_unraisable((kafka_producer_ProducerRecord_destroy_err(rec, &ffi_err), ffi_take(&ffi_err)));
 
     if (err != NULL) {
@@ -1629,9 +1627,9 @@ static PyObject* py_Producer_send_cb(PyObject* self, PyObject* args) {
     // (whose notify hook would wait for the GIL): when the task is gone it
     // calls producer_send_cb here, which re-enters the GIL this thread holds.
     kafka_producer_Producer_send_with_callback_cb(p->producer, rec, cb, producer_send_cb, ctx);
-    // Both are copied by the call; the record's key/value bytes stay borrowed
-    // until producer_send_cb (ctx->record holds them).
-    ffi_unraisable((kafka_producer_Callback_destroy_err(cb, &ffi_err), ffi_take(&ffi_err)));
+    // The call consumed the callback handle and copied the record; the record's
+    // key/value bytes stay borrowed until producer_send_cb (ctx->record holds
+    // them).
     ffi_unraisable((kafka_producer_ProducerRecord_destroy_err(rec, &ffi_err), ffi_take(&ffi_err)));
     return PyLong_FromLong(0);
 }

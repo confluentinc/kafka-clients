@@ -38,7 +38,7 @@ pub(crate) mod internals;
 mod invalid_record_error;
 mod isolation_level;
 mod kafka_error;
-mod kafka_future;
+pub mod kafka_future;
 mod local_callback_error;
 mod local_concurrent_modification_error;
 mod local_illegal_argument_error;

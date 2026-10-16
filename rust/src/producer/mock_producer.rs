@@ -382,7 +382,7 @@ struct Completion {
     offset: i64,
     metadata: RecordMetadata,
     result: Arc<ProduceRequestResult>,
-    callback: Option<Callback>,
+    callback: Option<Box<dyn Callback>>,
     topic_partition: TopicPartition,
 }
 
@@ -410,13 +410,13 @@ impl Completion {
             // error path does (`kafka_producer.rs:1155`).
             if let Some(cb) = callback {
                 let null_metadata = RecordMetadata::new(topic_partition, -1, -1, RecordBatch::NO_TIMESTAMP, -1, -1);
-                cb(Some(&null_metadata), Some(&e));
+                cb.on_completion(Some(&null_metadata), Some(&e));
             }
         } else {
             result.set(offset, RecordBatch::NO_TIMESTAMP, None);
             // Java 576: fire the callback with the record's metadata.
             if let Some(cb) = callback {
-                cb(Some(&metadata), None);
+                cb.on_completion(Some(&metadata), None);
             }
         }
         result.done();
@@ -1207,7 +1207,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
     async fn send_with_callback(
         &self,
         record: ProducerRecord<K, V>,
-        callback: Option<Callback>,
+        callback: Option<Box<dyn Callback>>,
     ) -> Result<KafkaFuture<RecordMetadata>, Error> {
         let mut inner = self.inner.lock().unwrap();
 
@@ -1738,7 +1738,7 @@ mod tests {
 
         let observed: Arc<Mutex<Option<ObservedMetadata>>> = Arc::new(Mutex::new(None));
         let sink = Arc::clone(&observed);
-        let callback: Callback = Box::new(move |metadata, _error| {
+        let callback: Box<dyn Callback> = Box::new(move |metadata: Option<&RecordMetadata>, _error: Option<&Error>| {
             let metadata = metadata.expect("the callback must receive metadata on the error path");
             *sink.lock().unwrap() = Some((
                 metadata.offset(),

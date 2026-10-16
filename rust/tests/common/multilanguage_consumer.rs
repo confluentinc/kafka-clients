@@ -55,7 +55,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use confluent_kafka::common::header::{RecordHeader, RecordHeaders};
-use confluent_kafka::common::metrics::{ClosureGauge, KafkaMetric, MetricValueProvider, Metrics};
+use confluent_kafka::common::metrics::{KafkaMetric, Metrics, gauge};
 use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::{Error, MetricName, MetricValue, PartitionInfo, TopicPartition};
 use confluent_kafka::consumer::{
@@ -513,7 +513,7 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         // is a live consumer in another language, NOT a mock, so reporting an
         // empty map would misreport its state.
         //
-        // Each entry is rebuilt locally as a `ClosureGauge` returning the value
+        // Each entry is rebuilt locally as a `gauge::new` gauge returning the value
         // the backend measured while serving the RPC. That is snapshot, not
         // live, semantics — which is exactly what `Consumer::metrics`
         // documents ("a point-in-time snapshot taken under the registry lock
@@ -859,7 +859,7 @@ fn offset_map_from_proto(map: proto::OffsetMap) -> HashMap<TopicPartition, Offse
 
 /// Rebuilds one `metrics()` entry from its proto form.
 ///
-/// The measured value is wrapped in a [`ClosureGauge`] that returns the
+/// The measured value is wrapped in a [`gauge::new`] gauge that returns the
 /// snapshotted reading, so the resulting [`KafkaMetric`] satisfies the trait's
 /// `Arc<KafkaMetric>` value type while preserving snapshot semantics (see
 /// `MultilanguageConsumer::metrics`). A `Gauge` provider is used for every kind,
@@ -877,10 +877,10 @@ fn metric_from_proto(m: proto::Metric) -> (MetricName, Arc<KafkaMetric>) {
         Some(proto::metric::Value::IntValue(i)) => MetricValue::Int(i),
         None => MetricValue::Double(0.0),
     };
-    let gauge = ClosureGauge::new(move |_config, _now| value.clone());
+    let provider = gauge::new(move |_config, _now| value.clone());
     // A standalone registry mints the `KafkaMetric`, as Java code obtains one
     // (its constructor is public only "for testing"); the metric outlives it.
-    let metric = Metrics::new().add_metric_if_absent(name.clone(), None, MetricValueProvider::Gauge(Box::new(gauge)));
+    let metric = Metrics::new().add_metric_if_absent(name.clone(), None, Box::new(provider));
     (name, metric)
 }
 

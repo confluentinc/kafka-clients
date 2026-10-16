@@ -435,7 +435,6 @@ void test_delivery_callback_cannot_flush_and_closes_without_blocking(void) {
     kafka_producer_Callback_t *callback = kafka_producer_Callback_new(&result, on_reentrant_completion);
     kafka_common_KafkaFuture_t *future = NULL;
     ASSERT_OK(future = kafka_producer_Producer_send_with_callback(view, record, callback, &err));
-    kafka_producer_Callback_destroy(callback);
     kafka_producer_ProducerRecord_destroy(record);
 
     TEST_ASSERT_TRUE(callback_pump_until(&pump, &result.fired, 1));

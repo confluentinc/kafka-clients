@@ -484,14 +484,14 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_abort_transaction_cb(
 ///
 /// # Safety
 ///
-/// `self_` and `record` must be live handles, `callback` null or a live handle,
-/// `out_err` a valid slot pointing at null.
+/// `self_` and `record` must be live handles, `callback` null or a live handle
+/// (consumed), `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_send(
     self_: *const kafka_producer_KafkaProducer_t,
     record: *const kafka_producer_ProducerRecord_t,
-    callback: *const kafka_producer_Callback_t,
+    callback: *mut kafka_producer_Callback_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `producer` requires, so
@@ -507,7 +507,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_send(
 /// # Safety
 ///
 /// `self_` and `record` must be live handles, `callback` null or a live
-/// handle.
+/// handle (consumed).
 #[ffi_guard(on_panic = |err| {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, so `producer(self_)` is its
     // live `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the
@@ -521,7 +521,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_send(
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_send_cb(
     self_: *const kafka_producer_KafkaProducer_t,
     record: *const kafka_producer_ProducerRecord_t,
-    callback: *const kafka_producer_Callback_t,
+    callback: *mut kafka_producer_Callback_t,
     cb: kafka_producer_KafkaProducer_send_cb_t,
     opaque: *mut c_void,
 ) {
@@ -866,7 +866,6 @@ mod tests {
             assert!(value.is_null());
             kafka_common_Error_destroy(err);
             kafka_common_KafkaFuture_destroy(future);
-            crate::ffi::producer::callback::kafka_producer_Callback_destroy(callback);
             kafka_producer_KafkaProducer_destroy(producer);
             kafka_producer_ProducerRecord_destroy(record);
         }
@@ -920,7 +919,7 @@ mod tests {
             // the error slot and the future handle.
             let record =
                 kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
-            let future = kafka_producer_KafkaProducer_send(producer, record, std::ptr::null(), &raw mut err);
+            let future = kafka_producer_KafkaProducer_send(producer, record, std::ptr::null_mut(), &raw mut err);
             if err.is_null() {
                 assert!(!future.is_null());
                 kafka_common_KafkaFuture_destroy(future);

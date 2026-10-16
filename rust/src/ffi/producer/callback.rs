@@ -15,13 +15,13 @@
 //! `kafka_producer_Callback_t`: `org.apache.kafka.clients.producer.Callback`,
 //! the delivery callback of `Producer.send(record, callback)`.
 //!
-//! Rust translates the interface to a closure (`producer::Callback`), which
-//! C cannot write; so C implements it as a rule 3 interface (CLAUDE.md §4):
+//! Rust translates the interface to the `producer::Callback` trait, which C
+//! cannot implement; so C implements it as a rule 3 interface (CLAUDE.md §4):
 //! `_new(void *self, on_completion)` builds a registration that
-//! `kafka_producer_Producer_send_with_callback` copies into the Rust closure.
-//! The registration handle may be destroyed as soon as `send_with_callback`
-//! returned; `self` must outlive the callback, which fires once per record
-//! when the producer completes, fails or aborts it.
+//! `kafka_producer_Producer_send_with_callback` consumes into a Rust
+//! `Callback`, as the Rust `send_with_callback` takes its `Box<dyn Callback>`;
+//! `self` must outlive the callback, which fires once per record when the
+//! producer completes, fails or aborts it.
 //!
 //! The callback is fired by the producer's background task, so it is always
 //! queued (§4 rule 5): `kafka_producer_Producer__execute_callbacks` invokes
@@ -83,8 +83,8 @@ pub type kafka_producer_Callback_on_completion_fn_t = unsafe extern "C" fn(
     callback_id: i64,
 );
 
-/// The registration a handle holds; copied into every Rust closure built
-/// from it, so the handle itself is not needed after `send_with_callback`.
+/// The registration a handle holds, moved into the Rust callback built from
+/// it when a function consumes the handle.
 #[derive(Clone, Copy)]
 pub(crate) struct CallbackRegistration {
     self_: SendPtr,
@@ -128,7 +128,7 @@ impl CallbackRegistration {
         queue: Arc<CallbackQueue>,
         results: Arc<CallbackResults>,
         completion: KafkaFutureImpl<RecordMetadata>,
-    ) -> Callback {
+    ) -> Box<dyn Callback> {
         Box::new(move |metadata: Option<&RecordMetadata>, error: Option<&Error>| {
             let metadata = metadata.cloned();
             let error = error.cloned();
@@ -182,22 +182,24 @@ fn report_sink(
     })
 }
 
-/// The registration behind a handle.
+/// Takes the registration a consumed handle holds, freeing the handle.
 ///
 /// # Safety
 ///
-/// `callback` must be a live handle.
-pub(crate) unsafe fn callback_registration(callback: *const kafka_producer_Callback_t) -> CallbackRegistration {
+/// `callback` must be a live handle, not used again by the caller.
+pub(crate) unsafe fn take_callback(callback: *mut kafka_producer_Callback_t) -> CallbackRegistration {
     // SAFETY: Per this function's `# Safety`, `callback` is a live handle, i.e. the `Box::into_raw`
-    // of a `CallbackRegistration` in `kafka_producer_Callback_new`, the only constructor; the
-    // registration is `Copy` and copied out, so the borrow ends before return.
-    *unsafe { &*(callback as *const CallbackRegistration) }
+    // of a `CallbackRegistration` in `kafka_producer_Callback_new`, the only constructor, which
+    // the caller does not use again, so `Box::from_raw` reclaims it exactly once.
+    *unsafe { Box::from_raw(callback as *mut CallbackRegistration) }
 }
 
 /// Registers a C implementation of `Callback`. The caller owns `self_` and
-/// keeps it alive until the callback fired; the handle is freed with
-/// [`kafka_producer_Callback_destroy`], at any time after the `send` that
-/// took it returned.
+/// keeps it alive until the callback fired. The handle is owned until a
+/// function consumes it — a `send` taking a callback, or
+/// [`kafka_producer_Callback_on_completion`] and its `_cb` twin, whatever
+/// their outcome — and is freed with [`kafka_producer_Callback_destroy`] only
+/// when none did.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_producer_Callback_new(
@@ -212,22 +214,23 @@ pub extern "C" fn kafka_producer_Callback_new(
 /// on the calling thread with the borrowed arguments and waits for its
 /// `kafka_producer_Producer__set_callback_result` report. No producer is
 /// involved: the report's `producer` argument is not read, so it may be any
-/// producer or `NULL`, and a reported error is freed.
+/// producer or `NULL`, and a reported error is freed. The callback fires once,
+/// so `self_` is consumed, as the Rust `on_completion` takes `self: Box<Self>`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle; `metadata` and `error` null or live
-/// handles.
+/// `self_` must be a live handle, not used again; `metadata` and `error` null
+/// or live handles.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Callback_on_completion(
-    self_: *const kafka_producer_Callback_t,
+    self_: *mut kafka_producer_Callback_t,
     metadata: *const kafka_producer_RecordMetadata_t,
     error: *const kafka_common_Error_t,
 ) {
-    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `callback_registration`
-    // requires.
-    let registration = unsafe { callback_registration(self_) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle not used again, as
+    // `take_callback` requires.
+    let registration = unsafe { take_callback(self_) };
     let (tx, rx) = std::sync::mpsc::channel();
     let callback_id = INVOKER_RESULTS.register(void_sink(move |result| {
         let _ = tx.send(result);
@@ -260,15 +263,15 @@ pub type kafka_producer_Callback_on_completion_cb_t = unsafe extern "C" fn(opaqu
 })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Callback_on_completion_cb(
-    self_: *const kafka_producer_Callback_t,
+    self_: *mut kafka_producer_Callback_t,
     metadata: *const kafka_producer_RecordMetadata_t,
     error: *const kafka_common_Error_t,
     cb: kafka_producer_Callback_on_completion_cb_t,
     opaque: *mut c_void,
 ) {
-    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `callback_registration`
-    // requires.
-    let registration = unsafe { callback_registration(self_) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle not used again, as
+    // `take_callback` requires.
+    let registration = unsafe { take_callback(self_) };
     let opaque = SendPtr(opaque);
     #[cfg(test)]
     crate::ffi::common::fail_point::hit();
@@ -281,19 +284,18 @@ pub unsafe extern "C" fn kafka_producer_Callback_on_completion_cb(
     unsafe { registration.fire(metadata, error, callback_id) };
 }
 
-/// Frees the handle; null is a no-op.
+/// Frees a handle no function consumed; null is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or a handle not yet destroyed.
+/// `self_` must be null or a handle neither destroyed nor consumed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Callback_destroy(self_: *mut kafka_producer_Callback_t) {
     if !self_.is_null() {
         // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, a handle
-        // not yet destroyed, i.e. the `Box::into_raw` of `kafka_producer_Callback_new`, so
-        // `Box::from_raw` reclaims it exactly once. The Rust closures built from it hold copies of
-        // the registration, not the handle.
+        // neither destroyed nor consumed, i.e. the `Box::into_raw` of `kafka_producer_Callback_new`
+        // no `take_callback` reclaimed, so `Box::from_raw` reclaims it exactly once.
         drop(unsafe { Box::from_raw(self_ as *mut CallbackRegistration) });
     }
 }
@@ -383,15 +385,17 @@ mod tests {
     #[test]
     fn invoker_runs_the_implementation_inline_and_waits_for_the_report() {
         let log = Log::default();
-        let handle = kafka_producer_Callback_new(&log as *const Log as *mut c_void, on_completion);
+        // Each invocation consumes its handle, as `on_completion` takes `self: Box<Self>`.
+        let handle = || kafka_producer_Callback_new(&log as *const Log as *mut c_void, on_completion);
         let metadata = box_record_metadata(record_metadata(5));
         let error = box_error(Error::timeout("late"));
-        // SAFETY: Test code: `handle` comes from `kafka_producer_Callback_new` over the test's
-        // `log`, which outlives every invocation, and `metadata` and `error` are live handles until
-        // they are destroyed once at the end.
+        // SAFETY: Test code: each handle comes from `kafka_producer_Callback_new` over the test's
+        // `log`, which outlives every invocation, and is consumed by the one invocation it is
+        // passed to; `metadata` and `error` are live handles until they are destroyed once at the
+        // end.
         unsafe {
-            kafka_producer_Callback_on_completion(handle, metadata, std::ptr::null());
-            kafka_producer_Callback_on_completion(handle, std::ptr::null(), error);
+            kafka_producer_Callback_on_completion(handle(), metadata, std::ptr::null());
+            kafka_producer_Callback_on_completion(handle(), std::ptr::null(), error);
         }
         assert_eq!(log.entries(), vec![(5, None), (-1, Some("late".to_string()))]);
         assert!(CallbackResults::is_tagged(log.last_id()), "an invoker's id is tagged");
@@ -408,11 +412,12 @@ mod tests {
             // SAFETY: Test code: `opaque` is `&fired`, alive until the test ends.
             *unsafe { &*(opaque as *const Mutex<i32>) }.lock().unwrap() += 1;
         }
-        // SAFETY: Test code: `handle` and `metadata` are still live; `cb` matches the completion
-        // type and `&fired` outlives the call, which reports inline, so `cb` has fired on return.
+        // SAFETY: Test code: the fresh handle is consumed by the call and `metadata` is still live;
+        // `cb` matches the completion type and `&fired` outlives the call, which reports inline, so
+        // `cb` has fired on return.
         unsafe {
             kafka_producer_Callback_on_completion_cb(
-                handle,
+                handle(),
                 metadata,
                 std::ptr::null(),
                 cb,
@@ -422,12 +427,12 @@ mod tests {
         assert_eq!(*fired.lock().unwrap(), 1);
         assert_eq!(log.entries().len(), 3);
 
-        // SAFETY: Test code: each handle is destroyed once, and destroying a null callback handle
-        // is a no-op.
+        // SAFETY: Test code: each handle is destroyed once, the callback handle never consumed, and
+        // destroying a null callback handle is a no-op.
         unsafe {
             kafka_producer_RecordMetadata_destroy(metadata);
             kafka_common_Error_destroy(error);
-            kafka_producer_Callback_destroy(handle);
+            kafka_producer_Callback_destroy(handle());
             kafka_producer_Callback_destroy(std::ptr::null_mut());
         }
     }
@@ -441,8 +446,8 @@ mod tests {
         let handle = kafka_producer_Callback_new(&log as *const Log as *mut c_void, on_completion);
         let probe = Probe::default();
         fail_point::arm();
-        // SAFETY: Test code: `handle` is a live handle this test made, destroyed once after its last
-        // use; null metadata and error are allowed, and the probe outlives the call.
+        // SAFETY: Test code: `handle` is a live handle this test made, consumed by the call before
+        // the fail point; null metadata and error are allowed, and the probe outlives the call.
         unsafe {
             kafka_producer_Callback_on_completion_cb(
                 handle,
@@ -451,7 +456,6 @@ mod tests {
                 on_opaque,
                 probe.as_opaque(),
             );
-            kafka_producer_Callback_destroy(handle);
         }
         assert_eq!(probe.fired(), ["<no error>"]);
         assert!(log.entries().is_empty(), "onCompletion never ran");
@@ -463,18 +467,15 @@ mod tests {
         let handle = kafka_producer_Callback_new(&log as *const Log as *mut c_void, on_completion);
         let queue = Arc::new(CallbackQueue::new());
         let results = Arc::new(CallbackResults::new());
-        // SAFETY: Test code: `handle` is still live; it is destroyed right after its registrations
-        // are copied out.
-        let registration = unsafe { callback_registration(handle) };
-        // SAFETY: Test code: `handle` is destroyed once; the closures hold copies of the
+        // SAFETY: Test code: `handle` is live and not used again; the closures hold copies of the
         // registration, and `log` outlives the queued invocations.
-        unsafe { kafka_producer_Callback_destroy(handle) };
+        let registration = unsafe { take_callback(handle) };
 
         // A record that succeeds: queued, not fired inline, and its future waits for the report,
         // whose error is only logged.
         let completion = KafkaFutureImpl::new();
         let callback = registration.into_callback(Arc::clone(&queue), Arc::clone(&results), completion.clone());
-        callback(Some(&record_metadata(9)), None);
+        callback.on_completion(Some(&record_metadata(9)), None);
         assert!(log.entries().is_empty(), "queued, not fired inline");
         assert_eq!(queue.execute(), 1);
         assert_eq!(log.entries(), vec![(9, None)]);
@@ -488,7 +489,7 @@ mod tests {
         // A record that fails: the future fails with the record's error, whatever the report.
         let completion = KafkaFutureImpl::new();
         let callback = registration.into_callback(Arc::clone(&queue), Arc::clone(&results), completion.clone());
-        callback(Some(&record_metadata(-1)), Some(&Error::timeout("expired")));
+        callback.on_completion(Some(&record_metadata(-1)), Some(&Error::timeout("expired")));
         assert_eq!(queue.execute(), 1);
         assert_eq!(log.entries()[1], (-1, Some("expired".to_string())));
         assert!(!completion.is_done());
@@ -534,11 +535,8 @@ mod tests {
         const RECORDS: usize = 8;
         let ids = Ids { next: Default::default(), ids: Default::default() };
         let handle = kafka_producer_Callback_new(&ids as *const Ids as *mut c_void, store_id);
-        // SAFETY: Test code: `handle` is live; it is destroyed right after its registration is
-        // copied out.
-        let registration = unsafe { callback_registration(handle) };
-        // SAFETY: Test code: `handle` is destroyed once; `ids` outlives every invocation.
-        unsafe { kafka_producer_Callback_destroy(handle) };
+        // SAFETY: Test code: `handle` is live and not used again; `ids` outlives every invocation.
+        let registration = unsafe { take_callback(handle) };
         let queue = Arc::new(CallbackQueue::new());
         let results = Arc::new(CallbackResults::new());
         let metadata = record_metadata(3);
@@ -554,7 +552,7 @@ mod tests {
             ids.next.store(0, std::sync::atomic::Ordering::SeqCst);
             let completions: Vec<KafkaFutureImpl<RecordMetadata>> =
                 (0..RECORDS).map(|_| KafkaFutureImpl::new()).collect();
-            let mut callbacks: Vec<Callback> = completions
+            let mut callbacks: Vec<Box<dyn Callback>> = completions
                 .iter()
                 .map(|completion| {
                     registration.into_callback(Arc::clone(&queue), Arc::clone(&results), completion.clone())
@@ -563,7 +561,7 @@ mod tests {
             let count = {
                 let _guard = crate::AllocTrackingGuard::new();
                 for callback in callbacks.drain(..) {
-                    callback(Some(&metadata), None);
+                    callback.on_completion(Some(&metadata), None);
                 }
                 assert_eq!(queue.execute(), RECORDS as i32);
                 for id in &ids.ids {
