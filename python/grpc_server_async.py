@@ -57,6 +57,7 @@ from confluent_kafka.consumer import (  # noqa: E402
     AsyncMockConsumer,
     OffsetAndMetadata,
 )
+from confluent_kafka import ExecutionError  # noqa: E402
 from confluent_kafka.common import KafkaError  # noqa: E402
 import producer_service_pb2 as pb  # noqa: E402  (generated)
 import producer_service_pb2_grpc as pb_grpc  # noqa: E402  (generated)
@@ -222,7 +223,7 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         callback = None
         if request.with_callback:
             callback = make_logging_delivery_callback(self._callback_log, request.producer_id)
-        # AsyncProducer.send is a coroutine that returns an asyncio.Future.
+        # AsyncProducer.send is a coroutine that returns an AsyncKafkaFuture.
         try:
             future = await producer.send(record=record, callback=callback)
         except KafkaError as e:
@@ -234,10 +235,12 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         # Await the record future on the event loop, where the producer drains
         # its queued completions. Bounded like the sync server's 120s.
         try:
-            metadata = await asyncio.wait_for(future, timeout=120)
+            metadata = await future.get(timeout=120)
+        except ExecutionError as e:
+            return pb.SendResponse(error=_kafka_error_to_proto(e.__cause__ or e))
         except KafkaError as e:
             return pb.SendResponse(error=_kafka_error_to_proto(e))
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return pb.SendResponse(error=pb.KafkaError(
                 code=_REQUEST_TIMED_OUT,
                 message="python async server: producer future timed out after 120s"))

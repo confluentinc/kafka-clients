@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -609,3 +610,44 @@ def test_scram_empty_composition_raises_the_all_error():
     admin = _scram_admin(all_error, {"c": ResourceNotFoundError(message="x")})
     with pytest.raises(UnknownServerError):
         tr.SyncAdminFacade(admin).describe_user_scram_credentials(users=["c"])
+
+
+# -- the producer servers read a send() future with get() -------------------------
+
+
+def _send_request(producer_id, topic="t"):
+    pb = pytest.importorskip("producer_service_pb2")
+    return pb.SendRequest(producer_id=producer_id, record=pb.ProducerRecord(
+        topic=topic, value=b"v"))
+
+
+def test_sync_server_send_reads_the_future_with_get():
+    pb = pytest.importorskip("producer_service_pb2")
+    svc = grpc_server.ProducerService(None)
+    pid = svc.CreateProducer(pb.CreateProducerRequest(), None).producer_id
+    resp = svc.Send(_send_request(pid), None)
+    assert not resp.HasField("error"), resp.error
+    assert resp.metadata.topic == "t"
+
+
+def test_sync_server_send_failure_crosses_as_the_cause():
+    pb = pytest.importorskip("producer_service_pb2")
+    svc = grpc_server.ProducerService(None)
+    svc._producers[1] = SimpleNamespace(
+        send=lambda **kw: _done(error=TopicExistsError(message="no")))
+    resp = svc.Send(_send_request(1), None)
+    assert resp.error.code == TopicExistsError._ffi_id
+    assert resp.error.message == "no"
+
+
+def test_async_server_send_awaits_the_future_with_get():
+    pb = pytest.importorskip("producer_service_pb2")
+
+    async def run():
+        svc = grpc_server_async.ProducerService(None)
+        pid = (await svc.CreateProducer(pb.CreateProducerRequest(), None)).producer_id
+        return await svc.Send(_send_request(pid), None)
+
+    resp = asyncio.run(run())
+    assert not resp.HasField("error"), resp.error
+    assert resp.metadata.topic == "t"

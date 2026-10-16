@@ -33,9 +33,9 @@ Docker image sets GRPC_HOST=0.0.0.0 and the test pool maps 50051 to a
 random host port via testcontainers). GRPC_PORT=0 binds an ephemeral port.
 
 Sync grpc.server + thread pool is used because the sync clients block the
-calling thread: KafkaProducer completes each concurrent.futures.Future on its
+calling thread: KafkaProducer completes each KafkaFuture on its
 background completion thread, which runs the C API's queued callbacks
-(``__execute_callbacks``), and Future.result() blocks the handler thread until
+(``__execute_callbacks``), and KafkaFuture.get() blocks the handler thread until
 the future fires; KafkaConsumer's waiting calls drain their completions and
 callbacks on the handler thread itself.
 """
@@ -61,6 +61,7 @@ from confluent_kafka.consumer import (  # noqa: E402
     MockConsumer,
     OffsetAndMetadata,
 )
+from confluent_kafka import ExecutionError  # noqa: E402
 from confluent_kafka.common import KafkaError  # noqa: E402
 import producer_service_pb2 as pb  # noqa: E402  (generated)
 import producer_service_pb2_grpc as pb_grpc  # noqa: E402  (generated)
@@ -238,19 +239,21 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
             return pb.SendResponse(error=_kafka_error_to_proto(e))
 
         # Block this gRPC worker thread until the producer future fires.
-        # KafkaProducer's futures are concurrent.futures.Future instances
-        # completed on the C extension's completion thread, so .result() is
-        # safe here.
+        # KafkaProducer's futures are KafkaFutures completed on the C extension's
+        # completion thread, so .get() is safe here. A failed send raises
+        # ExecutionError (Java's ExecutionException) whose cause is the error.
         try:
-            metadata = future.result(timeout=120)
+            metadata = future.get(timeout=120)
+        except ExecutionError as e:
+            return pb.SendResponse(error=_kafka_error_to_proto(e.__cause__ or e))
         except KafkaError as e:
             return pb.SendResponse(error=_kafka_error_to_proto(e))
-        except futures.TimeoutError:
+        except TimeoutError:
             return pb.SendResponse(error=pb.KafkaError(
                 code=_REQUEST_TIMED_OUT,
                 message="python server: producer future timed out after 120s"))
         except Exception as e:  # noqa: BLE001
-            LOG.exception("future.result raised")
+            LOG.exception("future.get raised")
             return pb.SendResponse(error=_kafka_error_to_proto(e))
         return pb.SendResponse(metadata=_record_metadata_to_proto(metadata))
 
@@ -759,9 +762,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
     Admin / MockAdminClient (the async twin is driven by
     grpc_server_async.py).
 
-    Java's Admin methods return per-key futures, but the admin facade's `_run_sync`
-    already waits for the FFI completion callback and hands back resolved data,
-    so blocking the gRPC worker thread here is what the binding does anyway."""
+    Java's Admin methods return per-key `KafkaFuture`s; the admin facade
+    (`grpc_translate.SyncAdminFacade`) waits for each with `get()` and hands back
+    resolved data, so blocking the gRPC worker thread here is what the binding
+    does anyway."""
 
     def __init__(self):
         self._admins = {}
