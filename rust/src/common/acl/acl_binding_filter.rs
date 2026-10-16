@@ -83,6 +83,12 @@ impl AclBindingFilter {
 
     /// Return true if the resource filter matches the binding's resource and the
     /// entry filter matches the binding's entry.
+    ///
+    /// # Panics
+    ///
+    /// Panics where [`ResourcePatternFilter::matches`] does, which this calls
+    /// on the binding's pattern, as Java's `matches` propagates that method's
+    /// `IllegalArgumentException`.
     #[doc(alias = "org.apache.kafka.common.acl.AclBindingFilter#matches")]
     pub fn matches(&self, binding: &AclBinding) -> bool {
         self.pattern_filter.matches(binding.pattern()) && self.entry_filter.matches(binding.entry())

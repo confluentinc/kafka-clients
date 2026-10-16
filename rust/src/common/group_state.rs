@@ -96,8 +96,16 @@ impl GroupState {
     ///
     /// # Panics
     ///
-    /// Panics if `type` is [`GroupType::Unknown`], mirroring Java's
-    /// `IllegalArgumentException("Group type not known")`.
+    /// Panics with `Group type not known` if `group_type` is
+    /// [`GroupType::Unknown`], where Java throws
+    /// `IllegalArgumentException("Group type not known")`
+    /// (`GroupState.java:79-91`). A group listing reports `Unknown` for a type
+    /// this client does not know, such as one a newer broker added, so check
+    /// for it before calling.
+    ///
+    /// The panic is a deliberate deviation from Java's catchable exception:
+    /// this is a lookup that otherwise always succeeds, and its signature
+    /// stays a plain `HashSet` rather than becoming a `Result`.
     #[doc(alias = "org.apache.kafka.common.GroupState#groupStatesForType")]
     pub fn group_states_for_type(group_type: GroupType) -> HashSet<GroupState> {
         match group_type {
