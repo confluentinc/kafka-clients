@@ -331,17 +331,19 @@ async fn test_sasl_wrong_credentials() {
 }
 
 /// Test: SASL unsupported mechanism rejection.
+///
+/// The client implements only PLAIN, so `SaslChannelBuilder` refuses any other mechanism
+/// before connecting, instead of sending the cleartext password as a PLAIN token under
+/// a SCRAM handshake.
 #[tokio::test]
 async fn test_sasl_unsupported_mechanism() {
-    let ctx = TestContext::new(ClusterConfig::default()).await;
-    // Use SCRAM-SHA-256 mechanism which the broker doesn't have enabled
     let sasl_config = sasl_configs(
         "SCRAM-SHA-256",
         "org.apache.kafka.common.security.scram.ScramLoginModule",
         SASL_USERNAME,
         SASL_PASSWORD,
     );
-    let channel_builder = SaslChannelBuilder::new(
+    let error = SaslChannelBuilder::new(
         SecurityProtocol::SaslPlaintext,
         sasl_config,
         None,
@@ -349,21 +351,9 @@ async fn test_sasl_unsupported_mechanism() {
         "integration-test",
         LogContext::empty(),
     )
-    .unwrap();
-    let mut selector = Selector::with_defaults(Selector::NO_IDLE_TIMEOUT_MS, Box::new(channel_builder));
-    let addr = parse_bootstrap_addr(ctx.sasl_plaintext_bootstrap_servers());
-
-    selector
-        .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
-        .await
-        .expect("Connect should succeed (TCP level)");
-
-    // Poll until disconnect — broker rejects unsupported mechanism
-    poll_until_disconnected(&mut selector).await;
+    .expect_err("SCRAM-SHA-256 must be rejected");
     assert!(
-        !selector.is_channel_ready(NODE_ID),
-        "Channel should not be ready after unsupported mechanism"
+        error.to_string().contains("SASL mechanism 'SCRAM-SHA-256' is not supported"),
+        "{error}"
     );
-
-    selector.close().await;
 }
